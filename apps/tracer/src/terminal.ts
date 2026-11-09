@@ -12,6 +12,8 @@ import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../pac
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
+import { selectionColors, THEMES } from "../../../packages/ui/src/themes";
+import { installWrapAwareSelection, type SelectableTerminal } from "./terminal-wrap-selection";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
@@ -37,6 +39,8 @@ const TERMINAL_FONT_SIZE_MAX = 24;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
+/** The selection colours of the default (ink) terminal theme, used until the screen hands the terminal its theme. */
+const INK_SELECTION = selectionColors(THEMES.ink!);
 const ANSI_THEME_KEYS = [
   "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
   "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
@@ -57,6 +61,7 @@ interface GhosttyActivityControls {
     remeasureFont(): void;
     resize(cols: number, rows: number): void;
     getMetrics(): { width: number; height: number; baseline: number };
+    getCanvas(): HTMLCanvasElement;
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
@@ -406,6 +411,11 @@ export class TerminalClient {
     const rendererFocus = terminal.focus;
     terminal.focus = () => {};
     try { terminal.open(config.host); } finally { terminal.focus = rendererFocus; }
+    // Mouse selection copies a soft-wrapped word whole and puts no newline where the program printed none (#426).
+    installWrapAwareSelection(terminal as unknown as SelectableTerminal, config.host, {
+      canvas: () => this.ghostty.renderer?.getCanvas(),
+      metrics: () => this.cellMetrics(),
+    });
     // Keep Ghostty's scrollbar drag handler, but let the on-demand controller own link scanning and activation.
     (terminal as unknown as { linkDetector?: unknown }).linkDetector = undefined;
     const write = terminal.write.bind(terminal);
@@ -414,7 +424,15 @@ export class TerminalClient {
       write(data, callback);
     };
     // Phones wait for a real tap before opening the keyboard (D191).
-    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
+    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal(),
+      // A finger selects and copies text (#426); the code for it loads when the first finger touches the terminal.
+      () => onDemand(() => import("./terminal-touch-select.on-demand")).then(({ createTouchSelection }) => createTouchSelection({
+        terminal: terminal as unknown as SelectableTerminal,
+        host: config.host,
+        canvas: () => this.ghostty.renderer?.getCanvas(),
+        metrics: () => this.cellMetrics(),
+        wake: () => this.wakeTerminal(),
+      })));
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     this.prediction = config.predictiveEcho === true
@@ -561,6 +579,7 @@ export class TerminalClient {
     }
   }
 
+  /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
       fontFamily: fontStack(font),
@@ -573,7 +592,8 @@ export class TerminalClient {
         foreground: "#e6e7e9",
         cursor: "#c8ceff",
         cursorAccent: "#101113",
-        selectionBackground: "#44485c",
+        selectionBackground: INK_SELECTION.background,
+        selectionForeground: INK_SELECTION.foreground,
       },
     });
   }
@@ -716,6 +736,11 @@ export class TerminalClient {
   readScreenText(): string {
     const maxRows = Math.max(10_000, this.terminal.options.scrollback ?? 10_000);
     return terminalBufferText(this.terminal, maxRows);
+  }
+
+  /** The text the terminal currently has selected ("" when nothing is), for browser checks of touch and mouse selection. */
+  readSelectionText(): string {
+    return this.terminal.getSelection();
   }
 
   /** Replays test-double output in a second Ghostty instance for differential checks. */
