@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Build every pinned input of the Nix release package, but not the package (#476).
+#
+# The release bundle (`nix build .#packages.<system>.default`) is what deploys
+# ship. The gate's static builds go through scripts/static-cargo instead, so a
+# change that only breaks the Nix side, such as a Zig upgrade that moves the
+# source our sandbox patch anchors on, used to merge unnoticed and block every
+# deploy (#476: 2c7135211 moved Zig to 0.17.0).
+#
+# This row builds the derivations that pin changes break: the patched Zig, the
+# signed VT sources, the Cargo and Bun vendor trees and the Rust toolchain.
+# `binaries.inputDerivation` depends on every input of the static build without
+# compiling it, and `bunDeps` is the web build's only fixed input. Inputs that
+# did not change come from the store, so the row costs a flake evaluation on
+# most branches. It does not compile the workspace under Nix; the full package
+# build is expected where release-affecting files change (see #476).
+#
+# Usage: scripts/check-nix-release-inputs   (from any directory)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if ! command -v nix >/dev/null; then
+    printf 'SKIP Nix release inputs: nix unavailable\n'
+    exit 0
+fi
+
+# Only the host's own system: the flake pins a different Zig archive per host,
+# and building another system's inputs would need a remote builder.
+system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+package=".#packages.${system}.default"
+nix build --no-link --print-out-paths \
+    "${package}.binaries.inputDerivation" \
+    "${package}.bunDeps"
+printf 'Nix release inputs (%s): built\n' "$system"
