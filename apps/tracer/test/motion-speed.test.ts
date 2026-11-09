@@ -5,13 +5,18 @@
  * entering or leaving the screen. Keep UI animations under 300ms." (#471).
  *
  * What fails this test:
- * - a `Spring` duration (`visualDuration`) over 0.3 s;
- * - a CSS transition or animation, or a Web Animation (`element.animate`), whose duration plus delay is over 300 ms;
+ * - a `Spring` duration (`visualDuration`) over 0.3 s, written as a literal, an expression or a constant; one given by a
+ *   name the scan cannot resolve (a parameter) is refused;
+ * - a CSS transition or animation (shorthand or `-duration`/`-delay` longhand), a Web Animation (`element.animate`), or a
+ *   transition set from script (`el.style.transition = ...`, template strings with constants included), whose duration
+ *   plus delay is over 300 ms. Named constants and conditionals are read through (both branches count); an unresolvable
+ *   duration is refused;
  * - a curve that starts slowly: `ease-in`, `ease-in-out`, or a `cubic-bezier` whose first control point leaves the
  *   start flatter than a straight line (y1 < x1);
  * - `ease`, `linear` or no easing at all (CSS and the Web Animations API then use `ease` and `linear`) on anything that
  *   moves, resizes or fades. Both start slowly or crawl. `ease` stays fine for a colour change in place (a hover tint),
- *   which neither enters nor leaves;
+ *   which neither enters nor leaves. A `transition-timing-function` longhand names no property, so there `ease` and
+ *   `linear` are refused outright;
  * - a `Spring` released from rest that does not cover most of its distance in the first frames.
  *
  * Durations written as `var(--t-press|pop|panel)` are read from packages/ui/styles.css, so a token that grows past
@@ -45,6 +50,17 @@ const ALLOWED: Array<{ file: string; has: string; why: string }> = [
   { file: "packages/ui/styles.css", has: "ui-conn-pulse", why: "connection status pulse: the status icon's own motion (TASTE 'Status is an icon with motion'), not an enter or exit" },
   { file: "packages/ui/styles.css", has: "ui-setting-found", why: "the tint on a setting ⌘K jumped to fades slowly so the eye finds the row; a colour in place, nothing moves" },
   { file: "packages/ui/src/terminal-cursor-layer.ts", has: "CURSOR_BLINK_PERIOD_MS", why: "terminal caret blink: a stepped loop, not a transition" },
+  // Press-and-hold progress cue (J455's question on #471): the window leans in only while a finger rests on the header,
+  // for exactly the hold time (`HOLD_MS`, 450 ms, after 120 ms so a tap shows nothing). The hold timer cancels it at
+  // 450 ms, so it never plays its nominal 570 ms, and the release reverses in 220 ms. It follows a gesture's progress
+  // like a spinner follows work; shortening it would make the cue finish before the hold counts.
+  { file: "packages/ui/src/window-resize.ts", has: "duration: HOLD_MS", why: "press-and-hold progress cue, as long as the hold itself; cancelled at the hold time" },
+  // The reflow's duration comes from `flipEasing(cfg)` (visualDuration x 1000); its own test below checks that, and every
+  // `flip.play` visualDuration is scanned by the spring rule.
+  { file: "apps/tracer/src/canvas/layout/flip.ts", has: "{ duration, easing: css }", why: "duration from flipEasing, checked by its own test and the spring scan" },
+  // The windows prototype mock staggers its sections and windows (`delay = index * 45`, `enter(entry, delay)`); each item's
+  // own motion is 160-280 ms on EASE_OUT. A stagger offsets items against each other; it is not a slower motion.
+  { file: "apps/tracer/src/canvas/mock/windows-proto/canvas.ts", has: "delay, easing: EASE_OUT", why: "stagger offsets in a prototype mock; each item's motion is <= 280 ms" },
 ];
 /** Whether the declaration or call `text` in file `rel` is on the allow-list. */
 const allowed = (rel: string, text: string): boolean => ALLOWED.some((a) => a.file === rel && text.includes(a.has));
@@ -148,10 +164,13 @@ function parseItem(item: string, kind: "transition" | "animation"): Motion {
   return { property, duration: times[0] ?? 0, delay: times[1] ?? 0, easing, loop: ws.includes("infinite") };
 }
 
-/** Every CSS transition and animation in the scanned stylesheets, with where it is. */
-function cssMotions(): Array<Motion & { at: string; text: string; rel: string }> {
+/** A source to scan: its repo-relative path and its text. The fixture tests below feed sources in the same shape. */
+type Src = { rel: string; text: string };
+
+/** Every CSS transition and animation shorthand in the stylesheets of `list`, with where it is. */
+function cssMotions(list: Src[] = files): Array<Motion & { at: string; text: string; rel: string }> {
   const out: Array<Motion & { at: string; text: string; rel: string }> = [];
-  for (const f of files) {
+  for (const f of list) {
     if (!f.rel.endsWith(".css")) continue;
     for (const m of f.text.matchAll(/(?<![-\w])(transition|animation)\s*:\s*([^;}]+)/g)) {
       const kind = m[1] as "transition" | "animation";
@@ -167,10 +186,10 @@ function cssMotions(): Array<Motion & { at: string; text: string; rel: string }>
   return out;
 }
 
-/** The argument text of every `.animate(` call in script, found by matching parentheses. */
-function animateCalls(): Array<{ at: string; text: string; rel: string }> {
+/** The argument text of every `.animate(` call in the scripts of `list`, found by matching parentheses. */
+function animateCalls(list: Src[] = files): Array<{ at: string; text: string; rel: string }> {
   const out: Array<{ at: string; text: string; rel: string }> = [];
-  for (const f of files) {
+  for (const f of list) {
     if (!f.rel.endsWith(".ts")) continue;
     for (const m of f.text.matchAll(/\.animate\(/g)) {
       let depth = 1, i = m.index! + m[0].length;
@@ -179,6 +198,247 @@ function animateCalls(): Array<{ at: string; text: string; rel: string }> {
     }
   }
   return out;
+}
+
+/**
+ * `text` with its comments blanked out (newlines kept, so line numbers stay right). Comments describe motion, they
+ * are not motion: `{ visualDuration }` in a doc comment must not count. Strings and template strings are kept.
+ */
+function stripComments(text: string): string {
+  let out = "", quote = "", i = 0;
+  while (i < text.length) {
+    const ch = text[i]!, next = text[i + 1];
+    if (quote) {
+      out += ch;
+      if (ch === "\\") { out += next ?? ""; i += 2; continue; }
+      if (ch === quote) quote = "";
+      i++; continue;
+    }
+    if (ch === "/" && next === "/") { while (i < text.length && text[i] !== "\n") { out += " "; i++; } continue; }
+    if (ch === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2), stop = end < 0 ? text.length : end + 2;
+      out += text.slice(i, stop).replace(/[^\n]/g, " "); i = stop; continue;
+    }
+    if (ch === "\"" || ch === "'" || ch === "`") quote = ch;
+    out += ch; i++;
+  }
+  return out;
+}
+
+/** The scanned scripts of `list` with comments removed. */
+const scripts = (list: Src[]): Src[] => list.filter((f) => f.rel.endsWith(".ts")).map((f) => ({ rel: f.rel, text: stripComments(f.text) }));
+
+/**
+ * The expression a `const NAME = ...` gives, looked up in `src`, then in `list`, then exported from any scanned file
+ * (an imported constant such as `EASE_OUT`). Undefined when the name is not a constant anywhere.
+ */
+function constExpr(name: string, src: Src, list: Src[]): { expr: string; src: Src } | undefined {
+  // `const A = 1;`, or one of several in one statement (`const POP = 160, SWAP = 140;`); the value stops at `,` or `;`.
+  const own = new RegExp(`(?:^|[^\\w.$])const\\s+(?:[^;=]*=[^;]*?,\\s*)?${name}\\s*(?::[^=,;\\n]+)?=\\s*([^,;\\n]+)`);
+  const exported = new RegExp(`export\\s+const\\s+${name}\\s*(?::[^=\\n]+)?=\\s*([^;\\n]+)`);
+  const hit = own.exec(src.text);
+  if (hit) return { expr: hit[1]!.trim(), src };
+  // Otherwise only a constant another file exports (an import such as `EASE_OUT`), never another file's local.
+  for (const f of [...list, ...files]) {
+    const m = exported.exec(f.text);
+    if (m) return { expr: m[1]!.trim(), src: f };
+  }
+  return undefined;
+}
+
+/** Splits `cond ? yes : no` at its top level; undefined when `expr` is not a conditional. */
+function splitTernary(expr: string): { yes: string; no: string } | undefined {
+  let depth = 0, q = -1;
+  for (let i = 0; i < expr.length; i++) {
+    const ch = expr[i]!;
+    if ("([{".includes(ch)) depth++; else if (")]}".includes(ch)) depth--;
+    else if (depth === 0 && ch === "?" && expr[i + 1] !== "?" && expr[i + 1] !== "." && expr[i - 1] !== "?") { q = i; break; }
+  }
+  if (q < 0) return undefined;
+  depth = 0;
+  let nested = 0;
+  for (let i = q + 1; i < expr.length; i++) {
+    const ch = expr[i]!;
+    if ("([{".includes(ch)) depth++; else if (")]}".includes(ch)) depth--;
+    else if (depth === 0 && ch === "?" && expr[i + 1] !== "?" && expr[i + 1] !== ".") nested++;
+    else if (depth === 0 && ch === ":") { if (nested) nested--; else return { yes: expr.slice(q + 1, i).trim(), no: expr.slice(i + 1).trim() }; }
+  }
+  return undefined;
+}
+
+/**
+ * Every number a duration expression can come out as (both branches of a conditional; the condition is not judged),
+ * with the names it could not resolve. Constants are followed through `const` declarations, also across files, so
+ * `duration: SWAP` or `visualDuration: D` is read as the number behind it. An unresolved name makes the caller refuse
+ * the motion: a duration the scan cannot read is a duration the scan cannot vouch for.
+ */
+function valuesOf(expr: string, src: Src, list: Src[], depth = 0): { values: number[]; unresolved: string[] } {
+  const e = expr.replace(/\bas\s+const\b/g, "").trim();
+  const t = splitTernary(e);
+  if (t) {
+    const yes = valuesOf(t.yes, src, list, depth), no = valuesOf(t.no, src, list, depth);
+    return { values: [...yes.values, ...no.values], unresolved: [...yes.unresolved, ...no.unresolved] };
+  }
+  const unresolved: string[] = [];
+  const substituted = e.replace(/(?<![\w.$])([A-Za-z_$][\w$]*)(?![\w$]*\s*\()/g, (name) => {
+    const c = depth < 5 ? constExpr(name, src, list) : undefined;
+    if (!c) { unresolved.push(name); return "NaN"; }
+    const v = valuesOf(c.expr, c.src, list, depth + 1);
+    unresolved.push(...v.unresolved);
+    return v.values.length ? String(Math.max(...v.values)) : "NaN";
+  });
+  if (unresolved.length) return { values: [], unresolved };
+  if (!/^[\d.\s()+\-*/]+$/.test(substituted)) return { values: [], unresolved: [e] };
+  const value = Function(`"use strict"; return (${substituted});`)() as unknown;
+  return typeof value === "number" && Number.isFinite(value) ? { values: [value], unresolved: [] } : { values: [], unresolved: [e] };
+}
+
+/** The text a string or template literal holds, with `${...}` resolved to the constant behind it; undefined if one is unknown. */
+function literalText(raw: string, src: Src, list: Src[]): string | undefined {
+  const body = raw.slice(1, -1);
+  if (!raw.startsWith("`")) return body;
+  let unknown = false;
+  const text = body.replace(/\$\{([^}]*)\}/g, (_, inner: string) => {
+    const name = inner.trim();
+    const c = /^[A-Za-z_$][\w$]*$/.test(name) ? constExpr(name, src, list) : undefined;
+    if (c && /^["'`]/.test(c.expr)) return c.expr.slice(1, -1);
+    const v = valuesOf(name, src, list);
+    if (v.unresolved.length || !v.values.length) { unknown = true; return "?"; }
+    return String(Math.max(...v.values));
+  });
+  return unknown ? undefined : text;
+}
+
+/** Whether a single easing (CSS or WAAPI) starts slowly or crawls when its property is unknown: `ease`, `linear`, `ease-in*`, a slow cubic-bezier. */
+function slowEasing(easing: string): boolean {
+  const e = /^var\(--ease-(out|drawer)/.test(easing) ? "ease-out" : easing.trim();
+  return e === "ease" || e === "linear" || /^ease-in/.test(e) || (/cubic-bezier/.test(e) && slowStart(e));
+}
+
+/** CSS longhands (`transition-duration`, `-delay`, `-timing-function` and the `animation-` ones) in `list`, item by item. */
+function cssLonghands(list: Src[]): Array<{ at: string; rel: string; text: string; kind: string; item: string }> {
+  const out: Array<{ at: string; rel: string; text: string; kind: string; item: string }> = [];
+  for (const f of list) {
+    if (!f.rel.endsWith(".css")) continue;
+    for (const m of f.text.matchAll(/(?<![-\w])(transition|animation)-(duration|delay|timing-function)\s*:\s*([^;}]+)/g)) {
+      const value = m[3]!.replace(/!important/, "").trim();
+      for (const item of splitTop(value)) out.push({ at: `${f.rel}:${lineOf(f.text, m.index!)}`, rel: f.rel, text: `${m[1]}-${m[2]}: ${value}`, kind: m[2]!, item });
+    }
+  }
+  return out;
+}
+
+/**
+ * Spring durations over the limit in the scripts of `list`, as `file:line text`. A literal, an expression or a
+ * constant is read through to its number; a name that resolves to nothing (a parameter) is refused, because the scan
+ * cannot vouch for it. A type annotation (`visualDuration: number`) is not a duration.
+ */
+function springOffences(list: Src[]): string[] {
+  const bad: string[] = [];
+  for (const f of scripts(list)) {
+    for (const m of f.text.matchAll(/visualDuration\s*:\s*([^,;}\n]+)/g)) {
+      const expr = m[1]!.trim();
+      if (/^number\b/.test(expr)) continue;
+      const v = valuesOf(expr, f, list);
+      const at = `${f.rel}:${lineOf(f.text, m.index!)} ${m[0].trim()}`;
+      if (v.unresolved.length) bad.push(`${at} (unresolved: ${v.unresolved.join(", ")})`);
+      else if (Math.max(...v.values) * 1000 > LIMIT_MS) bad.push(at);
+    }
+    // `{ visualDuration }` shorthand takes a variable of that name.
+    for (const m of f.text.matchAll(/[{,]\s*visualDuration\s*(?=[,}])/g)) {
+      const v = valuesOf("visualDuration", f, list);
+      const at = `${f.rel}:${lineOf(f.text, m.index!)} { visualDuration }`;
+      if (v.unresolved.length) bad.push(`${at} (unresolved)`);
+      else if (Math.max(...v.values) * 1000 > LIMIT_MS) bad.push(at);
+    }
+  }
+  return bad;
+}
+
+/** CSS transitions and animations of `list` that last too long, delay included (loops are judged separately), longhands too. */
+function cssDurationOffences(list: Src[]): string[] {
+  const shorthand = cssMotions(list).filter((m) => !m.loop && m.duration + m.delay > LIMIT_MS && !allowed(m.rel, m.text)).map((m) => `${m.at} ${m.text}`);
+  const longhand = cssLonghands(list).filter((l) => (l.kind === "duration" || l.kind === "delay") && (ms(l.item) ?? 0) > LIMIT_MS && !allowed(l.rel, l.text)).map((l) => `${l.at} ${l.text}`);
+  return [...shorthand, ...new Set(longhand)];
+}
+
+/**
+ * CSS motions of `list` that start slowly: a slow curve anywhere, or `ease`/`linear` on a move or fade. A
+ * `transition-timing-function` longhand names no property, so there `ease` and `linear` are refused outright.
+ */
+function cssSlowOffences(list: Src[]): string[] {
+  const shorthand = cssMotions(list).filter((m) => m.duration > 0 && !allowed(m.rel, m.text) && (
+    /^ease-in/.test(m.easing) || (/cubic-bezier/.test(m.easing) && slowStart(m.easing))
+    || (MOVING.test(m.property) || m.property === "animation") && (m.easing === "ease" || m.easing === "linear")
+  )).map((m) => `${m.at} ${m.text}`);
+  const longhand = cssLonghands(list).filter((l) => l.kind === "timing-function" && slowEasing(l.item) && !allowed(l.rel, l.text)).map((l) => `${l.at} ${l.text}`);
+  return [...shorthand, ...new Set(longhand)];
+}
+
+/**
+ * Web Animations in `list` that last too long or start slowly. `duration` and `delay` may be literals, expressions
+ * or constants (read through to their numbers, both branches of a conditional); one the scan cannot resolve is refused.
+ */
+function waapiOffences(list: Src[]): string[] {
+  const bad: string[] = [];
+  const stripped = new Map(scripts(list).map((f) => [f.rel, f]));
+  for (const call of animateCalls(list)) {
+    if (allowed(call.rel, call.text)) continue;
+    const src = stripped.get(call.rel)!;
+    const read = (key: string): { ms: number; unresolved: string[] } => {
+      const m = new RegExp(`[{,]\\s*${key}\\b\\s*(?::\\s*([^,}]+))?(?=\\s*[,}])`).exec(call.text);
+      if (!m) return { ms: 0, unresolved: [] };
+      const v = valuesOf((m[1] ?? key).trim(), src, list);
+      return { ms: v.values.length ? Math.max(...v.values) : 0, unresolved: v.unresolved };
+    };
+    const duration = read("duration"), delay = read("delay");
+    const easing = /\beasing\s*:\s*("[^"]*"|[\w.()]+)/.exec(call.text)?.[1];
+    const literal = easing?.startsWith("\"") ? easing.slice(1, -1) : undefined;
+    // No easing means linear in the Web Animations API; a literal must be ease-out shaped. A named constant
+    // (EASE_OUT, css from flipEasing) is checked where it is defined.
+    const slow = easing === undefined || (literal !== undefined && (literal === "linear" || slowStart(literal)));
+    const unresolved = [...duration.unresolved, ...delay.unresolved];
+    if (duration.ms + delay.ms > LIMIT_MS || slow || unresolved.length) {
+      bad.push(`${call.at} ${call.text.replace(/\s+/g, " ").slice(0, 140)}${unresolved.length ? ` (unresolved: ${unresolved.join(", ")})` : ""}`);
+    }
+  }
+  return bad;
+}
+
+/**
+ * Transitions set from script in `list` (`el.style.transition = ...`, its duration, delay and timing-function
+ * longhands, and `style.setProperty("transition", ...)`). Each string or template literal on the right is read like CSS,
+ * with `${CONSTANT}` resolved; one the scan cannot resolve is refused. `""` and `"none"` hand back to the stylesheet.
+ */
+function inlineOffences(list: Src[]): string[] {
+  const bad: string[] = [];
+  const PROPS: Record<string, string> = { transition: "transition", transitionDuration: "duration", transitionDelay: "delay", transitionTimingFunction: "timing-function",
+    "transition-duration": "duration", "transition-delay": "delay", "transition-timing-function": "timing-function" };
+  for (const f of scripts(list)) {
+    const sites = [
+      ...[...f.text.matchAll(/\.style\.(transition(?:Duration|Delay|TimingFunction)?)\s*=(?!=)\s*([^;\n]+)/g)].map((m) => ({ at: m.index!, prop: m[1]!, rhs: m[2]! })),
+      ...[...f.text.matchAll(/\.style\.setProperty\(\s*["'](transition(?:-duration|-delay|-timing-function)?)["']\s*,\s*([^)\n]+)\)/g)].map((m) => ({ at: m.index!, prop: m[1]!, rhs: m[2]! })),
+    ];
+    for (const site of sites.sort((a, b) => a.at - b.at)) {
+      const kind = PROPS[site.prop]!;
+      const where = `${f.rel}:${lineOf(f.text, site.at)}`;
+      if (allowed(f.rel, site.rhs)) continue;
+      for (const lit of site.rhs.match(/"[^"]*"|'[^']*'|`[^`]*`/g) ?? []) {
+        const text = literalText(lit, f, list);
+        if (text === undefined) { bad.push(`${where} ${lit} (unresolved)`); continue; }
+        if (text.trim() === "" || text.trim() === "none") continue;
+        const offending = splitTop(text).some((item) => {
+          if (kind === "duration" || kind === "delay") return (ms(item) ?? 0) > LIMIT_MS;
+          if (kind === "timing-function") return slowEasing(item);
+          const m = parseItem(item, "transition");
+          return m.duration + m.delay > LIMIT_MS || (m.duration > 0 && (/^ease-in/.test(m.easing) || (/cubic-bezier/.test(m.easing) && slowStart(m.easing))
+            || (MOVING.test(m.property) && (m.easing === "ease" || m.easing === "linear"))));
+        });
+        if (offending) bad.push(`${where} ${site.prop} = ${text}`);
+      }
+    }
+  }
+  return bad;
 }
 
 test("the scan sees the motion it is meant to police", () => {
@@ -192,6 +452,11 @@ test("the scan sees the motion it is meant to police", () => {
   expect(slowStart("ease-in-out")).toBe(true);
   expect(slowStart("cubic-bezier(0.42, 0, 1, 1)")).toBe(true);
   expect(slowStart("cubic-bezier(0.23, 1, 0.32, 1)")).toBe(false);
+  // The resolvers read the real tree: a constant from a comma declaration, and a template with an imported constant.
+  const tooltip = scripts(files).find((f) => f.rel === "packages/ui/src/tooltip.ts")!;
+  expect(valuesOf("SWAP", tooltip, files).values.length).toBe(1);
+  expect(valuesOf("SWAP", tooltip, files).values[0]).toBeGreaterThan(0);
+  expect(literalText("`width ${TRAVEL}ms ${EASE_OUT}`", tooltip, files)).toMatch(/^width \d+ms cubic-bezier\(0\.23, 1, 0\.32, 1\)$/);
 });
 
 test("durations scaled by #427's --ui-motion-scale are read at scale 1, not as 0", () => {
@@ -211,20 +476,71 @@ test("durations scaled by #427's --ui-motion-scale are read at scale 1, not as 0
   expect(scaled.filter((m) => m.duration === 0).map((m) => `${m.at} ${m.text}`)).toEqual([]);
 });
 
+// J455's review of #471 (comment 89290) found four ways motion slipped past the scan. Each fixture below must be caught,
+// and the safe neighbours beside it must not be.
+test("CSS longhands are read: transition-duration, -delay and -timing-function (and the animation ones)", () => {
+  const css: Src = { rel: "fixture.css", text: [
+    ".a { transition-duration: 420ms; }",
+    ".b { transition-timing-function: ease-in-out; }",
+    ".c { animation-duration: 0.5s; }",
+    ".d { transition-delay: 360ms; }",
+    ".e { transition-duration: var(--t-pop), var(--t-press); transition-timing-function: ease-out, var(--ease-out); }",
+    ".f { transition-duration: 0ms !important; transition-delay: 0s; }",
+  ].join("\n") };
+  expect(cssDurationOffences([css]).map((o) => o.split(" ")[0])).toEqual(["fixture.css:1", "fixture.css:3", "fixture.css:4"]);
+  expect(cssSlowOffences([css]).map((o) => o.split(" ")[0])).toEqual(["fixture.css:2"]);
+});
+
+test("Web Animation durations given by a named constant or an expression are resolved", () => {
+  const ts: Src = { rel: "fixture.ts", text: [
+    "const SLOW = 480;",
+    "const POP = 180;",
+    "el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: SLOW, easing: EASE_OUT });",
+    "el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: reduced() ? 160 : 420, easing: EASE_OUT });",
+    "el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: NOT_DEFINED_ANYWHERE, easing: EASE_OUT });",
+    "el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, delay: POP, easing: EASE_OUT });",
+    "el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE_OUT });",
+    "el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: reduced() ? 120 : 200, easing: EASE_OUT });",
+  ].join("\n") };
+  expect(waapiOffences([ts]).map((o) => o.split(" ")[0])).toEqual(["fixture.ts:3", "fixture.ts:4", "fixture.ts:5", "fixture.ts:6"]);
+});
+
+test("transitions set inline from script are read, constants in template strings included", () => {
+  const ts: Src = { rel: "fixture.ts", text: [
+    "const TRAVEL = 400;",
+    "const SHORT = 150;",
+    "el.style.transition = \"opacity 360ms var(--ease-out)\";",
+    "el.style.transition = `transform ${TRAVEL}ms ${EASE_OUT}`;",
+    "el.style.transition = \"opacity 120ms ease\";",
+    "el.style.setProperty(\"transition\", \"transform 200ms ease-in-out\");",
+    "el.style.transitionDuration = \"500ms\";",
+    "el.style.transition = animate ? `opacity ${SHORT}ms ${EASE_OUT}` : \"none\";",
+    "el.style.transition = \"\";",
+    "el.style.transition = other.style.transition;",
+  ].join("\n") };
+  expect(inlineOffences([ts]).map((o) => o.split(" ")[0])).toEqual(["fixture.ts:3", "fixture.ts:4", "fixture.ts:5", "fixture.ts:6", "fixture.ts:7"]);
+});
+
+test("a spring duration given through a variable is resolved, and an unknown one is refused", () => {
+  const ts: Src = { rel: "fixture.ts", text: [
+    "const D = 0.45;",
+    "new Spring(0, f, { visualDuration: D });",
+    "const twice = { visualDuration: 0.2 * 2 };",
+    "const make = (d: number) => new Spring(0, g, { visualDuration: d });",
+    "const ok = { visualDuration: QUICK };",
+    "const QUICK = 0.2;",
+    "type Cfg = { visualDuration: number; bounce?: 0 };",
+    "// a comment that says { visualDuration: 0.9 } is not motion",
+  ].join("\n") };
+  expect(springOffences([ts]).map((o) => o.split(" ")[0])).toEqual(["fixture.ts:2", "fixture.ts:3", "fixture.ts:4"]);
+});
+
 test("no spring lasts more than 300 ms", () => {
-  const bad: string[] = [];
-  for (const f of files) {
-    if (!f.rel.endsWith(".ts")) continue;
-    for (const m of f.text.matchAll(/visualDuration\s*:\s*([\d.]+)/g)) {
-      if (Number(m[1]) * 1000 > LIMIT_MS) bad.push(`${f.rel}:${lineOf(f.text, m.index!)} ${m[0]}`);
-    }
-  }
-  expect(bad).toEqual([]);
+  expect(springOffences(files)).toEqual([]);
 });
 
 test("no CSS transition or animation lasts more than 300 ms, delay included", () => {
-  const bad = cssMotions().filter((m) => !m.loop && m.duration + m.delay > LIMIT_MS && !allowed(m.rel, m.text)).map((m) => `${m.at} ${m.text}`);
-  expect(bad).toEqual([]);
+  expect(cssDurationOffences(files)).toEqual([]);
 });
 
 test("every looping CSS animation is on the allow-list", () => {
@@ -232,27 +548,15 @@ test("every looping CSS animation is on the allow-list", () => {
 });
 
 test("nothing that moves or fades in CSS starts slowly", () => {
-  const bad = cssMotions().filter((m) => m.duration > 0 && !allowed(m.rel, m.text) && (
-    /^ease-in/.test(m.easing) || (/cubic-bezier/.test(m.easing) && slowStart(m.easing))
-    || (MOVING.test(m.property) || m.property === "animation") && (m.easing === "ease" || m.easing === "linear")
-  )).map((m) => `${m.at} ${m.text}`);
-  expect(bad).toEqual([]);
+  expect(cssSlowOffences(files)).toEqual([]);
 });
 
 test("no Web Animation lasts more than 300 ms or starts slowly", () => {
-  const bad: string[] = [];
-  for (const call of animateCalls()) {
-    if (allowed(call.rel, call.text)) continue;
-    const duration = Number(/\bduration\s*:\s*(\d+)/.exec(call.text)?.[1] ?? 0);
-    const delay = Number(/\bdelay\s*:\s*(\d+)/.exec(call.text)?.[1] ?? 0);
-    const easing = /\beasing\s*:\s*("[^"]*"|[\w.()]+)/.exec(call.text)?.[1];
-    const literal = easing?.startsWith("\"") ? easing.slice(1, -1) : undefined;
-    // No easing means linear in the Web Animations API; a literal must be ease-out shaped. A named constant
-    // (EASE_OUT, css from flipEasing) is checked where it is defined.
-    const slow = easing === undefined || (literal !== undefined && (literal === "linear" || slowStart(literal)));
-    if (duration + delay > LIMIT_MS || slow) bad.push(`${call.at} ${call.text.replace(/\s+/g, " ").slice(0, 140)}`);
-  }
-  expect(bad).toEqual([]);
+  expect(waapiOffences(files)).toEqual([]);
+});
+
+test("no transition set from script lasts more than 300 ms or starts slowly", () => {
+  expect(inlineOffences(files)).toEqual([]);
 });
 
 test("the FLIP reflow curve is the product's ease-out and lasts its duration", () => {
