@@ -96,3 +96,31 @@ async fn replacement_leg_requires_successful_joined_previous_cleanup() {
         .worker = Some(worker);
     assert!(bridge.retire_previous(id).await.is_err());
 }
+
+/// A link that offers desktop lanes switches the source on by itself; one that
+/// does not (an HTTPS link, or a server without app windows) leaves it off, and
+/// a dropped link never switches it off again (#146, D349).
+#[tokio::test]
+async fn desktop_lanes_on_the_link_switch_the_source_on() {
+    let mut bridge = SourceBridge::new("missing-runtime".into(), "missing-helper".into(), 2);
+    let id = Uuid::from_u128(7);
+    AgentPlugin::transport_capabilities(&mut bridge, 0);
+    assert!(bridge.prepare(id, start()).is_err(), "no lanes: still off");
+    AgentPlugin::transport_capabilities(&mut bridge, WIRE.capability);
+    assert!(bridge.prepare(id, start()).is_ok(), "lanes offered: on");
+    AgentPlugin::transport_capabilities(&mut bridge, 0);
+    assert!(bridge.0.state.lock().unwrap().enabled, "a drop keeps it on");
+}
+
+/// An explicit `desktop.down` in progress wins over a link coming up: the
+/// switch is skipped while the lifecycle lock is held.
+#[tokio::test]
+async fn a_held_lifecycle_lock_blocks_the_automatic_switch() {
+    let mut bridge = SourceBridge::new("missing-runtime".into(), "missing-helper".into(), 2);
+    // A clone shares the same state, as the explicit switch's caller would.
+    let explicit = bridge.clone();
+    let held = explicit.0.lifecycle.try_lock().unwrap();
+    AgentPlugin::transport_capabilities(&mut bridge, WIRE.capability);
+    assert!(!bridge.0.state.lock().unwrap().enabled);
+    drop(held);
+}

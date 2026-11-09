@@ -637,7 +637,25 @@ impl SourceBridge {
 impl AgentPlugin for SourceBridge {
     /// Records what the connection to the server supports. If desktop lanes are
     /// not supported, running workers are cancelled but prepared sessions are kept.
+    ///
+    /// When the server offers desktop lanes on this connection, the source also
+    /// switches itself on (#146, D349): the server advertises the capability
+    /// only when it was built with app windows, this plugin is registered only on
+    /// macOS, and nothing else ever sent `desktop.up`, so a Mac host could list
+    /// windows but never start one. It is never switched off here: a link that
+    /// drops reports 0 and must keep prepared sessions for the next link, and
+    /// `desktop.down` stays the explicit way to turn capture off. The switch is
+    /// skipped while an explicit `desktop.up`/`desktop.down` holds the lifecycle
+    /// lock or an old cleanup is unjoined; the next link tries again.
     fn transport_capabilities(&mut self, capabilities: u64) {
+        if capabilities & WIRE.capability != 0
+            && let Ok(_lifecycle) = self.0.lifecycle.try_lock()
+            && let Ok(mut state) = self.0.state.lock()
+            && !state.enabled
+            && !state.prepared.values().any(|record| record.stopping)
+        {
+            state.enabled = true;
+        }
         if let Ok(mut state) = self.0.state.lock() {
             state.native_caps = Some(capabilities);
             if capabilities & WIRE.capability == 0 {
