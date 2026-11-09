@@ -75,7 +75,7 @@ export interface FailureDetail {
    * `unrecognized_install`: the old install's id (32 lowercase hex characters), which the
    * confirmation names, and whether its infraternal agent is running (Take over stops it).
    */
-  takeover?: { install: string; live: boolean };
+  takeover?: { install: string; live: boolean; terminals?: Array<{ account: string; program: string; since: number }>; close_challenge?: string };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -201,7 +201,17 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   if (value.kind === "unproven_files" && (value.refusal === "cache" || value.refusal === "prepared" || value.refusal === "foreign")) failure.refusal = value.refusal;
   if (value.kind === "unrecognized_install" && isRecord(value.takeover) && typeof value.takeover.install === "string"
     && /^[0-9a-f]{32}$/.test(value.takeover.install) && typeof value.takeover.live === "boolean") {
-    failure.takeover = { install: value.takeover.install, live: value.takeover.live };
+    const terminals = value.takeover.terminals;
+    // Unknown or malformed terminal metadata must never turn into an offer with an empty list.
+    if (terminals !== undefined && (!Array.isArray(terminals) || terminals.length > 1024 || !terminals.every((terminal: unknown) => isRecord(terminal)
+      && typeof terminal.account === "string" && terminal.account.length > 0 && terminal.account.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.account)
+      && typeof terminal.program === "string" && terminal.program.length > 0 && terminal.program.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.program)
+      && typeof terminal.since === "number" && Number.isSafeInteger(terminal.since) && terminal.since > 0 && terminal.since <= 253402300799))) return failure;
+    const closeChallenge = value.takeover.close_challenge;
+    if (Array.isArray(terminals) && terminals.length && (!isCanonicalUuid(closeChallenge) || closeChallenge === "00000000-0000-0000-0000-000000000000")) return failure;
+    failure.takeover = { install: value.takeover.install, live: value.takeover.live,
+      ...(isCanonicalUuid(closeChallenge) ? { close_challenge: closeChallenge } : {}),
+      ...(Array.isArray(terminals) ? { terminals: terminals as Array<{ account: string; program: string; since: number }> } : {}) };
   }
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
@@ -292,7 +302,7 @@ export class ProvisioningRun {
 
   /**
    * Removes exactly what the earlier attempt left on a host (the `ssh.start-fresh` action, #169) and continues the same
-   * attempt. `challenge` comes from the failed event's leftovers; the server refuses any other.
+   * attempt. `challenge` comes from the failed event's leftovers, or its terminal-close offer; the server refuses any other.
    */
   startFresh(target: string, challenge: string): void { this.send({ action: "start-fresh", target, challenge }); }
 

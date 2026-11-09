@@ -428,3 +428,18 @@ export function failureDiagnostics(failure: FailureDetail | undefined, guide: Gu
   const evidence = [failure.kind !== "stale_previous_attempt" ? failure.message : "", ...failure.log_tail];
   return [...new Set(evidence.filter((line) => line && !visible.includes(line)))];
 }
+
+/** Reuse the opening-date formatter across the terminal list without charging every row its own setup. */
+let takeoverDateFormat: Intl.DateTimeFormat | undefined;
+
+/** The terminal account, foreground program and opening date reviewed before Take over (D368). */
+export function takeoverTerminalLabel(terminal: { account: string; program: string; since: number }): string {
+  takeoverDateFormat ??= new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  const date = takeoverDateFormat.format(new Date(terminal.since * 1000));
+  return `${terminal.account}, ${terminal.program}, since ${date}`;
+}
+
+/** Explain the irreversible terminal close separately from restoring the install on failure (D368). */
+export function takeoverTerminalSummary(count: number): string {
+  return count === 1 ? "1 open terminal. Take over closes it." : `${count} open terminals. Take over closes them.`;
+}

@@ -1,6 +1,6 @@
 //! Rechecks earlier host provisioning ownership and liveness before explicit recovery [17][139], #169.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Write as _};
 
 use crate::{
     install::Installation,
@@ -50,6 +50,9 @@ use crate::{
 // Validate every socket before deleting any. Only these session rendezvous
 // names and empty directories belong to this legacy fresh-install receipt.
 pub(crate) const INSPECT: &str = include_str!("previous_attempt.sh");
+
+/// Maximum public check output, including at most 1024 bounded terminal confirmation records (D368).
+pub(crate) const MAX_CHECK_OUTPUT: usize = 512 * 1024;
 
 /// Nonsecret coordinates bind confirmation to exactly the directory observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,15 +168,119 @@ pub struct FinishedInstall {
     pub live: bool,
     /// Whether the host may take it over.
     pub takeover: Takeover,
+    /// Authenticated terminal records reviewed before any scope is stopped (D368).
+    pub terminals: Vec<TakeoverTerminal>,
+}
+
+/// A terminal shown on the Take over confirmation, with a private fingerprint binding its scope.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TakeoverTerminal {
+    /// The scope's canonical session id, never a service name supplied by the host.
+    #[serde(skip)]
+    id: uuid::Uuid,
+    /// The account running the foreground program.
+    pub account: String,
+    /// The foreground executable's short name, never its arguments.
+    pub program: String,
+    /// When the authenticated shim opened this terminal, in Unix seconds.
+    pub since: u64,
+    /// Binds socket, shim, scope and process identities across the confirmation.
+    #[serde(skip)]
+    fingerprint: String,
+}
+
+impl TakeoverTerminal {
+    /// Decode one bounded comma-separated terminal record; names cannot contain shell syntax.
+    fn parse(record: &str) -> Result<Self, Failure> {
+        let fields: Vec<_> = record.split(',').collect();
+        let [id, account, program, since, fingerprint] = fields.as_slice() else {
+            return Err(refused());
+        };
+        let account = decode_terminal_name(account)?;
+        let program = decode_terminal_name(program)?;
+        if fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(refused());
+        }
+        if since.is_empty()
+            || since.starts_with('0')
+            || !since.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(refused());
+        }
+        let since = since.parse::<u64>().map_err(|_| refused())?;
+        if since == 0 || since > 253_402_300_799 {
+            return Err(refused());
+        }
+        Ok(Self {
+            id: canonical_id(id)?,
+            account,
+            program,
+            since,
+            fingerprint: (*fingerprint).into(),
+        })
+    }
+
+    /// Reproduce the exact host record, including its scope fingerprint.
+    fn record(&self) -> String {
+        format!(
+            "{},{},{},{},{}",
+            self.id.simple(),
+            encode_terminal_name(&self.account),
+            encode_terminal_name(&self.program),
+            self.since,
+            self.fingerprint
+        )
+    }
+}
+
+/// Decode a printable public name while keeping the host's fixed records free of shell syntax.
+fn decode_terminal_name(record: &str) -> Result<String, Failure> {
+    if record.is_empty()
+        || record.len() > 128
+        || !record.len().is_multiple_of(2)
+        || !record
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(refused());
+    }
+    let bytes = record
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).map_err(|_| refused())?, 16)
+                .map_err(|_| refused())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let name = String::from_utf8(bytes).map_err(|_| refused())?;
+    if name.chars().any(char::is_control) {
+        return Err(refused());
+    }
+    Ok(name)
+}
+
+/// Reproduce the safe transport encoding of one public terminal name.
+fn encode_terminal_name(name: &str) -> String {
+    let mut record = String::with_capacity(name.len() * 2);
+    for byte in name.as_bytes() {
+        let _ = write!(record, "{byte:02x}");
+    }
+    record
 }
 
 /// Whether a finished install may be taken over, as the host proved it (D359).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Takeover {
     /// Root's own install, every part proven infraternal's, and used by
-    /// nothing but its agent: Take over may be offered.
+    /// its infraternal agent and authenticated own session scopes: Take over may be offered.
     Ready,
-    /// Proven infraternal's, but an open terminal or another process uses it.
+    /// Another holder uses it, or a terminal cannot be safely attributed to its own scope.
     Busy,
     /// Not provably infraternal's, or not root's: never offered.
     Unproven,
@@ -186,8 +293,8 @@ pub enum Takeover {
 pub fn parse_check_with_absence(
     bytes: &[u8],
 ) -> Result<(Check, Option<PreviousAttempt>, Remains), Failure> {
-    // The check lines plus an upgrade record with two host names stay below 1 KiB.
-    if bytes.len() > 1024 {
+    // Ordinary checks stay below 1 KiB; D368 adds bounded terminal records.
+    if bytes.len() > MAX_CHECK_OUTPUT {
         return Err(refused());
     }
     let end = bytes
@@ -216,10 +323,23 @@ pub fn parse_check_with_absence(
 /// `<host> <dev:ino> <live|idle> <ready|busy|unproven>`, exactly (D359).
 fn parse_installed(record: &str) -> Result<FinishedInstall, Failure> {
     let fields: Vec<&str> = record.split(' ').collect();
-    let [host, identity, live, takeover] = fields.as_slice() else {
+    let [host, identity, live, takeover, terminal_records @ ..] = fields.as_slice() else {
         return Err(refused());
     };
+    if terminal_records.len() > 1024 {
+        return Err(refused());
+    }
+    let terminals = terminal_records
+        .iter()
+        .map(|record| TakeoverTerminal::parse(record))
+        .collect::<Result<Vec<_>, _>>()?;
+    if terminals.windows(2).any(|pair| pair[0].id >= pair[1].id)
+        || (!terminals.is_empty() && *takeover != "ready")
+    {
+        return Err(refused());
+    }
     Ok(FinishedInstall {
+        terminals,
         host: canonical_id(host)?,
         identity: parse_identity(identity)?,
         live: parse_liveness(live)?,
@@ -271,12 +391,12 @@ pub const TAKEOVER_OFFER: &str = "This machine already has an infraternal agent 
 /// The refusal for a finished install that something still uses (D359).
 /// It holds before the stop (nothing touched) and after it (the agent was put
 /// back as it was found), so it never claims that nothing changed (J342 P3-4).
-pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something is using it right now, such as an open terminal. It was left as it was found. Close it, then try again.";
+pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and a program is still using it outside the terminal sessions it can safely identify. The old install is kept, but any terminals you confirmed closed stay closed. Stop that program, then try again.";
 
 impl FinishedInstall {
     /// The exact record the host compares before it changes anything.
     fn record(&self) -> String {
-        format!(
+        let mut record = format!(
             "INFRATERNAL_SETUP_INSTALLED {} {} {} {}",
             self.host.simple(),
             self.identity,
@@ -286,7 +406,12 @@ impl FinishedInstall {
                 Takeover::Busy => "busy",
                 Takeover::Unproven => "unproven",
             }
-        )
+        );
+        for terminal in &self.terminals {
+            record.push(' ');
+            record.push_str(&terminal.record());
+        }
+        record
     }
 
     /// The refusal when Take over is not offered: in use ([`TAKEOVER_BUSY`]),
@@ -303,7 +428,8 @@ impl FinishedInstall {
     /// The paused step that offers Take over and names the old install (D359).
     #[must_use]
     pub(crate) fn takeover_failure(&self, mode: InstallMode) -> Failure {
-        let mut failure = installed_elsewhere(mode).with_takeover(self.host, self.live);
+        let mut failure =
+            installed_elsewhere(mode).with_takeover(self.host, self.live, self.terminals.clone());
         failure.message = TAKEOVER_OFFER;
         failure
     }
@@ -311,7 +437,7 @@ impl FinishedInstall {
     /// What confirming Take over does, for the confirmation's Details.
     #[must_use]
     pub(crate) fn takeover_findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
-        Leftovers {
+        let mut leftovers = Leftovers {
             challenge,
             mode,
             findings: vec![
@@ -327,7 +453,14 @@ impl FinishedInstall {
                     "It is set aside, put back if setup fails, and deleted once this machine has joined",
                 ),
             ],
+        };
+        for terminal in &self.terminals {
+            leftovers.findings.push(Cow::Owned(format!(
+                "An open terminal: {}, {}; Take over closes it",
+                terminal.account, terminal.program
+            )));
         }
+        leftovers
     }
 
     /// This install as the attempt that takes it over with `token` sees it:
@@ -365,24 +498,32 @@ impl FinishedInstall {
         token: uuid::Uuid,
     ) -> Result<(), Failure> {
         target.validate()?;
+        let record = format!("{}\n", self.record());
+        // A long terminal list travels over stdin, never the operating system's single-argument limit.
         let body = format!(
-            "{}\n{}\n{INSPECT}\ntake_over_finished_install {} {}\n",
+            "{}\n{}\n{INSPECT}\nIFS= read -r takeover_record\ntake_over_finished_install \"$takeover_record\" {}\n",
             crate::install::SETUP_LOCK,
             crate::install::RUNTIME_CLEANUP,
-            crate::transport::shell_quote(&self.record()),
             token.simple()
         );
         session
             .run(
                 &Installation::script_for(target.mode, self.host, token, &body),
-                Input::Empty,
+                Input::Bytes(record.as_bytes()),
             )
             .await
             .map_err(classify)
             .map_err(|mut error| {
-                if error.exit_status == Some(73) {
-                    error.kind = FailureKind::UnrecognizedInstall;
-                    error.message = TAKEOVER_BUSY;
+                match error.exit_status {
+                    Some(73) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_BUSY;
+                    }
+                    Some(75) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = "This install or its open terminals changed since you reviewed them. Try again to review it before taking over. Terminals you confirmed closed stay closed.";
+                    }
+                    _ => {}
                 }
                 error
             })?;
@@ -1186,6 +1327,46 @@ mod tests {
             uuid::Uuid::from_u128(7),
             "the token names the set-aside"
         );
+    }
+
+    /// D368: a terminal-bearing offer carries exactly the reviewed metadata back to the host.
+    #[test]
+    fn terminal_takeover_record_names_what_confirmation_will_close() {
+        let terminal = format!(
+            "{},726f6f74,62617368,1792195200,{}",
+            "3".repeat(32),
+            "a".repeat(64)
+        );
+        let line = format!("{} 64:1234 live ready {terminal}", "1".repeat(32));
+        let installed = parse_installed(&line).unwrap();
+        assert_eq!(
+            installed.record(),
+            format!("INFRATERNAL_SETUP_INSTALLED {line}")
+        );
+        let offer = serde_json::to_value(installed.takeover_failure(InstallMode::Root)).unwrap();
+        assert_eq!(offer["takeover"]["terminals"][0]["account"], "root");
+        assert_eq!(offer["takeover"]["terminals"][0]["program"], "bash");
+        assert_eq!(
+            offer["takeover"]["terminals"][0]["since"],
+            1_792_195_200_u64
+        );
+        let findings = installed.takeover_findings(InstallMode::Root, uuid::Uuid::nil());
+        assert!(
+            findings
+                .findings
+                .iter()
+                .any(|line| line.contains("bash") && line.contains("closes"))
+        );
+        for invalid in [
+            terminal.replace("726f6f74", "bad name"),
+            terminal.replace("62617368", "$(id)"),
+            format!("{terminal} {terminal}"),
+        ] {
+            assert!(
+                parse_installed(&format!("{} 64:1234 live ready {invalid}", "1".repeat(32)))
+                    .is_err()
+            );
+        }
     }
 
     /// A set-aside install's record offers Put it back, and names which restore

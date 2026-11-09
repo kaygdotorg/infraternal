@@ -346,6 +346,11 @@ pub(crate) struct TakeoverOffer {
     /// The old install's id, as 32 lowercase hex characters.
     install: String,
     live: bool,
+    /// Each terminal that confirmation will close (D368).
+    terminals: Vec<crate::previous_attempt::TakeoverTerminal>,
+    /// Only a UI that understands terminal closure receives and submits this challenge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    close_challenge: Option<uuid::Uuid>,
 }
 
 /// Host-local lease metadata parsed from the fixed setup-check record.
@@ -515,12 +520,39 @@ impl Failure {
     /// Offer to take over the finished install of another server whose id is
     /// `install`, and say whether its agent runs (D359).
     #[must_use]
-    pub(crate) fn with_takeover(mut self, install: uuid::Uuid, live: bool) -> Self {
+    pub(crate) fn with_takeover(
+        mut self,
+        install: uuid::Uuid,
+        live: bool,
+        terminals: Vec<crate::previous_attempt::TakeoverTerminal>,
+    ) -> Self {
         self.ids.get_or_insert_with(Box::default).takeover = Some(TakeoverOffer {
             install: install.simple().to_string(),
             live,
+            terminals,
+            close_challenge: None,
         });
         self
+    }
+
+    /// Bind terminal closure to its own confirmation, so cached UIs cannot use generic cleanup consent.
+    #[must_use]
+    pub(crate) fn with_terminal_confirmation(mut self, challenge: uuid::Uuid) -> Self {
+        if let Some(offer) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.takeover.as_mut())
+            && !offer.terminals.is_empty()
+        {
+            offer.close_challenge = Some(challenge);
+        }
+        self
+    }
+
+    /// The terminal-aware confirmation challenge, absent for ordinary cleanup and terminal-free takeover.
+    #[must_use]
+    pub(crate) fn terminal_confirmation(&self) -> Option<uuid::Uuid> {
+        self.ids.as_deref()?.takeover.as_ref()?.close_challenge
     }
 
     /// Mark the lock as an install an earlier add-host set aside and did not put back.

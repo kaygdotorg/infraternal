@@ -2112,7 +2112,7 @@ manager=dropin_manager'''
         """A new install committed in $base for `owner`, built from the files of
         `source`, with its own unit, wants link and launcher."""
         shutil.copytree(source, self.base, symlinks=True,
-                        ignore=shutil.ignore_patterns('.bootstrap-lock', '.superseded-service', '.superseded-unit'))
+                        ignore=shutil.ignore_patterns('.bootstrap-lock', '.superseded-service', '.superseded-unit', '*.sock', '*.stop', '*.ending'))
         (self.base / '.bootstrap-owner').write_text(owner + '\n')
         binary_dir = self.base / 'bin'
         self.unit.write_text(

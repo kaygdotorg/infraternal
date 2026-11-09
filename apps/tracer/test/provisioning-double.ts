@@ -367,9 +367,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
               kind: "unrecognized_install",
               message: "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.",
               log_tail: ["Setup location: /var/lib/infraternal"],
-              takeover: { install: TAKEOVER_INSTALL, live: true },
+              takeover: { install: TAKEOVER_INSTALL, live: true, ...(target.name.startsWith("takeover-terminals") ? { terminals: [{ account: "root", program: "bash", since: 1792195200 }], close_challenge: target.challenge } : { terminals: [] }) },
             }, undefined, {
-              challenge: target.challenge,
+              challenge: target.name.startsWith("takeover-terminals") ? "00000000-0000-0000-0000-000000000000" : target.challenge,
               mode: target.mode,
               findings: ["An infraternal agent from an earlier setup that isn't one of this server's hosts", "Its infraternal agent is running; Take over stops it", "It is set aside, put back if setup fails, and deleted once this machine has joined"],
             });

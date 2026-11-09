@@ -28,8 +28,13 @@ pub const LOCK: &str = ".lifetime-lock";
 /// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
 /// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`;
 /// level 4: `sessions-count`; level 5: `enrolled`; level 6: `stage-processes`;
-/// level 7: root's `infraternal up` base may be 0711 ([`traversable_base`]).
-pub const LEVEL: &[u8] = b"7\n";
+/// level 7: root's `infraternal up` base may be 0711 ([`traversable_base`]);
+/// level 8: authenticated `takeover-terminals` confirmation records (D368).
+pub const LEVEL: &[u8] = b"8\n";
+
+/// Authenticate terminal records without attaching to or changing their sessions (D368).
+#[path = "takeover_terminals.rs"]
+mod takeover_terminals;
 
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -716,7 +721,7 @@ fn session_sockets(runtime: &File) -> Result<Vec<(PathBuf, fs::Metadata)>, u8> {
             if metadata.file_type().is_socket()
                 && metadata.uid() == nix::unistd::Uid::effective().as_raw()
             {
-                files.push((entry.path(), metadata));
+                files.push((fs::canonicalize(entry.path()).map_err(|_| 77)?, metadata));
                 if files.len() > 1024 {
                     return Err(77);
                 }
@@ -1060,6 +1065,10 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
         // Session inspection takes no lock and never removes anything.
         if mode == "sessions" {
             return sessions(&runtime);
+        }
+        if mode == "takeover-terminals" {
+            return writeln!(io::stdout(), "{}", takeover_terminals::records(&runtime)?)
+                .map_err(|_| 77);
         }
         if mode == "sessions-count" {
             let open = open_sessions(&runtime)?;

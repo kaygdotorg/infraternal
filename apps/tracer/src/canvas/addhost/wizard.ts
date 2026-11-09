@@ -31,7 +31,7 @@ import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
 import { ICON, escapeHtml, svg } from "./icons";
-import { failureDiagnostics, failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES } from "./model";
+import { failureDiagnostics, failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES, takeoverTerminalLabel, takeoverTerminalSummary } from "./model";
 import type { Guide, ParsedTarget } from "./model";
 import { matchListed } from "./model";
 import { ServiceError } from "./service";
@@ -672,17 +672,17 @@ export class Wizard {
   }
 
   /**
-   * Removes what an earlier setup left on this host and continues the same attempt (#169). No confirmation: the
-   * server removes only what infraternal provably created. Without an open run (the connection ended) there is no
-   * attempt to continue, so a fresh run starts and finds the leftovers again with a new handle.
+   * Continue the paused attempt with its reviewed challenge (#169). Terminal closure supplies the challenge from
+   * its own confirmation offer (D368), which a generic cleanup action cannot use. If the connection ended,
+   * start a fresh check with a new handle rather than reusing an expired confirmation.
    */
-  private startFresh(job: Job): void {
+  private startFresh(job: Job, confirmation?: string): void {
     const leftovers = job.view.leftovers;
     if (!leftovers || !job.run?.open) { this.retryJob(job); return; }
     this.fixing = undefined;
     // Same attempt number, and the sign-in that already succeeded stays on screen while the cleanup runs.
     job.view = { ...pendingTarget(), attempt: job.view.attempt, authentication: job.view.authentication };
-    job.run.startFresh(job.target, leftovers.challenge);
+    job.run.startFresh(job.target, confirmation ?? leftovers.challenge);
     if (this.page !== "progress") this.go("progress", -1);
     else { this.paint(job); this.summarise(); }
     this.setFoot("");
@@ -853,20 +853,23 @@ export class Wizard {
     const job = this.fixing!;
     const offer = job.view.failure?.takeover;
     const name = escapeHtml(job.entry.label);
+    const terminals = offer?.terminals ?? [];
+    const action = terminals.length === 1 ? "Close it and take over" : terminals.length ? "Close them and take over" : "Take over";
     page.innerHTML = `${this.hero(ICON.servers)}<h1 class="ah-title">Take over ${name}?</h1>
       <p class="ah-lede">Its old infraternal agent is ${offer?.live ? "stopped and " : ""}set aside, and a new one is installed for this server.</p>
+      ${terminals.length ? `<p class="ah-text" data-terminal-summary>${takeoverTerminalSummary(terminals.length)}</p>` : ""}
       <div class="ah-keyblock" data-kv></div>
-      <p class="ah-text">If setup fails, the old one is put back as it was. Once ${name} has joined, the old one is deleted.</p>${this.detailsBlock(job)}`;
+      <p class="ah-text">If setup fails, the old one is put back as it was.${terminals.length ? " Terminals you close stay closed." : ""} Once ${name} has joined, the old one is deleted.</p>${this.detailsBlock(job)}`;
     const list = createKeyValueList("The install that is taken over");
-    list.set(offer ? [{ key: "Old install", value: offer.install }] : []);
+    list.set(offer ? [{ key: "Old install", value: offer.install }, ...terminals.map((terminal, index) => ({ key: `Terminal ${index + 1}`, value: takeoverTerminalLabel(terminal) }))] : []);
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-failure">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="take-over"><span>Take over</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-failure">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="take-over"><span>${action}</span></button>`);
   }
 
   /** Confirmed on the Take over page: continue the paused attempt, only for a root-mode offer (D359). */
   private takeOver(job: Job): void {
     if (!job.view.failure?.takeover || job.view.leftovers?.mode !== "root") { this.go("failure", -1); return; }
-    this.startFresh(job);
+    this.startFresh(job, job.view.failure.takeover.close_challenge);
   }
 
   private renderHostKey(page: HTMLElement): void {

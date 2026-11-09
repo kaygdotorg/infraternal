@@ -20,13 +20,14 @@ async function config(page: Page, body: Record<string, string>): Promise<void> {
   await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
 
-async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
+/** Open the production tracer with a deterministic fixture and the requested display theme. */
+async function open(page: Page, query = "", settings: Record<string, string> = {}, theme = "ink"): Promise<void> {
   // Fixture setup is idempotent: retry only a reset keep-alive connection,
   // never a product operation or an assertion failure.
   await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
   if (Object.keys(settings).length) await config(page, settings);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/?mock=1&proto=clusters&scene=3&theme=ink&bg=none${query}`);
+  await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 45_000 });
   await expect.poll(() => probe(page, (p) => p.views().length), { timeout: 45_000 }).toBeGreaterThan(0);
   await page.waitForTimeout(400);
@@ -799,3 +800,43 @@ test("rootless: a finished install of another server offers no Take over", async
   await expect(inWizard(page, "Try again")).toBeVisible();
   await page.screenshot({ path: tracerEvidencePath("addhost-takeover", "rootless-1440.png") });
 });
+
+/** D368: terminal details are visible before consent, at both required sizes and themes. */
+for (const theme of ["ink", "paper"]) for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`Take over lists terminals before closing them: ${theme} ${viewport.width}`, async ({ page }) => {
+    await open(page, "", {}, theme);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    const sent: Array<Record<string, unknown>> = [];
+    page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* binary frames */ } }
+    }));
+    await addTyped(page, "root@takeover-terminals.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
+    const confirm = wizard(page).locator(".ah-page[data-page='takeover']");
+    await expect(confirm.locator("[data-terminal-summary]")).toHaveText("1 open terminal. Take over closes it.");
+    await expect(inWizard(page, "Close it and take over")).toBeVisible();
+    await expect(page.locator(".ah-float")).toHaveCount(1);
+    await expect(confirm.locator(".ui-kv-value")).toContainText([TAKEOVER_INSTALL, "root, bash, since 17 Oct 2026"]);
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    const edges = await confirm.evaluate((root) => {
+      const title = root.querySelector(".ah-title")!.getBoundingClientRect();
+      const summary = root.querySelector("[data-terminal-summary]")!.getBoundingClientRect();
+      return { title: title.left, summary: summary.left, right: summary.right, width: innerWidth };
+    });
+    expect(Math.abs(edges.title - edges.summary)).toBeLessThanOrEqual(0.5);
+    expect(edges.right).toBeLessThanOrEqual(edges.width);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `terminals-${theme}-${viewport.width}.png`) });
+    await inWizard(page, "Back").click();
+    await expect(wizard(page).locator('[data-ah="review-take-over"]')).toBeVisible();
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
+    await wizard(page).locator('[data-ah="take-over"]').click();
+    await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(1);
+    expect(sent.find((command) => command.action === "start-fresh")?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+  });
+}

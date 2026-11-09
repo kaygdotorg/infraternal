@@ -637,9 +637,14 @@ start_setup_lease
         let mut caps = None;
         let exact = loop {
             let receipt = channel
-                .line(512)
+                .line(crate::previous_attempt::MAX_CHECK_OUTPUT)
                 .await
                 .map_err(|error| error.at(InstallStep::Connect))?;
+            // Terminal-bearing finished-install records carry every reviewed scope. Other
+            // receipts keep their existing small bound, including capability records.
+            if receipt.len() > 512 && !receipt.starts_with(b"INFRATERNAL_SETUP_INSTALLED ") {
+                return Err(invalid_setup().at(InstallStep::Connect));
+            }
             if let Some(failure) = parse_refusal(&receipt, InstallStep::Connect) {
                 return Err(crate::previous_attempt::classify(failure));
             }
@@ -655,7 +660,7 @@ start_setup_lease
                 caps = Some(TransferCaps::parse(&receipt));
                 continue;
             }
-            if stdout.len() + receipt.len() > 512 {
+            if stdout.len() + receipt.len() > crate::previous_attempt::MAX_CHECK_OUTPUT {
                 return Err(invalid_setup().at(InstallStep::Connect));
             }
             stdout.extend_from_slice(&receipt);
