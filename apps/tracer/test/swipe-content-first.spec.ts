@@ -16,10 +16,14 @@ import { expect, test, type BrowserContext, type Page } from "playwright/test";
 import { CANVAS_WHEEL_MODIFIER } from "../src/canvas/camera/canvas-wheel-modifier";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** Where the captures go: the external evidence directory, never the checkout. */
 const OUT = tracerEvidencePath("swipe-content-first");
+/** The docs window that shows "Keys and how long they last": a long page that scrolls inside its window. */
 const PAGE = '.ui-window[data-window-id="d-reference/keys"]';
 
+/** The mock canvas's test hooks, as `window.__tracerClusters` exposes them. */
 type Api = Record<string, (...args: unknown[]) => unknown>;
+/** Calls one test hook of the mock canvas by name. */
 const api = (page: Page, fn: string, ...args: unknown[]): Promise<unknown> =>
   page.evaluate(([f, a]) => ((window as unknown as { __tracerClusters: Api }).__tracerClusters[f as string] as (...x: unknown[]) => unknown)(...(a as unknown[])), [fn, args] as const);
 /** Everything the canvas could have moved: the camera and the column strip of the Docs view. */
@@ -28,7 +32,9 @@ const canvasState = (page: Page): Promise<string> =>
     const col = document.querySelector<HTMLElement>('.cl[data-view="docs"] .cl-col');
     return `${document.querySelector<HTMLElement>(".cl-world")?.style.transform ?? ""}|${col?.scrollTop}|${col?.scrollLeft}`;
   });
+/** How far the docs page has scrolled inside its window. */
 const pageTop = (page: Page): Promise<number> => page.evaluate((sel) => document.querySelector<HTMLElement>(`${sel} .dr-scroll`)!.scrollTop, PAGE);
+/** The canvas stop (window) the locked canvas is on. */
 const stopIndex = async (page: Page): Promise<number> => ((await api(page, "canvasLock")) as { index: number }).index;
 
 /** Opens the clusters mock with the Docs page "Keys and how long they last" in its own window, on a locked canvas. */
@@ -36,6 +42,7 @@ async function open(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
   await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=plain&docs=1");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  // sleep: the mock canvas finishes its first layout and the page its fonts; no event marks it
   await page.waitForTimeout(1200);
   await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette-input")).toBeFocused();
@@ -45,6 +52,7 @@ async function open(context: BrowserContext): Promise<Page> {
   await result.click();
   await expect(page.locator(`${PAGE} .dr-page h1`)).toHaveText("Keys and how long they last", { timeout: 10_000 });
   await page.evaluate(() => document.fonts.ready);
+  // sleep: the mock canvas finishes its first layout and the page its fonts; no event marks it
   await page.waitForTimeout(1000);
   expect(await api(page, "canvasLock"), "the canvas is locked to windows, the input lock is off").toMatchObject({ on: true });
   return page;
@@ -55,6 +63,7 @@ async function twoFingers(page: Page, context: BrowserContext, x: number, y: num
   const cdp = await context.newCDPSession(page);
   const pts = (d: number) => [{ x: x - 40 + d, y }, { x: x + 40 + d, y }];
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: pts(0) });
+  // sleep: one touch or wheel step per frame, like a finger or a pad; there is no event to wait for
   for (let i = 1; i <= 12; i++) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: pts((dx * i) / 12) }); await page.waitForTimeout(16); }
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
@@ -72,8 +81,10 @@ test.describe("phone: touch", () => {
     const before = await canvasState(page), index = await stopIndex(page);
     const drag = async (dx: number, dy: number, steps = 12): Promise<void> => {
       await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+      // sleep: one touch or wheel step per frame, like a finger or a pad; there is no event to wait for
       for (let i = 1; i <= steps; i++) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x + (dx * i) / steps, y: y + (dy * i) / steps }] }); await page.waitForTimeout(16); }
       await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      // sleep: the camera spring and a gesture's momentum settle; no event marks the end
       await page.waitForTimeout(500);
     };
     await drag(-220, 0); // sideways, left then right: the content has nothing to scroll that way
@@ -112,8 +123,11 @@ test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
 
   /** A swipe as a trackpad delivers it: pixel deltas in many small steps, then a decaying momentum tail. */
   async function swipe(page: Page, dx: number, dy: number): Promise<void> {
+    // sleep: one touch or wheel step per frame, like a finger or a pad; there is no event to wait for
     for (let i = 0; i < 8; i++) { await page.mouse.wheel(dx, dy); await page.waitForTimeout(16); }
+    // sleep: one touch or wheel step per frame, like a finger or a pad; there is no event to wait for
     for (let i = 1; i <= 14; i++) { await page.mouse.wheel(Math.round(dx * 0.8 ** i), Math.round(dy * 0.8 ** i)); await page.waitForTimeout(16); }
+    // sleep: the camera spring and a gesture's momentum settle; no event marks the end
     await page.waitForTimeout(500);
   }
 
@@ -147,6 +161,7 @@ test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
     await page.mouse.wheel(0, -300); // (the previous window: this is the last one) an ordinary mouse wheel only has a vertical axis
     await page.keyboard.up(CANVAS_WHEEL_MODIFIER);
     await expect.poll(() => stopIndex(page), "modifier + wheel moves the canvas").not.toBe(index);
+    // sleep: the camera spring and a gesture's momentum settle; no event marks the end
     await page.waitForTimeout(600);
     expect(await pageTop(page), "and the page under the pointer did not scroll").toBe(0);
   });

@@ -18,6 +18,7 @@ const SIZES = [
   { name: "desktop", width: 1440, height: 900, scale: 2, touch: false },
   { name: "phone", width: 393, height: 852, scale: 3, touch: true },
 ] as const;
+/** The docs window that shows "Keys and how long they last": a long page that scrolls inside its window. */
 const PAGE = '.ui-window[data-window-id="d-reference/keys"]';
 
 type Api = Record<string, (...args: unknown[]) => unknown>;
@@ -97,6 +98,7 @@ for (const size of SIZES) {
       // ---- a sideways gesture over the same page is the content's (D374): the canvas stays; over the window's pill it moves ------
       await page.waitForTimeout(400);
       await page.mouse.wheel(300, 0);
+      // sleep: let any wrongly started canvas move show itself; no event marks that something did not happen
       await page.waitForTimeout(500);
       expect(await stopIndex(page), "a sideways swipe over content does not move the canvas").toBe(index);
       const pill = (await page.locator(`${PAGE} .ui-window-pill`).boundingBox())!;
