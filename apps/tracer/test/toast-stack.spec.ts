@@ -7,6 +7,7 @@
  */
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
+import { motionSettled } from "./motion";
 
 type Probe = { dismiss(...id: [string?]): void; show(value: Record<string, unknown>): string };
 declare global { interface Window { __toast?: Probe } }
@@ -44,6 +45,9 @@ for (const { name, viewport, touch } of VIEWPORTS) {
       await expect(front).toContainText("Notice 4");
       // Order in the DOM is creation order: the oldest (hidden) first, then the two behind, then the front.
       await expect(cards(page).nth(0)).toHaveAttribute("data-hidden", "true");
+      // Measure the stack at rest: each card eases its size and offset over about 190 ms, and a box read on the way
+      // can show a card behind as wide or as tall as the one in front of it.
+      await motionSettled(page);
       const [mid, behind, f] = [await box(page, 2), await box(page, 1), await box(page, 3)];
       // Behind means smaller and higher, centred on the same line.
       expect(behind.width).toBeLessThan(mid.width);

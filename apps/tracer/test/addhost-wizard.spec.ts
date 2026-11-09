@@ -20,10 +20,26 @@ async function config(page: Page, body: Record<string, string>): Promise<void> {
   await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
 
-async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
-  // Fixture setup is idempotent: retry only a reset keep-alive connection,
-  // never a product operation or an assertion failure.
+/**
+ * Puts the shared test double in a known state before a case. Fixture setup is idempotent: retry only a reset keep-alive
+ * connection, never a product operation or an assertion failure.
+ *
+ * The double keeps one owner session for the whole run, and a page load mints a session only while nothing has signed the
+ * preview out. A spec that ran before this one and signed out leaves every page here without a canvas (`.cl-mockup` never
+ * appears), and only the full `/__mock/reset` clears that. The bootstrap reset alone clears this wizard's own state, not
+ * the session, so both run: each case starts from a known double instead of from the previous spec's leftovers.
+ */
+async function resetDouble(page: Page): Promise<void> {
+  await page.request.post("/__mock/reset", { maxRetries: 1 });
   await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
+}
+
+/**
+ * Opens the clusters canvas at 1440x900 on a freshly reset double, with the double's `settings` applied first, and waits
+ * until the canvas has views. `query` is appended to the page address. Every case starts here.
+ */
+async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
+  await resetDouble(page);
   if (Object.keys(settings).length) await config(page, settings);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=ink&bg=none${query}`);
@@ -33,6 +49,12 @@ async function open(page: Page, query = "", settings: Record<string, string> = {
 }
 
 const wizard = (page: Page) => page.locator(".ah-float");
+/**
+ * The wizard page named `name` that is on screen. When a page hands over to another (Back, Continue), the page being left stays
+ * in the DOM for its exit, inert and marked `is-leaving`, next to the new one; both then match a plain `data-page` selector, and
+ * the progress page's job rows exist in both. Ask for the page on screen, and look for rows inside it.
+ */
+const onScreen = (page: Page, name: string) => page.locator(`.ah-page[data-page='${name}']:not(.is-leaving)`);
 /** Buttons of the wizard card only: the canvas has its own Back, Close and Retry-like controls. */
 const inWizard = (page: Page, name: string) => wizard(page).getByRole("button", { name, exact: true });
 /** Waits until a closed wizard has finished its exit, so the next one is the only one on screen. */
@@ -386,9 +408,7 @@ test("the wizard works on a phone and keeps the footer on screen", async ({ brow
   const context = await browser.newContext({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true, baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}` });
   const page = await context.newPage();
   try {
-    // Fixture setup is idempotent: retry only a reset keep-alive connection,
-  // never a product operation or an assertion failure.
-  await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
+    await resetDouble(page);
     await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await openWizard(page);
@@ -534,11 +554,12 @@ test("leftovers: Back returns to the host list and Start fresh needs the server'
   await addTyped(page, "stale.lab");
   await expect(page.getByRole("heading", { name: "This host has leftovers from an earlier setup" })).toBeVisible({ timeout: 15_000 });
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  const progress = onScreen(page, "progress");
+  await expect(progress).toBeVisible();
   // The row offers the same one tap instead of a retry that would only find the leftovers again.
-  await expect(page.locator(".ah-job-retry")).toBeHidden();
-  await expect(page.locator(".ah-job-fix")).toHaveText("Start fresh");
-  await page.locator(".ah-job-fix").click();
+  await expect(progress.locator(".ah-job-retry")).toBeHidden();
+  await expect(progress.locator(".ah-job-fix")).toHaveText("Start fresh");
+  await progress.locator(".ah-job-fix").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
@@ -551,8 +572,8 @@ test("a setup that is still running: wait, then try again", async ({ page }) => 
   expect(await heroTone(page)).toBeNull();
   await expect(inWizard(page, "Start fresh")).toHaveCount(0);
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
-  await page.locator(".ah-job-retry").click();
+  await expect(onScreen(page, "progress")).toBeVisible();
+  await onScreen(page, "progress").locator(".ah-job-retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
@@ -701,7 +722,8 @@ for (const [host, title] of [
     await expect(inWizard(page, "Try again")).toHaveCount(0);
     await expect(inWizard(page, "Retry")).toHaveCount(0);
     await inWizard(page, "Back").click();
-    await expect(page.locator(".ah-job-retry")).toBeHidden();
+    await expect(onScreen(page, "progress")).toBeVisible();
+    await expect(onScreen(page, "progress").locator(".ah-job-retry")).toBeHidden();
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `refusal-${host.split(".")[0]}-1440.png`) });
   });
 }
@@ -780,10 +802,11 @@ test("root: Back from the Take over confirmation changes nothing, and the row as
   await inWizard(page, "Back").click();
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
-  await expect(page.locator(".ah-job-retry")).toBeHidden();
-  await expect(page.locator(".ah-job-fix")).toHaveText("Take over");
-  await page.locator(".ah-job-fix").click();
+  const progress = onScreen(page, "progress");
+  await expect(progress).toBeVisible();
+  await expect(progress.locator(".ah-job-retry")).toBeHidden();
+  await expect(progress.locator(".ah-job-fix")).toHaveText("Take over");
+  await progress.locator(".ah-job-fix").click();
   // The row opens the page, never the action itself.
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
   expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);

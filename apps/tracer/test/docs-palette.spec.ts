@@ -187,7 +187,11 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       // Another page: its window is the one in view, and the first page's window stays where it was.
       await openPalette(page);
       await page.keyboard.type("infraternal multiplexer");
-      await page.keyboard.press("Enter");
+      // The query also names a Settings row (the "Offer To Switch" setting explains the switch to the Infraternal Multiplexer), and the
+      // palette lists Settings before Docs without ranking, so Enter would open that setting. This step is about the docs page: take its row.
+      const pageRow = page.locator(".palette .result", { hasText: "Terminal › The Infraternal Multiplexer" });
+      await expect(pageRow).toHaveCount(1);
+      await pageRow.click();
       await expect(page.locator('.ui-window[data-window-id="d-terminal/multiplexer"] .dr-page h1')).toHaveText("The Infraternal Multiplexer", { timeout: 10_000 });
       await page.waitForTimeout(900);
       await expect(page.locator('.ui-window[data-window-id="d-terminal/multiplexer"]')).toHaveAttribute("data-active", "");

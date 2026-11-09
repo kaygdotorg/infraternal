@@ -2,35 +2,18 @@
  * The contents of the Settings windows (D160). Settings is a view on the canvas and each section
  * is a window; these functions fill a window's body. Sections that already exist as shared
  * components (Toolbar, Shortcuts, About) are filled by their own `render`; the rest live here:
- * Appearance (theme, font, background and card transparency), Devices, Account and the
- * admin-only placeholders (Users, Access, Found hosts).
+ * Hosts, Window Sizes, Devices, Account and the admin-only placeholders (Users, Access, Found hosts). The Appearance
+ * Themes window is `canvas/themes/editor.on-demand.ts`, built from the option lists and sliders here.
  *
  * Rows are the shared kinds: a tappable row with a tick for the current choice, a key/value
  * list for facts, icon buttons with the warm tooltip, and the compact confirmation for a
- * destructive step. Everything applies live: choosing a theme or a font repaints the whole screen
- * at once, through the same actions the command palette uses.
+ * destructive step.
  */
-import { createCapsuleTabs } from "./capsule-tabs";
 import { markMotion } from "./input-source";
 import { ICONS } from "./icons";
 import { createKeyValueList } from "./kv-list";
-import { createSlider } from "./slider";
 import { enhanceSwitch } from "./switch";
 import { mountConfirmTip } from "./tooltip";
-import { LEVEL_NAMES } from "./themes";
-
-export interface AppearanceApi {
-  themes: Array<{ id: string; name: string; dark: boolean; bg: string; accent: string }>;
-  fonts: Array<{ id: string; label: string; hint: string }>;
-  /** The choices in force now. */
-  state(): { theme: string; font: string; card: number; windows: number; background: string };
-  /** Runs a palette action (`theme:ink`, `font:geist-mono`, `card:2`, `bg:mesh`). */
-  act(action: string): void;
-  /** Called after any appearance change; returns a remover. */
-  onChange(listener: () => void): () => void;
-  /** The whole UI's size (#283): a percentage within `min` and `max`, in `step`s, of the standard size. */
-  uiSize?: { min: number; max: number; step: number; get(): number; set(percent: number): void; onChange(listener: () => void): () => void };
-}
 
 /** One on/off preference: a titled row with a label, a quiet subtitle and a switch. */
 export interface SwitchPref {
@@ -46,7 +29,8 @@ export interface SwitchPref {
 
 const CHECK = '<path d="m5.5 12.5 4 4 9-9"/>';
 
-function heading(text: string): HTMLElement {
+/** A section title of a Settings window (shared with the Themes window). */
+export function heading(text: string): HTMLElement {
   const h = document.createElement("h3");
   h.className = "ui-ts-title";
   h.textContent = text;
@@ -100,7 +84,7 @@ function fitHints(list: HTMLElement): void {
  * never collides"). `reserveSwatch` keeps the swatch's place empty in a list without swatches whose window also has a list
  * with them (Settings → Appearance), so names line up across the window; a window without swatches reserves nothing.
  */
-function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void, reserveSwatch = false): HTMLElement {
+export function choiceBlock(title: string, items: ChoiceItem[], kind: string, current: () => string, pick: (id: string) => void, reserveSwatch = false): HTMLElement {
   const block = document.createElement("section");
   block.append(heading(title));
   const list = document.createElement("div");
@@ -213,7 +197,7 @@ export function renderHosts(container: HTMLElement, api: HostsApi): () => void {
 }
 
 /** Ticks the row of `current` in a choice block. */
-function paintChoice(block: HTMLElement, current: string): void {
+export function paintChoice(block: HTMLElement, current: string): void {
   for (const row of block.querySelectorAll<HTMLElement>(".ui-sp-row")) {
     const on = row.dataset.id === current;
     // A key that changes the selection (a palette Font row, Enter on a row) ticks it at once; a click grows the tick in (#427).
@@ -221,58 +205,6 @@ function paintChoice(block: HTMLElement, current: string): void {
     row.setAttribute("aria-checked", String(on));
     row.toggleAttribute("data-current", on);
   }
-}
-
-/** Theme, font, background, card transparency and the size of the whole UI. */
-export function renderAppearance(container: HTMLElement, api: AppearanceApi): () => void {
-  const root = document.createElement("div");
-  root.className = "ui-sp";
-  // A window with option lists has a tick column: the rows that are not options end where the descriptions end (CSS: --ui-sp-end).
-  root.dataset.ticks = "";
-  container.append(root);
-
-  // Themes carry a swatch and fonts do not: the font list keeps the swatch's place so both lists' names share one left edge.
-  const choices = (title: string, items: ChoiceItem[], kind: string, current: () => string, reserveSwatch = false): HTMLElement => choiceBlock(title, items, kind, current, (id) => api.act(`${kind}:${id}`), reserveSwatch);
-  const theme = choices("Theme", api.themes.map((t) => ({ id: t.id, label: t.name, hint: t.dark ? "dark" : "light", swatch: { bg: t.bg, accent: t.accent } })), "theme", () => api.state().theme);
-  const font = choices("Font", api.fonts.map((f) => ({ id: f.id, label: f.label, hint: f.hint })), "font", () => api.state().font, api.themes.length > 0);
-  const background = document.createElement("section");
-  background.append(heading("Background"));
-  const bgTabs = createCapsuleTabs([{ id: "none", label: "Plain" }, { id: "soft", label: "Soft" }, { id: "mesh", label: "Mesh" }], api.state().background, (id) => api.act(`bg:${id}`), "Background");
-  background.append(bgTabs.root);
-  const levels = LEVEL_NAMES.map((label, i) => ({ id: String(i + 1), label }));
-  const card = document.createElement("section");
-  card.append(heading("Card transparency"));
-  const cardTabs = createCapsuleTabs(levels, String(api.state().card), (id) => api.act(`card:${id}`), "Card transparency");
-  card.append(cardTabs.root);
-  const windows = document.createElement("section");
-  windows.append(heading("Window transparency"));
-  const windowTabs = createCapsuleTabs(levels, String(api.state().windows), (id) => api.act(`windows:${id}`), "Window transparency");
-  windows.append(windowTabs.root);
-  root.append(theme, font, background, card, windows);
-  // The size of the whole UI (#283): live while the thumb moves; the terminal's own font size is a separate setting.
-  const size = api.uiSize;
-  const sizeSlider = size ? createSlider({ label: "UI size", min: size.min, max: size.max, step: size.step, value: size.get(), format: (v) => `${v} %`, onInput: (v) => size.set(v) }) : undefined;
-  if (size && sizeSlider) {
-    const section = document.createElement("section");
-    section.append(heading("UI size"), sizeSlider.root);
-    const hint = document.createElement("p");
-    hint.className = "ui-sp-sub";
-    hint.textContent = "Scales text, rows, buttons and icons together. The terminal's own font size is separate.";
-    section.append(hint);
-    root.insertBefore(section, theme);
-  }
-  const offSize = size?.onChange(() => sizeSlider?.set(size.get()));
-
-  const paint = (): void => {
-    const s = api.state();
-    for (const [block, current] of [[theme, s.theme], [font, s.font]] as const) paintChoice(block, current);
-    bgTabs.select(s.background, true);
-    cardTabs.select(String(s.card), true);
-    windowTabs.select(String(s.windows), true);
-  };
-  paint();
-  const off = api.onChange(paint);
-  return () => { off(); offSize?.(); sizeSlider?.dispose(); bgTabs.dispose(); cardTabs.dispose(); windowTabs.dispose(); root.remove(); };
 }
 
 export interface WindowSizesApi {

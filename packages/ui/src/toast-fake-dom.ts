@@ -41,6 +41,8 @@ export class FakeElement {
   querySelectorAll() { return this.children; }
   /** Stores an attribute. */
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  /** Reads an attribute back, or null when it was never set (as in a browser). `markMotion` reads before it writes (#427). */
+  getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
   /** Removes an attribute and the `data-` entry that mirrors it. */
   removeAttribute(name: string) { this.attributes.delete(name); delete this.dataset[name.replace(/^data-/, "")]; }
   /** Registers a listener for `fire` to call. */

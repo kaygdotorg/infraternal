@@ -104,6 +104,21 @@ const familyBudgets: Record<string, { critical?: number; total: number }> = {
   "cascadia-code": { total: 86 * KB },
   "fira-code": { total: 40 * KB },
   "source-code-pro": { total: 48 * KB },
+  // D329 (#323), measured the same way (identity bytes of every face, rounded up to the next KB plus about 4 KB). None is fetched until chosen.
+  "iosevka": { total: 108 * KB },
+  "victor-mono": { total: 105 * KB },
+  "recursive-mono": { total: 76 * KB },
+  "martian-mono": { total: 24 * KB },
+  "intel-one-mono": { total: 48 * KB },
+  "fantasque-sans-mono": { total: 102 * KB },
+  "hack": { total: 98 * KB },
+  "inconsolata": { total: 26 * KB },
+  "0xproto": { total: 50 * KB },
+  "lilex": { total: 70 * KB },
+  "monaspace-argon": { total: 91 * KB },
+  "monaspace-xenon": { total: 94 * KB },
+  "monaspace-radon": { total: 138 * KB },
+  "monaspace-krypton": { total: 74 * KB },
 };
 /** The size limit for the Nerd Font symbols file. */
 const symbolsLimit = 230 * KB;
