@@ -1,6 +1,6 @@
 /**
  * How long a view flight takes to settle (within 1 px of where it ends, camera centre and screen position): pointer
- * and touch flights about 320 to 380 ms, key flights about 180 to 220 ms (the motion rule). Prints `FLIGHT kind ms`.
+ * and touch flights about 320 to 380 ms, key flights jump at once (#427; keyboard-instant.spec.ts checks the first frame). Prints `FLIGHT kind ms`.
  * Measured on a busy machine: median 360 (was 1300) and 210 (was 430); the ceilings below leave room for load.
  */
 import { expect, test, type Page } from "playwright/test";
@@ -29,7 +29,7 @@ async function settle(page: Page, start: () => Promise<void>): Promise<number> {
   });
 }
 
-test("view flights settle quickly: pointer about 350 ms, key about 180 ms", async ({ page }) => {
+test("view flights settle quickly: pointer about 350 ms, key at once", async ({ page }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
@@ -50,6 +50,8 @@ test("view flights settle quickly: pointer about 350 ms, key about 180 ms", asyn
   console.log(`FLIGHT ${JSON.stringify(results)}`);
   expect(results.pointer!).toBeLessThan(550);
   expect(results.pointerBack!).toBeLessThan(550);
-  expect(results.key!).toBeLessThan(300);
-  expect(results.key2!).toBeLessThan(300);
+  // A key flight has no spring (#427): it ends in the first frame or two. 34 ms is two frames at 60 Hz, which leaves a late sample
+  // on a busy machine its slack, and a 190 ms spring (the old key flight) fails it by far.
+  expect(results.key!).toBeLessThanOrEqual(34);
+  expect(results.key2!).toBeLessThanOrEqual(34);
 });

@@ -54,7 +54,7 @@ export function openWindowMenu(stage: HTMLElement, anchor: HTMLElement, items: W
     ...(options.avoid ? { avoid: options.avoid } : {}),
     ...(options.atBelow !== undefined ? { atBelow: options.atBelow } : {}),
     ...(options.glassBed ? { glassBed: true } : {}),
-  }, source, onClosed);
+  }, onClosed);
   menu.root.setAttribute("role", "menu");
   const rows: HTMLButtonElement[] = [];
   for (const item of items) {
@@ -72,7 +72,7 @@ export function openWindowMenu(stage: HTMLElement, anchor: HTMLElement, items: W
     row.setAttribute("role", "menuitem");
     row.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${item.icon}</svg><span></span>`;
     row.querySelector("span")!.textContent = item.label;
-    row.addEventListener("click", (event) => { if (!item.keepOpen) menu.close(event.detail === 0 ? "keyboard" : "pointer"); item.run(event); });
+    row.addEventListener("click", (event) => { if (!item.keepOpen) menu.close(); item.run(event); });
     rows.push(row);
     menu.root.append(row);
   }

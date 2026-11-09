@@ -18,18 +18,23 @@ import { inGroup, loadGroups, type Groups } from "../layout/groups-handle";
 import type { WindowModel } from "../model/types";
 import { MIN_COLUMN_WEIGHT } from "../model/schema";
 import { coarse } from "../dom";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { endActivity, setActivity } from "../../perf-activity";
 import { makeWindow } from "./frame";
 import { isTerminal } from "../views/body";
 
-/** The split actions. Each resolves when its motion is over; the keyboard forms pass `instant` and land in the same frame. */
+/**
+ * The split actions. Each resolves when its motion is over. Whether they animate is read from the input source (input-source.ts) when
+ * they run, not passed in: a split or new window started by a key (its chord or a palette row) lands in the same frame, a pointer one
+ * glides the other columns aside. No caller can pass the wrong answer (#427).
+ */
 export interface SplitModule {
   /** Divides a terminal window's own space into two windows (see `WindowsModule.split`). */
-  split(rec: WinRec, direction: "down" | "right", instant?: boolean): Promise<boolean>;
+  split(rec: WinRec, direction: "down" | "right"): Promise<boolean>;
   /** Opens a new full-size window next to a terminal window (see `WindowsModule.newWindow`). */
-  newWindow(rec: WinRec, side: "right" | "below", instant?: boolean, session?: string): Promise<void>;
+  newWindow(rec: WinRec, side: "right" | "below", session?: string): Promise<void>;
   /** Splits `rec` with an already made model: the undo of a close puts a split half back this way. */
-  splitInto(rec: WinRec, direction: "down" | "right", nm: WindowModel, instant?: boolean): Promise<void>;
+  splitInto(rec: WinRec, direction: "down" | "right", nm: WindowModel): Promise<void>;
 }
 
 /** Makes the split actions for the canvas `cx`. Only on-demand code may import this file (see the module comment). */
@@ -54,14 +59,15 @@ export function createSplit(cx: Ctx): SplitModule {
     return !!colEl && colEl.querySelectorAll(":scope > .ui-window").length === 1;
   };
 
-  const split = async (rec: WinRec, direction: "down" | "right", instant = false): Promise<boolean> => {
+  const split = async (rec: WinRec, direction: "down" | "right"): Promise<boolean> => {
     if (!isTerminal(rec)) return false;
-    await splitInto(rec, direction, cx.adapters.sessions.open(rec.model.host, { from: rec.model }), instant);
+    await splitInto(rec, direction, cx.adapters.sessions.open(rec.model.host, { from: rec.model }));
     return true;
   };
 
-  const newWindow = async (rec: WinRec, side: "right" | "below", instant = false, session?: string): Promise<void> => {
+  const newWindow = async (rec: WinRec, side: "right" | "below", session?: string): Promise<void> => {
     if (!isTerminal(rec)) return;
+    const instant = triggeredByKeyboard();
     const nm = session ? { ...cx.adapters.sessions.open(rec.model.host, { session }), splitOf: rec.model.id } : cx.adapters.sessions.open(rec.model.host, { from: rec.model });
     const c = rec.owner;
     const root = rec.card.root;
@@ -135,7 +141,8 @@ export function createSplit(cx: Ctx): SplitModule {
    * split right, goes through the grid: the windows around it span the new half. Splits are windows in the one structure:
    * no nesting, and the total footprint does not change.
    */
-  const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel, instant = false): Promise<void> => {
+  const splitInto = async (rec: WinRec, direction: "down" | "right", nm: WindowModel): Promise<void> => {
+    const instant = triggeredByKeyboard();
     cx.store.changed({ windowId: nm.id, anchorId: rec.model.id, axis: direction });
     const c = rec.owner;
     const root = rec.card.root;
