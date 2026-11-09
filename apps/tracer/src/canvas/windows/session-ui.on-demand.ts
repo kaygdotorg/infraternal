@@ -495,7 +495,6 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     private confirmEnd(anchor: HTMLElement, li: HTMLElement, host: string, s: SessionRecord): void {
       confirm?.close(false);
       confirm = mountConfirmTip(anchor, {
-        label: "End session",
         boundary: this.rec.card.root,
         message: `End '${s.name}'?`,
         detail: s.running ? `${s.running} is still running. Ending the session stops it.` : "Nothing is running in it.",
