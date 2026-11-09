@@ -256,7 +256,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const frame = el("span", "cl-sx-flash");
     frame.setAttribute("aria-hidden", "true");
     rec.card.root.append(frame);
-    frame.animate([{ opacity: 0.9 }, { opacity: 0 }], { duration: 520, easing: "ease-out" }).onfinish = () => frame.remove();
+    frame.animate([{ opacity: 0.9 }, { opacity: 0 }], { duration: 240, easing: EASE_OUT }).onfinish = () => frame.remove();
   };
   const slideLabel = (rec: WinRec): void => {
     if (reduced.matches) return;

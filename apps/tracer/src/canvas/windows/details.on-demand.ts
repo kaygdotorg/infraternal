@@ -146,7 +146,7 @@ export function openDetailsPopover(
       { opacity: 1, transform: "none" },
     ], { duration: 200, easing: EASE_OUT });
   } else if (source === "pointer") {
-    root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
+    root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT });
   }
   anchor.setAttribute("aria-expanded", "true");
 

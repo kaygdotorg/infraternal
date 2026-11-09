@@ -102,7 +102,7 @@ export function createWindows(cx: Ctx): WindowsModule {
 
   /** `opaque`: the window's content is there from the first frame (a session already exists); only its size springs. */
   const enterAnimation = (rec: WinRec, opaque = false): void => {
-    if (reduced.matches) { rec.card.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160 }); return; }
+    if (reduced.matches) { rec.card.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT }); return; }
     const root = rec.card.root;
     const spring = new Spring(1, (p) => {
       if (p === 0) { root.style.transform = ""; root.style.opacity = ""; root.style.transformOrigin = ""; return; }
@@ -332,7 +332,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   /** The small "this is the window" swell. A key never plays it (#427): the person asked for the window and is looking at it. */
   const pulse = (rec: WinRec): void => {
     if (triggeredByKeyboard()) return;
-    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 360, easing: EASE_OUT });
+    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 240, easing: EASE_OUT });
   };
 
   /**

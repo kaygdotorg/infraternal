@@ -463,7 +463,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
         const height = section.offsetHeight;
         const delay = index * 45;
         if (reducedMotion.matches) {
-          section.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay, easing: "ease", fill: "backwards" });
+          section.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay, easing: EASE_OUT, fill: "backwards" });
         } else {
           // Height and opacity together, short stagger; no fill so nothing stays clipped at rest.
           section.style.overflow = "hidden";
