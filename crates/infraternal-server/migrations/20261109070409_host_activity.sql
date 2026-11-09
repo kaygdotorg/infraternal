@@ -6,8 +6,9 @@
 -- Inbox. It never holds a secret: every column is a fixed word, an id or a
 -- time, and there is no free text from the host or the browser.
 --
--- The upgrade's "2 tries, then wait" rule (D376) is computed from these rows,
--- so a server restart doesn't reset it.
+-- The upgrade's "2 tries, then wait" rule (D376) is kept on the promotion rows
+-- (remote_host_promotions), where the check and the try are one write; this
+-- log records the tries and waits for people to read.
 CREATE TABLE host_activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     host_id BLOB NOT NULL CHECK (length(host_id) = 16),

@@ -1,22 +1,14 @@
-//! The host activity log and the root upgrade's "2 tries, then wait" rule (D274, D376, #399).
+//! The host activity log of privileged actions (D274, D376, #399).
 //!
 //! Every privileged action on a host is a row in `host_activity`: who asked,
 //! when, which way in, and what came of it. The host's activity view and the
 //! Inbox read it. Rows hold fixed words and ids only, never a secret and
 //! never text from the host.
 //!
-//! D376 allows two wrong passwords, then a wait. That keeps a person under
-//! the common three-failure account lockout (pam_faillock's default `deny=3`).
-//! The wait is [`WAIT`], pam_faillock's default `fail_interval`, so the
-//! host's own counter has forgotten both failures before the next try.
-//! [`retry_after`] computes the wait from the log, so a restart doesn't reset
-//! it.
+//! The upgrade's "2 tries, then wait" rule (D376) is not computed here: it
+//! lives with the promotion's own row, where the check and the try are one
+//! write (`crate::enrollment::promotion`, J415 B2). This log only records it.
 use sqlx::SqlitePool;
-
-/// How long a host refuses tries after two wrong passwords, in seconds.
-pub const WAIT: i64 = 15 * 60;
-/// Wrong passwords allowed before the wait.
-pub const TRIES: usize = 2;
 
 /// What happened, as stored. The words are part of the schema's CHECK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,86 +95,10 @@ pub async fn record(pool: &SqlitePool, entry: &Entry<'_>, now: i64) -> sqlx::Res
         .map(|_| ())
 }
 
-/// Seconds until `host` accepts another `method` try, or `None` when it does now.
-///
-/// # Errors
-/// The database could not be read; callers refuse the try.
-pub async fn retry_after(
-    pool: &SqlitePool,
-    host: uuid::Uuid,
-    method: &str,
-    now: i64,
-) -> sqlx::Result<Option<i64>> {
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT at, kind FROM host_activity WHERE host_id=? AND method=? AND at>? AND kind IN ('privilege.wrong','privilege.upgraded') ORDER BY id",
-    )
-    .bind(host.as_bytes().as_slice())
-    .bind(method)
-    .bind(now - WAIT)
-    .fetch_all(pool)
-    .await?;
-    let events: Vec<(i64, Kind)> = rows
-        .into_iter()
-        .filter_map(|(at, word)| Kind::from_word(&word).map(|kind| (at, kind)))
-        .collect();
-    Ok(wait(&events, now))
-}
-
-/// The rule itself, over one host's and one method's recent wrong and
-/// upgraded rows, oldest first: after [`TRIES`] wrong passwords in a row
-/// (with no successful upgrade after them) the host waits [`WAIT`] seconds
-/// from the last of them.
-#[must_use]
-pub fn wait(events: &[(i64, Kind)], now: i64) -> Option<i64> {
-    let streak: Vec<i64> = events
-        .iter()
-        .rev()
-        .take_while(|(_, kind)| *kind == Kind::Wrong)
-        .map(|(at, _)| *at)
-        .collect();
-    let last = *streak.first()?;
-    (streak.len() >= TRIES && now < last + WAIT).then_some(last + WAIT - now)
-}
-
 #[cfg(test)]
 mod tests {
     //! Two wrong tries wait 15 minutes; a success or the passing time clears it.
     use super::*;
-
-    /// One wrong try never waits; the second does, counted from itself.
-    #[test]
-    fn the_second_wrong_try_starts_the_wait() {
-        assert_eq!(wait(&[(100, Kind::Wrong)], 110), None);
-        assert_eq!(
-            wait(&[(100, Kind::Wrong), (130, Kind::Wrong)], 140),
-            Some(130 + WAIT - 140)
-        );
-    }
-
-    /// The wait ends after 15 minutes.
-    #[test]
-    fn the_wait_ends() {
-        assert_eq!(
-            wait(&[(100, Kind::Wrong), (130, Kind::Wrong)], 130 + WAIT),
-            None
-        );
-    }
-
-    /// A successful upgrade between wrong tries resets the count.
-    #[test]
-    fn a_success_resets_the_count() {
-        assert_eq!(
-            wait(
-                &[
-                    (100, Kind::Wrong),
-                    (110, Kind::Upgraded),
-                    (130, Kind::Wrong)
-                ],
-                140
-            ),
-            None
-        );
-    }
 
     /// Stored words map back to their kinds, and nothing else does.
     #[test]
@@ -212,46 +128,26 @@ mod tests {
         pool
     }
 
-    /// Rows go in, the rule reads them back per host and method, and the
-    /// schema refuses anything that isn't a fixed word (no free text, so no
-    /// secret can be stored by mistake).
+    /// Rows go in, and the schema refuses anything that isn't a fixed word
+    /// (no free text, so no secret can be stored by mistake).
     #[tokio::test]
-    async fn the_log_holds_fixed_words_and_drives_the_wait() {
+    async fn the_log_holds_fixed_words_only() {
         let pool = pool().await;
         let host = uuid::Uuid::from_u128(7);
-        let wrong = |at| {
-            let pool = pool.clone();
-            async move {
-                record(
-                    &pool,
-                    &Entry {
-                        host,
-                        person: "p1",
-                        kind: Kind::Wrong,
-                        method: Some("sudo"),
-                        attempt: None,
-                        reason: None,
-                    },
-                    at,
-                )
-                .await
-            }
-        };
-        wrong(1_000).await.unwrap();
-        assert_eq!(retry_after(&pool, host, "sudo", 1_010).await.unwrap(), None);
-        wrong(1_020).await.unwrap();
-        assert_eq!(
-            retry_after(&pool, host, "sudo", 1_030).await.unwrap(),
-            Some(1_020 + WAIT - 1_030)
-        );
-        // Another way in, or another host, is not affected.
-        assert_eq!(retry_after(&pool, host, "su", 1_030).await.unwrap(), None);
-        assert_eq!(
-            retry_after(&pool, uuid::Uuid::from_u128(8), "sudo", 1_030)
-                .await
-                .unwrap(),
-            None
-        );
+        record(
+            &pool,
+            &Entry {
+                host,
+                person: "p1",
+                kind: Kind::Wrong,
+                method: Some("sudo"),
+                attempt: None,
+                reason: None,
+            },
+            1_000,
+        )
+        .await
+        .unwrap();
         let free_text = sqlx::query("INSERT INTO host_activity(host_id, at, person, kind, reason) VALUES (?, 1, 'p1', 'privilege.failed', 'Password: hunter2')")
             .bind(host.as_bytes().as_slice())
             .execute(&pool)

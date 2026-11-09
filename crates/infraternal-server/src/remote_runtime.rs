@@ -366,6 +366,37 @@ impl RemoteHosts {
     pub(crate) fn ca_source(&self) -> Option<Arc<dyn crate::ca::CaKeySource>> {
         self.1.clone()
     }
+    /// The live link of host `id`, which a root upgrade binds itself to
+    /// (D376, J415 R7): its actor, its uid, the exact certificate it was
+    /// admitted with, and its generation (which changes when another link
+    /// replaces it). `None` when the host has no live link.
+    pub(crate) async fn binding(&self, id: Uuid) -> Option<(EmbeddedAgent, u32, [u8; 32], Uuid)> {
+        let hosts = self.0.lock().await;
+        let host = hosts.get(&id)?;
+        host.authority.permits().then(|| {
+            (
+                host.actor.clone(),
+                host.uid,
+                host.authority.predecessor(),
+                host.generation,
+            )
+        })
+    }
+
+    /// The current link generation of host `id`, if it has a live link.
+    pub(crate) async fn generation(&self, id: Uuid) -> Option<Uuid> {
+        let hosts = self.0.lock().await;
+        hosts
+            .get(&id)
+            .filter(|host| host.authority.permits())
+            .map(|host| host.generation)
+    }
+
+    /// Root upgrades' successors waiting for their driver.
+    pub(crate) fn successors(&self) -> &crate::remote_successor::Successors {
+        &self.7
+    }
+
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
         self.0
             .lock()

@@ -661,6 +661,25 @@ async fn build_router_core(
     .await?;
     #[cfg(feature = "remote")]
     let auth_api_issuer = issuer.clone();
+    // A root upgrade's endpoints (D376, #399) share the issuer, the host
+    // registry and the promotion ledger.
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let privilege_api = match issuer.clone() {
+        Some(issuer) => Some(crate::host_privilege_http::router(
+            auth.clone(),
+            crate::host_promotion::Promotions::new(
+                enrollment_store.clone(),
+                pool.clone(),
+                hosts.clone(),
+                issuer,
+                crate::bootstrap_runtime::promotion_payload(&config.data_dir)?,
+                "/proc/self/exe".into(),
+                config.data_dir.join("privilege"),
+            )
+            .map_err(|_| ServerError::InvalidConfiguration)?,
+        )),
+        None => None,
+    };
     #[cfg(all(feature = "ssh", feature = "remote"))]
     let integration = issuer.map(|issuer| (issuer, hosts.clone()));
     #[cfg(all(feature = "ssh", not(feature = "remote")))]
@@ -752,6 +771,11 @@ async fn build_router_core(
         .merge(ca_api);
     #[cfg(feature = "remote")]
     let app = app.merge(remote_api).merge(action_api);
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let app = match privilege_api {
+        Some(privilege_api) => app.merge(privilege_api),
+        None => app,
+    };
     #[cfg(feature = "ssh")]
     let warmup = Some(bootstrap.clone());
     #[cfg(not(feature = "ssh"))]
