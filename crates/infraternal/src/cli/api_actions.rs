@@ -594,6 +594,7 @@ async fn post_json(
         .map_err(|_| ActionFailure::new(Exit::Unreachable, "The server request timed out."))?
 }
 
+/// Send one authenticated action request over TLS and translate its response into a CLI result.
 async fn post_json_inner(
     server: &Url,
     api_key: &str,
@@ -894,6 +895,7 @@ impl Drop for Connection {
     }
 }
 
+/// Check hosted-action diagnostics, confirmation handling, and safe error output.
 #[cfg(test)]
 mod tests {
     use super::{
@@ -903,6 +905,7 @@ mod tests {
     use hyper::StatusCode;
     use serde_json::json;
 
+    /// Keep expired and revoked key refusals consistent with the shared sign-in guidance.
     #[test]
     fn expired_or_revoked_key_uses_the_shared_d303_diagnostic() {
         let failure = status_failure(StatusCode::FORBIDDEN);
