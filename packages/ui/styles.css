@@ -63,8 +63,17 @@
   backdrop-filter: blur(var(--ui-glass-bed-blur, 1rem));
   clip-path: inset(var(--ui-glass-bed-reach, 4rem) round var(--ui-glass-bed-radius, 0.875rem));
   opacity: 0; transform: scale(0.96);
-  transition: opacity var(--t-press) ease-out, transform var(--t-pop) var(--ease-out);
+  transition: opacity calc(var(--t-press) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out);
 }
+/* Keyboard opens instantly (#427). Whatever opens, closes or changes state calls markMotion (input-source.ts) on its element at that
+   moment, which writes data-motion="instant" when a key caused it and "animate" otherwise. An instant element sets --ui-motion-scale to
+   0, and only the open and close transitions are written as `calc(120ms * var(--ui-motion-scale, 1))`, so exactly those collapse
+   to nothing: the element's other transitions (a hover colour, a press scale, a height glide) are never touched, however long
+   data-motion stays on it. The property is registered as not inherited, so a child's own transitions are not scaled by its parent's
+   mark. A pointer change on the same element writes "animate" first and keeps the full motion. To make a new open or close
+   transition keyboard-instant, write its durations this way and call markMotion where the surface flips. */
+@property --ui-motion-scale { syntax: "<number>"; inherits: false; initial-value: 1; }
+[data-motion="instant"] { --ui-motion-scale: 0; }
 .ui-glass-bed[hidden] { display: none; }
 .ui-glass-bed[data-open="true"] { opacity: 1; transform: none; }
 @media (prefers-reduced-motion: reduce) { .ui-glass-bed { transition: opacity var(--t-press) ease; transform: none; } }
@@ -196,7 +205,7 @@
   transform: translateY(calc(var(--y) + var(--sw, 0px))) scale(var(--s));
   transform-origin: center bottom;
   touch-action: pan-x;
-  transition: opacity var(--t-pop) ease-out, transform var(--t-pop) var(--ease-out), translate var(--t-pop) var(--ease-out), scale var(--t-pop) var(--ease-out), height var(--t-pop) var(--ease-out);
+  transition: opacity calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), translate calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), scale calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), height calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out);
 }
 .ui-toast-stack[data-placement="parent"] .ui-toast { margin-inline: 0; }
 /* A window notice can ride the top edge (toast.setEdge), under the window's own header row, so it stays off a bottom prompt. */
@@ -205,7 +214,7 @@
 /* Collapsed: every toast behind the front one is as tall as the front one and shows only its top edge. */
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] { height: var(--front-h); width: var(--front-w); min-height: 0; overflow: hidden; }
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] > * { opacity: 0; }
-.ui-toast[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity var(--t-pop) ease-out, transform var(--t-pop) var(--ease-out), visibility 0s var(--t-pop); }
+.ui-toast[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), visibility 0s calc(var(--t-pop) * var(--ui-motion-scale, 1)); }
 .ui-toast[data-swiping="true"] { transition: none; }
 .ui-toast-count { font-variant-numeric: tabular-nums; color: var(--fg-2); }
 /* A toast is a small card of its own, not text over a busy terminal: the material's halo would only smear its glyphs. */
@@ -480,7 +489,7 @@
   /* Not clipped: the lock's shackle rises over the frame line. The body clips its own content. */
   background: var(--bg);
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 1.125rem); box-shadow: var(--shadow);
-  transition: border-color var(--t-pop) var(--ease-out, ease-out);
+  transition: border-color calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out, ease-out);
 }
 /* Window transparency (themes.ts WINDOW_LEVELS): Solid is the line above, with no alpha and no filter. The other
    levels read one fill token; only Frosted adds a backdrop blur, and only on windows that are on screen
@@ -918,7 +927,7 @@
 .ui-window-lock {
   position: absolute; z-index: var(--z-overlay); top: -1.375rem; left: 50%; width: 2.75rem; height: 2.75rem; margin-left: -1.375rem;
   display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg);
-  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity var(--t-pop) ease-out, color var(--t-pop) ease-out;
+  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out, color calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out;
 }
 .ui-window-lock svg { width: var(--ui-icon); height: var(--ui-icon); transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
 .ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }

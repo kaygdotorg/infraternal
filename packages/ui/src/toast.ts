@@ -17,6 +17,7 @@
  */
 import { ICONS } from "./icons";
 import { tick } from "./tick";
+import { markMotion } from "./input-source";
 
 /** A text button on a toast: what it says and what it does when chosen. */
 export interface ToastAction {
@@ -219,6 +220,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     for (let k = shown.length - 1; k >= 0; k--) {
       const it = shown[k]!;
       const behind = hidden[k]!;
+      // A toast a key brought (undo after Close window, say) and the stack's reshuffle appear and settle at once (#427).
+      markMotion(it.card);
       it.card.dataset.hidden = String(behind);
       it.card.dataset.front = String(!behind && depth === 0);
       it.card.style.setProperty("--i", String(Math.min(behind ? VISIBLE - 1 : depth, VISIBLE - 1)));

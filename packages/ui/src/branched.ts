@@ -3,6 +3,7 @@ import { ICON_DETACHED, icon } from "./icons";
 import { onDoubleActivate } from "./double-activate";
 
 import { cssPx } from "./ui-scale";
+import { triggeredByKeyboard } from "./input-source";
 import { EASE_OUT } from "./motion";
 export interface BranchLeaf {
   id: string;
@@ -323,7 +324,8 @@ export function branchedMenu(
   const api: BranchedMenu = {
     select(id, instant = false, notify = true) {
       active = id;
-      layout(!instant);
+      // A key moves the marker and draws the branch with no animation, whatever the caller passed (#427, TASTE).
+      layout(!(instant || triggeredByKeyboard()));
       if (notify) opts.onSelect?.(id);
     },
     rename(id) {

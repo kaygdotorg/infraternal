@@ -6,6 +6,7 @@
  */
 import type { DocsPreviewContent } from "../../../../../packages/ui/src/docs-preview.on-demand";
 import { onDemand } from "../../on-demand";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { Ctx, WinRec } from "../context";
 import { coarse } from "../dom";
 
@@ -18,7 +19,8 @@ function anchorOf(rec: WinRec): HTMLElement {
   return wanted.find((n): n is HTMLElement => !!n && n.getBoundingClientRect().width > 0) ?? rec.card.pill;
 }
 
-export function openWindowDocs(cx: Ctx, rec: WinRec, source: "pointer" | "keyboard" = "keyboard"): void {
+/** Opens (or closes) the docs preview for `rec`. `source` only places focus and defaults to the real last input; motion is read by the popover itself. */
+export function openWindowDocs(cx: Ctx, rec: WinRec, source: "pointer" | "keyboard" = triggeredByKeyboard() ? "keyboard" : "pointer"): void {
   const adapter = cx.adapters.docs;
   const entry = adapter?.for(rec.model);
   if (!adapter || !entry) return;
