@@ -604,10 +604,10 @@ test("a look picked while the previous one is still in flight is kept on a slow 
   }
 });
 
-/** Three quick picks over the same slow link end on the last pick on both devices. */
+/** Three quick picks over a slow link (1 s round trip) end on the last pick on both devices. */
 test("three quick look picks on a slow link end on the last pick on both devices", async ({ browser }) => {
   test.setTimeout(480_000);
-  const { server, first, second, a, b } = await offlineConflictClients(browser, 1000, 21);
+  const { server, first, second, a, b } = await offlineConflictClients(browser, 500, 21);
   try {
     await choosePaletteValue(a, "Theme: Frosted");
     // sleep: let the first look.set reach the wire before the next pick, so each pick meets one still in flight.
