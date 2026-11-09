@@ -1,6 +1,6 @@
 /** Receipt identity and optimistic projection controls retained from the #250 hunt and reviews (D312). */
 import { expect, test } from "bun:test";
-import { LayoutJournal } from "./journal";
+import { LayoutJournal, type Pending } from "./journal";
 import type { CanvasDocument } from "./schema";
 const document = (revision = 1, name = "Console"): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision, views: [{ id: "console", kind: "console", name, cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 function setup() {
@@ -39,11 +39,11 @@ test("duplicate event then late refusal cannot discard independent work", () => 
 });
 /** A look queued behind this tab's own accepted look is rebased onto it, so quick successive theme edits never refuse each other (#400). */
 test("an accepted look moves the base of the unsent looks queued behind it", () => {
-  const { journal, entry } = setup();
+  const { journal } = setup();
   const look = { type: "look.set", look: {} } as never;
-  const first = { op_id: "look-1", base_revision: 1, intent: look } as typeof entry, second = { op_id: "look-2", base_revision: 1, intent: look } as typeof entry;
+  const first: Pending = { op_id: "look-1", base_revision: 1, intent: look }, second: Pending = { op_id: "look-2", base_revision: 1, intent: look };
   journal.pending.push(first, second);
   journal.acknowledge(first, 5, false);
   expect(second.base_revision).toBe(5);
-  expect(entry.base_revision).toBe(1);
+  expect(first.base_revision).toBe(1);
 });
