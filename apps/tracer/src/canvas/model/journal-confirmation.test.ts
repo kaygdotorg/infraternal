@@ -37,3 +37,13 @@ test("duplicate event then late refusal cannot discard independent work", () => 
   expect(journal.accept(event)).toBe(true); expect(journal.accept(event)).toBe(false);
   journal.capture(document(2, "Later")); expect(journal.refuse(entry, epoch)).toBe(false); expect(journal.pending).toHaveLength(1);
 });
+/** A look queued behind this tab's own accepted look is rebased onto it, so quick successive theme edits never refuse each other (#400). */
+test("an accepted look moves the base of the unsent looks queued behind it", () => {
+  const { journal, entry } = setup();
+  const look = { type: "look.set", look: {} } as never;
+  const first = { op_id: "look-1", base_revision: 1, intent: look } as typeof entry, second = { op_id: "look-2", base_revision: 1, intent: look } as typeof entry;
+  journal.pending.push(first, second);
+  journal.acknowledge(first, 5, false);
+  expect(second.base_revision).toBe(5);
+  expect(entry.base_revision).toBe(1);
+});

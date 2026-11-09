@@ -90,6 +90,11 @@ export class LayoutJournal {
     const revealed = "intent" in operation && operation.held === true && revision > this.canonical.revision;
     this.#projection = undefined;
     operation.revision = revision;
+    // Our own accepted look is the newest look on the server, so a look queued behind it is based on it: the server
+    // refuses a look written from before another look, and that must not hit this tab's own quick successive edits.
+    if ("intent" in operation && operation.intent.type === "look.set") {
+      for (const next of this.pending) if (next !== operation && !next.sent && next.intent.type === "look.set" && next.base_revision < revision) next.base_revision = revision;
+    }
     if ("intent" in operation) delete operation.held;
     if (migration) this.initialized = true;
     const changed = this.#prune(); return migration || changed || revealed;

@@ -239,9 +239,10 @@ impl Store {
                         return Err(Error);
                     }
                     let intent = request.get("intent").ok_or(Error)?;
-                    // A whole-look replacement has no field merge; its base revision is a compare-and-set token.
+                    // A whole-look replacement has no field merge, so it is a compare-and-set against the last look.
+                    // Layout edits that landed after its base do not conflict with it.
                     if model::string(intent, "type") == Some("look.set")
-                        && base != document.revision()
+                        && look_superseded(&mut tx, account, base, document.revision()).await?
                     {
                         return Err(Error);
                     }
@@ -467,6 +468,39 @@ async fn ownership_window<'a>(
         }
     }
     Ok(())
+}
+/// Tells whether another `look.set` landed after `base`, so a whole-look write made from `base` would erase it.
+///
+/// Only the retained operation tail is consulted. When the tail does not cover every revision after `base` (a checkpoint
+/// dropped part of it) the answer is "superseded": refusing is safe because the client recovers with a fresh snapshot,
+/// while accepting could silently erase a newer look.
+async fn look_superseded(
+    tx: &mut Transaction<'_, Sqlite>,
+    account: &str,
+    base: i64,
+    current: i64,
+) -> Result<bool, Error> {
+    if base == current {
+        return Ok(false);
+    }
+    let rows = sqlx::query("SELECT event FROM canvas_operations WHERE account=? AND revision>?")
+        .bind(account)
+        .bind(base)
+        .fetch_all(&mut **tx)
+        .await?;
+    if i64::try_from(rows.len()).ok() != Some(current - base) {
+        return Ok(true);
+    }
+    for row in rows {
+        let event: Value = serde_json::from_str(row.get::<&str, _>("event"))?;
+        let is_look = event
+            .get("intent")
+            .is_some_and(|intent| model::string(intent, "type") == Some("look.set"));
+        if is_look && event.get("noop").and_then(Value::as_bool) != Some(true) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 async fn save_receipt(
     tx: &mut Transaction<'_, Sqlite>,
@@ -700,11 +734,27 @@ mod tests {
         .unwrap();
         assert!(
             store.apply("a", &stale_edit).await.is_err(),
-            "an offline look cannot overwrite a newer account revision"
+            "an offline look cannot overwrite a newer account look"
         );
 
+        // A layout edit between the base and the write is not a look conflict.
+        let rename = serde_json::to_vec(&json!({
+            "op_id": "view-a",
+            "base_revision": 3,
+            "intent": {"type": "view.update", "view_id": "console", "name": "Work"}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &rename).await.unwrap(), 4);
+        let after_layout = serde_json::to_vec(&json!({
+            "op_id": "look-d",
+            "base_revision": 3,
+            "intent": {"type": "look.set", "look": later_look}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &after_layout).await.unwrap(), 5);
+
         let reloaded_a = store.events("a", None).await.unwrap();
-        assert_eq!(reloaded_a[0]["revision"], 3);
+        assert_eq!(reloaded_a[0]["revision"], 5);
         assert_eq!(reloaded_a[0]["document"]["look"], later_look);
         let account_b = store.events("b", None).await.unwrap();
         assert_eq!(account_b[0]["revision"], 0);
