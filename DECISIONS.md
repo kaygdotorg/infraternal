@@ -4706,3 +4706,15 @@ access (#341 B19).
        hot paths, then the rest, then the plugin API. Each slice is measured
        against sqlx and checked on a copy of production's data. The
        time-limited RUSTSEC exception in deny.toml stays until the port lands.
+
+380. **Selected text and confirmation cards (owner, 2026-11-09, #426, #391):**
+     - **Selected text adapts in every theme.** Dark themes already switch to
+       white (nord: its background colour) when their own text colour can't
+       reach 4.5:1 on the selection. Light themes now follow the same rule
+       and switch to a dark colour when theirs can't. The owner, verbatim:
+       "yes i think apple's liquid glass adapts somewhat like this".
+     - **Confirmation cards follow the floating-card design.** They are
+       translucent glass like every other floating card, no longer opaque
+       (this reverses #391's opaque confirm cards). Readability comes from
+       the shared glass contrast guarantee (D365, #448). The owner,
+       verbatim: "make them follow the same design".
