@@ -179,8 +179,17 @@ for (const size of SIZES) {
       const button = page.locator('.ui-window[data-active] [data-action="sessions"]').first();
       // The button is in the active window's header; on a phone the header may hold it in a menu, and the test is then about the desktop.
       test.skip(await button.count() === 0 || !(await button.isVisible()), "the Sessions button is not on this header");
+      // The Console scene starts with this window's popover open, and Enter on its button would close it: close it first, so the press
+      // under test opens it.
+      if (await page.locator(".ui-anchored-popover").count()) {
+        await page.keyboard.press("Escape");
+        // sleep: the popover is gone before the button is pressed
+        await page.waitForTimeout(400);
+        expect(await page.locator(".ui-anchored-popover").count(), "the popover is closed before the press").toBe(0);
+      }
       await button.focus();
       const found = await sweep(page, () => page.keyboard.press("Enter"));
+      expect(await page.locator(".ui-anchored-popover").count(), "Enter on the Sessions button opened the popover").toBeGreaterThan(0);
       expect(found, `Sessions button, Enter:\n${found.join("\n")}`).toEqual([]);
     });
 
