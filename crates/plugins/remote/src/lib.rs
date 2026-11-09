@@ -96,6 +96,9 @@ pub const UNINSTALL: ActionDef = ActionDef {
     api_scope: None,
     fresh_passkey: false,
 };
+/// Opening the one-use sealed password of a root upgrade (D274, D376).
+#[cfg(feature = "agent")]
+pub mod privilege_seal;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod runtime_lock;
 #[cfg(all(feature = "agent", target_os = "linux"))]
