@@ -953,6 +953,8 @@ impl PreviousAttempt {
         }
     }
 
+    /// What Start fresh removes, for its confirmation's Details: the journal, what is still live
+    /// and, for a stuck first install, each of its own open terminals that it closes (D368).
     #[must_use]
     pub fn findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
         let upgrade = self.lease_owner.is_some();

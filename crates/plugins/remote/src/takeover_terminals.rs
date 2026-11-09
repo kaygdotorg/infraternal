@@ -631,6 +631,7 @@ pub(super) fn records(runtime: &File, base: &Path) -> Result<String, u8> {
     Ok(records.join(" "))
 }
 
+/// Unit tests for the boundary, logind record and attribution rules (both terminal layouts).
 #[cfg(test)]
 #[path = "takeover_terminals_tests.rs"]
 mod tests;

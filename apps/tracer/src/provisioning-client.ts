@@ -55,6 +55,7 @@ export interface AuthenticationInfo { method: AuthMethod; network?: NetworkProvi
  */
 export interface TakeoverTerminal { account: string; program: string; since: number; tty?: string; others?: number }
 
+/** Why one host's setup stopped, as the server sent it: only fields the decoder validated survive (#87, D359, D368). */
 export interface FailureDetail {
   kind: FailureKind;
   message: string;
@@ -213,6 +214,7 @@ function areTerminals(value: unknown): value is TakeoverTerminal[] {
     && (terminal.others === undefined || (typeof terminal.others === "number" && Number.isSafeInteger(terminal.others) && terminal.others >= 0 && terminal.others <= 1024)));
 }
 
+/** Decode a failure from the server, dropping any field that is not in its exact public shape. */
 function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
