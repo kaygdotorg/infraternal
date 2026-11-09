@@ -4690,3 +4690,19 @@ access (#341 B19).
      - The Mac App Store build is out of scope, so private macOS APIs are
        acceptable in the Mac build when they are measured to help and have
        a runtime fallback.
+
+379. **The server database moves from sqlx to rusqlite (owner, 2026-11-09,
+     #473):** rusqlite 0.41 with one writer thread and reader threads, and our
+     own migration runner that keeps the existing `_sqlx_migrations` history.
+     The owner answered "agreed" to that recommendation, and added: "ask
+     calternal which sql driver it's using since it's a rust project too and
+     ask it to switch to russql too if it's using sqlx".
+     - **Why (J438, #473 comment 88933):**
+       - It is the only route that fixes RUSTSEC-2026-0459 today.
+       - It was faster on every hot query measured (median 25–78% lower).
+       - Session p99 at 64 tasks drops from 13.1 to 3.9 ms.
+       - The binary is 363 KiB smaller and cold compiles are about 35% faster.
+     - **How:** in reviewed slices: the pool and the migration runner, then the
+       hot paths, then the rest, then the plugin API. Each slice is measured
+       against sqlx and checked on a copy of production's data. The
+       time-limited RUSTSEC exception in deny.toml stays until the port lands.
