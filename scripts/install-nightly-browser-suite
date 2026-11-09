@@ -48,7 +48,7 @@ Wants=network-online.target
 Type=oneshot
 ExecStart={SERVICE_HELPER}
 # Covers the build-slot queue, the production build and the whole suite.
-TimeoutStartSec=4h
+TimeoutStartSec=6h
 KillMode=control-group
 Nice=10
 UMask=0022
