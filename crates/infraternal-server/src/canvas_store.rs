@@ -697,7 +697,10 @@ mod tests {
             "intent": {"type": "look.set", "look": look}
         }))
         .unwrap();
-        assert!(store.apply("a", &stale_edit).await.is_err(), "an offline look cannot overwrite a newer account revision");
+        assert!(
+            store.apply("a", &stale_edit).await.is_err(),
+            "an offline look cannot overwrite a newer account revision"
+        );
 
         let reloaded_a = store.events("a", None).await.unwrap();
         assert_eq!(reloaded_a[0]["revision"], 3);
