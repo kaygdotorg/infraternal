@@ -172,11 +172,12 @@ mod tests {
         b.process(&a.snapshot().unwrap());
         compare(&a, &b, "oversized carry completed");
     }
+    /// Keeps byte-bounded history repaintable after a geometry change.
     #[test]
     fn byte_budget_prunes_history_and_resize_remains_repaintable() {
         let mut a = reset_terminal(200, 60).unwrap();
         a.process(&b"typical ASCII output\r\n".repeat(100_000));
-        let history = a.engine.history_rows();
+        let history = a.engine.history_rows().unwrap();
         assert!(
             (5000..20000).contains(&history),
             "17 MiB budget retained {history} rows"

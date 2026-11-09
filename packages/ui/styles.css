@@ -1,14 +1,14 @@
 /** Shared presentation for @infraternal/ui browser primitives. */
 
-/* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
-   sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
-   tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
-:root { --ui-base: 1.1; font-size: calc(16px * var(--ui-base) * var(--ui-scale, 1)); --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 0.8125rem; --text-secondary: 0.75rem; --text-caption: 0.6875rem; --text-input: 0.8125rem; --row: 1.75rem; }
+/* One type system (D372, TASTE section 2): the sizes of the sign-in-derived roles (--ui-size-*, further down), the same on every
+   platform except body, which is set once for phones. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input is the one
+   size that is not a role: it stays 16 px on touch so iOS never zooms. */
+:root { --ui-base: 1.1; font-size: calc(16px * var(--ui-base) * var(--ui-scale, 1)); --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --row: 1.75rem; }
 /* The UI's base size (owner, 2026-11-01: "110% should be the new 100%"): a desktop's UI is drawn at 1.1 times the 16 px root and
    the UI size slider (--ui-scale, 50-150 %) is relative to it. A touch screen keeps 1: it already has its own larger sizes below
    (16 px text, 44 px rows) and its width is the screen's. Phones taking the 1.1 as well is this one number. */
 @media (pointer: coarse) { :root { --ui-base: 1; } }
-@media (pointer: coarse) { :root { --text-body: 1rem; --text-secondary: 0.9375rem; --text-caption: 0.8125rem; --text-input: 1rem; --row: 2.75rem; } }
+@media (pointer: coarse) { :root { --row: 2.75rem; } }
 
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
@@ -20,11 +20,10 @@
 :root { --focus-ring-room: 0.375rem; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
-.busy-count { font: var(--fw-label, 500) 0.8125rem/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
+.busy-count { font: var(--fw-label, 500) var(--ui-size-label)/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
 /* Icons (icons.ts) follow the product's icon scale: 16 px on desktop, 18 px on touch, 1.5 stroke. */
-.ui-icon { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-@media (pointer: coarse) { .ui-icon { width: 1.125rem; height: 1.125rem; } }
-.terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
+.ui-icon { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.terminal-text-overlay { position: absolute; z-index: calc(var(--z-content) + 1); pointer-events: none; }
 
 /* The card tint is read by the element that carries it and by nothing inside it, so it does not inherit: a change then
    restyles the glass surfaces and not their descendants too (themes.ts `installLevelRules` sets it per element). */
@@ -59,16 +58,25 @@
    unblurred page show through, so on a small card no blur value hides text. The bed is an oversized blurred layer clipped to the
    card's shape: the blur starts well outside the card, so nothing behind it is legible at any card level. */
 .ui-glass-bed {
-  position: fixed; z-index: 1000; box-sizing: border-box; pointer-events: none;
+  position: fixed; z-index: var(--z-tooltip); box-sizing: border-box; pointer-events: none;
   -webkit-backdrop-filter: blur(var(--ui-glass-bed-blur, 1rem));
   backdrop-filter: blur(var(--ui-glass-bed-blur, 1rem));
   clip-path: inset(var(--ui-glass-bed-reach, 4rem) round var(--ui-glass-bed-radius, 0.875rem));
   opacity: 0; transform: scale(0.96);
-  transition: opacity 150ms ease-out, transform 180ms var(--ease-out);
+  transition: opacity calc(var(--t-press) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out);
 }
+/* Keyboard opens instantly (#427). Whatever opens, closes or changes state calls markMotion (input-source.ts) on its element at that
+   moment, which writes data-motion="instant" when a key caused it and "animate" otherwise. An instant element sets --ui-motion-scale to
+   0, and only the open and close transitions are written as `calc(120ms * var(--ui-motion-scale, 1))`, so exactly those collapse
+   to nothing: the element's other transitions (a hover colour, a press scale, a height glide) are never touched, however long
+   data-motion stays on it. The property is registered as not inherited, so a child's own transitions are not scaled by its parent's
+   mark. A pointer change on the same element writes "animate" first and keeps the full motion. To make a new open or close
+   transition keyboard-instant, write its durations this way and call markMotion where the surface flips. */
+@property --ui-motion-scale { syntax: "<number>"; inherits: false; initial-value: 1; }
+[data-motion="instant"] { --ui-motion-scale: 0; }
 .ui-glass-bed[hidden] { display: none; }
 .ui-glass-bed[data-open="true"] { opacity: 1; transform: none; }
-@media (prefers-reduced-motion: reduce) { .ui-glass-bed { transition: opacity 120ms ease; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .ui-glass-bed { transition: opacity var(--t-press) ease; transform: none; } }
 /* A tooltip is as wide as its text up to the cap set on .tip (tooltip.ts) and wraps beyond it, never an ellipsis: the
    owner reads the whole label or the tooltip is wrong. Only point previews carrying the per-call two-line attribute
    (a long link) are clamped, and they say so with their own rules below. */
@@ -84,7 +92,7 @@
   color: var(--fg);
   font: inherit;
   cursor: pointer;
-  transition: background 140ms ease, color 140ms ease;
+  transition: background var(--t-press) ease, color var(--t-press) ease;
 }
 /* Optional button kinds share states and motion; instances supply only geometry
    and typography through variables. Plain ui-button callers keep their defaults. */
@@ -98,7 +106,7 @@
   border: 0;
   font: var(--ui-button-font, inherit);
   letter-spacing: var(--ui-button-letter-spacing, normal);
-  transition: var(--ui-button-transition, transform 140ms var(--ease-out, ease), background-color 160ms ease, color 120ms ease);
+  transition: var(--ui-button-transition, transform var(--t-press) var(--ease-out, ease), background-color var(--t-pop) ease, color var(--t-press) ease);
 }
 /* A solid fill carries no text halo: the glass halo (above) would glow into the fill around every glyph, the
    "blurred or doubled" label of the disabled and enabled primary alike (TASTE: button text is crisp in every state). */
@@ -111,7 +119,7 @@
    quiet tint of the foreground, and the label a stronger one (measured in test/top-centre.spec.ts). */
 .ui-button[data-button="primary"]:disabled { background: var(--ui-button-disabled-background, color-mix(in oklab, var(--fg) 12%, var(--bg))); color: var(--ui-button-disabled-color, color-mix(in oklab, var(--fg) 58%, var(--bg))); }
 @media (hover: hover) and (pointer: fine) { .ui-button[data-button="secondary"]:hover:not(:disabled) { color: var(--ui-button-hover-color, var(--fg)); } }
-.ui-source-icon { display: block; width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-source-icon { display: block; width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 /* One native switch keeps pointer, keyboard, and assistive-technology state aligned. */
 .ui-switch {
@@ -142,7 +150,7 @@
   border: 1px solid var(--overlay-line);
   border-radius: var(--r-pill);
   background: var(--overlay-solid);
-  transition: background 180ms ease-out, border-color 180ms ease-out;
+  transition: background var(--t-pop) ease-out, border-color var(--t-pop) ease-out;
 }
 .ui-switch::after {
   left: 0.25rem;
@@ -151,7 +159,7 @@
   border-radius: 50%;
   background: var(--fg-2);
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
-  transition: transform 180ms var(--ease-out), background 180ms ease-out;
+  transition: transform var(--t-pop) var(--ease-out), background var(--t-pop) ease-out;
 }
 .ui-switch:checked::before { border-color: var(--accent); background: var(--accent); }
 .ui-switch:checked::after { transform: translate(1.25rem, -50%); background: var(--bg); }
@@ -162,7 +170,7 @@
 /* The stack (toast.ts) holds the toasts. Its height is the front toast's, so a persistent notice above it measures one toast. */
 .ui-toast-stack {
   position: fixed;
-  z-index: 900;
+  z-index: var(--z-toast);
   right: max(0.75rem, env(safe-area-inset-right));
   bottom: calc(max(1rem, env(safe-area-inset-bottom)) + var(--ui-toast-stack-offset, 0px));
   left: max(0.75rem, env(safe-area-inset-left));
@@ -190,21 +198,23 @@
   gap: 0.75rem;
   margin-inline: auto;
   padding: 0.4375rem 0.5625rem 0.4375rem 0.75rem;
-  border-radius: 0.9375rem;
+  border-radius: var(--r-md);
   opacity: 1;
   pointer-events: auto;
   /* --sw is a touch drag in progress. A single toast (--i 0) rests at the identity transform, so its text stays on the pixel grid. */
   transform: translateY(calc(var(--y) + var(--sw, 0px))) scale(var(--s));
   transform-origin: center bottom;
   touch-action: pan-x;
-  transition: opacity 170ms ease-out, transform 190ms var(--ease-out), translate 190ms var(--ease-out), scale 190ms var(--ease-out), height 190ms var(--ease-out);
+  transition: opacity calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), translate calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), scale calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), height calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out);
 }
 .ui-toast-stack[data-placement="parent"] .ui-toast { margin-inline: 0; }
+/* A window notice can ride the top edge (toast.setEdge), under the window's own header row, so it stays off a bottom prompt. */
+.ui-toast-stack[data-placement="parent"][data-edge="top"] { top: 3.25rem; bottom: auto; }
 .ui-toast-stack[data-expanded="true"] .ui-toast { --y: var(--ey, 0px); --s: 1; }
 /* Collapsed: every toast behind the front one is as tall as the front one and shows only its top edge. */
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] { height: var(--front-h); width: var(--front-w); min-height: 0; overflow: hidden; }
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] > * { opacity: 0; }
-.ui-toast[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 170ms ease-out, transform 190ms var(--ease-out), visibility 0s 170ms; }
+.ui-toast[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out), visibility 0s calc(var(--t-pop) * var(--ui-motion-scale, 1)); }
 .ui-toast[data-swiping="true"] { transition: none; }
 .ui-toast-count { font-variant-numeric: tabular-nums; color: var(--fg-2); }
 /* A toast is a small card of its own, not text over a busy terminal: the material's halo would only smear its glyphs. */
@@ -212,22 +222,22 @@
 .ui-toast[hidden] { display: none !important; }
 .ui-toast[data-open="false"] { opacity: 0; translate: 0 0.5rem; scale: 0.97; pointer-events: none; }
 /* A fanned-out stack grows upward over a neighbouring persistent notice: it goes above it, whole, never interleaved. */
-.ui-toast-stack[data-expanded="true"] { z-index: 901; }
+.ui-toast-stack[data-expanded="true"] { z-index: calc(var(--z-toast) + 1); }
 /* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
-.ui-toast { min-height: 2.75rem; gap: 0.625rem; padding: 0.375rem 0.5rem 0.375rem 0.75rem; border-radius: 0.875rem; }
+.ui-toast { min-height: 2.75rem; gap: 0.625rem; padding: 0.375rem 0.5rem 0.375rem 0.75rem; border-radius: var(--r-md); }
 /* A long message with actions stacks them under it (toast.ts sets data-stacked) instead of squeezing the text beside them. */
 /* Explicit cells: mark | message | close on the first row, the actions on the second. Auto-placement left the glyph, text and
    close in separate rows with an empty column between them at phone width. */
 .ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; column-gap: 0.625rem; row-gap: 0; }
 .ui-toast[data-stacked="true"] .ui-toast-marker, .ui-toast[data-stacked="true"] .ui-toast-glyph { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
-.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; padding-bottom: 0.3125rem; }
+.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.25rem; padding-bottom: 0.25rem; }
 .ui-toast[data-stacked="true"] .ui-toast-close { grid-column: 3; grid-row: 1; }
 .ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 2 / -1; grid-row: 2; justify-self: end; }
 .ui-toast-message { text-wrap: pretty; min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
-.ui-toast-marker .tick svg { width: 0.875rem; height: 0.875rem; stroke: var(--bg); }
+.ui-toast-marker .tick svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); stroke: var(--bg); }
 .ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; }
 .ui-toast-actions[hidden] { display: none !important; }
 .ui-toast-action { min-height: 2rem; flex: none; padding: 0 0.5rem; border-radius: var(--r-sm); color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
@@ -239,7 +249,7 @@
 @media (max-width: 520px) {
   .ui-toast[data-choices="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 0.625rem; row-gap: 0; }
   .ui-toast[data-choices="true"] .ui-toast-glyph, .ui-toast[data-choices="true"] .ui-toast-marker { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
-  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; }
+  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.25rem; }
   .ui-toast[data-choices="true"] .ui-toast-icons { grid-column: 1 / -1; grid-row: 2; justify-self: end; }
 }
 .ui-toast-icons { display: flex; flex: none; align-items: center; gap: 2px; }
@@ -263,7 +273,7 @@
 @media (pointer: coarse) {
   .ui-toast-close { width: 2.75rem; min-height: 2.75rem; }
   .ui-toast-icon { width: 2.75rem; min-height: 2.75rem; }
-  .ui-toast { min-height: 3.375rem; gap: 0.75rem; padding: 0.4375rem 0.5625rem 0.4375rem 0.75rem; border-radius: 0.9375rem; }
+  .ui-toast { min-height: 3.375rem; gap: 0.75rem; padding: 0.4375rem 0.5625rem 0.4375rem 0.75rem; border-radius: var(--r-md); }
   .ui-toast-action { min-height: 2.75rem; padding: 0 0.625rem; }
   .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 }
@@ -282,7 +292,7 @@
   .ui-switch::before, .ui-switch::after { transition: none; }
   .ui-spinner { animation: none; }
   /* The stack's offsets are its layout, so reduced motion keeps them and only drops the movement between them. */
-  .ui-toast { transition: opacity 150ms ease; }
+  .ui-toast { transition: opacity var(--t-press) ease; }
   .ui-toast[data-open="false"] { translate: none; scale: none; }
 }
 
@@ -301,12 +311,12 @@
 
 /* One spring drives the fill, tick draw-on and label treatment. */
 .tick { position: relative; display: inline-grid; place-items: center; flex: none; width: 1.25rem; height: 1.25rem;
-  border-radius: 0.375rem; box-shadow: inset 0 0 0 var(--ui-tick-border-width, 1.5px) var(--ui-tick-border-color, rgb(255 255 255 / 0.35)); color: #000; will-change: transform; }
+  border-radius: var(--r-xs); box-shadow: inset 0 0 0 var(--ui-tick-border-width, 1.5px) var(--ui-tick-border-color, rgb(255 255 255 / 0.35)); color: #000; will-change: transform; }
 .tick-fill { position: absolute; inset: 0; border-radius: inherit; background: var(--fg); transform: scale(0); will-change: transform; }
 .tick svg { position: relative; width: 78%; height: 78%; overflow: visible; }
 .tick path { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; opacity: 0; appearance: none; -webkit-appearance: none; margin: 0; }
-.check { position: relative; transition: transform 140ms var(--ease-out); }
+.check { position: relative; transition: transform var(--t-press) var(--ease-out); }
 .check[data-pressed] { transform: scale(0.98); }
 [data-focus-ring="on"] .check input:focus-visible + .tick { outline: 2px solid rgb(255 255 255 / 0.6); outline-offset: 2px; }
 
@@ -363,7 +373,7 @@
 .glitch::before, .glitch::after { content: attr(data-text); position: absolute; top: 0; left: 0; width: 100%; color: inherit; background: #000; overflow: hidden; clip-path: inset(0 0 0 0); pointer-events: none; }
 .glitch::after { transform: translateX(0.375rem); text-shadow: var(--g-after-shadow); animation: ui-glitch-bands var(--g-after-dur, 1.5s) infinite linear alternate-reverse; }
 .glitch::before { transform: translateX(-0.375rem); text-shadow: var(--g-before-shadow); animation: ui-glitch-bands var(--g-before-dur, 1s) infinite linear alternate-reverse; }
-.glitch.is-settled::before, .glitch.is-settled::after { animation: none; opacity: 0; transition: opacity 260ms var(--ease-out); }
+.glitch.is-settled::before, .glitch.is-settled::after { animation: none; opacity: 0; transition: opacity var(--t-panel) var(--ease-out); }
 @keyframes ui-glitch-bands {
   0% { clip-path: inset(20% 0 50% 0); } 10% { clip-path: inset(15% 0 55% 0); } 20% { clip-path: inset(30% 0 40% 0); }
   30% { clip-path: inset(10% 0 60% 0); } 40% { clip-path: inset(25% 0 35% 0); } 50% { clip-path: inset(40% 0 20% 0); }
@@ -374,14 +384,14 @@
 /* DECISION 103: one glyph cell morphs to a tick for 900 ms, then returns. */
 .icon-action { display: inline-grid; place-items: center; }
 .swap { display: inline-grid; width: 1.0625rem; height: 1.0625rem; }
-.swap svg { grid-area: 1 / 1; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out), filter 150ms var(--ease-out); }
+.swap svg { grid-area: 1 / 1; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: opacity var(--t-press) var(--ease-out), transform var(--t-press) var(--ease-out), filter var(--t-press) var(--ease-out); }
 .swap .is-done { opacity: 0; transform: scale(0.6); filter: blur(2px); stroke-width: 2.2; }
-.swap .is-done path { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 0ms 150ms; }
+.swap .is-done path { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 0ms var(--t-press); }
 [data-done] { color: var(--fg); }
-[data-done] svg { transition-duration: 200ms; }
+[data-done] svg { transition-duration: var(--t-pop); }
 [data-done] .is-idle { opacity: 0; transform: scale(0.6); filter: blur(2px); }
 [data-done] .is-done { opacity: 1; transform: none; filter: none; }
-[data-done] .is-done path { stroke-dashoffset: 0; transition: stroke-dashoffset 260ms var(--ease-out) 50ms; }
+[data-done] .is-done path { stroke-dashoffset: 0; transition: stroke-dashoffset var(--t-panel) var(--ease-out) 50ms; }
 [data-instant] .swap svg, [data-instant] .is-done path { transition: none; }
 @media (prefers-reduced-motion: reduce) {
   .check[data-pressed] { transform: none; transition: none; }
@@ -400,29 +410,60 @@
      eyebrow 500 12px/1     +0.02em  (auth-eyebrow)
    --------------------------------------------------------------------------------------- */
 :root {
-  --ui-type-name: 600 0.875rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-body: 450 0.875rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-label: 450 0.8125rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  /* Text sizes (D372): the sizes of the sign-in-derived roles, written once. Every font size reads one of these, directly or
+     through a role below; a rem literal in a font rule is a bug. Body is the one size that differs between desktop and a phone
+     (0.875 rem, 0.9375 rem on touch), set here and nowhere else; labels, buttons and eyebrows are the same everywhere (D174:
+     touch gets bigger targets, not bigger text). */
+  --ui-size-body: 0.875rem;
+  --ui-size-label: 0.8125rem;
+  --ui-size-button: 0.84375rem;
+  --ui-size-eyebrow: 0.75rem;
+  /* The one title size (D372) for every large title (sign-in, add host, access): 22 px at the default 110 % desktop root (1.25 rem x 17.6 px),
+     22 px on a phone too (1.375 rem x its 16 px root, set in the touch block). Titles of a window or a section are the name role, not this. */
+  --ui-size-title: 1.25rem;
+  /* The older names, kept as aliases of the sizes above so a reader never has two scales: on desktop body text in a row is a label,
+     secondary and caption text are eyebrow size. On touch (set in the touch block below, D373) rows read the body size, secondary
+     text the body size as before, and captions the label size: phone rows are 15 px, only true labels are 13 px. --text-input is the one size that is not a role: iOS zooms into a focused field under 16 px. */
+  --text-body: var(--ui-size-label);
+  --text-secondary: var(--ui-size-eyebrow);
+  --text-caption: var(--ui-size-eyebrow);
+  --text-input: var(--ui-size-label);
+  --ui-type-name: 600 var(--ui-size-body)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-body: 450 var(--ui-size-body)/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-label: 450 var(--ui-size-label)/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   /* Line height `normal`, never a number: next to an icon, a label's line box must be the font's own height. With a smaller
      line height (it was 1) Blink rounds the half-leading asymmetrically and the glyphs sit up to 0.75 px above the centre the
      icon is centred on (TASTE "Icon and text share one centre line", #282; icon-text-centre.spec.ts measures it). Every control
      that uses this token has a fixed height or min-height and centres its content, so only the text's offset changes. */
-  --ui-type-button: 500 0.84375rem/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-eyebrow: 500 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-button: 500 var(--ui-size-button)/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-eyebrow: 500 var(--ui-size-eyebrow)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   /* Every section heading (the small uppercase titles above a group of rows) is padded with this one value:
      6 px above, --ui-heading-gap between it and the group's first row. A new heading style uses it, never its own numbers. */
   --ui-heading-gap: 0.5rem;
   --ui-heading-pad: 0.375rem 0 var(--ui-heading-gap);
   --ui-tracking: -0.01em;
+  /* Layer scale for z-index (D372): content (inside a component), chrome (bars and badges), sidebar, overlay (popovers, palette, settings,
+     sheets, lifted windows), toast, tooltip. Write var(--z-overlay), or calc(var(--z-overlay) + n) when two layers of one step must stay
+     in order; never a bare number above 0. The offsets are the old numbers kept in rank, so no stacking order changed. */
+  --z-content: 1;
+  --z-chrome: 10;
+  --z-sidebar: 20;
+  --z-overlay: 30;
+  --z-toast: 60;
+  --z-tooltip: 70;
   /* Secondary text matches the sign-in card's secondary (rgb 161 161 170 on ink) and
      adapts to every theme, instead of the dimmer --fg-2. */
   --ui-text-secondary: color-mix(in oklab, var(--fg) 70%, var(--bg));
-  --ui-row-h: 2rem;
-  --ui-control-h: 1.875rem;
+  /* One height for controls and settings rows (D372): 32 px on desktop, 44 px on touch. List rows (--row, 28 px) and pills (--pill-h) keep their own. */
+  --ui-control-h: 2rem;
+  /* Icons (D372): --ui-icon is the standard size, growing to 18 px on touch with the targets; --ui-icon-sm is the 14 px small icon
+     (chips, status marks, chevrons) and stays 14 px. A hard-coded icon size reads one of these. */
   --ui-icon: 1rem;
+  --ui-icon-sm: 0.875rem;
   /* Corner radius scale, one set for every surface (windows, cards, popovers, controls). Defined on :root, not on .terminal-screen,
-     so the sign-in card, the docs pages and body-level popovers can read them too (#345). Steps in between are nested radii
-     (an inner corner is the outer radius minus the padding) or a one-off recorded where it is used. */
+     so the sign-in card, the docs pages and body-level popovers can read them too (#345). A corner nested in another is written calc(var(--r-…) - padding), never a number; any other radius is the
+     nearest step (D372). The cluster and mesh frames keep 1.75rem, larger than any step (open question on #345). */
+  --r-xs: 0.375rem;
   --r-sm: 0.5rem;
   --r-md: 0.75rem;
   --r-lg: 1.125rem;
@@ -431,11 +472,15 @@
      `easing` option cannot read var(), so TypeScript keeps a constant with the same curve). */
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  /* Three durations for every UI transition (D372): press (a control answering a touch), pop (a popover, menu or tooltip),
+     panel (a drawer, window or sheet). A keyboard-triggered open skips them and is instant (#427). Never write a number of
+     milliseconds in a transition; read one of these. Decorative loops and one-shot effects are not transitions and keep theirs. */
+  --t-press: 120ms;
   --t-pop: 180ms;
   --t-panel: 240ms;
 }
 @media (pointer: coarse) {
-  :root { --ui-row-h: 2.75rem; --ui-control-h: 2.75rem; --ui-icon: 1.125rem; }
+  :root { --ui-control-h: 2.75rem; --ui-icon: 1.125rem; --ui-size-body: 0.9375rem; --ui-size-title: 1.375rem; --text-body: var(--ui-size-body); --text-secondary: var(--ui-size-body); --text-caption: var(--ui-size-label); --text-input: 1rem; /* ui-literal: D372, iOS never zooms at 16 px */ }
 }
 
 /* Window card (window-card.ts): the pane card's surface plus a quiet header. */
@@ -444,7 +489,7 @@
   /* Not clipped: the lock's shackle rises over the frame line. The body clips its own content. */
   background: var(--bg);
   border: 1px solid var(--overlay-line); border-radius: var(--r-lg, 1.125rem); box-shadow: var(--shadow);
-  transition: border-color 180ms var(--ease-out, ease-out);
+  transition: border-color calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out, ease-out);
 }
 /* Window transparency (themes.ts WINDOW_LEVELS): Solid is the line above, with no alpha and no filter. The other
    levels read one fill token; only Frosted adds a backdrop blur, and only on windows that are on screen
@@ -460,7 +505,7 @@
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; cursor: pointer;
   /* The lock owns the exact centre of the frame line: the pill never reaches past half the header minus the lock's hit area. */
   max-width: calc(50% - 1.625rem); line-height: 1.4; /* room for descenders: the title clips its overflow */
-  transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out);
+  transition: background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out);
 }
 .ui-window-pill:active { transform: scale(var(--ui-press-scale)); }
 .ui-window-mark { display: grid; flex: none; place-items: center; width: var(--ui-icon); height: var(--ui-icon); color: var(--fg-2); }
@@ -471,33 +516,33 @@
    width. Opacity and transform only; `data-setup` on the mark says which of ring, tick, hidden (a flight carries a copy)
    or rest the slot is in, and hides the icon underneath until the ring is done. */
 .ui-window-mark { position: relative; }
-.ui-window-mark[data-setup] > svg { transition: opacity 220ms var(--ease-out); }
+.ui-window-mark[data-setup] > svg { transition: opacity var(--t-panel) var(--ease-out); }
 .ui-window-mark[data-setup="ring"] > svg, .ui-window-mark[data-setup="tick"] > svg, .ui-window-mark[data-setup="hidden"] > svg { opacity: 0; }
-.ui-setup-ring { position: absolute; inset: 0; display: block; color: var(--fg-2); pointer-events: none; transition: opacity 220ms var(--ease-out); }
+.ui-setup-ring { position: absolute; inset: 0; display: block; color: var(--fg-2); pointer-events: none; transition: opacity var(--t-panel) var(--ease-out); }
 .ui-setup-ring[data-hidden="true"], .ui-setup-ring[data-phase="rest"] { opacity: 0; }
 .ui-setup-ring[data-instant] { transition: none; }
 .ui-setup-ring > svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; fill: none; }
-.ui-setup-arcs { transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out); }
+.ui-setup-arcs { transition: opacity var(--t-press) var(--ease-out), transform var(--t-press) var(--ease-out); }
 .ui-setup-track, .ui-setup-fill { fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; }
 .ui-setup-track { opacity: 0.25; }
-.ui-setup-fill { opacity: 0; transition: opacity 220ms var(--ease-out), stroke 160ms ease; }
+.ui-setup-fill { opacity: 0; transition: opacity var(--t-panel) var(--ease-out), stroke var(--t-pop) ease; }
 .ui-setup-fill[data-state="done"] { opacity: 1; stroke: var(--fg); }
 .ui-setup-fill[data-state="running"] { opacity: 0.55; animation: ui-setup-pulse 1100ms ease-in-out infinite alternate; }
 .ui-setup-fill[data-state="failed"] { opacity: 1; stroke: var(--danger); }
 @keyframes ui-setup-pulse { from { opacity: 0.3; } to { opacity: 0.9; } }
-.ui-setup-check { opacity: 0; transform: scale(0.7); transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out); }
-.ui-setup-check path { fill: none; stroke: var(--ok); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 150ms var(--ease-out); }
+.ui-setup-check { opacity: 0; transform: scale(0.7); transition: opacity var(--t-press) var(--ease-out), transform var(--t-press) var(--ease-out); }
+.ui-setup-check path { fill: none; stroke: var(--ok); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset var(--t-press) var(--ease-out); }
 .ui-setup-ring[data-phase="tick"] .ui-setup-arcs, .ui-setup-ring[data-phase="rest"] .ui-setup-arcs { opacity: 0; transform: scale(0.7); }
 .ui-setup-ring[data-phase="tick"] .ui-setup-check, .ui-setup-ring[data-phase="rest"] .ui-setup-check { opacity: 1; transform: none; }
 .ui-setup-ring[data-phase="tick"] .ui-setup-check path, .ui-setup-ring[data-phase="rest"] .ui-setup-check path { stroke-dashoffset: 0; }
 /* A flying copy of the ring (setup-pill.on-demand.ts) is a fixed box moved by transform only. */
-.ui-setup-fly { position: fixed; left: 0; top: 0; z-index: 90; pointer-events: none; transform-origin: 0 0; color: var(--fg); }
+.ui-setup-fly { position: fixed; left: 0; top: 0; z-index: calc(var(--z-overlay) + 8); pointer-events: none; transform-origin: 0 0; color: var(--fg); }
 @media (prefers-reduced-motion: reduce) {
   .ui-setup-fill[data-state="running"] { animation: none; opacity: 0.55; }
-  .ui-setup-arcs, .ui-setup-check { transition: opacity 120ms ease; }
+  .ui-setup-arcs, .ui-setup-check { transition: opacity var(--t-press) ease; }
   .ui-setup-ring[data-phase="tick"] .ui-setup-arcs, .ui-setup-ring[data-phase="rest"] .ui-setup-arcs, .ui-setup-check { transform: none; }
   .ui-setup-check path { transition: none; }
-  .ui-setup-fill, .ui-setup-ring, .ui-window-mark[data-setup] > svg { transition-duration: 120ms; }
+  .ui-setup-fill, .ui-setup-ring, .ui-window-mark[data-setup] > svg { transition-duration: var(--t-press); }
 }
 .ui-window-title { display: inline-flex; min-width: 0; overflow: hidden; }
 .ui-window-user { color: var(--ui-text-secondary); font-weight: var(--fw-secondary); }
@@ -514,7 +559,7 @@
    (a flow in progress) shows none. */
 .ui-window-conn { --ui-conn-size: 0.875rem; }
 /* On touch the pill's hit area (`::after`, 44 px tall) is drawn over its children; the icon stays above it so a tap on it shows its sentence. */
-.ui-window-pill .ui-window-conn { z-index: 1; }
+.ui-window-pill .ui-window-conn { z-index: var(--z-content); }
 .ui-window[data-status="none"] .ui-window-conn { display: none; }
 /* The header's actions are one pill (the shared material, without its blur: windows stay cheap) holding icon
    buttons, the same height as the title pill and on the same line. The pill never shrinks (the title truncates
@@ -526,7 +571,7 @@
 .ui-window-actions:empty { display: none; }
 .ui-window-action {
   position: relative; display: grid; place-items: center; width: calc(var(--ui-control-h) - 0.375rem); height: calc(var(--ui-control-h) - 0.375rem); padding: 0; border: 0; border-radius: 50%;
-  background: none; color: var(--fg-3); cursor: pointer; transition: background-color 140ms ease, color 140ms ease, transform 140ms var(--ease-out, ease-out);
+  background: none; color: var(--fg-3); cursor: pointer; transition: background-color var(--t-press) ease, color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out);
 }
 /* On touch there is no frame lock to leave room for, so the pill may use the whole header less the actions: the host's name is
    never cut while there is room. The session name is secondary and goes whole (never as a lone "· …") in a phone-width card. */
@@ -539,9 +584,9 @@
   .ui-window-pill { position: relative; }
   /* The header is a container (layout containment makes it its own stacking level), so it must sit above the body itself:
      otherwise the body covers the 4 px of hit area below the pill and the pill is a 40 px target, not 44. */
-  .ui-window-head { position: relative; z-index: 1; }
+  .ui-window-head { position: relative; z-index: var(--z-content); }
   .ui-window-pill::after { content: ""; position: absolute; inset: -0.375rem -0.1875rem; }
-  .ui-window-actions { gap: 0; padding: 0 0.1875rem; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
+  .ui-window-actions { gap: 0; padding: 0 0.25rem; position: relative; z-index: var(--z-content); } /* above the body, so the hit area below the pill is not covered by it */
   .ui-window-action { width: 1.875rem; height: 1.875rem; }
   .ui-window-action::after { content: ""; position: absolute; inset: -0.4375rem; } /* 44 px square around the 30 px button */
 }
@@ -566,14 +611,16 @@
   @media (pointer: fine) { .ui-window-mark { display: none; } }
 }
 /* The anchored popover (anchored-popover.ts) floats inside its stage at the coordinates the placement computes. */
-.ui-anchored-popover { position: absolute; z-index: 6; overflow: hidden; border-radius: 0.875rem; }
+.ui-anchored-popover { position: absolute; z-index: var(--z-overlay); overflow: hidden; border-radius: var(--r-md); }
 .ui-window-menu { display: flex; flex-direction: column; gap: 2px; min-width: 10.5rem; padding: 0.375rem; }
+/* A callout over selected text (terminal-touch-select.on-demand.ts) is one row, as wide as its row: no shared minimum. */
+.ui-window-menu.ui-select-callout { min-width: 0; }
 .ui-window-menu-item {
-  display: flex; align-items: center; gap: 0.625rem; width: 100%; height: 2.125rem; padding: 0 0.625rem; border: 0; border-radius: 0.625rem;
+  display: flex; align-items: center; gap: 0.625rem; width: 100%; height: 2.125rem; padding: 0 0.625rem; border: 0; border-radius: var(--r-sm);
   background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
 }
 .ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-window-menu-rule { height: 1px; margin: 0.1875rem 0.375rem; background: var(--line); }
+.ui-window-menu-rule { height: 1px; margin: 0.25rem 0.375rem; background: var(--line); }
 .ui-window-menu-item.is-danger { color: var(--danger); }
 /* A menu opened from the keyboard lands on its first row without a ring (rings are for Tab, TASTE 1); a quiet fill shows where it is. */
 .ui-window-menu-item:focus-visible { background: var(--hover); color: var(--fg); }
@@ -592,27 +639,27 @@
 .ui-row-swipe-act::before { content: ""; position: absolute; inset: 0; background: var(--accent); opacity: calc(var(--arm, 0) * 0.34); pointer-events: none; }
 .ui-row-swipe-act[data-tone="danger"]::before { background: #000; opacity: calc(var(--arm, 0) * 0.18); }
 .ui-row-swipe-in { position: relative; }
-.ui-row-swipe-icon { display: grid; place-items: center; transition: transform 240ms var(--ease-out, var(--ease-out)); }
+.ui-row-swipe-icon { display: grid; place-items: center; transition: transform var(--t-panel) var(--ease-out, var(--ease-out)); }
 .ui-row-swipe-icon svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-row-swipe-act[data-armed] .ui-row-swipe-icon { transform: scale(1.22); }
 @media (prefers-reduced-motion: reduce) { .ui-row-swipe-icon { transition: none; } }
-.ui-row-edit { flex: 1; min-width: 0; height: 1.375rem; margin: 0 -0.25rem; padding: 0 0.25rem; border: 0; border-radius: 0.375rem; background: var(--hover); color: var(--fg); font: inherit; letter-spacing: inherit; outline: none; }
+.ui-row-edit { flex: 1; min-width: 0; height: 1.375rem; margin: 0 -0.25rem; padding: 0 0.25rem; border: 0; border-radius: var(--r-xs); background: var(--hover); color: var(--fg); font: inherit; letter-spacing: inherit; outline: none; }
 /* The in-row question (row-confirm.ts): over the row's leaf, at the leaf's own height, so the row never changes size. The leaf
    keeps its box and its marker (the status dot); only its words fade, and the question fades in over them, starting where the
    label started (row-confirm.ts sets the padding from the label's own offset). */
 .bm-row[data-asking] { position: relative; }
-.bm-row > .bm-leaf { transition: transform 140ms var(--ease-out, ease-out), opacity 150ms var(--ease-out, ease-out); }
-.bm-row > .bm-leaf > * { transition: opacity 150ms var(--ease-out, ease-out); }
+.bm-row > .bm-leaf { transition: transform var(--t-press) var(--ease-out, ease-out), opacity var(--t-press) var(--ease-out, ease-out); }
+.bm-row > .bm-leaf > * { transition: opacity var(--t-press) var(--ease-out, ease-out); }
 .bm-row[data-asking] > .bm-leaf { pointer-events: none; }
 .bm-row[data-asking] > .bm-leaf > :not(.glyph) { opacity: 0; }
-.ui-row-ask { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; gap: 0; padding: 0 2px 0 0.375rem; opacity: 0; color: var(--fg-2); font: inherit; letter-spacing: inherit; white-space: nowrap; transition: opacity 150ms var(--ease-out, ease-out); }
+.ui-row-ask { position: absolute; inset: 0; z-index: calc(var(--z-content) + 1); display: flex; align-items: center; gap: 0; padding: 0 2px 0 0.375rem; opacity: 0; color: var(--fg-2); font: inherit; letter-spacing: inherit; white-space: nowrap; transition: opacity var(--t-press) var(--ease-out, ease-out); }
 .ui-row-ask[data-open] { opacity: 1; }
 .ui-row-ask:not([data-open]) { pointer-events: none; }
 .ui-row-ask[data-instant] { transition: none; }
-.ui-row-ask-q { flex: none; margin-right: 0.1875rem; color: var(--fg); font-weight: var(--fw-body, 500); } /* the label's own weight: same text, turned into a question */
+.ui-row-ask-q { flex: none; margin-right: 0.25rem; color: var(--fg); font-weight: var(--fw-body, 500); } /* the label's own weight: same text, turned into a question */
 .ui-row-ask-effect { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .ui-row-ask-dot { color: var(--fg-3); }
-.ui-row-ask button { position: relative; flex: none; height: calc(100% - 0.375rem); padding: 0 0.1875rem; border: 0; border-radius: 0.375rem; background: none; color: var(--fg-2); font: inherit; font-weight: var(--fw-label, 500); letter-spacing: inherit; cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms var(--ease-out, ease-out); }
+.ui-row-ask button { position: relative; flex: none; height: calc(100% - 0.375rem); padding: 0 0.25rem; border: 0; border-radius: var(--r-xs); background: none; color: var(--fg-2); font: inherit; font-weight: var(--fw-label, 500); letter-spacing: inherit; cursor: pointer; transition: background-color var(--t-press) ease, color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
 .ui-row-ask button::after { content: ""; position: absolute; inset: -0.1875rem -0.25rem; } /* the hit area keeps to the row's own height */
 .ui-row-ask button:active { transform: scale(var(--ui-press-scale)); }
 .ui-row-ask .ui-row-ask-yes { color: var(--danger); }
@@ -630,15 +677,15 @@
 }
 
 /* Capsule tabs (capsule-tabs.ts): flat track, one gliding capsule. */
-.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 0.1875rem; border-radius: var(--r-pill); background: var(--hover); isolation: isolate; }
+.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 0.25rem; border-radius: var(--r-pill); background: var(--hover); isolation: isolate; }
 .ui-tabs-capsule {
-  position: absolute; z-index: -1; top: 0.1875rem; bottom: 0.1875rem; left: 0; border-radius: var(--r-pill);
+  position: absolute; z-index: -1; top: 0.25rem; bottom: 0.25rem; left: 0; border-radius: var(--r-pill);
   background: var(--overlay-solid); box-shadow: 0 1px 2px rgb(0 0 0 / 0.14), 0 0 0 1px var(--overlay-line);
 }
 .ui-tab {
   display: inline-flex; align-items: center; justify-content: center; gap: 0.375rem; min-width: 0; height: calc(var(--ui-control-h) - 0.375rem);
   padding: 0 0.75rem; border: 0; border-radius: var(--r-pill); background: none; color: var(--fg-2); cursor: pointer;
-  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: color 160ms ease;
+  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: color var(--t-pop) ease;
 }
 .ui-tab[aria-selected="true"] { color: var(--fg); }
 .ui-tabs[data-compact] .ui-tab[aria-selected="false"] > span { display: none; }
@@ -649,7 +696,7 @@
 .ui-kv { display: flex; flex-direction: column; }
 .ui-kv-row {
   display: grid; grid-template-columns: fit-content(55%) minmax(0, 1fr); column-gap: 1rem; align-items: baseline;
-  min-height: var(--ui-row-h); padding: 0.25rem 0; border-bottom: 1px solid var(--line);
+  min-height: var(--ui-control-h); padding: 0.25rem 0; border-bottom: 1px solid var(--line);
 }
 .ui-kv-row:last-child { border-bottom: 0; }
 /* A row's pane (`panel` in kv-list.ts) takes the whole row under the key and the value. */
@@ -660,38 +707,38 @@
 .ui-kv-group { padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-kv-cell {
   display: block; min-width: 0; max-width: 100%; margin: 0; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: left; font: inherit;
-  transition: transform 140ms var(--ease-out, ease-out);
+  transition: transform var(--t-press) var(--ease-out, ease-out);
   -webkit-user-select: text; user-select: text; -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-key { display: grid; justify-items: start; }
-.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: 0.6875rem; letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: var(--ui-size-eyebrow); letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
 .ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
    still lines up with the row's edges), cloned across wrapped lines. */
 .ui-kv-text {
-  display: inline; margin: 0 -0.375rem; padding: 0.1875rem 0.375rem; border-radius: 0.375rem; overflow-wrap: anywhere;
+  display: inline; margin: 0 -0.375rem; padding: 0.25rem 0.375rem; border-radius: var(--r-xs); overflow-wrap: anywhere;
   -webkit-box-decoration-break: clone; box-decoration-break: clone;
 }
 /* A value that changes (kv-list `patch`) fades out, says its new thing while it is gone, and fades back in. */
-.ui-kv-text { transition: background-color 120ms ease, opacity 160ms ease-out; }
-.ui-kv-cell[data-swapping] > .ui-kv-text { opacity: 0; transition: background-color 120ms ease, opacity 110ms ease-out; }
+.ui-kv-text { transition: background-color var(--t-press) ease, opacity var(--t-pop) ease-out; }
+.ui-kv-cell[data-swapping] > .ui-kv-text { opacity: 0; transition: background-color var(--t-press) ease, opacity var(--t-press) ease-out; }
 /* The copy confirmation (copy-feedback.ts `confirmInPlace`): the text fades out and a clipboard icon with "Copied" fades in
    over the same spot, at the cell's own edge (right for a value, left for a key). The cell keeps its box. Opacity only;
    the icon also grows a little, and with reduced motion it does not. */
 .ui-kv-cell { position: relative; }
-.ui-kv-cell[data-copied] > .ui-kv-text { opacity: 0; transition: background-color 120ms ease, opacity 110ms ease-out; }
+.ui-kv-cell[data-copied] > .ui-kv-text { opacity: 0; transition: background-color var(--t-press) ease, opacity var(--t-press) ease-out; }
 .ui-copied {
-  position: absolute; top: 0; display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.1875rem 0; white-space: nowrap; pointer-events: none;
-  color: var(--fg); opacity: 0; transition: opacity 120ms ease-out;
+  position: absolute; top: 0; display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0; white-space: nowrap; pointer-events: none;
+  color: var(--fg); opacity: 0; transition: opacity var(--t-press) ease-out;
 }
 .ui-kv-value > .ui-copied { right: 0; }
 .ui-kv-key > .ui-copied { left: 0; }
-.ui-kv-cell[data-copied] > .ui-copied { opacity: 1; transition: opacity 160ms ease-out 40ms; }
-.ui-copied-icon { display: inline-grid; place-items: center; width: 0.875rem; height: 0.875rem; transform: scale(0.7); transition: transform 200ms var(--ease-out); }
+.ui-kv-cell[data-copied] > .ui-copied { opacity: 1; transition: opacity var(--t-pop) ease-out 40ms; }
+.ui-copied-icon { display: inline-grid; place-items: center; width: var(--ui-icon-sm); height: var(--ui-icon-sm); transform: scale(0.7); transition: transform var(--t-pop) var(--ease-out); }
 .ui-kv-cell[data-copied] .ui-copied-icon { transform: none; }
-.ui-copied-icon svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-copied-icon svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-kv-cell[data-instant] > .ui-kv-text, .ui-kv-cell[data-instant] > .ui-copied, .ui-kv-cell[data-instant] .ui-copied-icon { transition: none; }
 @media (prefers-reduced-motion: reduce) { .ui-copied-icon { transform: none; transition: none; } }
 /* A value that is its row's action (kv-list `press`) reads as one: it keeps the pointer and takes the press scale. */
@@ -709,7 +756,7 @@
 .ui-kv-wide > .ui-kv-value { grid-column: 1 / -1; justify-self: stretch; padding-right: 1.25rem; text-align: left; }
 .ui-kv-wide:not(:has(.ui-kv-press)) > .ui-kv-value { color: var(--ui-text-secondary); padding-right: 0; }
 .ui-kv-wide > .ui-kv-value > .ui-copied { right: auto; left: 0; }
-.ui-kv-chevron { position: absolute; right: 0; top: calc(50% - 0.5rem); width: 0.875rem; height: 0.875rem; fill: none; stroke: var(--ui-text-secondary); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-kv-chevron { position: absolute; right: 0; top: calc(50% - 0.5rem); width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: var(--ui-text-secondary); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-kv-meter { grid-column: 1 / -1; position: relative; height: 0.1875rem; margin: 0.25rem 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
 .ui-kv-meter::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent); transform: scaleX(var(--meter, 0)); transform-origin: left; }
 @media (hover: hover) and (pointer: fine) {
@@ -720,8 +767,8 @@
 }
 
 /* DECISION 120 icon slot for branched-menu hosts. */
-.bm-icon { display: grid; place-items: center; width: 1rem; height: 1rem; flex: none; color: var(--fg-2); }
-.bm-icon svg { display: block; width: 0.9375rem; height: 0.9375rem; fill: currentColor; stroke: none; }
+.bm-icon { display: grid; place-items: center; width: var(--ui-icon); height: var(--ui-icon); flex: none; color: var(--fg-2); }
+.bm-icon svg { display: block; width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: currentColor; stroke: none; }
 
 /* Shared step transitions (pane-stepper.ts): leaving panes stack over the incoming one. */
 .ui-pane-viewport { position: relative; }
@@ -735,7 +782,7 @@
   border-radius: var(--r-md);
   background: rgb(from var(--fg) r g b / 0.05);
   cursor: text;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  transition: border-color var(--t-press) ease, background-color var(--t-press) ease;
 }
 .ui-chip-field:focus-within { border-color: rgb(from var(--fg) r g b / 0.28); background: rgb(from var(--fg) r g b / 0.09); }
 .ui-chip-flow { display: flex; min-height: 2.875rem; flex-wrap: wrap; align-items: center; gap: 0.375rem; padding: 0.375rem 0.5rem 0.375rem var(--ui-chip-field-inset, 0.875rem); }
@@ -765,18 +812,18 @@
   border-radius: var(--r-pill);
   background: rgb(from var(--fg) r g b / 0.08);
   color: var(--fg);
-  font: var(--fw-label) 0.8125rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-label) var(--ui-size-label)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: var(--ui-tracking);
   transform-origin: left center;
-  transition: background-color 120ms ease;
+  transition: background-color var(--t-press) ease;
 }
-.ui-chip > svg:first-child { width: 0.875rem; height: 0.875rem; flex: none; fill: currentColor; color: var(--fg-2); }
+.ui-chip > svg:first-child { width: var(--ui-icon-sm); height: var(--ui-icon-sm); flex: none; fill: currentColor; color: var(--fg-2); }
 .ui-chip > svg.is-line:first-child { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-chip-remove { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-3); cursor: pointer; }
 .ui-chip-remove svg { width: 0.75rem; height: 0.75rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .ui-chip-remove:hover { background: rgb(from var(--fg) r g b / 0.1); color: var(--fg); } }
-@media (pointer: coarse) { .ui-chip { height: 2.125rem; font-size: 0.9375rem; } .ui-chip-remove { width: 1.75rem; height: 1.75rem; } }
+@media (pointer: coarse) { .ui-chip { height: 2.125rem; font-size: var(--ui-size-body); } .ui-chip-remove { width: 1.75rem; height: 1.75rem; } }
 /* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
    sidebar toggle, session tabs). Instances set only their size and content layout; the material,
    hairline, shadow, radius and press feedback live here so they can never drift apart. */
@@ -784,7 +831,7 @@
   appearance: none; display: inline-flex; align-items: center; justify-content: center; height: var(--pill-h, 2.375rem);
   border: 1px solid var(--overlay-line) !important; border-radius: var(--r-pill); background: var(--overlay); box-shadow: var(--shadow);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation)); backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
-  transition: transform 140ms var(--ease-out, var(--ease-out));
+  transition: transform var(--t-press) var(--ease-out, var(--ease-out));
 }
 .ui-pill:active:not(:disabled) { transform: scale(var(--ui-press-scale)); }
 .ui-pill-icon { width: var(--pill-h, 2.375rem); padding: 0; color: var(--fg-2); }
@@ -802,7 +849,7 @@
 
 /* Window resize handles (window-resize.ts): invisible hit strips on the card's edges for a
    mouse; a finger gets four corner grips only after a press-and-hold on the header. */
-.ui-window-resize { position: absolute; z-index: 5; touch-action: none; }
+.ui-window-resize { position: absolute; z-index: var(--z-sidebar); touch-action: none; }
 .ui-window-resize[data-edge="n"], .ui-window-resize[data-edge="s"] { left: 1.125rem; right: 1.125rem; height: 0.375rem; }
 .ui-window-resize[data-edge="e"], .ui-window-resize[data-edge="w"] { top: 1.125rem; bottom: 1.125rem; width: 0.375rem; }
 .ui-window-resize[data-edge="n"] { top: 0; cursor: ns-resize; }
@@ -830,7 +877,7 @@
 }
 .ui-window[data-resize="touch"] .ui-window-resize::after {
   content: ""; position: absolute; width: 1.375rem; height: 1.375rem; border: 0 solid var(--accent);
-  transition: transform 140ms var(--ease-out, ease-out);
+  transition: transform var(--t-press) var(--ease-out, ease-out);
 }
 .ui-window[data-resize="touch"] .ui-window-resize:active::after { transform: scale(1.12); }
 .ui-window[data-resize="touch"] .ui-window-resize[data-edge="ne"]::after { top: 0.375rem; right: 0.375rem; border-width: 0.1875rem 0.1875rem 0 0; border-top-right-radius: 0.875rem; }
@@ -854,21 +901,21 @@
 .ui-sidebar-foot { --pill-h: 2.5rem; display: flex; flex: none; align-items: center; justify-content: space-between; gap: 0.5rem; margin-top: auto; padding: 0.5625rem 0 0; box-shadow: 0 -1px 0 var(--line); }
 .ui-sidebar-foot[data-variant="b"] { --pill-h: 2rem; }
 @media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 2.75rem; } }
-.ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, box-shadow 160ms ease; }
+.ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease, box-shadow var(--t-pop) ease; }
 @media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 0.5rem -2px rgb(0 0 0 / 0.18); } }
-.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 0.5rem); justify-content: flex-start; gap: 0.625rem; padding: 0 0.875rem 0 0.3125rem; text-align: left; }
+.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 0.5rem); justify-content: flex-start; gap: 0.625rem; padding: 0 0.875rem 0 0.25rem; text-align: left; }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 0.75rem; }
 .ui-sidebar-avatar {
   display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 0.625rem); height: calc(var(--pill-h) - 0.625rem); border-radius: 50%; color: #fff;
   background: linear-gradient(145deg, oklch(from var(--accent) calc(l + 0.06) c calc(h + var(--ui-avatar-hue, 0))), oklch(from var(--accent) calc(l - 0.12) c calc(h + var(--ui-avatar-hue, 0) + 28)));
-  font: 600 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
+  font: 600 var(--ui-size-eyebrow)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
 }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
-@media (pointer: coarse) { .ui-sidebar-avatar { font-size: 0.875rem; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
-.ui-sidebar-names { display: grid; min-width: 0; gap: 0.1875rem; }
+@media (pointer: coarse) { .ui-sidebar-avatar { font-size: var(--ui-size-body); } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
+.ui-sidebar-names { display: grid; min-width: 0; gap: 0.25rem; }
 .ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
-.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 0.6875rem; }
-@media (pointer: coarse) { .ui-sidebar-secondary { font-size: 0.75rem; } }
+.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: var(--ui-size-eyebrow); }
+@media (pointer: coarse) { .ui-sidebar-secondary { font-size: var(--ui-size-eyebrow); } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Window lock (lock-toggle.ts, window-card.ts): the padlock glyph itself, no chip. It is centred on
@@ -878,11 +925,11 @@
    44 px invisible hit area. On touch there is no frame lock: locking lives in the toolbar and the
    palette. */
 .ui-window-lock {
-  position: absolute; z-index: 6; top: -1.375rem; left: 50%; width: 2.75rem; height: 2.75rem; margin-left: -1.375rem;
-  display: grid; place-items: center; padding: 0; border: 0; border-radius: 0.625rem; background: none; color: var(--fg);
-  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity 160ms ease-out, color 160ms ease-out;
+  position: absolute; z-index: var(--z-overlay); top: -1.375rem; left: 50%; width: 2.75rem; height: 2.75rem; margin-left: -1.375rem;
+  display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg);
+  opacity: 0; pointer-events: none; cursor: pointer; transition: opacity calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out, color calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease-out;
 }
-.ui-window-lock svg { width: 1rem; height: 1rem; transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.ui-window-lock svg { width: var(--ui-icon); height: var(--ui-icon); transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
 .ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }
 .ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
 .ui-window-lock:focus-visible { opacity: 0.8; }
@@ -890,12 +937,12 @@
 .ui-window-lock:active svg { transform: translateY(0.5px) scale(var(--ui-press-scale-small)); }
 .ui-window[data-locked] { border-color: color-mix(in oklab, var(--accent) 78%, var(--overlay-line)); box-shadow: var(--shadow), 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent); }
 @media (pointer: coarse) { .ui-window-lock { display: none; } }
-@media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity 160ms ease; } }
+@media (prefers-reduced-motion: reduce) { .ui-window-lock { transition: opacity var(--t-pop) ease; } }
 .ui-window[data-status="none"] .ui-window-lock { display: none; }
 
 /* Shortcuts view (shortcuts-view.ts): the capsule's morph target. The material is the shared
    overlay surface; only the layout lives here. */
-.ui-shortcuts { position: absolute; z-index: 7; display: flex; flex-direction: column; min-height: 0; border-radius: var(--r-lg, 1.125rem); color: var(--fg); outline: none; }
+.ui-shortcuts { position: absolute; z-index: calc(var(--z-overlay) + 1); display: flex; flex-direction: column; min-height: 0; border-radius: var(--r-lg, 1.125rem); color: var(--fg); outline: none; }
 .ui-shortcuts-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 0.75rem; height: var(--pill-h, 2.375rem); padding: 0 0.5rem 0 0.875rem; font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .ui-shortcuts-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0.25rem 0.875rem 0.875rem; }
 .ui-shortcuts-section + .ui-shortcuts-section { margin-top: 0.75rem; }
@@ -905,20 +952,20 @@
 .ui-shortcuts-row:last-child { border-bottom: 0; }
 .ui-shortcuts-label { min-width: 0; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .ui-shortcuts-keys { display: inline-flex; flex: none; gap: 0.25rem; }
-.ui-shortcuts kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: 0.375rem; background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
+.ui-shortcuts kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: var(--r-xs); background: var(--hover); color: var(--fg-2); font: 500 var(--text-caption)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-align: center; }
 /* An alternate binding: the same keycap, quieter, so the primary reads first (TASTE: hierarchy by weight and tone). */
 .ui-shortcuts kbd.ui-shortcuts-alt { color: var(--fg-3); opacity: 0.7; }
 @media (pointer: coarse) { .ui-shortcuts-label { font-size: var(--text-body); } .ui-shortcuts-head { padding-right: 0.875rem; } }
 
 /* Settings overlay (settings-overlay.ts): one centred card in the shared overlay material. */
-.ui-settings { position: absolute; z-index: 8; top: 50%; left: 50%; display: flex; flex-direction: column; width: min(35rem, calc(100% - 1.5rem)); max-height: min(32.5rem, calc(100% - 1.5rem)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 1.125rem); color: var(--fg); outline: none; }
+.ui-settings { position: absolute; z-index: calc(var(--z-overlay) + 2); top: 50%; left: 50%; display: flex; flex-direction: column; width: min(35rem, calc(100% - 1.5rem)); max-height: min(32.5rem, calc(100% - 1.5rem)); margin: 0; translate: -50% -50%; border-radius: var(--r-lg, 1.125rem); color: var(--fg); outline: none; }
 .ui-settings-head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 3.25rem; padding: 0 0.5rem 0 1.125rem; }
 .ui-settings-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .ui-settings-nav-row:active { transform: scale(var(--ui-press-scale)); }
 @media (hover: hover) and (pointer: fine) { .ui-settings-nav-row:hover { background: var(--hover); } }
 .ui-settings-main { display: flex; min-height: 0; flex: 1; border-top: 1px solid var(--line); }
 .ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 9.375rem; padding: 0.5rem; border-right: 1px solid var(--line); }
-.ui-settings-nav-row { display: flex; align-items: center; gap: 0.5rem; height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-settings-nav-row { display: flex; align-items: center; gap: 0.5rem; height: var(--ui-control-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
 .ui-settings-nav-row[aria-current="true"] { background: var(--hover); color: var(--fg); }
 .ui-settings-nav-row svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-settings-pane { min-width: 0; flex: 1; overflow: auto; padding: 0.375rem 1.125rem 0.875rem; overscroll-behavior: contain; }
@@ -935,11 +982,11 @@
 .ui-conn[hidden] { display: none; }
 @media (pointer: coarse) { .ui-conn::after { content: ""; position: absolute; inset: -0.5rem; } }
 /* Keys that were typed while the link was down and are kept to be sent (connection-indicator.ts `queued`): one small amber key at the glyph's corner. */
-.ui-conn-q { position: absolute; right: -0.1875rem; top: -0.1875rem; display: grid; place-items: center; width: 0.5625rem; height: 0.5625rem; border-radius: 50%; background: var(--ui-conn-ground, var(--bg)); opacity: 0; transform: scale(0.4); transition: opacity 160ms ease-out, transform 220ms var(--ease-out); pointer-events: none; }
+.ui-conn-q { position: absolute; right: -0.1875rem; top: -0.1875rem; display: grid; place-items: center; width: 0.5625rem; height: 0.5625rem; border-radius: 50%; background: var(--ui-conn-ground, var(--bg)); opacity: 0; transform: scale(0.4); transition: opacity var(--t-pop) ease-out, transform var(--t-panel) var(--ease-out); pointer-events: none; }
 .ui-conn-q svg { width: 0.5625rem; height: 0.5625rem; fill: none; stroke: var(--warn); stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .ui-conn[data-queued] .ui-conn-q { opacity: 1; transform: none; }
 .ui-conn-g { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: scale(0.6); pointer-events: none;
-  transition: opacity 160ms ease-out, transform 240ms var(--ease-out, var(--ease-out)); }
+  transition: opacity var(--t-pop) ease-out, transform var(--t-panel) var(--ease-out, var(--ease-out)); }
 .ui-conn-g svg, .ui-conn-pulse, .ui-conn-spin { grid-area: 1 / 1; width: 100%; height: 100%; overflow: visible; fill: none; }
 /* Glyph parts opt in to a stroke; an inherited page-wide svg stroke must not outline the filled ones. */
 .ui-conn-g svg { stroke: none; }
@@ -991,8 +1038,8 @@
 
 /* Reduced motion: glyphs cross-fade; nothing moves or loops. The reconnecting arc stays as a static mark. */
 @media (prefers-reduced-motion: reduce) {
-  .ui-conn-g { transform: none; transition: opacity 200ms ease; }
-  .ui-conn-q { transform: none; transition: opacity 200ms ease; }
+  .ui-conn-g { transform: none; transition: opacity var(--t-pop) ease; }
+  .ui-conn-q { transform: none; transition: opacity var(--t-pop) ease; }
   .ui-conn-pulse, .ui-conn-spin { animation: none; }
   .ui-conn-pulse { display: none; }
 }
@@ -1001,16 +1048,16 @@
 .ui-toolbar-settings { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
 .ui-ts-title { margin: 0; padding: var(--ui-heading-pad); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-list { display: grid; margin: 0; padding: 0; list-style: none; }
-.ui-ts-item { position: relative; display: flex; align-items: center; gap: 0.625rem; min-height: var(--ui-row-h, 2rem); border-bottom: 1px solid var(--line); background: transparent; }
+.ui-ts-item { position: relative; display: flex; align-items: center; gap: 0.625rem; min-height: var(--ui-control-h, 2rem); border-bottom: 1px solid var(--line); background: transparent; }
 .ui-ts-item:last-child { border-bottom: 0; }
-.ui-ts-item[data-dragging] { z-index: 2; background: var(--overlay-solid); border-radius: 0.625rem; box-shadow: var(--shadow); }
+.ui-ts-item[data-dragging] { z-index: calc(var(--z-content) + 1); background: var(--overlay-solid); border-radius: var(--r-sm); box-shadow: var(--shadow); }
 .ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 1.875rem); height: var(--ui-control-h, 1.875rem); padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
 .ui-ts-grip svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-linecap: round; }
 .ui-ts-item[data-dragging] .ui-ts-grip { cursor: grabbing; }
 .ui-ts-icon { display: grid; flex: none; color: var(--fg-2); }
 .ui-ts-icon svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-ts-label { flex: 1; min-width: 0; color: var(--fg); font: var(--ui-type-label); line-height: normal; letter-spacing: var(--ui-tracking); } /* the label's line box is the font's own height, so it shares the icon's centre line (#282) */
-.ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: var(--r-pill); background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-ts-reset { justify-self: start; min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: var(--r-pill); background: none; color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
 .ui-ts-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-ts-reset:hover, .ui-ts-grip:hover { background: var(--hover); } }
 
@@ -1023,21 +1070,21 @@
 .ui-ss-main:disabled { cursor: default; color: var(--ui-text-secondary); }
 .ui-ss-keys { position: relative; display: inline-flex; flex: none; gap: 0.25rem; }
 /* A changed shortcut's mark (shortcuts-settings.ts): a dot on the first cap's top-left corner. Out of the flow, so the caps keep the shared right edge. */
-.ui-ss-dot { position: absolute; top: -0.125rem; left: -0.125rem; z-index: 1; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--accent); pointer-events: none; }
+.ui-ss-dot { position: absolute; top: -0.125rem; left: -0.125rem; z-index: var(--z-content); width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--accent); pointer-events: none; }
 .ui-ss-row[data-reset-all] .ui-ss-label { color: var(--danger); }
 /* "Reset all" asks in its own row (row-confirm.ts): its words crossfade into the question, like the sidebar's rows above. */
-.ui-ss-row[data-reset-all] > .ui-ss-main > * { transition: opacity 150ms var(--ease-out, ease-out); }
+.ui-ss-row[data-reset-all] > .ui-ss-main > * { transition: opacity var(--t-press) var(--ease-out, ease-out); }
 .ui-ss-row[data-asking] > .ui-ss-main > * { opacity: 0; }
 @media (prefers-reduced-motion: reduce) { .ui-ss-row[data-reset-all] > .ui-ss-main > * { transition: none; } }
 .ui-ss-main { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .ui-ss-keys[data-capturing] { color: var(--accent); }
-.ui-ss-keys kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: 0.375rem; background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption, 0.6875rem)/1 var(--font-ui); text-align: center; }
+.ui-ss-keys kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: var(--r-xs); background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption)/1 var(--font-ui); text-align: center; }
 .ui-ss-warn { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.25rem 0 0.5rem; color: var(--warn, var(--fg-2)); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .ui-ss-actions { display: inline-flex; gap: 0.375rem; }
 .ui-ss-actions button { min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: var(--r-pill); background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .ui-ss-actions button:hover, .ui-ss-main:not(:disabled):hover { background: var(--hover); } }
 .ui-ts-source { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.625rem; }
-.ui-ts-tag { padding: 0.1875rem 0.5625rem; border-radius: var(--r-pill); background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-tag { padding: 0.25rem 0.5625rem; border-radius: var(--r-pill); background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-tag[data-device="true"] { background: var(--accent-soft); color: var(--accent); }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
@@ -1064,7 +1111,7 @@
 /* One column that is the pane's width, never wider: a window keeps its width when the UI size grows (#283), and a row that cannot wrap (a theme and its "dark") must not widen the whole column and push every section's right edge out of the window. */
 .ui-sp { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
 .ui-sp-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
-.ui-sp-row { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-row { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: var(--ui-control-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
 .ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
 .ui-sp-swatch, .ui-sp-slot { flex: none; width: 1.125rem; height: 1.125rem; }
@@ -1075,7 +1122,7 @@
    ends at one x whether or not its row is selected. The name is one unbreakable line and is never truncated. When the
    list's widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every description sits
    under its name as a left-aligned subtitle, balanced and allowed two lines. The tick stays centred on the row. */
-.ui-sp-text { display: flex; flex: 1; align-items: baseline; justify-content: space-between; column-gap: 0.625rem; min-width: 0; padding: 0.3125rem 0; }
+.ui-sp-text { display: flex; flex: 1; align-items: baseline; justify-content: space-between; column-gap: 0.625rem; min-width: 0; padding: 0.25rem 0; }
 .ui-sp-text .ui-sp-label { flex: none; white-space: nowrap; }
 .ui-sp-text .ui-sp-hint { flex: none; margin-left: auto; text-align: right; white-space: nowrap; color: var(--ui-text-secondary); }
 .ui-sp-text .ui-sp-hint:empty { display: none; }
@@ -1091,7 +1138,9 @@
 .ui-sp[data-ticks] { --ui-sp-end: calc(var(--ui-sp-tick, 1.125rem) + 0.625rem); }
 .ui-sp .ui-sp-row { position: relative; isolation: isolate; padding: 0; }
 .ui-sp .ui-sp-row:is(.ui-sp-switch, .ui-sp-status) { padding-right: var(--ui-sp-end); }
-.ui-sp .ui-sp-row::before { content: ""; position: absolute; inset: 0 -0.5rem; z-index: -1; border-radius: var(--r-sm); pointer-events: none; transition: background-color 140ms ease; }
+/* A switch ends on the row's right edge. settings-edges.spec.ts measures that to 0.5 px and it was 0.8 px off when this 1 px margin was removed, so it stays (an optical hairline, not a grid step). */
+.ui-sp .ui-switch, .ui-ts-item .ui-switch { margin-right: 0.0625rem; }
+.ui-sp .ui-sp-row::before { content: ""; position: absolute; inset: 0 -0.5rem; z-index: -1; border-radius: var(--r-sm); pointer-events: none; transition: background-color var(--t-press) ease; }
 @media (hover: hover) and (pointer: fine) {
   .ui-sp .ui-sp-row:hover { background: none; }
   .ui-sp .ui-sp-row:hover::before { background: var(--hover); }
@@ -1099,7 +1148,6 @@
 }
 /* A switch's visible track is its ::before (content-box: 1px in, 2.875rem wide, 1px border either side), a hair wider than
    the 3rem box that holds it. The row's right edge is the track's, not the box's: the box stops short by the difference. */
-.ui-sp .ui-switch, .ui-ts-item .ui-switch { margin-right: calc(3px - 0.125rem); }
 .ui-sp[data-ticks] .ui-slider { margin-right: var(--ui-sp-end); }
 /* Icons are aligned by what you see: a glyph sits on the edge, and its hit box reaches past it into the pane's padding. */
 .ui-sp-kind { margin-left: calc((var(--ui-icon, 1rem) - 1.75rem) / 2); }
@@ -1110,7 +1158,7 @@
 .ui-sp-hint { color: var(--ui-text-secondary); }
 /* A destructive row (remove, sign out) names its action in the danger colour; the hint under it stays quiet. */
 .ui-sp-row[data-tone="danger"] .ui-sp-label { color: var(--danger); }
-.ui-sp-tick { width: var(--ui-sp-tick, 1.125rem); height: var(--ui-sp-tick, 1.125rem); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity 150ms ease, transform 180ms var(--ease-out, ease-out); }
+.ui-sp-tick { width: var(--ui-sp-tick, 1.125rem); height: var(--ui-sp-tick, 1.125rem); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity var(--t-press) ease, transform var(--t-pop) var(--ease-out, ease-out); }
 .ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
 .ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-sp-device { display: flex; align-items: center; gap: 0.625rem; min-height: 3.25rem; border-bottom: 1px solid var(--line); }
@@ -1121,18 +1169,18 @@
 .ui-sp-dot[data-online="false"] { background: var(--fg-3); }
 /* A static row (a fact and its action): no press scale or hover fill, because the row itself does nothing. The action fades
    instead of vanishing so the words keep their place. */
-.ui-sp-status { cursor: default; min-height: var(--ui-row-h, 2rem); }
+.ui-sp-status { cursor: default; min-height: var(--ui-control-h, 2rem); }
 .ui-sp-status:active { transform: none; }
 @media (hover: hover) and (pointer: fine) { .ui-sp-status:hover { background: none; } }
-.ui-sp-status-action { flex: none; transition: opacity 160ms ease, background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-status-action { flex: none; transition: opacity var(--t-pop) ease, background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
 .ui-sp-status-action[data-shown="false"] { opacity: 0; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .ui-sp-status-action { transition: none; } }
 .ui-sp-names { display: grid; flex: 1; min-width: 0; gap: 2px; }
 .ui-sp-name-row { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; }
-.ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: 0.375rem; background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
+.ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: var(--r-xs); background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
 .ui-sp-name:focus { background: var(--hover); }
-.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 0.75rem); white-space: nowrap; }
-.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 0.75rem); letter-spacing: var(--ui-tracking); }
+.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary); white-space: nowrap; }
+.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); }
 .ui-sp-actions { display: flex; flex: none; gap: 2px; }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
@@ -1152,7 +1200,7 @@
 .bm-leaf[aria-current] .ui-state-dot[data-state="open"]::before { background: var(--accent); }
 .ui-mark { flex: none; width: 0.75rem; height: 0.75rem; }
 .ui-mark.is-new { animation: ui-mark-in 180ms var(--ease-out, ease-out); }
-.ui-mark[data-mark="output"] { width: 0.375rem; height: 0.375rem; margin: 0 0.1875rem; border-radius: 50%; background: var(--accent); }
+.ui-mark[data-mark="output"] { width: 0.375rem; height: 0.375rem; margin: 0 0.25rem; border-radius: 50%; background: var(--accent); }
 .ui-mark[data-mark="ok"], .ui-mark[data-mark="fail"] { background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; }
 .ui-mark[data-mark="ok"] { color: var(--ok); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
 /* Ended: the session is gone without an exit code to report. Quiet, not an error: a stopped square. */
@@ -1160,7 +1208,7 @@
 .ui-mark[data-mark="fail"] { color: var(--danger); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
 /* In a branched menu the mark sits on the right, against the note beside it. */
 .bm-leaf .ui-mark { margin-left: auto; }
-.bm-leaf .ui-mark[data-mark="output"] { margin-right: 0.1875rem; }
+.bm-leaf .ui-mark[data-mark="output"] { margin-right: 0.25rem; }
 .bm-leaf .ui-mark + .bm-meta { margin-left: 0.375rem; }
 @keyframes ui-mark-in { from { opacity: 0; transform: scale(0.5); } }
 @media (prefers-reduced-motion: reduce) { .ui-mark.is-new { animation: none; } }
@@ -1196,14 +1244,14 @@
    A reserved 8 px bar would move the phone's key tray and its targets. */
 @media (hover: hover) and (pointer: fine) {
 @supports (-moz-appearance: none) {
-  :where(*:not(.terminal-host)) { scrollbar-width: thin; scrollbar-color: transparent transparent; transition: scrollbar-color 240ms var(--ease-out); }
+  :where(*:not(.terminal-host)) { scrollbar-width: thin; scrollbar-color: transparent transparent; transition: scrollbar-color var(--t-panel) var(--ease-out); }
   :where(*:not(.terminal-host))[data-scrolling] { scrollbar-color: color-mix(in srgb, var(--fg-2) 45%, transparent) transparent; }
 }
 @supports not (-moz-appearance: none) {
   *:not(.terminal-host)::-webkit-scrollbar { width: 0.5rem; height: 0.5rem; background: transparent; }
   *:not(.terminal-host)::-webkit-scrollbar-button { display: none; }
   *:not(.terminal-host)::-webkit-scrollbar-track { background: transparent; }
-  *:not(.terminal-host)::-webkit-scrollbar-thumb { background: transparent; border-radius: 0.25rem; transition: background-color 240ms var(--ease-out); }
+  *:not(.terminal-host)::-webkit-scrollbar-thumb { background: transparent; border-radius: var(--r-xs); transition: background-color var(--t-panel) var(--ease-out); }
   *:not(.terminal-host)[data-scrolling]::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg-2) 45%, transparent); }
 }
 }
@@ -1218,7 +1266,7 @@
   display: grid; flex: 0 1 auto; gap: 0.25rem; min-height: 0; margin: auto 0 0.5rem; padding: 0.5rem;
   border-radius: calc(var(--r-lg, 1.125rem) - 0.5rem); background: color-mix(in oklab, var(--fg) 6%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--fg) 12%, transparent);
-  transition: opacity 160ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
+  transition: opacity var(--t-pop) var(--ease-out, ease-out), transform var(--t-pop) var(--ease-out, ease-out);
 }
 /* The Inbox says "something waits for you": it takes the accent. */
 .ui-inbox { flex: none; background: color-mix(in oklab, var(--accent) 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 22%, transparent); }
@@ -1232,8 +1280,8 @@
 .ui-sidebar-card:not([hidden]) ~ .ui-sidebar-card, .ui-sidebar-card:not([hidden]) ~ .ui-sidebar-foot { margin-top: 0; }
 .ui-sidebar-card-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: 1.375rem; padding: 2px 0.375rem 0; color: var(--ui-text-secondary); font-size: var(--text-caption); font-weight: var(--fw-label); line-height: 1.4; }
 /* The card's close control: an icon button, 24 px on desktop; its hit area is 44 px on touch without making the header taller. */
-.ui-sidebar-card-close { position: relative; display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; margin: -2px -0.25rem -2px 0; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-3); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease, color 140ms ease; }
-.ui-sidebar-card-close svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.ui-sidebar-card-close { position: relative; display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; margin: -2px -0.25rem -2px 0; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-3); cursor: pointer; transition: transform var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease, color var(--t-press) ease; }
+.ui-sidebar-card-close svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .ui-sidebar-card-close:active { transform: scale(var(--ui-press-scale)); }
 @media (hover: hover) and (pointer: fine) { .ui-sidebar-card-close:hover { background: color-mix(in oklab, var(--fg) 8%, transparent); color: var(--fg); } }
 @media (pointer: coarse) { .ui-sidebar-card-close::after { content: ""; position: absolute; inset: -0.625rem; } }
@@ -1243,35 +1291,35 @@
   display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: var(--row); padding: 0 0.375rem; border: 0; border-radius: var(--r-sm);
   background: none; color: var(--fg); font: inherit; font-size: var(--text-body); font-weight: var(--fw-label); text-align: left; cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  transition: background-color 120ms ease, transform 140ms var(--ease-out, ease-out);
+  transition: background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out);
 }
 @media (hover: hover) and (pointer: fine) { .ui-inbox-row:hover { background: color-mix(in oklab, var(--fg) 6%, transparent); } }
 .ui-inbox-row:active { transform: scale(var(--ui-press-scale-soft)); }
-.ui-inbox-glyph, .ui-inbox-chevron { flex: none; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-inbox-glyph, .ui-inbox-chevron { flex: none; width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-inbox-glyph { color: var(--accent); }
-.ui-inbox-chevron { margin-left: auto; width: 0.875rem; height: 0.875rem; color: var(--ui-text-secondary); transition: transform 180ms var(--ease-out, ease-out); }
+.ui-inbox-chevron { margin-left: auto; width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--ui-text-secondary); transition: transform var(--t-pop) var(--ease-out, ease-out); }
 .ui-inbox-item[data-expanded="true"] .ui-inbox-chevron { transform: rotate(90deg); }
 .ui-inbox-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The panel's height is a grid track, so opening is a plain CSS transition: it can be reversed mid-way and costs no script. */
-.ui-inbox-panel { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows 180ms var(--ease-out, ease-out), visibility 0s 180ms; }
+.ui-inbox-panel { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows var(--t-pop) var(--ease-out, ease-out), visibility 0s var(--t-pop); }
 .ui-inbox-item[data-expanded="true"] .ui-inbox-panel { grid-template-rows: 1fr; visibility: visible; transition-delay: 0s; }
-.ui-inbox-panel-inner { display: grid; gap: 0.5rem; min-height: 0; overflow: hidden; padding: 0 0.375rem 0 1.875rem; opacity: 0; transition: opacity 150ms ease, padding-bottom 180ms var(--ease-out, ease-out); }
+.ui-inbox-panel-inner { display: grid; gap: 0.5rem; min-height: 0; overflow: hidden; padding: 0 0.375rem 0 1.875rem; opacity: 0; transition: opacity var(--t-press) ease, padding-bottom var(--t-pop) var(--ease-out, ease-out); }
 .ui-inbox-item[data-expanded="true"] .ui-inbox-panel-inner { opacity: 1; padding-bottom: 0.375rem; }
 .ui-inbox-body { margin: 0; padding-top: 2px; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
 .ui-inbox-actions { display: flex; justify-content: flex-end; gap: 0.375rem; }
 .ui-inbox-action { --ui-button-height: 1.75rem; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); min-height: 1.75rem; padding: 0 0.75rem; border-radius: var(--r-sm); }
 @media (pointer: coarse) { .ui-sidebar-card { padding: 0.375rem; } .ui-inbox-action { --ui-button-height: 2.75rem; min-height: 2.75rem; } }
-@media (prefers-reduced-motion: reduce) { .ui-sidebar-card, .ui-sidebar-card[data-open="false"] { transform: none; transition: opacity 150ms ease; } .ui-inbox-panel, .ui-inbox-panel-inner, .ui-inbox-chevron, .ui-inbox-row { transition-duration: 1ms; } .ui-inbox-panel-inner { transition: opacity 150ms ease; } }
+@media (prefers-reduced-motion: reduce) { .ui-sidebar-card, .ui-sidebar-card[data-open="false"] { transform: none; transition: opacity var(--t-press) ease; } .ui-inbox-panel, .ui-inbox-panel-inner, .ui-inbox-chevron, .ui-inbox-row { transition-duration: 1ms; } .ui-inbox-panel-inner { transition: opacity var(--t-press) ease; } }
 
 
 /* A card that grows out of its pill (sidebar-card-morph.ts): the script sets the pill's box as an inline transform and
    the transition below takes it to rest, so nothing but transform and opacity moves. The card sits above the pill while it
    travels; its content fades in after the shape is mostly there and out before it shrinks. A keyboard open has no motion. */
-.ui-sidebar-card[data-morph="from"], .ui-sidebar-card[data-morph="in"], .ui-sidebar-card[data-morph="out"] { position: relative; z-index: 1; transform-origin: 0 0; }
-.ui-sidebar-card[data-morph="in"] { transition: transform 200ms var(--ease-out), opacity 90ms ease-out; }
-.ui-sidebar-card[data-morph="out"] { transition: transform 180ms var(--ease-out), opacity 110ms ease-out 50ms; }
+.ui-sidebar-card[data-morph="from"], .ui-sidebar-card[data-morph="in"], .ui-sidebar-card[data-morph="out"] { position: relative; z-index: var(--z-content); transform-origin: 0 0; }
+.ui-sidebar-card[data-morph="in"] { transition: transform var(--t-pop) var(--ease-out), opacity 90ms ease-out; }
+.ui-sidebar-card[data-morph="out"] { transition: transform var(--t-pop) var(--ease-out), opacity var(--t-press) ease-out 50ms; }
 .ui-sidebar-card[data-morph="from"] > *, .ui-sidebar-card[data-morph="out"] > * { opacity: 0; }
-.ui-sidebar-card[data-morph="in"] > * { transition: opacity 130ms ease-out 70ms; }
+.ui-sidebar-card[data-morph="in"] > * { transition: opacity var(--t-press) ease-out 70ms; }
 .ui-sidebar-card[data-morph="out"] > * { transition: opacity 60ms ease-out; }
 .ui-sidebar-card[data-morph="none"], .ui-sidebar-card[data-morph="none"] > * { transition: none; }
 
@@ -1286,7 +1334,7 @@
 
 /* A value run (kv-decorate.ts `parts`): small items that wrap only between them; each is one unit, tinted, with its note one
    step quieter than the name but still readable (--fg-2 clears 4.5:1 on the tint). */
-.ui-kv-part { display: inline-flex; max-width: 100%; margin: 1px 0; padding: 0 0.4375rem; border-radius: var(--r-pill); background: color-mix(in oklab, var(--fg) 9%, transparent); font-size: var(--text-secondary, 0.75rem); line-height: 1.25rem; vertical-align: top; }
+.ui-kv-part { display: inline-flex; max-width: 100%; margin: 1px 0; padding: 0 0.4375rem; border-radius: var(--r-pill); background: color-mix(in oklab, var(--fg) 9%, transparent); font-size: var(--text-secondary); line-height: 1.25rem; vertical-align: top; }
 .ui-kv-part-name { min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-kv-part-note { flex: none; margin-left: 0.4em; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 /* A pressable value with a chevron (kv-decorate.ts `chevron`): the room for the chevron is the value's own padding. */
@@ -1299,11 +1347,11 @@
 .ui-slider-input::-webkit-slider-runnable-track { height: 0.25rem; border-radius: 2px; background: linear-gradient(to right, var(--fg-2) var(--fill), var(--hover) var(--fill)); }
 .ui-slider-input::-moz-range-track { height: 0.25rem; border-radius: 2px; background: var(--hover); }
 .ui-slider-input::-moz-range-progress { height: 0.25rem; border-radius: 2px; background: var(--fg-2); }
-.ui-slider-input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 1rem; height: 1rem; margin-top: -0.375rem; border: 0; border-radius: 50%; background: var(--fg); transition: transform 120ms var(--ease-out, ease-out); }
-.ui-slider-input::-moz-range-thumb { width: 1rem; height: 1rem; border: 0; border-radius: 50%; background: var(--fg); transition: transform 120ms var(--ease-out, ease-out); }
+.ui-slider-input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 1rem; height: 1rem; margin-top: -0.375rem; border: 0; border-radius: 50%; background: var(--fg); transition: transform var(--t-press) var(--ease-out, ease-out); }
+.ui-slider-input::-moz-range-thumb { width: 1rem; height: 1rem; border: 0; border-radius: 50%; background: var(--fg); transition: transform var(--t-press) var(--ease-out, ease-out); }
 .ui-slider-input:active::-webkit-slider-thumb { transform: scale(1.12); }
 .ui-slider-input:active::-moz-range-thumb { transform: scale(1.12); }
-[data-focus-ring="on"] .ui-slider-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0.375rem; }
+[data-focus-ring="on"] .ui-slider-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-xs); }
 .ui-slider-value { flex: none; min-width: 5ch; text-align: right; color: var(--fg-2); font: var(--ui-type-label); font-variant-numeric: tabular-nums; letter-spacing: var(--ui-tracking); }
 @media (pointer: coarse) { .ui-slider-input { height: 2.75rem; } .ui-slider-input::-webkit-slider-thumb { width: 1.375rem; height: 1.375rem; margin-top: -0.5625rem; } .ui-slider-input::-moz-range-thumb { width: 1.375rem; height: 1.375rem; } }
 @media (prefers-reduced-motion: reduce) { .ui-slider-input::-webkit-slider-thumb, .ui-slider-input::-moz-range-thumb { transition: none; } }
@@ -1318,30 +1366,30 @@
 .ui-setting + .ui-setting { border-top: 1px solid var(--line); }
 .ui-setting-names { display: contents; }
 .ui-setting-title { grid-row: 1; display: flex; align-items: center; min-width: 0; min-height: var(--ui-control-h, 1.875rem); color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: normal; }
-.ui-setting-explain { grid-row: 2; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-setting-explain { grid-row: 2; color: var(--ui-text-secondary); font-size: var(--text-secondary); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
 .ui-setting-control { grid-row: 3; display: flex; align-items: center; gap: 0.25rem; margin: 0.375rem 0 0.25rem; height: var(--ui-control-h, 1.875rem); }
-.ui-setting-caption { grid-row: 4; color: var(--fg-3); font-size: var(--text-caption, 0.6875rem); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); }
-.ui-setting-input { width: 7rem; min-width: 0; height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0 0.625rem; border: 0; border-radius: 0.5rem; background: var(--hover); color: var(--fg); font: var(--ui-type-label); font-size: var(--text-input, 0.8125rem); line-height: normal; letter-spacing: var(--ui-tracking); text-align: left; transition: background-color 140ms ease, color 140ms ease; }
+.ui-setting-caption { grid-row: 4; color: var(--fg-3); font-size: var(--text-caption); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); }
+.ui-setting-input { width: 7rem; min-width: 0; height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0 0.625rem; border: 0; border-radius: var(--r-sm); background: var(--hover); color: var(--fg); font: var(--ui-type-label); font-size: var(--text-input, var(--ui-size-label)); line-height: normal; letter-spacing: var(--ui-tracking); text-align: left; transition: background-color var(--t-press) ease, color var(--t-press) ease; }
 .ui-setting-input:focus { outline: none; }
 [data-focus-ring="on"] .ui-setting-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ui-setting[data-invalid] .ui-setting-input { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
-.ui-setting-reset { display: grid; flex: none; place-items: center; width: calc(var(--ui-control-h, 1.875rem) - 0.25rem); height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg-2); cursor: pointer; transition: opacity 160ms ease, background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-setting-reset { display: grid; flex: none; place-items: center; width: calc(var(--ui-control-h, 1.875rem) - 0.25rem); height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg-2); cursor: pointer; transition: opacity var(--t-pop) ease, background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
 .ui-setting-reset svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-setting-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
 .ui-setting-reset[data-shown="false"] { opacity: 0; pointer-events: none; }
 @media (hover: hover) and (pointer: fine) { .ui-setting-reset:hover { background: var(--hover); } }
 [data-focus-ring="on"] .ui-setting-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* The refusal slides open under the row (height and opacity) and says what is allowed and what is still in use. */
-.ui-setting-refusal { display: grid; grid-column: 1 / -1; grid-row: 5; justify-self: stretch; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms ease; }
+.ui-setting-refusal { display: grid; grid-column: 1 / -1; grid-row: 5; justify-self: stretch; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--t-pop) var(--ease-out, ease-out), opacity var(--t-pop) ease; }
 .ui-setting-refusal > div { min-height: 0; overflow: hidden; }
-.ui-setting-refusal p { margin: 0; padding-top: 0.375rem; color: var(--danger); font-size: var(--text-secondary, 0.75rem); line-height: 1.4; letter-spacing: var(--ui-tracking); }
+.ui-setting-refusal p { margin: 0; padding-top: 0.375rem; color: var(--danger); font-size: var(--text-secondary); line-height: 1.4; letter-spacing: var(--ui-tracking); }
 .ui-setting[data-invalid] .ui-setting-refusal { grid-template-rows: 1fr; opacity: 1; }
 /* ⌘K jumped here: a faint fill that fades, never an outline (TASTE: selection is quiet). */
-.ui-setting[data-found] { border-radius: 0.5rem; animation: ui-setting-found 1800ms ease-out; }
+.ui-setting[data-found] { border-radius: var(--r-sm); animation: ui-setting-found 1800ms ease-out; }
 @keyframes ui-setting-found { from { background: var(--accent-soft); } to { background: transparent; } }
 /* Touch: the field and Reset are full 44 px targets (TASTE: touch follows iOS), and the text never drops below 16 px so iOS does not zoom. */
 @media (pointer: coarse) { .ui-setting-input { width: 7.5rem; height: var(--ui-control-h); font-size: 1rem; } .ui-setting-reset { width: var(--ui-control-h); height: var(--ui-control-h); } }
-@media (prefers-reduced-motion: reduce) { .ui-setting-refusal { transition: opacity 160ms ease; } }
+@media (prefers-reduced-motion: reduce) { .ui-setting-refusal { transition: opacity var(--t-pop) ease; } }
 /* A choice (the shared segmented control) or a switch in a setting row: same place, same centre line as a typed field. */
 .ui-setting-switch { display: inline-flex; align-items: center; height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); cursor: pointer; }
 .ui-setting-field.ui-tabs { flex: none; }
@@ -1352,22 +1400,22 @@
 .ui-dp-pop { padding: 0; width: max-content; }
 .ui-dp { display: grid; gap: 0.375rem; padding: 0.625rem 0.75rem 0.75rem; min-width: 12rem; }
 .ui-dp-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: calc(var(--ui-control-h, 1.875rem) - 0.375rem); }
-.ui-dp-title { min-width: 0; margin: 0; color: var(--fg); font: var(--ui-type-label); font-size: var(--text-body, 0.8125rem); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: 1.3; overflow-wrap: anywhere; }
+.ui-dp-title { min-width: 0; margin: 0; color: var(--fg); font: var(--ui-type-label); font-size: var(--text-body); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: 1.3; overflow-wrap: anywhere; }
 .ui-dp-expand { flex: none; margin-right: -0.25rem; }
-.ui-dp-lead { margin: 0; color: var(--fg); font-size: var(--text-body, 0.8125rem); font-weight: var(--fw-secondary, 400); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-dp-lead { margin: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-secondary, 400); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
 .ui-dp-bullets { display: grid; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
-.ui-dp-bullet { position: relative; padding-left: 1rem; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-dp-bullet { position: relative; padding-left: 1rem; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
 .ui-dp-bullet::before { content: ""; position: absolute; left: 0.125rem; top: 0.5em; width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--fg-3); }
-.ui-dp-empty { margin: 0; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.45; }
+.ui-dp-empty { margin: 0; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.45; }
 .ui-dp-table-wrap { margin-top: 0.125rem; overflow-x: auto; }
-.ui-dp-table { width: 100%; border-collapse: collapse; font-size: var(--text-caption, 0.6875rem); line-height: 1.35; }
+.ui-dp-table { width: 100%; border-collapse: collapse; font-size: var(--text-caption); line-height: 1.35; }
 .ui-dp-table th { padding: 0 0.5rem 0.25rem 0; color: var(--fg-3); font-weight: var(--fw-label, 500); text-align: left; text-transform: uppercase; letter-spacing: 0.02em; }
 .ui-dp-table td { padding: 0.25rem 0.5rem 0.25rem 0; border-top: 1px solid var(--line); color: var(--ui-text-secondary); vertical-align: top; }
 .ui-dp-table td:first-child { color: var(--fg); }
 .ui-dp-table th:last-child, .ui-dp-table td:last-child { padding-right: 0; }
 /* The bottom sheet: lifted from the bottom edge, clear of the home indicator, never past 70 % of the visual viewport. */
-.ui-sheet-scrim { position: absolute; z-index: 8; inset: 0; background: rgb(0 0 0 / 0.28); }
-.ui-sheet { position: absolute; z-index: 9; left: 0.5rem; right: 0.5rem; bottom: calc(0.5rem + env(safe-area-inset-bottom)); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border-radius: 1.25rem; outline: none; }
+.ui-sheet-scrim { position: absolute; z-index: calc(var(--z-overlay) + 2); inset: 0; background: rgb(0 0 0 / 0.28); }
+.ui-sheet { position: absolute; z-index: calc(var(--z-overlay) + 3); left: 0.5rem; right: 0.5rem; bottom: calc(0.5rem + env(safe-area-inset-bottom)); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border-radius: var(--r-lg); outline: none; }
 .ui-sheet > .ui-dp-holder { min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .ui-sheet-grab { display: grid; place-items: center; height: 1.5rem; cursor: grab; }
 .ui-sheet-handle { width: 2.25rem; height: 0.25rem; border-radius: 0.125rem; background: var(--fg-3); opacity: 0.6; }

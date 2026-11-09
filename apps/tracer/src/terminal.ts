@@ -1,9 +1,12 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { keysIn } from "./input-keys";
-import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
+import { Osc52Scanner } from "./osc52";
+import { readProgramCopy } from "./program-copy";
+import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
@@ -12,6 +15,8 @@ import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../pac
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
+import { selectionColors, THEMES } from "../../../packages/ui/src/themes";
+import { installWrapAwareSelection, type SelectableTerminal } from "./terminal-wrap-selection";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
@@ -21,6 +26,8 @@ import { captureFocusIntent } from "../../../packages/ui/src/focus-intent";
 import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
 import { SynchronizedOutput } from "./synchronized-output";
 
+/** How many terminals have been made on this page; names each one's remote-copy notice. */
+let remoteCopyCount = 0;
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
@@ -37,6 +44,8 @@ const TERMINAL_FONT_SIZE_MAX = 24;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
+/** The selection colours of the default (ink) terminal theme, used until the screen hands the terminal its theme. */
+const INK_SELECTION = selectionColors(THEMES.ink!);
 const ANSI_THEME_KEYS = [
   "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
   "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
@@ -57,6 +66,7 @@ interface GhosttyActivityControls {
     remeasureFont(): void;
     resize(cols: number, rows: number): void;
     getMetrics(): { width: number; height: number; baseline: number };
+    getCanvas(): HTMLCanvasElement;
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
@@ -351,6 +361,12 @@ export class TerminalClient {
   private suppressTerminalResponses = false;
   // Allocate only when output is scanned; a reset before the first write has no query state.
   private terminalQueries: TerminalQueries | undefined;
+  /** Reads clipboard writes (OSC 52) out of live output; replayed output goes through it without acting (#440). */
+  private readonly clipboardWrites = new Osc52Scanner();
+  /** This window's own notice surface for remote copies, made on first use and disposed with the client. */
+  private remoteCopyNotice: ToastController | undefined;
+  /** Identifies this window's remote-copy notice, so two windows' notices stay separate on the shared toast. */
+  private readonly remoteCopyKey = `remote-copy-${++remoteCopyCount}`;
   private parserReplies: string[] | undefined;
   private parserReplyLength = 0;
   private renderIdleTimer = 0;
@@ -406,6 +422,11 @@ export class TerminalClient {
     const rendererFocus = terminal.focus;
     terminal.focus = () => {};
     try { terminal.open(config.host); } finally { terminal.focus = rendererFocus; }
+    // Mouse selection copies a soft-wrapped word whole and puts no newline where the program printed none (#426).
+    installWrapAwareSelection(terminal as unknown as SelectableTerminal, config.host, {
+      canvas: () => this.ghostty.renderer?.getCanvas(),
+      metrics: () => this.cellMetrics(),
+    });
     // Keep Ghostty's scrollbar drag handler, but let the on-demand controller own link scanning and activation.
     (terminal as unknown as { linkDetector?: unknown }).linkDetector = undefined;
     const write = terminal.write.bind(terminal);
@@ -414,7 +435,15 @@ export class TerminalClient {
       write(data, callback);
     };
     // Phones wait for a real tap before opening the keyboard (D191).
-    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
+    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal(),
+      // A finger selects and copies text (#426); the code for it loads when the first finger touches the terminal.
+      () => onDemand(() => import("./terminal-touch-select.on-demand")).then(({ createTouchSelection }) => createTouchSelection({
+        terminal: terminal as unknown as SelectableTerminal,
+        host: config.host,
+        canvas: () => this.ghostty.renderer?.getCanvas(),
+        metrics: () => this.cellMetrics(),
+        wake: () => this.wakeTerminal(),
+      })));
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     this.prediction = config.predictiveEcho === true
@@ -561,6 +590,7 @@ export class TerminalClient {
     }
   }
 
+  /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
       fontFamily: fontStack(font),
@@ -573,7 +603,8 @@ export class TerminalClient {
         foreground: "#e6e7e9",
         cursor: "#c8ceff",
         cursorAccent: "#101113",
-        selectionBackground: "#44485c",
+        selectionBackground: INK_SELECTION.background,
+        selectionForeground: INK_SELECTION.foreground,
       },
     });
   }
@@ -716,6 +747,11 @@ export class TerminalClient {
   readScreenText(): string {
     const maxRows = Math.max(10_000, this.terminal.options.scrollback ?? 10_000);
     return terminalBufferText(this.terminal, maxRows);
+  }
+
+  /** The text the terminal currently has selected ("" when nothing is), for browser checks of touch and mouse selection. */
+  readSelectionText(): string {
+    return this.terminal.getSelection();
   }
 
   /** Replays test-double output in a second Ghostty instance for differential checks. */
@@ -977,6 +1013,8 @@ export class TerminalClient {
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputResendNotice?.dispose();
+    this.remoteCopyNotice?.dispose();
+    this.clipboardWrites.reset();
     this.inputQueue.clear();
     this.retainedInput?.fill(0);
     this.retainedInput = undefined;
@@ -1375,6 +1413,7 @@ export class TerminalClient {
     this.pendingWriteSynchronizedBatch = false;
     this.prediction?.resetForSnapshot();
     this.terminalQueries?.reset();
+    this.clipboardWrites.reset();
     this.synchronizedOutput.reset();
     this.synchronizedOutputBatchPending = false;
     this.terminal.reset();
@@ -1511,6 +1550,7 @@ export class TerminalClient {
     return this.inputResendNotice?.focusAction() ?? false;
   }
 
+  /** Offers to send the typing that was saved offline again, or to discard it. */
   private showInputResendNotice(): void {
     this.inputResendNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
     const focusShortcut = bindingLabel("focus-resend-actions") || "Ctrl+Shift+Space";
@@ -1525,6 +1565,67 @@ export class TerminalClient {
       secondaryAction: { label: "Discard", onSelect: () => this.discardRetainedInput() },
     });
     this.inputResendNoticeVisible = true;
+  }
+
+  /**
+   * Whether a copy that a program asked for may go to the clipboard without a tap. This is the one place that decides
+   * it, so a later policy (a setting, an allow-list, "only shortly after typing") changes here and nowhere else.
+   * Today: only the terminal that has the focus, on a visible page, and only while Settings allows program copies
+   * (`program-copy.ts`, on by default). Any other window, or every window when the setting is off, offers the copy instead.
+   */
+  private mayCopyWithoutTap(): boolean {
+    return readProgramCopy() && document.visibilityState === "visible" && this.config.host.contains(document.activeElement);
+  }
+
+  /**
+   * Shows a remote-copy notice in this window, under this window's own key. It rides the edge of the window that is
+   * farther from the cursor, so it never covers the line the person is typing on: the bottom edge while the cursor is
+   * in the top half, the top edge otherwise.
+   */
+  private showCopyNotice(notice: Omit<ToastMessage, "key">): void {
+    if (this.closed) return;
+    this.remoteCopyNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    const cursorRow = this.terminal.buffer.active.cursorY;
+    this.remoteCopyNotice.setEdge(cursorRow >= this.terminal.rows / 2 ? "top" : "bottom");
+    this.remoteCopyNotice.show({ ...notice, key: this.remoteCopyKey });
+  }
+
+  /**
+   * A program in the terminal asked to copy `text` (OSC 52). In the focused terminal it goes to the clipboard at once
+   * and a notice says so, so the clipboard is never replaced silently. Anywhere else, or when the browser refuses a
+   * write that no gesture backs (always in Safari), the text waits behind a "Copy" action that names this window; the
+   * tap on it is the gesture. A write that a program started never uses the focus-moving legacy fallback.
+   */
+  private remoteCopy(text: string): void {
+    if (this.closed) return;
+    if (!this.mayCopyWithoutTap()) { this.offerCopy(text); return; }
+    void writeClipboard(text, { legacy: false }).then((ok) => {
+      if (ok) this.showCopyNotice({ message: "Copied from the terminal", duration: 1800 });
+      else this.offerCopy(text);
+    });
+  }
+
+  /**
+   * Holds `text` behind a "Copy" action for 15 seconds. The message names the window by its host ("From build-01"),
+   * cut to 11 characters, so it stays on one line beside the action on a phone.
+   */
+  private offerCopy(text: string): void {
+    const name = this.config.hostName?.trim();
+    const from = name ? (name.length > 11 ? `${name.slice(0, 11)}…` : name) : undefined;
+    this.showCopyNotice({
+      message: from ? `From ${from}` : "Text to copy",
+      icon: CLIPBOARD,
+      duration: 15000,
+      dismissible: true,
+      action: {
+        label: "Copy",
+        onSelect: () => {
+          void writeClipboard(text).then((done) => this.showCopyNotice(done
+            ? { message: "Copied from the terminal", duration: 1800 }
+            : { message: "Couldn't copy. Select the text instead.", tone: "error" }));
+        },
+      },
+    });
   }
 
   private encoderIntoScratch(data: string): Uint8Array | undefined {
@@ -1796,6 +1897,7 @@ export class TerminalClient {
    * Keyboard callbacks run in later tasks and always use the unchanged typing path.
    */
   private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback?: () => void): void {
+    this.clipboardWrites.scan(bytes, (text) => this.remoteCopy(text), () => this.showCopyNotice({ message: "That copy was too large for the clipboard", tone: "error", duration: 6000 }));
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     this.linkRowsArmed = true;
     this.terminal.writeSlices(bytes, (writeSlice) => {
@@ -1826,6 +1928,8 @@ export class TerminalClient {
   private writeSuppressingTerminalResponses(bytes: Uint8Array, callback?: () => void, queryOffset?: bigint): void {
     const previous = this.suppressTerminalResponses;
     this.suppressTerminalResponses = true;
+    // Replayed bytes are old output: a copy in them must not rewrite what the person copied since.
+    this.clipboardWrites.scan(bytes, undefined);
     if (queryOffset !== undefined) (this.terminalQueries ??= new TerminalQueries()).scan(bytes, queryOffset, () => undefined);
     try {
       this.terminal.write(bytes, callback);

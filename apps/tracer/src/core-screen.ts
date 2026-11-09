@@ -4,6 +4,7 @@ import { branchedMenu, type BranchSection, type BranchedMenu, type BranchedOptio
 import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { Spring } from "../../../packages/ui/src/spring";
+import { markMotion, triggeredByKeyboard } from "../../../packages/ui/src/input-source";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
@@ -76,6 +77,7 @@ export interface ToolbarRow {
   dispose(): void;
 }
 
+/** What the mounted core screen offers the canvas: its stage and palette hooks (see each member). */
 export interface CoreScreen {
   stage: HTMLElement;
   /** The pane area under the top bar; the window canvas mounts here (src/canvas.ts). */
@@ -125,10 +127,11 @@ export interface CoreScreen {
   /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
   refreshPalette(): void;
   /**
-   * Opens the palette limited to `entries` only (a view's windows from its hover card, #121). The same search and
-   * keys apply; the next open (⌘K, the capsule) shows the whole palette again.
+   * Opens the palette limited to `entries` only (a view's windows from its hover card, #121), or the whole palette when
+   * there are none (the view list's Search everything row). The same search and keys apply; the next open (⌘K, the
+   * capsule) shows the whole palette again.
    */
-  showPalette(entries: PaletteEntry[]): void;
+  showPalette(entries?: PaletteEntry[]): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setRecoveryPending(readyAt: number | undefined): void;
@@ -155,6 +158,7 @@ const SVG = {
   paste: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="12" height="15" rx="2.5"/><path d="M9.5 5V4.5A1.5 1.5 0 0 1 11 3h2a1.5 1.5 0 0 1 1.5 1.5V5"/></svg>',
 };
 
+/** The markup of the core screen: top bar with the capsule and pills, sidebar, palette with its scrim, key tray and terminal stage. */
 const SCREEN = `
   <section class="terminal-screen" id="terminal-screen" aria-label="Terminal">
     <div class="backdrop" aria-hidden="true"></div>
@@ -313,7 +317,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const settings = options.canvas && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
   const openSettingsFrom = (source: "pointer" | "keyboard"): void => {
     if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance", source } }));
-    else settings?.open("about", source);
+    else settings?.open("about");
   };
   const askSignOutFrom = (anchor: HTMLElement): void => { askSignOut(anchor, toast); };
   const sidebarFoot = options.canvas
@@ -463,7 +467,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     // after it. The attribute is set before anything changes, and removed after two frames, so the style recalculation that
     // would start the transitions always sees it. It costs one attribute and no forced layout (TASTE "No lag while animating").
     ROOT.setAttribute("data-look-swap", "");
-    setPalette(false, "keyboard");
+    setPalette(false);
     void applyLook(true);
     requestAnimationFrame(() => requestAnimationFrame(() => ROOT.removeAttribute("data-look-swap")));
   };
@@ -702,6 +706,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const setSidebar = (open: boolean, instant = false): void => {
     pulseActivity("sidebar", 450);
+    // A key (Escape, a shortcut) opens and closes the sidebar with no motion, whatever the caller asked for.
+    instant = markMotion(sidebar, sidebarToggle) || instant;
     dockPanes(open, instant);
     // The toggle travels between the top bar and the sidebar header on a transform transition.
     sidebarToggle.classList.toggle("instant", instant);
@@ -721,6 +727,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // listed: the canvas's corner buttons (the sidebar toggle, the "+") and the capsule the palette grows from.
   const PALETTE_COVERABLE = [sidebarToggle, capsule, ...document.querySelectorAll<HTMLElement>(".top > .tabs > .tab-add")];
   const coverTopBar = (open: boolean): void => {
+    markMotion(...PALETTE_COVERABLE);
     if (!open) { for (const control of PALETTE_COVERABLE) delete control.dataset.paletteCovered; return; }
     const box = palette.getBoundingClientRect();
     for (const control of PALETTE_COVERABLE) {
@@ -729,12 +736,15 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (overlaps) control.dataset.paletteCovered = ""; else delete control.dataset.paletteCovered;
     }
   };
-  const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer", only?: PaletteEntry[]): void => {
-    // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
-    palette.dataset.openKind = source;
+  // Where focus was when the palette opened, so closing it (Escape most of all) puts focus back there instead of on the page.
+  let paletteReturnFocus: HTMLElement | null = null;
+  // Whether it animates is not decided here: markMotion writes data-motion on the palette and scrim at the moment of the change, from the last input, and their open and close durations scale with it (--ui-motion-scale, #427).
+  const setPalette = (open: boolean, only?: PaletteEntry[]): void => {
     if (open) {
+      markMotion(palette, scrim);
+      if (palette.hidden) paletteReturnFocus = document.activeElement instanceof HTMLElement && !palette.contains(document.activeElement) && document.activeElement !== document.body ? document.activeElement : null;
       shortcuts.close(true);
-      settings?.close("keyboard");
+      settings?.close();
       indexScoped(false);
       scopedEntries = only;
       indexScoped(true);
@@ -749,12 +759,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       coverTopBar(true);
       paletteInput.focus({ preventScroll: true });
     } else {
+      // Only a close that left focus in the palette restores it: a picked action that moved focus on (to a window, a field) keeps it.
+      const focusInPalette = palette.contains(document.activeElement);
+      markMotion(palette, scrim);
       indexScoped(false);
       scopedEntries = undefined;
       palette.hidden = true;
       scrim.hidden = true;
       coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
+      if (focusInPalette && paletteReturnFocus?.isConnected) paletteReturnFocus.focus({ preventScroll: true });
+      paletteReturnFocus = null;
       syncFontPreview();
     }
   };
@@ -790,7 +805,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
   removeShortcuts.push(bindShortcut("focus-resend-actions", () => { client?.focusInputResendActions(); }, (event) => !isComposingKey(event) && (client?.hasPendingInputResend() ?? false)));
   // The DOM may report "until-found"; both hidden states should open the palette.
-  removeShortcuts.push(bindShortcut("palette", () => setPalette(Boolean(palette.hidden), "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
+  removeShortcuts.push(bindShortcut("palette", () => setPalette(Boolean(palette.hidden)), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
   if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {
@@ -798,8 +813,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     shortcutsFromTerminal = !!(event.target as Element | null)?.closest?.(".terminal-host");
     shortcuts.toggle();
   }));
-  const capsuleClick = (event: MouseEvent): void => setPalette(true, event.detail === 0 ? "keyboard" : "pointer");
-  const scrimClick = (): void => setPalette(false, "pointer");
+  const capsuleClick = (): void => setPalette(true);
+  const scrimClick = (): void => setPalette(false);
 
   const keydown = (event: KeyboardEvent): void => {
     // Inert descendants cannot block global shortcuts while logout is in flight.
@@ -826,7 +841,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true'], .ui-row-ask, [data-swiped]")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
       // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
-      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
+      if (!palette.hidden) { setPalette(false); event.preventDefault(); event.stopPropagation(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
   };
@@ -880,7 +895,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
       if (entry) runAction(entry.action ?? "", "keyboard");
-      setPalette(false, "keyboard");
+      setPalette(false);
       event.preventDefault();
     }
   });
@@ -909,7 +924,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!(target instanceof Element)) return;
     const result = target.closest<HTMLButtonElement>(".result");
     if (!result) return;
-    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false, "pointer");
+    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false);
   });
   window.addEventListener("keydown", keydown, true);
   window.addEventListener("resize", resize);
@@ -1070,7 +1085,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     keytray.querySelectorAll<HTMLElement>(".keydots i").forEach((dot, i) => dot.toggleAttribute("data-on", i === index));
     canvasRowEl.inert = index !== 0;
     keysRowEl.inert = index !== 1;
-    rowSpring.set(index, instant);
+    // A key (Tab into a terminal, the canvas lock, a palette row) swaps the tray rows at once; a swipe or a tap glides them (#427).
+    rowSpring.set(index, instant || triggeredByKeyboard());
   };
   let rowLock: "keys" | undefined;
   // The key row exists only while a terminal has input focus (or an input lock holds it): without one there is
@@ -1353,7 +1369,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         ghost = b.cloneNode(true) as HTMLElement;
         ghost.classList.add("keyghost");
         ghost.querySelector(".keyx")?.remove();
-        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:30;pointer-events:none`;
+        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:calc(var(--z-overlay) + 7);pointer-events:none`;
         document.body.append(ghost);
         b.style.opacity = "0.25";
       }
@@ -1427,10 +1443,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       requestAnimationFrame(() => requestAnimationFrame(() => performance.measure(`appearance:${kind}`, { start, detail: { value } })));
     }
     if (kind === "account" && value === "recovery") {
-      setPalette(false, source);
+      setPalette(false);
       options.onRecovery?.();
     } else if (kind === "account" && value === "signout") {
-      setPalette(false, source);
+      setPalette(false);
       // Asked from where the person can see: the profile pill when the sidebar is open, else the top pill.
       requestAnimationFrame(() => askSignOutFrom(sidebarFoot && !sidebar.hidden ? sidebarFoot.user : get<HTMLElement>("#capsule")));
       return true;
@@ -1461,13 +1477,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       swapLook();
       return true;
     } else if (kind === "settings") {
-      setPalette(false, source);
+      setPalette(false);
       if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${value ?? "appearance"}`, source } }));
-      else settings?.open(value ?? "about", source);
+      else settings?.open(value ?? "about");
       return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
-      setPalette(false, source);
+      setPalette(false);
       shortcutsFromTerminal = false;
       requestAnimationFrame(() => shortcuts.open());
       return true;
@@ -1527,7 +1543,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       refreshEntries();
       renderPalette(paletteInput.value, action);
     },
-    showPalette(only) { setPalette(true, "pointer", only); },
+    showPalette(only) { setPalette(true, only); },
     toast,
     inboxMount,
     act(action) { runAction(action, "pointer"); },

@@ -46,6 +46,8 @@ compact-history = ["process-per-user"]
 host-login = ["nix/uio"]
 # Audited transient process-transfer buffers are removed with the remote plugin.
 ca-handoff = ["dep:openssl"]
+# Enables input encoding only for the native mouse ABI probe, not shipping builds.
+vt-test-input = []
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
 bench-ghostty = ["bench-vt", "dep:libghostty-vt"]
 

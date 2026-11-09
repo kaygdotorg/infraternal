@@ -17,6 +17,7 @@
  */
 import { ICONS } from "./icons";
 import { tick } from "./tick";
+import { markMotion } from "./input-source";
 
 /** A text button on a toast: what it says and what it does when chosen. */
 export interface ToastAction {
@@ -81,6 +82,11 @@ export interface ToastController {
   focusAction(index?: number): boolean;
   /** Dismisses the toast `id`; without an id, every toast that is not an error (an error is dismissed by its own id or its Dismiss control). */
   dismiss(...id: [id?: string]): void;
+  /**
+   * Moves a window-anchored toast (`placement: "parent"`) to the top or the bottom of its window. Use it to keep a notice
+   * away from the line the person is working on, such as a terminal's prompt. It has no effect on a viewport toast.
+   */
+  setEdge(edge: "top" | "bottom"): void;
   dispose(): void;
 }
 
@@ -214,6 +220,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     for (let k = shown.length - 1; k >= 0; k--) {
       const it = shown[k]!;
       const behind = hidden[k]!;
+      // A toast a key brought (undo after Close window, say) and the stack's reshuffle appear and settle at once (#427).
+      markMotion(it.card);
       it.card.dataset.hidden = String(behind);
       it.card.dataset.front = String(!behind && depth === 0);
       it.card.style.setProperty("--i", String(Math.min(behind ? VISIBLE - 1 : depth, VISIBLE - 1)));
@@ -443,6 +451,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   });
 
   return {
+    setEdge(edge) { if (wrap.dataset.placement === "parent") wrap.dataset.edge = edge; },
     show(value) {
       const key = value.key ?? `${value.tone ?? "ok"}|${value.message}`;
       let it = live().find((other) => other.key === key);

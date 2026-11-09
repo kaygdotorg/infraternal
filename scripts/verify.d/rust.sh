@@ -341,6 +341,7 @@ rust_verify_fast() {
         rust_run_gate_skippable "privileged integration" verify_privileged
         rust_run_gate "probe release exclusion" python3 scripts/test-runtime-probe-gating.py
         rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
+        rust_run_gate "nightly browser suite reporter" python3 scripts/test-nightly-browser-suite.py
         rust_run_gate "static builds" rust_static_build_check
     fi
     rust_print_summary

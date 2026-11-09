@@ -59,10 +59,10 @@ test("a failed idle warm-up shows no toast and retries when the browser is back 
 
 test("a failed open shows the toast, and opening again after the network returns succeeds", async () => {
   const { ui, rec } = setup();
-  ui.toggleManager(rec, null, "pointer" as never); await flush();
+  ui.toggleManager(rec, null); await flush();
   expect(toasts).toEqual(["Could not load the session list. Try again."]);
   importFails = false;
-  ui.toggleManager(rec, null, "pointer" as never); await flush();
+  ui.toggleManager(rec, null); await flush();
   expect(toasts.length).toBe(1);
   expect(part.toggleManager).toHaveBeenCalledTimes(1);
 });
@@ -70,6 +70,6 @@ test("a failed open shows the toast, and opening again after the network returns
 test("an open that joins a failing idle warm-up still shows the toast", async () => {
   const { ui, rec } = setup();
   idle!();
-  ui.toggleManager(rec, null, "pointer" as never); await flush();
+  ui.toggleManager(rec, null); await flush();
   expect(toasts.length).toBe(1);
 });
