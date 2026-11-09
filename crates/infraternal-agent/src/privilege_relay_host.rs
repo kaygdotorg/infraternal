@@ -19,7 +19,9 @@
 //!
 //! It never sees the password: that was typed to sudo, doas or su before
 //! this process existed.
-use infraternal_plugin_remote::privilege_relay::{Decoder, Frame, MAX_CHANNELS, MAX_CHUNK};
+use infraternal_plugin_remote::privilege_relay::{
+    Decoder, Frame, MAX_CHANNELS, MAX_CHUNK, MAX_STDERR,
+};
 use std::{
     collections::HashMap,
     os::unix::fs::MetadataExt,
@@ -34,7 +36,7 @@ use tokio::{
 
 /// The longest a relay lives. An upgrade takes seconds to a minute; this is a
 /// hang guard so a lost server can't leave a root process behind.
-pub const LIFETIME: Duration = Duration::from_secs(15 * 60);
+pub const LIFETIME: Duration = Duration::from_mins(15);
 /// The hidden command word.
 pub const COMMAND: &str = "__privilege-relay";
 
@@ -49,34 +51,52 @@ pub fn run_if_requested() -> Option<ExitCode> {
         return None;
     }
     let parsed = match &args[1..] {
-        [s, socket, u, uid, d, dir] if s == "--socket" && u == "--uid" && d == "--dir" => {
-            uid.parse::<u32>().ok().map(|uid| (PathBuf::from(socket), uid, PathBuf::from(dir)))
-        }
+        [s, socket, u, uid, d, dir] if s == "--socket" && u == "--uid" && d == "--dir" => uid
+            .parse::<u32>()
+            .ok()
+            .map(|uid| (PathBuf::from(socket), uid, PathBuf::from(dir))),
         _ => None,
     };
-    let Some((socket, uid, dir)) = parsed else { return Some(ExitCode::from(2)) };
+    let Some((socket, uid, dir)) = parsed else {
+        return Some(ExitCode::from(2));
+    };
     if !nix::unistd::Uid::effective().is_root() || uid == 0 {
         return Some(ExitCode::from(2));
     }
     let _cleanup = RemoveOnDrop(dir);
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
         return Some(ExitCode::FAILURE);
     };
     let result = runtime.block_on(async {
         let stream = connect(&socket, uid).await?;
         let (reader, writer) = stream.into_split();
-        tokio::time::timeout(LIFETIME, serve(reader, writer)).await.unwrap_or(Ok(()))
+        tokio::time::timeout(LIFETIME, serve(reader, writer))
+            .await
+            .unwrap_or(Ok(()))
     });
-    Some(if result.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    Some(if result.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 /// Removes the relay's private directory (its binary copy) when it ends.
 struct RemoveOnDrop(PathBuf);
 
 impl Drop for RemoveOnDrop {
+    /// Removes the directory, but only one the snippet could have made.
     fn drop(&mut self) {
         // Only the directory the snippet made: a fresh root-owned one under /run.
-        if self.0.starts_with("/run") && self.0.file_name().is_some_and(|name| name.to_string_lossy().starts_with("infraternal-privilege.")) {
+        if self.0.starts_with("/run")
+            && self
+                .0
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("infraternal-privilege."))
+        {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
@@ -89,7 +109,11 @@ async fn connect(socket: &Path, uid: u32) -> std::io::Result<tokio::net::UnixStr
     let parent = socket.parent().ok_or_else(denied)?;
     let directory = std::fs::symlink_metadata(parent)?;
     let file = std::fs::symlink_metadata(socket)?;
-    if !directory.is_dir() || directory.uid() != uid || directory.mode() & 0o077 != 0 || file.uid() != uid {
+    if !directory.is_dir()
+        || directory.uid() != uid
+        || directory.mode() & 0o077 != 0
+        || file.uid() != uid
+    {
         return Err(denied());
     }
     let stream = tokio::net::UnixStream::connect(socket).await?;
@@ -111,13 +135,16 @@ struct Channel {
 ///
 /// Sends [`Frame::Ready`] first. Each `Open` runs its script as this process
 /// (root, in production) under `/bin/sh -c`, with the environment cleared
-/// apart from `PATH`, `HOME` and the `C` locale, stderr discarded (install
-/// steps report through stdout and their exit code, as over SSH), in its own
-/// process group. Ends on `Close` or end of input, killing what still runs.
+/// apart from `PATH`, `HOME` and the `C` locale, in its own process group.
+/// Its stdout is forwarded whole and its stderr up to [`MAX_STDERR`] bytes,
+/// the same bound the server keeps of an SSH command's stderr. Ends on `Close` or end of input, killing what still runs.
 ///
 /// # Errors
 /// The stream broke or carried something that is not relay protocol.
-pub async fn serve(mut reader: impl AsyncRead + Unpin, mut writer: impl AsyncWrite + Unpin + Send + 'static) -> std::io::Result<()> {
+pub async fn serve(
+    mut reader: impl AsyncRead + Unpin,
+    mut writer: impl AsyncWrite + Unpin + Send + 'static,
+) -> std::io::Result<()> {
     let (out, mut outgoing) = mpsc::channel::<Frame>(64);
     let write = tokio::spawn(async move {
         let mut bytes = Vec::new();
@@ -149,13 +176,19 @@ pub async fn serve(mut reader: impl AsyncRead + Unpin, mut writer: impl AsyncWri
                 Frame::Open { channel, script } => {
                     channels.retain(|_, open| open.group.is_some_and(alive));
                     if channels.len() >= MAX_CHANNELS || channels.contains_key(&channel) {
-                        let _ = out.send(Frame::Exit { channel, code: None }).await;
+                        let _ = out
+                            .send(Frame::Exit {
+                                channel,
+                                code: None,
+                            })
+                            .await;
                         continue;
                     }
                     channels.insert(channel, open(channel, &script, out.clone()));
                 }
                 Frame::Stdin { channel, bytes } => {
-                    if let Some(stdin) = channels.get(&channel).and_then(|open| open.stdin.as_ref()) {
+                    if let Some(stdin) = channels.get(&channel).and_then(|open| open.stdin.as_ref())
+                    {
                         let _ = stdin.send(bytes).await;
                     }
                 }
@@ -171,7 +204,7 @@ pub async fn serve(mut reader: impl AsyncRead + Unpin, mut writer: impl AsyncWri
                 }
                 Frame::Close => break 'serve Ok(()),
                 // Frames only the relay sends are a protocol error from the server.
-                Frame::Stdout { .. } | Frame::Exit { .. } | Frame::Ready => {
+                Frame::Stdout { .. } | Frame::Stderr { .. } | Frame::Exit { .. } | Frame::Ready => {
                     break 'serve Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
                 }
             }
@@ -204,15 +237,27 @@ fn open(channel: u32, script: &str, out: mpsc::Sender<Frame>) -> Channel {
         .env("LC_ALL", "C")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true)
         .spawn();
     let Ok(mut child) = spawned else {
-        tokio::spawn(async move { out.send(Frame::Exit { channel, code: None }).await });
-        return Channel { stdin: None, group: None };
+        tokio::spawn(async move {
+            out.send(Frame::Exit {
+                channel,
+                code: None,
+            })
+            .await
+        });
+        return Channel {
+            stdin: None,
+            group: None,
+        };
     };
-    let group = child.id().and_then(|pid| i32::try_from(pid).ok()).map(nix::unistd::Pid::from_raw);
+    let group = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .map(nix::unistd::Pid::from_raw);
     let (stdin, mut queued) = mpsc::channel::<Vec<u8>>(16);
     if let Some(mut pipe) = child.stdin.take() {
         tokio::spawn(async move {
@@ -225,6 +270,32 @@ fn open(channel: u32, script: &str, out: mpsc::Sender<Frame>) -> Channel {
         });
     }
     let mut stdout = child.stdout.take();
+    let stderr = child.stderr.take().map(|mut pipe| {
+        let out = out.clone();
+        tokio::spawn(async move {
+            // Forward the first MAX_STDERR bytes, then drain the rest unread
+            // so the script never blocks on a full pipe.
+            let mut chunk = vec![0; MAX_STDERR];
+            let mut sent = 0;
+            loop {
+                match pipe.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        let keep = read.min(MAX_STDERR - sent);
+                        if keep > 0 {
+                            sent += keep;
+                            let _ = out
+                                .send(Frame::Stderr {
+                                    channel,
+                                    bytes: chunk[..keep].to_vec(),
+                                })
+                                .await;
+                        }
+                    }
+                }
+            }
+        })
+    });
     tokio::spawn(async move {
         if let Some(pipe) = stdout.as_mut() {
             let mut chunk = vec![0; MAX_CHUNK];
@@ -232,17 +303,36 @@ fn open(channel: u32, script: &str, out: mpsc::Sender<Frame>) -> Channel {
                 match pipe.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
-                        if out.send(Frame::Stdout { channel, bytes: chunk[..read].to_vec() }).await.is_err() {
+                        if out
+                            .send(Frame::Stdout {
+                                channel,
+                                bytes: chunk[..read].to_vec(),
+                            })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
                 }
             }
         }
-        let code = child.wait().await.ok().and_then(|status| status.code()).and_then(|code| u8::try_from(code).ok());
+        if let Some(stderr) = stderr {
+            // Stderr is complete before the exit is reported.
+            let _ = stderr.await;
+        }
+        let code = child
+            .wait()
+            .await
+            .ok()
+            .and_then(|status| status.code())
+            .and_then(|code| u8::try_from(code).ok());
         let _ = out.send(Frame::Exit { channel, code }).await;
     });
-    Channel { stdin: Some(stdin), group }
+    Channel {
+        stdin: Some(stdin),
+        group,
+    }
 }
 
 #[cfg(test)]
@@ -265,8 +355,16 @@ mod tests {
         let mut seen = Vec::new();
         client_write.write_all(&bytes).await.unwrap();
         let mut buffer = vec![0; 1 << 16];
-        let expected_exits = frames.iter().filter(|frame| matches!(frame, Frame::Open { .. })).count();
-        while seen.iter().filter(|frame| matches!(frame, Frame::Exit { .. })).count() < expected_exits {
+        let expected_exits = frames
+            .iter()
+            .filter(|frame| matches!(frame, Frame::Open { .. }))
+            .count();
+        while seen
+            .iter()
+            .filter(|frame| matches!(frame, Frame::Exit { .. }))
+            .count()
+            < expected_exits
+        {
             let read = client_read.read(&mut buffer).await.unwrap();
             assert!(read > 0, "relay ended early: {seen:?}");
             decoder.push(&buffer[..read]);
@@ -297,39 +395,82 @@ mod tests {
     #[tokio::test]
     async fn a_script_gets_its_stdin_and_reports_output_and_exit() {
         let seen = exchange(vec![
-            Frame::Open { channel: 1, script: "read line; printf 'got %s' \"$line\"; exit 7".into() },
-            Frame::Stdin { channel: 1, bytes: b"hello\n".to_vec() },
+            Frame::Open {
+                channel: 1,
+                script: "read line; printf 'got %s' \"$line\"; exit 7".into(),
+            },
+            Frame::Stdin {
+                channel: 1,
+                bytes: b"hello\n".to_vec(),
+            },
             Frame::StdinEnd { channel: 1 },
         ])
         .await;
         assert_eq!(seen[0], Frame::Ready);
         assert_eq!(stdout(&seen, 1), b"got hello");
-        assert!(seen.contains(&Frame::Exit { channel: 1, code: Some(7) }), "{seen:?}");
+        assert!(
+            seen.contains(&Frame::Exit {
+                channel: 1,
+                code: Some(7)
+            }),
+            "{seen:?}"
+        );
     }
 
     /// The environment is empty apart from PATH, HOME and the C locale, and
-    /// stderr never reaches the server.
+    /// stderr comes back on its own frames, bounded.
     #[tokio::test]
     async fn scripts_run_with_a_clean_environment_and_no_stderr() {
         let seen = exchange(vec![
-            Frame::Open { channel: 2, script: "env | sort | tr '\\n' ' '; echo secret >&2".into() },
+            Frame::Open {
+                channel: 2,
+                script: "env | sort | tr '\\n' ' '; echo refused >&2; head -c 20000 /dev/zero >&2"
+                    .into(),
+            },
             Frame::StdinEnd { channel: 2 },
         ])
         .await;
         let text = String::from_utf8(stdout(&seen, 2)).unwrap();
-        let names: Vec<&str> = text.split_whitespace().map(|pair| pair.split('=').next().unwrap()).collect();
-        assert!(names.iter().all(|name| ["HOME", "LANG", "LC_ALL", "PATH", "PWD", "SHLVL", "_"].contains(name)), "{text}");
-        assert!(!text.contains("secret"));
+        let names: Vec<&str> = text
+            .split_whitespace()
+            .map(|pair| pair.split('=').next().unwrap())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| ["HOME", "LANG", "LC_ALL", "PATH", "PWD", "SHLVL", "_"].contains(name)),
+            "{text}"
+        );
+        assert!(!text.contains("refused"));
+        let errors: Vec<u8> = seen
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Stderr { bytes, .. } => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(errors.starts_with(b"refused\n"));
+        assert_eq!(errors.len(), MAX_STDERR);
     }
 
     /// Two scripts run side by side on separate channels.
     #[tokio::test]
     async fn channels_are_independent() {
         let seen = exchange(vec![
-            Frame::Open { channel: 1, script: "cat".into() },
-            Frame::Open { channel: 2, script: "printf two".into() },
+            Frame::Open {
+                channel: 1,
+                script: "cat".into(),
+            },
+            Frame::Open {
+                channel: 2,
+                script: "printf two".into(),
+            },
             Frame::StdinEnd { channel: 2 },
-            Frame::Stdin { channel: 1, bytes: b"one".to_vec() },
+            Frame::Stdin {
+                channel: 1,
+                bytes: b"one".to_vec(),
+            },
             Frame::StdinEnd { channel: 1 },
         ])
         .await;
@@ -344,7 +485,11 @@ mod tests {
         let (server_read, server_write) = tokio::io::split(server);
         let (_client_read, mut client_write) = tokio::io::split(client);
         let mut bytes = Vec::new();
-        Frame::Exit { channel: 1, code: Some(0) }.encode(&mut bytes);
+        Frame::Exit {
+            channel: 1,
+            code: Some(0),
+        }
+        .encode(&mut bytes);
         client_write.write_all(&bytes).await.unwrap();
         assert!(serve(server_read, server_write).await.is_err());
     }

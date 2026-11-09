@@ -4,7 +4,8 @@
 //! on the host, the *relay*. The server then runs the same root install steps
 //! an Add host over SSH runs, but through the relay instead of SSH. Each step
 //! is a *channel*: the server opens it with a shell script, streams its stdin,
-//! and reads its stdout and exit code back.
+//! and reads its stdout, its stderr (the first [`MAX_STDERR`] bytes, which is
+//! where install steps name a refusal) and its exit code back.
 //!
 //! The rootless infraternal agent carries these bytes between the server and
 //! the relay and never reads them: it is a pipe. Only the server writes `Open`
@@ -21,6 +22,9 @@
 pub const MAX_SCRIPT: usize = 1 << 20;
 /// Largest data body (`Stdin`, `Stdout`). Senders split larger writes.
 pub const MAX_CHUNK: usize = 256 << 10;
+/// Most stderr bytes the relay forwards per channel. The server keeps no more
+/// than this of an SSH command's stderr either.
+pub const MAX_STDERR: usize = 8192;
 /// Most channels open at once. Install steps run one at a time; the margin
 /// covers a check that overlaps a cleanup.
 pub const MAX_CHANNELS: usize = 8;
@@ -40,6 +44,8 @@ pub enum Frame {
     Kill { channel: u32 },
     /// Relay → server: bytes the script wrote to stdout.
     Stdout { channel: u32, bytes: Vec<u8> },
+    /// Relay → server: bytes the script wrote to stderr (bounded per channel).
+    Stderr { channel: u32, bytes: Vec<u8> },
     /// Relay → server: the script ended. `code` is its exit code, or `None`
     /// when a signal ended it.
     Exit { channel: u32, code: Option<u8> },
@@ -62,6 +68,7 @@ impl Frame {
             Self::Exit { .. } => 6,
             Self::Ready => 7,
             Self::Close => 8,
+            Self::Stderr { .. } => 9,
         }
     }
 
@@ -71,19 +78,26 @@ impl Frame {
     /// When a body is larger than the protocol allows; callers split data
     /// with [`MAX_CHUNK`] and scripts are fixed text far below [`MAX_SCRIPT`].
     pub fn encode(&self, out: &mut Vec<u8>) {
+        // An exit's two body bytes live here so the borrow below outlives the match.
+        let exit = match self {
+            Self::Exit {
+                code: Some(code), ..
+            } => [1, *code],
+            _ => [0, 0],
+        };
         let (channel, body): (u32, &[u8]) = match self {
             Self::Open { channel, script } => (*channel, script.as_bytes()),
-            Self::Stdin { channel, bytes } | Self::Stdout { channel, bytes } => (*channel, bytes),
+            Self::Stdin { channel, bytes }
+            | Self::Stdout { channel, bytes }
+            | Self::Stderr { channel, bytes } => (*channel, bytes),
             Self::StdinEnd { channel } | Self::Kill { channel } => (*channel, &[]),
-            Self::Exit { channel, code } => {
-                (*channel, match code {
-                    Some(code) => &[1, *code][..],
-                    None => &[0, 0][..],
-                })
-            }
+            Self::Exit { channel, .. } => (*channel, &exit[..]),
             Self::Ready | Self::Close => (0, &[]),
         };
-        assert!(body.len() <= limit(self.kind()), "relay frame body too large");
+        assert!(
+            body.len() <= limit(self.kind()),
+            "relay frame body too large"
+        );
         out.push(self.kind());
         out.extend_from_slice(&channel.to_be_bytes());
         out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(u32::MAX).to_be_bytes());
@@ -96,6 +110,7 @@ const fn limit(kind: u8) -> usize {
     match kind {
         1 => MAX_SCRIPT,
         2 | 5 => MAX_CHUNK,
+        9 => MAX_STDERR,
         6 => 2,
         _ => 0,
     }
@@ -133,11 +148,21 @@ impl Decoder {
             return Ok(None);
         }
         let kind = self.buffer[0];
-        if !(1..=8).contains(&kind) {
+        if !(1..=9).contains(&kind) {
             return Err(Malformed::Kind);
         }
-        let channel = u32::from_be_bytes([self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]]);
-        let length = u32::from_be_bytes([self.buffer[5], self.buffer[6], self.buffer[7], self.buffer[8]]) as usize;
+        let channel = u32::from_be_bytes([
+            self.buffer[1],
+            self.buffer[2],
+            self.buffer[3],
+            self.buffer[4],
+        ]);
+        let length = u32::from_be_bytes([
+            self.buffer[5],
+            self.buffer[6],
+            self.buffer[7],
+            self.buffer[8],
+        ]) as usize;
         if length > limit(kind) || (kind == 6 && length != 2) {
             return Err(Malformed::Length);
         }
@@ -146,11 +171,20 @@ impl Decoder {
         }
         let body: Vec<u8> = self.buffer.drain(..HEAD + length).skip(HEAD).collect();
         let frame = match kind {
-            1 => Frame::Open { channel, script: String::from_utf8(body).map_err(|_| Malformed::Body)? },
-            2 => Frame::Stdin { channel, bytes: body },
+            1 => Frame::Open {
+                channel,
+                script: String::from_utf8(body).map_err(|_| Malformed::Body)?,
+            },
+            2 => Frame::Stdin {
+                channel,
+                bytes: body,
+            },
             3 => Frame::StdinEnd { channel },
             4 => Frame::Kill { channel },
-            5 => Frame::Stdout { channel, bytes: body },
+            5 => Frame::Stdout {
+                channel,
+                bytes: body,
+            },
             6 => Frame::Exit {
                 channel,
                 code: match body[..] {
@@ -160,7 +194,11 @@ impl Decoder {
                 },
             },
             7 => Frame::Ready,
-            _ => Frame::Close,
+            8 => Frame::Close,
+            _ => Frame::Stderr {
+                channel,
+                bytes: body,
+            },
         };
         Ok(Some(frame))
     }
@@ -176,12 +214,31 @@ mod tests {
     fn frames_round_trip_through_split_reads() {
         let frames = [
             Frame::Ready,
-            Frame::Open { channel: 1, script: "printf ok".into() },
-            Frame::Stdin { channel: 1, bytes: vec![0, 255, 10] },
+            Frame::Open {
+                channel: 1,
+                script: "printf ok".into(),
+            },
+            Frame::Stdin {
+                channel: 1,
+                bytes: vec![0, 255, 10],
+            },
             Frame::StdinEnd { channel: 1 },
-            Frame::Stdout { channel: 1, bytes: b"ok".to_vec() },
-            Frame::Exit { channel: 1, code: Some(71) },
-            Frame::Exit { channel: 2, code: None },
+            Frame::Stdout {
+                channel: 1,
+                bytes: b"ok".to_vec(),
+            },
+            Frame::Stderr {
+                channel: 1,
+                bytes: b"INFRATERNAL_REFUSED cache\n".to_vec(),
+            },
+            Frame::Exit {
+                channel: 1,
+                code: Some(71),
+            },
+            Frame::Exit {
+                channel: 2,
+                code: None,
+            },
             Frame::Kill { channel: 3 },
             Frame::Close,
         ];
@@ -205,7 +262,7 @@ mod tests {
     #[test]
     fn malformed_streams_are_refused() {
         let mut decoder = Decoder::default();
-        decoder.push(&[9, 0, 0, 0, 0, 0, 0, 0, 0]);
+        decoder.push(&[10, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(decoder.frame(), Err(Malformed::Kind));
 
         let mut decoder = Decoder::default();
