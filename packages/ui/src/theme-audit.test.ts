@@ -42,7 +42,8 @@ test("every text role reaches its D365 contrast line at the worst sampled point 
     }
   }
   expect({ count: failures.length, examples: failures.slice(0, 8) }).toEqual({ count: 0, examples: [] });
-});
+  // Every scheme x gradient x role x sample point is scored: about 2 s alone, over 12 s when the gate runs many files at once.
+}, 60_000);
 
 test("every text token reaches 4.5:1 on its theme surface, and primary text keeps 7:1", () => {
   const failures: string[] = [];
