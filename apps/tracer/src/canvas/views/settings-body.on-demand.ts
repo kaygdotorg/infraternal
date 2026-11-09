@@ -61,6 +61,7 @@ function authorityPref(control: AuthorityControl): StatusActionPref {
   };
 }
 
+/** Fills one Settings window (`section`, such as "terminal.hosts") inside `body` and returns the function that tears it down. */
 export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement): () => void {
   const { core } = cx;
   const appearance: AppearanceApi = {
