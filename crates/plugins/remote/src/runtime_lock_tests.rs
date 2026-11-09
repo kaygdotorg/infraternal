@@ -777,8 +777,9 @@ fn only_roots_up_base_may_be_traversable() {
     assert!(!traversable_base(up, 0, 0o701));
 }
 
-/// D368: an owned live endpoint outside its own session scope cannot authorize a close.
-/// Even a matching Hello never receives an Attach or signal from read-only inspection.
+/// D368: an owned live endpoint whose shim is not this install's binary, outside its own session
+/// scope or login, cannot authorize a close (#433). Even a matching Hello never receives an Attach or
+/// signal from read-only inspection.
 #[test]
 fn takeover_refuses_an_authenticated_endpoint_outside_its_session_scope() {
     let fixture = Fixture::short();
@@ -810,6 +811,7 @@ fn takeover_refuses_an_authenticated_endpoint_outside_its_session_scope() {
         );
     });
     let runtime = directory(&fixture.state()).unwrap();
-    assert_eq!(takeover_terminals::records(&runtime), Err(73));
+    let base = fixture.state().parent().unwrap().to_owned();
+    assert_eq!(takeover_terminals::records(&runtime, &base), Err(73));
     server.join().unwrap();
 }

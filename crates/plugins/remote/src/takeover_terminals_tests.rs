@@ -11,10 +11,10 @@ use super::{Boundary, Process, attribute, boundary, login_leader, pts};
 const ID: &str = "d2f8649c0123456789abcdef01234567";
 
 /// A process record with the fields attribution reads; `tty` is a raw `tty_nr`.
-fn member(pid: i32, ppid: i32, tty: u32, foreground: bool, program: &str) -> Process {
+fn member(pid: i32, parent: i32, tty: u32, foreground: bool, program: &str) -> Process {
     Process {
         pid,
-        ppid,
+        ppid: parent,
         birth: u64::try_from(pid).unwrap() * 10,
         uid: 0,
         program: program.into(),
