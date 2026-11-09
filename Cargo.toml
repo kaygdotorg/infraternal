@@ -1,7 +1,7 @@
 # Virtual workspace manifest for the Rust pieces of infraternal.
 [workspace]
 resolver = "3"
-exclude = ["vendor/russh", "vendor/russh-sftp"]
+exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/sqlx-sqlite"]
 members = [
     "fuzz",
     "crates/infraternal-mesh",
@@ -169,3 +169,5 @@ opt-level = "s"
 [patch.crates-io]
 russh = { path = "vendor/russh" }
 russh-sftp = { path = "vendor/russh-sftp" }
+# sqlx 0.8.6 on libsqlite3-sys 0.39 so it can share one SQLite with rusqlite (D379); see its INFRATERNAL.md.
+sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
