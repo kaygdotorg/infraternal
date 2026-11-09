@@ -21,6 +21,7 @@
  * The element keeps `data-state` (idle | ok | error) for colour; callers style the rest.
  */
 import { icon, ICON_ALERT, ICON_CIRCLE_CHECK, ICON_INFO } from "./icons";
+import { EASE_OUT } from "./motion";
 
 export type StatusState = "idle" | "ok" | "error";
 export interface StatusLine { set(state: StatusState, text: string): void }
@@ -30,11 +31,11 @@ const STYLE = `
 .ui-status-line { display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; }
 .ui-status-icons { position: relative; display: inline-grid; flex: none; height: 1lh; align-items: center; }
 .ui-status-icons > .ui-icon { grid-area: 1 / 1; opacity: 0; transform: scale(0.6); filter: blur(2px);
-  transition: opacity 140ms ease-out, transform 160ms var(--ease-out), filter 140ms ease-out; }
+  transition: opacity var(--t-press) ease-out, transform var(--t-pop) var(--ease-out), filter var(--t-press) ease-out; }
 [data-state="idle"] > .ui-status-icons > .ui-status-info,
 [data-state="ok"] > .ui-status-icons > .ui-status-ok,
 [data-state="error"] > .ui-status-icons > .ui-status-alert { opacity: 1; transform: none; filter: none; }
-.ui-status-text { position: relative; min-width: 0; transition: color 160ms ease-out; }
+.ui-status-text { position: relative; min-width: 0; transition: color var(--t-pop) ease-out; }
 .ui-status-leaving { position: absolute; inset: 0 auto auto 0; width: 100%; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .ui-status-icons > .ui-icon, .ui-status-text { transition: none; } }
 `;
@@ -42,6 +43,7 @@ const STYLE = `
 const MOVE = 160;
 let styled = false;
 
+/** Turns `root` into a status line and returns its `set(state, text)` control; the stylesheet is injected on first use. */
 export function statusLine(root: HTMLElement): StatusLine {
   if (!styled) { styled = true; const style = document.createElement("style"); style.textContent = STYLE; document.head.append(style); }
   root.classList.add("ui-status-line");
@@ -91,7 +93,7 @@ export function statusLine(root: HTMLElement): StatusLine {
       const out = leaving.animate([{ opacity: 1, filter: "blur(0)" }, { opacity: 0, filter: "blur(3px)" }], { duration: 120, easing: "ease-out", fill: "forwards" });
       out.onfinish = () => leaving.remove();
       num.textContent = nextNum; rest.textContent = nextRest; value = Number(nextNum || 0);
-      for (const part of [num, rest]) part.animate([{ opacity: 0, filter: "blur(3px)" }, { opacity: 1, filter: "blur(0)" }], { duration: MOVE, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+      for (const part of [num, rest]) part.animate([{ opacity: 0, filter: "blur(3px)" }, { opacity: 1, filter: "blur(0)" }], { duration: MOVE, easing: EASE_OUT });
     },
   };
 }

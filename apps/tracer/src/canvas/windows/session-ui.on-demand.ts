@@ -40,6 +40,7 @@ import { isTerminal } from "../views/body";
 import { ICON, SESSION_ICON } from "../views/icons";
 import { paintLink } from "./link";
 import type { RefusalAction } from "../../terminal-refusal";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 
 /** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
 export interface SessionUiPart {
@@ -56,7 +57,6 @@ export interface SessionUiPart {
   dispose(): void;
 }
 
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const STATE_LABEL: Record<SessionState, string> = { open: "Open", detached: "Detached", exited: "Exited" };
 
 const button = (cls: string, label: string, paths: string): HTMLButtonElement => {
@@ -260,7 +260,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
   };
   const slideLabel = (rec: WinRec): void => {
     if (reduced.matches) return;
-    rec.card.pill.querySelector<HTMLElement>(".ui-window-session")?.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE });
+    rec.card.pill.querySelector<HTMLElement>(".ui-window-session")?.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE_OUT });
   };
 
   // ---- ending and dismissing --------------------------------------------------------------------
@@ -522,7 +522,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
           const was = tops.get(row.dataset.id);
           if (was === undefined) continue;
           const dy = was - row.getBoundingClientRect().top;
-          if (Math.abs(dy) > 1) row.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 260, easing: EASE });
+          if (Math.abs(dy) > 1) row.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 260, easing: EASE_OUT });
         }
       };
       if (reduced.matches) { finish(); return; }

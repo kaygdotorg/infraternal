@@ -32,6 +32,7 @@ declare global {
       dropConnection: () => void;
       screenText: () => string;
       graphemeText: () => string;
+      selectionText: () => string;
       injectInput: (data: string) => void;
       seedPrompt: () => Promise<void>;
       writeText: (text: string) => Promise<void>;
@@ -420,6 +421,7 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
+/** Opens the terminal screen for the signed-in person, reusing the startup snapshot, and publishes the test double in mock mode. */
 async function showTerminal(knownSession?: DrawingIdentity, instant = false): Promise<void> {
   // Startup already authenticated this snapshot. Reuse it rather than adding
   // another network round trip; the socket still checks authority on connection.
@@ -638,6 +640,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         dropConnection: () => currentTerminal?.forceDrop(),
         screenText: () => currentTerminal?.readScreenText() ?? "",
         graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
+        selectionText: () => currentTerminal?.readSelectionText() ?? "",
         injectInput: (data) => currentTerminal?.injectInput(data),
         seedPrompt: () => currentTerminal?.seedPromptForTest() ?? Promise.resolve(),
         writeText: (text) => currentTerminal?.writeTextForTest(text) ?? Promise.resolve(),

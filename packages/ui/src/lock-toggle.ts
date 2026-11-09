@@ -22,6 +22,7 @@
  *   card.append(lock.root); lock.setLocked(true);
  */
 import { Spring } from "./spring";
+import { EASE_OUT } from "./motion";
 
 /** What caused a toggle: a pointer click or a keyboard activation (a click with `detail` 0). */
 export type LockSource = "pointer" | "keyboard";
@@ -110,7 +111,7 @@ export function createLockToggle(options: LockToggleOptions): LockToggle {
     setLocked,
     nudge() {
       if (reduced.matches) return;
-      root.animate([{ transform: "scale(1)" }, { transform: "scale(1.18)" }, { transform: "scale(1)" }], { duration: 220, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+      root.animate([{ transform: "scale(1)" }, { transform: "scale(1.18)" }, { transform: "scale(1)" }], { duration: 220, easing: EASE_OUT });
     },
     dispose() { root.removeEventListener("click", onClick); root.remove(); },
   };

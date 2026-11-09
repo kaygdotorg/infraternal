@@ -133,6 +133,7 @@ spec ("before"), the main branch, and the deferred branch.
 | Web Animations API easing | `"cubic-bezier(0.23, 1, 0.32, 1)"` in TypeScript (14 `EASE` constants and `easing:` options) | The `easing` option cannot read `var()` | — (a shared `EASE_OUT` constant would be the TypeScript token; see question 8) |
 | Touch targets | `2.75rem` (44 px) | iOS target size, inside `pointer: coarse` blocks | TASTE §2 "Platform-sized controls"; D174 |
 | Inline text input | `--text-input` is 16 px on touch | iOS never zooms | `packages/ui/styles.css` token comment |
+| Cluster frames | `border-radius: 1.75rem` on `.cl-region`, `.cl-ghost` and `.cl-chip` | A nested outer frame around windows whose corners are `--r-lg`; larger than any step of the scale, so it is kept (D372) | comments in `clusters.css` and `mesh.css` |
 | Pill morph insets | `radius: 19 / 18` | Initial values; replaced by the measured pill height before the first frame | `pill-morph.ts`, `shortcuts-view.ts` |
 
 ## 6. Owner questions (class c)

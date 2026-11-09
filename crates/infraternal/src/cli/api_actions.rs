@@ -177,6 +177,7 @@ fn credential_failure(error: sign_in::ApiCredentialError) -> ActionFailure {
     }
 }
 
+/// Decode CLI arguments into the input expected by the shared hosted action.
 fn command_input(
     action: infraternal_plugin_api::ActionDef,
     matches: &ArgMatches,
@@ -186,7 +187,7 @@ fn command_input(
         "remote.host.list" => Ok(json!({
             "after": matches.get_one::<String>("after").cloned(),
         })),
-        "remote.host.remove" => {
+        "remote.host.remove" | "remote.host.forget" => {
             let host = matches
                 .get_one::<String>("host_id")
                 .and_then(|value| uuid::Uuid::parse_str(value).ok())
@@ -242,6 +243,7 @@ fn command_input(
     }
 }
 
+/// Send hosted actions through their existing review or progress adapter.
 async fn dispatch(
     command: &str,
     action: infraternal_plugin_api::ActionDef,
@@ -253,7 +255,9 @@ async fn dispatch(
     match action.id {
         "ssh.start" => add_host(command, server, api_key, input, json_output).await,
         "remote.host.list" => list_hosts(server, api_key, input).await,
-        "remote.host.remove" => remove_host(server, api_key, input, json_output).await,
+        "remote.host.remove" | "remote.host.forget" => {
+            review_host_change(server, api_key, action.id, input, json_output).await
+        }
         _ => post_action(server, api_key, action.id, &input).await,
     }
 }
@@ -268,12 +272,13 @@ async fn post_action(
     post_json(server, api_key, &path, input).await
 }
 
-/// D28: a removal is always its own dry run first. The review is shown, the person (or
-/// `--yes`) confirms, and only then is the removal sent with the dry run's single-use
-/// review token. `--dry-run` stops after the review. The token is never printed.
-async fn remove_host(
+/// D28: removal and Forget show their own dry run before the person (or `--yes`) confirms.
+/// The mutation repeats the reviewed input with its single-use token, which is never printed.
+/// `--dry-run` stops after the review and changes nothing.
+async fn review_host_change(
     server: &Url,
     api_key: &str,
+    action_id: &str,
     mut input: Value,
     json_output: bool,
 ) -> Result<Value, ActionFailure> {
@@ -284,7 +289,7 @@ async fn remove_host(
         .unwrap_or(false);
     let review_only = input["dry_run"] == true;
     input["dry_run"] = true.into();
-    let mut review = post_action(server, api_key, "remote.host.remove", &input).await?;
+    let mut review = post_action(server, api_key, action_id, &input).await?;
     let token = take_review_token(&mut review);
     if review_only {
         return Ok(review);
@@ -292,23 +297,23 @@ async fn remove_host(
     let token = token.ok_or_else(|| {
         ActionFailure::new(
             Exit::Failed,
-            "The server did not return a review for this removal, so nothing was removed.",
+            "The server did not return a review for this action, so nothing changed.",
         )
     })?;
     if !confirm_removal(&review, yes, json_output) {
         return Err(ActionFailure::new(
             Exit::NotAllowed,
-            "Nothing was removed. Confirm in a terminal, or check the dry run with `--dry-run` and pass `--yes`.",
+            "Nothing changed. Confirm in a terminal, or check the dry run with `--dry-run` and pass `--yes`.",
         )
         .with_details(
-            "The removal needs a confirmation after its dry run.",
+            "The action needs a confirmation after its dry run.",
             review,
         ));
     }
     post_action(
         server,
         api_key,
-        "remote.host.remove",
+        action_id,
         &confirmed_removal(input, token.as_str()),
     )
     .await
@@ -332,15 +337,12 @@ fn confirmed_removal(mut input: Value, token: &str) -> Value {
 }
 
 /// Show the dry run on stderr and ask. Only a terminal can answer; `--json` and pipes need
-/// `--yes`. The host name and effect come from the server and are made terminal-safe.
+/// `--yes`. The action label and effect come from the server and are made terminal-safe.
 fn confirm_removal(review: &Value, yes: bool, json_output: bool) -> bool {
     use std::io::{BufRead, IsTerminal, Read, Write};
-    let host = terminal_safe(review["host"].as_str().unwrap_or("this host"));
+    let label = terminal_safe(review["label"].as_str().unwrap_or("Change this host"));
     if !json_output {
-        eprintln!(
-            "Dry run: {}",
-            terminal_safe(review["label"].as_str().unwrap_or("Remove the host"))
-        );
+        eprintln!("Dry run: {label}");
         if let Some(effect) = review["effect"].as_str() {
             eprintln!("{}", terminal_safe(effect));
         }
@@ -351,7 +353,7 @@ fn confirm_removal(review: &Value, yes: bool, json_output: bool) -> bool {
     if json_output || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return false;
     }
-    eprint!("Remove {host}? Type yes to confirm: ");
+    eprint!("{label}? Type yes to confirm: ");
     if std::io::stderr().flush().is_err() {
         return false;
     }
@@ -592,6 +594,7 @@ async fn post_json(
         .map_err(|_| ActionFailure::new(Exit::Unreachable, "The server request timed out."))?
 }
 
+/// Send one authenticated action request over TLS and translate its response into a CLI result.
 async fn post_json_inner(
     server: &Url,
     api_key: &str,
@@ -641,7 +644,7 @@ async fn post_json_inner(
     })?;
     let status = response.status();
     if !status.is_success() && status != StatusCode::BAD_REQUEST {
-        return Err(status_failure(status));
+        return Err(action_status_failure(path, status));
     }
     let bytes = Limited::new(response.into_body(), MAX_RESPONSE)
         .collect()
@@ -676,6 +679,18 @@ fn bad_request_failure(body: &[u8]) -> ActionFailure {
             "The removal review expired or was already used, so nothing was removed. Run the command again to see a new dry run.",
         ),
         _ => status_failure(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// Explain Forget's state conflict; keep authentication and other actions' shared diagnostics.
+fn action_status_failure(path: &str, status: StatusCode) -> ActionFailure {
+    if path == "/v1/actions/remote.host.forget" && status == StatusCode::CONFLICT {
+        ActionFailure::new(
+            Exit::NotAllowed,
+            "This host is no longer retired and unreachable, so nothing was forgotten.",
+        )
+    } else {
+        status_failure(status)
     }
 }
 
@@ -752,12 +767,14 @@ fn step_label(step: &str) -> &'static str {
     }
 }
 
+/// Describe the completed hosted action without implying machine cleanup after Forget.
 fn success_message(action_id: &str) -> &'static str {
     match action_id {
         "server.status" => "The server status was read.",
         "remote.host.list" => "The server host list was read.",
         "sessions.list" => "The server session list was read.",
         "remote.host.remove" => "The host was removed.",
+        "remote.host.forget" => "The host was forgotten here. The machine itself was not changed.",
         "ssh.start" => "Host setup completed.",
         _ => "The hosted action completed.",
     }
@@ -878,6 +895,7 @@ impl Drop for Connection {
     }
 }
 
+/// Check hosted-action diagnostics, confirmation handling, and safe error output.
 #[cfg(test)]
 mod tests {
     use super::{
@@ -887,6 +905,7 @@ mod tests {
     use hyper::StatusCode;
     use serde_json::json;
 
+    /// Keep expired and revoked key refusals consistent with the shared sign-in guidance.
     #[test]
     fn expired_or_revoked_key_uses_the_shared_d303_diagnostic() {
         let failure = status_failure(StatusCode::FORBIDDEN);
@@ -894,6 +913,29 @@ mod tests {
         assert_eq!(failure.exit, exit);
         assert_eq!(failure.message, message);
         assert_eq!(failure.exit, Exit::NotAllowed);
+    }
+
+    /// A reconnect between review and commit is a host-state refusal, not a sign-in failure.
+    #[test]
+    fn forget_state_conflict_does_not_blame_the_api_key() {
+        let path = "/v1/actions/remote.host.forget";
+        let failure = super::action_status_failure(path, StatusCode::CONFLICT);
+        assert_eq!(failure.exit, Exit::NotAllowed);
+        assert_eq!(
+            failure.message,
+            "This host is no longer retired and unreachable, so nothing was forgotten."
+        );
+        assert_eq!(
+            super::action_status_failure(path, StatusCode::FORBIDDEN).message,
+            status_failure(StatusCode::FORBIDDEN).message,
+            "authentication refusals keep the shared key diagnostic"
+        );
+        assert_eq!(
+            super::action_status_failure("/v1/actions/remote.host.remove", StatusCode::CONFLICT)
+                .message,
+            status_failure(StatusCode::CONFLICT).message,
+            "other actions must not report a Forget refusal"
+        );
     }
 
     /// D28: the dry run's token is taken out of what is printed, and the real call repeats the

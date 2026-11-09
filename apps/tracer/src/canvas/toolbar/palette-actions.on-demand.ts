@@ -43,10 +43,11 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === value);
     if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); }
   }
-  else if (kind === "removehost" && value) {
+  else if ((kind === "removehost" || kind === "forgethost") && value) {
     const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
     // Started from the palette, the question is about a host and not about the focused window, so it is centred (TASTE: a confirmation belongs to what it acts on).
-    if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, null, () => {
+    const operation = kind === "forgethost" ? cx.adapters.hostRemoval?.forget : cx.adapters.hostRemoval?.remove;
+    if (host && (kind !== "forgethost" || host.state === "retired-unreachable")) operation?.(host.id, host.name, null, () => {
       // Escape or Keep goes back to the terminal the palette was opened from (not on a phone, where focus would raise the keyboard).
       if (!matchMedia("(pointer: coarse)").matches) active?.binding?.focus();
     });
