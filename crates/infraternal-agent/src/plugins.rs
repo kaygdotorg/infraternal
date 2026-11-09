@@ -51,6 +51,13 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
     registry_at(mode, None, None)
 }
 
+/// Builds the infraternal agent's plugin registry for `mode`, with node state at
+/// `state` and the enrolment in `installation` when they exist.
+///
+/// On macOS a rootless agent leaves the mesh node out (it needs root) and
+/// still registers the desktop source, which app windows use (#146).
+/// # Errors
+/// Returns an error if a plugin cannot be built or its descriptor conflicts.
 // Even an empty build keeps the same fallible factory contract as builds with
 // registered plugins; feature selection must not change its caller's API.
 #[cfg_attr(
@@ -194,11 +201,21 @@ pub(crate) fn registry_at_with_mesh_state(
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
+    // The Darwin mesh node owns a utun device and a system-keychain key, so it
+    // only runs in the root system service. A rootless agent (the one in a
+    // person's login session that shows app windows) still links to the
+    // server; it just leaves the mesh node out instead of failing to start.
     #[cfg(all(feature = "mesh", target_os = "macos"))]
-    registry.register(Box::new(darwin_mesh_plugin(
-        mesh_state.or(state),
-        installation,
-    )?))?;
+    if nix::unistd::Uid::effective().is_root() {
+        registry.register(Box::new(darwin_mesh_plugin(
+            mesh_state.or(state),
+            installation,
+        )?))?;
+    } else {
+        eprintln!(
+            "Infraternal Mesh node skipped: this infraternal agent is not running as root, and the mesh node needs the system service"
+        );
+    }
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
