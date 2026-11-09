@@ -1346,7 +1346,10 @@ take_over_finished_install() {
  [ "$(cat "$takeover_part/unit")" = "$(cat "$unit")" ] || exit 71
  mv -T "$takeover_part" "$aside"
  # From here every way out puts the old install back, until the end.
- trap 'takeover_status=$?; replace_untrap; put_back_taken_over; exit "$takeover_status"' EXIT
+ # A refusal (73) after a confirmed terminal was closed leaves 74, so the
+ # message can say that terminals were closed; every earlier 73 closed none.
+ takeover_closed=no
+ trap 'takeover_status=$?; replace_untrap; put_back_taken_over; [ "$takeover_status:$takeover_closed" != 73:yes ] || takeover_status=74; exit "$takeover_status"' EXIT
  trap 'replace_untrap; put_back_taken_over; exit 129' HUP
  trap 'replace_untrap; put_back_taken_over; exit 130' INT
  trap 'replace_untrap; put_back_taken_over; exit 143' TERM
@@ -1366,6 +1369,7 @@ take_over_finished_install() {
  done
  for takeover_close in "$@"; do
   $manager stop "$takeover_close" >/dev/null 2>&1 || exit 73
+  takeover_closed=yes
  done
  $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
  # The old unit and only the confirmed terminals' units have stopped.

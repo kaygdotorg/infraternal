@@ -463,10 +463,18 @@ pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal a
 /// The Take over offer's own words: what was found and what Take over does (D359).
 pub const TAKEOVER_OFFER: &str = "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.";
 
-/// The refusal for a finished install that something still uses (D359).
-/// It holds before the stop (nothing touched) and after it (the agent was put
-/// back as it was found), so it never claims that nothing changed (J342 P3-4).
-pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and a program is still using it outside the terminal sessions it can safely identify. The old install is kept, but any terminals you confirmed closed stay closed. Stop that program, then try again.";
+/// The refusal for a finished install that something still uses (D359), before Take over closed any
+/// terminal: at the check, or after the old agent stopped and was put back. It holds in both cases, so
+/// it never claims that nothing changed (J342 P3-4), and it never mentions closed terminals (#433 P2).
+pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something besides its own terminals is using it, such as a program that runs from its folder. No terminal was closed, and the old install was left as it was found. Stop that program, then try again.";
+
+/// The refusal when something still used the old install after Take over closed the terminals the
+/// person confirmed (host exit 74, #433 P2). The install is put back; closed terminals cannot be.
+pub const TAKEOVER_BUSY_AFTER_CLOSE: &str = "Take over closed the terminals you confirmed, then found something else still using the old infraternal agent, such as a program that runs from its folder. The old install was put back as it was, and those terminals stay closed. Stop that program, then try again.";
+
+/// The refusal when the install or its terminals changed between review and confirmation (host exit
+/// 75). Every 75 happens before any terminal is closed (#433 P2).
+pub const TAKEOVER_CHANGED: &str = "This install or its open terminals changed since you reviewed them, so no terminal was closed and the old install was left as it was found. Try again to review it before taking over.";
 
 impl FinishedInstall {
     /// The exact record the host compares before it changes anything.
@@ -591,9 +599,13 @@ impl FinishedInstall {
                         error.kind = FailureKind::UnrecognizedInstall;
                         error.message = TAKEOVER_BUSY;
                     }
+                    Some(74) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_BUSY_AFTER_CLOSE;
+                    }
                     Some(75) => {
                         error.kind = FailureKind::UnrecognizedInstall;
-                        error.message = "This install or its open terminals changed since you reviewed them. Try again to review it before taking over. Terminals you confirmed closed stay closed.";
+                        error.message = TAKEOVER_CHANGED;
                     }
                     _ => {}
                 }
