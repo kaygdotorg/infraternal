@@ -4549,3 +4549,30 @@ access (#341 B19).
        wrap-flag export for history rows to our pinned terminal-engine
        build so history copies are exact. Rejected: holding text selection
        for the engine change; no smart wrap in history.
+
+374. **#341 answers, round 1 (owner, 2026-11-09):**
+     - **Sideways swipe on touch (A17; amends D159, D177, D275, D329):** the
+       owner: "content first but I don't scrolls should overflow to the
+       canvas once there's nothing to scroll in the content. canvas
+       scrolling has to be intentional: two fingers on mobile, on desktop
+       swipes wtih magic mouse/magic trackpad or optoin + scroll for regular
+       people? the option modifier is open because i don't know which ones
+       are stolen/hijacked by the browser." So a one-finger swipe scrolls
+       the content under it and never passes to the canvas, even at its
+       end. Moving the canvas is a deliberate gesture: two fingers on touch;
+       on desktop, trackpad or Magic Mouse swipes, and for ordinary mice a
+       modifier plus scroll. Which modifier is chosen after measuring which
+       ones browsers already use.
+     - **Community edition (A14):** one person, signing in with a passkey
+       or their own identity provider. Inviting others, extra users and
+       local groups are EE. Supersedes the multi-user parts of D30, D154
+       and D187 for Community.
+     - **Proxy engine (A15; closes D316's open choice):** Traefik is the
+       proxy engine, run as a managed sidecar in its own cgroup (D320,
+       D336). D7 notes that some components (Traefik, OpenBao) run as
+       managed child processes. Rejected: a measurement round first; an
+       embedded engine.
+     - **New fonts:** the owner asked to add Ioskeley Mono
+       (github.com/ahatem/IoskeleyMono) and Obel Mono
+       (typographic.systems/obel-mono) to the app's font choices, licences
+       permitting.
