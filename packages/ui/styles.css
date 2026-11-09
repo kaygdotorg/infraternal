@@ -206,14 +206,14 @@
   transform: translateY(calc(var(--y) + var(--sw, 0px))) scale(var(--s));
   transform-origin: center bottom;
   touch-action: pan-x;
-  transition: opacity 170ms ease-out, transform 190ms var(--ease-out), translate 190ms var(--ease-out), scale 190ms var(--ease-out), height 190ms var(--ease-out);
+  transition: opacity calc(170ms * var(--ui-motion-scale, 1)) ease-out, transform calc(190ms * var(--ui-motion-scale, 1)) var(--ease-out), translate calc(190ms * var(--ui-motion-scale, 1)) var(--ease-out), scale calc(190ms * var(--ui-motion-scale, 1)) var(--ease-out), height calc(190ms * var(--ui-motion-scale, 1)) var(--ease-out);
 }
 .ui-toast-stack[data-placement="parent"] .ui-toast { margin-inline: 0; }
 .ui-toast-stack[data-expanded="true"] .ui-toast { --y: var(--ey, 0px); --s: 1; }
 /* Collapsed: every toast behind the front one is as tall as the front one and shows only its top edge. */
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] { height: var(--front-h); width: var(--front-w); min-height: 0; overflow: hidden; }
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] > * { opacity: 0; }
-.ui-toast[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 170ms ease-out, transform 190ms var(--ease-out), visibility 0s 170ms; }
+.ui-toast[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity calc(170ms * var(--ui-motion-scale, 1)) ease-out, transform calc(190ms * var(--ui-motion-scale, 1)) var(--ease-out), visibility 0s calc(170ms * var(--ui-motion-scale, 1)); }
 .ui-toast[data-swiping="true"] { transition: none; }
 .ui-toast-count { font-variant-numeric: tabular-nums; color: var(--fg-2); }
 /* A toast is a small card of its own, not text over a busy terminal: the material's halo would only smear its glyphs. */

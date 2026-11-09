@@ -126,8 +126,10 @@ export function createWindows(cx: Ctx): WindowsModule {
     c.empty?.remove(); delete c.empty;
     cx.view.geometry(c);
     cx.view.settle(c.view.id);
-    flip.play(before);
-    if (!silent) enterAnimation(rec, opaque);
+    // A window opened by a key (a chord or a palette row) is simply there: the others do not slide aside and it does not swell in (#427).
+    const byKey = triggeredByKeyboard();
+    if (!byKey) flip.play(before);
+    if (!silent && !byKey) enterAnimation(rec, opaque);
     cx.tree.render();
     cx.invalidate();
     return rec;
