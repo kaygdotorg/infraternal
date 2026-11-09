@@ -10,6 +10,7 @@ members = [
     "crates/infraternal-protocol",
     "crates/infraternal-plugin-api",
     "crates/infraternal-server",
+    "crates/infraternal-db",
     "crates/infraternal-agent",
     "crates/infraternal-shim",
     "crates/infraternal-session",
@@ -47,6 +48,8 @@ serde_json = "1"
 sha2 = "0.10"
 zeroize = { version = "1.9", features = ["serde"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+# The D379 database driver; `bundled` links the one SQLite 3.54 that sqlx shares during the port.
+rusqlite = { version = "0.41", features = ["bundled"] }
 thiserror = "2"
 # Each role enables its required scheduler; private session images use only the current-thread runtime.
 tokio = { version = "1", features = ["rt", "macros", "sync", "net", "signal", "time", "process", "io-util"] }
