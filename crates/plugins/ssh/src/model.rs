@@ -875,6 +875,11 @@ impl Failure {
                 self.message =
                     "Setup is already running on this host. Wait for it to finish, then try again.";
             }
+            // ACTIVATE could not give the root agent binary an SELinux type
+            // that systemd may start (#401).
+            (Some(78), _) => {
+                self.message = "SELinux would not let systemd start the infraternal agent: setup could not mark its binary in /var/lib/infraternal/bin as a program (bin_t). Check the host's SELinux policy, then try again.";
+            }
             (Some(76), _) => self.message = SOCKET_PROBE_UNAVAILABLE,
             (Some(77), _) => self.message = SOCKET_PROBE_UNCERTAIN,
             _ => {}
@@ -973,6 +978,21 @@ pub struct Event {
 mod failure_serialization_tests {
     //! Preserve the public UUID key while sharing one compact failure reference slot.
     use super::{Failure, FailureKind};
+
+    /// #401: a root install whose binary `SELinux` would not mark executable
+    /// (exit 78 from ACTIVATE) says so, instead of a generic setup failure.
+    #[test]
+    fn selinux_label_refusal_names_selinux() {
+        let mut failure =
+            Failure::install("The remote setup command failed.").at(super::InstallStep::Install);
+        failure.exit_status = Some(78);
+        let failure = failure.in_mode(super::InstallMode::Root);
+        assert!(
+            failure
+                .message
+                .starts_with("SELinux would not let systemd start")
+        );
+    }
 
     #[test]
     fn uuid_reference_uses_the_outcome_specific_wire_key() {
