@@ -8,9 +8,9 @@
  * - Chords: the `?` panel lists every registered shortcut for this platform; each chord is pressed on a fresh clusters mockup.
  * - Palette rows: the palette lists every action; for each, open it with the chord, type the row's label, then press Enter.
  *
- * What counts as still animating: something that is still being seen moving 50 ms after the key, and for at least 70 ms after that
- * (an instant change finishes within a frame or two; the time is measured, not counted in frames, so a slow host that draws a 130 ms
- * fade in three frames still fails it): a running CSS transition of open or close geometry or a script animation (`getAnimations()`,
+ * What counts as still animating: something that is still being seen moving 50 ms after the key and has been seen for 60 ms or more
+ * from its first frame (an instant change finishes within a frame or two, under 60 ms even at 20 frames a second; the time is
+ * measured, not counted in frames, so a slow host that draws a 120 ms fade in three frames still fails it): a running CSS transition of open or close geometry or a script animation (`getAnimations()`,
  * CSS keyframe animations aside), or an inline `transform`, `clip-path` or `opacity` that is still being rewritten (which is what every
  * spring does). Whatever was already moving while the page sat idle (a connection pulse, a cursor) is measured first and ignored. A
  * failure names the label and the element.
@@ -111,11 +111,10 @@ async function sweep(page: Page, act: () => Promise<void>): Promise<Finding[]> {
     const found: string[] = [];
     for (const [signature, times] of sw.key) {
       if (sw.idle.has(signature)) continue;
-      // An instant change that came after some code had loaded lasts a frame or two. Motion is still being seen 50 ms after the key
-      // and keeps being seen for at least 70 ms more.
-      const late = times.filter((t) => t >= sw.keyTime + 50);
-      const span = late.length ? late[late.length - 1]! - late[0]! : 0;
-      if (span >= 70) found.push(`${signature} (moving from ${Math.round(late[0]! - sw.keyTime)} ms to ${Math.round(late[late.length - 1]! - sw.keyTime)} ms after the key)`);
+      // An instant change, even one that came after some code had loaded, lasts a frame or two (under 60 ms even at 20 frames a second).
+      // Motion is still being seen 50 ms after the key and has been seen for 60 ms or more from its first frame: a 120 ms fade qualifies.
+      const first = times[0]!, last = times[times.length - 1]!;
+      if (last >= sw.keyTime + 50 && last - first >= 60) found.push(`${signature} (moving from ${Math.round(first - sw.keyTime)} ms to ${Math.round(last - sw.keyTime)} ms after the key)`);
     }
     return found;
   });
@@ -194,7 +193,16 @@ for (const size of SIZES) {
       // canvas:settings:*, canvas:view:* ... take one row each. A family of FAMILY_ALL rows or fewer (the four fonts, the four card
       // levels) is swept whole: each row changes a different selection in a pane behind the palette, and the one that moves is not
       // always the one sampled. The canvas verbs (canvas:close, canvas:overview, canvas:sessions, ...) are different code each.
-      const rows = await page.locator("#palette-results .result").evaluateAll((nodes) => nodes.map((node) => ({ label: node.querySelector(".result-label")?.textContent?.trim() ?? "", action: (node as HTMLElement).dataset.action ?? "" })));
+      const listed = (): Promise<Array<{ label: string; action: string }>> => page.locator("#palette-results .result").evaluateAll((nodes) => nodes.map((node) => ({ label: node.querySelector(".result-label")?.textContent?.trim() ?? "", action: (node as HTMLElement).dataset.action ?? "" })));
+      const rows = await listed();
+      // The empty palette shows only some rows of an argument family (the current font, the current card level). Typing the family's
+      // name lists all of it, so the sweep reads each family once more that way and keeps the union.
+      for (const word of new Set(rows.map((row) => row.action).filter((action) => action.includes(":") && !action.startsWith("canvas:")).map((action) => action.slice(0, action.indexOf(":"))))) {
+        await page.locator("#palette-input").fill(word);
+        // sleep: the list is filtered to the family
+        await page.waitForTimeout(150);
+        for (const row of await listed()) if (row.action && !rows.some((known) => known.action === row.action)) rows.push(row);
+      }
       const familyOf = (action: string, label: string): string => {
         const colons = action.split(":").length - 1;
         return colons >= 2 ? action.slice(0, action.lastIndexOf(":")) : colons === 1 && !action.startsWith("canvas:") ? action.slice(0, action.indexOf(":")) : action || label;
