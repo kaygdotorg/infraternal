@@ -177,6 +177,34 @@ test("Settings, Account has the row; it asks, then signs out", async ({ page }) 
   await reloadStaysSignedOut(page);
 });
 
+test("signing out while the terminal is still connecting leaves no terminal behind", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // The terminal cannot finish opening until its WebAssembly module arrives. Hold that one request until the person has
+  // signed out, then let it through: the terminal client completes AFTER sign-out, the order a slow link produces.
+  let release!: () => void;
+  const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+  await page.route(/\.wasm$/, async (route) => { await gate; await route.continue(); });
+  let closedAfterRelease = 0, released = false;
+  page.on("websocket", (socket) => { socket.on("close", () => { if (released) closedAfterRelease++; }); });
+  const live = trackSockets(page);
+  const hook = () => page.evaluate(() => (window as unknown as { __tracerTestDouble?: unknown }).__tracerTestDouble !== undefined);
+  await open(page);
+  expect(await hook(), "the terminal is still connecting").toBe(false);
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("sign out");
+  await page.keyboard.press("Enter");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 10_000 });
+  released = true;
+  release();
+  // The late client either closes its own connection straight away or never connects at all (what it does depends on how far the
+  // sign-out got when the module arrived). Both are fine; what is not is a client that stays. Wait, up to a deadline, for the
+  // first close after the release, which a kept client also produces when it reconnects but never without having set its hook.
+  await expect.poll(() => closedAfterRelease, { timeout: 4_000 }).toBeGreaterThan(0).catch(() => undefined);
+  expect(await live(), "no connection is left open after sign-out").toBe(0);
+  expect(await hook(), "no live terminal is left behind the sign-in screen").toBe(false);
+});
+
 test("a sign-out the server could not complete says so and leaves the person signed in", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page);
