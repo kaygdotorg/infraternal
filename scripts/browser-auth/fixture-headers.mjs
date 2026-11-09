@@ -1,6 +1,8 @@
+/** Header handling shared by the auth checks' Playwright proxies to the `browser_auth` fixture [#447]. */
+
 /**
  * Turns the auth fixture's response headers into the object Playwright's `route.fulfill()` takes, keeping every
- * `Set-Cookie` [#447].
+ * `Set-Cookie`.
  *
  * The `browser_auth` example returns headers as `[name, value]` pairs, and a name can repeat: since sessions got
  * per-login cookie names, a sign-in answers with two `Set-Cookie` headers, the new `__Host-infraternal-session-2-…`
