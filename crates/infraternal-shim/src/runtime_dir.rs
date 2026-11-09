@@ -1,0 +1,124 @@
+//! Finds the private per-user runtime directory that a rootless infraternal agent and its shims share [D349], #146.
+//!
+//! Linux login sessions set `XDG_RUNTIME_DIR` to a private 0700 directory the
+//! system clears at logout or boot, and the agent keeps its sockets under
+//! `$XDG_RUNTIME_DIR/infraternal`. macOS sets no such variable, so a rootless
+//! agent there (the one that captures app windows in the logged-in session)
+//! would refuse to start. On macOS this module falls back to the account's own
+//! `~/Library/Caches`, which macOS creates private (0700) for each account.
+//!
+//! Why not `$TMPDIR`: it is private too, but it is a long `/var/folders/…/T/`
+//! path, and the session sockets under it would pass the 104-byte macOS limit
+//! for a Unix socket path. `~/Library/Caches/infraternal/sessions/<32 hex>.sock`
+//! stays inside the limit for account names up to about 20 characters.
+//!
+//! The agent and every shim call [`user_runtime_dir`], so they always agree on
+//! one place without editing the process environment.
+use nix::unistd::Uid;
+use std::{
+    fs, io,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+
+/// Returns the private runtime directory of the current (non-root) account.
+///
+/// `XDG_RUNTIME_DIR` wins when it is set. Otherwise, on macOS only, the answer
+/// is `$HOME/Library/Caches`. Either way the directory must already exist, be
+/// a real directory (not a symlink), belong to this account and have mode 0700;
+/// anything else is refused, so another account can never plant the sockets.
+///
+/// # Errors
+/// `InvalidData` when no runtime directory can be named (Linux without
+/// `XDG_RUNTIME_DIR`, or macOS without `HOME`), `PermissionDenied` when the
+/// directory is not private to this account, and any error from reading it.
+pub fn user_runtime_dir() -> io::Result<PathBuf> {
+    let runtime = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(runtime) => PathBuf::from(runtime),
+        None => fallback()?,
+    };
+    check_private(&runtime)?;
+    Ok(runtime)
+}
+
+/// The macOS fallback: the account's own `~/Library/Caches`.
+#[cfg(target_os = "macos")]
+fn fallback() -> io::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "rootless infraternal agent needs HOME to find its runtime directory",
+        )
+    })?;
+    Ok(PathBuf::from(home).join("Library/Caches"))
+}
+
+/// Other systems have no safe default, so the variable stays required there.
+#[cfg(not(target_os = "macos"))]
+fn fallback() -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "rootless infraternal agent requires XDG_RUNTIME_DIR",
+    ))
+}
+
+/// Refuses a runtime directory that is a symlink, not a directory, owned by
+/// another account, or open to group or others.
+fn check_private(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir()
+        || meta.uid() != Uid::effective().as_raw()
+        || meta.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "invalid runtime directory",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+/// Checks the privacy rules every runtime directory must pass.
+mod tests {
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+
+    /// A fresh 0700 directory of this account is accepted; widening it to 0755 is refused.
+    #[test]
+    fn only_private_directories_of_this_account_pass() {
+        let root = std::env::temp_dir().join(format!("ifr-rt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .expect("create");
+        assert!(check_private(&root).is_ok());
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(
+            check_private(&root).expect_err("0755 is shared").kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A symlink to a private directory is refused: the link itself could be swapped.
+    #[test]
+    fn symlinked_runtime_directories_are_refused() {
+        let root = std::env::temp_dir().join(format!("ifr-rl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .expect("create");
+        let target = root.join("real");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&target)
+            .expect("create");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(check_private(&link).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+}
