@@ -176,17 +176,40 @@ export class PerformanceProbe {
     this.sendNextKey();
   }
 
-  /** Drops the socket to measure how long the resume takes. */
+  /**
+   * Drops the socket to measure how long the resume takes.
+   *
+   * One sample is one reconnect. The report shows "pending" (not the previous time) until this drop's marker echo is
+   * painted, so a reader polling for `Time to resume: <n> ms` gets this drop's number, not the last one. The button
+   * stays disabled until then (see `syncButtons`). Before both rules, a test that read the stale number clicked the
+   * next drop while the marker was still in flight, and that marker's echo later ended a sample that spanned two
+   * reconnects: 1432–1528 ms at a 300 ms round trip, where one reconnect takes 895–964 ms (#478).
+   */
   private forceDrop(): void {
     if (!this.terminal?.isConnected) {
       this.message.textContent = "Connect the terminal before forcing a socket drop.";
+      return;
+    }
+    if (this.resumeStartedAt !== undefined) {
+      this.message.textContent = "Wait for the current resume to finish before dropping again.";
       return;
     }
     this.resumeStartedAt = performance.now();
     this.resumeDuration = undefined;
     this.resumeMarkerSent = false;
     this.message.textContent = "Dropping the socket and measuring the first resumed echo…";
+    this.renderReport();
+    this.syncButtons();
     this.terminal.forceDrop();
+  }
+
+  /** Forgets the resume marker still waiting for its echo, so a later painted marker cannot end a newer sample. */
+  private abandonResumeMarker(): void {
+    for (const [byte, queue] of this.pending) {
+      const waiting = queue.samples.slice(queue.next).filter((sample) => sample.kind !== "resume");
+      if (waiting.length === 0) this.pending.delete(byte);
+      else this.pending.set(byte, { samples: waiting, next: 0 });
+    }
   }
 
   /** Notes a disconnect; a forced one starts the resume stopwatch. */
@@ -211,6 +234,9 @@ export class PerformanceProbe {
       try {
         terminal.injectInput("~");
       } catch {
+        // No echo will end this sample; free the drop button for another try.
+        this.abandonResumeMarker();
+        this.resumeStartedAt = undefined;
         this.message.textContent = "The resumed terminal could not accept the probe marker.";
       }
     }
@@ -366,11 +392,15 @@ export class PerformanceProbe {
     }
   }
 
-  /** Enables the run and drop buttons only when the terminal is connected, quiet and no run is active. */
+  /**
+   * Enables the run and drop buttons only when the terminal is connected, quiet, no run is active and no forced drop
+   * is still waiting for its resumed echo (a key or a second drop then would land inside that resume's sample).
+   */
   private syncButtons(): void {
     const connected = this.terminal?.isConnected === true;
-    this.runButton.disabled = !connected || !this.quiet || this.runActive;
-    this.dropButton.disabled = !connected || !this.quiet || this.runActive;
+    const busy = !connected || !this.quiet || this.runActive || this.resumeStartedAt !== undefined;
+    this.runButton.disabled = busy;
+    this.dropButton.disabled = busy;
   }
 
   /** Marks the terminal busy now and quiet again after 100 ms without output. */
