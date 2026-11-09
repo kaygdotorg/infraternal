@@ -11,6 +11,7 @@
  * at once, through the same actions the command palette uses.
  */
 import { createCapsuleTabs } from "./capsule-tabs";
+import { markMotion } from "./input-source";
 import { ICONS } from "./icons";
 import { createKeyValueList } from "./kv-list";
 import { createSlider } from "./slider";
@@ -215,6 +216,8 @@ export function renderHosts(container: HTMLElement, api: HostsApi): () => void {
 function paintChoice(block: HTMLElement, current: string): void {
   for (const row of block.querySelectorAll<HTMLElement>(".ui-sp-row")) {
     const on = row.dataset.id === current;
+    // A key that changes the selection (a palette Font row, Enter on a row) ticks it at once; a click grows the tick in (#427).
+    if (on !== row.hasAttribute("data-current")) markMotion(row.querySelector(".ui-sp-tick"));
     row.setAttribute("aria-checked", String(on));
     row.toggleAttribute("data-current", on);
   }

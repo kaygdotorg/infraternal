@@ -26,7 +26,7 @@
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
-import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
+import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { beginInlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
@@ -338,6 +338,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       root.querySelector<HTMLElement>(".cl-sx-title")!.textContent = rec.model.host;
       this.scroll = root.querySelector<HTMLElement>(".cl-sx-scroll")!;
       this.scroll.addEventListener("click", (event) => this.onClick(event));
+      // A row's actions replace its meta while it holds focus. Focus entering the popover by a key (Enter on the Sessions button) does it at
+      // once; the mouse moving over it, after that, fades again (#427, sessions.css).
+      root.addEventListener("focusin", () => markMotion(root));
+      root.addEventListener("pointerover", () => { if (root.dataset.motion === "instant") root.dataset.motion = "animate"; });
       // Arrows walk the rows.
       root.addEventListener("keydown", (event) => {
         if ((event.key !== "ArrowDown" && event.key !== "ArrowUp") || (event.target as Element).closest(".cl-sx-name-input")) return;
