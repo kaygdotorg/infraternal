@@ -1,449 +1,212 @@
 #!/usr/bin/env bash
-# Build MIT-licensed libghostty-vt with a read-only snapshot adapter [7,20,94].
+# Build the signed libghostty-vt release and our bounded state adapter [7,20,94].
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 output="${1:?Cargo OUT_DIR required}"
-version=a887df42c56f6de86c0fe6da9c4eeca37931e083
-checksum=fb4b2f9ffa0af125983041fdbe4ef94d3fa79fb9f2d22b9c213c0e3847a866b6
+version=1.0.0
 target_root="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target_root" = /* ]] || target_root="$root/$target_root"
 "$root/scripts/auth-toolchain"
 zig="$target_root/auth-tools/zig/zig"
-[[ "$("$zig" version)" == 0.15.2 ]] || { printf 'libghostty-vt requires Zig 0.15.2\n' >&2; exit 1; }
+[[ "$("$zig" version)" == 0.17.0 ]] || { printf 'libghostty-vt 1.0.0 requires Zig 0.17.0\n' >&2; exit 1; }
 case "${TARGET:?Cargo target required}" in
     x86_64-unknown-linux-musl) vt_target=x86_64-linux-musl ;;
     aarch64-unknown-linux-musl) vt_target=aarch64-linux-musl ;;
     x86_64-unknown-linux-gnu) vt_target=x86_64-linux-gnu ;;
     aarch64-unknown-linux-gnu) vt_target=aarch64-linux-gnu ;;
-    # The macOS shim links the same engine natively; the archive is static and
-    # needs no SDK framework (D94, #328).
+    # The shim links the same static engine on macOS without SDK frameworks.
     aarch64-apple-darwin) vt_target=aarch64-macos ;;
     *) printf 'unsupported libghostty-vt target: %s\n' "$TARGET" >&2; exit 1 ;;
 esac
+
 vt_tools="$target_root/vt-tools"
 mkdir -p "$vt_tools"
-archive="$vt_tools/$version.tar.gz"
-if [[ ! -f "$archive" ]]; then
-    temporary="$(mktemp "$vt_tools/download.XXXXXX")"
-    trap 'rm -f -- "$temporary"' EXIT
-    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-        "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$version" -o "$temporary"
-    printf '%s  %s\n' "$checksum" "$temporary" | sha256sum --check --status
-    mv "$temporary" "$archive"
-fi
-printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
-# Cargo check/test/features have different OUT_DIRs. Key the expensive native
-# build by source, adapter, build recipe, ABI and optimization instead. A lock
-# prevents two Cargo invocations from observing a partly installed archive.
+source_name="libghostty-vt-$version.tar.gz"
+deps_name="libghostty-vt-$version-deps.tar.gz"
+source_archive="$vt_tools/$source_name"
+source_signature="$source_archive.minisig"
+deps_archive="$vt_tools/$deps_name"
+deps_signature="$deps_archive.minisig"
+release_url="https://release.files.ghostty.org/libghostty-vt/$version"
+minisign_public_key=RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV
+
+# Both archives and both signatures are hash-pinned, then signature-verified
+# before extraction. Nix supplies these files in its offline build sandbox.
+sha256_check() {
+    local checksum="$1"
+    local file="$2"
+    if command -v sha256sum > /dev/null; then
+        printf '%s  %s\n' "$checksum" "$file" | sha256sum --check --status
+    else
+        printf '%s  %s\n' "$checksum" "$file" | shasum -a 256 --check --status
+    fi
+}
+fetch_pinned() {
+    local name="$1"
+    local destination="$2"
+    local checksum
+    checksum="$(awk -v file="$name" '$2 == file { print $1 }' "$root/scripts/libghostty-vt.sha256")"
+    [[ -n "$checksum" ]] || { printf 'no pinned checksum for %s\n' "$name" >&2; return 1; }
+    if [[ ! -f "$destination" ]]; then
+        local temporary
+        temporary="$(mktemp "$vt_tools/download.XXXXXX")"
+        if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "$release_url/$name" -o "$temporary"; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+        if ! sha256_check "$checksum" "$temporary"; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+        mv "$temporary" "$destination"
+    fi
+    sha256_check "$checksum" "$destination"
+}
+for asset in "$source_name" "$source_name.minisig" "$deps_name" "$deps_name.minisig"; do
+    case "$asset" in
+        "$source_name") destination="$source_archive" ;;
+        "$source_name.minisig") destination="$source_signature" ;;
+        "$deps_name") destination="$deps_archive" ;;
+        "$deps_name.minisig") destination="$deps_signature" ;;
+    esac
+    fetch_pinned "$asset" "$destination"
+done
+command -v minisign > /dev/null || { printf 'minisign is required to verify libghostty-vt releases\n' >&2; exit 1; }
+minisign -V -P "$minisign_public_key" -m "$source_archive" -x "$source_signature"
+minisign -V -P "$minisign_public_key" -m "$deps_archive" -x "$deps_signature"
+
+# Cargo features define separate, reproducible native archives. Input encoding
+# is present only for the explicit native mouse probe; shipping builds retain
+# the parser and the adapter while compiling every optional VT API feature out.
 optimize=ReleaseSafe
 [[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
-session_image="${CARGO_FEATURE_SESSION_IMAGE:-0}"
-shared_host=${CARGO_FEATURE_PROCESS_PER_USER:-}
-compact_history=${CARGO_FEATURE_COMPACT_HISTORY:-}
-key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/crates/infraternal-shim/native/session_log.zig" "$root/scripts/build-vt"; if [[ -n "$shared_host" ]]; then sha256sum "$root/crates/infraternal-shim/native/memory.zig"; fi; [[ -z "$compact_history" ]] || sha256sum "$root/crates/infraternal-shim/native/history.zig"; printf '%s %s %s %s %s %s\n' "$checksum" "$vt_target" "$optimize" "$session_image" "$shared_host" "$compact_history"; } | sha256sum | cut -d ' ' -f1)"
+shared_host="${CARGO_FEATURE_PROCESS_PER_USER:-}"
+compact_history="${CARGO_FEATURE_COMPACT_HISTORY:-}"
+session_image="${CARGO_FEATURE_SESSION_IMAGE:-}"
+test_input="${CARGO_FEATURE_VT_TEST_INPUT:-}"
+vt_features=-all
+[[ -z "$test_input" ]] || vt_features=-all,+input-encode
+strip=false
+[[ "$optimize" != ReleaseFast ]] || strip=true
+
+# Include every input that can alter native output so Cargo profiles and
+# feature combinations never race to install a different archive in one cache.
+key="$( {
+    sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" \
+        "$root/scripts/build-vt" "$root/scripts/patch-libghostty-vt.py"
+    if [[ -n "$shared_host" ]]; then
+        sha256sum "$root/crates/infraternal-shim/native/memory.zig"
+    fi
+    if [[ -n "$compact_history" ]]; then
+        sha256sum "$root/crates/infraternal-shim/native/history.zig"
+    fi
+    if [[ -n "$session_image" ]]; then
+        sha256sum "$root/crates/infraternal-shim/native/session_log.zig"
+    fi
+    printf '%s %s %s %s %s %s %s %s %s\n' \
+        "$(awk -v file="$source_name" '$2 == file { print $1 }' "$root/scripts/libghostty-vt.sha256")" \
+        "$(awk -v file="$deps_name" '$2 == file { print $1 }' "$root/scripts/libghostty-vt.sha256")" \
+        "$vt_target" "$optimize" "$strip" "$vt_features" "$shared_host" "$compact_history" "$session_image"
+} | sha256sum | cut -d ' ' -f1)"
 cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
 exec 9> "$cache_dir/lock"
 if command -v flock > /dev/null; then
     flock 9
 else
-    # macOS has flock(2) but no flock(1) (util-linux). The lock belongs to the
-    # open file description, so it stays held by this shell's descriptor 9
-    # after the short-lived locker exits.
+    # macOS has flock(2) but not flock(1). This descriptor keeps the lock after
+    # the short-lived Perl locker exits.
     perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or die "fd 9: $!"; flock($f, LOCK_EX) or die "flock: $!"'
 fi
+wire_static_link_dir() {
+    # Keep the pkg-config library directory intact while giving Cargo a path
+    # that cannot resolve libghostty-vt.dylib instead of our adapter archive.
+    local native_root="$1"
+    local link_dir="$native_root/static-link"
+    [[ -f "$native_root/lib/libghostty-vt.a" ]] || {
+        printf 'missing static libghostty-vt archive under %s\n' "$native_root" >&2
+        return 1
+    }
+    rm -rf -- "$link_dir"
+    mkdir -p "$link_dir"
+    ln -s ../lib/libghostty-vt.a "$link_dir/libghostty-vt.a"
+}
 if [[ -f "$cache_dir/native/lib/libghostty-vt.a" ]]; then
+    wire_static_link_dir "$cache_dir/native"
     rm -rf -- "$output/native"
     ln -s "$cache_dir/native" "$output/native"
     exit 0
 fi
-source_dir="$cache_dir/ghostty-source"
-if [[ ! -d "$source_dir" ]]; then
-    mkdir -p "$source_dir"
-    tar -xzf "$archive" --strip-components=1 -C "$source_dir"
-fi
+
+source_dir="$cache_dir/libghostty-vt-$version"
+deps_dir="$cache_dir/libghostty-vt-$version-deps"
+rm -rf -- "$source_dir" "$deps_dir" "$cache_dir/native"
+mkdir -p "$source_dir" "$deps_dir"
+tar -xzf "$source_archive" --strip-components=1 -C "$source_dir"
+tar -xzf "$deps_archive" --strip-components=1 -C "$deps_dir"
 cp "$root/crates/infraternal-shim/native/snapshot.zig" "$source_dir/src/infraternal_snapshot.zig"
-# Restore the exact upstream root before adding our three adapter exports.
-tar -xOf "$archive" "ghostty-$version/src/lib_vt.zig" > "$source_dir/src/lib_vt.zig"
-if [[ "$session_image" == 1 ]]; then
-    # The private executable uses only the callback-free Rust adapter. Do not
-    # expose setters that would appear to accept a callback while dropping it.
-    # Ordinary archives retain every upstream export and callback semantics.
-    cp "$root/crates/infraternal-shim/native/session_log.zig" "$source_dir/src/infraternal_session_log.zig"
-    sed -i '/\.name = "ghostty_sys_set"/d; /\.name = "ghostty_sys_log_stderr"/d; s|@import("terminal/c/sys.zig").logFn|@import("infraternal_session_log.zig").logFn|' "$source_dir/src/lib_vt.zig"
-fi
-cat >> "$source_dir/src/lib_vt.zig" <<'ZIG'
+cat >> "$source_dir/src/lib_vt.zig" <<'ZIG_SNAPSHOT'
 
 comptime {
     @export(&@import("infraternal_snapshot.zig").approximate, .{ .name = "infraternal_vt_approximate" });
     @export(&@import("infraternal_snapshot.zig").snapshot, .{ .name = "infraternal_vt_snapshot" });
     @export(&@import("infraternal_snapshot.zig").compare, .{ .name = "infraternal_vt_compare" });
 }
-ZIG
-# Shared hosts must account screen pools through the same per-terminal C
-# allocator as parser/style data. It supplies zero-filled page-aligned mappings.
-# The default artifact retains the pinned upstream page allocator unchanged.
+ZIG_SNAPSHOT
 if [[ -n "$shared_host" ]]; then
     cp "$root/crates/infraternal-shim/native/memory.zig" "$source_dir/src/infraternal_memory.zig"
-    cat >> "$source_dir/src/lib_vt.zig" <<'ZIG_EXPORT_SCREEN'
+    cat >> "$source_dir/src/lib_vt.zig" <<'ZIG_SCREEN'
 
 comptime {
     @export(&@import("infraternal_memory.zig").screenPages, .{ .name = "infraternal_vt_screen_pages" });
 }
-ZIG_EXPORT_SCREEN
-    page_list=src/terminal/PageList.zig
-    tar -xOf "$archive" "ghostty-$version/$page_list" > "$source_dir/$page_list"
-    python3 - "$source_dir/$page_list" <<'PY_LIMIT'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-source = path.read_text()
-assert source.count('        pageAllocator(),') == 2, 'native page-pool boundaries changed'
-path.write_text(source.replace('        pageAllocator(),', '        @import("../infraternal_memory.zig").pageAllocator(alloc),'))
-PY_LIMIT
-    # Standard pages otherwise hold 46,225 cells. The engine needs at least
-    # two such pages irrespective of a small history share, and slow output
-    # gradually makes that minimum resident. A smaller quantum keeps the
-    # existing page/reflow algorithms and exact cells with bounded overhead.
-    # One preheated item avoids reserving four unused pages on each screen.
-    tar -xOf "$archive" "ghostty-$version/src/terminal/page.zig" > "$source_dir/src/terminal/page.zig"
-    python3 - "$source_dir" <<'PY_PAGES'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-pages = root / 'src/terminal/PageList.zig'
-source = pages.read_text()
-assert source.count('const page_preheat = 4;') == 1, 'native pool preheat changed'
-source = source.replace('const page_preheat = 4;', 'const page_preheat = 1;')
-# The upstream pool carves items from a geometrically growing arena and
-# never returns them. Per-item storage keeps retained memory equal to the
-# live pages and lets growth reach the history share one item at a time.
-edits = [
-    ('const PagePool = std.heap.MemoryPoolAligned(',
-     'const PagePool = @import("../infraternal_memory.zig").PagePool('),
-    ('var node_pool = try NodePool.initPreheated(gen_alloc, preheat);',
-     'var node_pool = try NodePool.initPreheated(@import("../infraternal_memory.zig").structureAllocator(gen_alloc), preheat);'),
-    ('var page_pool = try PagePool.initPreheated(page_alloc, preheat);',
-     'var page_pool = try PagePool.initTracked(gen_alloc, page_alloc, preheat);'),
-    # Growth recycles the oldest history page when the session reservation
-    # cannot hold another item, instead of failing the write.
-    ('        self.page_size + PagePool.item_size > self.maxSize())\n    prune: {',
-     '        (self.page_size + PagePool.item_size > self.maxSize() or\n            !self.pool.pages.canCreate()))\n    prune: {'),
-    # Compression scratch is optional work: skip it when it does not fit
-    # rather than counting a refusal against the terminal's exact state.
-    ('        if (required <= std_size) {\n            const memory = try pool.pages.create();',
-     '        if (required <= std_size) {\n            if (!pool.pages.canCreate()) return error.OutOfMemory;\n            const memory = try pool.pages.create();'),
-    ('        const page_alloc = pool.pages.arena.child_allocator;\n        return .{ .allocated = try page_alloc.alignedAlloc(',
-     '        const page_alloc = pool.pages.arena.child_allocator;\n        if (!@import("../infraternal_memory.zig").fits(page_alloc, raw_len)) return error.OutOfMemory;\n        return .{ .allocated = try page_alloc.alignedAlloc('),
-]
-for before, after in edits:
-    assert source.count(before) == 1, 'native page pool boundary changed: ' + before
-    source = source.replace(before, after)
-# Reset zeroes retained items inside the pool; the arena walk has no arena.
-start = source.index('    // Our page pool relies on mmap to zero our page memory.')
-end = source.index('    // Initialize our pages. This should not be able to fail since')
-assert 'page_arena.state.buffer_list' in source[start:end], 'native reset zeroing changed'
-source = source[:start] + '    // The shared-host pool zeroes retained items in reset.\n\n' + source[end:]
-assert 'pages.arena.state' not in source, 'native pool arena use changed'
-pages.write_text(source)
-page = root / 'src/terminal/page.zig'
-source = page.read_text()
-before = 'pub const std_capacity: Capacity = .{\n    .cols = 215,\n    .rows = 215,'
-after = 'pub const std_capacity: Capacity = .{\n    .cols = 80,\n    .rows = 32,'
-assert source.count(before) == 1, 'native standard page capacity changed'
-page.write_text(source.replace(before, after))
-PY_PAGES
-    # A refused allocation can stop a reflow half way: the page list is then
-    # partly rebuilt and the cursor still pins a page the reflow freed. The
-    # upstream resize reloads the cursor style and untracks the saved cursor
-    # in defers that also run on that error path, so they read the freed page
-    # (decoded as garbage and written out of bounds) before the error returns.
-    # Shared hosts retire the whole engine on any resize error without
-    # walking it [D270, #205], so on error those defers must not run at all.
-    tar -xOf "$archive" "ghostty-$version/src/terminal/Screen.zig" > "$source_dir/src/terminal/Screen.zig"
-    tar -xOf "$archive" "ghostty-$version/src/terminal/compress/lz4.zig" > "$source_dir/src/terminal/compress/lz4.zig"
-    python3 - "$source_dir" <<'PY_RESIZE'
-from pathlib import Path
-import sys
-root = Path(sys.argv[1])
-screen = root / 'src/terminal/Screen.zig'
-source = screen.read_text()
-edits = [
-    ('    self.manualStyleUpdate() catch unreachable;\n    defer {\n        // Restore the cursor style.\n',
-     '    self.manualStyleUpdate() catch unreachable;\n    var resize_failed = false;\n    defer restore: {\n        if (resize_failed) break :restore;\n        // Restore the cursor style.\n'),
-    ('    defer if (saved_cursor_pin) |p| self.pages.untrackPin(p);\n',
-     '    defer if (!resize_failed) if (saved_cursor_pin) |p| self.pages.untrackPin(p);\n'
-     '    // Declared after both defers so it runs first on any error below.\n'
-     '    errdefer resize_failed = true;\n'),
-]
-for before, after in edits:
-    assert source.count(before) == 1, 'native screen resize boundary changed: ' + before
-    source = source.replace(before, after)
-screen.write_text(source)
-# Pages here hold 80x32 cells, so a row wider than 80 columns fits fewer
-# rows per page: widening a full history to 133 columns needs ~1.7x its
-# bytes, at 400 columns ~5x, and the reflow allocates all of it before
-# any prune. That crossed the session reservation and refused the resize.
-# Before a wider resize, drop the oldest whole history pages that the new
-# width could not keep within the history share; prune would drop them on
-# the next output anyway. Only node metadata is read.
-pages = root / 'src/terminal/PageList.zig'
-source = pages.read_text()
-call_before = '    self.page_compression.reset();\n    self.page_compression.markActivity();\n\n    if (comptime std.debug.runtime_safety) {\n'
-call_after = '    self.page_compression.reset();\n    self.page_compression.markActivity();\n    if (opts.cols) |cols| self.trimHistoryForCols(cols, opts.rows orelse self.rows, opts.reflow);\n\n    if (comptime std.debug.runtime_safety) {\n'
-anchor = '/// Resize the pagelist with reflow by adding or removing columns.\nfn resizeCols(\n'
-trim = '''/// Shared-host history bound for a wider geometry [D270, #205]. Whole
-/// pages from the oldest end only, never a page with active rows, so
-/// tracked pins and the cursor keep their rows.
-fn trimHistoryForCols(self: *PageList, cols: size.CellCountInt, new_rows: size.CellCountInt, reflow: bool) void {
-    if (cols <= self.cols) return;
-    // The destination viewport can pull its newest rows out of history before
-    // the upstream resize recomputes min_max_size, so size against its geometry.
-    const max = @max(self.explicit_max_size, minMaxSize(cols, new_rows));
-    // Cheap metadata bound first: every row kept, none unwrapped. It holds
-    // for most resizes, which then read no page memory at all.
-    var bound: usize = 0;
-    var it = self.pages.first;
-    while (it) |node| : (it = node.next) bound +|= widenedNodeBytes(node, cols);
-    if (bound <= max) return;
-    const history = self.total_rows - self.rows;
-    // A taller viewport consumes the newest history rows. They are part of
-    // the visible screen after resize and are never eligible for trimming.
-    const keep_history = if (new_rows > self.rows) new_rows - self.rows else 0;
-    const droppable_history = history -| keep_history;
-    var erase: usize = 0;
-    if (!reflow) {
-        // Without reflow every page is copied on its own, as the bound counts.
-        it = self.pages.first;
-        while (it) |node| : (it = node.next) {
-            if (bound <= max or erase + node.rows() > droppable_history) break;
-            erase += node.rows();
-            bound -|= widenedNodeBytes(node, cols);
-        }
-    } else {
-        // Reflow packs unwrapped lines into pages of the first page's shape.
-        const shape = widenedShape(self.pages.first.?.capacity(), cols);
-        var line: usize = 0;
-        var rows: usize = 0;
-        it = self.pages.first;
-        while (it) |node| : (it = node.next) rows += reflowedRows(node, cols, &line);
-        rows += lineRows(line, cols);
-        line = 0;
-        it = self.pages.first;
-        while (it) |node| : (it = node.next) {
-            const bytes = (std.math.divCeil(usize, rows, shape.rows) catch unreachable) * shape.bytes;
-            if (bytes <= max or erase + node.rows() > droppable_history) break;
-            erase += node.rows();
-            rows -|= reflowedRows(node, cols, &line);
-        }
-    }
-    if (erase == 0) return;
-    // Never keep the tail of a line whose head is gone: the orphaned rows
-    // would reflow as a line of their own. If completing that line would
-    // consume rows reserved for the new viewport, keep the whole line.
-    if (self.pin(.{ .history = .{ .y = @intCast(erase - 1) } })) |last| {
-        var boundary = last;
-        var next = boundary.down(1);
-        while (next) |p| {
-            if (!p.rowAndCell().row.wrap_continuation) break;
-            if (erase >= droppable_history) {
-                var line_start = boundary;
-                var line_rows: usize = 1;
-                while (line_start.rowAndCell().row.wrap_continuation) {
-                    const previous = line_start.up(1) orelse break;
-                    line_start = previous;
-                    line_rows += 1;
-                }
-                erase -|= line_rows;
-                break;
-            }
-            erase += 1;
-            boundary = p;
-            next = p.down(1);
-        }
-    }
-    if (erase == 0) return;
-    self.eraseHistory(.{ .history = .{ .y = @intCast(erase - 1) } });
-}
-
-const WidenedShape = struct { rows: usize, bytes: usize };
-
-/// Rows per page and bytes per page once `capacity` is `cols` wide, as
-/// reflow and the no-reflow copy allocate them: pool items or heap pages.
-fn widenedShape(capacity: Capacity, cols: size.CellCountInt) WidenedShape {
-    const cap = capacity.adjust(.{ .cols = cols }) catch wide: {
-        var cap = capacity;
-        cap.cols = cols;
-        cap.rows = @max(1, @min(capacity.rows, std_capacity.rows));
-        break :wide cap;
-    };
-    const total = Page.layout(cap).total_size;
-    return .{ .rows = cap.rows, .bytes = if (total <= std_size) PagePool.item_size else total };
-}
-
-fn widenedNodeBytes(node: *const List.Node, cols: size.CellCountInt) usize {
-    const capacity = node.capacity();
-    if (capacity.cols >= cols) return switch (node.owned) {
-        .pool => PagePool.item_size,
-        .heap => node.metadata().memory.len,
-    };
-    const shape = widenedShape(capacity, cols);
-    return (std.math.divCeil(usize, node.rows(), shape.rows) catch unreachable) * shape.bytes;
-}
-
-/// Rows one logical line of `cells` takes at `cols`; blank lines keep a row.
-fn lineRows(cells: usize, cols: size.CellCountInt) usize {
-    return @max(1, std.math.divCeil(usize, cells, cols) catch unreachable);
-}
-
-/// Rows the lines ending in `node` take after reflow to `cols`. `line`
-/// carries the cells of a line that continues into the next node. Widths
-/// follow reflowRow: wrapped rows count in full, the last row of a line
-/// without its trailing blanks.
-fn reflowedRows(node: *List.Node, cols: size.CellCountInt, line: *usize) usize {
-    const page = node.page();
-    var rows: usize = 0;
-    for (page.rows.ptr(page.memory)[0..page.size.rows]) |*row| {
-        if (!row.wrap_continuation and line.* > 0) {
-            rows += lineRows(line.*, cols);
-            line.* = 0;
-        }
-        var used: usize = page.size.cols;
-        if (!row.wrap) {
-            const cells = page.getCells(row);
-            while (used > 0 and cells[used - 1].isEmpty()) used -= 1;
-        }
-        if (used == 0 and !row.wrap_continuation and line.* == 0) {
-            rows += 1;
-            continue;
-        }
-        line.* += used;
-    }
-    return rows;
-}
-
-'''
-for before, after in ((call_before, call_after), (anchor, trim + anchor)):
-    assert source.count(before) == 1, 'native resize boundary changed: ' + before
-    source = source.replace(before, after)
-pages.write_text(source)
-# Restoring cold pages decodes into a retained mapping. Keep the decoder's
-# bounds checks in release builds too: a damaged page then stops the
-# process instead of writing past its mapping into a neighbour's memory.
-lz4 = root / 'src/terminal/compress/lz4.zig'
-source = lz4.read_text()
-heads = [
-    'pub fn decompress(input: []const u8, output: []u8) DecompressError!usize {\n',
-    'fn copyMatch(output: []u8, op_: usize, offset: usize, match_len: usize) void {\n',
-]
-for head in heads:
-    assert source.count(head) == 1, 'native decoder boundary changed: ' + head
-    source = source.replace(head, head + '    @setRuntimeSafety(true);\n')
-for helper in ('readIntAt', 'writeIntAt', 'copyIntAt'):
-    start = source.index('inline fn ' + helper + '(')
-    body = source.index('{\n', start) + len('{\n')
-    assert source[start:body].count('{') == 1, 'native decoder helper changed: ' + helper
-    source = source[:body] + '    @setRuntimeSafety(true);\n' + source[body:]
-lz4.write_text(source)
-PY_RESIZE
+ZIG_SCREEN
 fi
 if [[ -n "$compact_history" ]]; then
     cp "$root/crates/infraternal-shim/native/history.zig" "$source_dir/src/infraternal_history.zig"
-    compressed_page=src/terminal/compress/Page.zig
-    tar -xOf "$archive" "ghostty-$version/$compressed_page" > "$source_dir/$compressed_page"
-    python3 - "$source_dir/$compressed_page" <<'PY_HISTORY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1]); source = path.read_text()
-source = source.replace('encoded: []u8,', 'encoded: []u8,\ntext_runs: bool = false,')
-start = source.index('    const encoded_len = lz4.compress(')
-end = source.index('\n    // requiredScratch already', start)
-fallback = source[start:end].replace('    const encoded_len = ', '        break :fallback ')
-source = source[:start] + '''    var text_runs = true;
-    const encoded_len = @import("../../infraternal_history.zig").encode(source, scratch[0..required], table) catch fallback: {
-        text_runs = false;
-''' + fallback + '''
-    };
-    const encoded_allocator = @import("../../infraternal_memory.zig").historyAllocator(alloc);
-''' + source[end:]
-source = source.replace('.encoded = try alloc.dupe(u8, scratch[0..encoded_len]),', '.encoded = try encoded_allocator.dupe(u8, scratch[0..encoded_len]),\n        .text_runs = text_runs,')
-source = source.replace('.alloc = alloc,', '.alloc = encoded_allocator,')
-before = '    _ = try lz4.decompress(self.encoded, result.memory);'
-assert source.count(before) == 2, 'native compressed restore boundaries changed'
-source = source.replace(before, '''    if (self.text_runs) {
-        @import("../../infraternal_history.zig").decode(self.encoded, &self.page, result.memory) catch return error.InvalidOffset;
-    } else {
-        _ = try lz4.decompress(self.encoded, result.memory);
-    }''')
-path.write_text(source)
-PY_HISTORY
-    cat > "$source_dir/src/infraternal_history_driver.zig" <<'ZIG_HISTORY'
-//! Drives bounded cold-page compression only during explicit terminal activity [D81/D270].
-const c = @import("terminal/c/terminal.zig");
-const lib = @import("terminal/lib.zig");
-pub fn compact(handle: c.Terminal, full: bool) callconv(lib.calling_conv) void {
-    const terminal = c.zigTerminal(handle) orelse return;
-    inline for (.{ .primary, .alternate }) |key| {
-        if (terminal.screens.get(key)) |screen| {
-            _ = screen.pages.compress(if (full) .full else .incremental);
-        }
-    }
-}
-ZIG_HISTORY
-    cat >> "$source_dir/src/lib_vt.zig" <<'ZIG_EXPORT_HISTORY'
+    # The optional experiment needs an internal PageList compression step;
+    # the stable C API exposes neither cold pages nor a compact-history call.
+    cat >> "$source_dir/src/lib_vt.zig" <<'ZIG_HISTORY'
 
 comptime {
-    @export(&@import("infraternal_history_driver.zig").compact, .{ .name = "infraternal_vt_compact" });
+    @export(&@import("infraternal_history.zig").compact, .{ .name = "infraternal_vt_compact" });
 }
-ZIG_EXPORT_HISTORY
+ZIG_HISTORY
 fi
-# Keep every upstream API in the archive, but let the final static link discard
-# APIs the shim never calls. One monolithic section otherwise retains input
-# encoders, formatters and render-state helpers with the terminal engine [243].
-# Restore the pinned build definition before adjusting its section layout, so
-# retries cannot accumulate edits in the native source cache.
-build_definition=src/build/GhosttyLibVt.zig
-tar -xOf "$archive" "ghostty-$version/$build_definition" > "$source_dir/$build_definition"
-sed -i '/lib.bundle_compiler_rt = true;/a\
-        lib.link_function_sections = true;\
-        lib.link_data_sections = true;' "$source_dir/$build_definition"
-# The final release executable is already stripped. Tell native compilation
-# the same fact, avoiding its source-symbol reader in that distribution. Native
-# panic messages remain, but raw stack-address/external-symbol fallback is lost.
-# Keep development diagnostics, frame-pointer and unwind settings unchanged [5,243].
-if [[ "$optimize" == ReleaseFast ]]; then
-    sed -i '/lib.bundle_compiler_rt = true;/a\
-        lib.root_module.strip = true;' "$source_dir/$build_definition"
+if [[ -n "$session_image" ]]; then
+    cp "$root/crates/infraternal-shim/native/session_log.zig" "$source_dir/src/infraternal_session_log.zig"
 fi
-# The pinned recipe configures benchmark executables even when they are not
-# installed. Their full app graph fetches GUI dependencies on native macOS.
-# Configure only the requested artifacts; the VT modules and SIMD stay intact.
-# Restore first so retries always apply this adjustment to the pinned source.
-tar -xOf "$archive" "ghostty-$version/build.zig" > "$source_dir/build.zig"
-python3 - "$source_dir/build.zig" <<'PY_BENCH'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-source = path.read_text()
-before = '''    const bench = try buildpkg.GhosttyBench.init(b, &deps);
-    if (config.emit_bench) bench.install();'''
-after = '''    if (config.emit_bench) {
-        const bench = try buildpkg.GhosttyBench.init(b, &deps);
-        bench.install();
-    }'''
-assert source.count(before) == 1, 'native benchmark configuration boundary changed'
-path.write_text(source.replace(before, after))
-PY_BENCH
-# Baseline CPU keeps distributed binaries valid on hosts older than the builder.
-# ReleaseSafe retains bounds checks in development; release uses ReleaseFast.
+python3 "$root/scripts/patch-libghostty-vt.py" "$source_dir" "$shared_host" "$compact_history" "$session_image"
+
+# The release graph gates benchmark artifacts upstream, but its static library
+# has no per-function/data sections for final-link garbage collection. Restore
+# those sections for every build. Private session images have no C log callback
+# consumer, so the patcher also uses a no-op sink for those images only.
+# --system plus a fresh global cache keeps the Zig package build offline and
+# proves it used only the signed dependency tarball.
+global_cache="$cache_dir/zig-global-cache"
+rm -rf -- "$global_cache"
+mkdir -p "$global_cache"
 cd "$source_dir"
-"$zig" build -j2 -Demit-lib-vt=true -Doptimize="$optimize" -Dcpu=baseline \
-    -Dtarget="$vt_target" -Demit-xcframework=false -Dapp-runtime=none \
-    --prefix "$cache_dir/native" --cache-dir "$cache_dir/zig-cache" \
-    --global-cache-dir "$vt_tools/zig-cache"
-# The shim links only the static archive. Zig also installs a shared library,
-# and macOS's linker prefers it to the archive for -lghostty-vt (there is no
-# -Bstatic), which would make binaries load @rpath/libghostty-vt.dylib.
-rm -f -- "$cache_dir"/native/lib/libghostty-vt*.dylib "$cache_dir"/native/lib/libghostty-vt.so*
+build_args=(
+    build -j2
+    -Demit-lib-vt=true
+    -Demit-xcframework=false
+    -Doptimize="$optimize"
+    -Dcpu=baseline
+    -Dtarget="$vt_target"
+    -Dvt-features="$vt_features"
+    -Dstrip="$strip"
+    --system "$deps_dir"
+    --prefix "$cache_dir/native"
+    --cache-dir "$cache_dir/zig-cache"
+)
+# Zig 0.17 reads the global cache location from the environment.
+ZIG_GLOBAL_CACHE_DIR="$global_cache" "$zig" "${build_args[@]}"
+wire_static_link_dir "$cache_dir/native"
+
+# The cache retains both release library forms; build.rs explicitly asks Cargo
+# to link the static archive used by the shim.
 rm -rf -- "$output/native"
 ln -s "$cache_dir/native" "$output/native"

@@ -10,6 +10,21 @@ release_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)
 release_public=https://builds.infraternal.com
 release_signer=https://infraternal-release-signer.mail-111.workers.dev
 release_api=https://api.cloudflare.com/client/v4
+# Keep the vendored engine's complete readable notice inventory in every new signed bundle.
+release_license_files=(
+    licenses/libghostty-vt/README.md
+    licenses/libghostty-vt/Unicode-3.0.txt
+    licenses/libghostty-vt/aro-MIT.txt
+    licenses/libghostty-vt/highway-Apache-2.0.txt
+    licenses/libghostty-vt/highway-BSD-3-Clause.txt
+    licenses/libghostty-vt/libghostty-vt-MIT.txt
+    licenses/libghostty-vt/simdutf-Apache-2.0.txt
+    licenses/libghostty-vt/simdutf-MIT.txt
+    licenses/libghostty-vt/translate_c-MIT.txt
+    licenses/libghostty-vt/uucode-MIT.txt
+    licenses/libghostty-vt/wuffs-Apache-2.0.txt
+    licenses/libghostty-vt/wuffs-MIT.txt
+)
 # Local stand-ins are explicit and loopback-only; production never relaxes HTTPS.
 if [[ -n "${RELEASE_TEST_ORIGIN:-}" ]]; then
     [[ "$RELEASE_TEST_ORIGIN" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || { printf 'invalid local test origin\n' >&2; exit 2; }
@@ -32,6 +47,9 @@ publication_version() {
 }
 verify_download() {
     local version="$1" directory="$2"
+    local license_names
+    printf -v license_names '%s ' "${release_license_files[@]}"
+    license_names=${license_names% }
     request '' --max-filesize 65536 "$release_public/releases/$version/SHA256SUMS" -o "$directory/SHA256SUMS"
     request '' --max-filesize 1024 "$release_public/releases/$version/SHA256SUMS.sig" -o "$directory/SHA256SUMS.sig"
     ssh-keygen -Y verify -f "$release_root/release/allowed_signers" -I release@infraternal.com \
@@ -39,11 +57,36 @@ verify_download() {
     # Only fixed bundle names are accepted, even in a trusted signed manifest.
     # Older signed releases may omit session images; advertised images are
     # mandatory downloads and must match their signed digests.
-    awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ || ($2 != "infraternal" && $2 != "infraternal-x86_64-musl" && $2 != "infraternal-aarch64-musl" && $2 != "infraternal-x86_64-session-musl" && $2 != "infraternal-aarch64-session-musl" && $2 != "proxy-traefik-darwin-amd64.json" && $2 != "proxy-traefik-darwin-arm64.json" && $2 != "proxy-traefik-linux-amd64.json" && $2 != "proxy-traefik-linux-arm64.json" && $2 != "VERSION") || seen[$2]++ { exit 1 } END { if (!seen["VERSION"] || !seen["infraternal-x86_64-musl"] || !seen["infraternal-aarch64-musl"] || !seen["proxy-traefik-darwin-amd64.json"] || !seen["proxy-traefik-darwin-arm64.json"] || !seen["proxy-traefik-linux-amd64.json"] || !seen["proxy-traefik-linux-arm64.json"]) exit 1 }' "$directory/SHA256SUMS" || { printf 'invalid release file list\n' >&2; return 1; }
+    awk -v license_files="$license_names" '
+        BEGIN {
+            expected_licenses = split(license_files, license_name, " ")
+            for (i = 1; i <= expected_licenses; i++) allowed_license[license_name[i]] = 1
+        }
+        {
+            if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/) exit 1
+            if (!($2 in allowed_license) && $2 != "infraternal" &&
+                $2 != "infraternal-x86_64-musl" && $2 != "infraternal-aarch64-musl" &&
+                $2 != "infraternal-x86_64-session-musl" && $2 != "infraternal-aarch64-session-musl" &&
+                $2 != "proxy-traefik-darwin-amd64.json" && $2 != "proxy-traefik-darwin-arm64.json" &&
+                $2 != "proxy-traefik-linux-amd64.json" && $2 != "proxy-traefik-linux-arm64.json" &&
+                $2 != "VERSION") exit 1
+            if (seen[$2]++) exit 1
+            if ($2 in allowed_license) license_count++
+        }
+        END {
+            if (!seen["VERSION"] || !seen["infraternal-x86_64-musl"] ||
+                !seen["infraternal-aarch64-musl"] || !seen["proxy-traefik-darwin-amd64.json"] ||
+                !seen["proxy-traefik-darwin-arm64.json"] || !seen["proxy-traefik-linux-amd64.json"] ||
+                !seen["proxy-traefik-linux-arm64.json"]) exit 1
+            if (license_count && license_count != expected_licenses) exit 1
+        }
+    ' "$directory/SHA256SUMS" || { printf 'invalid release file list\n' >&2; return 1; }
     while read -r digest name; do
         local limit=134217728
         [[ "$name" != VERSION ]] || limit=128
         [[ "$name" != proxy-traefik-* ]] || limit=65536
+        [[ "$name" != licenses/libghostty-vt/* ]] || limit=2097152
+        mkdir -p -- "$(dirname -- "$directory/$name")"
         request '' --max-filesize "$limit" "$release_public/releases/$version/$name" -o "$directory/$name"
     done < "$directory/SHA256SUMS"
     (cd "$directory" && sha256sum --strict --check SHA256SUMS)
