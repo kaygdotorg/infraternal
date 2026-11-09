@@ -1,6 +1,20 @@
 # License, advisory, source, and duplicate-version policy for the Rust graph.
 [advisories]
 version = 2
+# Time-limited exceptions. cargo-deny has no native expiry, so each entry states its date and
+# the owner must remove it (or renew it with a fresh analysis) by then.
+ignore = [
+    { id = "RUSTSEC-2026-0459", reason = """\
+EXPIRES 2026-12-09 (#473). SQLite < 3.54.0 can return uninitialized page-cache memory when a \
+database is opened together with a `-wal` file of a different page size. We bundle SQLite \
+through sqlx's `sqlite` feature (libsqlite3-sys 0.30.1). The patched libsqlite3-sys >= 0.39 \
+is outside what sqlx 0.8 (^0.30.1) and sqlx 0.9 (<0.38) accept, so fixing it means changing \
+the database driver: a foundational choice for the owner. Exposure: the server opens one \
+database, `<data>/infraternal.sqlite`, in a data folder it creates mode 0700 and owns; the \
+release CLI refuses a database that is not private, owned by the caller, regular and \
+single-link. No code opens a database or `-wal` file supplied by an untrusted party, and the \
+leaked bytes would only come back to a caller who already controls the data folder.""" },
+]
 
 [bans]
 multiple-versions = "warn"

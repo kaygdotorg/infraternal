@@ -217,8 +217,8 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   expect(paletteActions.sort()).toEqual([
     "session:current", "host:current", "bg:mesh", "bg:soft", "bg:none", ...[1, 2, 3, 4].flatMap((n) => [`card:${n}`, `windows:${n}`]), ...Object.keys(THEMES).map((id) => `theme:${id}`), ...FONTS.map((font) => `font:${font.id}`),
   ].sort());
-  // Superseded (TASTE: animation never gets in the way): a key-triggered open is a short 180 ms fade, never blocking input.
-  expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0.18s");
+  // Keyboard opens instantly (#427, owner 2026-11-08): a key-triggered open has no transition at all. keyboard-instant.spec.ts samples the frames.
+  expect(await palette.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe("0s");
   const previousMesh = await page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"));
   await page.locator("#palette-input").fill("dracula");
   await expect(page.getByRole("option", { name: /Dracula/ })).toBeVisible();

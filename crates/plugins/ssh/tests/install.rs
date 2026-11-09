@@ -735,6 +735,103 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
     }
 }
 
+/// Whether `/proc/locks` shows a process blocked waiting for a lock on `inode`
+/// (a line with `->`), meaning the commit shell is queued behind the holder.
+#[cfg(target_os = "linux")]
+fn lock_waiter_on(inode: u64) -> bool {
+    let suffix = format!(":{inode} ");
+    std::fs::read_to_string("/proc/locks")
+        .unwrap()
+        .lines()
+        .any(|line| line.contains("->") && line.contains(&suffix))
+}
+
+/// A starting infraternal agent takes a short shared lock on the installation's
+/// parent (`runtime_lock::acquire_bound`) while setup commands still run, so
+/// any guarded command can meet it; here the commit after terminal proof. The
+/// command must wait out such a holder within its budget instead of refusing a
+/// finished install as "setup is already running" (#439), and must still
+/// refuse a holder that outlasts it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn commit_waits_for_a_brief_shared_holder_and_refuses_a_long_one() {
+    use infraternal_plugin_ssh::model::FailureKind;
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::fs::MetadataExt;
+    for release_while_waiting in [true, false] {
+        let fixture = Fixture::new();
+        let install = Installation::new(
+            Arc::new(Compound(Local {
+                root: fixture.root.clone(),
+            })),
+            &fixture.target,
+            &fixture.join,
+        )
+        .unwrap();
+        install.stage(&fixture.binary).await.unwrap();
+        install.setup(&fixture.join).await.unwrap();
+        let stage = fixture.base().join(".bootstrap-lock");
+        let (release, receiver) = tokio::sync::oneshot::channel();
+        let pending = install.commit_after(receiver, None);
+        tokio::pin!(pending);
+        tokio::select! {
+            result = &mut pending => panic!("commit preceded proof: {result:?}"),
+            result = tokio::time::timeout(INSTALL_HANG, async {
+                while !fixture.root.join("commit-admitted").exists() {
+                    // sleep: poll for the admission marker under the INSTALL_HANG guard.
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }) => { result.unwrap(); }
+        }
+        // The holder takes the same shared lock a starting session takes and
+        // keeps it until its stdin closes.
+        let parent = fixture.base().parent().unwrap().to_owned();
+        let inode = std::fs::metadata(&parent).unwrap().ino();
+        let mut holder = std::process::Command::new("flock")
+            .arg("-s")
+            .arg(&parent)
+            .args(["sh", "-c", "echo ready; exec cat >/dev/null"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        let mut holder_stdin = holder.stdin.take();
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(INSTALL_HANG, async {
+            loop {
+                tokio::select! {
+                    result = &mut pending => break result,
+                    // sleep: poll /proc/locks for the queued commit; outcome never depends on timing.
+                    () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                        // Release only once the commit is provably queued on the lock.
+                        if release_while_waiting && holder_stdin.is_some() && lock_waiter_on(inode) {
+                            drop(holder_stdin.take());
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(holder_stdin);
+        holder.wait().unwrap();
+        if release_while_waiting {
+            result.unwrap();
+            assert!(!stage.exists());
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind, FailureKind::SetupRunning, "{error:?}");
+            assert!(stage.join("activating").exists());
+            install.rollback().await.unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn compound_setup_keeps_owned_rollback_and_linger_warning() {
     let fixture = Fixture::new();

@@ -9,7 +9,8 @@
  * so the shape reads as one), and the content fades in only after the shape has settled. Close
  * reverses the same spring from wherever it is, so it can be interrupted either way. At rest no
  * clip, no transform and no opacity is left on anything (crisp text). Reduced motion: a
- * crossfade, no shape travel.
+ * crossfade, no shape travel. Opened or closed from the keyboard (`?`, ⌘/, Escape), the panel has no motion at all (#427,
+ * input-source.ts): it is whole in the first frame and gone in the first frame, with no spring, fade or shadow glide.
  *
  * Toggling is idempotent and never leaves a shell behind: opening while the close is still playing takes the panel that
  * is on screen and runs the same spring back from where it is (one panel at a time, the only one ever mounted), and a
@@ -20,6 +21,7 @@
  * (shortcuts.ts): current area first, then global, one shortcut per action for this platform.
  */
 import { Spring } from "./spring";
+import { markMotion } from "./input-source";
 import { comboLabel, isOverridden, isTypingTarget, keyCaps, shortcutSections } from "./shortcuts";
 /** Re-exported for callers that already import the view: true for keystrokes that belong to a field or terminal. */
 export { isTypingTarget } from "./shortcuts";
@@ -152,7 +154,9 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     openState = false;
     controller?.abort();
     controller = undefined;
-    if (instant || !panel) { spring.set(0, true); finishClose(); return; }
+    // The pill's own opacity fade follows the same answer as the panel: a key brings the pill back at once.
+    const byKey = markMotion(pill);
+    if (instant || !panel || byKey) { spring.set(0, true); finishClose(); return; }
     if (reduced.matches) {
       const node = panel;
       pill.style.opacity = "";
@@ -194,13 +198,14 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
   const open = (): void => {
     if (openState) return;
     openState = true;
+    const byKey = markMotion(pill);
     listen();
     if (panel) {
       // The close is still playing: reverse it, on the panel that is there. A second panel would leave the first one
       // behind, half clipped and without content.
       for (const animation of panel.getAnimations()) animation.cancel();
       pill.style.pointerEvents = "none";
-      if (reduced.matches) { pill.style.opacity = "0"; panel.style.opacity = ""; spring.set(1, true); return; }
+      if (reduced.matches || byKey) { pill.style.opacity = "0"; panel.style.opacity = ""; spring.set(1, true); return; }
       spring.set(1);
       requestAnimationFrame(settle);
       return;
@@ -230,6 +235,7 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     pill.setAttribute("aria-expanded", "true");
     pill.style.pointerEvents = "none";
     panel.focus({ preventScroll: true });
+    if (byKey) { spring.set(1, true); return; }
     if (reduced.matches) {
       pill.style.opacity = "0";
       panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });

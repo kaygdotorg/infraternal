@@ -86,11 +86,12 @@ export class Picker {
   private active: string | undefined;
   private query = "";
 
+  /** Opens the New window popover under `anchor`. `source` only decides where focus goes; the popover reads the input source itself for its motion. */
   constructor(private readonly cx: Ctx, private readonly machines: Machines, anchor: HTMLElement, source: PopoverSource, private readonly choose: (choice: Choice, how: PopoverSource) => void, onClosed: () => void, initialQuery = "") {
     const { stage } = cx;
     this.popover = openAnchoredPopover({ stage, anchor, label: "New window", className: "cl-sx-pop aw-pop", align: "start", maxWidth: 400,
       // On a phone the key tray (and the canvas row it carries) sits at the foot of the screen: the card stops above it.
-      bottomLimit: () => { const tray = stage.querySelector<HTMLElement>("#keybar"); return tray && getComputedStyle(tray).display !== "none" ? tray.getBoundingClientRect().top - 8 : undefined; } }, source, () => { this.dispose(); onClosed(); });
+      bottomLimit: () => { const tray = stage.querySelector<HTMLElement>("#keybar"); return tray && getComputedStyle(tray).display !== "none" ? tray.getBoundingClientRect().top - 8 : undefined; } }, () => { this.dispose(); onClosed(); });
     const root = this.popover.root;
     root.innerHTML = `<header class="cl-sx-head aw-head"><span class="cl-sx-logo"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS.search}</svg></span><input class="aw-search" type="text" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="aw-list" placeholder="Search windows and machines" spellcheck="false" autocomplete="off" aria-label="Search windows and machines"></header><div class="cl-sx-scroll aw-list" id="aw-list" role="listbox" aria-label="Windows you can open"></div>`;
     this.input = root.querySelector<HTMLInputElement>(".aw-search")!;
@@ -105,7 +106,7 @@ export class Picker {
       if (found) this.choose(found.choice, e.detail === 0 ? "keyboard" : "pointer");
     });
     // The canvas moving under it ends it: the card belongs to the screen position it opened at.
-    cx.viewport.addEventListener("wheel", () => this.popover.close("pointer"), { passive: true, signal: this.life.signal });
+    cx.viewport.addEventListener("wheel", () => this.popover.close(), { passive: true, signal: this.life.signal });
     const off = machines.onChange(() => this.render());
     this.life.signal.addEventListener("abort", off, { once: true });
     this.stopPoll = machines.poll();
@@ -115,7 +116,7 @@ export class Picker {
   }
 
   /** Closes the popover; `source` says whether the pointer or the keyboard caused it, so focus returns sensibly. */
-  close(source: PopoverSource): void { this.popover.close(source); }
+  close(): void { this.popover.close(); }
   private dispose(): void { this.life.abort(); this.stopPoll(); }
 
   private find(id: string): Row | undefined { return this.all().find((r) => r.id === id); }

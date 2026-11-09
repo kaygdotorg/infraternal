@@ -7,12 +7,12 @@
  */
 import { createPillMorph, type PillMorph } from "../../../../../packages/ui/src/pill-morph";
 import { keyCaps, PALETTE_KEYS } from "../../../../../packages/ui/src/shortcuts";
-import { isMacPlatform } from "../../../../../packages/ui/src/platform";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import { viewIcon } from "../views/icons";
 import { viewKeys, type ViewList } from "./viewlist";
 
+/** Builds the view list: the views with their keys, morphed out of the top pill; its last row opens the whole palette directly. */
 export function createViewListPanel(cx: Ctx): ViewList {
   const { stage, state, views } = cx;
   let morph: PillMorph | undefined;
@@ -51,7 +51,8 @@ export function createViewListPanel(cx: Ctx): ViewList {
     foot.type = "button";
     foot.innerHTML = '<span class="cl-viewrow-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="9" cy="9" r="5.5"/><path d="m13 13 3.5 3.5"/></svg></span><span class="cl-viewrow-name">Search everything</span><span class="cl-viewrow-keys"></span>';
     for (const cap of keyCaps(PALETTE_KEYS)) (foot.querySelector(".cl-viewrow-keys") as HTMLElement).append(el("kbd", "", cap));
-    foot.addEventListener("click", () => { close(true); document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true })); });
+    // Opens the palette directly (not by faking its chord), so a click animates like any pointer open.
+    foot.addEventListener("click", () => { close(true); cx.core.showPalette(); });
     panel.append(list, foot);
     morph = createPillMorph({ pill: capsule, stage, panel, content: [list, foot], width: 340, onClosed: () => { abort?.abort(); } });
     abort = new AbortController();

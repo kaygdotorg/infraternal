@@ -16,6 +16,7 @@ export interface SessionScenes {
   dispose(): void;
 }
 
+/** Installs the mock session scenes for the specs: their inventory, the Console rebuild hook and the sessions mockup actions. */
 export function installSessionScenes(env: { cx: Ctx; inventory: MockInventory; /** Rebuilds Console from the test double and flies to it. */ rebuild(): void }): SessionScenes {
   const { cx, inventory } = env;
   const timers = new Set<number>();
@@ -28,7 +29,7 @@ export function installSessionScenes(env: { cx: Ctx; inventory: MockInventory; /
     if (!rec) return undefined;
     cx.win.setActive(rec);
     cx.nav.focusWindow(rec);
-    later(() => cx.sessionUi?.toggleManager(rec, anchor, "pointer"), settle);
+    later(() => cx.sessionUi?.toggleManager(rec, anchor), settle);
     return rec;
   };
   const reset = (): void => {

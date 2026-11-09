@@ -11,7 +11,6 @@
  *   fetches the same code fails silently (#249).
  */
 import { onDemand, whenIdle } from "../../on-demand";
-import type { PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
 import type { SessionUiPart } from "./session-ui.on-demand";
@@ -22,7 +21,7 @@ export interface SessionUi {
   /** Brings a window's own surfaces (final-screen strip, size badge, status dot) in line with its session. */
   paint(rec: WinRec): void;
   /** Touch headers omit Sessions; an absent anchor uses the existing window pill. */
-  toggleManager(rec: WinRec, anchor: HTMLElement | null | undefined, source: PopoverSource): void;
+  toggleManager(rec: WinRec, anchor: HTMLElement | null | undefined): void;
   closeManager(): void;
   /** A window was pointed at another session: its name slides in and its frame lights up. */
   arrived(rec: WinRec): void;
@@ -91,12 +90,12 @@ export function createSessionHooks(cx: Ctx): SessionUi {
 
   return {
     paint,
-    toggleManager(rec, anchor, source) {
+    toggleManager(rec, anchor) {
       if (!canManage(rec)) return;
       // Keep all manager entry points usable when the touch header has only Close.
       const resolvedAnchor = anchor ?? rec.card.pill;
-      if (part) { part.toggleManager(rec, resolvedAnchor, source); return; }
-      void loadForUser().then((p) => { if (p && resolvedAnchor.isConnected && canManage(rec)) p.toggleManager(rec, resolvedAnchor, source); });
+      if (part) { part.toggleManager(rec, resolvedAnchor); return; }
+      void loadForUser().then((p) => { if (p && resolvedAnchor.isConnected && canManage(rec)) p.toggleManager(rec, resolvedAnchor); });
     },
     closeManager() { part?.closeManager(); },
     arrived(rec) { part?.arrived(rec); },

@@ -32,6 +32,7 @@ import { RecentList } from "../recency";
 let moveChunk: Promise<typeof import("./move.on-demand")> | undefined;
 const loadMove = (): Promise<typeof import("./move.on-demand")> => (moveChunk ??= onDemand(() => import("./move.on-demand")));
 
+/** Builds one window card for model `m` in view `c`, with its header actions, session pill and body. */
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const actions: WindowAction[] = [];
   const rec: WinRec = {} as WinRec;
@@ -51,7 +52,7 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   }
   // The session manager sits beside the splits when the canvas has an inventory (D127); a team layout's windows are read-only.
   if (m.kind === "terminal" && !m.noAccess && cx.adapters.inventory && header) {
-    actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
+    actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement) });
   }
   if (m.kind !== "node" && m.kind !== "settings" && m.kind !== "docs" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
   // "Read about this window" comes first when the docs adapter has something to say about the window (#304, D317: a Settings window's

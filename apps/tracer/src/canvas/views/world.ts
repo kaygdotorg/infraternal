@@ -14,6 +14,7 @@
  * - Views sit on the cell grid and never overlap (`resolve`).
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { Ctx, ViewRec } from "../context";
 import { columnEls, setColumnWidth } from "../layout/column-els";
 import { MARGIN, boxOf, contentSize, defaultWidth, isDefaultWidth, resolve, type Box, type Metrics, type Rect } from "../layout/geometry";
@@ -60,6 +61,7 @@ export interface ViewsModule {
   dispose(): void;
 }
 
+/** Makes the views module for the canvas `cx`: builds each view, lays them out in the world and keeps them from overlapping. */
 export function createViews(cx: Ctx): ViewsModule {
   const { viewport, world, overlay, signal, camera, state, views } = cx;
 
@@ -257,7 +259,9 @@ export function createViews(cx: Ctx): ViewsModule {
         if (c.view.home.x === p.x && c.view.home.y === p.y) delete c.view.home;
       }
       c.view.x = p.x; c.view.y = p.y;
-      c.sx.set(p.x, local); c.sy.set(p.y, local);
+      // A key (a window opened by a chord or a palette row widens its view) moves the neighbours at once; a drag or a tap glides them (#427).
+      const jump = local || triggeredByKeyboard();
+      c.sx.set(p.x, jump); c.sy.set(p.y, jump);
     }
   }
 

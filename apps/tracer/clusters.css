@@ -32,8 +32,10 @@
 .cl-region {
   position: absolute; border-radius: 1.75rem; border: 1px solid var(--overlay-line);
   background: color-mix(in oklab, var(--fg) 3%, transparent);
-  opacity: 0; pointer-events: none; transition: opacity var(--t-panel) var(--ease-out, ease-out);
+  opacity: 0; pointer-events: none; transition: opacity calc(var(--t-panel) * var(--ui-motion-scale, 1)) var(--ease-out, ease-out);
 }
+/* The world is marked (camera.ts, markMotion) when the zoom band flips; --ui-motion-scale does not inherit, so the regions take it from there. */
+.cl-world[data-motion="instant"] .cl-region { --ui-motion-scale: 0; }
 .cl-world[data-zoom="out"] .cl-region { opacity: 1; pointer-events: auto; cursor: pointer; }
 
 /* The label keeps a readable size at any zoom: --label-inv is 1 / zoom (clamped), applied with the

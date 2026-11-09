@@ -13,9 +13,10 @@
  * close it. Focus returns to whatever opened it.
  *
  *   const settings = createSettingsOverlay({ stage, sections: [aboutSection(info)] });
- *   settings.open("about", "pointer");
+ *   settings.open("about");
  */
 import type { KeyValueRow } from "./kv-list";
+import { triggeredByKeyboard } from "./input-source";
 import { EASE_OUT } from "./motion";
 
 /** One entry of the settings list: a stable `id`, the `title`, an `icon` and `render`, which fills the pane and may return a function that cleans up when the pane closes. */
@@ -33,11 +34,11 @@ export interface SettingsOverlayOptions {
   sections: SettingsSection[];
 }
 
-/** The handle returned by {@link createSettingsOverlay}. `open` falls back to the first section for an unknown id; `source` says whether the keyboard or the pointer asked, because keyboard changes skip the animation. */
+/** The handle returned by {@link createSettingsOverlay}. `open` falls back to the first section for an unknown id; whether it animates is read from the input source (input-source.ts) when it opens or closes: a key skips the animation (#427). */
 export interface SettingsOverlay {
   readonly isOpen: boolean;
-  open(section: string, source: "pointer" | "keyboard"): void;
-  close(source: "pointer" | "keyboard"): void;
+  open(section: string): void;
+  close(): void;
   dispose(): void;
 }
 
@@ -108,18 +109,19 @@ export function createSettingsOverlay(options: SettingsOverlayOptions): Settings
     restore = null;
   };
 
-  const close = (source: "pointer" | "keyboard"): void => {
+  const close = (): void => {
     const node = root;
     if (!node || controller === undefined) return;
     controller.abort();
     controller = undefined;
-    if (source === "keyboard") { teardown(); return; }
+    // A key closes it at once; a click or tap fades it. The input source is read here, when it closes (input-source.ts, #427).
+    if (triggeredByKeyboard()) { teardown(); return; }
     node.style.pointerEvents = "none";
     node.animate(reduced.matches ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.98)" }],
       { duration: 130, easing: EASE_OUT, fill: "forwards" }).onfinish = () => { if (root === node) teardown(); };
   };
 
-  const open = (sectionId: string, source: "pointer" | "keyboard"): void => {
+  const open = (sectionId: string): void => {
     const section = sections.find((entry) => entry.id === sectionId) ?? sections[0];
     if (!section) return;
     if (root) { controller?.abort(); teardown(); }
@@ -151,18 +153,18 @@ export function createSettingsOverlay(options: SettingsOverlayOptions): Settings
     root = card;
     controller = new AbortController();
     const { signal } = controller;
-    card.querySelector(".ui-settings-close")!.addEventListener("click", () => close("pointer"), { signal });
+    card.querySelector(".ui-settings-close")!.addEventListener("click", () => close(), { signal });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
-      close("keyboard");
+      close();
     }, { capture: true, signal });
     document.addEventListener("pointerdown", (event) => {
-      if (event.target instanceof Node && !card.contains(event.target) && !(event.target as Element).closest?.(".tip, .ui-sidebar-foot")) close("pointer");
+      if (event.target instanceof Node && !card.contains(event.target) && !(event.target as Element).closest?.(".tip, .ui-sidebar-foot")) close();
     }, { capture: true, signal });
     card.focus({ preventScroll: true });
-    if (source === "pointer") {
+    if (!triggeredByKeyboard()) {
       card.animate(reduced.matches ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: "scale(0.96)" }, { opacity: 1, transform: "none" }],
         { duration: 200, easing: EASE_OUT });
     }

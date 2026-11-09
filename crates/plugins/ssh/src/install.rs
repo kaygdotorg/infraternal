@@ -945,6 +945,12 @@ fi
         })
     }
 
+    /// Wraps an installer command body so it runs under the shared setup guard.
+    ///
+    /// Every command this installation sends to the host goes through here: the
+    /// guard serializes it against any other setup of the same install root,
+    /// and the setup lease helpers become available to the body. The result is
+    /// then bound to this installation's mode, host and transaction.
     #[cold]
     #[inline(never)]
     fn script(&self, body: &str) -> String {
@@ -952,8 +958,9 @@ fi
         // Every new installer command takes this same directory lock. It leaves
         // no lock file and serializes admission, recovery and journal mutation.
         // A bounded lease holds the transaction directory across SSH command gaps. Its
-        // public PID/start-time receipt is not authority by itself: retirement also
-        // requires the process's inherited descriptor to refer to this exact directory.
+        // public PID/start-time receipt authorizes signalling only when its inherited
+        // descriptor refers to this exact directory. An exited, unreaped lease has
+        // no descriptors; retirement completes only after acquiring the journal flock.
         // Also detect a holder whose creation was interrupted before PID journaling.
         // Such an unrecorded lease expires at the same bounded setup deadline.
         let guarded = format!("{SETUP_LOCK}\nsetup_guard\n{body}");

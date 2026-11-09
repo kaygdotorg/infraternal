@@ -20,6 +20,7 @@ export interface ToolbarModule {
   dispose(): void;
 }
 
+/** Builds the canvas toolbar row (previous and next window, the four window actions, search, sessions and the rest) for the canvas `cx`. */
 export function createToolbar(cx: Ctx): ToolbarModule {
   const { stage, signal, state, core } = cx;
   const openPalette = (): void => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true })); };
@@ -55,7 +56,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   const openSessions = (): void => {
     const w = state.activeWin;
     const anchor = w?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
-    if (w && isTerminal(w)) cx.sessionUi?.toggleManager(w, anchor, "pointer");
+    if (w && isTerminal(w)) cx.sessionUi?.toggleManager(w, anchor);
   };
   const items: ToolbarItem[] = [
     { id: "search", label: "Search and actions", icon: ICONS.search, onSelect: openPalette },

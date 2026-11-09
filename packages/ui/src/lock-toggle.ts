@@ -138,6 +138,8 @@ const sweep = (): void => {
     const box = entry.root.getBoundingClientRect();
     const near = !!pointer && pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top - 16 && pointer.y <= box.top + NEAR;
     if (near !== entry.root.hasAttribute("data-lock-near")) {
+      // The pointer moved it, so the reveal keeps its fade even if a key made the window's last change instant (#427).
+      entry.root.setAttribute("data-motion", "animate");
       entry.root.toggleAttribute("data-lock-near", near);
     }
   }

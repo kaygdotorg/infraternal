@@ -723,6 +723,51 @@ failed without writing an input, or a report that could not be filed).
 need root). A `--budget-seconds 36` run of `nightly-fuzz.py` exercises all
 targets for one second each; it is a smoke check, not an hour of fuzzing.
 
+### Nightly browser suite (D373, #443)
+
+The full tracer browser suite (the browser phase of `verify_latency`) runs
+every night on the latest origin/dev on dev-02, so job gates stay fast. The
+timer fires at 05:00 IST (up to fifteen minutes of jitter), three hours after
+the fuzz, and takes one of the build slots like any other run. Everything is
+`scripts/nightly-browser-suite.py` (`run` and `report`), a root-owned helper
+`scripts/nightly-browser-suite-service`, and `scripts/install-nightly-browser-suite`
+(needs the fuzz install and its token first).
+
+**Who runs what:** the suite runs unreviewed dev code, so it runs as the
+token-less `infraternal-browser` account (`/var/lib/infraternal-browser`, mode
+0700, checkout moved to origin/dev each night, `nice -n 10`, own test port
+4731). Everything that account writes is hostile data. After the run, the
+root helper opens the run folder and its three result files without following
+links, accepts only regular files owned by that account under a size cap, and
+copies them into a staging folder owned by the token account. Only the
+root-owned, reviewed copy of the reporter runs in the `infraternal-fuzz`
+account, on the staged copies; it never opens a path the suite controls.
+
+**Reports:** one issue per failing spec file, found by a hidden marker (a hash
+of the name) in issues written by the token's own account, so a persistent red
+is one issue. It carries the dev SHA, the error text, a log tail and the
+evidence path (the newest seven nights are kept under
+`/var/lib/infraternal-browser/runs/`), all inside a code fence no content can
+close, with test titles inside it too. At most ten new issues a night and
+thirty open at once: more, or a mostly red suite (a dead test
+server), becomes one roll-up issue. A spec that passes again gets one comment,
+and a later regression one more; issues are never closed. A build or suite
+that cannot run at all fails the unit and opens no spec issue.
+Time budgets: the wait for a build slot is bounded on its own (12 h; exit 75 and one
+`QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 6 h
+budget (`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot
+is granted; the unit's `TimeoutStartSec=24h` is just a backstop.
+`sudo systemctl start infraternal-browser-suite.service` is a manual run; the
+reporter's test is the `nightly browser suite reporter` gate row.
+
+**Install or update** (as root, only from a reviewed commit; the installer
+clones its own fresh root-owned copy at that exact commit and installs the two
+root-owned files from it, never from the browser account's checkout):
+
+    d=$(mktemp -d) && git clone -q https://git.kayg.org/kayg/infraternal.git "$d/src" \
+      && git -C "$d/src" checkout -q --detach <40-hex SHA> \
+      && python3 -I "$d/src/scripts/install-nightly-browser-suite" --ref <40-hex SHA>; rm -rf "$d"
+
 ## 13. Runtime responsiveness probes (D351, #344)
 
 `bench-probes` in `infraternal-agent` enables the D351 responsiveness driver:

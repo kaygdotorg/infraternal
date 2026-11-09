@@ -75,7 +75,7 @@ export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHo
         run: () => {
           // A phone shows one window at a time: beside is the same as open there.
           const active = cx.state.activeWin;
-          if (!coarse.matches && active && isTerminal(active) && !active.owner.view.team) void cx.win.newWindow(active, "right", false, sid);
+          if (!coarse.matches && active && isTerminal(active) && !active.owner.view.team) void cx.win.newWindow(active, "right", sid);
           else { cx.win.openSession(host, sid); afterOpen(); }
         },
       });

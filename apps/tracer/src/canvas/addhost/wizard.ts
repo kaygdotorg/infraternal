@@ -25,6 +25,7 @@
  * Text crispness: springs write no transform at rest, so settled text never sits on a fractional transform.
  */
 import { createSpinner, hostIconMarkup, hostSourceIconMarkup, installFocusRing, mountChipInput, mountStepStatus, PaneStepper, Spring, springCheckbox, createKeyValueList } from "../../../../../packages/ui/src/index";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusController, Tick, ToastController } from "../../../../../packages/ui/src/index";
 import { awaitingFresh, awaitingKey, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
 import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../../provisioning-client";
@@ -147,6 +148,7 @@ export class Wizard {
   private alive = true;
   private closing = false;
 
+/** Builds the add-host card and shows it: on a spring from a pointer, in place when a key opened it (#427). */
   constructor(private readonly deps: WizardDeps) {
     installFocusRing();
     this.surface = deps.host.open({ title: "Add hosts" });
@@ -184,7 +186,8 @@ export class Wizard {
     document.addEventListener("keydown", this.onKeyDown, true);
     this.root.addEventListener("paste", this.onPaste, true);
     // The card rises onto its dimmed stage; at rest it carries no transform at all.
-    this.spring = new Spring(reducedMotion() ? 1 : 0, (value) => {
+    // Opened by a key (a palette row, the plus on the keyboard) the card is simply there; a pointer open rises onto its stage (#427).
+    this.spring = new Spring(reducedMotion() || triggeredByKeyboard() ? 1 : 0, (value) => {
       if (value === 1) { this.float.style.transform = ""; this.float.style.opacity = ""; this.scrim.style.opacity = ""; return; }
       const clamped = Math.min(1, Math.max(0, value));
       this.float.style.opacity = String(clamped);
@@ -266,11 +269,11 @@ export class Wizard {
     else if (!this.float.contains(document.activeElement)) { page.tabIndex = -1; page.focus({ preventScroll: true }); }
   }
 
-  /** Replaces the footer's buttons with `markup`, hiding the footer when it is empty and fading new content in. */
+  /** Replaces the footer's buttons with `markup`; the footer fades in unless a key caused the change (#427). */
   private setFoot(markup: string): void {
     this.foot.innerHTML = markup;
     this.foot.hidden = markup === "";
-    if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE_OUT });
+    if (!reducedMotion() && !triggeredByKeyboard() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE_OUT });
   }
 
   private hero(icon: string, tone = ""): string { return `<div class="ah-hero"${tone ? ` data-tone="${tone}"` : ""}>${svg(icon)}</div>`; }
@@ -1069,7 +1072,7 @@ export class Wizard {
     this.setFoot(`<span class="ah-count">Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.</span><button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="keep">Keep installing</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="cancel-install">Stop installing</button>`);
   }
 
-  /** Closes the wizard once (a second call does nothing): cancels running installs, removes its listeners, animates out, then calls `after`. */
+  /** Closes the card and runs `after` once it is gone: at once after a key, with a short fade after a pointer (#427). */
   private dismiss(after?: () => void): void {
     if (this.closing) return;
     this.closing = true;
@@ -1082,7 +1085,8 @@ export class Wizard {
     document.removeEventListener("keydown", this.onKeyDown, true);
     this.root.removeEventListener("paste", this.onPaste, true);
     const gone = (): void => { this.teardown(); after?.(); };
-    if (reducedMotion()) { gone(); return; }
+    // Closed by a key (Escape): the card is gone in the same frame (#427).
+    if (reducedMotion() || triggeredByKeyboard()) { gone(); return; }
     this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.98)" }], { duration: 160, easing: EASE_OUT, fill: "forwards" });
     this.scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, delay: 40, easing: EASE_OUT, fill: "forwards" }).onfinish = gone;
   }

@@ -9,13 +9,15 @@
  * width, height and corner radius move together and nothing reflows. The pill fades out over the
  * first third, the content fades in after the shape has settled, and closing reverses the same
  * spring from wherever it is (interruptible). At rest no clip, transform or opacity is left
- * on anything. Reduced motion: a crossfade.
+ * on anything. Reduced motion: a crossfade. Opened or closed from the keyboard (Enter on the focused pill, Escape), the
+ * morph has no motion at all (#427, input-source.ts): the panel is whole in the first frame and gone in the first frame.
  *
  * `openHeight` makes the open state show only the top part of a taller panel (a floating
  * terminal that is a clipped view of a full window). `setReveal(e)` then grows the visible part
  * from `openHeight` to the whole panel, which is how that terminal expands into its slot.
  */
 import { Spring } from "./spring";
+import { markMotion } from "./input-source";
 
 export interface PillMorphOptions {
   /** The pill that morphs (the session capsule). */
@@ -53,6 +55,7 @@ export interface PillMorph {
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 const smooth = (from: number, to: number, value: number): number => { const t = clamp01((value - from) / (to - from)); return t * t * (3 - 2 * t); };
 
+/** Builds the morph for one pill and panel (see the module note); nothing is drawn until `open()`. */
 export function createPillMorph(options: PillMorphOptions): PillMorph {
   const { pill, stage, panel, content } = options;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");
@@ -119,7 +122,8 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
   const close = (instant = false): void => {
     if (!openState) return;
     openState = false;
-    if (instant) { spring.set(0, true); finishClose(); return; }
+    // The pill's own fade (its opacity transition) follows the same answer: a key brings it back at once.
+    if (markMotion(pill) || instant) { spring.set(0, true); finishClose(); return; }
     if (reduced.matches) {
       pill.style.opacity = "";
       panel.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: "ease-out", fill: "forwards" }).onfinish = () => { if (!openState) finishClose(); };
@@ -140,6 +144,7 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
     layout(options.width, undefined, options.openHeight);
     pill.setAttribute("aria-expanded", "true");
     pill.style.pointerEvents = "none";
+    if (markMotion(pill)) { spring.set(1, true); return; }
     if (reduced.matches) {
       pill.style.opacity = "0";
       panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });

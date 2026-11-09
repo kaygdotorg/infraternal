@@ -113,7 +113,7 @@ export function openDocsPreview(options: DocsPreviewOptions): DocsPreview {
   if (options.touch) {
     sheet = openBottomSheet({ stage: options.stage, label: options.label, content: holder, opener: options.anchor, source: options.source, onClosed: options.onClosed });
   } else {
-    const popover = openAnchoredPopover({ stage: options.stage, anchor: options.anchor, label: options.label, className: "ui-dp-pop", align: "end", hug: true, maxWidth: 380 }, options.source, options.onClosed);
+    const popover = openAnchoredPopover({ stage: options.stage, anchor: options.anchor, label: options.label, className: "ui-dp-pop", align: "end", hug: true, maxWidth: 380 }, options.onClosed);
     popover.root.append(holder);
     pop = popover;
   }
