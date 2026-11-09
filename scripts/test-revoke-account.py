@@ -58,6 +58,10 @@ def prepare(client, number, person, account):
 
 def job_plant(account, user, scenario, created):
     """Install one never-started system job; return its report label and root route."""
+    # Keep the review's three probe names in the final scenario receipts.
+    scenario = {'root-job-j391-wrapper': 'root-job-wrapper-nice',
+                'root-job-j391-at': 'root-job-prefix-@',
+                'root-job-j391-pre': 'root-job-exec-ExecStartPre'}.get(scenario, scenario)
     privileged = scenario.startswith('root-job')
     target = Path(user.pw_dir) / 'scheduled-script'
     if privileged and scenario != 'root-job-parent':
@@ -70,19 +74,33 @@ def job_plant(account, user, scenario, created):
     target.chmod(0o755)
     os.chown(target, user.pw_uid, user.pw_gid)
     runner = 'root' if privileged else (str(user.pw_uid) if scenario == 'system-uid' else account)
-    if scenario in ('system-cron', 'root-job-cron'):
+    if privileged and scenario != 'root-job-parent':
+        assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(target), check=False).returncode == 0
+    if scenario in ('system-cron', 'root-job-cron') or scenario.startswith('root-job-wrapper-'):
         path = Path('/etc/cron.d') / account
         with path.open('x') as cron:
-            cron.write(f'0 0 1 1 * {runner} {target}\n')
+            wrappers = {'nice': '/usr/bin/nice ', 'env': '/usr/bin/env FLAG=1 ',
+                        'ionice': '/usr/bin/ionice -c 3 ', 'flock': f'/usr/bin/flock /run/{account}.lock ',
+                        'sh': '/bin/sh -c ', 'bash': '/bin/bash -c '}
+            prefix = wrappers.get(scenario.removeprefix('root-job-wrapper-'), '')
+            argument = f"'{target}'" if scenario.endswith(('-sh', '-bash')) else str(target)
+            cron.write(f'0 0 1 1 * {runner} {prefix}{argument}\n')
         created.append(path)
         path.chmod(0o644)
         return str(path), privileged
     unit = Path('/etc/systemd/system') / (account + '-scheduled.service')
     with unit.open('x') as service:
-        service.write(f'[Unit]\nDescription=Disposable revoke job\n[Service]\nType=oneshot\nUser={runner}\nExecStart=/bin/sh {target}\n')
+        setting = scenario.removeprefix('root-job-exec-') if scenario.startswith('root-job-exec-') else 'ExecStart'
+        prefix = scenario.removeprefix('root-job-prefix-') if scenario.startswith('root-job-prefix-') else ''
+        invocation = f'{prefix}{target} /bin/true' if prefix == '@' else f'{prefix}/bin/sh {target}'
+        if scenario == 'root-job-shell-expansion':
+            invocation = f"/bin/bash -c '/bin/sh {target}{{,.backup}}'"
+        service.write(f'[Unit]\nDescription=Disposable revoke job\n[Service]\nType=oneshot\nUser={runner}\n{setting}={invocation}\n')
+        if setting != 'ExecStart':
+            service.write('ExecStart=/bin/true\n')
     created.append(unit)
     unit.chmod(0o644)
-    if scenario == 'root-job-unit':
+    if scenario in ('root-job-unit',):
         os.chown(unit, user.pw_uid, user.pw_gid)
         os.chown(target, 0, 0)
     if scenario == 'root-job-group':
@@ -99,7 +117,7 @@ def job_plant(account, user, scenario, created):
                 (16, 7, 0xffffffff), (32, 5, 0xffffffff)])
         os.setxattr(target, 'system.posix_acl_access', acl)
     if privileged:
-        checked = target.parent if scenario == 'root-job-parent' else (unit if scenario == 'root-job-unit' else target)
+        checked = target.parent if scenario == 'root-job-parent' else (unit if scenario in ('root-job-unit',) else target)
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(checked), check=False).returncode == 0
     if scenario == 'system-timer':
         timer = unit.with_suffix('.timer')
@@ -154,7 +172,7 @@ def prove(binary, scenario="sessions"):
             print(json.dumps(dict(account=account, uid=uid)), flush=True)
             client = Binary(binary, state)
             prepare(client, 100, people[0], account)
-            if scenario in ('system-cron', 'system-unit', 'system-uid', 'system-timer',
+            if scenario.startswith('root-job-') or scenario in ('system-cron', 'system-unit', 'system-uid', 'system-timer',
                             'root-job-owner', 'root-job-group', 'root-job-parent',
                             'root-job-unit', 'root-job-cron', 'root-job-acl'):
                 label, privileged = job_plant(account, user, scenario, created_jobs)
@@ -164,6 +182,8 @@ def prove(binary, scenario="sessions"):
                 assert report['state'] == 'not_checked', report
                 if privileged:
                     assert report['reason'] == 'privileged', report
+                    expected = 'target unknown' if scenario == 'root-job-shell-expansion' else 'input writable'
+                    assert any(label in job and expected in job for job in report.get('jobs', [])), report
                 else:
                     assert report['programs_may_remain'], report
                 assert any(label in job for job in report.get('jobs', [])), report

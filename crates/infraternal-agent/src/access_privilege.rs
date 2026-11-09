@@ -3,7 +3,7 @@
 //! results fail closed. Queries run in the access scan's blocking worker,
 //! never the reactor.
 //!
-//! Out of scope (D367, follow-up #429): `pam_cap` grants from
+//! Out of scope (D367, follow-up #437): `pam_cap` grants from
 //! `/etc/security/capability.conf`; subordinate-uid mappings, including a range
 //! containing host uid 0; and host-wide setuid-root binary auditing. Direct
 //! root-job scripts, unit files and their writable parents are checked, but

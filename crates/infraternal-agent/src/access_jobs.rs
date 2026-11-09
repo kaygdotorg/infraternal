@@ -4,7 +4,7 @@
 //! edited or deleted. Unknown inventory is reported, never treated as empty.
 //!
 //! Root-job coverage is deliberately bounded to a cron command's direct target,
-//! a service's ExecStart target/direct interpreter script, and its fragment and
+//! every service lifecycle executable and file argument, and its fragment and
 //! drop-ins, with their writable parent directories. It does not trace libraries,
 //! sourced files or arbitrary executable-input graphs. Shell expansion and
 //! wrappers we cannot resolve fail closed as privileged instead of being ignored.
@@ -56,7 +56,13 @@ fn cron_text(path: &Path) -> Option<String> {
     }
     let mut text = String::new();
     file.take(65537).read_to_string(&mut text).ok()?;
-    (text.len() <= 65536).then_some(text)
+    // Cron and shell separators are spaces, tabs and linefeeds here. Reject
+    // other controls or Unicode whitespace before lines/trim can change a path.
+    (text.len() <= 65536
+        && !text
+            .chars()
+            .any(|c| (c.is_control() || c.is_whitespace()) && !matches!(c, ' ' | '\t' | '\n')))
+    .then_some(text)
 }
 
 /// Parse only cron's schedule and account columns. Command text is never exposed.
@@ -111,71 +117,9 @@ fn after_columns(mut line: &str, count: usize) -> Option<&str> {
     Some(line.trim_start_matches(|c: char| c.is_ascii_whitespace()))
 }
 
-/// Direct command targets only: no shell expansion, sourcing or recursive
-/// executable-input graph. Ambiguous shell constructs fail closed for that job.
+/// Feed cron's simple command text to the shared bounded input resolver.
 fn command_targets(command: &str) -> Option<Vec<PathBuf>> {
-    if command.contains('\\')
-        || command.len() > 4096
-        || command.chars().any(|c| "$;|&<>`()\n%".contains(c))
-    {
-        return None;
-    }
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut quote = None;
-    let mut escape = false;
-    for c in command.chars() {
-        if escape {
-            word.push(c);
-            escape = false;
-            continue;
-        }
-        if c == '\\' && quote != Some('\'') {
-            escape = true;
-            continue;
-        }
-        if Some(c) == quote {
-            quote = None;
-        } else if quote.is_none() && matches!(c, '\'' | '"') {
-            quote = Some(c);
-        } else if quote.is_none() && c.is_ascii_whitespace() {
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
-        } else {
-            word.push(c);
-        }
-    }
-    if quote.is_some() || escape {
-        return None;
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    let first = words.first()?;
-    if !first.starts_with('/') {
-        return None;
-    }
-    let mut paths = vec![PathBuf::from(first)];
-    let name = Path::new(first).file_name()?.to_str()?;
-    if matches!(
-        name,
-        "sh" | "bash" | "dash" | "zsh" | "python" | "python3" | "perl" | "ruby" | "node"
-    ) {
-        let script = words.get(1)?;
-        if script == "-c" {
-            return command_targets(&words.get(2..)?.join(" "));
-        }
-        if !script.starts_with('/') {
-            return None;
-        }
-        paths.push(PathBuf::from(script));
-    } else if matches!(name, "env" | "sudo" | "doas" | "runuser" | "su") {
-        // These wrappers select another executable or identity. We do not
-        // interpret their argument languages and cannot prove the job safe.
-        return None;
-    }
-    Some(paths)
+    crate::access_command::targets(command)
 }
 
 /// Collect a root job's direct targets and unit files. Parents and resolved
@@ -188,13 +132,38 @@ fn root_job(observed: &mut Observation, name: String, inputs: Option<Vec<PathBuf
     };
     let mut paths = BTreeSet::new();
     for input in inputs {
-        let Ok(canonical) = fs::canonicalize(&input) else {
-            observed.privileged = true;
-            add(
-                observed,
-                &format!("Root-run job: {name} (target unavailable)"),
-            );
-            return;
+        // A future lock/output or conditionally used executable can be absent.
+        // Its nearest existing ancestor still determines whether this account
+        // can plant it. Resolve that ancestor too, including symlink parents.
+        let mut existing = input.as_path();
+        let canonical = loop {
+            match fs::canonicalize(existing) {
+                Ok(path) => break path,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && fs::symlink_metadata(existing)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    if let Some(parent) = existing.parent() {
+                        existing = parent;
+                    } else {
+                        observed.privileged = true;
+                        add(
+                            observed,
+                            &format!("Root-run job: {name} (target unavailable)"),
+                        );
+                        return;
+                    }
+                }
+                Err(_) => {
+                    observed.privileged = true;
+                    add(
+                        observed,
+                        &format!("Root-run job: {name} (target unavailable)"),
+                    );
+                    return;
+                }
+            }
         };
         for path in [input, canonical] {
             for (depth, parent) in path.ancestors().enumerate() {
@@ -206,7 +175,20 @@ fn root_job(observed: &mut Observation, name: String, inputs: Option<Vec<PathBuf
                     );
                     return;
                 }
-                paths.insert(parent.to_owned());
+                match fs::metadata(parent) {
+                    Ok(_) => {
+                        paths.insert(parent.to_owned());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => {
+                        observed.privileged = true;
+                        add(
+                            observed,
+                            &format!("Root-run job: {name} (target unavailable)"),
+                        );
+                        return;
+                    }
+                }
             }
         }
     }
@@ -447,7 +429,7 @@ fn system_units(account: &User, observed: &mut Observation) {
     let mut args = vec![
         "show",
         "--no-pager",
-        "--property=Id,User,Triggers,ExecStart,FragmentPath,DropInPaths,LoadState",
+        "--property=Id,User,Triggers,FragmentPath,DropInPaths,LoadState",
         "--",
     ];
     args.extend(names.iter().map(String::as_str));
@@ -465,8 +447,16 @@ fn system_units(account: &User, observed: &mut Observation) {
         .filter(|unit| unit["User"] == account.name || unit["User"] == uid)
         .map(|unit| unit["Id"].as_str())
         .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     for unit in &units {
         let name = unit["Id"].as_str();
+        if matches!(unit.get("LoadState").map(String::as_str), Some("masked")) {
+            continue;
+        }
+        if std::time::Instant::now() >= deadline {
+            observed.complete = false;
+            break;
+        }
         if matching.contains(name)
             || unit.get("Triggers").is_some_and(|triggers| {
                 triggers
@@ -476,45 +466,17 @@ fn system_units(account: &User, observed: &mut Observation) {
         {
             add(observed, &format!("system unit {name}"));
         }
-        if matches!(unit["User"].as_str(), "" | "root" | "0")
-            && unit.get("LoadState").map(String::as_str) != Some("masked")
-        {
-            let mut inputs = Vec::new();
-            let fragment = unit
-                .get("FragmentPath")
-                .map(String::as_str)
-                .unwrap_or_default();
-            let dropins = unit
-                .get("DropInPaths")
-                .map(String::as_str)
-                .unwrap_or_default();
-            if !fragment.is_empty() {
-                inputs.push(PathBuf::from(fragment));
-            }
-            inputs.extend(dropins.split_ascii_whitespace().map(PathBuf::from));
-            let mut valid = !fragment.is_empty();
-            if let Some(exec) = unit.get("ExecStart").filter(|exec| !exec.is_empty()) {
-                for part in exec.split("argv[]=").skip(1) {
-                    let Some(command) = part.split(" ;").next() else {
-                        valid = false;
-                        continue;
-                    };
-                    match command_targets(command) {
-                        Some(paths) => inputs.extend(paths),
-                        None => valid = false,
-                    }
+        let root = matches!(unit["User"].as_str(), "" | "root" | "0");
+        match crate::access_units::inputs(name, root) {
+            Some(inputs) => {
+                if !inputs.complete {
+                    root_job(observed, format!("system unit {name}"), None);
                 }
-                if !exec.contains("argv[]=") {
-                    valid = false;
+                if root || !inputs.paths.is_empty() {
+                    root_job(observed, format!("system unit {name}"), Some(inputs.paths));
                 }
             }
-            // A transient root unit has no fragment; its direct ExecStart is
-            // still inspectable, but any missing effective inputs fail closed.
-            root_job(
-                observed,
-                format!("system unit {name}"),
-                valid.then_some(inputs),
-            );
+            None => root_job(observed, format!("system unit {name}"), None),
         }
         if unit["User"].contains('%') {
             observed.complete = false;
@@ -547,6 +509,59 @@ mod tests {
     //! Scheduler columns must not confuse usernames with command text.
     use super::*;
 
+    /// Reject separators that line trimming could turn into a different command.
+    #[test]
+    fn cron_text_preserves_scheduler_path_boundaries() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        /// Remove only this exclusively created input on failure as well.
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            /// Release this test's private ordinary cron file.
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let path = std::env::temp_dir().join(format!("ifrv-cron-{}", uuid::Uuid::new_v4()));
+        let mut file = fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let _fixture = Fixture(path.clone());
+        for text in [
+            "0 0 * * * root /run/job\r\n",
+            "\u{00a0}0 0 * * * root /run/job\n",
+        ] {
+            file.set_len(0).unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+            assert!(cron_text(&path).is_none(), "{text:?}");
+        }
+    }
+
+    /// Read-only inventory samples for the performance VM's root harness.
+    /// Durations are measurements, never functional-test timing assertions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "run as host root through perf-run on the performance VM"]
+    async fn root_inventory_performance_samples() {
+        assert!(nix::unistd::Uid::effective().is_root());
+        let user = User::from_name("nobody").unwrap().unwrap();
+        tokio::task::spawn_blocking(move || {
+            for sample in 0..5 {
+                let started = std::time::Instant::now();
+                let observed = inspect(&user);
+                eprintln!(
+                    "D367_INVENTORY sample={sample} elapsed_us={} jobs={} complete={}",
+                    started.elapsed().as_micros(),
+                    observed.jobs.len(),
+                    observed.complete
+                );
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     /// Both standard and macro schedules retain the account column.
     #[test]
     fn cron_user_columns_and_unknown_lines() {
@@ -567,6 +582,26 @@ mod tests {
         assert!(command_targets("/bin/sh -c '$TARGET'").is_none());
         assert!(command_targets("cd / && run-parts /etc/cron.daily").is_none());
         assert!(command_targets("/usr/bin/env python3 /home/alice/task").is_none());
+    }
+
+    /// Wrappers and script arguments must retain each writable executable input.
+    #[test]
+    fn wrapped_root_scripts_are_not_hidden_by_the_launcher() {
+        for command in [
+            "/usr/bin/nice /home/alice/task",
+            "/usr/bin/env FLAG=1 /bin/sh /home/alice/task",
+            "/usr/bin/ionice -c 3 /home/alice/task",
+            "/usr/bin/flock /run/job.lock /home/alice/task",
+            "/bin/sh -c '/usr/bin/nice /home/alice/task'",
+            "/bin/bash -c '/bin/sh /home/alice/task'",
+            "/usr/bin/python3 -B /home/alice/task",
+        ] {
+            let paths = command_targets(command).expect(command);
+            assert!(
+                paths.contains(&PathBuf::from("/home/alice/task")),
+                "{command}: {paths:?}"
+            );
+        }
     }
 
     /// Effective empty User means root; incomplete manager blocks are unknown.

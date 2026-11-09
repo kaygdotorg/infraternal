@@ -1552,7 +1552,8 @@ fn loginctl() -> tokio::process::Command {
     crate::sessions::isolated(&account_tool("loginctl").unwrap_or_else(|| PathBuf::from("/")))
 }
 
-/// Fixed root-owned tools for account revocation and its access probes. The
+/// Fixed root-owned tools for account revocation and its access probes.
+/// `busctl` supplies typed manager paths and argv, without executing job text. The
 /// original and canonical parent chains must both be protected, including
 /// symlink parents. An untrusted first candidate is refused, never skipped.
 /// Callers fail closed when none exists; executing `/` also always fails.
@@ -1560,7 +1561,7 @@ pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt as _;
     if !matches!(
         name,
-        "systemctl" | "loginctl" | "sudo" | "pkaction" | "sh" | "setpriv"
+        "systemctl" | "loginctl" | "sudo" | "pkaction" | "busctl" | "sh" | "setpriv"
     ) {
         return None;
     }
