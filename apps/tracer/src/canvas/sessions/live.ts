@@ -310,6 +310,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           shouldFocusOnOpen: () => focusIntent.isCurrent() && this.activeNow && !this.disposed,
           host: hostEl,
           hostName: this.model.host,
+          toast: core.toast,
           screen: core.stage,
           status: this.status.element,
           theme: core.theme(),

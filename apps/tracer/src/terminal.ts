@@ -1,6 +1,6 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { keysIn } from "./input-keys";
-import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
@@ -23,6 +23,8 @@ import { captureFocusIntent } from "../../../packages/ui/src/focus-intent";
 import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
 import { SynchronizedOutput } from "./synchronized-output";
 
+/** How many terminals have been made on this page; names each one's remote-copy notice. */
+let remoteCopyCount = 0;
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
@@ -154,6 +156,8 @@ export interface TerminalConfig {
   shouldFocusOnOpen?: () => boolean;
   /** Readable label for refusal guidance; hostId remains the routing authority. */
   hostName?: string;
+  /** The page's shared toast, used for remote-copy notices so they sit where every other notice does; a private one is made without it. */
+  toast?: ToastController;
   host: HTMLElement;
   /** Stage that follows the visual viewport when iOS opens its on-screen keyboard. */
   screen?: HTMLElement;
@@ -355,8 +359,10 @@ export class TerminalClient {
   private terminalQueries: TerminalQueries | undefined;
   /** Reads clipboard writes (OSC 52) out of live output; replayed output goes through it without acting (#440). */
   private readonly clipboardWrites = new Osc52Scanner();
-  /** The notice that confirms a remote copy, or offers it when the browser refused to write without a gesture. */
+  /** The notice surface for remote copies: the shared one from the config, or a private one made on first use (then disposed with this client). */
   private remoteCopyNotice: ToastController | undefined;
+  /** Identifies this window's remote-copy notice, so two windows' notices stay separate on the shared toast. */
+  private readonly remoteCopyKey = `remote-copy-${++remoteCopyCount}`;
   private parserReplies: string[] | undefined;
   private parserReplyLength = 0;
   private renderIdleTimer = 0;
@@ -983,7 +989,7 @@ export class TerminalClient {
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputResendNotice?.dispose();
-    this.remoteCopyNotice?.dispose();
+    if (this.config.toast) this.remoteCopyNotice?.dismiss(this.remoteCopyKey); else this.remoteCopyNotice?.dispose();
     this.clipboardWrites.reset();
     this.inputQueue.clear();
     this.retainedInput?.fill(0);
@@ -1538,29 +1544,53 @@ export class TerminalClient {
   }
 
   /**
-   * A program in the terminal asked to copy `text` (OSC 52). Writes it to the clipboard and says so. A browser may
-   * refuse a write that no gesture or permission backs (always, in Safari); then the text waits behind a "Copy"
-   * action, and the tap on that action is the gesture the browser wants.
+   * Whether a copy that a program asked for may go to the clipboard without a tap. This is the one place that decides
+   * it, so a later policy (a setting, an allow-list, "only shortly after typing") changes here and nowhere else.
+   * Today: only the terminal that has the focus, on a visible page. Any other window offers the copy instead.
+   */
+  private mayCopyWithoutTap(): boolean {
+    return document.visibilityState === "visible" && this.config.host.contains(document.activeElement);
+  }
+
+  /** Shows a remote-copy notice on the shared toast (or a private one), under this window's own key. */
+  private showCopyNotice(notice: Omit<ToastMessage, "key">): void {
+    if (this.closed) return;
+    this.remoteCopyNotice ??= this.config.toast ?? mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    this.remoteCopyNotice.show({ ...notice, key: this.remoteCopyKey });
+  }
+
+  /**
+   * A program in the terminal asked to copy `text` (OSC 52). In the focused terminal it goes to the clipboard at once
+   * and a notice says so, so the clipboard is never replaced silently. Anywhere else, or when the browser refuses a
+   * write that no gesture backs (always in Safari), the text waits behind a "Copy" action that names this window; the
+   * tap on it is the gesture. A write that a program started never uses the focus-moving legacy fallback.
    */
   private remoteCopy(text: string): void {
     if (this.closed) return;
-    this.remoteCopyNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
-    const notice = this.remoteCopyNotice;
-    const key = "remote-copy";
-    void writeClipboard(text).then((ok) => {
-      if (this.closed) return;
-      if (ok) { notice.show({ key, message: "Copied from the terminal", duration: 1800 }); return; }
-      notice.show({
-        key,
-        message: "The terminal has text to copy",
-        icon: CLIPBOARD,
-        duration: 15000,
-        dismissible: true,
-        action: {
-          label: "Copy",
-          onSelect: () => { void writeClipboard(text).then((done) => notice.show(done ? { key, message: "Copied from the terminal", duration: 1800 } : { key, message: "Couldn't copy. Select the text instead.", tone: "error" })); },
+    if (!this.mayCopyWithoutTap()) { this.offerCopy(text); return; }
+    void writeClipboard(text, { legacy: false }).then((ok) => {
+      if (ok) this.showCopyNotice({ message: "Copied from the terminal", duration: 1800 });
+      else this.offerCopy(text);
+    });
+  }
+
+  /** Holds `text` behind a "Copy" action for 15 seconds. The message is short enough for one line on a phone. */
+  private offerCopy(text: string): void {
+    const name = this.config.hostName?.trim();
+    const from = name ? (name.length > 16 ? `${name.slice(0, 15)}…` : name) : undefined;
+    this.showCopyNotice({
+      message: from ? `Text to copy from ${from}` : "Text to copy",
+      icon: CLIPBOARD,
+      duration: 15000,
+      dismissible: true,
+      action: {
+        label: "Copy",
+        onSelect: () => {
+          void writeClipboard(text).then((done) => this.showCopyNotice(done
+            ? { message: "Copied from the terminal", duration: 1800 }
+            : { message: "Couldn't copy. Select the text instead.", tone: "error" }));
         },
-      });
+      },
     });
   }
 
@@ -1833,7 +1863,7 @@ export class TerminalClient {
    * Keyboard callbacks run in later tasks and always use the unchanged typing path.
    */
   private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback?: () => void): void {
-    this.clipboardWrites.scan(bytes, (text) => this.remoteCopy(text));
+    this.clipboardWrites.scan(bytes, (text) => this.remoteCopy(text), () => this.showCopyNotice({ message: "That copy was too large for the clipboard", tone: "error", duration: 6000 }));
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     this.linkRowsArmed = true;
     this.terminal.writeSlices(bytes, (writeSlice) => {
