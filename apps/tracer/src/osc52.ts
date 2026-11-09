@@ -15,8 +15,11 @@
 /** Most base64 characters of one copy: about 750 KiB of text. A larger copy is ignored. */
 export const MAX_BASE64 = 1_048_576;
 
+/** The escape byte that starts every control sequence. */
 const ESC = 0x1b;
+/** The bell byte, which ends an OSC string in the short form. */
 const BEL = 0x07;
+/** The byte after ESC that makes the string terminator (`ESC \`). */
 const BACKSLASH = 0x5c;
 /** Reads the run of base64 characters; every character of a valid text is plain ASCII. */
 const ASCII = new TextDecoder("latin1");

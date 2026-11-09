@@ -1520,6 +1520,7 @@ export class TerminalClient {
     return this.inputResendNotice?.focusAction() ?? false;
   }
 
+  /** Offers to send the typing that was saved offline again, or to discard it. */
   private showInputResendNotice(): void {
     this.inputResendNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
     const focusShortcut = bindingLabel("focus-resend-actions") || "Ctrl+Shift+Space";

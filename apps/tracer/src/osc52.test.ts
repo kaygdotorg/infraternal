@@ -2,8 +2,11 @@
 import { test, expect } from "bun:test";
 import { MAX_BASE64, Osc52Scanner } from "./osc52";
 
+/** Turns test strings into the bytes the scanner reads. */
 const encoder = new TextEncoder();
+/** The base64 text of a string, as a program sends it. */
 const b64 = (text: string): string => Buffer.from(text, "utf8").toString("base64");
+/** Feeds the chunks to one scanner in order and returns every text it reports. */
 const scanAll = (...chunks: string[]): string[] => {
   const scanner = new Osc52Scanner(); const copies: string[] = [];
   for (const chunk of chunks) scanner.scan(encoder.encode(chunk), (text) => copies.push(text));

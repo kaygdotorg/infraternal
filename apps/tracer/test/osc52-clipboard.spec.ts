@@ -11,14 +11,18 @@ import { expect, test, type BrowserContext, type Page } from "playwright/test";
 import { mkdirSync } from "node:fs";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** The two sizes the gate names: a desktop window and an iPhone. */
 const VIEWPORTS = [
   { name: "desktop", width: 1440, height: 900, dpr: 2, touch: false },
   { name: "phone", width: 393, height: 852, dpr: 3, touch: true },
 ] as const;
+/** Where the screenshots of the prompt and the confirmation go (outside the checkout). */
 const OUT = tracerEvidencePath("osc52");
 /** Text with spaces, a newline and non-ASCII, so a wrong decode (latin1, lost line break) shows. */
 const COPIED = "kubectl get pods -n prod\nnaïve ✓ 日本";
+/** The base64 text of a string, as a program sends it. */
 const base64 = (text: string): string => Buffer.from(text, "utf8").toString("base64");
+/** The bytes a program prints to copy `text`; `end` is BEL or the string terminator. */
 const copySequence = (text: string, targets = "c", end = "\u0007"): string => `\u001b]52;${targets};${base64(text)}${end}`;
 
 for (const viewport of VIEWPORTS) {
