@@ -124,10 +124,13 @@ _PACING_PATTERN = re.compile(r"METRIC name=frame_pacing (.*)$")
 #: The browser rows run twice (D375 round 2): with the display cap lifted, which is what gates, and paced to a 60 Hz
 #: display, which is reported beside it. Native rows have no display and gate as they are.
 GATED_DISPLAYS = ("unthrottled", "native")
-#: The idle animation-frame rate the unthrottled run must exceed to count as unthrottled. Headless Chromium paces
-#: frames at 60 Hz; a run whose flags had no effect sits there, and its frame-bound rows would then measure the
-#: wait for a 60 Hz frame again while claiming not to.
-UNTHROTTLED_MIN_FPS = 70.0
+#: The animation-frame rate the unthrottled run must reach *while the rows are measured* (the prediction-off probe
+#: run) to count: at least what a 120 Hz display gives. Below it the browser could not keep up with a 120 Hz screen
+#: under the rows' own load, or the flags had no effect (headless Chromium then sits at 60 Hz), and the frame-bound
+#: rows would include frame waits again while claiming not to. An idle-page rate is printed too but never gates.
+UNTHROTTLED_MIN_FPS = RENDER_FPS
+#: The CPU slowdown the phone first-paint row applies (Chromium's mobile preset uses the same factor).
+PHONE_CPU_SLOWDOWN = 4
 
 
 def _fields(text: str) -> dict[str, str]:
@@ -135,14 +138,28 @@ def _fields(text: str) -> dict[str, str]:
     return dict(part.split("=", 1) for part in text.split() if "=" in part)
 
 
+def _worse(old: dict[str, str], new: dict[str, str]) -> bool:
+    """True when `new` is the worse of two measurements of one row: a FAIL beats a PASS, then the worse value."""
+    if (old.get("result") == "PASS") != (new.get("result") == "PASS"):
+        return new.get("result") != "PASS"
+    try:
+        old_value, new_value = float(old.get("value", "nan")), float(new.get("value", "nan"))
+    except ValueError:
+        return True
+    if new_value != new_value:
+        return True
+    higher_is_better = new.get("unit") == "fps"
+    return new_value < old_value if higher_is_better else new_value > old_value
+
+
 def parse(log_text: str) -> dict[str, dict[str, dict[str, str]]]:
-    """Collect the last METRIC line for each D375 row and display, as key=value fields.
+    """Collect the worst METRIC line for each D375 row and display, as key=value fields.
 
     Returns `{row: {display: fields}}`, where display is `unthrottled`, `60hz` or
     `native` (lines without a display field). Playwright may prefix test output,
-    so the pattern searches anywhere in a line. A later line for the same row
-    and display replaces an earlier one, so a rerun inside one log reports its
-    final value.
+    so the pattern searches anywhere in a line. When one log measures a row more
+    than once (a rerun), the worst measurement is kept, so a rerun can never hide
+    an earlier FAIL, and `runs` counts how many there were.
     """
     rows: dict[str, dict[str, dict[str, str]]] = {}
     for line in log_text.splitlines():
@@ -150,19 +167,36 @@ def parse(log_text: str) -> dict[str, dict[str, dict[str, str]]]:
         if not match:
             continue
         fields = _fields(match.group(2))
-        rows.setdefault(match.group(1), {})[fields.get("display", "native")] = fields
+        displays = rows.setdefault(match.group(1), {})
+        display = fields.get("display", "native")
+        previous = displays.get(display)
+        runs = int(previous["runs"]) + 1 if previous else 1
+        if previous is None or _worse(previous, fields):
+            displays[display] = fields
+        displays[display]["runs"] = str(runs)
     return rows
 
 
-def frame_pacing(log_text: str) -> dict[str, float]:
-    """The idle animation-frame rate each browser display measured (`METRIC name=frame_pacing display= idle_fps=`)."""
-    rates: dict[str, float] = {}
+def frame_pacing(log_text: str) -> tuple[dict[str, float], dict[str, float]]:
+    """Animation-frame rates per display: `(during_rows, idle)`.
+
+    `during_rows` comes from `METRIC name=frame_pacing display= phase=rows fps=` (the slowest such run is kept),
+    `idle` from `METRIC name=frame_pacing display= idle_fps=`. Only `during_rows` gates.
+    """
+    rows: dict[str, float] = {}
+    idle: dict[str, float] = {}
     for line in log_text.splitlines():
         match = _PACING_PATTERN.search(line)
-        if match:
-            fields = _fields(match.group(1))
-            rates[fields.get("display", "60hz")] = float(fields.get("idle_fps", "0"))
-    return rates
+        if not match:
+            continue
+        fields = _fields(match.group(1))
+        display = fields.get("display", "60hz")
+        if fields.get("phase") == "rows":
+            fps = float(fields.get("fps", "0"))
+            rows[display] = min(fps, rows.get(display, fps))
+        elif "idle_fps" in fields:
+            idle[display] = float(fields["idle_fps"])
+    return rows, idle
 
 
 _PART_PATTERN = re.compile(r"METRIC name=own_overhead_(agent|browser) (.*)$")
@@ -234,19 +268,21 @@ def report(log_text: str) -> tuple[str, bool]:
         unit = fields.get("unit", "")
         result = fields.get("result", "FAIL")
         passed &= result == "PASS"
+        reruns = f", worst of {fields['runs']} runs" if int(fields.get("runs", "1")) > 1 else ""
         lines.append(
             f"| {row.measure} | {row.target} | {fields.get('gate', '?')} {unit} | "
-            f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}) | {shown_60} | "
+            f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}{reruns}) | {shown_60} | "
             f"{fields.get('target_met', '?')} | {result} |"
         )
-    rates = frame_pacing(log_text)
+    during_rows, idle = frame_pacing(log_text)
     lines.append("")
-    lines.append("Frame pacing (idle animation frames per second): " +
-                 (", ".join(f"{name} {fps:.1f}" for name, fps in sorted(rates.items())) or "not measured"))
-    if unthrottled_rows and rates.get("unthrottled", 0.0) <= UNTHROTTLED_MIN_FPS:
+    lines.append("Frame pacing while the rows ran (frames per second): " +
+                 (", ".join(f"{name} {fps:.1f}" for name, fps in sorted(during_rows.items())) or "not measured") +
+                 "; idle: " + (", ".join(f"{name} {fps:.1f}" for name, fps in sorted(idle.items())) or "not measured"))
+    if unthrottled_rows and during_rows.get("unthrottled", 0.0) < UNTHROTTLED_MIN_FPS:
         passed = False
-        lines.append(f"FAIL: the unthrottled run did not run above {UNTHROTTLED_MIN_FPS:.0f} fps, so its frame-bound "
-                     "rows still include the wait for a 60 Hz frame.")
+        lines.append(f"FAIL: while its rows ran, the unthrottled browser stayed under {UNTHROTTLED_MIN_FPS:.0f} fps, "
+                     "so its frame-bound rows still include waits for a frame.")
     return "\n".join(lines), passed
 
 

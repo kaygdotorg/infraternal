@@ -228,10 +228,14 @@ numbered history, both timestamp arrival orders and altered checksums.
   - **60 Hz** (`INFRATERNAL_LATENCY_DISPLAY=60hz`, normal pacing): what a
     60 Hz screen shows. Reported in its own column, never gates.
 
-  Each run prints `METRIC name=frame_pacing display=… idle_fps=…`. The report
-  fails when the unthrottled run's idle rate is 70 fps or less: the flags then
-  had no effect and its rows would still include the 60 Hz wait. A row seen
-  only at 60 Hz counts as MISSING.
+  Each run prints `METRIC name=frame_pacing display=… phase=rows fps=…`, the
+  animation-frame rate while the prediction-off probe types its keys, and an
+  idle-page rate for reference. The report fails when the unthrottled run
+  stayed under 120 fps *while its rows ran*: below a 120 Hz display's rate,
+  under the rows' own load, its frame-bound rows would include frame waits
+  again. A row seen only at 60 Hz counts as MISSING. When one log measures a
+  row more than once, the report keeps the worst measurement and says "worst
+  of N runs", so a rerun cannot hide a failure.
 - **Measuring on your own device.** The gate cannot see a real 120 Hz panel;
   this is a manual check, not a gate. On the owner's iPhone or Mac, signed
   in to a server running the build under test:
