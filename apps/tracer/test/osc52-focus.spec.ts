@@ -61,15 +61,15 @@ for (const viewport of VIEWPORTS) {
       expect(await writes(), "the page wrote nothing by itself").toBe(base);
       expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("before");
 
+      // The offered text copies on a tap (the notice is the window's single one, so this is done before the next copy replaces it).
+      await offer.locator(".ui-toast-action", { hasText: "Copy" }).evaluate((el: HTMLElement) => el.click());
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 10_000 }).toBe("from the unfocused window");
+
       // Back in the terminal, the next copy goes through at once.
       if (viewport.touch) await page.locator("#terminal-host").tap({ position: { x: 40, y: 120 } }); else await page.locator("#terminal-host").click({ position: { x: 40, y: 120 } });
       await expect.poll(() => page.evaluate(() => document.querySelector("#terminal-host")?.contains(document.activeElement))).toBe(true);
       await send(copy("from the focused window"));
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 10_000 }).toBe("from the focused window");
-
-      // The offered text still copies on a tap.
-      await offer.locator(".ui-toast-action", { hasText: "Copy" }).evaluate((el: HTMLElement) => el.click());
-      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 10_000 }).toBe("from the unfocused window");
     });
   });
 }
