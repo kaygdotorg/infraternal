@@ -300,7 +300,23 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     void loadAccount().catch(() => { /* the rows stay hidden; opening Settings again retries */ });
     return [shellRow(0, "passkeys", "Passkeys"), shellRow(1, "recovery", "Recovery key")];
   } : undefined;
-  const productRows = createProductRows(() => true);
+  // App Windows is the server's `desktop` feature switch (#146): a refusal asks for the passkey once, then reconnects so
+  // the socket carries the fresh sign-in the server wants for an owner switch.
+  const productRows = createProductRows(() => true, {
+    call: (actionId, input) => connection.call(actionId, input),
+    confirmAndReconnect: async () => {
+      const [{ loginWithPasskey }, { deviceName }] = await Promise.all([onDemand(() => import("../auth")), onDemand(() => import("../onboarding"))]);
+      await loginWithPasskey(deviceName());
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(() => { off(); reject(new Error("no reconnect")); }, 8000);
+        let off = (): void => undefined;
+        let dropped = false;
+        off = connection.onWelcome(() => { if (!dropped) return; window.clearTimeout(timer); off(); resolve(); });
+        dropped = true;
+        connection.forceDrop();
+      });
+    },
+  });
   const canvas = createCanvas(core, {
     adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, ...(lookBridge() ? { look: lookBridge()! } : {}), settings: { sections: [], ...productRows, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void loadAccount().then((session) => session.model.refresh?.()).catch(() => undefined); } } : {}) }, mesh, docs: createRowsDocs(() => docs), hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
