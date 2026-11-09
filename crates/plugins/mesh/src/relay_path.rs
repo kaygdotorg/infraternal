@@ -39,7 +39,7 @@ use infraternal_plugin_relay::{
     wire::{self, HostId, LinkId, Notice},
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
@@ -288,37 +288,6 @@ pub trait EndpointUpdater {
     fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater;
 }
 
-impl EndpointUpdater for wireguard::Client {
-    fn handshake_starter(&self, peer: &dataplane::Peer) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
-        let peer = peer.clone();
-        Ok(Arc::new(move || {
-            let _ = start_kernel_handshake(&peer);
-        }))
-    }
-
-    fn handshake_preparer(
-        &self,
-        peer: &dataplane::Peer,
-    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
-        let peer = peer.clone();
-        Ok(Arc::new(move || prepare_kernel_handshake(&peer)))
-    }
-
-    fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater {
-        let peer = peer.clone();
-        Arc::new(move |relay_mtu| {
-            let overrides = relay_mtu
-                .map(|mtu| BTreeMap::from([(peer.key, mtu)]))
-                .unwrap_or_default();
-            wireguard::Device::routes_with_mtu_overrides(
-                std::slice::from_ref(&peer),
-                &overrides,
-                false,
-            )
-        })
-    }
-}
-
 impl EndpointUpdater for crate::node::Node {
     fn handshake_starter(&self, peer: &dataplane::Peer) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
         self.relay_handshake_starter(peer)
@@ -368,14 +337,6 @@ impl RelayPaths {
             drivers,
             shims: Mutex::new(HashMap::new()),
         })
-    }
-
-    /// Relay `peer` through the legacy kernel data plane.
-    /// # Errors
-    /// Fails if the socket cannot be bound or the kernel client cannot be opened.
-    pub async fn relay(&self, peer: HostId, kernel: &dataplane::Peer) -> io::Result<SocketAddr> {
-        let mut client = wireguard::Client::new()?;
-        self.relay_with_endpoint(&mut client, peer, kernel).await
     }
 
     /// Relay `peer`: bind its shim socket and ask the live relays for a link. The data
