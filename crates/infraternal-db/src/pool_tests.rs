@@ -136,6 +136,7 @@ enum Step {
 struct XorShift(u64);
 
 impl XorShift {
+    /// The next pseudo-random value (xorshift64).
     fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;

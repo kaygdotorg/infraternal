@@ -27,6 +27,7 @@
     clippy::cast_possible_truncation
 )]
 
+/// The shared seed, SQL, operation mix and statistics.
 mod workload;
 
 use infraternal_db::{
@@ -527,6 +528,7 @@ async fn prepare(path: &Path) {
     pool.close().await;
 }
 
+/// Dispatch one command; see the module docs for usage.
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -37,7 +37,9 @@
 //! next to it first.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+/// The `_sqlx_migrations`-compatible schema migration runner.
 pub mod migrate;
+/// The one-writer, N-reader connection pool behind [`Database`].
 mod pool;
 
 pub use migrate::{MigrateError, Migration, Report};
@@ -46,7 +48,9 @@ pub use pool::{Database, Error, Options};
 /// exactly the rusqlite this crate was built against.
 pub use rusqlite;
 
+/// Rule tests for the migration runner.
 #[cfg(test)]
 mod migrate_tests;
+/// Behaviour tests for the writer queue and the readers.
 #[cfg(test)]
 mod pool_tests;

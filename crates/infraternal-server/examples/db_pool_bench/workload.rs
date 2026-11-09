@@ -189,6 +189,7 @@ pub fn document_json(revision: i64) -> String {
     )
 }
 
+/// Syscall counters taken by [`io_mark`] right before the measured loop.
 static IO_MARK: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
 
 /// Read/write syscall counters of this process (from /proc/self/io).

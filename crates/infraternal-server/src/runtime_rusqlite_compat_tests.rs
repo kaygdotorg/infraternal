@@ -35,6 +35,7 @@ const SEED: &str = include_str!("../examples/db_pool_bench/seed.sql");
 struct DataDir(PathBuf);
 
 impl DataDir {
+    /// A fresh, not yet created directory path under the system temp dir.
     fn new() -> Self {
         Self(std::env::temp_dir().join(format!("infraternal-dbcompat-{}", uuid::Uuid::new_v4())))
     }
