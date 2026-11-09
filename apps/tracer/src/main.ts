@@ -422,6 +422,16 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
+/**
+ * Test double only: tells a spec how a terminal that finished opening after its session ended was dealt with. Its absence cannot
+ * be observed any other way, so a spec waiting for "nothing happened" waits for this instead of sleeping. Sets
+ * `data-late-terminal` on the root element to "cancelled" (nothing was built: the right outcome), "disposed" (a client was built
+ * and closed at once: the backstop) or "failed". The product itself never reads it.
+ */
+function markLateTerminal(mockMode: boolean, how: "cancelled" | "disposed" | "failed"): void {
+  if (mockMode) document.documentElement.dataset.lateTerminal = how;
+}
+
 /** Opens the terminal screen for the signed-in person, reusing the startup snapshot, and publishes the test double in mock mode. */
 async function showTerminal(knownSession?: DrawingIdentity, instant = false): Promise<void> {
   // Startup already authenticated this snapshot. Reuse it rather than adding
@@ -430,6 +440,9 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   sessionStarted = performance.timeOrigin + performance.now();
   const identity = knownSession ?? await checkSession();
   if (generation !== sessionGeneration) return;
+  // No session at all is a 401: the cookie is gone or no longer valid (another sign-in, a server restart). That sends the
+  // person to sign-in, exactly as the background session check does; it is not a server whose name could not be read.
+  if (!identity) { endSession("Your session ended. Sign in again to continue."); return; }
   const hostName = sessionHostname(identity);
   if (!hostName) {
     renderUnavailable("Could not read this server's name. Try again.");
@@ -501,6 +514,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     });
   } catch (error: unknown) {
     screen?.dispose();
+    // A font that fails after the person has signed out (here or in another tab) must not replace the sign-in screen.
+    if (generation !== sessionGeneration) return;
     renderUnavailable(safeMessage(error));
     return;
   }
@@ -508,6 +523,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   if ((clustersMode || canvasMode) && query.get("fps") !== "0") startPerfHud(query.get("fps") === "bench");
   if (clustersMode) {
     const { mountMockup } = await import("./canvas/mock");
+    if (generation !== sessionGeneration) return;
     const scene = Number(query.get("scene"));
     const roleParam = query.get("role");
     let clusters: Awaited<ReturnType<typeof mountMockup>>;
@@ -516,7 +532,12 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       ...(scene ? { scene } : {}),
       ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" || roleParam === "asha" ? { role: roleParam } : {}),
     });
-    } catch (error: unknown) { console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    } catch (error: unknown) {
+      if (generation !== sessionGeneration) return;
+      console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return;
+    }
+    // The session ended while the mockup was mounting: endSession() had no handle to it yet, so close it here.
+    if (generation !== sessionGeneration) { clusters.dispose(); return; }
     canvasPrototype = clusters;
     // The flow carries on: the live terminal opens into the build-01 window the mockup hosts it in.
   }
@@ -525,11 +546,14 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
     const { mountCanvas } = await import("./canvas/mock/windows-proto/canvas");
     const { mountAddHostPrototype } = await import("./add-host-prototype");
+    if (generation !== sessionGeneration) return;
     const canvas = mountCanvas(screen, hostName);
     let addHost: { dispose(): void } | undefined;
     try { addHost = await mountAddHostPrototype(screen, canvas, query.get("empty") === "1", proto === "addhost" || query.get("wizard") === "1"); }
-    catch (error: unknown) { canvas.dispose(); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    catch (error: unknown) { canvas.dispose(); if (generation !== sessionGeneration) return; screen.dispose(); renderUnavailable(safeMessage(error)); return; }
     canvasPrototype = { dispose() { addHost?.dispose(); canvas.dispose(); } };
+    // As above: a session that ended while the flow was mounting leaves nothing of it behind.
+    if (generation !== sessionGeneration) { canvasPrototype.dispose(); canvasPrototype = undefined; return; }
   }
   if (useCanvas) {
     screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
@@ -632,14 +656,16 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       onInputActivity: () => screen?.onInputActivity(),
       onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen?.setRecoveryPending(readyAt); },
       onRecoveryCompleted: (message) => { if (generation === sessionGeneration) endSession(message); },
+      // Nothing is constructed, and so no connection opened, for a session that has already ended (sign-out while loading).
+      isCurrent: () => generation === sessionGeneration,
       traceMockServer: probeMode && mockMode,
       ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
       ...(initialSessionId ? { initialSessionId } : {}),
     });
-    // The person may have signed out (or the session ended) while the terminal was still connecting. endSession() could not
+    // Backstop for a session that ended during the last step of the open, after `isCurrent` was asked: endSession() could not
     // dispose a client it did not have yet, so a late one is closed here instead of being kept, bound to a dead screen and
     // left connected to the host after sign-out.
-    if (generation !== sessionGeneration) { client.dispose(); return; }
+    if (generation !== sessionGeneration) { client.dispose(); markLateTerminal(mockMode, "disposed"); return; }
     currentTerminal = client;
     screen.bindTerminal(client);
     if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
@@ -682,6 +708,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       };
     }
   } catch (error: unknown) {
+    // A terminal that was cancelled, or that failed after the session ended, has nothing to tell the person on the sign-in screen.
+    if (generation !== sessionGeneration) { markLateTerminal(mockMode, error instanceof Error && error.name === "TerminalOpenCancelled" ? "cancelled" : "failed"); return; }
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
   }

@@ -1,4 +1,5 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
+import { rankByTitle } from "./palette-rank";
 import { bindInputToolbar } from "../../../packages/ui/src/input-toolbar";
 import { branchedMenu, type BranchSection, type BranchedMenu, type BranchedOptions } from "../../../packages/ui/src/branched";
 import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
@@ -255,6 +256,7 @@ function themeId(value: string | null): string | undefined {
   return value && Object.hasOwn(THEMES, value) ? value : undefined;
 }
 
+/** One row of the command palette: what it says, where it is listed, what it does when chosen and what it is found by. */
 export interface PaletteEntry {
   group: string;
   glyph: string;
@@ -270,6 +272,8 @@ export interface PaletteEntry {
   queryOnly?: boolean;
   /** What is searched in place of the hint, when the hint is for reading only (a docs row's hint names its page and must not match every heading). */
   search?: string;
+  /** The row's own name when its label is a longer trail. A title that is, or starts with, the query lists this row's group first (palette-rank.ts). */
+  title?: string;
 }
 
 /** The name of a modifier key on this platform: Option is the Mac key, Alt the PC one (Control is the same word everywhere). */
@@ -664,7 +668,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   const renderPalette = (query = "", preserveAction?: string): void => {
     const needle = query.trim().toLocaleLowerCase();
-    visibleEntries = (scopedEntries ?? entries).filter((entry) => (needle !== "" || !entry.queryOnly) && (paletteSearchText.get(entry)?.includes(needle) ?? false));
+    const found = (scopedEntries ?? entries).filter((entry) => (needle !== "" || !entry.queryOnly) && (paletteSearchText.get(entry)?.includes(needle) ?? false));
+    // A group with a row named by what was typed comes first (palette-rank.ts); nothing else is reordered.
+    visibleEntries = needle === "" ? found : rankByTitle(found, needle);
     selected = preserveAction === undefined ? Math.min(selected, Math.max(0, visibleEntries.length - 1)) : Math.max(0, visibleEntries.findIndex((entry) => entry.action === preserveAction));
     visibleOptions = [];
     // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
