@@ -553,6 +553,9 @@ button { color: inherit; }
    on a narrow screen (the Settings row read as a row with no title on a phone). */
 .result-label { line-height: normal; flex: none; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
+/* Forget keeps its short state readable on a phone; its host title yields the space instead (D369, #435). */
+.result[data-action^="canvas:forgethost:"] .result-label { flex: 1 1 0; }
+.result[data-action^="canvas:forgethost:"] .result-hint { flex: none; }
 .swatch { height: 0.875rem; border-radius: 50%; }
 .palette-empty { margin: 1rem 0.5rem; color: var(--fg-2); font-size: var(--text-body); }
 .palette-foot { display: flex; align-items: center; gap: 0.3125rem; margin: 0; padding: 0.625rem 0.875rem; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
