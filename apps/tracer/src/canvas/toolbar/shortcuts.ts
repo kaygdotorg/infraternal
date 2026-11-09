@@ -27,6 +27,10 @@ export const bindingText = (id: string): string => {
   return c ? comboLabel(c) : "";
 };
 
+/**
+ * Registers the canvas shortcuts in the shortcut registry and installs their handlers on `cx`. Returns a function that removes
+ * both. The keyboard help (`?`) lists every entry, including the ones that are not bindings, such as the wheel gestures.
+ */
 export function installShortcuts(cx: Ctx): () => void {
   const { stage, signal, state, views } = cx;
   const removeRegistry = registerShortcuts({ id: "canvas", title: "Canvas", area: "canvas", shortcuts: [
