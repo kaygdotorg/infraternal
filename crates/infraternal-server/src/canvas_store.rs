@@ -110,9 +110,9 @@ impl Store {
             )]);
         }
     }
-    /// Apply exactly one bounded semantic intent, allowing stale but never future revisions.
+    /// Apply one bounded semantic intent; whole-look replacements require the exact current revision.
     /// # Errors
-    /// Refuses invalid references, bounds, ownership or reused IDs with different input.
+    /// Refuses stale whole-look replacements, invalid references, bounds, ownership or reused IDs with different input.
     pub async fn apply(&self, account: &str, input: &[u8]) -> Result<i64, Error> {
         self.call(false, account, input).await
     }
@@ -238,6 +238,12 @@ impl Store {
                         return Err(Error);
                     }
                     let intent = request.get("intent").ok_or(Error)?;
+                    // A whole-look replacement has no field merge; its base revision is a compare-and-set token.
+                    if model::string(intent, "type") == Some("look.set")
+                        && base != document.revision()
+                    {
+                        return Err(Error);
+                    }
                     // Each intent can inspect only its own ID and a split anchor. Probe
                     // the account index instead of loading its lifetime close history.
                     let id = intent
@@ -677,13 +683,21 @@ mod tests {
         let mut later_look = look.clone();
         later_look["themes"][0]["font"] = json!("fira-code");
         later_look["basics"]["font"] = json!("fira-code");
-        let stale_edit = serde_json::to_vec(&json!({
+        let newer_edit = serde_json::to_vec(&json!({
             "op_id": "look-b",
-            "base_revision": 1,
+            "base_revision": 2,
             "intent": {"type": "look.set", "look": later_look}
         }))
         .unwrap();
-        assert_eq!(store.apply("a", &stale_edit).await.unwrap(), 3);
+        assert_eq!(store.apply("a", &newer_edit).await.unwrap(), 3);
+
+        let stale_edit = serde_json::to_vec(&json!({
+            "op_id": "look-c",
+            "base_revision": 2,
+            "intent": {"type": "look.set", "look": look}
+        }))
+        .unwrap();
+        assert!(store.apply("a", &stale_edit).await.is_err(), "an offline look cannot overwrite a newer account revision");
 
         let reloaded_a = store.events("a", None).await.unwrap();
         assert_eq!(reloaded_a[0]["revision"], 3);
