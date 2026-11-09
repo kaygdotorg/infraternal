@@ -57,6 +57,9 @@ impl Way {
 pub enum Outcome {
     /// The command became root and the snippet ran (the relay is starting).
     Started,
+    /// su can't run a command here: root's login shell isn't a POSIX shell
+    /// (often `nologin`). Nothing was typed (J415 B11).
+    RootShell,
     /// The password was refused. Counts toward D376's two tries.
     Wrong,
     /// This account may not become root this way (not in sudoers, no doas rule).
@@ -96,7 +99,9 @@ pub struct Transcript {
     way: Way,
     marker: Vec<u8>,
     typed: bool,
-    tail: Vec<u8>,
+    /// Wiped when dropped: should a terminal ever echo, the password could
+    /// pass through here (J415 B3).
+    tail: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl Transcript {
@@ -107,7 +112,7 @@ impl Transcript {
             way,
             marker: marker.as_bytes().to_vec(),
             typed: false,
-            tail: Vec::new(),
+            tail: zeroize::Zeroizing::new(Vec::new()),
         }
     }
 
@@ -118,11 +123,18 @@ impl Transcript {
         self.tail.clear();
     }
 
+    /// Whether the password has been typed (so PAM may have counted it).
+    #[must_use]
+    pub const fn was_typed(&self) -> bool {
+        self.typed
+    }
+
     /// Read more terminal output and decide what to do.
     pub fn feed(&mut self, bytes: &[u8]) -> Step {
         self.tail.extend_from_slice(bytes);
         if self.tail.len() > TAIL {
-            self.tail.drain(..self.tail.len() - TAIL);
+            let excess = self.tail.len() - TAIL;
+            self.tail.drain(..excess);
         }
         if contains(&self.tail, STARTED_LINE.as_bytes()) {
             return Step::Done(Outcome::Started);
@@ -226,7 +238,8 @@ fn trim_end(bytes: &[u8]) -> &[u8] {
 /// uid. It copies the binary into a fresh 0700 directory under `/run` that
 /// only root can write, hashes *the copy*, and runs it only on a match, so a
 /// file swapped after the check is never run. The relay removes that
-/// directory when it exits.
+/// directory when it exits. The relay's stdin stays the terminal: it reads
+/// its one-time token from there (see [`elevate`]).
 #[must_use]
 pub fn snippet() -> String {
     format!(
@@ -244,7 +257,7 @@ fi
 chmod 0700 "$dir/relay"
 [ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t "$dir/relay" 2>/dev/null || :
 echo {STARTED_LINE}
-exec "$dir/relay" __privilege-relay --socket "$3" --uid "$4" --dir "$dir" </dev/null >/dev/null 2>&1
+exec "$dir/relay" __privilege-relay --socket "$3" --uid "$4" --dir "$dir" >/dev/null 2>&1
 "#
     )
 }
@@ -252,7 +265,7 @@ exec "$dir/relay" __privilege-relay --socket "$3" --uid "$4" --dir "$dir" </dev/
 /// The command for `way`, by absolute path, ready to run `snippet` with its
 /// four public arguments. `None` when the tool isn't installed.
 #[must_use]
-pub fn command(way: Way, marker: &str, args: [&str; 4]) -> Option<(String, Vec<String>)> {
+pub fn command(way: Way, marker: &str, words: [&str; 4]) -> Option<(String, Vec<String>)> {
     let first = |paths: &[&str]| {
         paths
             .iter()
@@ -266,32 +279,32 @@ pub fn command(way: Way, marker: &str, args: [&str; 4]) -> Option<(String, Vec<S
         script.clone(),
         "infraternal-privilege".to_owned(),
     ];
-    tail.extend(args.iter().map(|arg| (*arg).to_owned()));
+    tail.extend(words.iter().map(|word| (*word).to_owned()));
     match way {
         Way::SudoNoPassword => {
             let sudo = first(&["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"])?;
-            let mut options = vec!["-n".to_owned(), "--".to_owned()];
-            options.extend(tail);
-            Some((sudo, options))
+            let mut argv = vec!["-n".to_owned(), "--".to_owned()];
+            argv.extend(tail);
+            Some((sudo, argv))
         }
         Way::Sudo => {
             let sudo = first(&["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"])?;
             // -k: always check the password, never a cached timestamp, so each
             // try is a real check. -p: our own prompt, which nothing can fake.
-            let mut options = vec![
+            let mut argv = vec![
                 "-k".to_owned(),
                 "-p".to_owned(),
                 marker.to_owned(),
                 "--".to_owned(),
             ];
-            options.extend(tail);
-            Some((sudo, options))
+            argv.extend(tail);
+            Some((sudo, argv))
         }
         Way::Doas => {
             let doas = first(&["/usr/bin/doas", "/bin/doas", "/usr/local/bin/doas"])?;
-            let mut options = vec!["--".to_owned()];
-            options.extend(tail);
-            Some((doas, options))
+            let mut argv = vec!["--".to_owned()];
+            argv.extend(tail);
+            Some((doas, argv))
         }
         Way::Su => {
             let su = first(&["/bin/su", "/usr/bin/su"])?;
@@ -306,9 +319,70 @@ pub fn command(way: Way, marker: &str, args: [&str; 4]) -> Option<(String, Vec<S
     }
 }
 
+/// How long to wait for a prompt's terminal to turn echo off (B3).
+const ECHO_WAIT: Duration = Duration::from_secs(3);
+
+/// Wait up to `wait` for the terminal behind `master` to have echo off.
+async fn echo_off(master: &OwnedFd, wait: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match nix::sys::termios::tcgetattr(master) {
+            Ok(modes)
+                if !modes
+                    .local_flags
+                    .contains(nix::sys::termios::LocalFlags::ECHO) =>
+            {
+                return true;
+            }
+            Ok(_) if tokio::time::Instant::now() < deadline => {
+                // sleep: polling the terminal's modes; there is no event for a mode change.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Lowercase hex of `bytes`.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
+/// Whether root's login shell (from `passwd`, the text of `/etc/passwd`) is
+/// one `su root -c` can run a command with. `nologin`, `false` and other
+/// non-POSIX shells can't (J415 B11).
+#[must_use]
+pub fn root_shell_is_posix(passwd: &str) -> bool {
+    passwd
+        .lines()
+        .find(|line| line.starts_with("root:"))
+        .and_then(|line| line.rsplit(':').next())
+        .and_then(|shell| shell.rsplit('/').next())
+        .is_some_and(|name| {
+            ["sh", "bash", "dash", "ash", "ksh", "mksh", "zsh", "busybox"].contains(&name)
+        })
+}
+
 /// Single-quote `word` for `/bin/sh`.
 fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// What one try came to.
+pub struct Try {
+    /// The answer.
+    pub outcome: Outcome,
+    /// Whether the password reached the prompt, so PAM may have counted the
+    /// try even when the outcome isn't [`Outcome::Wrong`] (J415 B2).
+    pub typed: bool,
+    /// The running relay, on [`Outcome::Started`].
+    pub elevated: Option<Elevated>,
 }
 
 /// A command that became root and is now the relay. Keep it alive for as
@@ -327,19 +401,31 @@ pub struct Elevated {
 /// controlling terminal (util-linux `setsid --ctty`), with an empty
 /// environment apart from `PATH` and the `C` locale. The whole session is
 /// killed on any answer but [`Outcome::Started`], and in every case after
-/// `bound`. On `Started` the command keeps running: it *is* the relay now.
+/// `bound`. On `Started` the command keeps running: it *is* the relay now,
+/// and `token` has been typed to it (64 hex digits, echo off), which the
+/// relay then requires as the first frame on its socket (J415 B5).
 ///
 /// # Errors
 /// Only when the terminal or the command can't be set up at all.
 pub async fn elevate(
     way: Way,
     secret: Option<&[u8]>,
-    args: [&str; 4],
+    token: &[u8; 32],
+    words: [&str; 4],
     bound: Duration,
-) -> io::Result<(Outcome, Option<Elevated>)> {
+) -> io::Result<Try> {
+    if way == Way::Su
+        && !root_shell_is_posix(&std::fs::read_to_string("/etc/passwd").unwrap_or_default())
+    {
+        return Ok(Try {
+            outcome: Outcome::RootShell,
+            typed: false,
+            elevated: None,
+        });
+    }
     let marker = format!("[infraternal-{:032x}] ", uuid::Uuid::new_v4().as_u128());
-    let (program, options) =
-        command(way, &marker, args).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    let (program, argv) =
+        command(way, &marker, words).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     let pty = nix::pty::openpty(None, None).map_err(io::Error::from)?;
     let flags =
         nix::fcntl::fcntl(&pty.master, nix::fcntl::FcntlArg::F_GETFL).map_err(io::Error::from)?;
@@ -351,7 +437,7 @@ pub async fn elevate(
         .arg("--ctty")
         .arg("--")
         .arg(&program)
-        .args(&options)
+        .args(&argv)
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .env("LANG", "C")
@@ -397,6 +483,13 @@ pub async fn elevate(
                     let Some(secret) = secret else {
                         return Ok(Outcome::Failed);
                     };
+                    // B3: su (Linux-PAM's conversation) prints its prompt
+                    // before it turns echo off. Typing before that would echo
+                    // the password back, or lose it. Wait for echo to be off;
+                    // a terminal that never turns it off gets no password.
+                    if !echo_off(master.get_ref(), ECHO_WAIT).await {
+                        return Ok(Outcome::Failed);
+                    }
                     let mut line = zeroize::Zeroizing::new(Vec::with_capacity(secret.len() + 1));
                     line.extend_from_slice(secret);
                     line.push(b'\n');
@@ -408,20 +501,42 @@ pub async fn elevate(
     })
     .await
     .unwrap_or(Ok(Outcome::Timeout))?;
+    let typed = transcript.was_typed();
     if outcome == Outcome::Started {
-        return Ok((
+        // B5: type the relay's one-time token to its terminal, with echo off
+        // on our side. The relay reads it, then requires it as the first
+        // frame on the socket, which proves the listener is this process.
+        if let Ok(mut modes) = nix::sys::termios::tcgetattr(master.get_ref()) {
+            modes
+                .local_flags
+                .remove(nix::sys::termios::LocalFlags::ECHO);
+            let _ = nix::sys::termios::tcsetattr(
+                master.get_ref(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &modes,
+            );
+        }
+        let mut line = zeroize::Zeroizing::new(hex(token).into_bytes());
+        line.push(b'\n');
+        nix::unistd::write(master.get_ref(), &line).map_err(io::Error::from)?;
+        return Ok(Try {
             outcome,
-            Some(Elevated {
+            typed,
+            elevated: Some(Elevated {
                 child,
                 terminal: master,
             }),
-        ));
+        });
     }
     if let Some(session) = session {
         let _ = nix::sys::signal::killpg(session, nix::sys::signal::Signal::SIGKILL);
     }
     let _ = child.wait().await;
-    Ok((outcome, None))
+    Ok(Try {
+        outcome,
+        typed,
+        elevated: None,
+    })
 }
 
 #[cfg(test)]
@@ -429,7 +544,7 @@ mod tests {
     //! Prompts, refusals and the one-try rule, from real transcripts (locale C).
     use super::*;
 
-    /// A sudo prompt marker for the transcripts.
+    /// A stand-in for the random sudo prompt marker.
     const MARK: &str = "[infraternal-0123] ";
 
     /// Feed `chunks` in order and collect each step.
@@ -444,6 +559,26 @@ mod tests {
             out.push(step);
         }
         out
+    }
+
+    /// B11: su needs root's login shell to run a command; nologin can't.
+    #[test]
+    fn su_needs_a_posix_root_shell() {
+        assert!(root_shell_is_posix("root:x:0:0:root:/root:/bin/bash\n"));
+        assert!(root_shell_is_posix(
+            "daemon:x:1:1::/:/usr/sbin/nologin\nroot:x:0:0::/root:/bin/sh\n"
+        ));
+        assert!(!root_shell_is_posix(
+            "root:x:0:0::/root:/usr/sbin/nologin\n"
+        ));
+        assert!(!root_shell_is_posix("root:x:0:0::/root:/usr/bin/fish\n"));
+        assert!(!root_shell_is_posix(""));
+    }
+
+    /// The token is typed as 64 lowercase hex digits.
+    #[test]
+    fn tokens_are_typed_as_hex() {
+        assert_eq!(hex(&[0, 0xab, 0x10]), "00ab10");
     }
 
     /// sudo: our marker asks once; a second marker or "Sorry, try again" after

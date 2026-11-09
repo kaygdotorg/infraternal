@@ -32,7 +32,7 @@ struct FakeRelay {
 }
 
 impl FakeRelay {
-    /// A stand-in that has already said `Ready`.
+    /// A stand-in that has already said Ready.
     fn new() -> Arc<Self> {
         let relay = Arc::new(Self {
             inbox: Mutex::new(Decoder::default()),
@@ -147,6 +147,7 @@ async fn session(name: &str) -> (Arc<FakeRelay>, RelaySession, PathBuf) {
     )
     .await
     .unwrap();
+    session.arm_rollback("true".to_owned());
     (relay, session, dir)
 }
 
@@ -176,7 +177,7 @@ async fn steps_behave_like_ssh_commands() {
         )
         .await
     else {
-        panic!("the refusal should fail the step");
+        panic!("a refused step must fail");
     };
     assert_eq!(failure.exit_status, Some(71));
     session.close();
@@ -197,11 +198,138 @@ async fn a_lost_relay_fails_every_step() {
         }
     });
     let Err(failure) = session.run("sleep 30", Input::Empty).await else {
-        panic!("the step should fail");
+        panic!("a step of a vanished relay must fail");
     };
     running.await.unwrap();
     assert_eq!(failure.exit_status, Some(255), "{failure:?}");
     assert!(session.lost());
     assert!(session.run("true", Input::Empty).await.is_err());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A pump onto the *real* relay loop (`privilege_relay_host::serve`) over an
+/// in-memory pipe, playing the rootless agent: it writes the token first,
+/// then carries the session's bytes. Dropping it is a lost link.
+struct RealRelay {
+    to_relay: tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+    from_relay: tokio::sync::Mutex<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    lost: AtomicBool,
+}
+
+impl Pump for RealRelay {
+    fn pump(&self, bytes: Vec<u8>) -> Operation<'_, (Vec<u8>, bool)> {
+        Box::pin(async move {
+            use tokio::io::AsyncReadExt as _;
+            if self.lost.load(Ordering::SeqCst) {
+                return Err(infraternal_plugin_ssh::model::Failure::install("lost"));
+            }
+            if !bytes.is_empty() {
+                self.to_relay.lock().await.write_all(&bytes).await.unwrap();
+            }
+            let mut buffer = vec![0; 1 << 20];
+            let mut reader = self.from_relay.lock().await;
+            match tokio::time::timeout(Duration::from_millis(50), reader.read(&mut buffer)).await {
+                Ok(Ok(0) | Err(_)) => Ok((Vec::new(), true)),
+                Ok(Ok(read)) => Ok((buffer[..read].to_vec(), false)),
+                Err(_) => Ok((Vec::new(), false)),
+            }
+        })
+    }
+}
+
+/// Start the real relay loop with `rollback`, and a session over it.
+async fn real_session(
+    name: &str,
+    rollback: String,
+) -> (
+    Arc<RealRelay>,
+    RelaySession,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    PathBuf,
+) {
+    let dir = scratch(name);
+    let token = [9u8; 32];
+    let (agent_side, relay_side) = tokio::io::duplex(1 << 20);
+    let (relay_read, relay_write) = tokio::io::split(relay_side);
+    let relay = tokio::spawn(async move {
+        infraternal_agent::privilege_relay_host::serve(
+            relay_read,
+            relay_write,
+            &token,
+            Duration::from_secs(60),
+        )
+        .await
+    });
+    let (from_relay, mut to_relay) = tokio::io::split(agent_side);
+    let mut first = Vec::new();
+    Frame::Token { bytes: token }.encode(&mut first);
+    to_relay.write_all(&first).await.unwrap();
+    let pump = Arc::new(RealRelay {
+        to_relay: tokio::sync::Mutex::new(to_relay),
+        from_relay: tokio::sync::Mutex::new(from_relay),
+        lost: AtomicBool::new(false),
+    });
+    let session = RelaySession::start(
+        pump.clone(),
+        &dir,
+        PathBuf::from(env!("CARGO_BIN_EXE_infraternal")),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    session.arm_rollback(rollback);
+    (pump, session, relay, dir)
+}
+
+/// J415 R4 / B1: a link lost mid-install makes the real relay run the
+/// install's rollback by itself; nothing from the server is needed.
+#[tokio::test]
+async fn a_lost_link_mid_install_rolls_back_on_the_host() {
+    let marks = scratch("lost-link-marks");
+    let rollback = format!(
+        "rm -f '{0}/installed'; touch '{0}/rolled-back'",
+        marks.display()
+    );
+    let (pump, session, relay, dir) = real_session("lost-link", rollback).await;
+    session
+        .run(
+            &format!("touch '{}/installed'", marks.display()),
+            Input::Empty,
+        )
+        .await
+        .unwrap();
+    assert!(marks.join("installed").exists());
+    // The link goes: the rootless agent's socket end closes.
+    pump.lost.store(true, Ordering::SeqCst);
+    pump.to_relay.lock().await.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), relay)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!marks.join("installed").exists());
+    assert!(marks.join("rolled-back").exists());
+    drop(session);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(marks);
+}
+
+/// J415 R4: after the session's commit, closing ends the relay without a rollback.
+#[tokio::test]
+async fn a_committed_upgrade_is_not_rolled_back() {
+    let marks = scratch("committed-marks");
+    let rollback = format!("touch '{}/rolled-back'", marks.display());
+    let (_pump, session, relay, dir) = real_session("committed", rollback).await;
+    session.run("true", Input::Empty).await.unwrap();
+    session.commit();
+    session.close();
+    tokio::time::timeout(Duration::from_secs(30), relay)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!marks.join("rolled-back").exists());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(marks);
 }

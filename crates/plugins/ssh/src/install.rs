@@ -1420,6 +1420,17 @@ fi
         }
     }
 
+    /// The exact script [`Self::rollback`] runs, for a host-side runner that
+    /// must put the host back without the server: a root upgrade's relay
+    /// keeps it and runs it itself if the upgrade ends uncommitted (D376, R4).
+    /// It takes the setup lock and undoes only this transaction's journal.
+    #[must_use]
+    pub fn rollback_script(&self) -> String {
+        self.script(&format!(
+            "{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\npreserve_session=no\n{ROLLBACK_TRANSACTION}"
+        ))
+    }
+
     /// Restore the previous installation, or remove only this host-bound fresh installation.
     /// # Errors
     /// Reports an unreachable host/failed cleanup; callers retain that fact in progress.
@@ -1430,12 +1441,7 @@ fi
         // this exact transaction owns it (#230).
         Box::pin(async move {
             self.session
-                .run(
-                    &self.script(&format!(
-                        "{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\npreserve_session=no\n{ROLLBACK_TRANSACTION}"
-                    )),
-                    Input::Empty,
-                )
+                .run(&self.rollback_script(), Input::Empty)
                 .await
                 .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
             Ok(())

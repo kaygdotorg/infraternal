@@ -21,12 +21,18 @@
 //! The [`Pump`] carries bytes to and from the relay, through the rootless
 //! infraternal agent's `privilege.pump` action. When the relay is gone, every
 //! open step ends with exit 255, as when an SSH connection drops.
+//!
+//! The first thing this session sends is the install's rollback script
+//! ([`Frame::Rollback`]); the relay keeps it and runs it itself if the
+//! upgrade ends without [`RelaySession::commit`] (J415 R4). So a link lost
+//! mid-install, here or on the host, puts the host back as it was even
+//! though the server can't reach it any more (B1).
 use crate::{
     model::Failure,
     process::execute,
     transport::{CommandOutput, Input, Operation, SshSession},
 };
-use infraternal_plugin_remote::privilege_relay::{Decoder, Frame, MAX_CHUNK};
+use infraternal_plugin_remote::privilege_relay::{Decoder, Frame, MAX_CHUNK, MAX_STDERR};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -81,6 +87,9 @@ impl RelaySession {
     /// helper socket; `exe` is this server's own binary, which carries the
     /// helper. Returns when the relay has said `Ready`.
     ///
+    /// Call [`Self::arm_rollback`] before the first step: the relay runs no
+    /// step until it knows how to put the host back.
+    ///
     /// # Errors
     /// The relay did not say `Ready` within `ready`, or the socket failed.
     pub async fn start(
@@ -112,9 +121,39 @@ impl RelaySession {
         }
     }
 
-    /// End the session: ask the relay to stop everything and exit.
+    /// End the session: ask the relay to stop everything and exit. Without
+    /// an earlier [`Self::commit`] the relay rolls the host back first.
     pub fn close(&self) {
         let _ = self.hub.outgoing.send(Frame::Close);
+    }
+
+    /// Close the session and wait up to `bound` for the close to reach the
+    /// relay (its pump loop ends right after sending it). True when it did.
+    pub async fn finish(&self, bound: Duration) -> bool {
+        self.close();
+        let deadline = tokio::time::Instant::now() + bound;
+        while !self.lost() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            // sleep: the pump loop marks the end with a flag; poll it briefly.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
+    }
+
+    /// Hand the relay the install's rollback script
+    /// ([`crate::install::Installation::rollback_script`]). Frames keep their
+    /// order, so it reaches the relay before any step queued after it. The
+    /// relay keeps the first one it gets.
+    pub fn arm_rollback(&self, script: String) {
+        let _ = self.hub.outgoing.send(Frame::Rollback { script });
+    }
+
+    /// Tell the relay the install committed, so its end needs no rollback.
+    /// Call it only after the install's own commit step succeeded.
+    pub fn commit(&self) {
+        let _ = self.hub.outgoing.send(Frame::Commit);
     }
 
     /// The relay has gone away; every later step fails.
@@ -219,6 +258,9 @@ async fn pump_loop(
     let mut ready = Some(ready);
     let mut decoder = Decoder::default();
     let mut closing = false;
+    // B10: the relay's stderr is capped here too, per channel, since the
+    // rootless agent's pipe could inject more than the relay would send.
+    let mut stderr: HashMap<u32, usize> = HashMap::new();
     loop {
         let mut send = Vec::new();
         while send.len() < 2 * MAX_CHUNK {
@@ -242,13 +284,27 @@ async fn pump_loop(
                         let _ = ready.send(());
                     }
                 }
-                Ok(Some(
-                    frame @ (Frame::Stdout { .. } | Frame::Stderr { .. } | Frame::Exit { .. }),
-                )) => {
+                // B10: nothing but Ready may come before Ready.
+                Ok(Some(_)) if ready.is_some() => {
+                    broken = true;
+                    break;
+                }
+                Ok(Some(Frame::Stderr { channel, bytes })) => {
+                    let forwarded = stderr.entry(channel).or_default();
+                    let keep = bytes.len().min(MAX_STDERR.saturating_sub(*forwarded));
+                    *forwarded += keep;
+                    if keep > 0
+                        && let Some(route) = lock(&hub.routes).get(&channel)
+                    {
+                        let _ = route.send(Frame::Stderr {
+                            channel,
+                            bytes: bytes[..keep].to_vec(),
+                        });
+                    }
+                }
+                Ok(Some(frame @ (Frame::Stdout { .. } | Frame::Exit { .. }))) => {
                     let channel = match &frame {
-                        Frame::Stdout { channel, .. }
-                        | Frame::Stderr { channel, .. }
-                        | Frame::Exit { channel, .. } => *channel,
+                        Frame::Stdout { channel, .. } | Frame::Exit { channel, .. } => *channel,
                         _ => 0,
                     };
                     let exit = matches!(frame, Frame::Exit { .. });
@@ -363,9 +419,9 @@ pub fn run_if_requested() -> Option<std::process::ExitCode> {
     if args.first().map(String::as_str) != Some(CHANNEL_COMMAND) {
         return None;
     }
-    let (Some(socket), Some(channel), 3) = (
+    let (Some(socket), Some(Ok(channel)), 3) = (
         args.get(1),
-        args.get(2).and_then(|value| value.parse::<u32>().ok()),
+        args.get(2).map(|value| value.parse::<u32>()),
         args.len(),
     ) else {
         return Some(std::process::ExitCode::from(LOST));
@@ -441,10 +497,8 @@ mod tests {
     /// Without a Ready from the relay the session doesn't start.
     #[tokio::test]
     async fn no_ready_no_session() {
-        /// A relay that never says `Ready`.
         struct Silent;
         impl Pump for Silent {
-            /// Never answers anything.
             fn pump(&self, _: Vec<u8>) -> Operation<'_, (Vec<u8>, bool)> {
                 Box::pin(async {
                     // sleep: pace the silent pump like the real one's short wait.

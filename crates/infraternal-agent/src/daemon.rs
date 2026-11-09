@@ -956,6 +956,12 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
         let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
         let mut renewals = JoinSet::new();
+        // A root upgrade's `privilege.*` calls have their own small lane, so
+        // a stuck relay can never hold up certificate renewal or terminal
+        // startup (J415 B4). Each call is also bounded in time. Builds
+        // without root upgrades keep it empty, which masks its select arm.
+        #[cfg_attr(not(all(feature = "remote", target_os = "linux")), allow(unused_mut))]
+        let mut privileges: JoinSet<(u32, io::Result<Vec<u8>>)> = JoinSet::new();
         let mut opens: JoinSet<(
             u32,
             u32,
@@ -1026,6 +1032,11 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                     // handlers outside that monomorph as well as the select mask.
                     if SESSION_ONLY { return Err(sessions::invalid("session image cannot complete identity renewal")); }
                     let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
+                    let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
+                    reply(&control, Message::Result(0, call_id, ok, json))?;
+                }
+                result = join_privilege(&mut privileges), if !SESSION_ONLY && control_ready && !privileges.is_empty() => {
+                    let (call_id, result) = result.ok_or_else(|| sessions::invalid("missing privilege task"))?.map_err(io::Error::other)?;
                     let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
                     reply(&control, Message::Result(0, call_id, ok, json))?;
                 }
@@ -1119,11 +1130,14 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                         // elevation takes seconds and the relay carries the payload.
                         #[cfg(all(feature = "remote", target_os = "linux"))]
                         Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && stream == 0 && crate::privilege_agent::ACTIONS.contains(&action_id) => {
-                            if input_json.len() > 2 * 1024 * 1024 || renewals.len() >= 4 {
+                            if input_json.len() > 2 * 1024 * 1024 || privileges.len() >= crate::privilege_agent::LANE {
                                 reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
                             } else {
                                 let action = action_id.to_owned(); let state = state.clone(); let input = input_json.to_vec();
-                                renewals.spawn(async move { (call_id, crate::privilege_agent::execute(&action, &input, &state).await) });
+                                privileges.spawn(async move {
+                                    let result = tokio::time::timeout(crate::privilege_agent::CALL_BOUND, crate::privilege_agent::execute(&action, &input, &state)).await;
+                                    (call_id, result.unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into())))
+                                });
                             }
                         }
                         Frame::Call {call_id, action_id: "terminal.startup", input_json} if !SESSION_ONLY && plugins.is_some() && stream == 0 => {
@@ -2045,4 +2059,12 @@ pub(crate) async fn run_bound_terminal_opened_mode(
     allow_priming: bool,
 ) -> io::Result<()> {
     run_bound_terminal_mode(channel, state, allow_priming, receive, opening).await
+}
+
+/// The next finished `privilege.*` call. On builds without root upgrades
+/// the lane stays empty, so its select arm is always masked off.
+async fn join_privilege(
+    privileges: &mut JoinSet<(u32, io::Result<Vec<u8>>)>,
+) -> Option<Result<(u32, io::Result<Vec<u8>>), tokio::task::JoinError>> {
+    privileges.join_next().await
 }

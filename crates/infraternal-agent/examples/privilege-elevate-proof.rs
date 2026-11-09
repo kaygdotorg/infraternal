@@ -177,6 +177,12 @@ async fn prove(way: &str, mut password: Vec<u8>) -> Result<ExitCode, Failed> {
         printf 'selinux=%s\\n' \"$(getenforce 2>/dev/null || echo none)\"; \
         read line; printf 'stdin=%s\\n' \"$line\"; exit 3";
     let mut send = Vec::new();
+    // The relay runs no step before it knows how to put the host back
+    // (J415 R4). This proof installs nothing, so its rollback only logs.
+    Frame::Rollback {
+        script: "logger -t infraternal-privilege-proof rollback-ran".into(),
+    }
+    .encode(&mut send);
     Frame::Open {
         channel: 1,
         script: script.into(),

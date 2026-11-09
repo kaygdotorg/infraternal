@@ -9,7 +9,19 @@
 //!
 //! The rootless infraternal agent carries these bytes between the server and
 //! the relay and never reads them: it is a pipe. Only the server writes `Open`
-//! frames, and the relay runs nothing else.
+//! frames, and the relay runs nothing else. The one frame the agent itself
+//! writes is the first: [`Frame::Token`], the one-time token it typed to the
+//! relay's terminal, which proves to the relay that this socket's listener is
+//! the agent that started it (J415 B5).
+//!
+//! # Ending
+//!
+//! The server sends [`Frame::Rollback`] before any step: the script that
+//! puts the host back as it was. The relay keeps it and runs it itself,
+//! after stopping every step, whenever the upgrade ends without a
+//! [`Frame::Commit`]: on [`Frame::Close`], end of input, a protocol error or
+//! its lifetime (J415 R4). So a lost link never leaves a half-installed root
+//! service behind, even though the server can no longer reach the host.
 //!
 //! # Wire format
 //!
@@ -53,7 +65,16 @@ pub enum Frame {
     /// first; the server starts nothing before it.
     Ready,
     /// Server → relay: the upgrade is over; stop every script and exit.
+    /// Without an earlier [`Frame::Commit`], the relay rolls back first.
     Close,
+    /// Agent → relay, first and once: the 32-byte one-time token typed to the
+    /// relay's terminal. The relay refuses a socket whose first frame isn't it.
+    Token { bytes: [u8; 32] },
+    /// Server → relay, before any `Open`: the rollback script, kept by the
+    /// relay and run if the upgrade ends without `Commit`.
+    Rollback { script: String },
+    /// Server → relay: the install committed; a later end needs no rollback.
+    Commit,
 }
 
 impl Frame {
@@ -69,6 +90,9 @@ impl Frame {
             Self::Ready => 7,
             Self::Close => 8,
             Self::Stderr { .. } => 9,
+            Self::Token { .. } => 10,
+            Self::Rollback { .. } => 11,
+            Self::Commit => 12,
         }
     }
 
@@ -87,12 +111,14 @@ impl Frame {
         };
         let (channel, body): (u32, &[u8]) = match self {
             Self::Open { channel, script } => (*channel, script.as_bytes()),
+            Self::Rollback { script } => (0, script.as_bytes()),
+            Self::Token { bytes } => (0, &bytes[..]),
             Self::Stdin { channel, bytes }
             | Self::Stdout { channel, bytes }
             | Self::Stderr { channel, bytes } => (*channel, bytes),
             Self::StdinEnd { channel } | Self::Kill { channel } => (*channel, &[]),
             Self::Exit { channel, .. } => (*channel, &exit[..]),
-            Self::Ready | Self::Close => (0, &[]),
+            Self::Ready | Self::Close | Self::Commit => (0, &[]),
         };
         assert!(
             body.len() <= limit(self.kind()),
@@ -108,10 +134,11 @@ impl Frame {
 /// The largest body a frame of `kind` may carry.
 const fn limit(kind: u8) -> usize {
     match kind {
-        1 => MAX_SCRIPT,
+        1 | 11 => MAX_SCRIPT,
         2 | 5 => MAX_CHUNK,
         9 => MAX_STDERR,
         6 => 2,
+        10 => 32,
         _ => 0,
     }
 }
@@ -148,7 +175,7 @@ impl Decoder {
             return Ok(None);
         }
         let kind = self.buffer[0];
-        if !(1..=9).contains(&kind) {
+        if !(1..=12).contains(&kind) {
             return Err(Malformed::Kind);
         }
         let channel = u32::from_be_bytes([
@@ -163,7 +190,7 @@ impl Decoder {
             self.buffer[7],
             self.buffer[8],
         ]) as usize;
-        if length > limit(kind) || (kind == 6 && length != 2) {
+        if length > limit(kind) || (kind == 6 && length != 2) || (kind == 10 && length != 32) {
             return Err(Malformed::Length);
         }
         if self.buffer.len() < HEAD + length {
@@ -195,10 +222,17 @@ impl Decoder {
             },
             7 => Frame::Ready,
             8 => Frame::Close,
-            _ => Frame::Stderr {
+            9 => Frame::Stderr {
                 channel,
                 bytes: body,
             },
+            10 => Frame::Token {
+                bytes: body.try_into().map_err(|_| Malformed::Length)?,
+            },
+            11 => Frame::Rollback {
+                script: String::from_utf8(body).map_err(|_| Malformed::Body)?,
+            },
+            _ => Frame::Commit,
         };
         Ok(Some(frame))
     }
@@ -240,6 +274,11 @@ mod tests {
                 code: None,
             },
             Frame::Kill { channel: 3 },
+            Frame::Token { bytes: [7; 32] },
+            Frame::Rollback {
+                script: "rollback".into(),
+            },
+            Frame::Commit,
             Frame::Close,
         ];
         let mut wire = Vec::new();
@@ -262,7 +301,7 @@ mod tests {
     #[test]
     fn malformed_streams_are_refused() {
         let mut decoder = Decoder::default();
-        decoder.push(&[10, 0, 0, 0, 0, 0, 0, 0, 0]);
+        decoder.push(&[0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(decoder.frame(), Err(Malformed::Kind));
 
         let mut decoder = Decoder::default();
@@ -282,5 +321,14 @@ mod tests {
         let mut decoder = Decoder::default();
         decoder.push(&[1, 0, 0, 0, 1, 0, 0, 0, 1, 0xff]);
         assert_eq!(decoder.frame(), Err(Malformed::Body));
+
+        // A token is exactly 32 bytes; a short one is refused.
+        let mut decoder = Decoder::default();
+        decoder.push(&[10, 0, 0, 0, 0, 0, 0, 0, 31]);
+        assert_eq!(decoder.frame(), Err(Malformed::Length));
+
+        let mut decoder = Decoder::default();
+        decoder.push(&[13, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(decoder.frame(), Err(Malformed::Kind));
     }
 }

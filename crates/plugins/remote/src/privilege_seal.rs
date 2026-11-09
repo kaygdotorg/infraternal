@@ -29,14 +29,22 @@
 //! Binding the host, the attempt and the method into both the key and the
 //! additional data means a sealed password can't be replayed to another host,
 //! another attempt or another way in. The browser side implements the same
-//! format with `WebCrypto`; a known-answer vector in this module's tests pins it
+//! format with WebCrypto; a known-answer vector in this module's tests pins it
 //! for both.
 //!
 //! What this protects against, plainly: the password never sits readable in
 //! the server's memory, database, logs or backups. A server that is actively
 //! malicious could hand the browser a key of its own, but such a server
 //! already commands this infraternal agent, so sealing does not claim to stop
-//! it.
+//! it. Nor does it protect against whoever holds the rootless infraternal
+//! agent's key: that agent opens the seal, so the password is only as safe
+//! as that key (J415, question 4).
+//!
+//! What is wiped: the copy of the shared secret this module makes, and the
+//! opened password. `ring` keeps its own copies of the X25519 result and the
+//! HKDF output inside its types and doesn't wipe them when they drop; that is
+//! a limit of the library, accepted here because they live only for the
+//! one open call (J415 B12).
 use ring::{aead, agreement, hkdf, rand::SystemRandom};
 use zeroize::Zeroizing;
 
@@ -131,7 +139,7 @@ impl SealKey {
     /// [`OpenError::Malformed`] for the wrong version or size,
     /// [`OpenError::Refused`] when the bytes don't authenticate.
     pub fn open(self, binding: &Binding, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, OpenError> {
-        let peer = split(sealed)?.peer;
+        let (peer, _, _) = split(sealed)?;
         let peer = agreement::UnparsedPublicKey::new(&agreement::X25519, peer);
         let seal_public = self.public;
         agreement::agree_ephemeral(self.private, &peer, |dh| {
@@ -143,17 +151,11 @@ impl SealKey {
     }
 }
 
-/// The three parts of a seal after its version byte.
-struct Parts<'a> {
-    /// The browser's one-use X25519 public key.
-    peer: &'a [u8],
-    /// The AES-GCM nonce.
-    nonce: [u8; 12],
-    /// The ciphertext with its tag.
-    ciphertext: &'a [u8],
-}
+/// A seal's parts: the browser's public key, the nonce and the ciphertext.
+type Parts<'a> = (&'a [u8], [u8; 12], &'a [u8]);
 
-/// Split a seal into its [`Parts`], checking only the version and the size.
+/// Split a seal into the browser's public key, the nonce and the ciphertext,
+/// checking only the version and the size.
 fn split(sealed: &[u8]) -> Result<Parts<'_>, OpenError> {
     if sealed.len() < HEADER + TAG + 1
         || sealed.len() > HEADER + TAG + MAX_SECRET
@@ -163,11 +165,7 @@ fn split(sealed: &[u8]) -> Result<Parts<'_>, OpenError> {
     }
     let mut nonce = [0; 12];
     nonce.copy_from_slice(&sealed[33..HEADER]);
-    Ok(Parts {
-        peer: &sealed[1..33],
-        nonce,
-        ciphertext: &sealed[HEADER..],
-    })
+    Ok((&sealed[1..33], nonce, &sealed[HEADER..]))
 }
 
 /// The symmetric half of opening, once the X25519 agreement is done. Split out
@@ -179,11 +177,7 @@ fn open_with_shared(
     binding: &Binding,
     sealed: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, OpenError> {
-    let Parts {
-        peer,
-        nonce,
-        ciphertext,
-    } = split(sealed)?;
+    let (peer, nonce, ciphertext) = split(sealed)?;
     let key = derive(shared, peer, seal_public, binding)?;
     let aad = additional(binding);
     let mut buffer = Zeroizing::new(ciphertext.to_vec());
@@ -197,6 +191,18 @@ fn open_with_shared(
         .len();
     buffer.truncate(plain);
     Ok(buffer)
+}
+
+/// 32 bytes from the system's secure random source: the one-time token the
+/// rootless infraternal agent types to its relay (J415 B5).
+///
+/// # Errors
+/// The random source failed.
+pub fn random_token() -> Result<[u8; 32], ring::error::Unspecified> {
+    use ring::rand::SecureRandom as _;
+    let mut token = [0u8; 32];
+    SystemRandom::new().fill(&mut token)?;
+    Ok(token)
 }
 
 /// The AES-256-GCM key for one seal (see the module docs for the inputs).
@@ -266,7 +272,7 @@ mod tests {
         sealed
     }
 
-    /// The binding every test seals for, unless it tests another.
+    /// The binding every vector in these tests is sealed for.
     const BINDING: Binding = Binding {
         host: [0x11; 16],
         attempt: [0x22; 16],
@@ -374,6 +380,55 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    /// J415 B7: a vector from *fixed* X25519 keys, so the key agreement and
+    /// the salt order (`e_pub ‖ seal_pub`) are pinned too, not only the
+    /// symmetric half. The keys are RFC 7748 §6.1's Alice (the browser's
+    /// ephemeral key) and Bob (the host's seal key); RFC 7748 publishes their
+    /// shared secret, which is the `dh` below. Made with Python
+    /// `cryptography` (evidence `j416/evidence/kat.py`). ring can't load a
+    /// fixed private key, so this side starts from the published secret; the
+    /// browser's sealer imports both private keys and must produce `sealed`
+    /// byte for byte with the nonce `00 01 … 0b`.
+    pub(super) const FIXED_KEYS: [&str; 5] = [
+        // browser private (RFC 7748 Alice)
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+        // host seal private (RFC 7748 Bob)
+        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+        // host seal public
+        "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+        // shared secret (RFC 7748's K)
+        "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+        // sealed "hunter2" for BINDING
+        "018520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a000102030405060708090a0b7eb96ae140561fc0f6dc52d871df495040f7df36820183",
+    ];
+
+    /// The fixed-key vector opens, and it carries the browser's real public
+    /// key (RFC 7748 Alice's), so the salt order is the one pinned.
+    #[test]
+    fn the_fixed_key_vector_opens() {
+        let public: [u8; 32] = hex(FIXED_KEYS[2]).try_into().unwrap();
+        let shared: [u8; 32] = hex(FIXED_KEYS[3]).try_into().unwrap();
+        let sealed = hex(FIXED_KEYS[4]);
+        assert_eq!(
+            &sealed[1..33],
+            &hex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")[..]
+        );
+        let opened = open_with_shared(&shared, &public, &BINDING, &sealed).unwrap();
+        assert_eq!(&opened[..], b"hunter2");
+        // Swapping the salt halves (seal_pub ‖ e_pub) must not open it.
+        let mut swapped = sealed.clone();
+        swapped[1..33].copy_from_slice(&public);
+        assert!(
+            open_with_shared(
+                &shared,
+                &hex(FIXED_KEYS[4])[1..33].try_into().unwrap(),
+                &BINDING,
+                &swapped
+            )
+            .is_err()
+        );
     }
 
     /// The format is pinned: the vector opens to "hunter2".
