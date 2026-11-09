@@ -173,7 +173,7 @@ test("a failed stage turns its arc to the failure state; the pill explains it an
   expect(await page.locator('.ui-window .ui-setup-ring[data-phase="tick"]').count()).toBe(0);
   expect(await failed.evaluate((el) => getComputedStyle(el).stroke)).not.toBe(await page.locator(".ui-setup-fill").first().evaluate((el) => getComputedStyle(el).stroke));
   await o2Pill(page).click();
-  const tip = page.getByRole("dialog", { name: "Setup of o2" });
+  const tip = page.getByRole("dialog", { name: "o2 couldn't join this server" });
   await expect(tip).toBeVisible();
   await expect(tip).toContainText("o2 couldn't join this server");
   await expect(tip).toContainText("Your other sessions keep working.");
