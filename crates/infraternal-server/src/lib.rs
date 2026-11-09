@@ -63,6 +63,8 @@ pub use infraternal_plugin_mesh::api as mesh_api;
 mod api_actions;
 #[cfg(feature = "remote")]
 pub mod enrollment;
+/// The host activity log and the root upgrade's wait rule (D376, #399).
+pub mod host_activity;
 /// Server-scheduled host identity key rotation (#285).
 #[cfg(feature = "remote")]
 mod identity_rotation;
