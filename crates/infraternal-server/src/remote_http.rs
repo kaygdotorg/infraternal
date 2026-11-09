@@ -656,6 +656,9 @@ async fn issue_approved_machine_join(
     Ok(invitation)
 }
 
+/// `POST /remote/join`: a host redeems its invitation (or a root upgrade's
+/// successor its promotion token) with a CSR, and gets its signed
+/// certificate and the uid it is bound to.
 async fn join(
     State(api): State<Api>,
     Json(request): Json<JoinRequest>,
