@@ -59,6 +59,10 @@ export interface ChipInputController {
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]!));
 
+/**
+ * Turns `host` into a chip field with `options` and returns its controller. The field's height and each new chip
+ * ease out in at most 220 ms; reduced motion skips the motion.
+ */
 export function mountChipInput(host: HTMLElement, options: ChipInputOptions): ChipInputController {
   const field = document.createElement("div");
   field.className = "ui-chip-field";

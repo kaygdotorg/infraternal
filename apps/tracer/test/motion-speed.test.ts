@@ -46,11 +46,16 @@ const ALLOWED: Array<{ file: string; has: string; why: string }> = [
   { file: "packages/ui/styles.css", has: "ui-setting-found", why: "the tint on a setting ⌘K jumped to fades slowly so the eye finds the row; a colour in place, nothing moves" },
   { file: "packages/ui/src/terminal-cursor-layer.ts", has: "CURSOR_BLINK_PERIOD_MS", why: "terminal caret blink: a stepped loop, not a transition" },
 ];
+/** Whether the declaration or call `text` in file `rel` is on the allow-list. */
 const allowed = (rel: string, text: string): boolean => ALLOWED.some((a) => a.file === rel && text.includes(a.has));
 
+/** The repository root. */
 const repo = join(import.meta.dir, "../../..");
+/** The trees the scan reads: the web app and the shared UI package. */
 const ROOTS = ["apps/tracer", "packages/ui"];
+/** Directories never scanned: dependencies, build output, vendored code, fonts and tests. */
 const SKIP_DIRS = new Set(["node_modules", "dist", "vendor", "fonts", "test", "real", "docs-dist"]);
+/** Every TypeScript, CSS, Svelte and HTML source under `dir`, tests excluded. */
 function sources(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
@@ -59,6 +64,7 @@ function sources(dir: string, out: string[] = []): string[] {
   }
   return out;
 }
+/** The scanned files with their repo-relative path and text. */
 const files = ROOTS.flatMap((root) => sources(join(repo, root))).map((path) => ({ path, rel: relative(repo, path), text: readFileSync(path, "utf8") }));
 /** The line number of offset `at` in `text`, for `file:line` messages. */
 const lineOf = (text: string, at: number): number => text.slice(0, at).split("\n").length;
@@ -110,6 +116,7 @@ function words(item: string): string[] {
   if (cur) out.push(cur);
   return out;
 }
+/** A shorthand word that names an easing (keyword, function or product curve variable). */
 const EASING = /^(ease|ease-in|ease-out|ease-in-out|linear|step-start|step-end|steps\(|cubic-bezier\(|linear\(|var\(--ease)/;
 
 /** One CSS transition or animation item, read from its shorthand. */

@@ -31,6 +31,7 @@ import { easeOut } from "./motion";
 /** Either a visual duration (an ease-out curve, and a critically damped fling) or raw stiffness and damping. */
 export type SpringConfig = { visualDuration: number; bounce?: 0 } | { stiffness: number; damping: number };
 
+/** One animated number; see the module comment for `set` (ease-out curve) and `fling` (spring from a finger's speed). */
 export class Spring {
   /** The current value. A caller may write it before `set` to start the motion from somewhere else. */
   value: number;

@@ -209,6 +209,10 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     private alive = true;
     private finished = false;
 
+    /**
+     * Builds the card and its first step. `startEmpty` opens on the empty state, `animate` plays the card's
+     * entrance (ease-out, under 300 ms; off under reduced motion), and `review` replays a recorded run.
+     */
     constructor(startEmpty: boolean, animate: boolean, review?: Review) {
       this.win = canvas.openFlowWindow({ title: "Add hosts", icon: svg(ICON.plus, "is-line") });
       this.card = this.win.card.root;

@@ -25,6 +25,10 @@ export interface PillModule {
   dispose(): void;
 }
 
+/**
+ * Builds the top pill for the canvas `cx` and returns its controls. A committed swipe slides the old content out and
+ * the new one in on the ease-out curve (each leg at most 260 ms); a short drag settles back the same way.
+ */
 export function createPill(cx: Ctx): PillModule {
   const { stage, signal, state, views, camera } = cx;
   const capsule = stage.querySelector<HTMLElement>("#capsule")!;
