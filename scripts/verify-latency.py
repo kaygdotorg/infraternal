@@ -9,15 +9,17 @@ cannot see:
   key-to-paint number; the agent's share is gated here against the same bound;
 - `flood_effect`: how much a flooding terminal (another session, then the same
   one) grows echo p99;
-- `own_overhead`: echo p99 with no network at all (relay delay 0), the measure
-  D296 set the ~25 ms baseline on;
+- the agent's share of `own_overhead`: echo p99 with no network at all (relay
+  delay 0), printed as `own_overhead_agent`; the report adds the browser's
+  share to form the row;
 - `reconnect_resumed_link`: re-attaching a terminal over a link that stays up,
   from Attach sent to the agent's acknowledgement (the terminal is current and
   accepts keys), then one key's echo as proof it is typable;
 - `idle_agent_rss`: the agent's resident memory when idle, with no session and
   with one quiet session; the larger is the row.
 
-Each row is a `METRIC name=d375_<key>` line from `latency_targets.row_line()`.
+Each row is a `METRIC name=d375_<key>` line from `latency_targets.row_line()`
+(own overhead is composed by the report from the two shares).
 The process exits non-zero when a gated row or component fails;
 `latency_targets.py report` then prints the whole table for the run.
 """
@@ -287,19 +289,17 @@ def run(binary, state_dir, overhead_state, samples):
     failed_metrics = []
 
     overhead_echo, idle_kb, session_kb = measure_without_network(binary, overhead_state, samples)
-    overhead_p99 = percentile(overhead_echo, 0.99)
-    overhead_line = targets.row_line(
-        "own_overhead", source="real-agent-pty", n=len(overhead_echo), value=overhead_p99, unit="ms",
-        target=targets.FRAME_MS, gate=targets.OWN_OVERHEAD_BASELINE_MS,
-        extra=f"p50_ms={percentile(overhead_echo, 0.50):.2f} rtt_ms=0 stretch_ms=5.00")
-    print(overhead_line, flush=True)
+    # The agent's share of the own-overhead row; the report adds the browser's share (latency_targets.compose_own_overhead).
+    print(f"METRIC name=own_overhead_agent source=real-agent-pty n={len(overhead_echo)} "
+          f"p50_ms={percentile(overhead_echo, 0.50):.2f} p99_ms={percentile(overhead_echo, 0.99):.2f} rtt_ms=0 result=REPORT",
+          flush=True)
     rss_mb = max(idle_kb, session_kb) * 1024 / 1_000_000
     rss_line = targets.row_line(
         "idle_agent_rss", source="real-agent", n=2, value=rss_mb, unit="MB", target=targets.IDLE_AGENT_RSS_MB,
         extra=f"no_session_kb={idle_kb} one_quiet_session_kb={session_kb}")
     print(rss_line, flush=True)
-    failed_metrics += [name for name, line in (("own_overhead", overhead_line), ("idle_agent_rss", rss_line))
-                       if "result=FAIL" in line]
+    if "result=FAIL" in rss_line:
+        failed_metrics.append("idle_agent_rss")
 
     client = Binary(binary.resolve(), state_dir)
     try:

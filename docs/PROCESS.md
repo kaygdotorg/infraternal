@@ -180,7 +180,7 @@ numbered history, both timestamp arrival orders and altered checksums.
   | Key to letter on screen, with prediction | 8.3 ms | tracer scenario, every probe key (a declined prediction counts as its real echo) |
   | Real echo | round trip + 16.7 ms | tracer scenario, prediction off, key to painted echo |
   | Flood effect on typing | at most +8.3 ms | `verify-latency.py`, echo p99 growth with another and the same PTY flooding (the worse one) |
-  | Own overhead, no network | 8.3 ms (stretch 5 ms) | `verify-latency.py`, real agent echo with the relay delay at 0 |
+  | Own overhead, no network | 8.3 ms (stretch 5 ms) | the report: real agent echo p99 with the relay delay at 0 (`verify-latency.py`) plus the browser's own spans p99, keydown to send and echo arrival to paint (tracer scenario) |
   | Reconnect, last screen | 8.3 ms | tracer scenario, socket drop to the first frame showing the last screen |
   | Reconnect, typable, resumed link | 1 round trip + 50 ms | `verify-latency.py`, re-attach over the live link to the agent's Ack |
   | Reconnect, typable, after a network change | 4 round trips + 50 ms | tracer scenario, socket drop to the first resumed echo painted (D267) |

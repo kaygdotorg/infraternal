@@ -48,6 +48,16 @@ class ReportTests(unittest.TestCase):
                                  target=targets.FRAME_MS, gate=targets.OWN_OVERHEAD_BASELINE_MS)
         self.assertIn("result=FAIL", worse)
 
+    def test_own_overhead_is_composed_from_both_shares(self):
+        log = "\n".join(line for line in full_log().splitlines() if "d375_own_overhead" not in line)
+        parts = ("METRIC name=own_overhead_agent source=a n=100 p50_ms=0.4 p99_ms=0.74 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b n=20 p50_ms=3 p99_ms=6.10 result=REPORT")
+        table, passed = targets.report(log + "\n" + parts)
+        self.assertTrue(passed)
+        self.assertIn("| 6.84 ms (n=20) | yes | PASS |", table)
+        _, passed = targets.report(log + "\n" + parts.splitlines()[0])
+        self.assertFalse(passed, "one share alone must leave the row MISSING")
+
     def test_frame_rate_compares_upwards(self):
         self.assertIn("result=PASS", targets.row_line("render_10mbps", source="t", n=1, value=121, unit="fps",
                                                       target=120, higher_is_better=True))

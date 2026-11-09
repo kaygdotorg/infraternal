@@ -9,6 +9,8 @@ single Python copy of that table:
 - `row_line()` formats one measured row as a `METRIC name=d375_<key> ...` line, so
   every producer (the native agent probe, the tracer browser suite) prints the
   same shape;
+- `compose_own_overhead()` adds the agent's and the browser's measured shares
+  into the own-overhead row, since no single probe sees both;
 - `report()` reads a whole `scripts/verify latency` log and prints the table with
   the measured value next to each target. A row that is missing or failed makes
   the report exit non-zero, so a row cannot silently drop out of the gate.
@@ -128,6 +130,34 @@ def parse(log_text: str) -> dict[str, dict[str, str]]:
     return rows
 
 
+_PART_PATTERN = re.compile(r"METRIC name=own_overhead_(agent|browser) (.*)$")
+
+
+def compose_own_overhead(log_text: str) -> str | None:
+    """Build the own-overhead row from its two measured shares, or `None` if either is missing.
+
+    No single probe sees all of our own work: the native probe measures the
+    real agent and PTY with the relay delay at 0 (`own_overhead_agent`), and the
+    browser suite measures the browser's spans around the network
+    (`own_overhead_browser`: keydown to socket send, plus echo arrival to
+    paint). The row is the sum of the two p99s, which can only overstate the
+    p99 of the combined path, so a pass is never optimistic.
+    """
+    parts: dict[str, dict[str, str]] = {}
+    for line in log_text.splitlines():
+        match = _PART_PATTERN.search(line)
+        if match:
+            parts[match.group(1)] = dict(part.split("=", 1) for part in match.group(2).split() if "=" in part)
+    if set(parts) != {"agent", "browser"}:
+        return None
+    agent, browser = float(parts["agent"]["p99_ms"]), float(parts["browser"]["p99_ms"])
+    return row_line(
+        "own_overhead", source="real-agent-pty+tracer-production-build",
+        n=min(int(parts["agent"]["n"]), int(parts["browser"]["n"])), value=agent + browser, unit="ms",
+        target=FRAME_MS, gate=OWN_OVERHEAD_BASELINE_MS,
+        extra=f"agent_p99_ms={agent:.2f} browser_p99_ms={browser:.2f} stretch_ms=5.00")
+
+
 def report(log_text: str) -> tuple[str, bool]:
     """Render the D375 table for one run and say whether every row passed its gate.
 
@@ -135,7 +165,8 @@ def report(log_text: str) -> tuple[str, bool]:
     none failed. Missing rows are listed as MISSING: a producer that stopped
     printing its row must fail the gate rather than vanish from the report.
     """
-    measured = parse(log_text)
+    composed = compose_own_overhead(log_text)
+    measured = parse(log_text + ("\n" + composed if composed else ""))
     lines = [
         "| Measure | Target, p99 | Gate this run | Measured | Target met | Result |",
         "|---|---|---|---|---|---|",

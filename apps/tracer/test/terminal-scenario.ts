@@ -504,6 +504,20 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
       : [];
   });
   expect(offSamples).toHaveLength(probeCount);
+  // The browser's own share of a key with prediction off: keydown to the socket send, plus the echo's arrival to its
+  // paint. The network and the test double sit between those two spans and are excluded. The latency report adds the
+  // real agent's no-network echo p99 to this p99 to form the D375 own-overhead row (an upper bound on the true p99).
+  const browserOwnMs = offTrace.flatMap((sample) => {
+    const { keydown, wsSend, wsMessage, paint } = sample.stages;
+    return keydown !== undefined && wsSend !== undefined && wsMessage !== undefined && paint !== undefined &&
+      wsSend >= keydown && paint >= wsMessage
+      ? [(wsSend - keydown) + (paint - wsMessage)]
+      : [];
+  }).sort((left, right) => left - right);
+  console.log(
+    `METRIC name=own_overhead_browser source=tracer-production-build n=${browserOwnMs.length} ` +
+      `p50_ms=${percentile(browserOwnMs, 0.5).toFixed(2)} p99_ms=${percentile(browserOwnMs, 0.99).toFixed(2)} result=REPORT`,
+  );
   const offConfirmed = offSamples.map((sample) => sample.confirmed).sort((left, right) => left - right);
   const offVisible = offSamples.map((sample) => sample.painted).sort((left, right) => left - right);
   const cpuOff = offSamples.map((sample) => sample.cpu).sort((left, right) => left - right);
