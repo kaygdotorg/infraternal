@@ -4530,3 +4530,22 @@ access (#341 B19).
      layer scale for z-index (content, chrome, sidebar, overlay, toast,
      tooltip) with captures of every overlay pair, and one exported
      `EASE_OUT` curve for Web Animations calls.
+
+373. **Morning answers (owner, 2026-11-09):** answered inline, all as
+     recommended.
+     - Phone rows: palette result rows and sidebar names use the 15 px body
+       size on phones; only true labels (eyebrows, captions, field labels)
+       are 13 px. TASTE's "phone text 15-16 px or larger" stays (refines
+       D372).
+     - Programs copying to the clipboard (OSC 52, #440): copies from the
+       terminal in use land automatically with a "Copied from the terminal"
+       notice, and Settings gets "Programs can copy to your clipboard", on
+       by default. Other windows offer a Copy button instead. Rejected:
+       always asking; no switch.
+     - Browser tests: the full browser suite runs nightly on dev, like the
+       nightly fuzz (D361), opening an issue per new failure; job gates stay
+       fast. Rejected: the suite in every job's gate; leaving it as is.
+     - Scrollback copy (#426): ship the wrap guess now; later add a small
+       wrap-flag export for history rows to our pinned terminal-engine
+       build so history copies are exact. Rejected: holding text selection
+       for the engine change; no smart wrap in history.
