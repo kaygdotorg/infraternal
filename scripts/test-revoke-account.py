@@ -77,11 +77,27 @@ def job_plant(account, user, scenario, created):
     if scenario.startswith('root-job-priority'):
         noisy = Path('/etc/cron.d') / (account + '-unknown')
         with noisy.open('x') as cron:
-            cron.write('0 0 1 1 * root unresolved-command\n' * 70)
+            # Runtime expansion stays unresolved, so these rows are uncertain.
+            cron.write('0 0 1 1 * root unresolved-command $UNSET\n' * 70)
         noisy.chmod(0o644)
         created.append(noisy)
     if privileged and scenario != 'root-job-parent':
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(target), check=False).returncode == 0
+    cron_forms = {
+        # A bare name found through the file's own PATH line.
+        'root-job-bare-path': f'PATH={target.parent}:/usr/bin:/bin\n0 0 1 1 * root {target.name}\n',
+        # The script is the second command of a shell list.
+        'root-job-cron-list': f'0 0 1 1 * root test -e /nonexistent || /bin/sh {target}\n',
+        # A launcher runs every file of a root-owned directory.
+        'root-job-run-parts': f'0 0 1 1 * root run-parts {target.parent}\n',
+    }
+    if scenario in cron_forms:
+        path = Path('/etc/cron.d') / account
+        with path.open('x') as cron:
+            cron.write(cron_forms[scenario])
+        created.append(path)
+        path.chmod(0o644)
+        return str(path), privileged
     if scenario in ('system-cron', 'system-cron-dot', 'root-job-cron') or scenario.startswith('root-job-wrapper-'):
         path = Path('/etc/cron.d') / (account + ('.cron' if scenario == 'system-cron-dot' else ''))
         with path.open('x') as cron:
@@ -103,7 +119,24 @@ def job_plant(account, user, scenario, created):
             invocation = "/bin/sh -c 'test -f /root/unused && /bin/true'"
         if scenario == 'root-job-shell-expansion':
             invocation = f"/bin/bash -c '/bin/sh {target}{{,.backup}}'"
-        service.write(f'[Unit]\nDescription=Disposable revoke job\n[Service]\nType=oneshot\nUser={runner}\n{setting}={invocation}\n')
+        extra = ''
+        if scenario == 'root-job-env-expand':
+            # The manager expands ${JOB} before it runs the shell.
+            extra = f'Environment=JOB={target}\n'
+            invocation = '/bin/sh ${JOB}'
+        if scenario == 'root-job-envfile':
+            # The account owns a file that sets the unit's environment.
+            environment = target.parent / 'environment'
+            environment.write_text('FLAG=1\n')
+            os.chown(environment, user.pw_uid, user.pw_gid)
+            created.append(environment)
+            os.chown(target, 0, 0)
+            extra = f'EnvironmentFile={environment}\n'
+            invocation = '/bin/true'
+        if scenario == 'root-job-chdir':
+            # A launcher changes into a directory before it runs a relative script.
+            invocation = f'/usr/bin/env -C {target.parent} /bin/sh ./{target.name}'
+        service.write(f'[Unit]\nDescription=Disposable revoke job\n[Service]\nType=oneshot\nUser={runner}\n{extra}{setting}={invocation}\n')
         if setting != 'ExecStart':
             service.write('ExecStart=/bin/true\n')
     created.append(unit)
@@ -126,6 +159,8 @@ def job_plant(account, user, scenario, created):
         os.setxattr(target, 'system.posix_acl_access', acl)
     if privileged:
         checked = target.parent if scenario == 'root-job-parent' else (unit if scenario in ('root-job-unit', 'root-job-priority-unit') else target)
+        if scenario == 'root-job-envfile':
+            checked = target.parent / 'environment'
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(checked), check=False).returncode == 0
     if scenario == 'system-timer':
         timer = unit.with_suffix('.timer')
@@ -190,6 +225,11 @@ def prove(binary, scenario="sessions"):
                         load = command('systemctl', 'show', '--value', '-p', 'LoadState', unit).stdout.strip()
                         assert load != 'not-found', job
                 print('STOCK_ABSENT_UNIT_NOISE_PASS', flush=True)
+                # Separate the job inventory from the other root checks, so a
+                # host whose only blocker is policy still shows its job result.
+                print('STOCK_JOB_ROWS=' + json.dumps(report.get('jobs', [])), flush=True)
+                if not report.get('jobs'):
+                    print('STOCK_NO_JOB_ROWS_PASS', flush=True)
                 assert report['state'] == 'unchanged', report
                 print('STOCK_CLEAN_REAL_ROOT_PASS', flush=True)
                 return
