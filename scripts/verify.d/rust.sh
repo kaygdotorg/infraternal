@@ -324,6 +324,7 @@ rust_verify_fast() {
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
+    rust_run_gate "latency report (D375)" python3 scripts/test-latency-report.py
     rust_run_gate "Traefik component manifest" python3 -m unittest discover -s scripts/release -p traefik_component_test.py
     rust_run_gate "release component publication" python3 scripts/release/test.py
     rust_run_gate "test" cargo test --workspace --locked
