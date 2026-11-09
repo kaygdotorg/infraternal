@@ -3,12 +3,17 @@ use super::*;
 use nix::libc;
 
 #[repr(C)]
+/// C callback table used by the allocation-refusal test engine.
 struct Vtable {
     alloc: unsafe extern "C" fn(*mut c_void, usize, u8, usize) -> *mut c_void,
     resize: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize, usize) -> bool,
     remap: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize, usize) -> *mut c_void,
     free: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize),
+    /// Reserved by the stable C ABI; all four slots must stay null.
+    reserved: [*mut c_void; 4],
 }
+/// The allocator table is immutable and its reserved slots are null.
+unsafe impl Sync for Vtable {}
 #[repr(C)]
 struct Allocator {
     context: *mut Context,
@@ -80,16 +85,20 @@ unsafe extern "C" fn free_memory(_: *mut c_void, memory: *mut c_void, _: usize, 
         libc::free(memory);
     }
 }
+/// Stable callbacks shared by native terminals created in these unit tests.
 static VTABLE: Vtable = Vtable {
     alloc: allocate,
     resize: resize_memory,
     remap: remap_memory,
     free: free_memory,
+    reserved: [std::ptr::null_mut(); 4],
 };
 
 // The context outlives the closure and every valid native handle. Refusal is
 // enabled only after both retained screens have been constructed.
 pub(crate) const PREFIX: &[u8] = b"\x1bcPRIMARY\x1b[?47hALT\x1b[?47l";
+/// Builds a populated native terminal, then refuses its `step`th later allocation.
+/// Runs `run` with the engine while the allocator context and callback table live.
 pub(crate) fn with_refusing_engine(step: usize, run: impl FnOnce(Engine)) {
     let mut context = Box::new(Context {
         remaining: 0,
@@ -102,19 +111,25 @@ pub(crate) fn with_refusing_engine(step: usize, run: impl FnOnce(Engine)) {
     let mut raw = std::ptr::null_mut();
     // SAFETY: allocator, vtable and boxed context outlive the synchronous closure.
     assert_eq!(
-        unsafe {
-            ghostty_terminal_new(
-                (&raw const allocator).cast(),
-                &raw mut raw,
-                Options {
-                    cols: 80,
-                    rows: 24,
-                    max_scrollback: 17 * 1024 * 1024,
-                },
-            )
-        },
+        unsafe { ghostty_terminal_new((&raw const allocator).cast(), &raw mut raw, 80, 24,) },
         0
     );
+    // libghostty-vt 1.0 sets the history cap after creating its opaque handle.
+    // SAFETY: successful creation returned a uniquely owned terminal, and the
+    // scalar option value remains live for this synchronous call.
+    let max_scrollback = 17 * 1024 * 1024_usize;
+    let result = unsafe {
+        ghostty_terminal_set(
+            raw,
+            TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+            (&raw const max_scrollback).cast(),
+        )
+    };
+    if result != 0 {
+        // SAFETY: creation succeeded and this fixture still owns the handle.
+        unsafe { ghostty_terminal_free(raw) };
+        panic!("native scrollback option failed: {result}");
+    }
     let mut engine = Engine(
         Some(NonNull::new(raw).unwrap()),
         #[cfg(feature = "process-per-user")]
@@ -126,6 +141,7 @@ pub(crate) fn with_refusing_engine(step: usize, run: impl FnOnce(Engine)) {
     run(engine);
 }
 
+/// After a failed native resize, later reads observe a retired terminal.
 #[test]
 fn resize_allocation_refusal_retires_native_handle() {
     let step = std::env::var("VT_ALLOCATION_STEP").map_or(2, |value| value.parse().unwrap());
@@ -135,7 +151,7 @@ fn resize_allocation_refusal_retires_native_handle() {
             assert!(engine.try_snapshot(&mut buffer, 0).is_err());
             engine.process(b"later output");
             assert_eq!(engine.approximate_snapshot(&mut buffer), 0);
-            assert_eq!(engine.history_rows(), 0);
+            assert_eq!(engine.history_rows().unwrap(), 0);
             assert_eq!(engine.state_difference(&engine), usize::MAX);
             assert_eq!(engine.difference(&engine), usize::MAX);
             assert!(engine.resize(80, 24).is_err());

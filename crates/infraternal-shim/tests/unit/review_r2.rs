@@ -270,6 +270,24 @@ fn review_r2_limiter_is_transparent_for_short_control_mixtures() {
     );
 }
 
+/// C1 bytes inside a DCS payload stay payload data and never become commands.
+#[test]
+fn review_r2_c1_controls_in_dcs_payload_remain_inert() {
+    // 0x90 starts DCS from Escape; '^' completes its header. The later C1
+    // bytes are payload in libghostty-vt 1.0, so X must stay hidden too.
+    let bytes = b"\x1b\x90^0\x90\x80X\x18\x1b\\";
+    let mut bounded = Terminal::with_history_budget(80, 24, 65536).unwrap();
+    bounded.process(bytes);
+    let mut native = Terminal::new(80, 24).unwrap();
+    native.process(bytes);
+
+    assert_eq!(
+        bounded.engine.state_difference(&native.engine),
+        0,
+        "DCS payload C1 bytes changed the terminal screen or modes"
+    );
+}
+
 /// ESC followed by a non-ASCII byte and then a raw C1 byte: the limiter
 /// must not invent an OSC that swallows the following ordinary text.
 #[test]

@@ -1,4 +1,5 @@
 //! Public C mouse encoder continuations against the built native adapter [13][40].
+#![cfg(feature = "vt-test-input")]
 #![allow(clippy::unwrap_used)]
 use std::{fs, path::PathBuf, process::Command};
 

@@ -8,11 +8,80 @@
 /// on to the terminal. Bytes beyond this are dropped until the string ends.
 pub(super) const STRING_BYTES: usize = 4096;
 
-/// Where the filter is in the escape-sequence grammar. `String` counts the
-/// bytes passed on so far (`osc` marks an operating-system command, which ends
-/// on BEL as well). `Discard` and `DiscardEscape` are the over-limit states:
-/// the string is still open, so its remaining bytes must stay hidden from the
-/// terminal until a real terminator arrives.
+/// Which part of a DCS control string is being read. The parser handles high
+/// C1 bytes as payload after the header, including when it ignores a bad header.
+#[derive(Clone, Copy, Default)]
+enum DcsState {
+    #[default]
+    Entry,
+    Parameters,
+    Intermediate,
+    Payload,
+}
+
+/// Identifies the control string so its payload follows the native parser's
+/// C1 and terminator rules.
+#[derive(Clone, Copy)]
+enum StringKind {
+    Osc,
+    Dcs(DcsState),
+    Other,
+}
+
+impl StringKind {
+    /// Starts the corresponding string after a 7-bit introducer.
+    fn from_introducer(introducer: u8) -> Self {
+        match introducer {
+            b']' => Self::Osc,
+            b'P' => Self::Dcs(DcsState::Entry),
+            _ => Self::Other,
+        }
+    }
+
+    /// Returns true when BEL ends this string, as it does for OSC.
+    fn is_osc(self) -> bool {
+        matches!(self, Self::Osc)
+    }
+
+    /// Returns true when C1 bytes are literal data rather than new controls.
+    fn c1_is_payload(self) -> bool {
+        matches!(self, Self::Osc | Self::Dcs(DcsState::Payload))
+    }
+
+    /// Advances a DCS header and marks invalid or completed headers as payload.
+    fn after_byte(self, byte: u8) -> Self {
+        let Self::Dcs(state) = self else {
+            return self;
+        };
+        let state = match state {
+            DcsState::Entry => match byte {
+                0x20..=0x2f => DcsState::Intermediate,
+                0x3a => DcsState::Payload,
+                0x30..=0x3f => DcsState::Parameters,
+                0x40..=0x7e => DcsState::Payload,
+                _ => state,
+            },
+            DcsState::Parameters => match byte {
+                0x20..=0x2f => DcsState::Intermediate,
+                0x3a | 0x3c..=0x3f => DcsState::Payload,
+                0x40..=0x7e => DcsState::Payload,
+                _ => state,
+            },
+            DcsState::Intermediate => match byte {
+                0x30..=0x3f => DcsState::Payload,
+                0x40..=0x7e => DcsState::Payload,
+                _ => state,
+            },
+            DcsState::Payload => DcsState::Payload,
+        };
+        Self::Dcs(state)
+    }
+}
+
+/// Where the filter is in the escape-sequence grammar. Strings retain their
+/// kind so the C1 rules match the terminal parser. `Discard` and
+/// `DiscardEscape` are over-limit states whose bytes stay hidden until a real
+/// terminator arrives.
 #[derive(Clone, Copy, Default)]
 enum State {
     #[default]
@@ -21,17 +90,17 @@ enum State {
     EscapeIntermediate,
     Csi,
     String {
-        osc: bool,
+        kind: StringKind,
         bytes: usize,
     },
     StringEscape {
-        osc: bool,
+        kind: StringKind,
     },
     Discard {
-        osc: bool,
+        kind: StringKind,
     },
     DiscardEscape {
-        osc: bool,
+        kind: StringKind,
     },
 }
 
@@ -84,13 +153,14 @@ impl Limits {
         use State::{
             Csi, Discard, DiscardEscape, Escape, EscapeIntermediate, Ground, String, StringEscape,
         };
-        // C1 controls are interpreted outside UTF-8 ground state. OSC treats
-        // high bytes as payload, so it remains excluded. Canonical seven-bit
-        // syntax also preserves the same boundary in the carry observer.
-        if !matches!(
-            self.state,
-            Ground | String { osc: true, .. } | Discard { osc: true }
-        ) {
+        // libghostty-vt 1.0 keeps high bytes as data inside OSC and after a
+        // DCS header. DCS header states still accept C1 controls, as do other
+        // string kinds; those controls use canonical syntax for snapshot carry.
+        let c1_is_payload = match self.state {
+            String { kind, .. } | Discard { kind } => kind.c1_is_payload(),
+            _ => false,
+        };
+        if !matches!(self.state, Ground) && !c1_is_payload {
             let introducer = match byte {
                 0x90 => Some(b'P'),
                 0x98 => Some(b'X'),
@@ -101,7 +171,7 @@ impl Limits {
             };
             if let Some(introducer) = introducer {
                 self.state = String {
-                    osc: introducer == b']',
+                    kind: StringKind::from_introducer(introducer),
                     bytes: 2,
                 };
                 return Action::Start(introducer);
@@ -120,14 +190,14 @@ impl Limits {
             Escape => (
                 match byte {
                     b']' | b'P' | b'_' | b'^' | b'X' => String {
-                        osc: byte == b']',
+                        kind: StringKind::from_introducer(byte),
                         bytes: 2,
                     },
                     b'[' | 0x9b => Csi,
                     0x1b | 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f | 0xa0..=0xff => Escape,
                     0x20..=0x2f => EscapeIntermediate,
                     0x90 | 0x98 | 0x9d | 0x9e | 0x9f => String {
-                        osc: byte == 0x9d,
+                        kind: StringKind::from_introducer(byte - 0x40),
                         bytes: 1,
                     },
                     _ => Ground,
@@ -139,7 +209,7 @@ impl Limits {
                     0x1b => Escape,
                     0x18 | 0x1a | 0x80..=0x8f | 0x91..=0x97 | 0x99 | 0x9a | 0x9c => Ground,
                     0x90 | 0x98 | 0x9d | 0x9e | 0x9f => String {
-                        osc: byte == 0x9d,
+                        kind: StringKind::from_introducer(byte - 0x40),
                         bytes: 1,
                     },
                     0x9b => Csi,
@@ -149,34 +219,34 @@ impl Limits {
                 };
                 (next, Keep)
             }
-            String { osc, bytes } => {
-                if matches!(byte, 0x18 | 0x1a) || (osc && byte == 7) {
+            String { kind, bytes } => {
+                if matches!(byte, 0x18 | 0x1a) || (kind.is_osc() && byte == 7) {
                     (Ground, Keep)
+                } else if byte == 0x1b {
+                    if bytes == STRING_BYTES {
+                        (DiscardEscape { kind }, Drop)
+                    } else {
+                        (StringEscape { kind }, Keep)
+                    }
                 } else if bytes == STRING_BYTES {
                     (
-                        if byte == 0x1b {
-                            DiscardEscape { osc }
-                        } else {
-                            Discard { osc }
+                        Discard {
+                            kind: kind.after_byte(byte),
                         },
                         Drop,
                     )
                 } else {
                     (
-                        if byte == 0x1b {
-                            StringEscape { osc }
-                        } else {
-                            String {
-                                osc,
-                                bytes: bytes + 1,
-                            }
+                        String {
+                            kind: kind.after_byte(byte),
+                            bytes: bytes + 1,
                         },
                         Keep,
                     )
                 }
             }
-            StringEscape { osc } => {
-                if byte == b'\\' || matches!(byte, 0x18 | 0x1a) || (osc && byte == 7) {
+            StringEscape { kind } => {
+                if byte == b'\\' || matches!(byte, 0x18 | 0x1a) || (kind.is_osc() && byte == 7) {
                     (Ground, Keep)
                 } else {
                     // ESC abandons a string and begins a new escape sequence.
@@ -186,25 +256,27 @@ impl Limits {
                     return result;
                 }
             }
-            Discard { osc } => (
+            Discard { kind } => (
                 if byte == 0x1b {
-                    DiscardEscape { osc }
-                } else if matches!(byte, 0x18 | 0x1a) || (osc && byte == 7) {
+                    DiscardEscape { kind }
+                } else if matches!(byte, 0x18 | 0x1a) || (kind.is_osc() && byte == 7) {
                     Ground
                 } else {
-                    Discard { osc }
+                    Discard {
+                        kind: kind.after_byte(byte),
+                    }
                 },
-                if matches!(byte, 0x18 | 0x1a) || (osc && byte == 7) {
+                if matches!(byte, 0x18 | 0x1a) || (kind.is_osc() && byte == 7) {
                     Keep
                 } else {
                     Drop
                 },
             ),
-            DiscardEscape { osc } => {
-                if byte == b'\\' || matches!(byte, 0x18 | 0x1a) || (osc && byte == 7) {
+            DiscardEscape { kind } => {
+                if byte == b'\\' || matches!(byte, 0x18 | 0x1a) || (kind.is_osc() && byte == 7) {
                     (Ground, if byte == b'\\' { Restart } else { Keep })
                 } else if byte == 0x1b {
-                    (DiscardEscape { osc }, Drop)
+                    (DiscardEscape { kind }, Drop)
                 } else {
                     // The dropped ESC must be restored before its following
                     // byte, whether ending the string or starting a command.
