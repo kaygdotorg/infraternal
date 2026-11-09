@@ -324,6 +324,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     private renaming: string | undefined;
     /** Which status card was showing, so a change between two of them crossfades instead of swapping. */
     private shown: string = "ready";
+    /** Opens the session manager for `rec` under `anchor`; the card reads the input source for where focus goes and its popover for its motion. */
     constructor(readonly rec: WinRec, anchor: HTMLElement) {
       // Only focus placement still needs to know; the popover itself reads the input source for its motion (#427).
       const source: PopoverSource = triggeredByKeyboard() ? "keyboard" : "pointer";
@@ -351,6 +352,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       if (source === "keyboard") this.scroll.querySelector<HTMLElement>(".cl-sx-main")?.focus({ preventScroll: true });
     }
     private readonly life = new AbortController();
+    /** Closes the manager: at once after a key, with the popover fade after a pointer. */
     close(): void { this.popover.close(); }
     private dispose(): void {
       this.life.abort();
@@ -459,6 +461,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       return li;
     }
 
+    /** Handles a press on a session row or one of its actions (switch, run again, beside, end). */
     private onClick(event: MouseEvent): void {
       const target = event.target as Element;
       const li = target.closest<HTMLElement>(".cl-sx-row");
@@ -488,6 +491,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       cx.win.attach(rec, s.id);
     }
 
+    /** Asks before ending session `s` of `host`, in a confirmation anchored to the row. */
     private confirmEnd(anchor: HTMLElement, li: HTMLElement, host: string, s: SessionRecord): void {
       confirm?.close(false);
       confirm = mountConfirmTip(anchor, {

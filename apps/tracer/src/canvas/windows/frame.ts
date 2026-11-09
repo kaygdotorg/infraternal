@@ -32,6 +32,7 @@ import { RecentList } from "../recency";
 let moveChunk: Promise<typeof import("./move.on-demand")> | undefined;
 const loadMove = (): Promise<typeof import("./move.on-demand")> => (moveChunk ??= onDemand(() => import("./move.on-demand")));
 
+/** Builds one window card for model `m` in view `c`, with its header actions, session pill and body. */
 export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   const actions: WindowAction[] = [];
   const rec: WinRec = {} as WinRec;

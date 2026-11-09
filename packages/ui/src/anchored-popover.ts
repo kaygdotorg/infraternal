@@ -55,6 +55,7 @@ export interface AnchoredPopoverOptions {
   bottomLimit?(): number | undefined;
 }
 
+/** The handle of an open popover: its `root` to fill, `place()` to re-measure, `close()` to dismiss. */
 export interface AnchoredPopover {
   readonly root: HTMLElement;
   /** Re-places it, for content whose size changed. */

@@ -86,6 +86,7 @@ export class Picker {
   private active: string | undefined;
   private query = "";
 
+  /** Opens the New window popover under `anchor`. `source` only decides where focus goes; the popover reads the input source itself for its motion. */
   constructor(private readonly cx: Ctx, private readonly machines: Machines, anchor: HTMLElement, source: PopoverSource, private readonly choose: (choice: Choice, how: PopoverSource) => void, onClosed: () => void, initialQuery = "") {
     const { stage } = cx;
     this.popover = openAnchoredPopover({ stage, anchor, label: "New window", className: "cl-sx-pop aw-pop", align: "start", maxWidth: 400,

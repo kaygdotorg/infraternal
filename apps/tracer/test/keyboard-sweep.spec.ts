@@ -15,11 +15,14 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
+/** The page the sweep boots: the Console scene with sessions. */
 const OPEN = "/?mock=1&proto=clusters&scene=1&theme=mocha&bg=none&sessions=1";
 /** The palette chord on the (non-Mac) test browser. */
 const PALETTE = "Control+Shift+K";
-/** What the sweep leaves out, with the reason; keep it short, every entry is a hole in the guard. */
+/** Palette rows the sweep leaves out, with the reason; keep it short, every entry is a hole in the guard. */
 const SKIP_LABEL = /^(Reload|Sign out of every device)/i;
+/** Elements whose motion is not product UI: the test double's badge (a test-only label that dims while the palette is open). */
+const NOT_PRODUCT = /#test-double-badge/;
 
 /** One finding: what was still moving and where. */
 type Finding = string;
@@ -79,7 +82,7 @@ async function sweep(page: Page, act: () => Promise<void>): Promise<Finding[]> {
   await act();
   // sleep: long enough for a 130 to 300 ms animation to be caught in the frames after the third
   await page.waitForTimeout(450);
-  return page.evaluate(() => {
+  const found = await page.evaluate(() => {
     const sw = (window as unknown as { __sw: { keyFrame: number; idle: Map<string, Set<number>>; key: Map<string, Set<number>> } }).__sw;
     const found: string[] = [];
     for (const [signature, frames] of sw.key) {
@@ -89,6 +92,7 @@ async function sweep(page: Page, act: () => Promise<void>): Promise<Finding[]> {
     }
     return found;
   });
+  return found.filter((finding) => !NOT_PRODUCT.test(finding));
 }
 
 /** The pressable chords of the `?` panel: its rows' first run of key caps, as Playwright key names. */

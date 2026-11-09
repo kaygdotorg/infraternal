@@ -20,6 +20,7 @@ export interface ToolbarModule {
   dispose(): void;
 }
 
+/** Builds the canvas toolbar row (previous and next window, the four window actions, search, sessions and the rest) for the canvas `cx`. */
 export function createToolbar(cx: Ctx): ToolbarModule {
   const { stage, signal, state, core } = cx;
   const openPalette = (): void => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true })); };
