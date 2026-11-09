@@ -41,6 +41,21 @@ const NAMESPACE = "infraternal-release";
 const VERSION_RE = /^(?:[0-9]+\.[0-9]+\.[0-9]+|edge-[0-9]{8}T[0-9]{6}Z)$/;
 /** The release channel ("edge" or "stable") a validated version string belongs to. */
 const channelOf = (version) => (version.startsWith("edge-") ? "edge" : "stable");
+/** Readable copyright and permission notices required in every newly signed release. */
+const REQUIRED_LICENSE_FILES = new Set([
+  "licenses/libghostty-vt/README.md",
+  "licenses/libghostty-vt/Unicode-3.0.txt",
+  "licenses/libghostty-vt/aro-MIT.txt",
+  "licenses/libghostty-vt/highway-Apache-2.0.txt",
+  "licenses/libghostty-vt/highway-BSD-3-Clause.txt",
+  "licenses/libghostty-vt/libghostty-vt-MIT.txt",
+  "licenses/libghostty-vt/simdutf-Apache-2.0.txt",
+  "licenses/libghostty-vt/simdutf-MIT.txt",
+  "licenses/libghostty-vt/translate_c-MIT.txt",
+  "licenses/libghostty-vt/uucode-MIT.txt",
+  "licenses/libghostty-vt/wuffs-Apache-2.0.txt",
+  "licenses/libghostty-vt/wuffs-MIT.txt",
+]);
 const enc = new TextEncoder();
 
 export default {
@@ -92,8 +107,8 @@ async function authorised(request, env) {
 /**
  * Signs one release and publishes its metadata; returns the index entry that was appended.
  * Throws {@link Refusal} when the version already has a signature, the release folder has no
- * files, or the previous signature was under a minute ago. Files are hashed here from the
- * bucket, never taken from the caller. The signature objects are written before the index,
+ * files, any required license notice is missing, or the previous signature was under a minute
+ * ago. Files are hashed here from the bucket, never taken from the caller. The signature objects are written before the index,
  * so a release only appears in `index.json` once its `SHA256SUMS.sig` exists. The optional
  * notification is best effort and cannot fail the signing.
  */
@@ -110,11 +125,13 @@ async function signRelease(env, version) {
     const page = await env.BUILDS.list({ prefix, cursor });
     for (const o of page.objects) {
       const name = o.key.slice(prefix.length);
-      if (name && !name.includes("/") && name !== "SHA256SUMS" && name !== "SHA256SUMS.sig") names.push(name);
+      if (name && (!name.includes("/") || REQUIRED_LICENSE_FILES.has(name)) && name !== "SHA256SUMS" && name !== "SHA256SUMS.sig") names.push(name);
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
   if (!names.length) throw new Refusal("no files in this release");
+  const found = new Set(names);
+  if ([...REQUIRED_LICENSE_FILES].some((name) => !found.has(name))) throw new Refusal("release is missing required license notices");
   const key = await signingKey(env);
   names.sort();
 

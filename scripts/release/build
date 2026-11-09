@@ -28,6 +28,6 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         --output "$staging/bundle"
 done
 printf '%s\n' "$release_version" > "$staging/bundle/VERSION"
-(cd "$staging/bundle" && sha256sum VERSION infraternal infraternal-aarch64-musl infraternal-x86_64-musl infraternal-aarch64-session-musl infraternal-x86_64-session-musl proxy-traefik-darwin-amd64.json proxy-traefik-darwin-arm64.json proxy-traefik-linux-amd64.json proxy-traefik-linux-arm64.json > SHA256SUMS)
+(cd "$staging/bundle" && sha256sum VERSION infraternal infraternal-aarch64-musl infraternal-x86_64-musl infraternal-aarch64-session-musl infraternal-x86_64-session-musl proxy-traefik-darwin-amd64.json proxy-traefik-darwin-arm64.json proxy-traefik-linux-amd64.json proxy-traefik-linux-arm64.json "${release_license_files[@]}" > SHA256SUMS)
 mkdir -p "$(dirname -- "$destination")"
 mv -T -- "$staging/bundle" "$destination"
