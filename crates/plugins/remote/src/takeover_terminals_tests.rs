@@ -240,3 +240,31 @@ fn a_terminal_without_a_foreground_program_is_refused() {
     ];
     assert_eq!(attribute(&members, &[(10, None)], None), Err(73));
 }
+
+/// Seen on the real guest (#433 e2e L1): `PAMName=login` leaves systemd's `(sd-pam)` helper, a tty-less
+/// child of the login worker, inside the session scope. It belongs to the login itself, like the
+/// worker, and is neither refused nor counted as a program of a terminal.
+#[test]
+fn the_logins_own_pam_helper_belongs_to_the_login() {
+    let members = [
+        member(2632, 1, 0, false, "infraternal"),
+        member(2634, 2632, 0, false, "(sd-pam)"),
+        member(2636, 2525, 0, false, "infraternal"),
+        member(2637, 2632, pty(0), true, "bash"),
+        member(2661, 2637, pty(0), false, "sleep"),
+    ];
+    let found = attribute(&members, &[(2636, Some(0))], Some(2632)).unwrap();
+    assert_eq!(members[found[0].foreground].program, "bash");
+    assert_eq!(
+        found[0].others, 1,
+        "the background sleep, not the PAM helper"
+    );
+    let mut renamed = members.clone();
+    renamed[1].ppid = 2637;
+    renamed[1].tty = pty(0);
+    assert_eq!(
+        attribute(&renamed, &[(2636, Some(0))], Some(2632)).unwrap()[0].others,
+        2,
+        "a program on the terminal that calls itself (sd-pam) is still that terminal's"
+    );
+}
