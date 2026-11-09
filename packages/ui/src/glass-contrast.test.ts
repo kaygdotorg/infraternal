@@ -17,7 +17,9 @@ import { describe, expect, test } from "bun:test";
 import { ANY_BACKDROP, GLASS_CEILING, composite, hexToRgb, luminanceOf, ratioOf, worstRatio, type GlassFill, type Rgb } from "./glass-contrast";
 import { CARD_LEVELS, THEMES, glassFill, glassFor, glassRoles, glassTint, levelName, levelOpacity, themedBackdrop } from "./themes";
 
+/** The line every text role must reach (D365). */
 const LINE = 4.5;
+/** A grey of equal channels. */
 const grey = (v: number): Rgb => [v, v, v];
 /** Black, white and a 16-step grey ramp: the backdrops that decide a luminance-monotone material. */
 const RAMP: Rgb[] = [0, ...Array.from({ length: 16 }, (_, i) => (i + 1) * 16 - 1)].map(grey);
@@ -33,6 +35,7 @@ function lowest(text: string, tint: Rgb, alpha: number, backdrops: readonly Rgb[
   return out;
 }
 
+/** Every card level, Solid to Frosted. */
 const LEVELS = Object.keys(CARD_LEVELS).map(Number);
 
 describe("glass text reaches 4.5:1 over worst-case backdrops (D365)", () => {

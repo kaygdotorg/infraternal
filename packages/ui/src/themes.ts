@@ -174,7 +174,6 @@ export interface OverlayMaterial {
   surface: string;
 }
 
-/** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
 /**
  * How much of what is behind shows through, in four named levels, for the two kinds of surface (the owner's
  * approved values). Cards are the floating material (popovers, palette, sidebar, pills, toasts); windows are the
@@ -245,6 +244,11 @@ export function glassFor(active: Theme, level: number, range: BackdropRange = th
  */
 export const glassFill = (active: Theme): GlassFill => ({ rgb: hexToRgb(active.fg), alpha: 0.08 });
 
+/**
+ * The floating-card material of one level for a theme: the tint (kept close to the palette on dark themes), its halo,
+ * the shadows, and `surface`, the alpha composite over the page colour that the contrast audit measures cards against.
+ * The text colours that go with the tint's opacity come from {@link glassFor}.
+ */
 export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMaterial {
   const tinted = glassTint(active);
   // The one floating-card material (popover, flow card, confirmation, sidebar, toast): the page
@@ -320,6 +324,10 @@ function installLevelRules(): void {
 /** Names of the glass variables a backdrop sampler may write on a `data-glass-under` element (see `glass-adapt.ts`). */
 export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", role: (role: string): string => `--ui-glass-adapt-${role}` } as const;
 
+/** The one adopted sheet that holds the glass contrast rules; created on first use and rewritten on a theme change. */
+let glassSheet: CSSStyleSheet | undefined;
+/** The theme the sheet was last written for, so applying the same theme again costs nothing. */
+let glassSheetTheme: Theme | undefined;
 /**
  * The contrast layer of the glass material (D365), as rules for the active theme.
  *
@@ -332,8 +340,6 @@ export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", role: (ro
  * children), leaving the page's own tokens alone. Specificity of the themed set is zero, like the level rules above.
  * Rebuilt only when the theme changes, because working the sets out costs a few milliseconds.
  */
-let glassSheet: CSSStyleSheet | undefined;
-let glassSheetTheme: Theme | undefined;
 function installGlassRules(active: Theme): void {
   if (typeof CSSStyleSheet === "undefined" || glassSheetTheme === active) return;
   glassSheetTheme = active;
