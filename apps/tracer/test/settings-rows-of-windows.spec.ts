@@ -1308,6 +1308,7 @@ test("desktop: a wheel at the end of a window's content never steps to the next 
   const context = await browser.newContext({ ...SIZES.desktop, baseURL: baseURL() });
   const page = await context.newPage();
   await open(page, "&at=terminal.typing");
+  const first = await page.evaluate(windowBoxes);
   const b = (await page.locator('[data-window-id="s-terminal-typing"] .ui-window-body > .ui-settings-pane').boundingBox())!;
   await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
   for (let i = 0; i < 6; i++) {
@@ -1320,6 +1321,8 @@ test("desktop: a wheel at the end of a window's content never steps to the next 
   const atEnd = await page.evaluate(windowBoxes);
   const typing = atEnd.find((w) => w.id === "s-terminal-typing")!;
   expect(typing.paneMax - typing.paneTop, "the content is at its end").toBeLessThanOrEqual(1);
+  // Not one window moved while the content scrolled to its end, even with fresh gestures arriving at the end.
+  for (const [k, w] of atEnd.entries()) near(w.top, first[k]!.top, `${w.id} did not move while the content reached its end`);
   for (let i = 0; i < 3; i++) {
     await page.mouse.wheel(0, 300);
     // sleep: a quiet gap longer than a gesture (150 ms), so each wheel is a fresh gesture at the end
@@ -1328,7 +1331,7 @@ test("desktop: a wheel at the end of a window's content never steps to the next 
   // sleep: a wrongly started row step would be mid-spring now; no event marks that nothing happened
   await page.waitForTimeout(1000);
   const after = await page.evaluate(windowBoxes);
-  for (const [k, w] of after.entries()) near(w.top, atEnd[k]!.top, `${w.id} did not move: the wheel at the end of the content stayed with the window`);
+  for (const [k, w] of after.entries()) near(w.top, first[k]!.top, `${w.id} did not move: the wheel at the end of the content stayed with the window`);
   await context.close();
 });
 

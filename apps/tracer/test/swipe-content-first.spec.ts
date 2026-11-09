@@ -278,6 +278,7 @@ test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
     const before = await canvasState(page), index = await stopIndex(page);
     await page.mouse.move(at.x, at.y);
     await page.keyboard.down("Shift");
+    // sleep: one touch or wheel step per frame, like a finger or a pad; there is no event to wait for
     for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 100); await page.waitForTimeout(16); }
     await page.keyboard.up("Shift");
     // sleep: the camera spring and a gesture's momentum settle; no event marks the end
