@@ -294,20 +294,25 @@ fn status_action() -> ActionDefinition {
 }
 
 /// Register hosted command adapters against the descriptors used by the browser dispatcher.
+///
+/// `hosts add` enrolls over SSH, so it exists only when the SSH plugin is
+/// compiled in. The macOS release build (`remote,desktop`, no `plugin-ssh`)
+/// still gets the other host commands.
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 fn hosted_server_actions() -> Vec<ActionDefinition> {
-    vec![
-        hosted_action(
-            infraternal_plugin_remote::inventory::LIST,
-            &["hosts", "list"],
-            JsonSchema::object(
-                [(
-                    "after".to_owned(),
-                    JsonSchema::string("Continue after this host ID."),
-                )],
-                [],
-            ),
+    let mut actions = vec![hosted_action(
+        infraternal_plugin_remote::inventory::LIST,
+        &["hosts", "list"],
+        JsonSchema::object(
+            [(
+                "after".to_owned(),
+                JsonSchema::string("Continue after this host ID."),
+            )],
+            [],
         ),
+    )];
+    #[cfg(feature = "plugin-ssh")]
+    actions.push(
         hosted_action(
             infraternal_plugin_ssh::manifest::START,
             &["hosts", "add"],
@@ -328,6 +333,8 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
             ),
         )
         .with_cli_positionals(["address"]),
+    );
+    actions.extend([
         hosted_action(
             infraternal_plugin_remote::REMOVE,
             &["hosts", "remove"],
@@ -381,7 +388,8 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
             &["sessions", "list"],
             JsonSchema::empty_object(),
         ),
-    ]
+    ]);
+    actions
 }
 
 /// Carry the original action metadata into the CLI tree; only syntax and transport are adapted.
