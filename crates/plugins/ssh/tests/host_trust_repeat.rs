@@ -74,7 +74,11 @@ fn rig(root: &Path) -> (TrustedOpenSsh, Destination) {
     );
     let public = std::fs::read_to_string(root.join("host-key.pub")).unwrap();
     let mut fields = public.split_whitespace();
-    let line = format!("scanned {} {}\n", fields.next().unwrap(), fields.next().unwrap());
+    let line = format!(
+        "scanned {} {}\n",
+        fields.next().unwrap(),
+        fields.next().unwrap()
+    );
     let scan_output = root.join("scan-output");
     std::fs::write(&scan_output, line).unwrap();
     let keyscan = root.join("ssh-keyscan");
@@ -135,7 +139,9 @@ async fn the_same_confirmation_repeated_answers_success_and_pins_once() {
         trust
             .confirm_host_key(destination.clone(), &challenge, &fingerprint, &live)
             .await
-            .unwrap_or_else(|_| panic!("confirmation {repeat} of the same key must answer success"));
+            .unwrap_or_else(|_| {
+                panic!("confirmation {repeat} of the same key must answer success")
+            });
     }
     assert_eq!(pins(), 1, "a repeat must not write another pin");
     std::fs::remove_dir_all(&root).unwrap();
@@ -166,7 +172,12 @@ async fn a_repeat_with_another_key_or_revoked_authority_is_still_refused() {
     let (trust, destination) = rig(&root);
     let (challenge, fingerprint) = observe(&trust, &destination).await;
     trust
-        .confirm_host_key(destination.clone(), &challenge, &fingerprint, &Authority(true))
+        .confirm_host_key(
+            destination.clone(),
+            &challenge,
+            &fingerprint,
+            &Authority(true),
+        )
         .await
         .unwrap();
     // A different (well-formed) key for the same challenge is never "already trusted".
@@ -194,7 +205,12 @@ async fn a_repeat_with_another_key_or_revoked_authority_is_still_refused() {
     // A repeat is not a way around a revoked sign-in.
     assert!(
         trust
-            .confirm_host_key(destination.clone(), &challenge, &fingerprint, &Authority(false))
+            .confirm_host_key(
+                destination.clone(),
+                &challenge,
+                &fingerprint,
+                &Authority(false)
+            )
             .await
             .is_err(),
         "a repeat still needs live authority"

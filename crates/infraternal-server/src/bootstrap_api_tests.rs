@@ -598,7 +598,10 @@ async fn pending_confirmation_with(
     } else {
         // Nothing may arrive while the lookup is held: a reply now would be the busy error.
         let early = tokio::time::timeout(Duration::from_millis(300), socket.next()).await;
-        assert!(early.is_err(), "an identical confirmation got a reply while the first was pending: {early:?}");
+        assert!(
+            early.is_err(),
+            "an identical confirmation got a reply while the first was pending: {early:?}"
+        );
     }
     // A busy response must leave the actual lookup pending and able to answer.
     backend.release.add_permits(1);
