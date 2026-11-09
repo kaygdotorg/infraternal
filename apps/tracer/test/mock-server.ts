@@ -355,10 +355,16 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     if (typeof body?.text !== "string") return sendJson(response, 400, { error: "query output must be a string" });
     const bytes = new TextEncoder().encode(body.text);
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_MESSAGE) return sendJson(response, 413, { error: "query output must fit one frame" });
-    session.echoMode = "none";
+    // `session_id` aims the bytes at one attached window's session (several windows each have their own); without it,
+    // the newest session gets them, as before.
+    const target = typeof body.session_id === "string"
+      ? [...connections].find((candidate) => candidate.session.sessionIdText === body.session_id)?.session
+      : session;
+    if (!target) return sendJson(response, 404, { error: "no attached session has that id" });
+    target.echoMode = "none";
     // Use the existing live suffix writer so these bytes follow the captured replay head.
-    appendEchoOutput(session, bytes);
-    return sendJson(response, 200, { bytes: bytes.byteLength, output_sequence: String(session.outputLength) });
+    appendEchoOutput(target, bytes);
+    return sendJson(response, 200, { bytes: bytes.byteLength, output_sequence: String(target.outputLength) });
   }
   if (request.method === "POST" && url.pathname === "/__mock/synchronized-output") {
     const body = await readJson(request);
@@ -549,6 +555,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       attach_count: attachCount,
       attach_history: attachHistory,
       attached_stream_ids: [...connections].filter((connection) => connection.attached).map((connection) => connection.stream),
+      attached_sessions: [...connections].filter((connection) => connection.attached).map((connection) => ({ id: connection.session.sessionIdText, accepted_input_bytes: connection.acceptedInputBytes })),
       viewer_input_bytes: [...connections].map((connection) => ({
         client_id: connection.clientId,
         viewer_label: connection.viewerLabel,
