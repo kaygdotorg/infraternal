@@ -4576,3 +4576,54 @@ access (#341 B19).
        (github.com/ahatem/IoskeleyMono) and Obel Mono
        (typographic.systems/obel-mono) to the app's font choices, licences
        permitting.
+
+375. **#341 answers, round 2, and 120 Hz latency targets (owner,
+     2026-11-09; rewrites D41's budgets):**
+     - **Latency targets at 120 Hz (A9).** The owner: "please aim for 120hz,
+       not 60hz.. much like superlogical's rex, in our terminal too
+       everything remote should feel local. I want the numbers recrunched
+       against 120hz and i want a table of targets". One frame is 8.3 ms.
+
+       | Measure | Target (p99) |
+       |---|---|
+       | Key to letter on screen, prediction on | 8.3 ms (1 frame) |
+       | Server's real echo | round trip + 16.7 ms (2 frames) |
+       | A flooding terminal's effect on typing | at most +8.3 ms |
+       | Our own overhead, no network | 8.3 ms; 5 ms stretch aim |
+       | Reconnect: last screen back | 8.3 ms, from the device's copy |
+       | Reconnect: typable, resumed link | 1 round trip + 50 ms |
+       | Reconnect: typable, after a network change | 4 round trips + 50 ms (D267) |
+       | Rendering under 10 MB/s output | 120 fps sustained |
+       | First paint, mid-range phone | under 1 s |
+       | Idle infraternal agent | under 15 MB RSS |
+
+       Every target is reported on each run. Owner chose "Adopt; overhead
+       gate at today's baseline": the 8.3 ms own-overhead target becomes a
+       merge gate once reached; until then no change may be worse than the
+       current baseline (about 25 ms, D296). PROCESS.md's "RTT x 2 + 300 ms"
+       is replaced by these rows.
+     - **API-key lifetime (A1):** every key has an approved hard end
+       (default 24 h) and an idle limit; a "never expires" key has no hard
+       end and keeps only its own idle setting (D370). D311's "permanent
+       keys rejected" is superseded.
+     - **Sign-in (A2):** the owner: "Continue with: → Passkey → OIDC". Sign-in
+       is usernameless with two choices, passkey or the person's own
+       identity provider; the username is asked only at setup. Amends D230
+       and D239.
+     - **Taps (A4):** saving access rules (D209) and downgrading a root
+       install (D274) both work inside the 15-minute admin window (D333).
+     - **Mesh SSH (A5):** stays off until its security review (D344); the
+       automatic switch-on of D197 and D289 waits for it.
+     - **Idle sessions (A8):** never ended automatically by default (D178);
+       a per-host idle limit is optional. D56 is superseded.
+     - **Scale (A10):** budgets are sized for D170's 200 sessions; D124's 500
+       sessions and 50 desktops are stress-test headroom that must work.
+     - **Backup key (A11):** backups are encrypted with the key derived from
+       the owner's recovery words (D147). Rejected: D186's per-admin key.
+     - **Log retention (A12):** the owner: "30 days for the community
+       editino default and non-configurable, 90 days + configurable for EE".
+     - **Mesh membership (A13):** never expires, except a machine offline
+       over 90 days needs passkey re-approval (D237) and ephemeral machines
+       are removed after their offline time (D370). D166 amended.
+     - **Solid material (A16):** overlays are never opaque, except when the
+       person chooses Solid. D160 amended.
