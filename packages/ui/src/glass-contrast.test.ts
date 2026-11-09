@@ -4,7 +4,8 @@
  *
  * For every theme and every card level, every text role of the glass reaches 4.5:1 over the worst-case backdrops: pure
  * white, pure black, a grey ramp between them, the theme's own extremes (its background and its text colour), and the
- * theme's own terminal backdrop. The check composites the tint over each backdrop itself (`composite`, then WCAG
+ * theme's own terminal backdrop, with the text colour's own 8% fill under the text (the strip behind a segmented control, a
+ * hovered row). The check composites the tint over each backdrop itself (`composite`, then WCAG
  * luminance) and does not call `worstRatio`, so a mistake in the solver's closed form cannot hide from it.
  *
  * Two sets are audited, the two the shipped sheet carries (`themes.ts` `installGlassRules`): the *static* set (anything
@@ -13,8 +14,8 @@
  * here before it reaches a screen.
  */
 import { describe, expect, test } from "bun:test";
-import { ANY_BACKDROP, GLASS_CEILING, composite, hexToRgb, luminanceOf, ratioOf, worstRatio, type Rgb } from "./glass-contrast";
-import { CARD_LEVELS, THEMES, glassFor, glassRoles, glassTint, levelName, levelOpacity, themedBackdrop } from "./themes";
+import { ANY_BACKDROP, GLASS_CEILING, composite, hexToRgb, luminanceOf, ratioOf, worstRatio, type GlassFill, type Rgb } from "./glass-contrast";
+import { CARD_LEVELS, THEMES, glassFill, glassFor, glassRoles, glassTint, levelName, levelOpacity, themedBackdrop } from "./themes";
 
 const LINE = 4.5;
 const grey = (v: number): Rgb => [v, v, v];
@@ -22,10 +23,11 @@ const grey = (v: number): Rgb => [v, v, v];
 const RAMP: Rgb[] = [0, ...Array.from({ length: 16 }, (_, i) => (i + 1) * 16 - 1)].map(grey);
 
 /** Lowest contrast of `text` on the tint at `alpha` over each backdrop, with the backdrop that gave it. */
-function lowest(text: string, tint: Rgb, alpha: number, backdrops: readonly Rgb[]): { ratio: number; at: Rgb } {
+function lowest(text: string, tint: Rgb, alpha: number, backdrops: readonly Rgb[], fill?: GlassFill): { ratio: number; at: Rgb } {
   let out = { ratio: Infinity, at: backdrops[0]! };
   for (const at of backdrops) {
-    const ratio = ratioOf(luminanceOf(hexToRgb(text)), luminanceOf(composite(tint, alpha, at)));
+    const under = composite(tint, alpha, at);
+    const ratio = ratioOf(luminanceOf(hexToRgb(text)), luminanceOf(fill ? composite(under, 1 - fill.alpha, fill.rgb) : under));
     if (ratio < out.ratio) out = { ratio, at };
   }
   return out;
@@ -44,7 +46,7 @@ describe("glass text reaches 4.5:1 over worst-case backdrops (D365)", () => {
         const sol = glassFor(theme, level, ANY_BACKDROP);
         expect(sol.ok).toBe(true);
         for (const { role } of glassRoles(theme)) {
-          const got = lowest(sol.colours[role]!, tint, sol.alpha, [...RAMP, ...extremes]);
+          const got = lowest(sol.colours[role]!, tint, sol.alpha, [...RAMP, ...extremes], glassFill(theme));
           expect(got.ratio, `${label} ${role} ${sol.colours[role]} at alpha ${sol.alpha} over rgb(${got.at})`).toBeGreaterThanOrEqual(LINE);
         }
       });
@@ -53,7 +55,7 @@ describe("glass text reaches 4.5:1 over worst-case backdrops (D365)", () => {
         expect(sol.ok).toBe(true);
         const sweep = Array.from({ length: 9 }, (_, i) => composite(range.dark, i / 8, range.light) as Rgb);
         for (const { role } of glassRoles(theme)) {
-          const got = lowest(sol.colours[role]!, tint, sol.alpha, sweep);
+          const got = lowest(sol.colours[role]!, tint, sol.alpha, sweep, glassFill(theme));
           expect(got.ratio, `${label} ${role} ${sol.colours[role]} at alpha ${sol.alpha} over rgb(${got.at})`).toBeGreaterThanOrEqual(LINE);
         }
       });

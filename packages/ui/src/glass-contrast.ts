@@ -54,13 +54,24 @@ export const composite = (tint: Rgb, alpha: number, backdrop: Rgb): Rgb =>
   [0, 1, 2].map((i) => tint[i]! * alpha + backdrop[i]! * (1 - alpha)) as unknown as Rgb;
 
 /**
- * The lowest contrast `text` reaches on `tint` at `alpha` over any backdrop in `range`. Exact, not sampled: the glass's
- * luminance runs from its value over `range.dark` to its value over `range.light`; if the text's luminance is inside
- * that stretch some backdrop makes the text vanish (returns 1), otherwise the worse end decides.
+ * A fill painted on top of the glass under some text, such as the pill behind a segmented control or a hovered row
+ * (`--hover` is the text colour at 6%). It moves the colour under the text toward `rgb`, which only ever costs contrast
+ * when `rgb` is the text's own side, so the audit counts it.
  */
-export function worstRatio(text: string, tint: Rgb, alpha: number, range: BackdropRange): number {
-  const lo = luminanceOf(composite(tint, alpha, range.dark));
-  const hi = luminanceOf(composite(tint, alpha, range.light));
+export interface GlassFill { rgb: Rgb; alpha: number }
+
+/** The colour under text: `tint` at `alpha` over `backdrop`, then the optional in-surface `fill`. */
+const surfaceOver = (tint: Rgb, alpha: number, backdrop: Rgb, fill?: GlassFill): Rgb =>
+  fill ? composite(composite(tint, alpha, backdrop), 1 - fill.alpha, fill.rgb) : composite(tint, alpha, backdrop);
+
+/**
+ * The lowest contrast `text` reaches on `tint` at `alpha` over any backdrop in `range`, under `fill` if given. Exact, not
+ * sampled: the glass's luminance runs from its value over `range.dark` to its value over `range.light`; if the text's
+ * luminance is inside that stretch some backdrop makes the text vanish (returns 1), otherwise the worse end decides.
+ */
+export function worstRatio(text: string, tint: Rgb, alpha: number, range: BackdropRange, fill?: GlassFill): number {
+  const lo = luminanceOf(surfaceOver(tint, alpha, range.dark, fill));
+  const hi = luminanceOf(surfaceOver(tint, alpha, range.light, fill));
   const t = luminanceOf(hexToRgb(text));
   if (t >= lo && t <= hi) return 1;
   return Math.min(ratioOf(t, lo), ratioOf(t, hi));
@@ -84,13 +95,13 @@ export interface GlassSolution {
  * returns `undefined` when lightness alone cannot (the colour would pass white or black) or the move would exceed
  * `maxShift`. Hue and chroma stay, so a danger label is still red.
  */
-function nudge(colour: string, lighter: boolean, need: number, tint: Rgb, alpha: number, range: BackdropRange, maxShift: number): string | undefined {
-  if (worstRatio(colour, tint, alpha, range) >= need) return colour;
+function nudge(colour: string, lighter: boolean, need: number, tint: Rgb, alpha: number, range: BackdropRange, maxShift: number, fill?: GlassFill): string | undefined {
+  if (worstRatio(colour, tint, alpha, range, fill) >= need) return colour;
   const [l0, a, b] = hexToOklab(colour);
   for (let shift = 0.005; shift <= maxShift + 1e-9; shift += 0.005) {
     const l = Math.min(1, Math.max(0, l0 + (lighter ? shift : -shift)));
     const next = oklabToHex([l, a, b]);
-    if (worstRatio(next, tint, alpha, range) >= need) return next;
+    if (worstRatio(next, tint, alpha, range, fill) >= need) return next;
     if (l <= 0 || l >= 1) return undefined;
   }
   return undefined;
@@ -112,16 +123,16 @@ export const GLASS_CEILING = 0.92;
  * from the tint: true on dark themes (light text), false on light themes. A `nominal` at or above the ceiling (Solid)
  * is kept as it is.
  */
-export function solveGlass(tint: Rgb, nominal: number, lighter: boolean, rolesIn: readonly GlassRole[], range: BackdropRange = ANY_BACKDROP, maxShift = MAX_SHIFT): GlassSolution {
+export function solveGlass(tint: Rgb, nominal: number, lighter: boolean, rolesIn: readonly GlassRole[], range: BackdropRange = ANY_BACKDROP, fill?: GlassFill, maxShift = MAX_SHIFT): GlassSolution {
   // Stage 0: D365 on the plain page. A colour already below its line on the theme's own surface (the tint at full
   // opacity) is brought to it first, uncapped; the shift cap below then measures only what the glass itself costs.
   const solid: BackdropRange = { dark: tint, light: tint };
-  const roles = rolesIn.map((r) => ({ ...r, colour: nudge(r.colour, lighter, (r.need ?? TEXT_LINE) + MARGIN, tint, 1, solid, 1) ?? r.colour }));
+  const roles = rolesIn.map((r) => ({ ...r, colour: nudge(r.colour, lighter, (r.need ?? TEXT_LINE) + MARGIN, tint, 1, solid, 1, fill) ?? r.colour }));
   const ceiling = Math.max(nominal, GLASS_CEILING);
   const attempt = (alpha: number, shift: number): GlassSolution | undefined => {
     const colours: Record<string, string> = {};
     for (const { role, colour, need } of roles) {
-      const fixed = nudge(colour, lighter, (need ?? TEXT_LINE) + MARGIN, tint, alpha, range, shift);
+      const fixed = nudge(colour, lighter, (need ?? TEXT_LINE) + MARGIN, tint, alpha, range, shift, fill);
       if (fixed === undefined) return undefined;
       colours[role] = fixed;
     }

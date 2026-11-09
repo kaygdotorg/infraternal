@@ -1,6 +1,6 @@
 /** Curated UI and terminal palettes; one theme keeps both color systems coherent. */
 import { entityPaletteCss } from "./entity-palette";
-import { ANY_BACKDROP, hexToRgb, solveGlass, type BackdropRange, type GlassRole, type GlassSolution } from "./glass-contrast";
+import { ANY_BACKDROP, hexToRgb, solveGlass, type BackdropRange, type GlassFill, type GlassRole, type GlassSolution } from "./glass-contrast";
 
 import { contrastRatio } from "./color";
 
@@ -235,8 +235,15 @@ export const glassRoles = (active: Theme): GlassRole[] => Object.entries({
  * the theme's own backdrop; pass {@link ANY_BACKDROP} for the static guarantee that holds over anything).
  */
 export function glassFor(active: Theme, level: number, range: BackdropRange = themedBackdrop(active)): GlassSolution {
-  return solveGlass(hexToRgb(glassTint(active)), levelOpacity(active, level), active.dark, glassRoles(active), range);
+  return solveGlass(hexToRgb(glassTint(active)), levelOpacity(active, level), active.dark, glassRoles(active), range, glassFill(active));
 }
+
+/**
+ * The in-surface fill the audit assumes under text on glass: the text colour at 8%. Hovered rows and the strip behind a
+ * segmented control paint `--hover` (the text colour at 6%) over the glass, which moves the colour under their labels toward
+ * the label; the 2% above it is margin for the pixel rounding of the browser's compositing.
+ */
+export const glassFill = (active: Theme): GlassFill => ({ rgb: hexToRgb(active.fg), alpha: 0.08 });
 
 export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMaterial {
   const tinted = glassTint(active);
