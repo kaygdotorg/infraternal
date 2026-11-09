@@ -3251,3 +3251,7 @@ mod tests {
 #[cfg(test)]
 #[path = "node_rotation_tests.rs"]
 mod rotation_tests;
+
+#[cfg(test)]
+#[path = "node_restart_continuity_bench.rs"]
+mod restart_continuity_bench;
