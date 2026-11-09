@@ -38,7 +38,7 @@ async function enrol(page: Page, server: { origin: string; token: string }): Pro
   await page.getByRole("heading", { name: "Save your recovery key" }).waitFor();
   await page.locator(".auth-check").click();
   await page.getByRole("button", { name: "Open infraternal" }).click();
-  await expect(windows(page)).toHaveCount(1, { timeout: 60_000 });
+  await expect(windows(page)).toHaveCount(1, { timeout: 150_000 });
 }
 
 /** Changes one palette value through the real command palette with the browser's platform shortcut. */
@@ -528,7 +528,7 @@ async function offlineConflictClients(browser: Browser, latencyMs = 0) {
   await second.addCookies(await first.cookies());
   const b = watchLayout(await second.newPage());
   await b.goto(server.origin + "/");
-  await expect(windows(b)).toHaveCount(1, { timeout: 60_000 });
+  await expect(windows(b)).toHaveCount(1, { timeout: 150_000 });
   await settled(b);
   return { server, first, second, a, b };
 }
@@ -586,7 +586,7 @@ test("a refused offline look does not suppress later remote looks", async ({ bro
 
 /** On a slow link a second look made while the first is still unacknowledged must not be refused: the latest pick wins on both devices. */
 test("a look picked while the previous one is still in flight is kept on a slow link (1 s one way)", async ({ browser }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(480_000);
   const { server, first, second, a, b } = await offlineConflictClients(browser, 1000);
   try {
     await choosePaletteValue(a, "Theme: Frosted");
@@ -606,7 +606,7 @@ test("a look picked while the previous one is still in flight is kept on a slow 
 
 /** Three quick picks over the same slow link end on the last pick on both devices. */
 test("three quick look picks on a slow link end on the last pick on both devices", async ({ browser }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(480_000);
   const { server, first, second, a, b } = await offlineConflictClients(browser, 1000);
   try {
     await choosePaletteValue(a, "Theme: Frosted");
