@@ -1,6 +1,17 @@
-"""D368 real-root proof with real shim PTYs and systemd scopes on a disposable build VM.
+"""D368 real-root proof with real shim PTYs and old-layout systemd scopes (#433).
 
-Run only while holding the mesh claim, under /root, with the root-built recovery-helper.
+Where it runs: only on a disposable guest or VM, as root, from a directory under /root, with no
+`infraternal-agent.service` installed (setUp refuses otherwise), and with the root-built static
+`recovery-helper` in INFRATERNAL_TEST_RUNTIME_HELPER. It installs a temporary unit under /run and
+real scopes, and stops only what it created.
+
+SELinux must be permissive: on an enforcing host systemd refuses to exec the fixture's unit from
+/root (`203/EXEC`, admin_home_t), so setUp skips with that reason instead of failing.
+
+How to run: `python3 takeover_terminals_root.py [test names]`, or `python3 -m unittest
+takeover_terminals_root`. Either way only this module's own tests run (see `load_tests`): the
+inherited EarlierSetup tests expect a fake service manager and are not meant for a real one.
+
 The old service is a parked executable; terminal ownership and closing use the shipping shim.
 Never runs automatically: the ordinary gate has no access to the system service manager.
 """
@@ -22,10 +33,15 @@ class RootTerminals(EarlierSetup):
     """Own a temporary system unit and unique scopes; refuse before touching a preexisting unit."""
 
     def setUp(self):
-        """Require our live claim and an unused system unit before allocating the fixture."""
+        """Require root under /root, a permissive SELinux and an unused system unit before allocating the fixture."""
         self.assertEqual(os.geteuid(), 0)
-        self.assertTrue(Path('/home/claude/mesh-vm.claim').read_text().startswith('J379 '), 'claim the live VM pair before running')
         self.assertTrue(str(Path.cwd()).startswith('/root/'))
+        try:
+            enforcing = subprocess.run(['getenforce'], capture_output=True, text=True).stdout.strip() == 'Enforcing'
+        except FileNotFoundError:
+            enforcing = False  # No SELinux tools: nothing to enforce.
+        if enforcing:
+            self.skipTest('SELinux is enforcing: systemd cannot exec the fixture unit from /root (203/EXEC); set it permissive on the disposable guest')
         loaded = subprocess.check_output(['systemctl', 'show', '-p', 'LoadState', '--value', 'infraternal-agent.service'], text=True).strip()
         self.assertEqual(loaded, 'not-found', 'never replace an existing unit')
         self.scope_units = []
@@ -98,7 +114,11 @@ class RootTerminals(EarlierSetup):
             else:
                 probe = subprocess.run([os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'], '--bootstrap-runtime', str(self.base), self.identity, 'takeover-terminals'], capture_output=True, text=True)
                 record = probe.stdout
-            if f'{session},726f6f74,62617368,' in record:
+            # Take the record only once the new shell is idle: while bash still runs its startup child,
+            # the terminal's other-program count is not 0 and the confirm would see a changed set.
+            mine = next((entry for entry in record.split() if entry.startswith(f'{session},')), '')
+            fields = mine.split(',')
+            if len(fields) == 8 and fields[2] == '62617368' and fields[5] == '0':
                 print(f'OPEN {scope} {record}', flush=True)
                 return session, record
             if child.poll() is not None:
@@ -291,6 +311,11 @@ manager=fail_after_close
         self.assertEqual((self.base.stat().st_ino, self.identity_path.read_bytes(), self.unit.read_bytes()), before)
         self.assertEqual(subprocess.check_output(['systemctl', 'is-active', 'infraternal-agent.service'], text=True).strip(), 'active')
         self.assertFalse(self.takeover_aside().exists())
+
+
+def load_tests(loader, tests, pattern):
+    """Collect only RootTerminals' own tests, never the EarlierSetup tests it inherits."""
+    return unittest.TestSuite(RootTerminals(name) for name in RootTerminals.__dict__ if name.startswith('test_'))
 
 
 if __name__ == '__main__':
