@@ -9,9 +9,6 @@
  * numeric checks run the real `Spring` and the FLIP curve and assert that no value passes its target.
  *
  * Allow-list (each entry needs a reason a reader can check):
- * - droplet.on-demand.ts: the split-window droplet. TASTE section 3 ("Splits are playful physics") and the row that
- *   says liquid motion belongs to the droplet make its wobble the owner's own request. Pending the owner's word on
- *   whether the new rule also covers it (issue #308).
  * - countup.ts: raw spring that is overdamped for every duration (asserted below), so it cannot overshoot.
  */
 import { expect, test } from "bun:test";
@@ -23,7 +20,7 @@ import { flipEasing } from "../src/canvas/layout/flip";
 const repo = join(import.meta.dir, "../../..");
 const ROOTS = ["apps/tracer", "packages/ui"];
 const SKIP_DIRS = new Set(["node_modules", "dist", "vendor", "fonts", "test", "real", "docs-dist"]);
-const RAW_SPRING_ALLOWED = new Set(["apps/tracer/src/canvas/layout/droplet.on-demand.ts", "packages/ui/src/countup.ts", "packages/ui/src/spring.ts"]);
+const RAW_SPRING_ALLOWED = new Set(["packages/ui/src/countup.ts", "packages/ui/src/spring.ts"]);
 
 function sources(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

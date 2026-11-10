@@ -5,7 +5,7 @@ export const SESSION_SCENES: Array<{ title: string; hint: string }> = [
   { title: "Exited session", hint: "final screen · Run again · Dismiss" },
   { title: "Close keeps it running", hint: "detached · toast · Reopen" },
   { title: "End a session", hint: "names what is running" },
-  { title: "Splits", hint: "right, then down · the droplet" },
+  { title: "Splits", hint: "right, then down · a fade" },
   { title: "Sized for another device", hint: "scaled to fit · type to take over" },
   { title: "Only one session", hint: "empty manager" },
   { title: "Loading sessions", hint: "slow host" },

@@ -18,7 +18,7 @@
  * A config is `{ visualDuration }` in seconds, at most 0.3 (checked by `apps/tracer/test/motion-speed.test.ts`). The type
  * keeps `bounce?: 0` only so an old call site that passes 0 still compiles. Raw `{ stiffness, damping }` always runs the
  * physics (also for `set`) and is the only way to build an under-damped spring. It is rejected everywhere outside the
- * allow-list in `no-overshoot.test.ts` (the droplet split, which the owner asked to wobble).
+ * allow-list in `no-overshoot.test.ts` (the count-up, which is overdamped).
  *
  * @example
  * const s = new Spring(0, (v) => { el.style.transform = `translateX(${v}px)`; }, { visualDuration: 0.24 });
