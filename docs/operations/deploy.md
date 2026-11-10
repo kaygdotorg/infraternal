@@ -181,6 +181,30 @@ COMMIT;
 A migration that rewrites or drops data cannot be rewound this way; its pull
 request must say so and name the backup to restore.
 
+## Restoring an older Mesh authority
+
+Each server process creates a fresh Mesh authority UUID. Before publishing a
+snapshot, it commits that UUID to `mesh_state`; if the write fails, it sends no
+snapshot. After restoring any database backup, start the server normally. Its
+new process UUID makes enrolled nodes fence the previous peer set before they
+apply the restored snapshot, even when the backup was taken after the epoch
+column was added.
+
+A database restore also restores the Mesh membership from the time of that
+backup. It can therefore re-authorize a node that was removed afterwards. The
+new authority epoch retires peers left on enrolled nodes, but it cannot infer
+removals that are absent from the restored database. Before allowing infraternal
+agents to reconnect, compare the restored Mesh inventory with removals made
+since the backup and remove those nodes again. Keep agent connectivity blocked
+until that reconciliation is complete. For nodes marked `unsafe after restore`,
+do not assume the old local peer set was replaced; upgrade them to epoch support
+or keep their mesh traffic blocked until their local Mesh state is reset and
+they are re-enrolled.
+
+Nodes keep their last-known rules while the server is unreachable (D166). When a
+restarted server reconnects, nodes briefly reapply the full snapshot under the
+new authority. No manual SQL reset is needed.
+
 Migration `0029_remote_host_hostname` (#236) adds the retained hostname column
 and replaces existing UUID-shaped Mesh placeholders with audited unnamed
 labels. A deliberate rewind across it restores the pre-migration database

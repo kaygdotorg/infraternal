@@ -260,6 +260,7 @@ fn rootful_agent_is_a_host_with_its_own_state_directory() {
     assert_eq!(state(&status, "relay").0, "Not available yet");
 }
 
+/// Rootful service status reads the peer count from the system agent's state directory.
 #[test]
 fn rootful_agent_reads_mesh_peers_from_its_state_directory() {
     let fixture = Fixture::new();
@@ -275,6 +276,34 @@ fn rootful_agent_reads_mesh_peers_from_its_state_directory() {
     fixture.write("net/infraternal0/.keep", "");
     let status = fixture.status(&[(Scope::System, "infraternal-agent.service")]);
     assert_eq!(state(&status, "mesh"), ("Running", "peers: 2"));
+}
+
+/// An enabled mesh with no accepted snapshot tells the operator to check compatibility.
+#[test]
+fn mesh_without_a_server_configuration_reports_possible_version_mismatch() {
+    let fixture = Fixture::new();
+    let state_dir = fixture.root.join("agent-state");
+    fixture.write(
+        "etc/infraternal-agent.service",
+        &format!(
+            "[Service]\nExecStart=/opt/infraternal agent --state={} run\n",
+            state_dir.display()
+        ),
+    );
+    fixture.write(
+        "agent-state/mesh-public.json",
+        r#"{"enabled":true,"config":null,"backend":null}"#,
+    );
+
+    let status = fixture.status(&[(Scope::System, "infraternal-agent.service")]);
+
+    assert_eq!(
+        state(&status, "mesh"),
+        (
+            "Waiting",
+            "No server configuration accepted; check server and infraternal agent compatibility"
+        )
+    );
 }
 
 #[test]

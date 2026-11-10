@@ -212,6 +212,7 @@ fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() 
     let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
     let previous = node.up().unwrap().public_key;
     let snapshot = crate::dataplane::Config {
+        authority_epoch: None,
         local_key: Some(previous),
         server: None,
         node: node_id,
@@ -334,6 +335,7 @@ fn check(backend: Backend) {
     };
     Device::addresses(proposed).unwrap();
     let accepted = Config {
+        authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(1),
@@ -903,4 +905,290 @@ fn nft_restart_fences_retained_replacement_address() {
 #[ignore = "Run in a disposable user/network namespace, #173."]
 fn nf_tables_restart_fences_retained_replacement_address() {
     check(Backend::NfTables);
+}
+
+/// The original authority used by the independent SIGKILL retirement reproducer.
+const J363_EPOCH_A: &str = "00000000-0000-4000-8000-000000000001";
+/// The replacement authority used by the independent SIGKILL retirement reproducer.
+const J363_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
+
+/// Pause a test child after durable retirement intent and before the runtime fence.
+pub(super) fn j363_retirement_crash_checkpoint() {
+    if let Some(ready) = std::env::var_os("J363_RETIREMENT_READY") {
+        std::fs::write(ready, b"retirement persisted; runtime fence not entered").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+/// Construct an authenticated peer-bearing snapshot for the J363 authority transition tests.
+fn j363_config(key: crate::policy::model::PublicKey) -> Config {
+    Config {
+        authority_epoch: Some(J363_EPOCH_A.to_owned()),
+        local_key: Some(key),
+        server: None,
+        node: NodeId(1),
+        #[cfg(feature = "mesh-dns")]
+        name: None,
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: "internal".to_owned(),
+        version: 10,
+        addresses: Addresses {
+            ipv4: "10.254.0.1".parse().unwrap(),
+            ipv6: "fd01::1".parse().unwrap(),
+        },
+        default_policy: DefaultPolicy::Deny,
+        exposure: None,
+        peers: BTreeMap::from([(
+            NodeId(2),
+            crate::dataplane::PeerPolicy {
+                peer: crate::dataplane::Peer {
+                    key: Key::generate().unwrap().1,
+                    previous_key: None,
+                    previous_active: false,
+                    addresses: Addresses {
+                        ipv4: "10.254.0.2".parse().unwrap(),
+                        ipv6: "fd01::2".parse().unwrap(),
+                    },
+                    endpoint: None,
+                },
+                inbound: crate::policy::rules::TrafficPolicy::All,
+                outbound: crate::policy::rules::TrafficPolicy::All,
+                access_ssh: None,
+            },
+        )]),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: BTreeMap::new(),
+    }
+}
+
+/// A child installs authority A, then blocks after persisting B's deny state while applying B.
+#[test]
+#[ignore = "child process of the independent retirement crash proof"]
+fn j363_retirement_crash_child() {
+    let path = std::path::PathBuf::from(std::env::var_os("J363_STATE").unwrap());
+    let mut node = Node::restore_with_engine(&path, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    let old = j363_config(identity.public_key);
+    for chunk in crate::configuration::chunks(None, &old).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    assert_eq!(Device::counters().unwrap().len(), 1);
+    let mut replacement = old.clone();
+    replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
+    replacement.peers.clear();
+    for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    panic!("retirement checkpoint was not reached");
+}
+
+/// SIGKILL between durable retirement and the runtime fence must not restore retired peers.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j363_kill_between_persist_and_fence() {
+    use std::time::Instant;
+
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let ready = state.0.join("j363-ready");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "j363_retirement_crash_child", "--nocapture"])
+        .env("J363_STATE", &state.0)
+        .env("J363_RETIREMENT_READY", &ready)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("child exited before retirement checkpoint: {status}");
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("retirement checkpoint timed out");
+        }
+        // sleep: wait for the child to publish the exact retirement boundary.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let runtime_peers_before_fence = Device::counters().unwrap().len();
+    let durable: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.0.join("mesh-public.json")).unwrap()).unwrap();
+    // The epoch lives in its own record beside the snapshot (D295, #382 P2).
+    let durable_authority: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state.0.join(crate::node_state::AUTHORITY_FILE)).unwrap(),
+    )
+    .unwrap();
+    println!(
+        "J363_RUNTIME_PEERS_BEFORE_FENCE={runtime_peers_before_fence} DURABLE_EPOCH={} DURABLE_RESET={} DURABLE_PEERS={}",
+        durable_authority["epoch"],
+        durable_authority["reset_pending"],
+        durable["config"]["peers"].as_object().unwrap().len()
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let peers = Device::counters().unwrap().len();
+    println!(
+        "J363_RESTORED_PEERS={peers} RESTORED_EPOCH={:?}",
+        restored
+            .config()
+            .and_then(|config| config.authority_epoch.as_deref())
+    );
+    restored.down().unwrap();
+    assert_eq!(
+        runtime_peers_before_fence, 1,
+        "the checkpoint precedes the runtime fence"
+    );
+    assert_eq!(durable_authority["epoch"], J363_EPOCH_B);
+    assert_eq!(durable_authority["reset_pending"], true);
+    assert_eq!(durable["config"]["peers"].as_object().unwrap().len(), 0);
+    assert_eq!(
+        peers, 0,
+        "retired authority peers resurrected after SIGKILL"
+    );
+}
+
+/// An authority change removes its abandoned rotation journal before the new server rotates again.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j363_epoch_change_retires_old_rotation_journal() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let mut failures = Vec::new();
+    for engine in [EngineKind::Kernel, EngineKind::GotaTun] {
+        let state = RotationState::new();
+        let mut node = Node::restore_with_engine(&state.0, engine).unwrap();
+        let identity = node.up().unwrap();
+        let old = j363_config(identity.public_key);
+        for chunk in crate::configuration::chunks(None, &old).unwrap() {
+            node.chunk(chunk).unwrap();
+        }
+        node.prepare_rotation("00000000-0000-4000-8000-000000000011", 11)
+            .unwrap();
+
+        let mut replacement = old.clone();
+        replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
+        replacement.peers.clear();
+        for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+            node.chunk(chunk).unwrap();
+        }
+
+        let journal = node.store.as_ref().unwrap().rotation_secret().unwrap();
+        println!(
+            "J363_ENGINE={engine:?} RETAINED_OLD_JOURNAL={}",
+            journal.is_some()
+        );
+        drop(journal);
+        let result = node.prepare_rotation("00000000-0000-4000-8000-000000000001", 1);
+        println!("J363_ENGINE={engine:?} NEW_AUTHORITY_PREPARE={result:?}");
+        if result.is_err() {
+            failures.push(engine);
+        }
+        node.down().unwrap();
+    }
+    assert!(
+        failures.is_empty(),
+        "retired authority journal blocks its replacement: {failures:?}"
+    );
+}
+
+/// A new authority must stage the complete replacement before it changes live kernel peers.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j363b_authority_replacement_keeps_identical_peers_live_until_complete() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    let current = j363_config(identity.public_key);
+    for chunk in crate::configuration::chunks(None, &current).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let mut replacement = current.clone();
+    replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
+    let mut complete = crate::configuration::chunks(None, &replacement)
+        .unwrap()
+        .pop()
+        .unwrap();
+    complete.authority_epoch = Some(J363_EPOCH_B.to_owned());
+    let mut first = complete.clone();
+    first.last = false;
+    complete.index = 1;
+    complete.last = true;
+    complete.upserted.clear();
+    complete.merged.clear();
+    complete.removed.clear();
+    #[cfg(feature = "mesh-dns")]
+    {
+        complete.peer_names.clear();
+        complete.removed_peer_names.clear();
+    }
+
+    let staged = node.chunk(first);
+    let config_while_staged = node.config().cloned();
+    let peers_while_staged = Device::counters().unwrap().len();
+    let applied = node.chunk(complete);
+    let accepted = node.config().cloned();
+    let peers_after_replacement = Device::counters().unwrap().len();
+    node.down().unwrap();
+
+    assert!(
+        matches!(staged, Ok(false)),
+        "the first part should remain staged: {staged:?}"
+    );
+    assert_eq!(config_while_staged, Some(current.clone()));
+    assert_eq!(
+        peers_while_staged, 1,
+        "the old runtime was cut before staging ended"
+    );
+    assert!(
+        matches!(applied, Ok(true)),
+        "the full replacement should be applied: {applied:?}"
+    );
+    assert_eq!(accepted, Some(replacement));
+    assert_eq!(
+        peers_after_replacement, 1,
+        "the replacement peer disappeared"
+    );
+}
+
+/// #382 P2 (J418): a server rolled back to a release without epochs (D295) sends epoch-less
+/// snapshots. A node that saw an epoch adopts the full one as a new authority, keeps the
+/// unchanged peer installed, and records no epoch, instead of dropping its mesh for good.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j418_epochless_rollback_snapshot_is_adopted() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    let current = j363_config(identity.public_key);
+    for chunk in crate::configuration::chunks(None, &current).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let mut rolled_back = current.clone();
+    rolled_back.authority_epoch = None;
+    rolled_back.version = 3;
+    let mut applied = Ok(false);
+    for mut chunk in crate::configuration::chunks(None, &rolled_back).unwrap() {
+        chunk.authority_epoch = None;
+        applied = node.chunk(chunk);
+    }
+    let accepted = node.config().cloned();
+    let installed = Device::counters().unwrap().len();
+    let (_, restored) = crate::node_state::Store::open(&state.0).unwrap();
+    node.down().unwrap();
+
+    assert!(
+        matches!(applied, Ok(true)),
+        "the epoch-less full snapshot must be adopted: {applied:?}"
+    );
+    assert_eq!(accepted, Some(rolled_back));
+    assert_eq!(installed, 1, "the unchanged peer must stay installed");
+    assert_eq!(
+        restored.config.map(|config| config.authority_epoch),
+        Some(None),
+        "the durable state must no longer claim the old epoch"
+    );
 }

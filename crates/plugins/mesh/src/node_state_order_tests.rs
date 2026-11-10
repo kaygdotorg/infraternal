@@ -11,6 +11,7 @@ fn revision(version: u64) -> State {
     State {
         enabled: true,
         config: Some(Config {
+            authority_epoch: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -33,6 +34,7 @@ fn revision(version: u64) -> State {
             #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         }),
+        authority_reset_pending: false,
         backend: None,
     }
 }
@@ -197,6 +199,7 @@ fn exact_legacy_binding_upgrade_preserves_the_revision_fence() {
     );
 }
 
+/// Explicit off can replace corrupt saved intent without reviving its mesh peers.
 #[test]
 fn explicit_off_can_replace_a_corrupt_public_snapshot() {
     let directory = Directory::new();
@@ -208,6 +211,7 @@ fn explicit_off_can_replace_a_corrupt_public_snapshot() {
         .save(&State {
             enabled: false,
             config: None,
+            authority_reset_pending: false,
             backend: None,
         })
         .expect("explicit off must replace invalid retained data");

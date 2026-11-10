@@ -6,9 +6,24 @@ use crate::policy::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, net::SocketAddr};
 
+/// Accept only the canonical UUID text used to identify one durable server deployment authority.
+#[must_use]
+pub fn valid_authority_epoch(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
 /// Public node identity and actual UDP socket coordinates; private material has no field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+// These capability flags are independent additive fields in the authenticated identity wire shape.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Identity {
     pub public_key: PublicKey,
     pub port: u16,
@@ -22,6 +37,9 @@ pub struct Identity {
     /// This node supports durable automatic key rotation actions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub key_rotation: bool,
+    /// This node accepts authenticated authority epochs on configuration chunks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_epoch: bool,
 }
 
 /// Explicit pair rules replace this fallback, so port grants also narrow an open mesh.
@@ -49,7 +67,7 @@ pub struct Peer {
     pub previous_key: Option<PublicKey>,
     /// Keep outgoing host routes on `previous_key` until the new local key is active.
     /// This avoids sending to a candidate identity before its `WireGuard` interface switches.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub previous_active: bool,
     pub addresses: Addresses,
     pub endpoint: Option<SocketAddr>,
@@ -94,6 +112,13 @@ pub struct Config {
     /// Explicit server identity; older persisted snapshots cannot propose a route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
+    /// Authenticated server deployment authority retained beside this peer snapshot.
+    /// Missing values identify legacy snapshots. An authenticated full snapshot bound to the
+    /// current local key may replace an epoch-bearing authority with an epoch-less one, allowing
+    /// coordinator rollback. The transition durably retires the old authority before applying
+    /// changed peers; unchanged peers retain their sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_epoch: Option<String>,
     pub node: NodeId,
     /// The coordinator's canonical single-label name for this node; absent on legacy snapshots.
     #[cfg(feature = "mesh-dns")]
@@ -145,6 +170,21 @@ impl Config {
     }
 }
 
+/// Whether two snapshots describe the same installed mesh while ignoring authority and revision metadata.
+///
+/// A coordinator restart can advance its authenticated authority epoch while returning the same
+/// policy. Nodes use this check to update that metadata without rebuilding peers or losing their
+/// existing handshakes.
+#[must_use]
+pub(crate) fn same_runtime_content(left: &Config, right: &Config) -> bool {
+    let mut normalized = left.clone();
+    normalized
+        .authority_epoch
+        .clone_from(&right.authority_epoch);
+    normalized.version = right.version;
+    normalized == *right
+}
+
 /// Transport selector seam: a mesh destination never replaces the enrolled TLS server name [215].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerPath {
@@ -159,6 +199,9 @@ pub struct Chunk {
     /// Repeated in every part so a split snapshot cannot change its binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_key: Option<PublicKey>,
+    /// Repeated in every part so a changed authenticated deployment epoch retires old peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_epoch: Option<String>,
     /// Repeated on every chunk and checked before applying the complete policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
@@ -258,4 +301,74 @@ fn deserialize_access_updates<'de, D: serde::Deserializer<'de>>(
     }
     Vec::<Object>::deserialize(deserializer)
         .map(|objects| objects.into_iter().map(|object| object.0).collect())
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    //! Keep non-rotating peer snapshots readable by strict pre-rotation nodes.
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// The peer shape understood by nodes built before rotation fields were added.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreRotationPeer {
+        key: PublicKey,
+        addresses: Addresses,
+        endpoint: Option<SocketAddr>,
+    }
+
+    /// Authority and revision changes alone do not require a peer reconfiguration.
+    #[test]
+    fn same_runtime_content_ignores_authority_and_revision() {
+        let current = Config {
+            local_key: Some(PublicKey([1; 32])),
+            server: Some(NodeId(3)),
+            authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            node: NodeId(1),
+            #[cfg(feature = "mesh-dns")]
+            name: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_suffix: DEFAULT_DNS_SUFFIX.to_owned(),
+            version: 10,
+            addresses: Addresses {
+                ipv4: "10.254.0.1".parse().unwrap(),
+                ipv6: "fd01::1".parse().unwrap(),
+            },
+            default_policy: DefaultPolicy::Deny,
+            exposure: None,
+            peers: BTreeMap::new(),
+            #[cfg(feature = "mesh-dns")]
+            peer_names: BTreeMap::new(),
+        };
+        let mut restarted = current.clone();
+        restarted.authority_epoch = Some("00000000-0000-4000-8000-000000000002".to_owned());
+        restarted.version = 2;
+        assert!(same_runtime_content(&current, &restarted));
+
+        restarted.default_policy = DefaultPolicy::Allow;
+        assert!(!same_runtime_content(&current, &restarted));
+    }
+
+    /// A non-rotating peer keeps the old wire shape so an upgraded server can still configure it.
+    #[test]
+    fn nonrotating_peer_uses_pre_rotation_wire_shape() {
+        let peer = Peer {
+            key: PublicKey([1; 32]),
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().unwrap(),
+                ipv6: "fd01::2".parse().unwrap(),
+            },
+            endpoint: None,
+        };
+        let encoded = serde_json::to_vec(&peer).unwrap();
+        let legacy: PreRotationPeer = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(legacy.key, peer.key);
+        assert_eq!(legacy.addresses, peer.addresses);
+        assert_eq!(legacy.endpoint, peer.endpoint);
+    }
 }
