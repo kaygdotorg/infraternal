@@ -525,7 +525,9 @@ mod tests {
     #[test]
     fn full_queue_stops_reading_at_the_bound() {
         let (device, peer) = datagram_pair();
-        let (queue_batches, read_batch) = (2, 4);
+        // `read_batch` is a maximum, so the feeder may schedule between frames and produce
+        // smaller batches. One-frame batches make the queue cap exact in every schedule.
+        let (queue_batches, read_batch) = (2, 1);
         let mut reader = UtunReader::spawn(
             device,
             PacketBufPool::new(0),
@@ -535,16 +537,15 @@ mod tests {
         )
         .expect("spawn");
         let _feeder = Feeder::start(peer, 0..60);
-        // sleep: let the thread fill the queue
-        std::thread::sleep(Duration::from_millis(300));
-        // Queued batches plus the one batch the blocked thread holds.
+        // Queued batches plus the one frame the blocked thread has already read.
         let bound = (queue_batches + 1) * read_batch;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reader.frames_read() < bound && Instant::now() < deadline {
+            // sleep: wait for the reader to fill the hand-off queue and hold one more frame.
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let read = reader.frames_read();
-        assert!(read <= bound, "read {read} frames, bound {bound}");
-        assert!(
-            read >= queue_batches * read_batch,
-            "read only {read} frames"
-        );
+        assert_eq!(read, bound, "read {read} frames, expected bound {bound}");
         let rt = runtime();
         let mut seen = Vec::new();
         while seen.len() < 60 {
