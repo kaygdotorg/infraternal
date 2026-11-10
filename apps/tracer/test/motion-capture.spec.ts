@@ -163,7 +163,8 @@ function summarisePill(log: PillSample[]): Record<string, unknown> {
     result[phase] = {
       panelFirstFrameMs: first((s) => Boolean(s.panel)),
       rowsHalfVisibleMs: first((s) => Boolean(s.panel) && (s.rows as number) >= 0.5),
-      settledMs: first((s) => phase === "open" ? Boolean(s.panel) && s.clip === "" && (s.rows as number) >= 0.999 : !s.panel),
+      // Open: the clip is within 1 px of the whole panel and the rows are whole; close: the panel is gone.
+      settledMs: first((s) => phase === "open" ? Boolean(s.panel) && /^inset\((0px )?(0(\.\d+)?px )*round/.test(String(s.clip)) && (s.rows as number) >= 0.999 : !s.panel),
       panelFramesWithRowsBelow10pct: shown.filter((s) => (s.rows as number) < 0.1).length,
       panelFrames: shown.length,
     };
@@ -184,9 +185,11 @@ function summariseSplit(log: SplitSample[]): Record<string, unknown> {
   if (!start) return { error: "no click mark" };
   const t0 = start.t!;
   const frames = log.filter((s) => s.mark === undefined && s.t! >= t0);
-  const before = new Set(frames[0]?.wins?.map((w) => w.id));
+  // The windows that stood before the click: the last sample taken before it.
+  const rest = [...log].reverse().find((s) => s.mark === undefined && s.t! < t0);
+  const before = new Set(rest?.wins?.map((w) => w.id));
   let lastMove = 0, appeared: number | null = null, gooFrames = 0, gooLast = 0;
-  let prev = frames[0];
+  let prev = rest;
   const fade: number[] = [];
   for (const f of frames) {
     const fresh = f.wins?.find((w) => !before.has(w.id));
