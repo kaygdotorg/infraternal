@@ -142,6 +142,7 @@ export function createRemovalFoot(action: DetailsAction): RemovalFoot {
     if (phase !== "asking") return;
     phase = "row";
     say("");
+    yes.textContent = "Remove";
     show(false, instant, true);
   };
   keep.addEventListener("click", () => back(triggeredByKeyboard()));

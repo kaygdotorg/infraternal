@@ -133,6 +133,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     },
   });
   const cx = canvas.cx;
+  // `?removal=1` also gives specs a way to open the glass confirmation card on any element, to measure where it may sit
+  // (confirm-card-bounds.spec.ts); no screen offers this, and the product build leaves the mock out.
+  if (new URLSearchParams(location.search).get("removal") === "1") (window as unknown as { __removalCard?: (anchor: HTMLElement) => void }).__removalCard = (anchor) => { confirmHostRemoval("edge-arm", anchor, () => undefined); };
   // The docs: a Docs view with a window per page, and searchable in the palette (#302). The production canvas always has them
   // (when the server has docs); the test double adds them only with `?docs=1`, so the scenes keep the views they are about. The "?"
   // buttons are there either way (#304): without the docs they say the page is not available.
