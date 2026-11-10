@@ -266,7 +266,8 @@ manager=after_close_manager
             with proceed.open('w') as handle:
                 handle.write('continue\n')
             output, errors = action.communicate(timeout=30)
-            self.assertEqual(action.returncode, 73, output + errors)
+            # Every confirmed terminal closed, then a holder refused: 74, which says they were closed.
+            self.assertEqual(action.returncode, 74, output + errors)
             self.assertEqual(self.base.stat().st_ino, before)
             self.assertFalse(self.takeover_aside().exists())
             self.assertEqual(subprocess.check_output(['systemctl', 'is-active', 'infraternal-agent.service'], text=True).strip(), 'active')
@@ -284,7 +285,8 @@ fail_after_close() {
 }
 manager=fail_after_close
 ''')
-        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        # A service step failing after a terminal closed: 79 (closing could not finish), never "busy".
+        self.assertEqual(result.returncode, 79, result.stdout + result.stderr)
         self.assertFalse(self.scope_active(session))
         self.assertEqual((self.base.stat().st_ino, self.identity_path.read_bytes(), self.unit.read_bytes()), before)
         self.assertEqual(subprocess.check_output(['systemctl', 'is-active', 'infraternal-agent.service'], text=True).strip(), 'active')

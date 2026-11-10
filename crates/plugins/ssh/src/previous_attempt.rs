@@ -1654,6 +1654,20 @@ mod tests {
         assert!(START_FRESH_BUSY_AFTER_CLOSE.contains("stay closed"));
     }
 
+    /// #433 P3-1 (J462): when a confirmed terminal would not close, the text neither claims every
+    /// terminal closed nor sends the person looking for a program that does not exist.
+    #[test]
+    fn an_unfinished_close_says_some_terminals_are_still_open() {
+        for text in [TAKEOVER_CLOSE_UNFINISHED, START_FRESH_CLOSE_UNFINISHED] {
+            assert!(text.contains("the others are still open"), "{text}");
+            assert!(
+                !text.contains("closed the terminals you confirmed"),
+                "{text}"
+            );
+            assert!(!text.contains("program"), "{text}");
+        }
+    }
+
     /// A set-aside install's record offers Put it back, and names which restore
     /// puts it back (Re-enroll or Take over, D359); unknown kinds refuse.
     #[test]
