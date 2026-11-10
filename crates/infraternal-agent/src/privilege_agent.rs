@@ -431,6 +431,7 @@ async fn elevate_unlocked(
         "privilege-{}",
         &uuid::Uuid::from_bytes(attempt).simple().to_string()[..12]
     ));
+    sweep_relay_directories(sessions);
     std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
     let socket = directory.join("relay.sock");
     let listener = UnixListener::bind(&socket)?;
@@ -505,6 +506,26 @@ async fn elevate_unlocked(
         None
     };
     Ok((word, tried.typed, relay))
+}
+
+/// Remove `privilege-*` socket directories left in `sessions` by an earlier
+/// try whose agent died with it (a reboot mid-upgrade, J465 round 2). Only
+/// one elevation or relay is live per process and none is now, so every
+/// such directory is stale.
+fn sweep_relay_directories(sessions: &Path) {
+    let Ok(entries) = std::fs::read_dir(sessions) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("privilege-")
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Whether a cancelled elevation may already have handed its password to
@@ -775,6 +796,19 @@ mod tests {
         assert!(call("privilege.end", first).await);
         assert!(call("privilege.key", second).await);
         assert!(call("privilege.end", second).await);
+    }
+
+    /// A socket directory left by a try whose agent died is swept; other
+    /// entries stay.
+    #[test]
+    fn stale_relay_directories_are_swept() {
+        let sessions = std::env::temp_dir().join(format!("j416-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(sessions.join("privilege-0123456789ab")).unwrap();
+        std::fs::create_dir_all(sessions.join("sessions")).unwrap();
+        sweep_relay_directories(&sessions);
+        assert!(!sessions.join("privilege-0123456789ab").exists());
+        assert!(sessions.join("sessions").exists());
+        let _ = std::fs::remove_dir_all(&sessions);
     }
 
     /// Pumping without a relay is refused.
