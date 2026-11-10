@@ -3615,7 +3615,7 @@ mod tests {
         );
     }
 
-    /// The peer-free authority state is durable before the worker fences old peers.
+    /// The peer-free authority state is durable before the worker hears about the new authority.
     #[test]
     fn mac_retirement_persists_deny_state_before_worker_fence() {
         let current = config();
@@ -3674,22 +3674,30 @@ mod tests {
             binding: None,
         };
 
-        for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_B) {
-            node.chunk(chunk).expect("adopt the new authority");
-        }
-        let saved_at_fence = at_fence
-            .lock()
-            .expect("retirement state lock")
-            .clone()
-            .expect("worker observed a saved state");
+        // The production replacement path: persist the reset, then hand the worker the
+        // complete new snapshot. Read the disk between the two steps.
+        let mut replacement = current.clone();
+        replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
+        node.prepare_authority_replacement(&replacement)
+            .expect("persist the new authority's reset");
+        let saved_before_worker = read_public_state(&directory.join(PUBLIC_STATE))
+            .expect("read state before the worker is told")
+            .expect("state exists before the worker is told");
+        let worker_touched_peers = at_fence.lock().expect("replacement state lock").is_some();
         node.down().expect("stop test worker");
         fs::remove_dir_all(directory).expect("remove state directory");
 
-        let denied = saved_at_fence.config.expect("retained denied snapshot");
+        assert!(
+            !worker_touched_peers,
+            "the worker was told before the reset was durable"
+        );
+        let denied = saved_before_worker
+            .config
+            .expect("retained denied snapshot");
         assert_eq!(denied.authority_epoch.as_deref(), Some(AUTHORITY_EPOCH_B));
         assert!(denied.peers.is_empty(), "retired peers were persisted");
         assert_eq!(denied.default_policy, DefaultPolicy::Deny);
-        assert!(saved_at_fence.authority_reset_pending);
+        assert!(saved_before_worker.authority_reset_pending);
     }
 
     /// A changed authority retires its old rotation journal but keeps the active interface marker.
