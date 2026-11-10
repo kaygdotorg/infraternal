@@ -43,6 +43,7 @@ fn durable_epoch(path: &std::path::Path) -> serde_json::Value {
     })
 }
 
+/// A fresh state directory path for one J330 test, unique per test name and process.
 fn j330_state_path(test_name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("j330-{test_name}-{}", std::process::id()))
 }
