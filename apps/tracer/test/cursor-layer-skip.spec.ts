@@ -185,7 +185,9 @@ test("a theme change recolours the layer", async ({ page }) => {
       await option.click();
       await expect(page.locator("#terminal-screen")).toHaveAttribute("data-theme", id);
     });
-    expect((await truth(page)).got.color.toLowerCase(), `layer colour in ${id}`).toBe(THEMES[id].accent.toLowerCase());
+    const theme = THEMES[id];
+    if (!theme) throw new Error(`unknown theme ${id}`);
+    expect((await truth(page)).got.color.toLowerCase(), `layer colour in ${id}`).toBe(theme.accent.toLowerCase());
   }
 });
 
