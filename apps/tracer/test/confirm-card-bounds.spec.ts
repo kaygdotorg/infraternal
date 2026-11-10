@@ -63,7 +63,9 @@ test.describe("desktop", () => {
 
   test("a window too small for the card falls back to the viewport and is never cut off", async ({ page }) => {
     await open(page);
-    await page.evaluate(() => { const w = document.querySelector<HTMLElement>(".ui-window")!; w.style.height = "90px"; w.style.maxHeight = "90px"; w.style.width = "220px"; w.style.maxWidth = "220px"; });
+    await page.evaluate(() => { const w = document.querySelector<HTMLElement>(".ui-window")!; w.style.flex = "none"; w.style.minHeight = "0"; w.style.height = "90px"; w.style.maxHeight = "90px"; w.style.width = "220px"; w.style.minWidth = "0"; w.style.maxWidth = "220px"; });
+    // Near the bottom of the screen, where a card pinned to the window's top would run off the viewport.
+    await page.evaluate(() => { const w = document.querySelector<HTMLElement>(".ui-window")!; w.style.transform = `translateY(${innerHeight - 100 - w.getBoundingClientRect().top}px)`; });
     const m = await measure(page);
     expect(m.win.height, "the window is smaller than the card plus its inset").toBeLessThan(m.card.height + 2 * INSET);
     expect(insideView(m), `card ${JSON.stringify(m.card)}`).toBe(true);
