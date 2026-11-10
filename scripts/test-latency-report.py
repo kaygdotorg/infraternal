@@ -56,26 +56,26 @@ class ReportTests(unittest.TestCase):
     def test_own_overhead_is_composed_from_both_shares(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_own_overhead" not in line)
         parts = ("METRIC name=own_overhead_agent source=a n=100 p50_ms=0.4 p99_ms=0.74 result=REPORT\n"
-                 "METRIC name=own_overhead_browser source=b display=unthrottled n=20 p50_ms=3 p99_ms=6.10 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b display=unthrottled n=100 p50_ms=3 p99_ms=6.10 result=REPORT\n"
                  "METRIC name=frame_pacing display=unthrottled phase=rows n=5000 fps=250")
         table, passed = targets.report(log + "\n" + parts)
         self.assertTrue(passed)
-        self.assertIn("| 6.84 ms (n=20) | - | yes | PASS |", table)
+        self.assertIn("| 6.84 ms (n=100) | - | yes | PASS |", table)
         _, passed = targets.report(log + "\n" + parts.splitlines()[0] + "\n" + parts.splitlines()[2])
         self.assertFalse(passed, "one share alone must leave the row MISSING")
 
     def test_unthrottled_gates_and_60hz_is_shown_beside_it(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
-        fast = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=20, value=4.0, unit="ms",
+        fast = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=100, value=4.0, unit="ms",
                                 target=targets.FRAME_MS)
-        paced = targets.row_line("predicted_glyph", source="t", display="60hz", n=20, value=15.0, unit="ms",
+        paced = targets.row_line("predicted_glyph", source="t", display="60hz", n=100, value=15.0, unit="ms",
                                  target=targets.FRAME_MS)
         pacing = ("METRIC name=frame_pacing display=unthrottled phase=rows n=7000 fps=240.0\n"
                   "METRIC name=frame_pacing display=60hz phase=rows n=1800 fps=60.0\n"
                   "METRIC name=frame_pacing display=unthrottled n=240 idle_fps=350.0")
         table, passed = targets.report("\n".join([log, paced, fast, pacing]))
         self.assertTrue(passed, table)
-        self.assertIn("| 4.00 ms (n=20) | 15.00 ms | yes | PASS |", table)
+        self.assertIn("| 4.00 ms (n=100) | 15.00 ms | yes | PASS |", table)
         self.assertIn("unthrottled 240.0", table)
 
     def test_60hz_alone_cannot_gate(self):
@@ -102,12 +102,34 @@ class ReportTests(unittest.TestCase):
     def test_own_overhead_per_display(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_own_overhead" not in line)
         parts = ("METRIC name=own_overhead_agent source=a n=100 p50_ms=0.4 p99_ms=0.70 result=REPORT\n"
-                 "METRIC name=own_overhead_browser source=b display=unthrottled n=20 p50_ms=1 p99_ms=3.30 result=REPORT\n"
-                 "METRIC name=own_overhead_browser source=b display=60hz n=20 p50_ms=3 p99_ms=17.30 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b display=unthrottled n=100 p50_ms=1 p99_ms=3.30 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b display=60hz n=100 p50_ms=3 p99_ms=17.30 result=REPORT\n"
                  "METRIC name=frame_pacing display=unthrottled phase=rows n=9000 fps=300")
         table, passed = targets.report(log + "\n" + parts)
         self.assertTrue(passed, table)
-        self.assertIn("| 4.00 ms (n=20) | 18.00 ms | yes | PASS |", table)
+        self.assertIn("| 4.00 ms (n=100) | 18.00 ms | yes | PASS |", table)
+
+    def test_too_few_samples_fail_the_row(self):
+        """A p99 of a handful of samples is just their maximum, so the report refuses it (J468 review)."""
+        few = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=20, value=1.0, unit="ms",
+                               target=targets.FRAME_MS)
+        self.assertIn("result=PASS", few)
+        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
+        pacing = "METRIC name=frame_pacing display=unthrottled phase=rows n=9000 fps=300"
+        table, passed = targets.report("\n".join([log, few, pacing]))
+        self.assertFalse(passed)
+        self.assertIn("FAIL (n 20 < 100)", table)
+
+    def test_own_overhead_shares_keep_the_slower_run(self):
+        log = "\n".join(line for line in full_log().splitlines() if "d375_own_overhead" not in line)
+        parts = ("METRIC name=own_overhead_agent source=a n=100 p50_ms=0.4 p99_ms=9.00 result=REPORT\n"
+                 "METRIC name=own_overhead_agent source=a n=100 p50_ms=0.4 p99_ms=0.70 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b display=unthrottled n=100 p50_ms=1 p99_ms=4.00 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b display=unthrottled n=100 p50_ms=1 p99_ms=2.00 result=REPORT\n"
+                 "METRIC name=frame_pacing display=unthrottled phase=rows n=9000 fps=300")
+        table, passed = targets.report(log + "\n" + parts)
+        self.assertFalse(passed, table)
+        self.assertIn("| 13.00 ms (n=100) |", table)
 
     def test_frame_rate_compares_upwards(self):
         self.assertIn("result=PASS", targets.row_line("render_10mbps", source="t", n=1, value=121, unit="fps",
@@ -184,9 +206,9 @@ class TypeScriptCopyTests(unittest.TestCase):
 
     def test_typescript_rows_decide_like_python_rows(self):
         """d375Row() and row_line() must print the same line, so both copies pass and fail alike."""
+        # Fails rather than skips without bun: a skipped check would let the two copies drift unseen (J468 review).
         bun = shutil.which("bun")
-        if bun is None:
-            self.skipTest("bun is not installed")
+        self.assertIsNotNone(bun, "bun is required to compare d375Row() with row_line()")
         cases = [
             dict(key="predicted_glyph", n=100, value=1.1, unit="ms", target=targets.FRAME_MS),
             dict(key="predicted_glyph", n=100, value=9.2, unit="ms", target=targets.FRAME_MS),

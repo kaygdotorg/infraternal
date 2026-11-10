@@ -235,7 +235,10 @@ numbered history, both timestamp arrival orders and altered checksums.
   under the rows' own load, its frame-bound rows would include frame waits
   again. A row seen only at 60 Hz counts as MISSING. When one log measures a
   row more than once, the report keeps the worst measurement and says "worst
-  of N runs", so a rerun cannot hide a failure.
+  of N runs", so a rerun cannot hide a failure. A row with fewer samples than
+  its minimum fails as well (100 keys, frames or flood samples; 20 reconnects
+  or pages; 2 memory readings), because a p99 of a few samples is only their
+  maximum.
 - **Measuring on your own device.** The gate cannot see a real 120 Hz panel;
   this is a manual check, not a gate. On the owner's iPhone or Mac, signed
   in to a server running the build under test:

@@ -58,25 +58,30 @@ RENDER_FPS = 120.0
 
 @dataclass(frozen=True)
 class Row:
-    """One D375 row: its METRIC key, the owner's wording and how its target reads."""
+    """One D375 row: its METRIC key, the owner's wording, how its target reads, and the fewest samples it may gate on.
+
+    `min_n` keeps a p99 meaningful: below it a p99 is just the slowest few samples (J468 review). The latency profile
+    measures 100 keys and 20 reconnects or pages; idle memory is read twice (no session, one quiet session).
+    """
 
     key: str
     measure: str
     target: str
+    min_n: int
 
 
 #: The D375 table in the owner's order. Keys are the suffix after `d375_` in METRIC lines.
 ROWS = (
-    Row("predicted_glyph", "Key to letter on screen, with prediction", "8.3 ms"),
-    Row("real_echo", "Real echo", "round trip + 16.7 ms"),
-    Row("flood_effect", "Flood effect on typing", "at most +8.3 ms"),
-    Row("own_overhead", "Own overhead, no network", "8.3 ms (stretch 5 ms); gate 12 ms until reached"),
-    Row("reconnect_last_screen", "Reconnect, last screen", "8.3 ms"),
-    Row("reconnect_resumed_link", "Reconnect, typable, resumed link", "1 round trip + 50 ms"),
-    Row("reconnect_network_change", "Reconnect, typable, after a network change", "4 round trips + 50 ms"),
-    Row("render_10mbps", "Rendering at 10 MB/s output", "120 fps"),
-    Row("first_paint_phone", "First paint, mid-range phone", "under 1 s"),
-    Row("idle_agent_rss", "Idle infraternal agent", "under 15 MB RSS"),
+    Row("predicted_glyph", "Key to letter on screen, with prediction", "8.3 ms", 100),
+    Row("real_echo", "Real echo", "round trip + 16.7 ms", 100),
+    Row("flood_effect", "Flood effect on typing", "at most +8.3 ms", 100),
+    Row("own_overhead", "Own overhead, no network", "8.3 ms (stretch 5 ms); gate 12 ms until reached", 100),
+    Row("reconnect_last_screen", "Reconnect, last screen", "8.3 ms", 20),
+    Row("reconnect_resumed_link", "Reconnect, typable, resumed link", "1 round trip + 50 ms", 20),
+    Row("reconnect_network_change", "Reconnect, typable, after a network change", "4 round trips + 50 ms", 20),
+    Row("render_10mbps", "Rendering at 10 MB/s output", "120 fps", 100),
+    Row("first_paint_phone", "First paint, mid-range phone", "under 1 s", 20),
+    Row("idle_agent_rss", "Idle infraternal agent", "under 15 MB RSS", 2),
 )
 
 
@@ -213,6 +218,10 @@ def compose_own_overhead(log_text: str) -> list[str]:
     only overstate the p99 of the combined path, so a pass is never optimistic.
     Returns no lines while either share is missing.
     """
+    def slower(old: dict[str, str] | None, new: dict[str, str]) -> dict[str, str]:
+        """The worse of two measurements of one share: the higher p99 (a rerun can never hide a slow run)."""
+        return new if old is None or float(new.get("p99_ms", "inf")) > float(old.get("p99_ms", "inf")) else old
+
     agent: dict[str, str] | None = None
     browsers: dict[str, dict[str, str]] = {}
     for line in log_text.splitlines():
@@ -221,9 +230,10 @@ def compose_own_overhead(log_text: str) -> list[str]:
             continue
         fields = _fields(match.group(2))
         if match.group(1) == "agent":
-            agent = fields
+            agent = slower(agent, fields)
         else:
-            browsers[fields.get("display", "60hz")] = fields
+            display = fields.get("display", "60hz")
+            browsers[display] = slower(browsers.get(display), fields)
     if agent is None:
         return []
     lines = []
@@ -267,6 +277,12 @@ def report(log_text: str) -> tuple[str, bool]:
         fields = entries[display]
         unit = fields.get("unit", "")
         result = fields.get("result", "FAIL")
+        try:
+            samples = int(fields.get("n", "0"))
+        except ValueError:
+            samples = 0
+        if samples < row.min_n:
+            result = f"FAIL (n {samples} < {row.min_n})"
         passed &= result == "PASS"
         reruns = f", worst of {fields['runs']} runs" if int(fields.get("runs", "1")) > 1 else ""
         lines.append(
