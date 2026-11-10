@@ -717,7 +717,10 @@ fn encode_public_state(
     let mut legacy = state.clone();
     legacy.config = config;
     legacy.authority_reset_pending = false;
-    Ok((serde_json::to_vec(&legacy).map_err(io::Error::other)?, authority))
+    Ok((
+        serde_json::to_vec(&legacy).map_err(io::Error::other)?,
+        authority,
+    ))
 }
 
 /// Atomically persist a bounded public snapshot with root-only file permissions.
@@ -1635,8 +1638,9 @@ impl RuntimeState {
                 Ok(resolver) => Some(resolver),
                 Err(error) => {
                     if rollback_on_failure {
-                rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
-            }
+                        rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun)
+                            .await;
+                    }
                     return Err(error);
                 }
             }
@@ -3594,8 +3598,11 @@ mod tests {
         // as the old one. That is safe: the saved snapshot is peer-free, and the next server
         // snapshot counts as an authority change (#382 P2).
         assert!(
-            saved.config.as_ref().is_some_and(|config| config.peers.is_empty()
-                && config.default_policy == DefaultPolicy::Deny),
+            saved
+                .config
+                .as_ref()
+                .is_some_and(|config| config.peers.is_empty()
+                    && config.default_policy == DefaultPolicy::Deny),
             "a failed replacement must leave a peer-free deny snapshot: {saved:?}"
         );
         assert!(

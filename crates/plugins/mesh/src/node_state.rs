@@ -978,7 +978,10 @@ fn encode_state(state: &State) -> io::Result<(Vec<u8>, AuthorityRecord)> {
         #[cfg(target_os = "linux")]
         backend: state.backend,
     };
-    Ok((serde_json::to_vec(&legacy).map_err(io::Error::other)?, authority))
+    Ok((
+        serde_json::to_vec(&legacy).map_err(io::Error::other)?,
+        authority,
+    ))
 }
 
 /// Read `mesh-public.json` and merge its authority record (see [`merge_authority`]).
@@ -1329,7 +1332,9 @@ pub(crate) mod tests {
             config.authority_epoch = Some(epoch.to_owned());
         }
         state.authority_reset_pending = true;
-        store.save_retired(&state).expect("save fenced authority state");
+        store
+            .save_retired(&state)
+            .expect("save fenced authority state");
 
         let body = fs::read(&store.path).expect("public snapshot");
         serde_json::from_slice::<PreviousReleaseState>(&body)

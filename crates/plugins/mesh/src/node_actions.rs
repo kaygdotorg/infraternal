@@ -827,7 +827,10 @@ mod tests {
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
                 .expect("status JSON");
-        assert_ne!(status["state"], "Waiting", "the node is not left waiting: {status}");
+        assert_ne!(
+            status["state"], "Waiting",
+            "the node is not left waiting: {status}"
+        );
         plugin.call("mesh.down", b"{}").expect("mesh down");
     }
 
