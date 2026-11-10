@@ -646,7 +646,7 @@ impl Device {
     pub fn peers(upserted: &[Peer], removed: &[PublicKey]) -> io::Result<()> {
         Client::new()?.peers(upserted, removed)
     }
-    /// Install/remove only peer host routes; no subnet routes or default route.
+    /// Install/remove only peer host routes with the mesh-owned route protocol; no subnet or default route.
     /// # Errors
     /// Returns route-netlink errors.
     pub fn routes(peers: &[Peer], remove: bool) -> io::Result<()> {
@@ -674,7 +674,20 @@ impl Device {
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
             ] {
-                let mut payload = vec![family, prefix, 0, 0, 254, 4, 253, 1, 0, 0, 0, 0];
+                let mut payload = vec![
+                    family,
+                    prefix,
+                    0,
+                    0,
+                    254,
+                    RTPROT_INFRATERNAL,
+                    253,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                ];
                 attribute(&mut payload, 1, &address)?;
                 attribute(&mut payload, 4, &index.to_ne_bytes())?;
                 if let Some(mtu) = mtu {
@@ -688,12 +701,19 @@ impl Device {
                     if remove { 4 } else { 4 | 0x100 | 0x400 },
                     &payload,
                 );
-                // Restart/rollback can replay a removal after an interrupted
-                // batch. Only absence is success; privilege and other errors remain visible.
-                if let Err(error) = result
-                    && (!remove || !matches!(error.raw_os_error(), Some(2 | 3)))
-                {
-                    return Err(error);
+                if let Err(error) = result {
+                    // A newer node can stop after replacing an old static route but before its
+                    // next restart. Try that legacy owner only after the mesh protocol is absent.
+                    if remove && matches!(error.raw_os_error(), Some(2 | 3)) {
+                        payload[5] = RTPROT_LEGACY_STATIC;
+                        if let Err(error) = socket.request(25, 4, &payload)
+                            && !matches!(error.raw_os_error(), Some(2 | 3))
+                        {
+                            return Err(error);
+                        }
+                    } else {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -755,7 +775,7 @@ impl Device {
     pub fn peer_routes() -> io::Result<BTreeSet<IpAddr>> {
         Ok(Self::peer_route_owners()?.into_keys().collect())
     }
-    /// Retire orphan static host routes after adopting durable peer state [206,228].
+    /// Retire orphan mesh host routes after adopting durable peer state, including legacy routes [206,228].
     /// # Errors
     /// Reports malformed route dumps or kernel deletion errors.
     pub fn retain_routes(addresses: &[Addresses]) -> io::Result<()> {
@@ -780,11 +800,11 @@ impl Device {
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         for reply in socket.request(26, 0x300, &[0; 12])? {
             let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
-            // Linux normalizes IPv6 scope-link host routes to universe scope.
-            // IPv4 keeps link scope. Reject source/TOS/flags and every routing
-            // modifier: a gateway, onlink or multipath static route is foreign.
+            // New mesh routes use a private protocol so NetworkManager can leave them alone
+            // during DNS reapply. Keep recognizing the old static protocol for upgrades.
+            // Linux normalizes IPv6 scope-link host routes to universe scope; IPv4 keeps link scope.
             if header[4] != 254
-                || header[5] != 4
+                || (header[5] != RTPROT_INFRATERNAL && header[5] != RTPROT_LEGACY_STATIC)
                 || header[7] != 1
                 || header[2] != 0
                 || header[3] != 0
@@ -991,6 +1011,11 @@ fn mesh_route_metrics_are_owned(field: netlink::Attribute<'_>) -> bool {
     (u32::from(mesh_mtu::MIN_MESH_MTU)..=u32::from(u16::MAX)).contains(&mtu)
 }
 
+/// Identifies mesh-owned routes so `NetworkManager` can distinguish them from generic static routes.
+/// Linux preserves unknown protocol values end to end; value 250 is reserved by infraternal.
+const RTPROT_INFRATERNAL: u8 = 250;
+/// Identifies generic static routes written by earlier mesh versions during upgrade cleanup.
+const RTPROT_LEGACY_STATIC: u8 = 4;
 /// `RTA_METRICS`: nested per-route metrics accepted by rtnetlink.
 const RTA_METRICS: u16 = 8;
 /// `RTAX_MTU`: the per-peer inner packet limit stored on a mesh host route.

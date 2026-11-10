@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Comm
 /// Retiring orphan routes on restart leaves routes this node does not own.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
-/// Retires orphan mesh routes after restart without removing a foreign host route.
+/// Marks mesh routes separately and retires orphan routes without removing foreign host routes.
 fn orphan_route_retirement_preserves_foreign_routes() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-routes-{}", std::process::id()));
@@ -64,7 +64,56 @@ fn orphan_route_retirement_preserves_foreign_routes() {
     // Model a stop after peers/routes reached the kernel, before public-state
     // fsync. Node deliberately has no Drop cleanup so existing sessions survive.
     Device::peers(std::slice::from_ref(&orphan), &[]).unwrap();
+    // A normal upgrade may find routes left by the prior generic-static encoding.
+    for arguments in [
+        vec![
+            "route",
+            "replace",
+            "10.254.0.2/32",
+            "dev",
+            "infraternal0",
+            "proto",
+            "static",
+            "scope",
+            "link",
+        ],
+        vec![
+            "-6",
+            "route",
+            "replace",
+            "fd01::2/128",
+            "dev",
+            "infraternal0",
+            "proto",
+            "static",
+            "scope",
+            "link",
+        ],
+    ] {
+        assert!(
+            Command::new("ip")
+                .args(arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     Device::routes(std::slice::from_ref(&orphan), false).unwrap();
+    for (arguments, family) in [
+        (vec!["-j", "route", "show", "10.254.0.2/32"], "IPv4"),
+        (vec!["-j", "-6", "route", "show", "fd01::2/128"], "IPv6"),
+    ] {
+        let output = Command::new("ip").args(arguments).output().unwrap();
+        assert!(output.status.success());
+        let routes: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let route = routes.as_array().unwrap().first().unwrap();
+        assert!(
+            route.get("protocol") == Some(&serde_json::Value::from("250"))
+                || route.get("protocol") == Some(&serde_json::Value::from(250)),
+            "{family} mesh peer routes need protocol 250 so NetworkManager can preserve them during reapply; got {:?}",
+            route.get("protocol")
+        );
+    }
     assert!(Device::counters().unwrap().contains_key(&key));
     install_foreign_routes();
     Device::retain_routes(&[]).unwrap();
