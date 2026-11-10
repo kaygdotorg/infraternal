@@ -4,7 +4,17 @@ import { hostPlatformFromOs } from "../../../../../packages/ui/src/host-icons";
 import type { DetailsSource, HostFactsSnapshot } from "../windows/details-source";
 import { detailsFacts } from "../windows/details-facts";
 import { readExtendedInfo } from "../windows/extended-info";
+import type { WinRec } from "../context";
 import type { SessionInventory } from "./inventory";
+
+/**
+ * Where a window's machine facts come from (#410): the server's own machine for a window on the server's host, the window's
+ * own host (by its admitted id) for an added host, and nowhere for a window whose host cannot be read from here.
+ */
+function factsTarget(model: WinRec["model"], server: { name: string }): { kind: "server" } | { kind: "host"; hostId: string } | { kind: "none" } {
+  if (model.hostId) return { kind: "host", hostId: model.hostId };
+  return !model.noAccess && (model.host === server.name || model.host === "embedded") ? { kind: "server" } : { kind: "none" };
+}
 
 /**
  * Makes the details source for the popover: it reads the host's facts, the connection and the session when the popover is asked for, and keeps
@@ -18,6 +28,8 @@ export function createLiveDetails(options: {
 }): DetailsSource {
   const { host, connection, inventory, roundTrip } = options;
   const snapshots = new Map<string, HostFactsSnapshot>();
+  // Windows whose host answered "offline" on the last read; cleared by the next answer or when the popover closes.
+  const offline = new Set<string>();
   const lastReadAt = new Map<string, number>();
   return {
     facts(rec) {
@@ -26,17 +38,21 @@ export function createLiveDetails(options: {
       const other = rec.model.sessionId ? inventory?.sizedFor(rec.model.host, rec.model.sessionId) : undefined;
       const delay = roundTrip();
       const facts = snapshots.get(rec.model.id);
+      const target = factsTarget(rec.model, host);
+      const server = target.kind === "server";
+      const gone = target.kind === "host" && !facts && offline.has(rec.model.id);
       return detailsFacts({
         extended: readExtendedInfo(),
         host: {
           name: rec.model.host,
-          ...(host.user ? { user: host.user } : {}),
-          ...(facts ? { os: hostPlatformFromOs(facts.os) } : {}),
-          address: location.hostname,
-          reach: "Directly, over this connection",
-          ...(facts ? { facts } : {}),
+          // The server's login only describes the server's own windows; an added host names its own.
+          ...(server ? (host.user ? { user: host.user } : {}) : rec.model.user ? { user: rec.model.user } : {}),
+          ...(facts ? { os: hostPlatformFromOs(facts.os) } : !server && rec.model.os ? { os: rec.model.os } : {}),
+          // The page's own hostname is the server's address; an added host is reached by the address it was added with.
+          ...(server ? { address: location.hostname, reach: "Directly, over this connection" } : { ...(rec.model.address ? { address: rec.model.address } : {}), reach: "Through this server" }),
+          ...(facts ? { facts } : server ? {} : { unavailable: gone ? "offline" as const : "pending" as const }),
         },
-        connection: { state: connection.isWelcomed ? "connected" : connection.isOpen ? "connecting" : "offline", ...(delay === undefined ? {} : { delayMs: delay }), encrypted: location.protocol === "https:" },
+        connection: { state: gone ? "offline" : connection.isWelcomed ? "connected" : connection.isOpen ? "connecting" : "offline", ...(delay === undefined ? {} : { delayMs: delay }), encrypted: location.protocol === "https:" },
         session: {
           name: rec.model.session ?? record?.name ?? "",
           ...(record?.age ? { lastUsed: record.age } : {}),
@@ -48,6 +64,9 @@ export function createLiveDetails(options: {
     },
     open(rec, refresh) {
       const id = rec.model.id;
+      const target = factsTarget(rec.model, host);
+      // A window with no readable host has nothing to ask for; its panel says the facts are not known.
+      if (target.kind === "none") return () => {};
       let active = true;
       let inFlight = false;
       let timer = 0;
@@ -70,14 +89,21 @@ export function createLiveDetails(options: {
         lastReadAt.set(id, now);
         inFlight = true;
         try {
-          const result = await connection.call("host.facts.read", { includeLive: true });
+          const result = target.kind === "host"
+            ? await connection.call("remote.host.facts", { host_id: target.hostId })
+            : await connection.call("host.facts.read", { includeLive: true });
           const snapshot = decodeHostFacts(result);
           if (snapshot && active) {
             snapshots.set(id, snapshot);
+            offline.delete(id);
             refresh();
           }
         } catch (error) {
-          if (error instanceof ActionRefused) {
+          if (target.kind === "host" && error instanceof ActionRefused && error.reason === "host offline") {
+            // The machine is admitted but not connected: say so and keep reading, it may come back while the panel is open.
+            snapshots.delete(id);
+            if (active && !offline.has(id)) { offline.add(id); refresh(); }
+          } else if (error instanceof ActionRefused) {
             // Refused actions will not recover by polling; reopening can retry after state changes.
             active = false;
           }
@@ -88,7 +114,7 @@ export function createLiveDetails(options: {
         }
       };
       void read();
-      return () => { active = false; window.clearTimeout(timer); snapshots.delete(id); };
+      return () => { active = false; window.clearTimeout(timer); snapshots.delete(id); offline.delete(id); };
     },
   };
 }

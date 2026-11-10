@@ -76,3 +76,87 @@ test("a detected operating system supplies the live popover mark", async () => {
     else Reflect.deleteProperty(globalThis, "location");
   }
 });
+
+/** Runs `body` with the browser globals the live details source reads (timers, the page's own address). */
+async function withPage(body: () => Promise<void>): Promise<void> {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout: (): number => 1, clearTimeout: (): void => {} } });
+  Object.defineProperty(globalThis, "location", { configurable: true, value: { hostname: "server.example.invalid", protocol: "https:" } });
+  try { await body(); } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow); else Reflect.deleteProperty(globalThis, "window");
+    if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation); else Reflect.deleteProperty(globalThis, "location");
+  }
+}
+
+/** What the server's own agent reports. */
+const SERVER_FACTS = { os: "AlmaLinux", version: "10.2", kernel: "6.12", architecture: "x86_64", cpuModel: "Intel N100", logicalCpus: 4, executionUid: 0, mode: "embedded", engines: [] };
+/** What an added host's agent reports: every field differs from the server's. */
+const WORKER_FACTS = { os: "Debian GNU/Linux", version: "13", kernel: "6.12.5", architecture: "aarch64", cpuModel: "Neoverse N1", logicalCpus: 8, executionUid: 1000, mode: "remote", engines: [] };
+/** The admitted id of the added host in these specs. */
+const WORKER_ID = "11111111-1111-4111-8111-111111111111";
+/** The value of the Host tab row named `key`, or undefined when the row is not drawn. */
+const row = (facts: ReturnType<ReturnType<typeof createLiveDetails>["facts"]>, key: string): string | undefined => facts!.sections[0]!.rows.find((r) => r.key === key)?.value;
+
+// #410: a window's details describe the window's own host. The server's machine answers only for the server's own windows.
+test("two hosts' details differ: each window reads and shows its own host's system, CPU, address and kind", async () => {
+  await withPage(async () => {
+    const asked: Array<[string, Record<string, unknown>]> = [];
+    const connection = {
+      isWelcomed: true, isOpen: true,
+      call: async (action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        asked.push([action, input]);
+        return action === "remote.host.facts" ? WORKER_FACTS : SERVER_FACTS;
+      },
+    } as unknown as MuxConnection;
+    const source = createLiveDetails({ host: { name: "server" }, connection, roundTrip: () => undefined });
+    const own = { model: { id: "w-own", kind: "terminal", host: "server" } } as unknown as WinRec;
+    const added = { model: { id: "w-added", kind: "terminal", host: "worker", hostId: WORKER_ID, user: "operator", address: "operator@worker.lan" } } as unknown as WinRec;
+    const stops = [source.open!(own, () => {}), source.open!(added, () => {})];
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    const server = source.facts(own)!, worker = source.facts(added)!;
+    expect(asked).toContainEqual(["host.facts.read", { includeLive: true }]);
+    expect(asked).toContainEqual(["remote.host.facts", { host_id: WORKER_ID }]);
+    expect(row(server, "System")).toBe("AlmaLinux 10.2");
+    expect(row(server, "CPU")).toBe("4 logical cores · Intel N100");
+    expect(row(server, "Address")).toBe("server.example.invalid");
+    expect(row(server, "Infraternal agent")).toBe("Embedded · root");
+    expect(row(worker, "System")).toBe("Debian GNU/Linux 13");
+    expect(row(worker, "CPU")).toBe("8 logical cores · Neoverse N1");
+    expect(row(worker, "Address")).toBe("operator@worker.lan");
+    expect(row(worker, "Infraternal agent")).toBe("Remote · user");
+    expect(worker.os).toBe("debian");
+    for (const stop of stops) stop();
+  });
+});
+
+// #410: when the host cannot answer, the panel says so and never falls back to the server's machine.
+test("an offline or not-yet-read host says so in plain words and never shows the server's facts", async () => {
+  await withPage(async () => {
+    let answer: () => Promise<Record<string, unknown>> = async () => { throw new ActionRefused(undefined, "host offline"); };
+    const connection = { isWelcomed: true, isOpen: true, call: (action: string): Promise<Record<string, unknown>> => action === "remote.host.facts" ? answer() : Promise.resolve(SERVER_FACTS) } as unknown as MuxConnection;
+    const source = createLiveDetails({ host: { name: "server" }, connection, roundTrip: () => undefined });
+    const added = { model: { id: "w-added", kind: "terminal", host: "worker", hostId: WORKER_ID, address: "operator@worker.lan" } } as unknown as WinRec;
+    // Before any answer: not known yet.
+    answer = () => new Promise(() => {});
+    const stop = source.open!(added, () => {});
+    let facts = source.facts(added)!;
+    expect(row(facts, "System")).toBe("Not known yet");
+    expect(row(facts, "CPU")).toBe("");
+    expect(JSON.stringify(facts)).not.toContain("AlmaLinux");
+    stop();
+    // Refused as offline.
+    answer = async () => { throw new ActionRefused(undefined, "host offline"); };
+    // Another window of the same host: reads are spaced per window, so a fresh id reads at once.
+    const again = { model: { ...added.model, id: "w-added-2" } } as unknown as WinRec;
+    const stop2 = source.open!(again, () => {});
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    facts = source.facts(again)!;
+    expect(row(facts, "System")).toBe("Can't be read while this machine is offline");
+    expect(facts.sections[1]!.rows.find((r) => r.key === "Status")?.value).toContain("Offline");
+    expect(JSON.stringify(facts)).not.toContain("AlmaLinux");
+    expect(JSON.stringify(facts)).not.toContain("Intel N100");
+    expect(row(facts, "Address")).toBe("operator@worker.lan");
+    stop2();
+  });
+});

@@ -80,3 +80,23 @@ Clients retain these status rows and show pending or retired-unreachable in the
 existing host list, without shell, removal or privilege actions. The CLI reports pending for an accepted removal whose cleanup has not completed. See
 `docs/operations/login-revocation-backpressure.md` for delivery bounds and the
 operator action when cleanup certificates expire.
+
+## Facts of one host: `remote.host.facts` (#410)
+
+A window's machine details describe the window's own host, never the server.
+`host.facts.read` on the browser socket answers only for the server's own agent
+and takes no host. `remote.host.facts` takes exactly `{ "host_id": UUID }`
+(canonical lowercase, at most 256 bytes; unknown fields and arrays are refused)
+and returns what that host's infraternal agent reports for `host.facts.read`
+with live figures. It has no API scope: it is a browser action.
+
+The host must pass the same predicate as `remote.host.list` (the account's own,
+not revoked, admitted, no pending retirement). Otherwise the answer is
+`{"error":"host unavailable"}`, the same for a host that does not exist and a
+host of another account. An admitted host whose agent is not connected, or does
+not answer within 5 seconds, is `{"error":"host offline"}`. The server's own
+facts are never returned in place of either. Live reads do not write inventory
+rows; the connection observer retains the host's name and system separately.
+
+The details panel says "Can't be read while this machine is offline" for
+`host offline` and "Not known yet" until the first answer.

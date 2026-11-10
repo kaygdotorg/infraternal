@@ -144,6 +144,40 @@ impl Inventory for Source {
             }
         })
     }
+    /// Read live facts from the named host's own infraternal agent, never from the server's (#410).
+    /// The host must pass the same authority predicate as `list`; a pending retirement is not a host to read.
+    fn facts<'a>(
+        &'a self,
+        account: &'a str,
+        host_id: &'a str,
+    ) -> Operation<'a, Result<Value, &'static str>> {
+        use infraternal_plugin_remote::inventory::{HOST_OFFLINE, HOST_UNAVAILABLE};
+        Box::pin(async move {
+            let id = Uuid::parse_str(host_id).map_err(|_| HOST_UNAVAILABLE)?;
+            let admitted: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM remote_hosts h WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)")
+                .bind(id.as_bytes().as_slice()).bind(account).fetch_optional(&self.pool).await.map_err(|_| HOST_UNAVAILABLE)?;
+            if admitted.is_none() {
+                return Err(HOST_UNAVAILABLE);
+            }
+            if !self.hosts.online(id).await {
+                return Err(HOST_OFFLINE);
+            }
+            let actor = self.hosts.actor(id).await.ok_or(HOST_OFFLINE)?;
+            let reply = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                actor.call(
+                    "host.facts.read".into(),
+                    br#"{"includeLive":true}"#.to_vec(),
+                ),
+            )
+            .await
+            .map_err(|_| HOST_OFFLINE)?
+            .map_err(|_| HOST_OFFLINE)?;
+            // The connection observer retains identity facts. A live panel read
+            // needs no writer transaction or inventory invalidation every second.
+            serde_json::from_slice(&reply).map_err(|_| HOST_UNAVAILABLE)
+        })
+    }
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.hosts.5.subscribe()
     }
@@ -210,9 +244,11 @@ impl Inventory for Source {
 /// A pure data notification source is shared with durable admission and revocation writers.
 pub(crate) type InventoryChanges = Changes;
 
+/// Tests the admitted-host list and the per-host facts read against the real enrollment store.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The list is account-scoped, shows offline hosts, and drops revoked ones.
     #[tokio::test]
     async fn admitted_hosts_are_account_scoped_offline_and_revocation_filtered() {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -242,6 +278,29 @@ mod tests {
         assert_eq!(
             source.list("owner", None).await.unwrap()["hosts"],
             json!([])
+        );
+    }
+    /// A window's details name its own host (#410): an unknown or other account's host is `host unavailable`,
+    /// and an admitted host whose agent is not connected is `host offline`. Neither answers with the server's facts.
+    #[tokio::test]
+    async fn host_facts_refuse_foreign_unknown_and_offline_hosts() {
+        let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let source = Source {
+            pool,
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        let own = host.to_string();
+        assert_eq!(source.facts("owner", &own).await, Err("host offline"));
+        assert_eq!(source.facts("other", &own).await, Err("host unavailable"));
+        assert_eq!(
+            source.facts("owner", &Uuid::from_u128(9).to_string()).await,
+            Err("host unavailable")
+        );
+        assert_eq!(
+            source.facts("owner", "not-a-uuid").await,
+            Err("host unavailable")
         );
     }
     #[tokio::test]

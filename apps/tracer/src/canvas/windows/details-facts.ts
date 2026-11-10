@@ -13,8 +13,13 @@ const ICON_HOST = ICON.host;
 const ICON_CONNECTION = '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>';
 const ICON_SESSION = '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="m7.5 10 2.5 2-2.5 2M12.5 14h4"/>';
 
+/** Everything the details panel is built from: the host, the page's connection, the optional session, and whether extended info is on. */
 export interface DetailsInput {
-  host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string; facts?: HostFactsSnapshot };
+  /**
+   * `unavailable` says why there are no `facts` for this host: `offline` (its infraternal agent is not connected) or `pending`
+   * (not read yet, or never readable from here). The System row then says so in plain words; no other host's facts stand in.
+   */
+  host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string; facts?: HostFactsSnapshot; unavailable?: "offline" | "pending" };
   connection: { state: "connected" | "connecting" | "offline"; delayMs?: number; encrypted?: boolean };
   /** Extended machine info (Settings): adds the technical facts (init, virtualization, shell, locale, how it is reached). */
   extended?: boolean;
@@ -51,6 +56,7 @@ function uptime(seconds: number | undefined): string {
   return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
 }
 
+/** Turns what is known about a window's host, connection and session into the panel's header and tabs, in plain words. */
 export function detailsFacts(input: DetailsInput): DetailsFacts {
   const { host, connection, session } = input;
   const facts = host.facts;
@@ -65,7 +71,7 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
   const row = (group: string, core: boolean, key: string, value: string) => ({ key, value, group, core });
   const allHostRows = [
     row("System", true, "Name", host.name),
-    row("System", true, "System", facts ? `${facts.os}${facts.version ? ` ${facts.version}` : ""}` : osName),
+    row("System", true, "System", facts ? `${facts.os}${facts.version ? ` ${facts.version}` : ""}` : host.unavailable === "offline" ? "Can't be read while this machine is offline" : host.unavailable === "pending" ? "Not known yet" : osName),
     row("System", true, "Kernel", facts?.kernel ?? ""),
     row("System", true, "Architecture", facts?.architecture ?? ""),
     row("System", true, "Model", facts?.model ?? ""),
