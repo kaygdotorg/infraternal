@@ -10,6 +10,9 @@
 //! repaint can spend that floor, and returned client credit is the only way to
 //! restore it. Repaints consume credit before they are sent. The 250 ms path
 //! keeps using ordinary bulk credit, and every `Output` owns its own budgets.
+//! A key treats the stream as backlogged when bulk credit is exhausted or at
+//! least 16 KiB of output credit is still in flight; a small quiet write alone
+//! does not turn the next key into a repaint.
 
 use std::{
     ops::Range,
@@ -21,6 +24,8 @@ pub const STARVATION: Duration = Duration::from_millis(250);
 
 /// Credit held back from raw output for one input-triggered repaint budget.
 pub const REPAINT_RESERVE: u32 = 64 * 1024;
+/// Minimum spent output credit that counts as a backlog before the bulk window empties.
+pub const KEY_REPAINT_BACKLOG: u64 = 16 * 1024;
 /// Maximum bulk credit raw output may spend in a reserved relay.
 const BULK_WINDOW: u64 = 1024 * 1024;
 /// Reserve setup state before the first client credit grant is inspected.
@@ -322,14 +327,15 @@ impl Output {
         self.bulk_credit() == 0
     }
 
-    /// Whether any raw output still uses the active bulk window without returned client credit.
+    /// Bulk allowance unavailable because the client has not returned output credit.
     ///
-    /// A key can arrive while some credit remains, but bytes already sent may
-    /// still sit ahead of its echo on the client link. The relay uses this to
-    /// request a reserved repaint before the window reaches zero.
+    /// Credit is shared by raw output and repaint frames, so this counts any
+    /// output bytes still in flight instead of guessing which frame a later
+    /// Credit returns. The relay compares it with [`KEY_REPAINT_BACKLOG`] to
+    /// avoid repainting after tiny quiet writes.
     #[must_use]
-    pub fn bulk_output_unreturned(&self) -> bool {
-        self.reserve_mode == RESERVE_ACTIVE && self.bulk_credit() < BULK_WINDOW
+    pub fn unreturned_output_credit(&self) -> u64 {
+        BULK_WINDOW.saturating_sub(self.bulk_credit())
     }
 
     /// Ordinary credit left after preserving the key-triggered repaint floor.

@@ -14,6 +14,8 @@ const REPAINT_CREDIT: u32 = 64 * 1024;
 const INITIAL_CREDIT: u32 = BULK_CREDIT + REPAINT_CREDIT;
 /// A forwarded frame that leaves bulk credit available but remains unreturned.
 const PARTIAL_BULK_OUTPUT: usize = 64 * 1024;
+/// A small quiet write does not represent a credit-blocked flood backlog.
+const QUIET_OUTPUT: usize = 4 * 1024;
 /// A frame larger than either credit pool makes starvation deterministic.
 const STARVING_OUTPUT: usize = 128 * 1024;
 /// Each spam repaint consumes one quarter of the finite reserve.
@@ -366,6 +368,46 @@ async fn key_repaint_preempts_unreturned_bulk_before_window_is_empty() {
             u64::try_from(PARTIAL_BULK_OUTPUT).unwrap() + 1,
             b"echo:k".to_vec()
         ))
+    );
+}
+
+/// Keep a small fully forwarded quiet write from turning the next key into a repaint.
+#[tokio::test]
+async fn fully_forwarded_quiet_output_does_not_trigger_a_key_repaint() {
+    let mut fixture = start_relay(2).await;
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(INITIAL_CREDIT))
+        .unwrap();
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Output(0, vec![b'q'; QUIET_OUTPUT]),
+    )
+    .await
+    .unwrap();
+    let Some(Message::Shim(stream, Shim::Output(0, bytes))) =
+        tokio::time::timeout(EVENT_GUARD, fixture.messages.recv())
+            .await
+            .expect("quiet output was not forwarded")
+    else {
+        panic!("relay did not forward the quiet output");
+    };
+    assert_eq!(stream, fixture.stream);
+    assert_eq!(bytes.len(), QUIET_OUTPUT);
+    assert!(type_key_and_wait_for_ack(&mut fixture, 0).await);
+
+    let early_request = tokio::time::timeout(
+        Duration::from_millis(25),
+        fixture.reader.read(&mut fixture.peer),
+    )
+    .await;
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        early_request.is_err(),
+        "a repaint is only needed when output is waiting for credit"
     );
 }
 

@@ -15,6 +15,8 @@
 //! when already-sent bulk bytes remain unreturned; dropping stalled output
 //! affects only its own stream; and key input cannot refill the finite repaint
 //! reserve. Keys may coalesce behind one in-flight capture.
+//! A key preempts only when bulk credit is exhausted or at least 16 KiB of
+//! output credit is in flight, so a small quiet write does not trigger a repaint.
 //! A closed shim or failed terminal task closes only its mux stream. A session
 //! whose shim is gone answers its stream with the final Close 4404 (#158).
 use crate::{
@@ -1970,20 +1972,11 @@ async fn terminal_run(
                             }
                             Command::Input(seq, bytes) => {
                                 if !bytes.is_empty() {
-                                    let pending_output = pending.as_ref().is_some_and(|frame| {
-                                        matches!(
-                                            frame,
-                                            Shim::Output(..)
-                                                | Shim::Snapshot(..)
-                                                | Shim::SnapshotWithFlags(..)
-                                        )
-                                    });
-                                    // Unreturned bulk can already be ahead of
-                                    // this key even before the 1 MiB window is
-                                    // empty, so let the repaint replace it now.
+                                    // A small prior write is not a blocked flood;
+                                    // this also catches a key just before bulk credit runs out.
                                     let output_waiting = output.bulk_starved()
-                                        || output.bulk_output_unreturned()
-                                        || pending_output;
+                                        || output.unreturned_output_credit()
+                                            >= relay::KEY_REPAINT_BACKLOG;
                                     if key_repaint_target.is_some()
                                         || (output_waiting && output.reserved_credit() > 0)
                                     {

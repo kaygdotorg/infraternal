@@ -21,8 +21,8 @@ from agent_fixture import Binary, cleanup, fixture_state
 from latency_proxy import LatencyConfig
 
 
-FRAME_MS = 1000 / 60
-FLOOD_DELTA_BUDGET_MS = FRAME_MS
+# D375 limits the effect of a flood to one frame at 120 Hz.
+FLOOD_DELTA_BUDGET_MS = 1000 / 120
 PROBE_SAMPLES = 100
 # Keep the 1 MiB bulk window while also funding the relay's 64 KiB key repaint reserve.
 INITIAL_CREDIT = 1024 * 1024 + 64 * 1024
@@ -318,7 +318,7 @@ def run(binary, state_dir, samples):
             f"METRIC name=flood_isolation_same_session source=real-agent-pty n={samples} "
             f"baseline_p99_ms={same_quiet_p99:.2f} flood_p99_ms={same_echo_p99:.2f} "
             f"growth_ms={same_growth:.2f} budget_ms={FLOOD_DELTA_BUDGET_MS:.2f} "
-            f"d375_target_ms={1000 / 120:.2f} "
+            f"d375_target_ms={FLOOD_DELTA_BUDGET_MS:.2f} "
             f"result={'PASS' if same_growth <= FLOOD_DELTA_BUDGET_MS else 'FAIL'}",
             flush=True,
         )
