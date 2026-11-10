@@ -432,6 +432,10 @@ export class TerminalClient {
     const write = terminal.write.bind(terminal);
     terminal.write = (data, callback) => {
       this.linkRowsArmed = true;
+      // Every write is new parsed output, including local ones that bypass the output pump (test-double helpers, the
+      // 10 MB/s benchmark): the cursor layer resyncs on a version change (#447, J468). The pump also bumps it; every
+      // reader compares with !==, so two bumps for one write are harmless.
+      this.parsedOutputVersion += 1;
       write(data, callback);
     };
     // Phones wait for a real tap before opening the keyboard (D191).
