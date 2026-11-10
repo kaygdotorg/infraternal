@@ -202,6 +202,9 @@ impl Promotions {
             return Err(Refused::Forbidden);
         }
         let (agent, ..) = self.hosts.binding(host).await.ok_or(Refused::Unavailable)?;
+        if let Some(refusal) = refusal_for_os(self.host_os(&agent).await.as_deref()) {
+            return Ok(refusal);
+        }
         match host_privilege::probe(&agent)
             .await
             .map_err(|_| Refused::Unavailable)?
@@ -232,6 +235,10 @@ impl Promotions {
         let _ = self.store.sweep_promotions(now, false).await;
         let (agent, uid, fingerprint, generation) =
             self.hosts.binding(host).await.ok_or(Refused::Unavailable)?;
+        // A Mac keeps its rootless agent: nothing here turns it into root.
+        if let Some(refusal) = refusal_for_os(self.host_os(&agent).await.as_deref()) {
+            return Ok(refusal);
+        }
         // Until running terminals can be adopted by the person's own process
         // (J415 R6, not built yet), an upgrade with open terminals would
         // leave them unreachable once the rootless agent is retired. Refuse
@@ -408,10 +415,13 @@ impl Promotions {
             Elevation::Failed => "failed",
         };
         if outcome != Elevation::Wrong {
-            let _ = self
-                .store
-                .settle_try(attempt, Settled::Failed { typed }, now)
-                .await;
+            // A mismatch reached root with the right password (J465 P3-2).
+            let settled = if outcome == Elevation::Mismatch {
+                Settled::Mismatch
+            } else {
+                Settled::Failed { typed }
+            };
+            let _ = self.store.settle_try(attempt, settled, now).await;
             let reason = if outcome == Elevation::Denied {
                 Kind::Denied
             } else {
@@ -517,6 +527,23 @@ impl Promotions {
                 let _ = write!(text, "{byte:02x}");
                 text
             }))
+    }
+
+    /// The host's operating system name from its facts (`Linux`, `macOS`),
+    /// or `None` when the facts can't be read.
+    async fn host_os(&self, agent: &crate::embedded::EmbeddedAgent) -> Option<String> {
+        let facts = tokio::time::timeout(
+            Duration::from_secs(15),
+            agent.call(
+                "host.facts.read".into(),
+                br#"{"includeLive":false}"#.to_vec(),
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let facts: Value = serde_json::from_slice(&facts).ok()?;
+        facts["os"].as_str().map(str::to_owned)
     }
 
     /// The host's architecture, from its facts.
@@ -678,6 +705,12 @@ impl Promotions {
             Installation::new_pending(session.clone(), &target, host).map_err(|_| "install")?;
         // R4: before any step, the relay learns how to put the host back.
         session.arm_rollback(install.rollback_script());
+        // J465 P1: if the relay itself dies later, the uninstall outbox rolls
+        // back this exact transaction through the abandoned successor.
+        self.store
+            .record_install_transaction(attempt, install.transaction())
+            .await
+            .map_err(|_| "install")?;
         let result = self
             .run_install(host, attempt, agent, generation, &session, &install)
             .await;
@@ -753,6 +786,9 @@ impl Promotions {
             return Err("proof");
         }
         self.still_bound(host, generation).await?;
+        // J465 P2-1: a terminal opened on the rootless agent during the
+        // install would be orphaned when it is retired; stop here instead.
+        no_open_terminals(agent)?;
         self.set(attempt, generation, Stage::Handover);
         install
             .commit()
@@ -775,7 +811,19 @@ impl Promotions {
         .map_err(|_| "handover")?
         .ok_or("handover")?;
         let fingerprint: [u8; 32] = fingerprint.try_into().map_err(|_| "handover")?;
+        // Once more right before the point of no return (J465 P2-1, P3-4):
+        // still the bound link, and still no terminal on it. A failure here
+        // abandons; the committed root install is then removed by the
+        // successor's uninstall outbox.
         let now = crate::runtime::unix_seconds().map_err(|_| "clock")?;
+        if let Err(reason) = self
+            .still_bound(host, generation)
+            .await
+            .and_then(|()| no_open_terminals(agent))
+        {
+            let _ = self.store.abandon_promotion(attempt, now).await;
+            return Err(reason);
+        }
         if self
             .store
             .handover(attempt, &fingerprint, now)
@@ -798,6 +846,37 @@ impl Promotions {
             Err("link")
         }
     }
+}
+
+/// Refuse (`terminals`) while the rootless agent reports any open terminal,
+/// or can't say (its census is pending or its link is gone).
+fn no_open_terminals(agent: &crate::embedded::EmbeddedAgent) -> Result<(), &'static str> {
+    match &*agent.session_inventory().borrow() {
+        crate::embedded::SessionInventoryState::Available(sessions) if sessions.is_empty() => {
+            Ok(())
+        }
+        _ => Err("terminals"),
+    }
+}
+
+/// The answer for a host whose operating system this upgrade doesn't
+/// cover, or `None` to go on.
+///
+/// On a Mac the infraternal agent stays rootless by design: the only part
+/// that needs root, the mesh, already runs as its own root launchd service,
+/// installed with one sudo prompt by `infraternal up` on the Mac
+/// (`infraternal_plugin_mesh::macos_service`). So Full access never turns a
+/// Mac agent into a root agent; it refuses and points there instead
+/// (owner, 2026-11-10, #399). Unknown facts are not refused here: the probe
+/// itself fails closed on a host that can't elevate.
+fn refusal_for_os(os: Option<&str>) -> Option<Value> {
+    (os == Some("macOS")).then(|| {
+        json!({
+            "outcome": "macos",
+            "full": false,
+            "message": "On a Mac, infraternal doesn't need a root agent. To use the mesh, run `infraternal up` on the Mac once; it asks for your password one time to install its system service.",
+        })
+    })
 }
 
 /// Note an install step's failure for the operator and return its word.
@@ -824,3 +903,26 @@ impl Drop for RemoveDir {
 }
 
 use sha2::Digest as _;
+
+#[cfg(test)]
+mod tests {
+    //! The operating-system gate of a root upgrade.
+    use super::*;
+
+    /// A Mac is refused with a pointer to the mesh service; Linux and
+    /// unread facts go on to the probe.
+    #[test]
+    fn a_mac_is_never_upgraded_to_a_root_agent() {
+        let refusal = refusal_for_os(Some("macOS")).unwrap();
+        assert_eq!(refusal["outcome"], "macos");
+        assert!(
+            refusal["message"]
+                .as_str()
+                .unwrap()
+                .contains("infraternal up")
+        );
+        assert!(refusal_for_os(Some("Linux")).is_none());
+        assert!(refusal_for_os(Some("AlmaLinux")).is_none());
+        assert!(refusal_for_os(None).is_none());
+    }
+}

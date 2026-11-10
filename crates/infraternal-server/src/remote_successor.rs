@@ -30,6 +30,11 @@ pub(crate) const PROOF_ACTIONS: &[&str] = &["host.facts.read"];
 /// `infraternal_agent::privilege_agent`.
 pub(crate) const TAKE_OVER: &str = "privilege.take_over";
 
+/// The control action that asks an abandoned successor to roll back its
+/// install transaction, then uninstall itself (J465 P1). Implemented by
+/// `infraternal_agent::privilege_take_over::abandon`.
+pub(crate) const ABANDON: &str = "privilege.abandon";
+
 /// Successors that are connected and waiting for their promotion's driver,
 /// keyed by promotion. Each entry owns its actor; the lane task holds the
 /// link until the driver releases it, the promotion ends, or the link drops.
@@ -149,6 +154,11 @@ pub(crate) async fn deliver(
 /// The uninstall outbox (R5): an abandoned successor removes itself, and
 /// only its acceptance retires the entry and revokes its certificate. A lost
 /// or refused answer leaves the entry for its next reconnect.
+///
+/// When the promotion recorded its install transaction, the successor is
+/// asked to [`ABANDON`] it: roll that transaction back first, then
+/// uninstall. A plain uninstall refuses while the install's journal is open,
+/// which is exactly the state a relay that died mid-install leaves (J465 P1).
 async fn deliver_uninstall(
     authority: AuthorityGuard,
     link: RemoteLink,
@@ -160,12 +170,29 @@ async fn deliver_uninstall(
     accepts
         .try_send(link.authorize(authority))
         .map_err(|_| io::ErrorKind::WouldBlock)?;
-    let reply = tokio::time::timeout(
-        Duration::from_mins(1),
-        crate::remote_removal::ask_uninstall(&actor, host),
-    )
-    .await;
-    if let Ok(crate::remote_removal::UninstallReply::Accepted(_)) = reply {
+    let accepted = match store.install_transaction(attempt).await.ok().flatten() {
+        Some(transaction) => {
+            let input = serde_json::to_vec(&serde_json::json!({
+                "host": host.simple().to_string(),
+                "transaction": transaction.simple().to_string(),
+            }))
+            .map_err(io::Error::other)?;
+            let reply =
+                tokio::time::timeout(Duration::from_mins(1), actor.privilege_call(ABANDON, input))
+                    .await;
+            matches!(&reply, Ok(Ok(bytes)) if serde_json::from_slice::<serde_json::Value>(bytes)
+                .is_ok_and(|reply| reply["accepted"] == true))
+        }
+        None => matches!(
+            tokio::time::timeout(
+                Duration::from_mins(1),
+                crate::remote_removal::ask_uninstall(&actor, host),
+            )
+            .await,
+            Ok(crate::remote_removal::UninstallReply::Accepted(_))
+        ),
+    };
+    if accepted {
         store
             .confirm_successor_uninstall(
                 attempt,

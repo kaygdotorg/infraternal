@@ -14,6 +14,7 @@
 //! After the handover the *root* infraternal agent gets one more:
 //!
 //! | `privilege.take_over` | Retires the rootless install it replaced, then leaves standby. |
+//! | `privilege.abandon` | Its upgrade was abandoned: rolls back that install and removes itself. |
 //!
 //! They arrive only on the authenticated server control stream, in their own
 //! small lane beside terminal dispatch ([`LANE`], each call bounded by
@@ -68,13 +69,14 @@ pub const LANE: usize = 2;
 pub const CALL_BOUND: Duration = Duration::from_mins(2);
 
 /// The action ids, as the server sends them.
-pub const ACTIONS: [&str; 6] = [
+pub const ACTIONS: [&str; 7] = [
     "privilege.probe",
     "privilege.key",
     "privilege.elevate",
     "privilege.pump",
     "privilege.end",
     "privilege.take_over",
+    "privilege.abandon",
 ];
 
 /// Everything one upgrade keeps between calls. One per process.
@@ -125,6 +127,7 @@ pub async fn execute(action: &str, input: &[u8], sessions: &Path) -> io::Result<
         // finishes the upgrade that made it (R5).
         return match action {
             "privilege.take_over" => crate::privilege_take_over::execute(input).await,
+            "privilege.abandon" => crate::privilege_take_over::abandon(input).await,
             _ => Ok(br#"{"full":true}"#.to_vec()),
         };
     }

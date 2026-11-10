@@ -555,3 +555,72 @@ async fn a_successor_guard_is_private_and_ends_with_its_promotion() {
     assert!(!cleanup.permits());
     assert!(!rootless.permits());
 }
+
+/// J465 P3-2: a digest mismatch reached root with the right password, so it
+/// is no failed try: after it, one wrong password doesn't wait.
+#[tokio::test]
+async fn a_digest_mismatch_counts_as_reaching_root() {
+    let (store, pool, host) = enrolled().await;
+    session(&pool, "s", 150).await;
+    let run = |attempt: u128, now: i64, settled: Settled| {
+        let store = store.clone();
+        async move {
+            let attempt = Uuid::from_u128(attempt);
+            store
+                .begin_promotion("s", host, attempt, Method::Sudo, bound(), now)
+                .await?;
+            store.reserve_try("s", attempt, true, now).await?;
+            store.settle_try(attempt, settled, now + 1).await
+        }
+    };
+    run(1, 200, Settled::Wrong).await.unwrap();
+    run(2, 210, Settled::Mismatch).await.unwrap();
+    run(3, 220, Settled::Wrong).await.unwrap();
+    assert_eq!(
+        store.retry_after(host, Method::Sudo, 230).await.unwrap(),
+        None
+    );
+}
+
+/// J465 P3-3: the try is reserved only inside the admin window, as begin is.
+#[tokio::test]
+async fn a_try_needs_the_admin_window_still_open() {
+    let (store, pool, host) = enrolled().await;
+    session(&pool, "s", 150).await;
+    let attempt = Uuid::from_u128(4);
+    store
+        .begin_promotion("s", host, attempt, Method::Sudo, bound(), 200)
+        .await
+        .unwrap();
+    let late = 150 + infraternal_plugin_api::ADMIN_WINDOW_SECONDS;
+    assert!(matches!(
+        store.reserve_try("s", attempt, true, late).await,
+        Err(PromotionError::Denied)
+    ));
+}
+
+/// J465 P1: the install transaction is recorded once, for a live row, and
+/// read back for the uninstall outbox.
+#[tokio::test]
+async fn the_install_transaction_is_recorded_once() {
+    let (store, pool, host) = enrolled().await;
+    session(&pool, "s", 150).await;
+    let attempt = Uuid::from_u128(77);
+    enrolled_promotion(&store, host, attempt, 200).await;
+    assert_eq!(store.install_transaction(attempt).await.unwrap(), None);
+    let transaction = Uuid::from_u128(0xabc);
+    store
+        .record_install_transaction(attempt, transaction)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .record_install_transaction(attempt, Uuid::from_u128(0xdef))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.install_transaction(attempt).await.unwrap(),
+        Some(transaction)
+    );
+}

@@ -780,6 +780,7 @@ impl RemoteLink {
                     }
                     crate::enrollment::promotion::SuccessorPurpose::Uninstall => {
                         *action_id == infraternal_plugin_remote::UNINSTALL.id
+                            || *action_id == crate::remote_successor::ABANDON
                     }
                 },
                 _ => false,

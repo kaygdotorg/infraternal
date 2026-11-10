@@ -1420,15 +1420,37 @@ fi
         }
     }
 
+    /// This attempt's transaction id: the journal it opens on the host.
+    #[must_use]
+    pub fn transaction(&self) -> uuid::Uuid {
+        self.transaction
+    }
+
+    /// The rollback of root-mode transaction `transaction` of `host`, built
+    /// from ids alone, for the host to run without the server (J465 P1): an
+    /// abandoned root upgrade's successor rolls back the journal its dead
+    /// relay left open. The same text [`Self::rollback_script`] gives a
+    /// root `Installation` of that transaction.
+    #[must_use]
+    pub fn root_rollback_script(host: uuid::Uuid, transaction: uuid::Uuid) -> String {
+        Self::rollback_script_for(InstallMode::Root, host, transaction)
+    }
+
+    /// The one rollback text, for any mode; see [`Self::rollback`].
+    fn rollback_script_for(mode: InstallMode, host: uuid::Uuid, transaction: uuid::Uuid) -> String {
+        let guarded = format!(
+            "{SETUP_LOCK}\nsetup_guard\n{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\npreserve_session=no\n{ROLLBACK_TRANSACTION}"
+        );
+        Self::script_for(mode, host, transaction, &guarded)
+    }
+
     /// The exact script [`Self::rollback`] runs, for a host-side runner that
     /// must put the host back without the server: a root upgrade's relay
     /// keeps it and runs it itself if the upgrade ends uncommitted (D376, R4).
     /// It takes the setup lock and undoes only this transaction's journal.
     #[must_use]
     pub fn rollback_script(&self) -> String {
-        self.script(&format!(
-            "{RUNTIME_CLEANUP}\n{FRESH_CLEANUP}\npreserve_session=no\n{ROLLBACK_TRANSACTION}"
-        ))
+        Self::rollback_script_for(self.mode, self.host, self.transaction)
     }
 
     /// Restore the previous installation, or remove only this host-bound fresh installation.
@@ -2086,6 +2108,26 @@ fn invalid_setup() -> Failure {
 mod tests {
     //! Pins the check-time transfer record and the script compaction rules (#189).
     use super::*;
+
+    /// J465 P1: the host-side rollback of an abandoned root upgrade is built
+    /// from ids alone and is the root rollback of exactly that transaction.
+    #[test]
+    fn the_root_rollback_binds_its_host_and_transaction() {
+        let host = uuid::Uuid::from_u128(0x11);
+        let transaction = uuid::Uuid::from_u128(0x22);
+        let script = Installation::root_rollback_script(host, transaction);
+        assert!(script.contains(&host.simple().to_string()));
+        assert!(script.contains(&transaction.simple().to_string()));
+        assert!(script.contains("/var/lib/infraternal"));
+        assert_eq!(
+            script,
+            Installation::rollback_script_for(InstallMode::Root, host, transaction)
+        );
+        assert_ne!(
+            script,
+            Installation::root_rollback_script(host, uuid::Uuid::from_u128(0x23))
+        );
+    }
 
     #[test]
     fn only_the_root_base_may_be_traversable() {

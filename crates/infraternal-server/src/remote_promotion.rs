@@ -138,6 +138,11 @@ pub(crate) enum Settled {
     },
     /// Root was reached; the install runs next.
     Rooted,
+    /// Root was reached (the password was right), but the host's binary
+    /// didn't match this server's payload, so nothing ran as root and the
+    /// try ends. It counts as a success for the 2-try rule (J465 P3-2): PAM
+    /// counted a success too, so the count starts again.
+    Mismatch,
 }
 
 /// What an admitted successor may do (R5).
@@ -314,7 +319,8 @@ impl EnrollmentStore {
         Ok(last)
     }
 
-    /// Reserve the try of `attempt` for the session that began it (B2).
+    /// Reserve the try of `attempt` for the session that began it (B2),
+    /// still inside its admin window (J465 P3-3).
     ///
     /// One UPDATE moves the row from `open` to `elevating` only if the 2-try
     /// wait doesn't apply, so a concurrent second finish of the same attempt,
@@ -336,7 +342,8 @@ impl EnrollmentStore {
             "UPDATE remote_host_promotions SET state = 'elevating', tried = ?1 \
              WHERE attempt = ?2 AND state = 'open' AND expires_at > ?3 \
              AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash = ?4 \
-                 AND s.user_id = remote_host_promotions.person AND s.unlocked = 1 AND s.expires > ?3) \
+                 AND s.user_id = remote_host_promotions.person AND s.unlocked = 1 AND s.expires > ?3 \
+                 AND s.fresh <= ?3 AND ?3 - s.fresh < ?5) \
              AND NOT {} \
              RETURNING host_id, method",
             locked(
@@ -350,6 +357,7 @@ impl EnrollmentStore {
             .bind(attempt.as_bytes().as_slice())
             .bind(now)
             .bind(session_hash)
+            .bind(infraternal_plugin_api::ADMIN_WINDOW_SECONDS)
             .fetch_optional(&self.0)
             .await?;
         if let Some((host, method)) = row {
@@ -388,6 +396,7 @@ impl EnrollmentStore {
             Settled::Failed { typed } => ("failed", Some(i64::from(typed)), 0, Some(now)),
             // Root reached: the try was right and the count starts again.
             Settled::Rooted => ("installing", None, 1, None),
+            Settled::Mismatch => ("failed", Some(1), 1, Some(now)),
         };
         let changed = sqlx::query(
             "UPDATE remote_host_promotions SET state = ?1, tried = COALESCE(?2, tried), rooted = ?3, ended_at = ?4 \
@@ -797,6 +806,52 @@ impl EnrollmentStore {
             ))
         })
         .transpose()
+    }
+
+    /// Record the install transaction the relay runs for `attempt` (J465 P1),
+    /// once, while the row is live. The uninstall outbox needs it to roll
+    /// back a journal the relay left open.
+    ///
+    /// # Errors
+    /// `Denied` when the row isn't live or already has another transaction.
+    pub(crate) async fn record_install_transaction(
+        &self,
+        attempt: Uuid,
+        transaction: Uuid,
+    ) -> Result<(), PromotionError> {
+        let changed = sqlx::query(
+            "UPDATE remote_host_promotions SET install_transaction = ? WHERE attempt = ? \
+             AND install_transaction IS NULL AND state IN ('installing', 'enrolled')",
+        )
+        .bind(transaction.as_bytes().as_slice())
+        .bind(attempt.as_bytes().as_slice())
+        .execute(&self.0)
+        .await?
+        .rows_affected();
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(PromotionError::Denied)
+        }
+    }
+
+    /// The install transaction recorded for `attempt`, if any.
+    ///
+    /// # Errors
+    /// Storage failure only.
+    pub(crate) async fn install_transaction(
+        &self,
+        attempt: Uuid,
+    ) -> Result<Option<Uuid>, PromotionError> {
+        let stored: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+            "SELECT install_transaction FROM remote_host_promotions WHERE attempt = ?",
+        )
+        .bind(attempt.as_bytes().as_slice())
+        .fetch_optional(&self.0)
+        .await?;
+        Ok(stored
+            .flatten()
+            .and_then(|bytes| Uuid::from_slice(&bytes).ok()))
     }
 
     /// The root infraternal agent confirmed the rootless install is retired.
