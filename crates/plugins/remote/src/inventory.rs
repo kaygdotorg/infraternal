@@ -35,7 +35,7 @@ pub const LIST: ActionDef = ActionDef {
     fresh_passkey: false,
 };
 /// Reads the machine facts of one admitted host, so a window's details describe its own host and never the server.
-/// Browser-only (no API scope): the facts are live figures from that host's infraternal agent.
+/// Keys use hosts:read (D371); the source keeps the same person-level host ownership check.
 pub const FACTS: ActionDef = ActionDef {
     id: "remote.host.facts",
     summary: "Read the machine facts of one admitted host.",
@@ -51,7 +51,7 @@ pub const FACTS: ActionDef = ActionDef {
     permission: Permission::One("authenticated"),
     dry_run: DryRun::Unsupported,
     opens: None,
-    api_scope: None,
+    api_scope: Some("hosts:read"),
     fresh_passkey: false,
 };
 /// The refusal for a host that is admitted to the account but whose infraternal agent is not connected.
