@@ -2240,6 +2240,26 @@ manager=holding_manager''')
         finally:
             os.kill(int(pid_file.read_text()), 15)
 
+    def test_takeover_manager_failures_before_closing_have_their_own_status(self):
+        """#433 P3: stop, disable and reload failures are not evidence of another holder."""
+        for operation in ('stop', 'disable', 'daemon-reload'):
+            with self.subTest(operation=operation):
+                record = self.make_takeover_fixture()
+                found = self.found_install()
+                result = self.take_over(record, prefix=f'''
+manager_failed=no
+failing_manager() {{
+ if [ "$1" = "{operation}" ] && [ "$manager_failed" = no ]; then
+  manager_failed=yes
+  return 1
+ fi
+ mock_manager "$@"
+}}
+manager=failing_manager''')
+                self.assertEqual(result.returncode, 80, result.stderr.decode())
+                self.assertEqual(self.found_install(), found, 'rollback restores the old install')
+                self.assertFalse(self.takeover_aside().exists())
+
     def test_a_termination_after_the_stop_still_puts_it_back(self):
         record = self.make_takeover_fixture()
         found = self.found_install()

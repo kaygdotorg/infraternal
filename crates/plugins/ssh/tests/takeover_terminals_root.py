@@ -305,8 +305,30 @@ fail_after_close() {
 }
 manager=fail_after_close
 ''')
-        # A service step failing after a terminal closed: 79 (closing could not finish), never "busy".
-        self.assertEqual(result.returncode, 79, result.stdout + result.stderr)
+        # Disabling failed after every terminal stopped: manager failure, never an unfinished close.
+        self.assertEqual(result.returncode, 81, result.stdout + result.stderr)
+        self.assertFalse(self.scope_active(session))
+        self.assertEqual((self.base.stat().st_ino, self.identity_path.read_bytes(), self.unit.read_bytes()), before)
+        self.assertEqual(subprocess.check_output(['systemctl', 'is-active', 'infraternal-agent.service'], text=True).strip(), 'active')
+        self.assertFalse(self.takeover_aside().exists())
+
+    def test_reload_failure_after_close_does_not_report_a_holder(self):
+        """#433 P3: a failed reload after all terminal stops has the manager-failure status."""
+        self.make_takeover_fixture()
+        session, record = self.open_terminal()
+        before = (self.base.stat().st_ino, self.identity_path.read_bytes(), self.unit.read_bytes())
+        result = self.take_over(record, prefix='''
+reload_failed=no
+fail_reload_once() {
+ if [ "$1" = daemon-reload ] && [ "$reload_failed" = no ]; then
+  reload_failed=yes
+  return 1
+ fi
+ systemctl --runtime "$@"
+}
+manager=fail_reload_once
+''')
+        self.assertEqual(result.returncode, 81, result.stdout + result.stderr)
         self.assertFalse(self.scope_active(session))
         self.assertEqual((self.base.stat().st_ino, self.identity_path.read_bytes(), self.unit.read_bytes()), before)
         self.assertEqual(subprocess.check_output(['systemctl', 'is-active', 'infraternal-agent.service'], text=True).strip(), 'active')

@@ -472,21 +472,28 @@ pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal a
 /// The Take over offer's own words: what was found and what Take over does (D359).
 pub const TAKEOVER_OFFER: &str = "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.";
 
-/// The refusal for a finished install that something still uses (D359), before Take over closed any
-/// terminal: at the check, or after the old agent stopped and was put back. It holds in both cases, so
-/// it never claims that nothing changed (J342 P3-4), and it never mentions closed terminals (#433 P2).
-pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something besides its own terminals is using it, such as a program that runs from its folder. No terminal was closed, and the old install was left as it was found. Stop that program, then try again.";
+/// The check or Take over could not prove that only this install's terminals used it, before any
+/// terminal closed (D359, #433 P2). This includes ambiguous helper attribution, not just known holders.
+pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, but Take over could not confirm that only its own terminals were using it. No terminal was closed, and the old install's files were kept. Try again.";
 
-/// The refusal when something still used the old install after Take over closed every terminal the
+/// The refusal when the final holder check could not prove the old install unused after every terminal the
 /// person confirmed (host exit 74, #433 P2). The host leaves 74 only once all their units stopped;
 /// a unit that would not stop is [`TAKEOVER_CLOSE_UNFINISHED`]. The install is put back; closed
 /// terminals cannot be.
-pub const TAKEOVER_BUSY_AFTER_CLOSE: &str = "Take over closed the terminals you confirmed, then found something else still using the old infraternal agent, such as a program that runs from its folder. The old install was put back as it was, and those terminals stay closed. Stop that program, then try again.";
+pub const TAKEOVER_BUSY_AFTER_CLOSE: &str = "Take over closed the terminals you confirmed, but could not confirm that the old infraternal agent was no longer in use. The old install's files were kept, and those terminals stay closed. Try again.";
 
-/// The refusal when a confirmed terminal's unit, or the old service, would not stop after Take over
+/// The refusal when a confirmed terminal's unit could not be confirmed stopped after Take over
 /// began closing (host exit 79, #433 P3-1, J462). Some confirmed terminals may be closed and the
-/// rest are still open; no other program is to blame, and the install is put back.
-pub const TAKEOVER_CLOSE_UNFINISHED: &str = "A terminal you confirmed, or the old infraternal agent's service, would not stop, so Take over stopped. Terminals it had already closed stay closed and the others are still open. The old install was put back as it was. Try again.";
+/// rest may still be open; no other program is to blame, and the install is put back.
+pub const TAKEOVER_CLOSE_UNFINISHED: &str = "A terminal you confirmed would not close, so Take over stopped. Some terminals may already be closed; any that closed stay closed. The old install was put back as it was. Try again.";
+
+/// A service-manager operation failed before Take over closed any terminal (host exit 80, #433 P3).
+/// Unlike 73, this status is not evidence of an unexpected holder.
+pub const TAKEOVER_MANAGER_FAILED: &str = "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again.";
+
+/// Disabling the old service or reloading the manager failed after every confirmed terminal stopped
+/// (host exit 81, #433 P3). Closed terminals cannot be reopened by restoring the install.
+pub const TAKEOVER_MANAGER_FAILED_AFTER_CLOSE: &str = "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again.";
 
 /// The refusal when the install or its terminals changed between review and confirmation (host exit
 /// 75). Every 75 happens before any terminal is closed (#433 P2).
@@ -615,6 +622,14 @@ impl FinishedInstall {
                     Some(73) => {
                         error.kind = FailureKind::UnrecognizedInstall;
                         error.message = TAKEOVER_BUSY;
+                    }
+                    Some(80) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_MANAGER_FAILED;
+                    }
+                    Some(81) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_MANAGER_FAILED_AFTER_CLOSE;
                     }
                     Some(79) => {
                         error.kind = FailureKind::UnrecognizedInstall;
@@ -1323,8 +1338,8 @@ pub const START_FRESH_BUSY: &str = "Something besides the earlier setup's own te
 pub const START_FRESH_BUSY_AFTER_CLOSE: &str = "Start fresh closed the terminals you confirmed, then found something else still using the earlier setup, such as a program that runs from its folder. Nothing was removed, and those terminals stay closed. Stop that program, then try again.";
 
 /// A confirmed terminal's unit would not stop during Start fresh (host exit 79, #433 P3-1): some may be
-/// closed and the rest are still open; nothing was removed.
-pub const START_FRESH_CLOSE_UNFINISHED: &str = "A terminal you confirmed would not close, so Start fresh stopped. Terminals it had already closed stay closed and the others are still open. Nothing was removed. Try again.";
+/// closed and the rest may still be open; nothing was removed.
+pub const START_FRESH_CLOSE_UNFINISHED: &str = "A terminal you confirmed would not close, so Start fresh stopped. Some terminals may already be closed; any that closed stay closed. Nothing was removed. Try again.";
 
 /// The earlier setup or its terminals changed between review and confirmation (host exit 75);
 /// every 75 happens before any terminal is closed.
@@ -1671,17 +1686,75 @@ mod tests {
         assert!(START_FRESH_BUSY_AFTER_CLOSE.contains("stay closed"));
     }
 
-    /// #433 P3-1 (J462): when a confirmed terminal would not close, the text neither claims every
-    /// terminal closed nor sends the person looking for a program that does not exist.
+    /// #433 P3: a failed terminal stop does not establish whether that unit stopped, so the copy
+    /// allows either outcome without blaming another program.
     #[test]
-    fn an_unfinished_close_says_some_terminals_are_still_open() {
+    fn an_unfinished_close_does_not_guess_which_terminals_remain_open() {
         for text in [TAKEOVER_CLOSE_UNFINISHED, START_FRESH_CLOSE_UNFINISHED] {
-            assert!(text.contains("the others are still open"), "{text}");
+            assert!(
+                text.contains("Some terminals may already be closed"),
+                "{text}"
+            );
             assert!(
                 !text.contains("closed the terminals you confirmed"),
                 "{text}"
             );
             assert!(!text.contains("program"), "{text}");
+        }
+    }
+
+    /// Return one host status without executing a remote script, to test the public failure mapping.
+    struct HostExit(u8);
+
+    impl SshSession for HostExit {
+        /// Model the transport's fixed exit status; no host prose is trusted.
+        fn run<'a>(
+            &'a self,
+            _: &'a str,
+            _: Input<'a>,
+        ) -> crate::transport::Operation<'a, crate::transport::CommandOutput> {
+            Box::pin(async {
+                let mut error = Failure::install("fixture");
+                error.exit_status = Some(self.0);
+                Err(error)
+            })
+        }
+    }
+
+    /// #433 P3: each takeover status selects truthful UI copy and preserves its diagnostic code.
+    #[tokio::test]
+    async fn takeover_failures_distinguish_holders_terminals_and_manager_operations() {
+        let installed = parse_installed(&format!("{} 64:1234 live ready", "a".repeat(32))).unwrap();
+        let target = Target {
+            id: "fixture".into(),
+            address: crate::model::TargetAddress::Manual("root@fixture".into()),
+            credential: None,
+            mode: InstallMode::Root,
+            root_consent: true,
+        };
+        for (status, message) in [
+            (73, TAKEOVER_BUSY),
+            (74, TAKEOVER_BUSY_AFTER_CLOSE),
+            (75, TAKEOVER_CHANGED),
+            (79, TAKEOVER_CLOSE_UNFINISHED),
+            (80, TAKEOVER_MANAGER_FAILED),
+            (81, TAKEOVER_MANAGER_FAILED_AFTER_CLOSE),
+        ] {
+            let error = installed
+                .take_over(&HostExit(status), &target, uuid::Uuid::from_u128(7))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.exit_status, Some(status));
+            assert_eq!(error.kind, FailureKind::UnrecognizedInstall);
+            assert_eq!(error.message, message);
+        }
+        assert!(TAKEOVER_MANAGER_FAILED.contains("No terminal was closed"));
+        assert!(TAKEOVER_MANAGER_FAILED_AFTER_CLOSE.contains("those terminals stay closed"));
+        for text in [TAKEOVER_MANAGER_FAILED, TAKEOVER_MANAGER_FAILED_AFTER_CLOSE] {
+            assert!(text.contains("service manager"));
+            assert!(!text.contains("something else"));
+            assert!(!text.contains("still open"));
         }
     }
 

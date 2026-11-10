@@ -33,6 +33,12 @@ export const RUNNING_TEXT: Record<StageId, string> = {
   session: "Opening a terminal on the host",
 };
 
+/** These host statuses report a failed Take over, including terminal or service-manager operations (#433). */
+function takeoverStopped(failure: FailureDetail): boolean {
+  return failure.exit_status === 73 || failure.exit_status === 74 || failure.exit_status === 75
+    || failure.exit_status === 79 || failure.exit_status === 80 || failure.exit_status === 81;
+}
+
 /** One plain sentence for a failure. An unknown or missing failure gets the generic one; the raw text stays in the details. */
 export function failureLine(failure: FailureDetail | undefined): string {
   switch (failure?.kind) {
@@ -43,7 +49,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "unsupported": return "This host can't run the infraternal agent yet";
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
-    case "unrecognized_install": return "Already set up elsewhere";
+    case "unrecognized_install": return takeoverStopped(failure) ? "Take over didn't finish" : "Already set up elsewhere";
     case "unproven_files": return "Setup files it can't vouch for";
     case "no_account": return "Couldn't find that account on this host";
     case "install":
@@ -278,7 +284,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     // D359: in root mode the server offers to take a finished install of another server over. The page offers
     // Take over, which opens a confirmation that names the old install; nothing changes until then.
     case "unrecognized_install": return {
-      title: `${name} is set up elsewhere`,
+      title: takeoverStopped(failure) ? `Take over on ${name} didn't finish` : `${name} is set up elsewhere`,
       happened: failure.message,
       next: "",
       fix: failure.takeover ? "take-over" : "retry", tone: "info",

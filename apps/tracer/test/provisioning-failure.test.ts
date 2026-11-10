@@ -167,3 +167,26 @@ test("a Start fresh offer carries the terminals it closes", () => {
     globalThis.WebSocket = previous;
   }
 });
+
+/** #433 P3: retain only a byte-sized integer status, so takeover copy can distinguish manager failures. */
+test("takeover exit statuses survive the decoder only as valid bytes", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  /** A socket stand-in that delivers fixture events to the production decoder. */
+  class Socket extends EventTarget {
+    /** Keep the socket available so each case can deliver its public failure record. */
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    for (const status of [0, 79, 80, 81, 255, -1, 256, 80.5, "80", null]) {
+      socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: events.length + 1, target: "host", attempt: 1, step: "failed", message: "Take over stopped", elapsed_ms: 1,
+        failure: { kind: "unrecognized_install", message: "x", log_tail: [], exit_status: status } }) }));
+      const failure = events.at(-1)?.failure;
+      if (typeof status === "number" && Number.isInteger(status) && status >= 0 && status <= 255) expect(failure).toHaveProperty("exit_status", status);
+      else expect(failure).not.toHaveProperty("exit_status");
+    }
+  } finally { globalThis.WebSocket = original; }
+});

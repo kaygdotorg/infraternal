@@ -60,6 +60,8 @@ export interface FailureDetail {
   kind: FailureKind;
   message: string;
   log_tail: string[];
+  /** The host command's byte-sized exit status, used to explain Take over failures (#433). */
+  exit_status?: number;
   /** Validated host-local setup lease coordinates for lock and interrupted-upgrade guidance. */
   setup_lock?: {
     machine: string; pid?: number; since: string; active: boolean;
@@ -218,6 +220,7 @@ function areTerminals(value: unknown): value is TakeoverTerminal[] {
 function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
+  if (typeof value.exit_status === "number" && Number.isInteger(value.exit_status) && value.exit_status >= 0 && value.exit_status <= 255) failure.exit_status = value.exit_status;
   if (value.kind === "setup_running" || value.kind === "stale_previous_attempt") {
     const setupLock = parseSetupLock(value.setup_lock);
     if (setupLock) failure.setup_lock = setupLock;

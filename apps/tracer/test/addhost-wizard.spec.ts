@@ -923,3 +923,48 @@ for (const theme of ["ink", "paper"]) for (const viewport of [{ width: 1440, hei
     expect(sent.find((command) => command.action === "start-fresh")?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
   });
 }
+
+/** #433 P3: the production failure page preserves each close state from the server without guessing. */
+for (const [status, message] of [
+  [79, "A terminal you confirmed would not close, so Take over stopped. Some terminals may already be closed; any that closed stay closed. The old install was put back as it was. Try again."],
+  [80, "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again."],
+  [81, "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again."],
+] as const) for (const width of [1440, 393]) {
+  test(`takeover failure copy and alignment: status ${status} width ${width}`, async ({ page }) => {
+    await page.routeWebSocket("**/v1/bootstrap/ws", (socket) => {
+      const server = socket.connectToServer();
+      server.onMessage((data) => {
+        const event = JSON.parse(String(data)) as { step?: string; message?: string; failure?: { kind: string; message: string; exit_status?: number; takeover?: unknown }; leftovers?: unknown };
+        if (event.failure?.kind === "unrecognized_install") {
+          event.step = "failed";
+          event.message = "Take over didn't finish";
+          event.failure.message = message;
+          event.failure.exit_status = status;
+          delete event.failure.takeover;
+          delete event.leftovers;
+        }
+        socket.send(JSON.stringify(event));
+      });
+    });
+    await open(page);
+    await page.setViewportSize({ width, height: width === 1440 ? 900 : 852 });
+    await openWizard(page);
+    await addTyped(page, "root@takeover.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    await expect(page.getByRole("heading", { name: "Take over on takeover.lab didn't finish", exact: true })).toBeVisible();
+    const failure = onScreen(page, "failure");
+    await expect(failure.locator(".ah-lede")).toHaveText(message);
+    await expect(inWizard(page, "Try again")).toBeVisible();
+    await expect(wizard(page).locator('[data-ah="review-take-over"]')).toHaveCount(0);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    const edges = await failure.evaluate((root) => {
+      const title = root.querySelector(".ah-title")!.getBoundingClientRect();
+      const text = root.querySelector(".ah-lede")!.getBoundingClientRect();
+      return { title: title.left, text: text.left, right: text.right, width: innerWidth };
+    });
+    expect(Math.abs(edges.title - edges.text)).toBeLessThanOrEqual(0.5);
+    expect(edges.right).toBeLessThanOrEqual(edges.width);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `failure-${status}-${width}.png`) });
+  });
+}

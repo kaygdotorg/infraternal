@@ -479,11 +479,12 @@ stop_activated_agent() {
 # Stop the infraternal agent's unit, then refuse (73) while anything else it
 # started is still running. KillMode=process leaves it: a shim that started
 # after the earlier checks, or never bound a socket, is still in the unit's
-# cgroup (#305 J272).
+# cgroup (#305 J272). Take over passes 80 for a manager failure, distinct
+# from a holder refusal; callers without terminal-aware messages keep 73.
 stop_agent_unit() {
  # Read the unit's cgroup while it runs; systemd may forget it once stopped.
  agent_cgroup=$($manager show -p ControlGroup --value infraternal-agent.service 2>/dev/null || :)
- $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
+ $manager stop infraternal-agent.service >/dev/null 2>&1 || exit "${1:-73}"
  case "$agent_cgroup" in
   /*) agent_procs="${agent_cgroup_root:-/sys/fs/cgroup}$agent_cgroup/cgroup.procs"
       if [ -e "$agent_procs" ]; then
@@ -1389,17 +1390,16 @@ take_over_finished_install() {
  [ "$(cat "$takeover_part/unit")" = "$(cat "$unit")" ] || exit 71
  mv -T "$takeover_part" "$aside"
  # From here every way out puts the old install back, until the end.
- # A terminal unit that will not stop, or a service step failing after a
- # terminal closed, ends with 79: some confirmed terminals may be closed and
- # the rest are open. Once every confirmed terminal closed, a holder refusal
- # (73) leaves 74; every 73 before that closed none (#433 P2, P3-1).
+ # A terminal unit that will not stop leaves 79. A manager failure leaves
+ # 80 before any terminal closed, or 81 after every confirmed unit stopped.
+ # Only a holder refusal (73) becomes 74 after every terminal closed.
  takeover_closed=no
- trap 'takeover_status=$?; replace_untrap; put_back_taken_over; [ "$takeover_status:$takeover_closed" != 73:yes ] || takeover_status=74; exit "$takeover_status"' EXIT
+ trap 'takeover_status=$?; replace_untrap; put_back_taken_over; case "$takeover_status:$takeover_closed" in 73:yes) takeover_status=74;; 80:yes) takeover_status=81;; esac; exit "$takeover_status"' EXIT
  trap 'replace_untrap; put_back_taken_over; exit 129' HUP
  trap 'replace_untrap; put_back_taken_over; exit 130' INT
  trap 'replace_untrap; put_back_taken_over; exit 143' TERM
  trap 'replace_untrap; put_back_taken_over; exit 141' PIPE
- stop_agent_unit
+ stop_agent_unit 80
  # Stop the source of new terminals first, then compare every record again
  # immediately before stopping exactly the units the person reviewed (D368).
  installed_terminals=$takeover_terminals_expected
@@ -1416,17 +1416,14 @@ take_over_finished_install() {
   $manager stop "$takeover_close" >/dev/null 2>&1 || exit 79
   takeover_closed=yes
  done
- if ! $manager disable infraternal-agent.service >/dev/null 2>&1; then
-  [ "$takeover_closed" = no ] || exit 79
-  exit 73
- fi
+ $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 80
  # The old unit and only the confirmed terminals' units have stopped.
  live_session_sockets
  scan_holders takeover-all
  mv -T "$base" "$aside/install"
  rm -f "$unit"
  rm -f "$launcher"
- $manager daemon-reload >/dev/null 2>&1 || exit 73
+ $manager daemon-reload >/dev/null 2>&1 || exit 80
  replace_done
 }
 # Put back what take_over_finished_install set aside in $aside, whatever step

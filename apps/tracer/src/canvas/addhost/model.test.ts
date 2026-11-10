@@ -283,3 +283,22 @@ test("early terminal publication selects only its canonical host-bound shim sess
   expect(fold(event("done", { host_id: "host", session_id: session })).sessionId).toBeUndefined();
   expect(fold(event("done", { host_id: host, session_id: "shell" })).sessionId).toBeUndefined();
 });
+
+/** #433 P3: the takeover failure page preserves the server's cause and close state. */
+test("takeover failures show the trusted manager and terminal messages unchanged", () => {
+  for (const [exit_status, message] of [
+    [73, "This machine has an infraternal agent from an earlier setup, but Take over could not confirm that only its own terminals were using it. No terminal was closed, and the old install's files were kept. Try again."],
+    [74, "Take over closed the terminals you confirmed, but could not confirm that the old infraternal agent was no longer in use. The old install's files were kept, and those terminals stay closed. Try again."],
+    [75, "This install or its open terminals changed since you reviewed them, so no terminal was closed and the old install was left as it was found. Try again to review it before taking over."],
+    [79, "A terminal you confirmed would not close, so Take over stopped. Some terminals may already be closed; any that closed stay closed. The old install was put back as it was. Try again."],
+    [80, "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again."],
+    [81, "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again."],
+  ] as const) {
+    const failure = { kind: "unrecognized_install" as const, message, exit_status, log_tail: [] };
+    const guide = guideFor("fixture", failure);
+    expect(guide.happened).toBe(message);
+    expect(guide.fix).toBe("retry");
+    expect(guide.title).toBe("Take over on fixture didn't finish");
+    expect(failureLine(failure)).toBe("Take over didn't finish");
+  }
+});
