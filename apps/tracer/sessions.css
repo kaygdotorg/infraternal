@@ -38,14 +38,16 @@
 .cl-sx-row[data-state="detached"] .cl-sx-sub-line, .cl-sx-row[data-state="exited"] .cl-sx-sub-line { color: var(--ui-text-secondary); }
 .cl-sx-pin { display: inline-grid; flex: none; place-items: center; color: var(--fg-3); }
 .cl-sx-pin svg, .cl-sx-viewers svg { width: 0.75rem; height: 0.75rem; }
-.cl-sx-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--fg-3); font: var(--sx-small); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: opacity var(--t-press) var(--ease-out); }
+.cl-sx-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--fg-3); font: var(--sx-small); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: opacity calc(var(--t-press) * var(--ui-motion-scale, 1)) var(--ease-out); }
 .cl-sx-meta-top { display: inline-flex; align-items: center; gap: 0.5rem; }
 .cl-sx-viewers { display: inline-flex; align-items: center; gap: 0.25rem; }
 .cl-sx-meta .is-fail { color: var(--danger); }
 /* The field itself is the shared `.ui-inline-rename`; the row only gives it the name's width. */
 .cl-sx-name-input { width: 100%; margin: 0 -6px; }
 /* Row actions: the shared header icon button, in place of the age and size while the row is hovered or focused. */
-.cl-sx-acts { position: absolute; top: 0; right: 0.25rem; bottom: 0; display: flex; align-items: center; gap: 0; opacity: 0; pointer-events: none; transition: opacity var(--t-press) var(--ease-out); }
+.cl-sx-acts { position: absolute; top: 0; right: 0.25rem; bottom: 0; display: flex; align-items: center; gap: 0; opacity: 0; pointer-events: none; transition: opacity calc(var(--t-press) * var(--ui-motion-scale, 1)) var(--ease-out); }
+/* The popover is marked when focus enters it (session-ui.on-demand.ts, markMotion): a row's actions replace its meta at once for a key, and fade for a pointer. */
+.cl-sx-pop[data-motion="instant"] :is(.cl-sx-meta, .cl-sx-acts) { --ui-motion-scale: 0; }
 @media (hover: hover) and (pointer: fine) {
   .cl-sx-main:hover { background: var(--hover); }
   .cl-sx-row:hover .cl-sx-acts, .cl-sx-row:focus-within .cl-sx-acts { opacity: 1; pointer-events: auto; }

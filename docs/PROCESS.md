@@ -754,9 +754,26 @@ server), becomes one roll-up issue. A spec that passes again gets one comment,
 and a later regression one more; issues are never closed. A build or suite
 that cannot run at all fails the unit and opens no spec issue.
 Time budgets: the wait for a build slot is bounded on its own (12 h; exit 75 and one
-`QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 6 h
-budget (`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot
-is granted; the unit's `TimeoutStartSec=24h` is just a backstop.
+`QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 9 h budget
+(`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot is granted; the
+unit's `TimeoutStartSec=24h` is just a backstop. A suite that hits its budget still reports:
+`apps/tracer/nightly-reporter.ts` streams one line per finished test into `results.jsonl`
+(Playwright's own JSON only appears at the end), issues are filed for the tests that really
+failed, and the roll-up gets one note, "suite timed out after 9 h; M of K tests ran". Specs that
+did not run are never reported fixed. After the run, every leftover process of the suite account
+is killed (a Python `os.kill(-1, SIGKILL)` as that account; if that cannot run, nothing is staged).
+
+**Token and login.** The token has issue write and repo read, and deliberately not `read:user`,
+so the reporter never calls `/user`. It is told whose markers to believe by
+`/etc/infraternal-browser-suite.login` (root-owned, written by the installer from
+`--forgejo-login <account>`, required the first time), checks every issue and comment it posts
+against that name, and stops the night if they differ. A 401 or 403 ends the reporter with one
+`TOKEN LACKS PERMISSION` line (HTTP status, route, Forgejo's message), exit 77; the staged files
+stay in `/var/lib/infraternal-fuzz/browser-staging/`. To file a night's results after fixing the
+token, without re-running the suite, as root:
+`/usr/local/libexec/infraternal-browser-suite-service --report-only [--run-name <folder name>]`
+(the name is only needed for staging left by an older helper; it takes no slot and runs only
+the reporter, which is safe to repeat because issues are deduplicated).
 `sudo systemctl start infraternal-browser-suite.service` is a manual run; the
 reporter's test is the `nightly browser suite reporter` gate row.
 
