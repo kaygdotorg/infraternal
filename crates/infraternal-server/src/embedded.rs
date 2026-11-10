@@ -678,6 +678,12 @@ impl EmbeddedAgent {
         result.await.map_err(|_| AgentError::Unavailable)?
     }
 
+    /// Stand in for an agent census in tests of code that reads it.
+    #[cfg(test)]
+    pub(crate) fn set_session_inventory_for_test(&self, state: SessionInventoryState) {
+        self.session_inventory.send_replace(state);
+    }
+
     /// Watch the latest authoritative live-shim set reported by this infraternal agent.
     pub(crate) fn session_inventory(&self) -> watch::Receiver<SessionInventoryState> {
         self.session_inventory.subscribe()

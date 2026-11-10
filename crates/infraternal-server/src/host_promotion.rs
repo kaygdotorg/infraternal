@@ -909,6 +909,23 @@ mod tests {
     //! The operating-system gate of a root upgrade.
     use super::*;
 
+    /// J465 P2-1: the gate before commit and before the handover refuses
+    /// while the rootless agent reports any terminal, or can't say.
+    #[tokio::test]
+    async fn the_upgrade_stops_while_a_terminal_is_open() {
+        use crate::embedded::SessionInventoryState;
+        let (agent, _accepts) = crate::embedded::EmbeddedAgent::remote(1001);
+        assert_eq!(no_open_terminals(&agent), Err("terminals"));
+        agent.set_session_inventory_for_test(SessionInventoryState::Available(Vec::new().into()));
+        assert_eq!(no_open_terminals(&agent), Ok(()));
+        agent.set_session_inventory_for_test(SessionInventoryState::Available(
+            vec![[7u8; 16]].into(),
+        ));
+        assert_eq!(no_open_terminals(&agent), Err("terminals"));
+        agent.set_session_inventory_for_test(SessionInventoryState::Unavailable);
+        assert_eq!(no_open_terminals(&agent), Err("terminals"));
+    }
+
     /// A Mac is refused with a pointer to the mesh service; Linux and
     /// unread facts go on to the probe.
     #[test]
