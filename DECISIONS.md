@@ -4784,3 +4784,31 @@ access (#341 B19).
        hard expiry and an inactivity limit. Either can be set to forever, and
        a key with both set to forever is truly permanent.
      - **Sign-in stays usernameless** (re-confirmed; already D375 A2).
+
+384. **Mesh access rules are enforced in userspace; the kernel firewall becomes an optional guard (owner, 2026-11-10, #483, #265; extends D340, amends D216):**
+     - **Why:** a missing `/usr/sbin/nft` stopped the production mesh without
+       a word. Prod's nft lives in a Nix store path (#483).
+     - **Access rules move into GotaTun's packet path on Linux, as D340
+       already planned for the Mac.** That gives one implementation for both
+       platforms. A GotaTun node enforces per-peer grants (D164) with no
+       firewall tool installed.
+     - **The kernel table is an optional extra guard.** It covers what only
+       the kernel can see: mesh addresses arriving on a non-mesh interface
+       (anti-spoofing), forwarding into or out of the mesh, and the public
+       80/443 gate. It is installed whenever nft or iptables-nft is found at a
+       fixed, root-owned path, including Nix-provided ones, and never through
+       a PATH search. Without it the mesh still runs, and `mesh status` and the
+       UI say plainly which protection is missing.
+     - **Still needs the kernel firewall:** the kernel-WireGuard opt-out
+       (D346), whose packets bypass userspace, and future routing features
+       such as exit nodes and subnet routers (forwarding and NAT). Mesh SSH's
+       port-22 redirect moves into userspace with the rules.
+     - **Research behind it:** Tailscale enforces its rules inside its own
+       process, and its netfilter rules are optional (netfilter-mode off).
+       NetBird prefers kernel rules and falls back to a userspace filter.
+     - **The owner chose "Userspace rules + optional kernel guard",** and
+       noted that nftables/iptables machinery will eventually be needed for
+       reverse-proxy work. Rejected: requiring the kernel guard to start, and
+       userspace only.
+     - **Every per-packet cost is measured** against the current GotaTun
+       numbers before it ships.
