@@ -1158,7 +1158,7 @@
 .ui-sp-hint { color: var(--ui-text-secondary); }
 /* A destructive row (remove, sign out) names its action in the danger colour; the hint under it stays quiet. */
 .ui-sp-row[data-tone="danger"] .ui-sp-label { color: var(--danger); }
-.ui-sp-tick { width: var(--ui-sp-tick, 1.125rem); height: var(--ui-sp-tick, 1.125rem); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity var(--t-press) ease, transform var(--t-pop) var(--ease-out, ease-out); }
+.ui-sp-tick { width: var(--ui-sp-tick, 1.125rem); height: var(--ui-sp-tick, 1.125rem); flex: none; fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(0.6); transition: opacity calc(var(--t-press) * var(--ui-motion-scale, 1)) ease, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out, ease-out); }
 .ui-sp-row[data-current] .ui-sp-tick { opacity: 1; transform: none; }
 .ui-sp-devices { display: grid; margin: 0; padding: 0; list-style: none; }
 .ui-sp-device { display: flex; align-items: center; gap: 0.625rem; min-height: 3.25rem; border-bottom: 1px solid var(--line); }

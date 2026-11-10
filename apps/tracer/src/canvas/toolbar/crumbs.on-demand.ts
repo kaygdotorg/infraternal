@@ -21,6 +21,7 @@
  * A menu opens under its pill, centred on it, in the shared overlay material, grows from the pill, and closes on a press outside, on Escape
  * and on choosing; the choice is ticked.
  */
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import { ICON, lineIcon, viewIcon } from "../views/icons";
@@ -32,6 +33,7 @@ const ease = (): string => getComputedStyle(document.documentElement).getPropert
 const CHEVRON = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.chevron}</svg>`;
 const TICK = '<svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>';
 
+/** Builds the breadcrumb pills (view, window, session) in the top bar and returns their controls; a name changed by a key shows at once (#427). */
 export function createCrumbs(cx: Ctx): Crumbs {
   const { stage, state, camera, signal, views } = cx;
   const outline = cx.adapters.settings.outline!;
@@ -79,7 +81,8 @@ export function createCrumbs(cx: Ctx): Crumbs {
     name.textContent = text;
     pillEl.setAttribute("aria-label", text);
     const now = performance.now();
-    if (had && now - lastMotion > 260 && !matchMedia("(prefers-reduced-motion: reduce)").matches) name.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: ease() });
+    // A crumb that changes because a key moved the camera or opened a view reads its new name at once (#427).
+    if (had && now - lastMotion > 260 && !triggeredByKeyboard() && !matchMedia("(prefers-reduced-motion: reduce)").matches) name.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: ease() });
     if (had) lastMotion = now;
   };
 
