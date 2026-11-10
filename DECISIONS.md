@@ -4718,3 +4718,26 @@ access (#341 B19).
        (this reverses #391's opaque confirm cards). Readability comes from
        the shared glass contrast guarantee (D365, #448). The owner,
        verbatim: "make them follow the same design".
+
+381. **Typing during a flood, and GotaTun's bar (owner, 2026-11-10, #477, #260):**
+     - **A key typed during a flood wins.** When output is waiting for
+       flow-control credit and a key arrives for the same session, the relay
+       drops the queued bulk output and sends a screen repaint from a small
+       reserved credit budget, so the echo shows within about one frame
+       (D375's 8.3 ms target). Output the flood produced just before the key
+       is skipped on screen, as the 250 ms starvation path already does, and
+       stays in the host's scrollback. Flood throughput is unchanged.
+       Rejected: holding back credit so the echo never queues (about 25%
+       slower floods); a bigger browser window (longer queues on slow links,
+       and it still misses the target); limiting D375 to other sessions. The
+       owner chose "Key wins: repaint" in a grill question. This is
+       relay flow-control code and gets the strictest review.
+     - **GotaTun's bar (amends D378).** The owner, verbatim: "yes please,
+       faster than tailscale and netbird on both linux/mac. our protocol must
+       do 10 Gbit/s at the least latency possible consuming as little memory
+       and cpu as possible to keep optimising and better yet, checkpoint and
+       keep shipping." And: "also pleaes simulate bufferbloat as that's a
+       problem with lots of home connections". Mac batching ships once it is
+       faster on both Linux and macOS. Each verified gain ships as a pin bump.
+       Reports give Gbit/s per core alongside totals, and the test matrix
+       gains a bufferbloat profile (a shaped bottleneck with a deep queue).
