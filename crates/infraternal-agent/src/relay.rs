@@ -1,9 +1,15 @@
-//! Offset and credit invariants for a bounded terminal relay [13][41][81].
+//! Offset and credit invariants for a bounded terminal relay [13][41][81][D381].
 //!
 //! This state owns no terminal bytes: retention belongs to the shim. A transport
 //! may hold one bounded frame while credit is exhausted. After 250 ms with
 //! pending output it detaches from the shim, letting the shim update its screen
 //! and ring, and requests replay when credit returns. No idle timer runs.
+//!
+//! Raw output may spend only the ordinary 1 MiB bulk window. A relay attached
+//! for the tracer also protects 64 KiB for an input-triggered repaint; only a
+//! repaint can spend that floor, and returned client credit is the only way to
+//! restore it. Repaints consume credit before they are sent. The 250 ms path
+//! keeps using ordinary bulk credit, and every `Output` owns its own budgets.
 
 use std::{
     ops::Range,
@@ -12,6 +18,15 @@ use std::{
 
 /// The wire catch-up threshold; schedule a single deadline only for pending data.
 pub const STARVATION: Duration = Duration::from_millis(250);
+
+/// Credit held back from raw output for one input-triggered repaint budget.
+pub const REPAINT_RESERVE: u32 = 64 * 1024;
+/// Maximum bulk credit raw output may spend in a reserved relay.
+const BULK_WINDOW: u64 = 1024 * 1024;
+/// Reserve setup state before the first client credit grant is inspected.
+const RESERVE_WAITING_FOR_INITIAL_CREDIT: u8 = 1;
+/// Reserve setup state after the client grants the full bulk and repaint budgets.
+const RESERVE_ACTIVE: u8 = 2;
 
 /// Invalid sequence arithmetic, ordering, or credit consumption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +114,7 @@ pub struct Output {
     stalled: Option<Instant>,
     snapshot: bool,
     required: u64,
+    reserve_mode: u8,
 }
 
 impl Output {
@@ -113,6 +129,23 @@ impl Output {
             stalled: None,
             snapshot: false,
             required: 1,
+            reserve_mode: 0,
+        }
+    }
+
+    /// Attach with a small credit floor when the client offers it in its first grant.
+    ///
+    /// A client that sends only the legacy 1 MiB initial grant keeps the full
+    /// amount for raw output and has no key-triggered repaint reserve.
+    #[must_use]
+    pub const fn attach_with_repaint_reserve(cursor: u64) -> Self {
+        Self {
+            cursor,
+            credit: 0,
+            stalled: None,
+            snapshot: false,
+            required: 1,
+            reserve_mode: RESERVE_WAITING_FOR_INITIAL_CREDIT,
         }
     }
 
@@ -124,7 +157,14 @@ impl Output {
             .credit
             .checked_add(u64::from(bytes))
             .ok_or(Error::Overflow)?;
-        if self.credit >= self.required {
+        if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT && bytes > 0 {
+            self.reserve_mode = if u64::from(bytes) >= BULK_WINDOW + u64::from(REPAINT_RESERVE) {
+                RESERVE_ACTIVE
+            } else {
+                0
+            };
+        }
+        if self.bulk_credit() >= self.required {
             self.stalled = None;
         }
         Ok(())
@@ -142,7 +182,7 @@ impl Output {
             return Ok(len..len);
         }
         let skip = usize::try_from(self.cursor - seq).map_err(|_| Error::Overflow)?;
-        let available = usize::try_from(self.credit).unwrap_or(usize::MAX);
+        let available = usize::try_from(self.bulk_credit()).unwrap_or(usize::MAX);
         Ok(skip..skip + (len - skip).min(available))
     }
 
@@ -152,7 +192,7 @@ impl Output {
     pub fn forward(&mut self, len: usize) -> Result<(), Error> {
         let next = end(self.cursor, len)?;
         let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
-        if bytes > self.credit || self.snapshot {
+        if bytes > self.bulk_credit() || self.snapshot {
             return Err(Error::OutOfRange);
         }
         self.cursor = next;
@@ -164,7 +204,18 @@ impl Output {
     /// Record an unaffordable pending frame; callers arm this one-shot deadline.
     /// Calling again does not postpone catch-up.
     pub fn pending(&mut self, now: Instant) -> Option<Instant> {
-        if self.credit < self.required && !self.snapshot {
+        if self.bulk_credit() < self.required && !self.snapshot {
+            let start = *self.stalled.get_or_insert(now);
+            Some(start + STARVATION)
+        } else {
+            None
+        }
+    }
+
+    /// Arm the unchanged starvation deadline for a reserved repaint that is too large.
+    pub fn pending_reserved_repaint(&mut self, now: Instant) -> Option<Instant> {
+        let available = self.credit.min(u64::from(REPAINT_RESERVE));
+        if available < self.required && !self.snapshot {
             let start = *self.stalled.get_or_insert(now);
             Some(start + STARVATION)
         } else {
@@ -186,8 +237,8 @@ impl Output {
 
     /// Whether returned credit requires reattachment for replay or a repaint.
     #[must_use]
-    pub const fn needs_snapshot(&self) -> bool {
-        self.snapshot && self.credit >= self.required
+    pub fn needs_snapshot(&self) -> bool {
+        self.snapshot && self.bulk_credit() >= self.required
     }
 
     /// Resume raw replay at the unchanged cursor after a successful `ReadFrom`.
@@ -213,7 +264,7 @@ impl Output {
         if seq < self.cursor {
             return Err(Error::OutOfRange);
         }
-        if bytes > self.credit {
+        if bytes > self.bulk_credit() {
             // Remember the frame cost after detaching, so unchanged or still
             // insufficient credit cannot repeatedly request native serialization.
             self.required = bytes;
@@ -225,6 +276,61 @@ impl Output {
         self.snapshot = false;
         self.stalled = None;
         Ok(())
+    }
+
+    /// Commit an input-triggered repaint using at most the protected 64 KiB floor.
+    ///
+    /// This method is called only after the shim acknowledges the key. A zero-byte
+    /// repaint still needs one credit byte, so key spam cannot create uncharged frames.
+    /// # Errors
+    /// Rejects regression, overflow, zero-cost frames, oversized snapshots, or
+    /// insufficient client credit without changing the cursor or spending credit.
+    pub fn repaint_reserved(&mut self, seq: u64, len: usize) -> Result<(), Error> {
+        let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
+        if seq < self.cursor {
+            return Err(Error::OutOfRange);
+        }
+        let cost = bytes.max(1);
+        if self.reserve_mode != RESERVE_ACTIVE
+            || bytes > u64::from(REPAINT_RESERVE)
+            || cost > self.credit.min(u64::from(REPAINT_RESERVE))
+        {
+            self.required = cost;
+            return Err(Error::OutOfRange);
+        }
+        self.required = 1;
+        self.cursor = seq;
+        self.credit -= cost;
+        self.snapshot = false;
+        self.stalled = None;
+        Ok(())
+    }
+
+    /// Remaining bytes protected from raw output and available to a key repaint.
+    #[must_use]
+    pub fn reserved_credit(&self) -> u64 {
+        if self.reserve_mode == RESERVE_ACTIVE {
+            self.credit.min(u64::from(REPAINT_RESERVE))
+        } else {
+            0
+        }
+    }
+
+    /// Whether raw output has no credit, even if the relay has not read its next frame yet.
+    #[must_use]
+    pub fn bulk_starved(&self) -> bool {
+        self.bulk_credit() == 0
+    }
+
+    /// Ordinary credit left after preserving the key-triggered repaint floor.
+    fn bulk_credit(&self) -> u64 {
+        if self.reserve_mode == RESERVE_ACTIVE {
+            self.credit
+                .saturating_sub(u64::from(REPAINT_RESERVE))
+                .min(BULK_WINDOW)
+        } else {
+            self.credit
+        }
     }
 
     /// Exclusive raw output offset queued to the server.

@@ -3,10 +3,11 @@
 The fixture plays the browser's part of the output flow control: it returns
 credit for every Output and Snapshot byte it receives, as the tracer does
 (#477). A Snapshot is a repaint that replaces raw output the agent skipped
-after its credit starvation deadline, so raw echo bytes inside a flooding
-session can legitimately never arrive. The same-session phase therefore
-measures each key's visible effect: a numbered token drawn on row 1, read from
-raw output or from a repaint, whichever comes first.
+after a key or its credit starvation deadline, so raw echo bytes inside a
+flooding session can legitimately never arrive. The initial credit includes
+the relay's 64 KiB repaint reserve. The same-session phase therefore measures
+each key's visible effect: a numbered token drawn on row 1, read from raw
+output or from a repaint, whichever comes first.
 """
 import argparse
 import os
@@ -23,6 +24,8 @@ from latency_proxy import LatencyConfig
 FRAME_MS = 1000 / 60
 FLOOD_DELTA_BUDGET_MS = FRAME_MS
 PROBE_SAMPLES = 100
+# Keep the 1 MiB bulk window while also funding the relay's 64 KiB key repaint reserve.
+INITIAL_CREDIT = 1024 * 1024 + 64 * 1024
 ECHO_KEY = b"x"
 # Longest wait for one key's Ack and echo. A key that never shows is a typing
 # freeze: fail with the stream's flow state instead of hanging the gate.
@@ -244,7 +247,7 @@ def run(binary, state_dir, samples):
         }
         for stream, state in streams.items():
             client.send(stream, 0x16, state["id"].bytes + struct.pack("<QQ", 0, 0))
-            client.send(stream, 0x14, struct.pack("<I", 1024 * 1024))
+            client.send(stream, 0x14, struct.pack("<I", INITIAL_CREDIT))
         wait_for(client, streams, lambda: all(state["acked"] == 0 for state in streams.values()))
 
         # Keep only a small rolling marker tail while still crediting every PTY Output byte.

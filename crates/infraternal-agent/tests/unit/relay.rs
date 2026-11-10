@@ -38,6 +38,7 @@ fn input_overlap_gap_and_restart_from_confirmed_offset() {
     assert_eq!(resumed.suffix(u64::MAX, 1), Err(Error::Overflow));
 }
 
+/// Check partial credit, overlap trimming, cursor progression, and gap rejection.
 #[test]
 fn output_partial_credit_and_dedup() {
     let mut output = funded_output(10);
@@ -52,6 +53,64 @@ fn output_partial_credit_and_dedup() {
     output.forward(1).unwrap();
     output.grant(3).unwrap();
     assert_eq!(output.suffix(output.cursor(), 10), Ok(0..3));
+}
+
+/// Keep the whole ordinary bulk window while requiring repaint bytes to spend
+/// only credit the client has actually granted.
+#[test]
+fn reserved_credit_preserves_the_bulk_window_and_cannot_be_overspent() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    assert_eq!(output.repaint_reserved(1, 1), Err(Error::OutOfRange));
+    assert_eq!(output.repaint_reserved(1, 0), Err(Error::OutOfRange));
+    output.grant(BULK_CREDIT + REPAINT_RESERVE).unwrap();
+    assert_eq!(
+        output.suffix(0, (BULK_CREDIT + REPAINT_RESERVE) as usize),
+        Ok(0..BULK_CREDIT as usize),
+        "bulk output must leave the reserved repaint credit untouched"
+    );
+    output.forward(BULK_CREDIT as usize).unwrap();
+    assert!(output.bulk_starved());
+    assert_eq!(output.suffix(u64::from(BULK_CREDIT), 1), Ok(0..0));
+    assert_eq!(
+        output.repaint_reserved(u64::from(BULK_CREDIT) + 1, REPAINT_RESERVE as usize + 1),
+        Err(Error::OutOfRange),
+        "a repaint larger than the remaining granted reserve must wait"
+    );
+    assert_eq!(output.cursor(), u64::from(BULK_CREDIT));
+    output
+        .repaint_reserved(u64::from(BULK_CREDIT) + 1, REPAINT_RESERVE as usize)
+        .unwrap();
+    assert_eq!(output.reserved_credit(), 0);
+    assert_eq!(
+        output.repaint_reserved(u64::from(BULK_CREDIT) + 2, 1),
+        Err(Error::OutOfRange)
+    );
+    output.grant(1).unwrap();
+    assert_eq!(output.reserved_credit(), 1);
+    output
+        .repaint_reserved(u64::from(BULK_CREDIT) + 2, 1)
+        .unwrap();
+}
+
+/// Keep the full legacy window for clients that do not offer repaint credit.
+#[test]
+fn a_legacy_initial_credit_keeps_its_full_bulk_window() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT).unwrap();
+    assert_eq!(output.reserved_credit(), 0);
+    assert_eq!(
+        output.suffix(0, BULK_CREDIT as usize),
+        Ok(0..BULK_CREDIT as usize)
+    );
+    assert_eq!(
+        output.repaint_reserved(u64::from(BULK_CREDIT), 1),
+        Err(Error::OutOfRange)
+    );
 }
 
 #[test]

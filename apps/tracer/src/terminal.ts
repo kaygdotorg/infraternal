@@ -30,7 +30,8 @@ import { SynchronizedOutput } from "./synchronized-output";
 
 /** How many terminals have been made on this page; names each one's remote-copy notice. */
 let remoteCopyCount = 0;
-const INITIAL_CREDIT = 1024 * 1024;
+/** The relay keeps 64 KiB of this opening grant for a key-triggered repaint. */
+const INITIAL_CREDIT = 1024 * 1024 + 64 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;

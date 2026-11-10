@@ -9,6 +9,11 @@
 //! terminal dispatch continues on its independent streams. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
+//!
+//! D381 keeps four relay invariants: a repaint spends client credit before it
+//! is sent; a key-triggered repaint waits for that key's `InputAck`; dropping a
+//! stalled bulk frame affects only its own stream; and key input cannot refill
+//! the finite repaint reserve. Keys may coalesce behind one in-flight capture.
 //! A closed shim or failed terminal task closes only its mux stream. A session
 //! whose shim is gone answers its stream with the final Close 4404 (#158).
 use crate::{
@@ -1680,13 +1685,17 @@ async fn terminal_run(
     }
     #[cfg(feature = "plugin-host-facts")]
     let _window = crate::lifecycle::windows::Attachment::new(path.clone());
-    let mut output = relay::Output::attach(cursor);
+    let mut output = relay::Output::attach_with_repaint_reserve(cursor);
     if replay_until.is_some_and(|fence| output.cursor() >= fence) {
         replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
         replay_until = None;
     }
     let mut pending: Option<Shim> = None;
     let mut deadline = None;
+    // The latest input offset a repaint must show, and the offset covered by
+    // the one SnapshotRequest already sent to the shim, if any.
+    let mut key_repaint_target: Option<u64> = None;
+    let mut key_repaint_requested: Option<u64> = None;
     let mut finished_peer = false;
     // One state fence in flight bounds shim work even if probes are pipelined over the network.
     // It belongs to the data socket: parking that socket must clear its pending fence.
@@ -1770,7 +1779,18 @@ async fn terminal_run(
                     if seq < output.cursor() {
                         return Err(sessions::invalid("snapshot cursor regressed"));
                     }
-                    if output.repaint(seq, length).is_ok() {
+                    // A capture that raced ahead of the key's InputAck cannot
+                    // prove that it contains the echo, so discard it.
+                    if key_repaint_target.is_some() && key_repaint_requested.is_none() {
+                        continue;
+                    }
+                    let reserved = key_repaint_requested.is_some();
+                    let repainted = if reserved {
+                        output.repaint_reserved(seq, length)
+                    } else {
+                        output.repaint(seq, length)
+                    };
+                    if repainted.is_ok() {
                         deadline = None;
                         if approximate {
                             let json = terminal_events::Notice::Snapshot {
@@ -1788,15 +1808,32 @@ async fn terminal_run(
                             replay_complete(&tx, stream, id, seq, replay_size).await?;
                             replay_until = None;
                         }
+                        if let Some(requested) = key_repaint_requested.take() {
+                            if key_repaint_target.is_some_and(|target| target <= requested) {
+                                key_repaint_target = None;
+                            } else if let Some(target) = key_repaint_target
+                                && acknowledged >= target
+                                && output.reserved_credit() > 0
+                            {
+                                session
+                                    .as_mut()
+                                    .ok_or_else(|| sessions::invalid("missing shim"))?
+                                    .send(&Shim::SnapshotRequest)
+                                    .await?;
+                                key_repaint_requested = Some(target);
+                            }
+                        }
                     } else {
                         pending = Some(frame);
-                        // A repaint is indivisible. Positive credit below its
-                        // cost needs the same bounded pause as zero-credit raw
-                        // output; expiry preserves the client cursor and parks
-                        // serialization until the remembered cost is affordable.
-                        deadline = output
-                            .pending(Instant::now())
-                            .map(tokio::time::Instant::from_std);
+                        // Reserved captures wait only for the protected budget;
+                        // ordinary recovery remains funded by the bulk window.
+                        let now = Instant::now();
+                        deadline = if reserved {
+                            output.pending_reserved_repaint(now)
+                        } else {
+                            output.pending(now)
+                        }
+                        .map(tokio::time::Instant::from_std);
                     }
                 }
                 _ => return Err(sessions::invalid("invalid pending frame")),
@@ -1855,7 +1892,27 @@ async fn terminal_run(
             command = commands.next() => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
-                    Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
+                    Command::Credit(bytes) => {
+                        output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?;
+                        if session.is_none() && bytes > 0 {
+                            output.retry_recovery();
+                        }
+                        if !finished_peer
+                            && session.is_some()
+                            && key_repaint_requested.is_none()
+                            && let Some(target) = key_repaint_target
+                            && acknowledged >= target
+                            && output.reserved_credit() > 0
+                        {
+                            session
+                                .as_mut()
+                                .ok_or_else(|| sessions::invalid("missing shim"))?
+                                .send(&Shim::SnapshotRequest)
+                                .await?;
+                            key_repaint_requested = Some(target);
+                        }
+                        deadline = None;
+                    }
                     _ if finished_peer => {}
                     #[cfg(feature = "remote")]
                     Command::Cursor(cursor) if primed => {
@@ -1863,9 +1920,11 @@ async fn terminal_run(
                         // Reset only this shadow relay, before its ordered Credit;
                         // already queued duplicates remain bounded and are trimmed
                         // by the server rather than charged to browser credit again.
-                        output = relay::Output::attach(cursor);
+                        output = relay::Output::attach_with_repaint_reserve(cursor);
                         pending = None;
                         deadline = None;
+                        key_repaint_target = None;
+                        key_repaint_requested = None;
                         if session.is_none() {
                             let Some(mut next) = relink(&path, id, stream, &tx, true).await? else { return Ok(()); };
                             let written = input_state(&mut next).await?;
@@ -1908,7 +1967,42 @@ async fn terminal_run(
                                     emit(&tx, Message::Event(stream, json)).await?;
                                 }
                             }
-                            Command::Input(seq, bytes) => peer.send(&Shim::SequencedInput(seq, bytes)).await?,
+                            Command::Input(seq, bytes) => {
+                                if !bytes.is_empty() {
+                                    let output_waiting = output.bulk_starved()
+                                        && pending.as_ref().is_none_or(|frame| {
+                                            matches!(
+                                                frame,
+                                                Shim::Output(..)
+                                                    | Shim::Snapshot(..)
+                                                    | Shim::SnapshotWithFlags(..)
+                                            )
+                                        });
+                                    if key_repaint_target.is_some()
+                                        || (output_waiting && output.reserved_credit() > 0)
+                                    {
+                                        let length = u64::try_from(bytes.len())
+                                            .map_err(|_| sessions::invalid("input length overflow"))?;
+                                        let target = seq
+                                            .checked_add(length)
+                                            .ok_or_else(|| sessions::invalid("input sequence overflow"))?;
+                                        if output_waiting && key_repaint_target.is_none() {
+                                            // This stream is starved even when
+                                            // its next frame has not been read.
+                                            // Discard only its pending payload so
+                                            // InputAck can pass the key's echo.
+                                            pending = None;
+                                            deadline = output
+                                                .pending(Instant::now())
+                                                .map(tokio::time::Instant::from_std);
+                                        }
+                                        key_repaint_target = Some(
+                                            key_repaint_target.map_or(target, |seen| seen.max(target)),
+                                        );
+                                    }
+                                }
+                                peer.send(&Shim::SequencedInput(seq, bytes)).await?;
+                            }
                             Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
                             Command::Ping(nonce, sent_us) => {
                                 if detached {
@@ -1948,6 +2042,8 @@ async fn terminal_run(
                 };
                 if !finished_peer {
                     output.expire(Instant::now()); session = None; probe = None; pending = None;
+                    key_repaint_target = None;
+                    key_repaint_requested = None;
                 }
                 deadline = None;
             }
@@ -1956,10 +2052,25 @@ async fn terminal_run(
                 else { std::future::pending().await }
             }, if pending.is_none() => {
                 match frame? {
+                    Shim::Output(..) if key_repaint_target.is_some() => {}
+                    Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)
+                        if key_repaint_target.is_some() && key_repaint_requested.is_none() => {}
                     frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
                     Shim::InputAck(seq) => {
                         emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
                         acknowledged = acknowledged.max(seq);
+                        if let Some(target) = key_repaint_target
+                            && key_repaint_requested.is_none()
+                            && seq >= target
+                            && output.reserved_credit() > 0
+                        {
+                            session
+                                .as_mut()
+                                .ok_or_else(|| sessions::invalid("missing shim"))?
+                                .send(&Shim::SnapshotRequest)
+                                .await?;
+                            key_repaint_requested = Some(target);
+                        }
                     }
                     Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
                         input_progress(&tx, stream, &mut acknowledged, written).await?;
@@ -2014,6 +2125,11 @@ mod readiness_exit_tests;
 #[cfg(test)]
 #[path = "daemon_liveness_tests.rs"]
 mod liveness_tests;
+
+/// Exercise bounded, input-triggered repaint ordering with real shim sockets.
+#[cfg(test)]
+#[path = "daemon_key_repaint_tests.rs"]
+mod key_repaint_tests;
 
 #[cfg(test)]
 #[path = "daemon_replay_fence_tests.rs"]
