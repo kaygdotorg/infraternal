@@ -28,6 +28,10 @@
 //!   So a lost link, a server restart or a killed rootless agent puts the
 //!   host back as it was (D376), instead of leaving a half-installed root
 //!   service behind.
+//! - It also arms a host-side guard (an undo script, a boot-time unit and a
+//!   watcher unit outside its own process tree), so a relay that is killed,
+//!   crashes or loses its host to a reboot still puts the host back
+//!   (J465 P1). `Commit` or its own rollback disarms the guard.
 //! - It blocks `SIGHUP`: the terminal it was started on closes when the
 //!   rootless agent lets go of it, and that must not skip the rollback. Its
 //!   end is the socket's end (J415 B6). `--dir` (its own copy of the
@@ -89,6 +93,7 @@ pub fn run_if_requested() -> Option<ExitCode> {
     if hangup.thread_block().is_err() {
         return Some(ExitCode::from(2));
     }
+    let own = dir.clone();
     let _cleanup = RemoveOnDrop(dir);
     let Some(token) = read_token(TOKEN_WAIT) else {
         return Some(ExitCode::from(2));
@@ -99,6 +104,8 @@ pub fn run_if_requested() -> Option<ExitCode> {
     else {
         return Some(ExitCode::FAILURE);
     };
+    // Only the real relay arms the host-side guard; `serve`'s tests don't.
+    let _ = GUARDED.set(own);
     let result = runtime.block_on(async {
         let stream = connect(&socket, uid).await?;
         let (reader, writer) = stream.into_split();
@@ -293,6 +300,9 @@ pub async fn serve(
             }
             match frame {
                 Frame::Rollback { script } if rollback.is_none() => {
+                    if guarded() {
+                        arm_guard(&script).await;
+                    }
                     rollback = Some(Zeroizing::new(script));
                 }
                 Frame::Open { channel, script } => {
@@ -342,7 +352,12 @@ pub async fn serve(
                         let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
                     }
                 }
-                Frame::Commit => committed = true,
+                Frame::Commit => {
+                    committed = true;
+                    if guarded() {
+                        disarm_guard().await;
+                    }
+                }
                 Frame::Close => break 'serve Ok(()),
                 // A second token or rollback, or a frame only the relay
                 // sends, is a protocol error.
@@ -362,10 +377,136 @@ pub async fn serve(
     }
     if !committed && let Some(script) = rollback {
         run_rollback(&script).await;
+        if guarded() {
+            disarm_guard().await;
+        }
     }
     drop(out);
     let _ = tokio::time::timeout(Duration::from_secs(2), write).await;
     result
+}
+
+/// Set by the real relay ([`run_if_requested`]); in-process tests of
+/// [`serve`] leave it unset and never touch the host.
+/// It holds this relay's own `/run` directory (its binary copy), which the
+/// guard also removes: `RemoveOnDrop` can't run after a SIGKILL.
+static GUARDED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Whether this process is the real relay, which arms the host guard.
+fn guarded() -> bool {
+    GUARDED.get().is_some()
+}
+
+/// Where the guard keeps its undo script (root-only).
+const GUARD_DIR: &str = "/var/lib/infraternal-promotion";
+/// The boot-time unit that runs the undo script after a reboot.
+const GUARD_UNIT: &str = "infraternal-promotion-rollback.service";
+
+/// The undo script: the install's rollback, then the relay's own copy in
+/// `/run` (`own`, empty for none) and the guard itself go.
+fn undo_script(rollback: &str, own: &str) -> String {
+    let own = if own.starts_with("/run/infraternal-privilege.") && !own.contains('\'') {
+        format!("rm -rf -- '{own}'\n")
+    } else {
+        String::new()
+    };
+    format!(
+        "( {rollback} ) || :\n{own}rm -f /etc/systemd/system/multi-user.target.wants/{GUARD_UNIT} /etc/systemd/system/{GUARD_UNIT}\nrm -rf {GUARD_DIR}\nsystemctl daemon-reload || :\n"
+    )
+}
+
+/// The boot-time unit text.
+fn guard_unit() -> String {
+    format!(
+        "[Unit]\nDescription=infraternal: undo an interrupted root upgrade\nConditionPathExists={GUARD_DIR}/undo\nAfter=local-fs.target\n\n[Service]\nType=oneshot\nExecStart=/bin/sh {GUARD_DIR}/undo\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+/// Arm the host-side guard of this upgrade (J465 P1): put the host back
+/// even when this relay can't, because it was killed, crashed or the host
+/// rebooted mid-install.
+///
+/// - `undo` (the rollback, then the guard removing itself) goes to a
+///   root-only directory;
+/// - a oneshot unit enabled for boot runs it after a reboot;
+/// - a transient watcher unit, outside this relay's process tree, waits for
+///   this process to end and then runs it if it is still armed.
+///
+/// [`disarm_guard`] removes all three once the install committed or this
+/// relay rolled back itself. Arming is best effort: a failure here leaves
+/// the relay's own rollback (R4) and the uninstall outbox (R5).
+async fn arm_guard(rollback: &str) {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    let dir = Path::new(GUARD_DIR);
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(dir);
+    let undo = dir.join("undo");
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&undo)
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, undo_script(rollback).as_bytes())
+        });
+    if written.is_err() {
+        return;
+    }
+    let unit = Path::new("/etc/systemd/system").join(GUARD_UNIT);
+    if std::fs::write(&unit, guard_unit()).is_ok() {
+        let wants = Path::new("/etc/systemd/system/multi-user.target.wants");
+        let _ = std::fs::create_dir_all(wants);
+        let _ = std::os::unix::fs::symlink(&unit, wants.join(GUARD_UNIT));
+        let _ = quiet_command("systemctl", &["daemon-reload"]).await;
+    }
+    let pid = std::process::id().to_string();
+    let watch = format!(
+        "while kill -0 {pid} 2>/dev/null; do sleep 1; done; [ -f {GUARD_DIR}/undo ] && exec /bin/sh {GUARD_DIR}/undo; exit 0"
+    );
+    let _ = quiet_command(
+        "systemd-run",
+        &[
+            "--quiet",
+            "--collect",
+            "--unit",
+            &format!("infraternal-promotion-watch-{pid}"),
+            "/bin/sh",
+            "-c",
+            &watch,
+        ],
+    )
+    .await;
+}
+
+/// Disarm the guard: the upgrade committed, or this relay rolled back.
+async fn disarm_guard() {
+    let _ = std::fs::remove_file(
+        Path::new("/etc/systemd/system/multi-user.target.wants").join(GUARD_UNIT),
+    );
+    let _ = std::fs::remove_file(Path::new("/etc/systemd/system").join(GUARD_UNIT));
+    let _ = std::fs::remove_dir_all(GUARD_DIR);
+    let _ = quiet_command("systemctl", &["daemon-reload"]).await;
+}
+
+/// Run a fixed system command with a clean environment, cwd `/`, no
+/// output, bounded to 30 s.
+async fn quiet_command(program: &str, args: &[&str]) -> bool {
+    let status = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(program)
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+    matches!(status, Ok(Ok(status)) if status.success())
 }
 
 /// Equal without an early exit on the first differing byte.
@@ -860,6 +1001,22 @@ mod tests {
         ];
         run(frames, TOKEN, LIFETIME, false).await.unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "/\n");
+    }
+
+    /// J465 P1: the undo script runs the rollback, then removes the guard;
+    /// the boot unit only runs while the undo script exists.
+    #[test]
+    fn the_guard_undoes_then_removes_itself() {
+        let undo = undo_script("echo rollback", "/run/infraternal-privilege.abcd1234");
+        assert!(undo.starts_with("( echo rollback ) || :"));
+        assert!(undo.contains("rm -rf -- '/run/infraternal-privilege.abcd1234'"));
+        assert!(!undo_script("x", "/home/kayg").contains("/home/kayg"));
+        assert!(undo.contains(&format!("rm -rf {GUARD_DIR}")));
+        assert!(undo.contains(GUARD_UNIT));
+        let unit = guard_unit();
+        assert!(unit.contains(&format!("ConditionPathExists={GUARD_DIR}/undo")));
+        assert!(unit.contains("WantedBy=multi-user.target"));
+        assert!(!guarded());
     }
 
     /// R4: a step is refused until the rollback script is known.
