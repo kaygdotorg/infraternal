@@ -86,7 +86,7 @@ fn mtu_echo_peer(
 
 /// An MTU-only authority refresh must preserve established peers and encrypted traffic.
 #[test]
-#[ignore = "Run only as root on the Mac under the mesh lock."]
+#[ignore = "Run on the macOS VM with system service privileges under the mesh lock."]
 fn mtu_only_authority_refresh_keeps_peer_sessions() {
     use std::sync::atomic::Ordering;
     let directory = test_directory();
