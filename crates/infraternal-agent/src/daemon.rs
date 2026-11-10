@@ -11,9 +11,10 @@
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //!
 //! D381 keeps four relay invariants: a repaint spends client credit before it
-//! is sent; a key-triggered repaint waits for that key's `InputAck`; dropping a
-//! stalled bulk frame affects only its own stream; and key input cannot refill
-//! the finite repaint reserve. Keys may coalesce behind one in-flight capture.
+//! is sent; a key-triggered repaint follows that key's `InputAck`, including
+//! when already-sent bulk bytes remain unreturned; dropping stalled output
+//! affects only its own stream; and key input cannot refill the finite repaint
+//! reserve. Keys may coalesce behind one in-flight capture.
 //! A closed shim or failed terminal task closes only its mux stream. A session
 //! whose shim is gone answers its stream with the final Close 4404 (#158).
 use crate::{
@@ -1969,15 +1970,20 @@ async fn terminal_run(
                             }
                             Command::Input(seq, bytes) => {
                                 if !bytes.is_empty() {
+                                    let pending_output = pending.as_ref().is_some_and(|frame| {
+                                        matches!(
+                                            frame,
+                                            Shim::Output(..)
+                                                | Shim::Snapshot(..)
+                                                | Shim::SnapshotWithFlags(..)
+                                        )
+                                    });
+                                    // Unreturned bulk can already be ahead of
+                                    // this key even before the 1 MiB window is
+                                    // empty, so let the repaint replace it now.
                                     let output_waiting = output.bulk_starved()
-                                        && pending.as_ref().is_none_or(|frame| {
-                                            matches!(
-                                                frame,
-                                                Shim::Output(..)
-                                                    | Shim::Snapshot(..)
-                                                    | Shim::SnapshotWithFlags(..)
-                                            )
-                                        });
+                                        || output.bulk_output_unreturned()
+                                        || pending_output;
                                     if key_repaint_target.is_some()
                                         || (output_waiting && output.reserved_credit() > 0)
                                     {

@@ -322,6 +322,16 @@ impl Output {
         self.bulk_credit() == 0
     }
 
+    /// Whether any raw output still uses the active bulk window without returned client credit.
+    ///
+    /// A key can arrive while some credit remains, but bytes already sent may
+    /// still sit ahead of its echo on the client link. The relay uses this to
+    /// request a reserved repaint before the window reaches zero.
+    #[must_use]
+    pub fn bulk_output_unreturned(&self) -> bool {
+        self.reserve_mode == RESERVE_ACTIVE && self.bulk_credit() < BULK_WINDOW
+    }
+
     /// Ordinary credit left after preserving the key-triggered repaint floor.
     fn bulk_credit(&self) -> u64 {
         if self.reserve_mode == RESERVE_ACTIVE {

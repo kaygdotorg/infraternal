@@ -12,6 +12,8 @@ const BULK_CREDIT: u32 = 1024 * 1024;
 const REPAINT_CREDIT: u32 = 64 * 1024;
 /// The complete starting grant for a client that supports reserved repaints.
 const INITIAL_CREDIT: u32 = BULK_CREDIT + REPAINT_CREDIT;
+/// A forwarded frame that leaves bulk credit available but remains unreturned.
+const PARTIAL_BULK_OUTPUT: usize = 64 * 1024;
 /// A frame larger than either credit pool makes starvation deterministic.
 const STARVING_OUTPUT: usize = 128 * 1024;
 /// Each spam repaint consumes one quarter of the finite reserve.
@@ -308,6 +310,62 @@ async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
     assert_eq!(
         repaint,
         Some((u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec()))
+    );
+}
+
+/// A key still preempts raw bytes that are in flight before the bulk window empties.
+#[tokio::test]
+async fn key_repaint_preempts_unreturned_bulk_before_window_is_empty() {
+    let mut fixture = start_relay(2).await;
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(INITIAL_CREDIT))
+        .unwrap();
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Output(0, vec![b'f'; PARTIAL_BULK_OUTPUT]),
+    )
+    .await
+    .unwrap();
+    let Some(Message::Shim(stream, Shim::Output(0, bytes))) =
+        tokio::time::timeout(EVENT_GUARD, fixture.messages.recv())
+            .await
+            .expect("partially funded bulk output was not forwarded")
+    else {
+        panic!("relay did not forward the partial bulk frame");
+    };
+    assert_eq!(stream, fixture.stream);
+    assert_eq!(bytes.len(), PARTIAL_BULK_OUTPUT);
+
+    let requested = type_key_and_wait_for_repaint_request(&mut fixture, 0).await;
+    let repaint = if requested {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Snapshot(
+                u64::try_from(PARTIAL_BULK_OUTPUT).unwrap() + 1,
+                b"echo:k".to_vec(),
+            ),
+        )
+        .await
+        .unwrap();
+        wait_for_repaint(&mut fixture).await
+    } else {
+        None
+    };
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        requested,
+        "unreturned raw output must not let the key spend the whole bulk window"
+    );
+    assert_eq!(
+        repaint,
+        Some((
+            u64::try_from(PARTIAL_BULK_OUTPUT).unwrap() + 1,
+            b"echo:k".to_vec()
+        ))
     );
 }
 
