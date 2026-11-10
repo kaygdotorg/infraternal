@@ -350,6 +350,32 @@ fn a_spoofed_pam_helper_refuses_the_offer() {
     );
 }
 
+/// #433 P2-1 (J379d): a real executor inode cannot identify the helper when its birth tick ties
+/// another non-worker. Coarse kernel ticks do not prove which process started first.
+#[test]
+fn a_pam_helper_tied_for_earliest_tick_refuses_the_offer() {
+    let mut members = vec![
+        member(20, 1, 0, false, "infraternal"),
+        pam_helper(21, 20),
+        member(22, 2, 0, false, "infraternal"),
+        member(23, 20, pty(0), true, "bash"),
+    ];
+    let offer = |members: &[Process]| attribute(members, &[(22, Some(0))], Some(20), &[EXECUTOR]);
+    assert!(
+        offer(&members).is_ok(),
+        "a strictly earlier helper is accepted"
+    );
+    // Either a shim or a shell can share the helper's tick; neither tie proves precedence.
+    for other in [2, 3] {
+        let birth = members[other].birth;
+        members[other].birth = members[1].birth;
+        assert_eq!(offer(&members), Err(73), "tied member {other}");
+        members[other].birth = birth;
+    }
+    members[0].birth = members[1].birth;
+    assert!(offer(&members).is_ok(), "the worker is the sole exception");
+}
+
 /// Seen on the real guest (#433 e2e L1, second run): a host-login shim's parent is the old agent, and
 /// Take over stops that agent before it compares the records again, so the shim is reparented to
 /// pid 1. That must not read as "changed since you reviewed"; any other process changing still does.

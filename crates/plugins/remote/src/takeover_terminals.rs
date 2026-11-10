@@ -181,8 +181,8 @@ fn process(pid: i32) -> Result<Process, u8> {
 /// The (device, inode) of the system manager's own executables that may run the login's PAM helper:
 /// `systemd-executor` beside `/proc/1/exe` (systemd 255 and later) and `/proc/1/exe` itself (earlier
 /// systemd forks the helper from the manager). Each must be a root-owned regular file nobody else can
-/// write. An account cannot make a process run one of these as a long-lived helper of its login, so
-/// they identify the real `(sd-pam)` where its name proves nothing (#433 P2-1).
+/// write. Their identity is necessary but not sufficient: attribution also requires a unique,
+/// strictly earlier birth tick than every non-worker member (#433 P2-1).
 fn executors() -> Vec<(u64, u64)> {
     let Ok(manager) = executable(1) else {
         return Vec::new();
@@ -404,11 +404,6 @@ fn attribute(
     // identity tells them apart (#433 P2-1, J462). Anything on a terminal stays that terminal's.
     let helper = leader.and_then(|leader| {
         let worker = members.iter().find(|process| process.pid == leader)?;
-        let earliest = members
-            .iter()
-            .filter(|process| process.pid != leader)
-            .map(|process| process.birth)
-            .min()?;
         let mut candidates = members.iter().filter(|process| {
             process.ppid == leader
                 && process.tty == 0
@@ -417,7 +412,13 @@ fn attribute(
                 && executors.contains(&process.exe)
         });
         let found = candidates.next()?;
-        (candidates.next().is_none() && found.birth == earliest).then_some(found.pid)
+        // Birth times use coarse kernel ticks. A tie proves no ordering, even for the real
+        // executor inode, so never omit that process from confirmation on the strength of a tie.
+        (candidates.next().is_none()
+            && members.iter().all(|other| {
+                other.pid == leader || other.pid == found.pid || found.birth < other.birth
+            }))
+        .then_some(found.pid)
     });
     let pam_helper = |pid: i32| helper == Some(pid);
     let infrastructure = |pid: i32| {
