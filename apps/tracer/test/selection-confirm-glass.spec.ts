@@ -35,10 +35,24 @@ async function selectTerminalRow(page: Page): Promise<{ x: number; y: number }> 
 test("selected text adapts in every curated theme, in the terminal and in the interface", async ({ page }) => {
   test.setTimeout(600_000);
   await page.setViewportSize({ width: 1440, height: 900 });
+  await page.context().request.post("/__mock/reset");
+  await page.context().request.post("/__mock/open-terminal");
+  await page.goto("/?mock=1&theme=paper&bg=none");
+  await expect(page.locator("#terminal-screen")).toHaveCount(1, { timeout: 30_000 });
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  // Every row holds text, so the drag below always selects something.
+  await page.evaluate(async () => {
+    const hook = window.__tracerTestDouble as unknown as { writeText(text: string): Promise<void> };
+    await hook.writeText(`${Array.from({ length: 60 }, (_, i) => `row ${String(i).padStart(2, "0")}: selected text in the terminal`).join("\r\n")}\r\n`);
+  });
   const tiles: { id: string; name: string; terminal: string; ui: string }[] = [];
   for (const [id, theme] of Object.entries(THEMES)) {
-    await page.goto(`/?mock=1&theme=${id}&bg=none`);
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+    // Switch the way a person does, through the palette, so the live terminal and the page both take the theme.
+    await page.keyboard.press("Control+Shift+K");
+    await page.locator("#palette-input").fill(theme.name);
+    const option = page.locator(`[role="option"][data-action="theme:${id}"]`);
+    await expect(option).toBeVisible();
+    await option.click();
     await expect(page.locator("#terminal-screen")).toHaveAttribute("data-theme", id);
     const pair = selectionColors(theme);
     expect(contrastRatio(pair.foreground, pair.background), `${id}: selected text on its highlight`).toBeGreaterThanOrEqual(4.5);
