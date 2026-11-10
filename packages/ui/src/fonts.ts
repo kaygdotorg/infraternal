@@ -88,6 +88,22 @@ const staticPair = (id: string): FontFaceSource[] => [
   { file: `${id}/italic-700.latin.woff2`, style: "italic", weight: "700" },
 ];
 
+/** The faces of a static family from the styles it ships; a style it lacks is drawn by the browser from the nearest one (0xProto has no bold italic). */
+const staticFaces = (id: string, styles: ReadonlyArray<"roman-400" | "roman-700" | "italic-400" | "italic-700">): FontFaceSource[] =>
+  styles.map((style) => ({ file: `${id}/${style}.latin.woff2`, style: style.startsWith("italic") ? "italic" : "normal", weight: style.endsWith("700") ? "700" : "400" }));
+
+/** The upright face only: a family with no italic design, whose italic the browser slants from the upright. */
+const uprightOnly = (id: string): FontFaceSource[] => [{ file: `${id}/roman.latin.woff2`, style: "normal", weight: "400 700" }];
+
+/**
+ * One of the D329 families from its faces: the body weight is its terminal weight too unless `terminal` says otherwise, bold is 700, and a family with a
+ * 700 static face (regular and bold only, `staticPair` or `staticFaces`) snaps its weights to those two.
+ */
+const added = (id: string, label: string, body: number, faces: FontFaceSource[], extra: { hint?: string; terminal?: number; placeGlyphs?: boolean } = {}): MonoFont => ({
+  id, label, family: label, hint: extra.hint ?? "", bodyWeight: body, terminalWeight: extra.terminal ?? body, boldWeight: 700, range: [400, 700],
+  ...(faces.some((f) => f.weight === "700") ? { discrete: [400, 700] as const } : {}), ...(extra.placeGlyphs ? { placeGlyphs: true } : {}), faces,
+});
+
 /**
  * The curated fonts (D87), default first, then in the order the palette lists them.
  *
@@ -122,6 +138,20 @@ export const FONTS: readonly MonoFont[] = [
     faces: [{ file: "fira-code/roman.latin.woff2", style: "normal", weight: "400 700" }] },
   { id: "source-code-pro", label: "Source Code Pro", family: "Source Code Pro", hint: "",
     bodyWeight: 550, terminalWeight: 550, boldWeight: 700, range: [400, 700], faces: variable("source-code-pro") },
+  // D329 (#323): fourteen more families, all fetched only when previewed or picked (never on the first load). Their weights are the common
+  // defaults, not ink measurements: variable families at 450 like most of the list, static families at their regular (400) with bold at 700.
+  added("iosevka", "Iosevka", 400, staticPair("iosevka")),
+  added("victor-mono", "Victor Mono", 400, staticPair("victor-mono")),
+  added("recursive-mono", "Recursive Mono", 400, variable("recursive-mono")),
+  added("martian-mono", "Martian Mono", 400, uprightOnly("martian-mono"), { hint: "wide" }),
+  added("intel-one-mono", "Intel One Mono", 400, staticPair("intel-one-mono")),
+  added("fantasque-sans-mono", "Fantasque Sans Mono", 400, staticPair("fantasque-sans-mono")),
+  added("hack", "Hack", 400, staticPair("hack")),
+  added("inconsolata", "Inconsolata", 500, uprightOnly("inconsolata")),
+  added("0xproto", "0xProto", 400, staticFaces("0xproto", ["roman-400", "roman-700", "italic-400"])),
+  added("lilex", "Lilex", 450, variable("lilex")),
+  // The other four Monaspace faces share Neon's metrics, so they take its terminal weight and per-glyph placement (see `placeGlyphs`).
+  ...["argon", "xenon", "radon", "krypton"].map((name) => added(`monaspace-${name}`, `Monaspace ${name[0]!.toUpperCase()}${name.slice(1)}`, 450, variable(`monaspace-${name}`), { terminal: 500, placeGlyphs: true })),
 ];
 
 /** The font used when nothing is saved. It is the one preloaded for the sign-in card. */

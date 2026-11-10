@@ -6,13 +6,99 @@ use crate::{
     gotatun_node::Engine,
     wireguard::{Client, Device, Key},
 };
-#[cfg(feature = "relay")]
-use std::sync::Arc;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     net::IpAddr,
+    sync::{Arc, Mutex, MutexGuard},
 };
+
+/// The per-peer route state that config updates and relay path callbacks share (#381).
+///
+/// One mutex guards both maps, and every peer host-route write happens while it is held.
+/// `peers` is the set of peers whose routes this node last installed, keyed by public key,
+/// so a relay callback resolves the *current* endpoint and membership at write time instead
+/// of a copy taken when its relay shim started. A key missing from `peers` means the
+/// coordinator removed that peer: callbacks for it write nothing.
+#[derive(Clone, Debug, Default)]
+struct PeerRouteState {
+    /// Active relay budgets; a peer without an entry uses its direct-path budget.
+    overrides: BTreeMap<crate::policy::model::PublicKey, u16>,
+    /// The installed peers, refreshed in the same critical section as their routes. Only relay
+    /// callbacks read it, so builds without the relay feature never do.
+    #[cfg_attr(not(feature = "relay"), allow(dead_code))]
+    peers: BTreeMap<crate::policy::model::PublicKey, crate::dataplane::Peer>,
+}
+
+impl PeerRouteState {
+    /// Record `peers` as the installed set, replacing the previous one.
+    fn set_peers(&mut self, peers: &[crate::dataplane::Peer]) {
+        self.peers = peers.iter().map(|peer| (peer.key, peer.clone())).collect();
+    }
+}
+
+/// Recover route state after a callback panics while holding its mutex.
+fn lock_route_state(state: &Mutex<PeerRouteState>) -> MutexGuard<'_, PeerRouteState> {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Apply a full route snapshot while retaining relay budgets, restoring state if the write fails.
+///
+/// On success `peers` becomes the installed set that relay callbacks resolve against. The
+/// returned snapshot lets an enclosing transaction roll both maps back.
+fn refresh_peer_routes_from(
+    state: &Mutex<PeerRouteState>,
+    peers: &[crate::dataplane::Peer],
+    clear_overrides_for: &BTreeSet<crate::policy::model::PublicKey>,
+) -> io::Result<PeerRouteState> {
+    let mut state = lock_route_state(state);
+    let previous = state.clone();
+    for key in clear_overrides_for {
+        state.overrides.remove(key);
+    }
+    if let Err(error) = Device::routes_with_mtu_overrides(peers, &state.overrides, false) {
+        *state = previous;
+        return Err(error);
+    }
+    state.set_peers(peers);
+    Ok(previous)
+}
+
+/// Write one peer's route from the accepted state, for a relay path change or MTU refresh.
+///
+/// `relay_mtu` is `Some` while a relay carries the peer and `None` once it falls back to its
+/// direct endpoint. The peer is looked up by key under the state lock, so the write uses the
+/// endpoint of the latest accepted snapshot. When the peer is gone, its override is dropped
+/// and nothing is written: re-adding the host route would leak it outside the route inventory.
+/// # Errors
+/// Returns route-netlink errors and leaves the override map as it was.
+#[cfg(feature = "relay")]
+fn update_relay_route_mtu(
+    state: &Mutex<PeerRouteState>,
+    key: crate::policy::model::PublicKey,
+    relay_mtu: Option<u16>,
+) -> io::Result<()> {
+    let mut state = lock_route_state(state);
+    let Some(peer) = state.peers.get(&key).cloned() else {
+        state.overrides.remove(&key);
+        return Ok(());
+    };
+    let previous = match relay_mtu {
+        Some(mtu) => state.overrides.insert(key, mtu),
+        None => state.overrides.remove(&key),
+    };
+    let result =
+        Device::routes_with_mtu_overrides(std::slice::from_ref(&peer), &state.overrides, false);
+    if result.is_err() {
+        match previous {
+            Some(previous) => state.overrides.insert(key, previous),
+            None => state.overrides.remove(&key),
+        };
+    }
+    result
+}
 
 pub use crate::dataplane::Chunk;
 
@@ -412,6 +498,8 @@ pub struct Node {
     authority_reset: AuthorityResetState,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
+    /// Installed peers and live relay budgets; relay callbacks share it (see [`PeerRouteState`]).
+    peer_route_state: Arc<Mutex<PeerRouteState>>,
     firewall: Firewall,
     proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
@@ -442,6 +530,7 @@ impl Default for Node {
             authority_reset: AuthorityResetState::Stable,
             pending: None,
             routes: BTreeSet::new(),
+            peer_route_state: Arc::default(),
             firewall: Firewall::default(),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
@@ -926,6 +1015,61 @@ impl Node {
                 .handshake_preparer(peer.key, peer.endpoint.ok_or(io::ErrorKind::InvalidInput)?)),
         }
     }
+
+    /// Return a callback that keeps this peer's kernel route on its active path budget.
+    ///
+    /// The callback keeps only the peer's key. Each call resolves the accepted peer under the
+    /// route-state lock (see [`update_relay_route_mtu`]), so it follows endpoint moves and does
+    /// nothing once the peer is removed. `Some(mtu)` records the active relay's derived route
+    /// MTU; `None` removes that override and re-derives from the current direct endpoint.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_route_mtu_updater(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> crate::relay_path::RouteMtuUpdater {
+        let state = Arc::clone(&self.peer_route_state);
+        let key = peer.key;
+        Arc::new(move |relay_mtu| update_relay_route_mtu(&state, key, relay_mtu))
+    }
+
+    /// Refresh peer host routes using active relay budgets where present.
+    ///
+    /// `peers` is the complete installed set (an accepted snapshot or the one a rollback
+    /// restores). After a successful install it becomes the set relay callbacks resolve against.
+    /// # Errors
+    /// Returns route-netlink errors without changing the route state.
+    fn install_peer_routes(
+        &self,
+        peers: &[crate::dataplane::Peer],
+        remove: bool,
+    ) -> io::Result<()> {
+        let mut state = lock_route_state(&self.peer_route_state);
+        Device::routes_with_mtu_overrides(peers, &state.overrides, remove)?;
+        if !remove {
+            state.set_peers(peers);
+        }
+        Ok(())
+    }
+
+    /// Apply a full route refresh after clearing overrides for peers that returned to direct paths.
+    ///
+    /// The returned snapshot lets the caller restore the previous relay budgets and installed
+    /// peers if a later part of the enclosing configuration transaction rolls back.
+    /// # Errors
+    /// Returns route-netlink errors and restores the route state if route installation fails.
+    fn refresh_peer_routes(
+        &self,
+        peers: &[crate::dataplane::Peer],
+        clear_overrides_for: &BTreeSet<crate::policy::model::PublicKey>,
+    ) -> io::Result<PeerRouteState> {
+        refresh_peer_routes_from(&self.peer_route_state, peers, clear_overrides_for)
+    }
+
+    /// Restore relay budgets and the installed peer set after a failed configuration transaction.
+    fn restore_peer_route_state(&self, previous: PeerRouteState) {
+        *lock_route_state(&self.peer_route_state) = previous;
+    }
+
     fn apply_peer_changes(
         &mut self,
         config: &Config,
@@ -946,6 +1090,9 @@ impl Node {
                 .map(|_| ()),
         }
     }
+    /// Retire the recorded routes only after kernel teardown has completed.
+    ///
+    /// Keeping the inventory after a failure preserves the ordering of an explicit retry.
     fn retire_routes(&mut self) -> io::Result<()> {
         // Publish an empty inventory only after kernel teardown is complete.
         // Keep the in-memory inventory on failure so an explicit retry remains
@@ -954,6 +1101,7 @@ impl Node {
             store.record_routes(&BTreeSet::new())?;
         }
         self.routes.clear();
+        *lock_route_state(&self.peer_route_state) = PeerRouteState::default();
         Ok(())
     }
     /// The key an interrupted Linux rotation left as this node's identity: the candidate once
@@ -1173,6 +1321,62 @@ impl Node {
             return Err(io::ErrorKind::InvalidData.into());
         }
         Ok(link)
+    }
+
+    /// Return this node's proven kernel link for owner-only changes such as MTU updates.
+    /// # Errors
+    /// Refuses non-kernel engines, inactive links, and links whose owner marker changed.
+    fn owned_kernel_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
+        if self.engine_kind != EngineKind::Kernel {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        self.rotation_link()
+    }
+
+    /// Return this node's live `GotaTun` link after validating its owner proof.
+    ///
+    /// Restored nodes prove the marker with durable state. A fresh in-memory node
+    /// proves it against the key and engine handle it created in this process.
+    /// # Errors
+    /// Refuses non-`GotaTun` engines, inactive links, and links whose owner proof changed.
+    fn owned_gotatun_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
+        if self.engine_kind != EngineKind::GotaTun {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        if self.store.is_none() {
+            if !self.owned || self.gotatun.is_none() {
+                return Err(io::ErrorKind::NotConnected.into());
+            }
+            let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
+            let owner = self
+                .identity
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .public_key;
+            if link.engine != EngineKind::GotaTun || link.owner != Some(owner) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            return Ok(link);
+        }
+        self.rotation_link()
+    }
+
+    /// Set the MTU on this node's proven interface and keep `GotaTun`'s packet watcher in step.
+    /// # Errors
+    /// Refuses a changed interface index or reports a link update failure.
+    fn set_mesh_mtu(&self, ifindex: u32, mtu: u16) -> io::Result<()> {
+        match self.engine_kind {
+            EngineKind::Kernel => Device::set_mtu(ifindex, mtu),
+            EngineKind::GotaTun => {
+                if self.owned_gotatun_link()?.ifindex != ifindex {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.gotatun
+                    .as_ref()
+                    .ok_or(io::ErrorKind::NotConnected)?
+                    .set_mtu(mtu)
+            }
+        }
     }
 
     /// Read the identity the selected live engine currently presents for a proven link.
@@ -1903,7 +2107,9 @@ impl Node {
         let runtime_matches = crate::dataplane::same_runtime_content(&previous, &config)
             && self.runtime_peer_inventory_matches(&config);
         let denied = self.prepare_authority_replacement(&config)?;
-        if runtime_matches {
+        // The fast path keeps peers, but endpoint-derived MTUs can still move with the underlay
+        // path (#381). A failed refresh falls back to the full replacement below.
+        if runtime_matches && self.refresh_unchanged_mesh_mtus(&config).is_ok() {
             if let Err(error) = self.save_with_snapshot_base(Some(&config), true, Some(&denied)) {
                 return Err(self.fail_closed_authority_replacement(error, &denied));
             }
@@ -1915,6 +2121,30 @@ impl Node {
             Ok(()) => Ok(true),
             Err(error) => Err(self.fail_closed_authority_replacement(error, &denied)),
         }
+    }
+
+    /// Re-derive the route and interface MTUs for an unchanged peer set (#381) without touching
+    /// peers, so a same-content authority replacement cuts no session yet keeps MTUs current.
+    ///
+    /// The interface MTU first rises to the larger of the old and new values, so no route ever
+    /// exceeds it, then settles on the new value once the host routes are written. The route
+    /// state's installed peers become `config`'s, which relay callbacks look up under the lock.
+    /// # Errors
+    /// Reports a link or route-netlink failure; the caller then runs the full replacement.
+    fn refresh_unchanged_mesh_mtus(&self, config: &Config) -> io::Result<()> {
+        let link = match self.engine_kind {
+            EngineKind::Kernel => self.owned_kernel_link()?,
+            EngineKind::GotaTun => self.owned_gotatun_link()?,
+        };
+        let target = crate::mesh_mtu::for_config(Some(config));
+        self.set_mesh_mtu(link.ifindex, Device::mtu(link.ifindex)?.max(target))?;
+        let peers: Vec<_> = config
+            .peers
+            .values()
+            .map(|policy| policy.peer.clone())
+            .collect();
+        self.refresh_peer_routes(&peers, &BTreeSet::new())?;
+        self.set_mesh_mtu(link.ifindex, target)
     }
 
     /// Check that the live data plane contains exactly the keys in a same-content snapshot.
@@ -2544,6 +2774,15 @@ impl Node {
                     })
                 });
             if endpoints_only {
+                let mesh_link = match self.engine_kind {
+                    EngineKind::Kernel => self.owned_kernel_link()?,
+                    EngineKind::GotaTun => self.owned_gotatun_link()?,
+                };
+                let mesh_mtu = (
+                    mesh_link.ifindex,
+                    Device::mtu(mesh_link.ifindex)?,
+                    crate::mesh_mtu::for_config(Some(&config)),
+                );
                 let mut updates = Vec::new();
                 for (id, peer) in &config.peers {
                     let previous = &old.peers[id].peer;
@@ -2568,21 +2807,44 @@ impl Node {
                 if snapshot_base.is_some() {
                     self.authority_reset = AuthorityResetState::Stable;
                 }
-                let installed = match self.engine_kind {
-                    EngineKind::Kernel => {
-                        let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
-                        updates.iter().try_for_each(|(previous, endpoint)| {
-                            client.endpoint(previous.key, *endpoint)
-                        })
+                self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.1.max(mesh_mtu.2))?;
+                let route_overrides_to_clear: BTreeSet<_> =
+                    updates.iter().map(|(previous, _)| previous.key).collect();
+                let route_state = Arc::clone(&self.peer_route_state);
+                let peers: Vec<_> = config
+                    .peers
+                    .values()
+                    .map(|policy| policy.peer.clone())
+                    .collect();
+                let mut previous_route_overrides = None;
+                let installed: io::Result<()> = (|| {
+                    match self.engine_kind {
+                        EngineKind::Kernel => {
+                            let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                            updates.iter().try_for_each(|(previous, endpoint)| {
+                                client.endpoint(previous.key, *endpoint)
+                            })?;
+                        }
+                        EngineKind::GotaTun => {
+                            self.gotatun
+                                .as_ref()
+                                .ok_or(io::ErrorKind::NotConnected)?
+                                .apply(config.clone())?;
+                        }
                     }
-                    EngineKind::GotaTun => self
-                        .gotatun
-                        .as_ref()
-                        .ok_or(io::ErrorKind::NotConnected)?
-                        .apply(config.clone())
-                        .map(|_| ()),
-                };
+                    previous_route_overrides = Some(refresh_peer_routes_from(
+                        &route_state,
+                        &peers,
+                        &route_overrides_to_clear,
+                    )?);
+                    Ok(())
+                })();
+                // Release the engine-field borrow before updating the shared interface MTU.
+                let installed = installed.and_then(|()| self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.2));
                 if let Err(error) = installed {
+                    if let Some(previous) = previous_route_overrides {
+                        self.restore_peer_route_state(previous);
+                    }
                     match self.engine_kind {
                         EngineKind::Kernel => {
                             let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
@@ -2604,6 +2866,16 @@ impl Node {
                                 .apply(old.clone())?;
                         }
                     }
+                    let restore: Vec<_> = old
+                        .peers
+                        .values()
+                        .map(|policy| policy.peer.clone())
+                        .collect();
+                    self.install_peer_routes(&restore, false)?;
+                    self.set_mesh_mtu(
+                        mesh_mtu.0,
+                        mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+                    )?;
                     // Keep the newer durable desired endpoints for recovery.
                     // No revision is acknowledged on failure; the server may
                     // retry it after this kernel-only rollback. Publishing old
@@ -2648,10 +2920,23 @@ impl Node {
             .filter(|key| !desired.contains(key))
             .copied()
             .collect();
+        let mut route_overrides_to_clear: BTreeSet<_> = retired_keys.iter().copied().collect();
+        if let Some(old) = &self.config {
+            for (node, peer) in &config.peers {
+                if old
+                    .peers
+                    .get(node)
+                    .is_some_and(|old| old.peer.endpoint != peer.peer.endpoint)
+                {
+                    route_overrides_to_clear.insert(peer.peer.key);
+                }
+            }
+        }
         #[cfg(feature = "cutoff-measure")]
         drop(inventory);
         if changed.is_empty()
             && retired_keys.is_empty()
+            && route_overrides_to_clear.is_empty()
             && self.config.as_ref().is_some_and(|old| {
                 old.node == config.node
                     && old.addresses == config.addresses
@@ -2659,14 +2944,25 @@ impl Node {
             })
         {
             // Route validation and the actual key inventory above still run.
-            // Only access changes remain: one final firewall transaction is
-            // sufficient, without an intermediate table or peer/route writes.
+            // Only access changes remain. Keep the small firewall transaction, but
+            // still rederive peer route budgets because their underlay can change
+            // independently of the accepted peer snapshot.
             #[cfg(feature = "cutoff-measure")]
             let firewall =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
             self.firewall.install_pending(&config)?;
+            let configured_peers: Vec<_> = config
+                .peers
+                .values()
+                .map(|policy| policy.peer.clone())
+                .collect();
+            if let Err(error) = self.install_peer_routes(&configured_peers, false) {
+                self.firewall
+                    .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+                return Err(error);
+            }
             #[cfg(feature = "cutoff-measure")]
             {
                 self.refusing_at_ns = crate::cutoff_measure::monotonic_ns();
@@ -2722,9 +3018,19 @@ impl Node {
             peer.inbound = crate::policy::rules::TrafficPolicy::None;
             peer.outbound = crate::policy::rules::TrafficPolicy::None;
         }
+        let mesh_link = match self.engine_kind {
+            EngineKind::Kernel => self.owned_kernel_link()?,
+            EngineKind::GotaTun => self.owned_gotatun_link()?,
+        };
+        let mesh_mtu = (
+            mesh_link.ifindex,
+            Device::mtu(mesh_link.ifindex)?,
+            crate::mesh_mtu::for_config(Some(&config)),
+        );
         self.apply_fence(&fence, &config)?;
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
+        let mut previous_route_overrides = None;
         let result = (|| {
             if self
                 .config
@@ -2735,8 +3041,20 @@ impl Node {
             }
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
+            let (ifindex, previous_mtu, requested_mtu) = mesh_mtu;
+            // Keep the larger interface until per-peer route metrics are installed. The shared
+            // link stays IPv6-safe; its final size follows the largest peer budget.
+            self.set_mesh_mtu(ifindex, previous_mtu.max(requested_mtu))?;
             self.apply_peer_changes(&config, &changed, &retired_keys)?;
-            Device::routes(&changed, false)?;
+            // A full accepted snapshot also re-derives routes for unchanged peers: the endpoint
+            // route or its egress link MTU may have changed since their last peer update.
+            let configured_peers: Vec<_> = config
+                .peers
+                .values()
+                .map(|policy| policy.peer.clone())
+                .collect();
+            previous_route_overrides =
+                Some(self.refresh_peer_routes(&configured_peers, &route_overrides_to_clear)?);
             if self.config.is_none()
                 || self
                     .routes
@@ -2745,6 +3063,7 @@ impl Node {
             {
                 Device::retain_recorded_routes(&self.routes, &proposed)?;
             }
+            self.set_mesh_mtu(ifindex, requested_mtu)?;
             self.firewall.install_pending(&config)?;
             #[cfg(feature = "cutoff-measure")]
             {
@@ -2760,6 +3079,9 @@ impl Node {
             saved
         })();
         if let Err(error) = result {
+            if let Some(previous) = previous_route_overrides {
+                self.restore_peer_route_state(previous);
+            }
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             if !dns_was_running && self.config.is_none() {
                 self.dns_resolver = None;
@@ -2793,11 +3115,19 @@ impl Node {
                         .ok_or(io::ErrorKind::NotConnected)?
                         .apply(old.clone())?;
                 }
-                Device::routes(&restore, false)?;
+                self.set_mesh_mtu(
+                    mesh_mtu.0,
+                    mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+                )?;
+                self.install_peer_routes(&restore, false)?;
                 let retained: Vec<_> = std::iter::once(old.addresses)
                     .chain(restore.iter().map(|peer| peer.addresses))
                     .collect();
                 Device::retain_recorded_routes(&self.routes, &retained)?;
+                self.set_mesh_mtu(
+                    mesh_mtu.0,
+                    mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+                )?;
                 self.firewall.apply(old)?;
             } else {
                 if self.engine_kind == EngineKind::Kernel {
@@ -2819,6 +3149,10 @@ impl Node {
                 Device::routes(&[], false)?;
                 Device::retain_recorded_routes(&self.routes, &[])?;
             }
+            self.set_mesh_mtu(
+                mesh_mtu.0,
+                mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+            )?;
             return Err(error);
         }
         if snapshot_base.is_some() {

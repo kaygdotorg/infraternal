@@ -110,9 +110,9 @@ impl Store {
             )]);
         }
     }
-    /// Apply exactly one bounded semantic intent, allowing stale but never future revisions.
+    /// Apply one bounded semantic intent; whole-look replacements require the exact current revision.
     /// # Errors
-    /// Refuses invalid references, bounds, ownership or reused IDs with different input.
+    /// Refuses stale whole-look replacements, invalid references, bounds, ownership or reused IDs with different input.
     pub async fn apply(&self, account: &str, input: &[u8]) -> Result<i64, Error> {
         self.call(false, account, input).await
     }
@@ -137,8 +137,9 @@ impl Store {
         )
         .await
     }
-    // Keep one storage state machine for edits and read repair. The caller holds
-    // only this operation handle rather than another copy of the write futures.
+    /// One storage state machine for edits and read repair. The caller holds
+    /// only this operation handle rather than another copy of the write futures.
+    /// A `look.set` is refused unless its base revision is the current one.
     #[inline(never)]
     fn transact<'a>(
         &'a self,
@@ -238,6 +239,13 @@ impl Store {
                         return Err(Error);
                     }
                     let intent = request.get("intent").ok_or(Error)?;
+                    // A whole-look replacement has no field merge, so it is a compare-and-set against the last look.
+                    // Layout edits that landed after its base do not conflict with it.
+                    if model::string(intent, "type") == Some("look.set")
+                        && look_superseded(&mut tx, account, base, document.revision()).await?
+                    {
+                        return Err(Error);
+                    }
                     // Each intent can inspect only its own ID and a split anchor. Probe
                     // the account index instead of loading its lifetime close history.
                     let id = intent
@@ -461,6 +469,39 @@ async fn ownership_window<'a>(
     }
     Ok(())
 }
+/// Tells whether another `look.set` landed after `base`, so a whole-look write made from `base` would erase it.
+///
+/// Only the retained operation tail is consulted. When the tail does not cover every revision after `base` (a checkpoint
+/// dropped part of it) the answer is "superseded": refusing is safe because the client recovers with a fresh snapshot,
+/// while accepting could silently erase a newer look.
+async fn look_superseded(
+    tx: &mut Transaction<'_, Sqlite>,
+    account: &str,
+    base: i64,
+    current: i64,
+) -> Result<bool, Error> {
+    if base == current {
+        return Ok(false);
+    }
+    let rows = sqlx::query("SELECT event FROM canvas_operations WHERE account=? AND revision>?")
+        .bind(account)
+        .bind(base)
+        .fetch_all(&mut **tx)
+        .await?;
+    if i64::try_from(rows.len()).ok() != Some(current - base) {
+        return Ok(true);
+    }
+    for row in rows {
+        let event: Value = serde_json::from_str(row.get::<&str, _>("event"))?;
+        let is_look = event
+            .get("intent")
+            .is_some_and(|intent| model::string(intent, "type") == Some("look.set"));
+        if is_look && event.get("noop").and_then(Value::as_bool) != Some(true) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 async fn save_receipt(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
@@ -535,6 +576,7 @@ impl infraternal_plugin_canvas::store::LayoutStore for Store {
         Box::pin(async move { Store::events(self, account, after).await.map_err(|_| ()) })
     }
 }
+/// SQLite-backed canvas store behavior and account-isolation tests.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,5 +684,80 @@ mod tests {
         assert_eq!(store.apply("a", close).await.unwrap(), 2);
         assert_eq!(store.apply("a", close).await.unwrap(), 2);
         assert_eq!(store.events("a", Some(1)).await.unwrap()[0]["revision"], 2);
+    }
+
+    /// A real look edit survives reload in its account's canvas and is absent from another account.
+    #[tokio::test]
+    async fn appearance_edits_are_persisted_for_only_the_authorized_account() {
+        let store = fixture().await;
+        let init =
+            serde_json::to_vec(&json!({"op_id":"init-a","document":Document::default()})).unwrap();
+        assert_eq!(store.initialize("a", &init).await.unwrap(), 1);
+
+        let look = json!({
+            "v": 1,
+            "selected": "solid",
+            "basics": {"colors": "ink", "font": "geist-mono", "uiSize": 110},
+            "windowSizes": {"phone": "full", "desktop": "wide"},
+            "extendedInfo": true,
+            "themes": [{
+                "id": "solid", "name": "Solid", "tint": 100, "blur": 0, "grain": 0,
+                "font": "geist-mono", "colors": "ink", "uiSize": 110,
+                "background": "solid", "customSolid": "#3b4252",
+                "custom": {"stops": ["#7a9cff", "#cba6f7"], "angle": 135}
+            }]
+        });
+        let edit = serde_json::to_vec(&json!({
+            "op_id": "look-a",
+            "base_revision": 1,
+            "intent": {"type": "look.set", "look": look}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &edit).await.unwrap(), 2);
+
+        let mut later_look = look.clone();
+        later_look["themes"][0]["font"] = json!("fira-code");
+        later_look["basics"]["font"] = json!("fira-code");
+        let newer_edit = serde_json::to_vec(&json!({
+            "op_id": "look-b",
+            "base_revision": 2,
+            "intent": {"type": "look.set", "look": later_look}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &newer_edit).await.unwrap(), 3);
+
+        let stale_edit = serde_json::to_vec(&json!({
+            "op_id": "look-c",
+            "base_revision": 2,
+            "intent": {"type": "look.set", "look": look}
+        }))
+        .unwrap();
+        assert!(
+            store.apply("a", &stale_edit).await.is_err(),
+            "an offline look cannot overwrite a newer account look"
+        );
+
+        // A layout edit between the base and the write is not a look conflict.
+        let rename = serde_json::to_vec(&json!({
+            "op_id": "view-a",
+            "base_revision": 3,
+            "intent": {"type": "view.update", "view_id": "console", "name": "Work"}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &rename).await.unwrap(), 4);
+        let after_layout = serde_json::to_vec(&json!({
+            "op_id": "look-d",
+            "base_revision": 3,
+            "intent": {"type": "look.set", "look": later_look}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &after_layout).await.unwrap(), 5);
+
+        let reloaded_a = store.events("a", None).await.unwrap();
+        assert_eq!(reloaded_a[0]["revision"], 5);
+        assert_eq!(reloaded_a[0]["document"]["look"], later_look);
+        let account_b = store.events("b", None).await.unwrap();
+        assert_eq!(account_b[0]["revision"], 0);
+        assert!(account_b[0]["document"].get("look").is_none());
     }
 }

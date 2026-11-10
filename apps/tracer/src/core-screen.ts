@@ -1,9 +1,11 @@
 /** Mounts the authenticated terminal shell, theme controls, host tree, and mobile key tray. */
+import { rankByTitle } from "./palette-rank";
 import { bindInputToolbar } from "../../../packages/ui/src/input-toolbar";
 import { branchedMenu, type BranchSection, type BranchedMenu, type BranchedOptions } from "../../../packages/ui/src/branched";
 import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { Spring } from "../../../packages/ui/src/spring";
+import { markMotion, triggeredByKeyboard } from "../../../packages/ui/src/input-source";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
@@ -13,12 +15,14 @@ import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/sho
 import { askSignOut } from "./sign-out";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
-import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
-import { toolbarSection } from "../../../packages/ui/src/toolbar-settings";
 import { readLocal as readPref, writeLocal as writePref } from "../../../packages/ui/src/local-pref";
-import { aboutSection, createSettingsOverlay, type SettingsSection } from "../../../packages/ui/src/settings-overlay";
+import type { SettingsOverlay, SettingsSection } from "../../../packages/ui/src/settings-overlay";
+import type { SettingsPanelId, SettingsUiOptions } from "./settings-ui.on-demand";
+import { onDemand } from "./on-demand";
 import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
+import { lookBridge, startThemes } from "./canvas/themes/controller";
+import { readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { initialFont, rememberFont } from "./font-preference";
@@ -41,10 +45,13 @@ function isComposingKey(event: KeyboardEvent): boolean {
   return event.isComposing || event.keyCode === 229;
 }
 
+/** Startup flags and identity values needed to create the main terminal screen. */
 export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
   probeMode: boolean;
+  /** Signed-in account whose appearance is carried by its canvas document. */
+  accountId?: string;
   /** The canvas chrome: sidebar footer, the shortcuts list, Settings as a view and the actions the canvas handles. */
   canvas?: boolean;
   /** Offers "Add hosts" in the palette (the add-host flow exists). */
@@ -76,6 +83,7 @@ export interface ToolbarRow {
   dispose(): void;
 }
 
+/** What the mounted core screen offers the canvas: its stage and palette hooks (see each member). */
 export interface CoreScreen {
   stage: HTMLElement;
   /** The pane area under the top bar; the window canvas mounts here (src/canvas.ts). */
@@ -114,9 +122,16 @@ export interface CoreScreen {
   lockToolbarRow(row: "keys" | undefined): void;
   /** Runs a palette action (`theme:ink`, `font:geist-mono`, `card:2`, `bg:mesh`) as a click on its row would. */
   act(action: string): void;
-  /** The appearance choices in force, and the sections of Settings that live in core (for the Settings view). */
+  /** The appearance choices in force, and the shared Settings panels available after a person opens them. */
   appearance(): { theme: string; font: string; card: number; windows: number; background: string };
-  settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
+  /**
+   * Paints the image behind the windows from a theme (`canvas/themes`): any CSS image, or "" for none. Used with the background
+   * `themed` (`act("bg:themed")`), which shows the canvas backdrop like `mesh` does but never runs the mesh painter, because the
+   * theme draws its own gradient in plain CSS.
+   */
+  setBackdrop(image: string): void;
+  /** Renders a shared panel after its action-only code has loaded; the returned function stops its listeners and DOM. */
+  settingsPanels: { render(id: SettingsPanelId, container: HTMLElement): () => void };
   /** The row that shows now. */
   toolbarRow(): "canvas" | "keys";
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void, extras?: Pick<BranchedOptions, "openRename">): BranchedMenu;
@@ -125,10 +140,11 @@ export interface CoreScreen {
   /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
   refreshPalette(): void;
   /**
-   * Opens the palette limited to `entries` only (a view's windows from its hover card, #121). The same search and
-   * keys apply; the next open (⌘K, the capsule) shows the whole palette again.
+   * Opens the palette limited to `entries` only (a view's windows from its hover card, #121), or the whole palette when
+   * there are none (the view list's Search everything row). The same search and keys apply; the next open (⌘K, the
+   * capsule) shows the whole palette again.
    */
-  showPalette(entries: PaletteEntry[]): void;
+  showPalette(entries?: PaletteEntry[]): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setRecoveryPending(readyAt: number | undefined): void;
@@ -155,6 +171,7 @@ const SVG = {
   paste: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="12" height="15" rx="2.5"/><path d="M9.5 5V4.5A1.5 1.5 0 0 1 11 3h2a1.5 1.5 0 0 1 1.5 1.5V5"/></svg>',
 };
 
+/** The markup of the core screen: top bar with the capsule and pills, sidebar, palette with its scrim, key tray and terminal stage. */
 const SCREEN = `
   <section class="terminal-screen" id="terminal-screen" aria-label="Terminal">
     <div class="backdrop" aria-hidden="true"></div>
@@ -239,6 +256,7 @@ function themeId(value: string | null): string | undefined {
   return value && Object.hasOwn(THEMES, value) ? value : undefined;
 }
 
+/** One row of the command palette: what it says, where it is listed, what it does when chosen and what it is found by. */
 export interface PaletteEntry {
   group: string;
   glyph: string;
@@ -254,6 +272,8 @@ export interface PaletteEntry {
   queryOnly?: boolean;
   /** What is searched in place of the hint, when the hint is for reading only (a docs row's hint names its page and must not match every heading). */
   search?: string;
+  /** The row's own name when its label is a longer trail. A title that is, or starts with, the query lists this row's group first (palette-rank.ts). */
+  title?: string;
 }
 
 /** The name of a modifier key on this platform: Option is the Mac key, Alt the PC one (Control is the same word everywhere). */
@@ -306,14 +326,37 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
   const build = buildVersion();
   const canvasItems = new Map<string, ToolbarItem>();
-  const settingsSections: SettingsSection[] = [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })];
-  const shortcutsPanel = shortcutsSection(stage);
-  if (options.canvas && !options.settingsView) settingsSections.unshift(shortcutsPanel);
-  const aboutPanel = settingsSections[0]!;
-  const settings = options.canvas && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
+  let settingsSections: SettingsSection[] | undefined;
+  let settings: SettingsOverlay | undefined;
+  let settingsUi: typeof import("./settings-ui.on-demand") | undefined;
+  let settingsUiLoading: Promise<typeof import("./settings-ui.on-demand")> | undefined;
+  let settingsRequest = 0;
+  let settingsOpening = false;
+  let screenDisposed = false;
+  /** Opens the legacy Settings overlay after its action-only UI chunk has loaded. */
+  const openSettingsSection = (section: string, source: "pointer" | "keyboard"): void => {
+    if (options.settingsView) {
+      window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source } }));
+      return;
+    }
+    settingsOpening = true;
+    const request = ++settingsRequest;
+    void loadSettingsUi().then((ui) => {
+      if (screenDisposed || request !== settingsRequest) return;
+      settingsOpening = false;
+      settingsSections ??= ui.createSettingsSections(settingsUiOptions(), Boolean(options.canvas), canvasItems.size > 0);
+      settings ??= ui.mountSettingsOverlay(stage, settingsSections);
+      settings.open(section);
+    }).catch(() => {
+      if (screenDisposed || request !== settingsRequest) return;
+      settingsOpening = false;
+      toast.show({ message: "Settings could not be loaded. Try again.", duration: 4000 });
+    });
+  };
+  /** Opens the app's About panel or sends the product canvas to its Appearance settings. */
   const openSettingsFrom = (source: "pointer" | "keyboard"): void => {
     if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance", source } }));
-    else settings?.open("about", source);
+    else openSettingsSection("about", source);
   };
   const askSignOutFrom = (anchor: HTMLElement): void => { askSignOut(anchor, toast); };
   const sidebarFoot = options.canvas
@@ -373,24 +416,30 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const validLevel = (n: number): boolean => Number.isInteger(n) && n >= 1 && n <= 4;
   const levelFrom = (param: string, saved: string, fallback: number): number => {
     const q = Number(params.get(param)), v = Number(readLocal(saved));
-    return validLevel(q) ? q : validLevel(v) ? v : fallback;
+    return validLevel(q) ? q : !options.accountId && validLevel(v) ? v : fallback;
   };
   let cardLevel = levelFrom("card", "tracer.card", DEFAULT_CARD);
   let windowLevel = levelFrom("windows", "tracer.windows", DEFAULT_WINDOW);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
-  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "mocha" : "latte");
+  const legacyAppearance = options.accountId ? readLegacyAppearance(options.accountId) : undefined;
+  const cachedLook = options.accountId ? readCachedLook(options.accountId) : undefined;
+  const cachedTheme = cachedLook?.themes.find((theme) => theme.id === cachedLook.selected);
+  const savedThemeId = themeId(legacyAppearance?.theme ?? null) ?? themeId(cachedTheme?.colors ?? null)
+    ?? (!options.accountId ? themeId(readLocal("tracer.theme")) : undefined);
+  let currentThemeId = themeId(params.get("theme")) ?? savedThemeId ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
   // `committedFont` is what the person chose; `shownFont` is what is on screen, which differs
   // only while a palette row previews another font.
-  let committedFont = initialFont();
+  let committedFont = initialFont(options.accountId);
   let shownFont = committedFont;
   let fontRequest = 0;
   // Plain (`none`): one solid colour with subtle dots. Soft: the theme's gentle gradient. Plain is the default (D191); a saved choice stays. Mesh: the full
-  // theme mesh. The dots sit on all three.
-  const validBackground = (v: string | null): v is "none" | "soft" | "mesh" => v === "none" || v === "soft" || v === "mesh";
-  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "none";
+  // theme mesh. The dots sit on all three. `themed` (D322, #323) is a Theme's own background: it looks like mesh to the stylesheets, but the image is
+  // CSS written by `setBackdrop`, so the mesh painter (WebGL) never runs for it.
+  const validBackground = (v: string | null): v is "none" | "soft" | "mesh" | "themed" => v === "none" || v === "soft" || v === "mesh" || v === "themed";
+  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : !options.accountId && validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "none";
   /** The terminal paints no background of its own where a window shows the canvas through it (and over the mesh). */
-  const translucentTerminal = (): boolean => background === "mesh" || windowLevel > 1;
+  const translucentTerminal = (): boolean => background === "mesh" || background === "themed" || windowLevel > 1;
   /** Every terminal on the screen (they share the look), and the one that takes the keys. */
   const clients = new Set<TerminalClient>();
   let client: TerminalClient | undefined;
@@ -435,9 +484,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const active = THEMES[currentThemeId]!;
     stage.toggleAttribute("data-no-motion", instant);
     ROOT.dataset.theme = currentThemeId;
-    ROOT.dataset.bg = background;
+    // A theme's own background reads as mesh to every stylesheet (the same backdrop layers show it).
+    const shownBg = background === "themed" ? "mesh" : background;
+    ROOT.dataset.bg = shownBg;
     stage.dataset.theme = currentThemeId;
-    stage.dataset.bg = background;
+    stage.dataset.bg = shownBg;
     applyTheme(active, ROOT, cardLevel, windowLevel);
     window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
@@ -447,6 +498,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const terminal = terminalTheme(active, translucentTerminal());
     window.setTimeout(() => { for (const c of clients) c.setTheme(terminal); }, 0);
     if (background === "mesh") return paintMesh();
+    // `themed`: the theme owns the image (`setBackdrop`); only the mesh painter's memory is let go, its sheet is left alone.
+    if (background === "themed") { meshKey = ""; void backdropModule?.then((renderer) => renderer.releaseBackdrop()); return Promise.resolve(); }
     releaseMesh();
     return Promise.resolve();
   };
@@ -456,14 +509,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // at 1440x900 DPR 2: a view-transition crossfade froze rendering for 80-220 ms while it
   // captured two full-screen snapshots, and the old per-element fades repainted every
   // blurred surface per frame; the instant swap costs one repaint (p95 16.7-33 ms headless).
-  // The palette closes in the same step so it never fades over a repainting page.
+  // Remote document updates keep this device's overlays open; local palette actions close through the action handler.
   const swapLook = (): void => {
-    // Every token changes in this step, so no element may start a transition from its old value (a window card's border
-    // colour, the palette's own close): transitions are off while the first frame with the new styles is made, and on again
+    // Every token changes in this step, so no element may start a transition from its old value (for example a window card's
+    // border or the palette when a local action closes it): transitions are off while the first frame with the new styles is made, and on again
     // after it. The attribute is set before anything changes, and removed after two frames, so the style recalculation that
     // would start the transitions always sees it. It costs one attribute and no forced layout (TASTE "No lag while animating").
     ROOT.setAttribute("data-look-swap", "");
-    setPalette(false, "keyboard");
     void applyLook(true);
     requestAnimationFrame(() => requestAnimationFrame(() => ROOT.removeAttribute("data-look-swap")));
   };
@@ -491,16 +543,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     { group: "Sessions", glyph: "›_", label: "SSH shell", hint: hostName, action: "session:current" },
     { group: "Hosts", glyph: "●", label: hostName, hint: "current", action: "host:current" },
     ...Object.entries(THEMES).map(([id, theme]) => ({
-      group: "Theme", glyph: "◉", label: theme.name, hint: theme.dark ? "dark" : "light", action: `theme:${id}`, swatch: theme,
+      group: "Colour", glyph: "◉", label: theme.name, hint: theme.dark ? "dark" : "light", action: `theme:${id}`, swatch: theme,
     })),
     ...FONTS.map((font) => ({
       group: "Font", glyph: "Aa", label: font.label, hint: font.hint, action: `font:${font.id}`, previewFont: font,
     })),
-    { group: "Background", glyph: "□", label: "Background: Plain", hint: "one solid colour · subtle dots", action: "bg:none" },
-    { group: "Background", glyph: "▦", label: "Background: Soft", hint: "a gentle gradient · dots", action: "bg:soft" },
-    { group: "Background", glyph: "▦", label: "Background: Mesh", hint: "the theme's mesh · dots", action: "bg:mesh" },
-    ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Card transparency: ${name}`, hint: "popovers, palette, sidebar", action: `card:${i + 1}` })),
-    ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Window transparency: ${name}`, hint: "terminals and window cards", action: `windows:${i + 1}` })),
+    // Where the Themes exist (the product's screens) a theme owns the background, tint and blur, so these rows would fight it; the plain screen keeps them.
+    ...(options.settingsView ? [] : [
+      { group: "Background", glyph: "□", label: "Background: Plain", hint: "one solid colour · subtle dots", action: "bg:none" },
+      { group: "Background", glyph: "▦", label: "Background: Soft", hint: "a gentle gradient · dots", action: "bg:soft" },
+      { group: "Background", glyph: "▦", label: "Background: Mesh", hint: "the theme's mesh · dots", action: "bg:mesh" },
+      ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Card transparency: ${name}`, hint: "popovers, palette, sidebar", action: `card:${i + 1}` })),
+      ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Window transparency: ${name}`, hint: "terminals and window cards", action: `windows:${i + 1}` })),
+    ]),
     ...(options.addHostEntry ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
@@ -613,7 +668,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   const renderPalette = (query = "", preserveAction?: string): void => {
     const needle = query.trim().toLocaleLowerCase();
-    visibleEntries = (scopedEntries ?? entries).filter((entry) => (needle !== "" || !entry.queryOnly) && (paletteSearchText.get(entry)?.includes(needle) ?? false));
+    const found = (scopedEntries ?? entries).filter((entry) => (needle !== "" || !entry.queryOnly) && (paletteSearchText.get(entry)?.includes(needle) ?? false));
+    // A group with a row named by what was typed comes first (palette-rank.ts); nothing else is reordered.
+    visibleEntries = needle === "" ? found : rankByTitle(found, needle);
     selected = preserveAction === undefined ? Math.min(selected, Math.max(0, visibleEntries.length - 1)) : Math.max(0, visibleEntries.findIndex((entry) => entry.action === preserveAction));
     visibleOptions = [];
     // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
@@ -702,6 +759,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const setSidebar = (open: boolean, instant = false): void => {
     pulseActivity("sidebar", 450);
+    // A key (Escape, a shortcut) opens and closes the sidebar with no motion, whatever the caller asked for.
+    instant = markMotion(sidebar, sidebarToggle) || instant;
     dockPanes(open, instant);
     // The toggle travels between the top bar and the sidebar header on a transform transition.
     sidebarToggle.classList.toggle("instant", instant);
@@ -721,6 +780,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // listed: the canvas's corner buttons (the sidebar toggle, the "+") and the capsule the palette grows from.
   const PALETTE_COVERABLE = [sidebarToggle, capsule, ...document.querySelectorAll<HTMLElement>(".top > .tabs > .tab-add")];
   const coverTopBar = (open: boolean): void => {
+    markMotion(...PALETTE_COVERABLE);
     if (!open) { for (const control of PALETTE_COVERABLE) delete control.dataset.paletteCovered; return; }
     const box = palette.getBoundingClientRect();
     for (const control of PALETTE_COVERABLE) {
@@ -729,12 +789,16 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (overlaps) control.dataset.paletteCovered = ""; else delete control.dataset.paletteCovered;
     }
   };
-  const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer", only?: PaletteEntry[]): void => {
-    // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
-    palette.dataset.openKind = source;
+  // Where focus was when the palette opened, so closing it (Escape most of all) puts focus back there instead of on the page.
+  let paletteReturnFocus: HTMLElement | null = null;
+  // Whether it animates is not decided here: markMotion writes data-motion on the palette and scrim at the moment of the change, from the last input, and their open and close durations scale with it (--ui-motion-scale, #427).
+  const setPalette = (open: boolean, only?: PaletteEntry[]): void => {
     if (open) {
+      markMotion(palette, scrim);
+      if (palette.hidden) paletteReturnFocus = document.activeElement instanceof HTMLElement && !palette.contains(document.activeElement) && document.activeElement !== document.body ? document.activeElement : null;
       shortcuts.close(true);
-      settings?.close("keyboard");
+      if (settingsOpening) { settingsOpening = false; settingsRequest++; }
+      settings?.close();
       indexScoped(false);
       scopedEntries = only;
       indexScoped(true);
@@ -749,12 +813,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       coverTopBar(true);
       paletteInput.focus({ preventScroll: true });
     } else {
+      // Only a close that left focus in the palette restores it: a picked action that moved focus on (to a window, a field) keeps it.
+      const focusInPalette = palette.contains(document.activeElement);
+      markMotion(palette, scrim);
       indexScoped(false);
       scopedEntries = undefined;
       palette.hidden = true;
       scrim.hidden = true;
       coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
+      if (focusInPalette && paletteReturnFocus?.isConnected) paletteReturnFocus.focus({ preventScroll: true });
+      paletteReturnFocus = null;
       syncFontPreview();
     }
   };
@@ -790,7 +859,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
   removeShortcuts.push(bindShortcut("focus-resend-actions", () => { client?.focusInputResendActions(); }, (event) => !isComposingKey(event) && (client?.hasPendingInputResend() ?? false)));
   // The DOM may report "until-found"; both hidden states should open the palette.
-  removeShortcuts.push(bindShortcut("palette", () => setPalette(Boolean(palette.hidden), "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
+  removeShortcuts.push(bindShortcut("palette", () => setPalette(Boolean(palette.hidden)), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
   if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {
@@ -798,8 +867,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     shortcutsFromTerminal = !!(event.target as Element | null)?.closest?.(".terminal-host");
     shortcuts.toggle();
   }));
-  const capsuleClick = (event: MouseEvent): void => setPalette(true, event.detail === 0 ? "keyboard" : "pointer");
-  const scrimClick = (): void => setPalette(false, "pointer");
+  const capsuleClick = (): void => setPalette(true);
+  const scrimClick = (): void => setPalette(false);
 
   const keydown = (event: KeyboardEvent): void => {
     // Inert descendants cannot block global shortcuts while logout is in flight.
@@ -816,6 +885,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return;
     }
     if (event.key === "Escape") {
+      if (settingsOpening) { settingsOpening = false; settingsRequest++; return; }
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
       // A control that holds something open (the inbox's expanded line) collapses it first (`data-owns-escape`).
       if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
@@ -826,7 +896,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true'], .ui-row-ask, [data-swiped]")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
       // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
-      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
+      if (!palette.hidden) { setPalette(false); event.preventDefault(); event.stopPropagation(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
   };
@@ -839,8 +909,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
     }, 250);
   };
+  /** Keeps the OS scheme as a fallback only until the account document supplies its saved look. */
   const systemThemeChange = (): void => {
-    if (!themeId(params.get("theme")) && !themeId(readLocal("tracer.theme"))) {
+    if (!themeId(params.get("theme")) && !savedThemeId && !lookBridge()?.hasAccountLook()) {
       currentThemeId = systemDark.matches ? "mocha" : "latte";
       void applyLook();
     }
@@ -880,7 +951,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
       if (entry) runAction(entry.action ?? "", "keyboard");
-      setPalette(false, "keyboard");
+      setPalette(false);
       event.preventDefault();
     }
   });
@@ -909,7 +980,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!(target instanceof Element)) return;
     const result = target.closest<HTMLButtonElement>(".result");
     if (!result) return;
-    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false, "pointer");
+    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false);
   });
   window.addEventListener("keydown", keydown, true);
   window.addEventListener("resize", resize);
@@ -1070,7 +1141,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     keytray.querySelectorAll<HTMLElement>(".keydots i").forEach((dot, i) => dot.toggleAttribute("data-on", i === index));
     canvasRowEl.inert = index !== 0;
     keysRowEl.inert = index !== 1;
-    rowSpring.set(index, instant);
+    // A key (Tab into a terminal, the canvas lock, a palette row) swaps the tray rows at once; a swipe or a tap glides them (#427).
+    rowSpring.set(index, instant || triggeredByKeyboard());
   };
   let rowLock: "keys" | undefined;
   // The key row exists only while a terminal has input focus (or an input lock holds it): without one there is
@@ -1228,7 +1300,54 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       applyPrefs(true);
     },
   };
-  const toolbarSettings = toolbarSection(toolbarModel);
+  /** Provides current values to the Settings chunk without loading its panel code on the first screen. */
+  const settingsUiOptions = (): SettingsUiOptions => ({
+    stage,
+    about: { name: "infraternal", version: build.short, commit: build.full, built: build.built },
+    toolbar: toolbarModel,
+  });
+  /** Shares one late-loaded Settings module across overlay opens and panel renders. */
+  const loadSettingsUi = (): Promise<typeof import("./settings-ui.on-demand")> => {
+    if (settingsUi) return Promise.resolve(settingsUi);
+    if (!settingsUiLoading) {
+      settingsUiLoading = onDemand(() => import("./settings-ui.on-demand")).then((loaded) => {
+        settingsUi = loaded;
+        return loaded;
+      }).catch((error: unknown) => {
+        settingsUiLoading = undefined;
+        throw error;
+      });
+    }
+    return settingsUiLoading;
+  };
+  /** Renders a section from the on-demand chunk and releases it if its canvas window closes first. */
+  const renderSettingsPanel = (id: SettingsPanelId, container: HTMLElement): (() => void) => {
+    let disposed = false;
+    let stop: (() => void) | void;
+    const load = (): void => {
+      void loadSettingsUi().then((ui) => {
+        if (disposed) return;
+        stop = ui.createSettingsPanel(id, settingsUiOptions()).render(container);
+      }).catch(() => {
+        if (disposed) return;
+        const notice = document.createElement("span");
+        notice.textContent = "Settings could not be loaded.";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Try again";
+        retry.addEventListener("click", load, { once: true });
+        container.replaceChildren(notice, retry);
+      });
+    };
+    load();
+    return () => { disposed = true; stop?.(); };
+  };
+  /** Adds the Toolbar panel to an already-open legacy Settings list when its row becomes available. */
+  const addToolbarSettingsSection = (ui: typeof import("./settings-ui.on-demand")): void => {
+    if (!settingsSections || canvasItems.size === 0 || settingsSections.some((section) => section.id === "toolbar")) return;
+    settingsSections.unshift(ui.createSettingsPanel("toolbar", settingsUiOptions()));
+  };
+  /** Renders current toolbar items before an optional legacy Settings panel is needed. */
   applyPrefs(false);
 
   // ---- long-press the toolbar: edit it in place ---------------------------------------------------------------
@@ -1353,7 +1472,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         ghost = b.cloneNode(true) as HTMLElement;
         ghost.classList.add("keyghost");
         ghost.querySelector(".keyx")?.remove();
-        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:30;pointer-events:none`;
+        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:calc(var(--z-overlay) + 7);pointer-events:none`;
         document.body.append(ghost);
         b.style.opacity = "0.25";
       }
@@ -1427,47 +1546,52 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       requestAnimationFrame(() => requestAnimationFrame(() => performance.measure(`appearance:${kind}`, { start, detail: { value } })));
     }
     if (kind === "account" && value === "recovery") {
-      setPalette(false, source);
+      setPalette(false);
       options.onRecovery?.();
     } else if (kind === "account" && value === "signout") {
-      setPalette(false, source);
+      setPalette(false);
       // Asked from where the person can see: the profile pill when the sidebar is open, else the top pill.
       requestAnimationFrame(() => askSignOutFrom(sidebarFoot && !sidebar.hidden ? sidebarFoot.user : get<HTMLElement>("#capsule")));
       return true;
     } else if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
-      writeLocal("tracer.theme", currentThemeId);
+      if (!options.accountId) writeLocal("tracer.theme", currentThemeId);
       swapLook();
-      return true;
+      return false;
     } else if (kind === "font" && fontById(value)) {
       committedFont = fontById(value)!;
-      rememberFont(committedFont);
+      if (!options.accountId) rememberFont(committedFont);
       showFont(committedFont);
       window.dispatchEvent(new CustomEvent("tracer:appearance"));
       return false;
     } else if (kind === "card" && validLevel(Number(value))) {
       cardLevel = Number(value);
-      writeLocal("tracer.card", value!);
+      if (!options.accountId) writeLocal("tracer.card", value!);
       swapLook();
-      return true;
+      return false;
     } else if (kind === "windows" && validLevel(Number(value))) {
       windowLevel = Number(value);
-      writeLocal("tracer.windows", value!);
+      if (!options.accountId) writeLocal("tracer.windows", value!);
       swapLook();
-      return true;
+      return false;
     } else if (kind === "bg" && validBackground(value ?? null)) {
       background = value!;
-      writeLocal("tracer.background", value!);
+      if (!options.accountId) writeLocal("tracer.background", value!);
       swapLook();
+      return false;
+    } else if (kind === "themes") {
+      // A row of the Themes group (`canvas/themes/controller.ts` offers the rows and listens): the palette closes, the controller switches the theme.
+      setPalette(false);
+      window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: value } }));
       return true;
     } else if (kind === "settings") {
-      setPalette(false, source);
+      setPalette(false);
       if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${value ?? "appearance"}`, source } }));
-      else settings?.open(value ?? "about", source);
+      else openSettingsSection(value ?? "about", source);
       return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
-      setPalette(false, source);
+      setPalette(false);
       shortcutsFromTerminal = false;
       requestAnimationFrame(() => shortcuts.open());
       return true;
@@ -1527,12 +1651,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       refreshEntries();
       renderPalette(paletteInput.value, action);
     },
-    showPalette(only) { setPalette(true, "pointer", only); },
+    showPalette(only) { setPalette(true, only); },
     toast,
     inboxMount,
     act(action) { runAction(action, "pointer"); },
     appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),
-    settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },
+    setBackdrop(image) { setMeshImages(image || "none", "none"); },
+    settingsPanels: { render: renderSettingsPanel },
     toolbarRow: () => (rowIndex === 0 ? "canvas" : "keys"),
     lockToolbarRow(row) { rowLock = row; autoRow(); },
     setCanvasRow(items) {
@@ -1562,7 +1687,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       for (const item of items) paint(item.id);
       defaults.canvas = items.map((i) => i.id);
       applyPrefs(false);
-      if (items.length && !options.settingsView && !settingsSections.includes(toolbarSettings)) settingsSections.unshift(toolbarSettings);
+      if (items.length && !options.settingsView && settingsSections && settingsUi) addToolbarSettingsSection(settingsUi);
       rebuildStaticEntries();
       canvasRowEl.hidden = items.length === 0;
       keysRowEl.hidden = items.length > 0 && !isTerminalFocus(document.activeElement);
@@ -1571,7 +1696,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       else settleRow(keysRowEl.hidden ? 0 : 1, true);
       return {
         update(id, patch) { const cur = canvasItems.get(id); if (!cur) return; Object.assign(cur, patch); paint(id); },
-        dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keysRowEl.hidden = false; keytray.dataset.rows = "1"; settleRow(1, true); },
+        dispose() { const at = settingsSections?.findIndex((section) => section.id === "toolbar") ?? -1; if (at >= 0) settingsSections?.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keysRowEl.hidden = false; keytray.dataset.rows = "1"; settleRow(1, true); },
       };
     },
     setHostTree(sections, activeLeaf, onSelect, extras) {
@@ -1628,6 +1753,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       shortcuts.dispose();
+      screenDisposed = true;
+      settingsOpening = false;
+      settingsRequest++;
       settings?.dispose();
       for (const remove of removeShortcuts) remove();
       sidebarFoot?.dispose();
@@ -1645,9 +1773,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       keybar.removeEventListener("click", keybarClick);
       keytray.removeEventListener("keydown", keybarKeydown);
       window.clearTimeout(resizeTimer);
+      stopThemes?.();
       releaseMesh();
       delete ROOT.dataset.kb;
     },
   };
+  // The person's Themes (D322): the page shows the selected one from now on. Only the product's screens have Settings windows to edit them in.
+  // `?look=<theme id>` previews a theme for this page load only (tests and screenshots, like `?theme=`): honoured on the test double alone, so a link sent to a person of
+  // a real server cannot change their look, and a preview never saves (see `startThemes`).
+  /** A mock-only URL preview; null keeps the account's saved appearance authoritative. */
+  const previewThemeId = options.mockMode ? new URLSearchParams(location.search).get("look") : null;
+  const stopThemes = options.settingsView ? startThemes(api, {
+    ...(options.accountId ? { accountId: options.accountId } : {}),
+    ...(previewThemeId !== null ? { preview: previewThemeId } : {}),
+  }) : undefined;
   return api;
 }

@@ -23,112 +23,137 @@ enum IntentKind {
     Weight,
     MembershipRemove,
     Pin,
+    Look,
 }
+/// Shape and typed validation metadata for one semantic canvas operation.
+#[derive(Clone, Copy)]
 struct IntentRule {
+    name: &'static str,
     kind: IntentKind,
     fields: &'static [&'static str],
     strings: &'static [&'static str],
 }
+/// The single source of accepted keys and value checks for every intent kind.
+const INTENT_RULES: &[IntentRule] = &[
+    IntentRule {
+        name: "view.add",
+        kind: IntentKind::ViewAdd,
+        fields: &["type", "view"],
+        strings: &[],
+    },
+    IntentRule {
+        name: "view.remove",
+        kind: IntentKind::ViewRemove,
+        fields: &["type", "view_id"],
+        strings: &["view_id"],
+    },
+    IntentRule {
+        name: "view.update",
+        kind: IntentKind::ViewUpdate,
+        fields: &["type", "view_id", "cell", "name"],
+        strings: &["view_id"],
+    },
+    IntentRule {
+        name: "target",
+        kind: IntentKind::Target,
+        fields: &["type", "window_id", "target"],
+        strings: &["window_id"],
+    },
+    IntentRule {
+        name: "open",
+        kind: IntentKind::Open,
+        fields: &[
+            "type",
+            "view_id",
+            "column_id",
+            "window",
+            "after",
+            "column_after",
+        ],
+        strings: &["view_id", "column_id"],
+    },
+    IntentRule {
+        name: "split",
+        kind: IntentKind::Split,
+        fields: &[
+            "type",
+            "view_id",
+            "anchor_id",
+            "axis",
+            "column_id",
+            "window",
+        ],
+        strings: &["view_id", "anchor_id", "axis", "column_id"],
+    },
+    IntentRule {
+        name: "close",
+        kind: IntentKind::Close,
+        fields: &["type", "window_id"],
+        strings: &["window_id"],
+    },
+    IntentRule {
+        name: "move",
+        kind: IntentKind::Move,
+        fields: &[
+            "type",
+            "view_id",
+            "window_id",
+            "column_id",
+            "after",
+            "column_after",
+        ],
+        strings: &["view_id", "window_id", "column_id"],
+    },
+    IntentRule {
+        name: "membership.add",
+        kind: IntentKind::MembershipAdd,
+        fields: &[
+            "type",
+            "view_id",
+            "window_id",
+            "column_id",
+            "after",
+            "column_after",
+        ],
+        strings: &["view_id", "window_id", "column_id"],
+    },
+    IntentRule {
+        name: "resize",
+        kind: IntentKind::Resize,
+        fields: &["type", "window_id", "height", "span", "rows", "row"],
+        strings: &["window_id"],
+    },
+    IntentRule {
+        name: "weight",
+        kind: IntentKind::Weight,
+        fields: &["type", "view_id", "column_id", "weight"],
+        strings: &["view_id", "column_id"],
+    },
+    IntentRule {
+        name: "membership.remove",
+        kind: IntentKind::MembershipRemove,
+        fields: &["type", "view_id", "window_id"],
+        strings: &["view_id", "window_id"],
+    },
+    IntentRule {
+        name: "pin",
+        kind: IntentKind::Pin,
+        fields: &["type", "view_id", "node_id", "position"],
+        strings: &["view_id", "node_id"],
+    },
+    IntentRule {
+        name: "look.set",
+        kind: IntentKind::Look,
+        fields: &["type", "look"],
+        strings: &[],
+    },
+];
+
+/// Returns the validation rule for a recognized intent type.
 fn intent_rule(kind: &str) -> Option<IntentRule> {
-    // Keep shape and value checks in one kind dispatch so each intent has one
-    // authoritative list of accepted and required keys.
-    Some(match kind {
-        "view.add" => IntentRule {
-            kind: IntentKind::ViewAdd,
-            fields: &["type", "view"],
-            strings: &[],
-        },
-        "view.remove" => IntentRule {
-            kind: IntentKind::ViewRemove,
-            fields: &["type", "view_id"],
-            strings: &["view_id"],
-        },
-        "view.update" => IntentRule {
-            kind: IntentKind::ViewUpdate,
-            fields: &["type", "view_id", "cell", "name"],
-            strings: &["view_id"],
-        },
-        "target" => IntentRule {
-            kind: IntentKind::Target,
-            fields: &["type", "window_id", "target"],
-            strings: &["window_id"],
-        },
-        "open" => IntentRule {
-            kind: IntentKind::Open,
-            fields: &[
-                "type",
-                "view_id",
-                "column_id",
-                "window",
-                "after",
-                "column_after",
-            ],
-            strings: &["view_id", "column_id"],
-        },
-        "split" => IntentRule {
-            kind: IntentKind::Split,
-            fields: &[
-                "type",
-                "view_id",
-                "anchor_id",
-                "axis",
-                "column_id",
-                "window",
-            ],
-            strings: &["view_id", "anchor_id", "axis", "column_id"],
-        },
-        "close" => IntentRule {
-            kind: IntentKind::Close,
-            fields: &["type", "window_id"],
-            strings: &["window_id"],
-        },
-        "move" => IntentRule {
-            kind: IntentKind::Move,
-            fields: &[
-                "type",
-                "view_id",
-                "window_id",
-                "column_id",
-                "after",
-                "column_after",
-            ],
-            strings: &["view_id", "window_id", "column_id"],
-        },
-        "membership.add" => IntentRule {
-            kind: IntentKind::MembershipAdd,
-            fields: &[
-                "type",
-                "view_id",
-                "window_id",
-                "column_id",
-                "after",
-                "column_after",
-            ],
-            strings: &["view_id", "window_id", "column_id"],
-        },
-        "resize" => IntentRule {
-            kind: IntentKind::Resize,
-            fields: &["type", "window_id", "height", "span", "rows", "row"],
-            strings: &["window_id"],
-        },
-        "weight" => IntentRule {
-            kind: IntentKind::Weight,
-            fields: &["type", "view_id", "column_id", "weight"],
-            strings: &["view_id", "column_id"],
-        },
-        "membership.remove" => IntentRule {
-            kind: IntentKind::MembershipRemove,
-            fields: &["type", "view_id", "window_id"],
-            strings: &["view_id", "window_id"],
-        },
-        "pin" => IntentRule {
-            kind: IntentKind::Pin,
-            fields: &["type", "view_id", "node_id", "position"],
-            strings: &["view_id", "node_id"],
-        },
-        _ => return None,
-    })
+    INTENT_RULES.iter().copied().find(|rule| rule.name == kind)
 }
+/// Checks the payload-specific values after its keys and strings pass the table rule.
 fn check_intent(value: &Value, kind: IntentKind) -> bool {
     match kind {
         IntentKind::ViewAdd => value.get("view").is_some_and(model::view),
@@ -159,6 +184,7 @@ fn check_intent(value: &Value, kind: IntentKind) -> bool {
             })
         }),
         IntentKind::Weight => model::numeric(value, "weight", 0.1, 10.0),
+        IntentKind::Look => value.get("look").is_some_and(model::look),
         IntentKind::Pin => value
             .get("position")
             .is_none_or(|p| p.is_null() || model::point(p, 100_000.0)),
@@ -514,6 +540,10 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
                 pins.remove(id);
             }
         }
+        IntentKind::Look => {
+            // The whole look is replaced: the server orders edits, so the last one to arrive is the account's look on every device.
+            doc.0["look"] = intent.get("look").ok_or(())?.clone();
+        }
     }
     if matches!(
         kind,
@@ -537,6 +567,7 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
     if doc.valid() { Ok(()) } else { Err(()) }
 }
 
+/// Invariants for valid intent shapes and deterministic document reduction.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,5 +730,111 @@ mod tests {
         ] {
             assert!(!valid_intent(&value));
         }
+    }
+
+    /// A bounded account look used by reducer tests.
+    fn look() -> Value {
+        let theme = |id: &str| json!({"id":id,"name":id,"tint":75,"blur":25,"grain":0,"font":"maple-mono-nf","colors":"mocha","uiSize":100,"background":"aurora","customSolid":"#3b4252","custom":{"stops":["#7a9cff","#cba6f7"],"angle":135}});
+        json!({"v":1,"selected":"tinted","basics":{"colors":"mocha","font":"maple-mono-nf","uiSize":100},"themes":[theme("solid"),theme("tinted"),theme("custom-1")],"windowSizes":{"phone":"edge","desktop":"comfortable"},"extendedInfo":false})
+    }
+    /// Stores one complete look in the canonical document and replaces it as a whole.
+    #[test]
+    fn the_accounts_look_is_set_whole_validated_and_part_of_the_document() {
+        let mut doc = document();
+        assert!(
+            doc.0.get("look").is_none(),
+            "a document without a look is still valid"
+        );
+        let intent = json!({"type":"look.set","look":look()});
+        assert!(valid_intent(&intent));
+        reduce(&mut doc, &intent, &[]).unwrap();
+        assert_eq!(doc.0["look"], look());
+        assert!(doc.valid());
+        // Setting it again changes nothing (a no-op does not make a new revision), and a later look replaces the earlier one whole.
+        let before = doc.clone();
+        reduce(&mut doc, &intent, &[]).unwrap();
+        assert_eq!(doc, before);
+        let mut next = look();
+        // The following pop removes the last theme, so keep selection on a retained id.
+        next["selected"] = json!("tinted");
+        next["themes"].as_array_mut().unwrap().pop();
+        reduce(&mut doc, &json!({"type":"look.set","look":next}), &[]).unwrap();
+        assert_eq!(doc.0["look"]["themes"].as_array().unwrap().len(), 2);
+    }
+    /// Rejects malformed and out-of-range looks without changing the saved document.
+    #[test]
+    fn a_look_out_of_bounds_is_refused_and_leaves_the_document_alone() {
+        let mut doc = document();
+        let bad = |edit: &dyn Fn(&mut Value)| {
+            let mut value = look();
+            edit(&mut value);
+            json!({"type":"look.set","look":value})
+        };
+        let cases = [
+            bad(&|v| v["themes"][0]["tint"] = json!(101)),
+            bad(&|v| v["themes"][0]["blur"] = json!(-1)),
+            bad(&|v| v["themes"][0]["grain"] = json!(12.5)),
+            bad(&|v| v["themes"][0]["uiSize"] = json!(10)),
+            bad(&|v| v["basics"]["uiSize"] = json!(900)),
+            bad(&|v| v["themes"][0]["customSolid"] = json!("red")),
+            bad(&|v| v["themes"][0]["custom"]["stops"] = json!(["#ffffff"])),
+            bad(&|v| {
+                v["themes"][0]["custom"]["stops"] =
+                    json!(["#ffffff", "#000000", "#111111", "#222222", "#333333"]);
+            }),
+            bad(&|v| v["themes"][0]["custom"]["angle"] = json!(361)),
+            bad(&|v| v["themes"][0]["name"] = json!("x".repeat(201))),
+            bad(&|v| v["themes"][0]["extra"] = json!(1)),
+            bad(&|v| v["themes"][1]["id"] = json!("solid")),
+            bad(&|v| v["v"] = json!(2)),
+            bad(&|v| v["uiFont"] = json!("serif")),
+            bad(&|v| v["windowSizes"]["phone"] = json!("tablet")),
+            bad(&|v| v["windowSizes"]["desktop"] = json!("compact")),
+            bad(&|v| v["extendedInfo"] = json!("yes")),
+            bad(&|v| v["windowSizes"]["extra"] = json!(true)),
+            bad(&|v| {
+                let t = v["themes"][0].clone();
+                for n in 0..16 {
+                    let mut c = t.clone();
+                    c["id"] = json!(format!("n{n}"));
+                    v["themes"].as_array_mut().unwrap().push(c);
+                }
+            }),
+            json!({"type":"look.set"}),
+            json!({"type":"look.set","look":look(),"extra":1}),
+        ];
+        for case in &cases {
+            assert!(!valid_intent(case), "{case}");
+            assert!(reduce(&mut doc, case, &[]).is_err());
+        }
+        assert_eq!(doc, document());
+        // A document that carries an out-of-range look is not a valid document either.
+        doc.0["look"] = look();
+        doc.0["look"]["themes"][0]["tint"] = json!(500);
+        assert!(!doc.valid());
+    }
+    /// Ensures the largest accepted look fits within one protocol intent.
+    #[test]
+    fn a_full_look_fits_in_one_intent() {
+        let mut value = look();
+        let one = value["themes"][0].clone();
+        // Selection must still point into the replacement list.
+        value["selected"] = json!("custom-0");
+        let list = value["themes"].as_array_mut().unwrap();
+        list.clear();
+        for n in 0..16 {
+            let mut t = one.clone();
+            t["id"] = json!(format!("custom-{n}"));
+            t["name"] = json!("A theme with a long name");
+            t["font"] = json!("fantasque-sans-mono");
+            list.push(t);
+        }
+        let intent = json!({"type":"look.set","look":value});
+        assert!(valid_intent(&intent));
+        assert!(
+            intent.to_string().len() < crate::model::MAX_INPUT,
+            "{} bytes",
+            intent.to_string().len()
+        );
     }
 }

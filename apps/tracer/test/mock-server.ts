@@ -35,7 +35,8 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error("TRACER_BACKEND_PORT must be an integer TCP port");
 }
 const MAX_HTTP_BODY = 32 * 1024;
-const MAX_MOCK_OUTPUT = 1024 * 1024;
+/** The most output one mock session keeps (2 MiB: room for a copy just over the OSC 52 cap, 1,048,576 base64 characters). */
+const MAX_MOCK_OUTPUT = 2 * 1024 * 1024;
 const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
 const MAX_TRACE_EVENTS = 120_000;
@@ -122,6 +123,13 @@ interface TraceEvent {
 
 let owner: MockOwner | undefined;
 let activeAuthCookie: string | undefined;
+/**
+ * Preview sessions handed out by a plain page load or by `ensurePreviewSession`. Each page load adds its own cookie and none
+ * replaces another, so a stray page from another test, tab or browser context cannot turn this context's next request into a
+ * 401 (#442). The ceremonies (setup, login, open-terminal) still replace `activeAuthCookie`, which is how a second sign-in
+ * ends the first. `logout` removes only the cookie that signed out, and `/__mock/reset` clears the set.
+ */
+const previewCookies = new Set<string>();
 /**
  * A preview signed out on purpose (#171). Loading a preview page normally hands out a fresh mock session; after the
  * person signs out, a reload must stay on the sign-in screen, so the double stops handing one out until the page is
@@ -355,10 +363,16 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     if (typeof body?.text !== "string") return sendJson(response, 400, { error: "query output must be a string" });
     const bytes = new TextEncoder().encode(body.text);
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_MESSAGE) return sendJson(response, 413, { error: "query output must fit one frame" });
-    session.echoMode = "none";
+    // `session_id` aims the bytes at one attached window's session (several windows each have their own); without it,
+    // the newest session gets them, as before.
+    const target = typeof body.session_id === "string"
+      ? [...connections].find((candidate) => candidate.session.sessionIdText === body.session_id)?.session
+      : session;
+    if (!target) return sendJson(response, 404, { error: "no attached session has that id" });
+    target.echoMode = "none";
     // Use the existing live suffix writer so these bytes follow the captured replay head.
-    appendEchoOutput(session, bytes);
-    return sendJson(response, 200, { bytes: bytes.byteLength, output_sequence: String(session.outputLength) });
+    appendEchoOutput(target, bytes);
+    return sendJson(response, 200, { bytes: bytes.byteLength, output_sequence: String(target.outputLength) });
   }
   if (request.method === "POST" && url.pathname === "/__mock/synchronized-output") {
     const body = await readJson(request);
@@ -549,6 +563,7 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       attach_count: attachCount,
       attach_history: attachHistory,
       attached_stream_ids: [...connections].filter((connection) => connection.attached).map((connection) => connection.stream),
+      attached_sessions: [...connections].filter((connection) => connection.attached).map((connection) => ({ id: connection.session.sessionIdText, accepted_input_bytes: connection.acceptedInputBytes })),
       viewer_input_bytes: [...connections].map((connection) => ({
         client_id: connection.clientId,
         viewer_label: connection.viewerLabel,
@@ -730,15 +745,17 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
   if ((url.pathname === "/" || url.pathname === "/index.html") && ["windows", "addhost", "clusters", "product"].includes(url.searchParams.get("proto") ?? "") && (!previewSignedOut || url.searchParams.has("fresh"))) {
     previewSignedOut = false;
     if (!owner) owner = makeMockOwner();
-    activeAuthCookie = newToken();
+    const token = newToken();
+    previewCookies.add(token);
     unlockPending = false;
     pendingTransaction = undefined;
     pendingLogin = undefined;
-    setPreviewAuthCookie(response, activeAuthCookie);
+    setPreviewAuthCookie(response, token);
   }
   await serveDist(url.pathname, request.method === "HEAD", response);
 }
 
+/** Answers one `/auth/<action>` request of the double: the passkey ceremonies, the session check, wraps, unlock and logout. */
 async function authAction(
   action: string,
   body: Record<string, unknown>,
@@ -865,7 +882,12 @@ async function authAction(
     case "logout":
       if (body.pending_transaction !== undefined && (!unlockPending || body.pending_transaction !== pendingTransaction)) return sendJson(response, 401, { error: "authorization failed" });
       if (!isAuthenticated(request)) return sendJson(response, 401, { error: "authorization failed" });
-      activeAuthCookie = undefined;
+      for (const name of ["__Host-infraternal", "infraternal-mock-session"]) {
+        const presented = cookieValue(request, name);
+        if (presented === undefined) continue;
+        previewCookies.delete(presented);
+        if (presented === activeAuthCookie) activeAuthCookie = undefined;
+      }
       if (body.pending_transaction === undefined) previewSignedOut = true;
       response.setHeader("Set-Cookie", "__Host-infraternal=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
       return sendJson(response, 200, { ok: true });
@@ -1326,14 +1348,17 @@ function ensurePreviewSession(request: IncomingMessage, response: ServerResponse
   if (!request.url?.startsWith("/auth/") && !request.url?.startsWith("/__mock/")) return;
   if (request.url.startsWith("/__mock/reset") || isAuthenticated(request) || previewSignedOut) return;
   if (!owner) owner = makeMockOwner();
-  activeAuthCookie = newToken();
-  setPreviewAuthCookie(response, activeAuthCookie);
-  request.headers.cookie = `infraternal-mock-session=${activeAuthCookie}`;
+  const token = newToken();
+  previewCookies.add(token);
+  setPreviewAuthCookie(response, token);
+  request.headers.cookie = `infraternal-mock-session=${token}`;
 }
 
+/** True when the request carries a session cookie the double handed out and has not ended: the active ceremony one or any preview one. */
 function isAuthenticated(request: IncomingMessage): boolean {
-  const cookie = activeAuthCookie;
-  return Boolean(owner && cookie && [cookieValue(request, "__Host-infraternal"), cookieValue(request, "infraternal-mock-session")].includes(cookie));
+  if (!owner) return false;
+  return [cookieValue(request, "__Host-infraternal"), cookieValue(request, "infraternal-mock-session")]
+    .some((presented) => presented !== undefined && (presented === activeAuthCookie || previewCookies.has(presented)));
 }
 
 function hasAuthCookie(request: IncomingMessage): boolean {
@@ -1371,11 +1396,13 @@ interface MockShare { id: string; from: string; to: string[]; publish: boolean; 
 const mockShares: MockShare[] = [];
 const mockGroups: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["ravi", "asha"] };
 let accountToolbar: unknown;
+/** Puts the double back to a fresh state for the next test: no owner, no sessions, no sockets or counters, and the setup token renewed. */
 function resetMockState(): void {
   mockShares.length = 0;
   accountToolbar = undefined;
   owner = undefined;
   activeAuthCookie = undefined;
+  previewCookies.clear();
   // A failed login can leave a half-finished unlock; it belongs to the retired fixture.
   unlockPending = false;
   pendingTransaction = undefined;

@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./spring": "./src/spring.ts",
+    "./motion": "./src/motion.ts",
     "./tick": "./src/tick.ts",
     "./glitch": "./src/glitch.ts",
     "./countup": "./src/countup.ts",

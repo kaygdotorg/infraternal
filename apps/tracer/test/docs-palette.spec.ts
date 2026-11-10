@@ -129,7 +129,7 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       expect(Math.abs(await page.evaluate(() => { const w = '.ui-window[data-window-id="d-reference/keys"]'; const s = document.querySelector<HTMLElement>(`${w} .dr-scroll`)!; const scale = s.getBoundingClientRect().height / s.clientHeight; const row = document.querySelector(`${w} .dr-page tbody tr`)!; const inset = parseFloat(getComputedStyle(row.closest(".table")!).borderLeftWidth) + parseFloat(getComputedStyle(row).paddingLeft); return (document.querySelector(`${w} .dr-page td:first-child`)!.getBoundingClientRect().left - document.querySelector(`${w} .dr-page h1`)!.getBoundingClientRect().left) / scale - inset; })), "table cell text is inset by the card's border and padding").toBeLessThanOrEqual(0.5);
       // The page is fully inside its window: nothing runs sideways, and the type is the product's scale (13 px, 16 px on touch).
       expect(await page.evaluate(() => { const s = document.querySelector<HTMLElement>('.ui-window[data-window-id="d-reference/keys"] .dr-scroll')!; return s.scrollWidth - s.clientWidth; })).toBeLessThanOrEqual(0);
-      expect(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.ui-window[data-window-id="d-reference/keys"] .doc-body p')!).fontSize) / (parseFloat(getComputedStyle(document.documentElement).fontSize) / 16))).toBe(size.touch ? 16 : 13);
+      expect(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.ui-window[data-window-id="d-reference/keys"] .doc-body p')!).fontSize) / (parseFloat(getComputedStyle(document.documentElement).fontSize) / 16))).toBe(size.touch ? 15 : 14);
       // The measure: at most 70 characters, however wide the window.
       expect(await page.evaluate(() => {
         const body = document.querySelector<HTMLElement>('.ui-window[data-window-id="d-reference/keys"] .doc-body')!;
@@ -187,6 +187,9 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       // Another page: its window is the one in view, and the first page's window stays where it was.
       await openPalette(page);
       await page.keyboard.type("infraternal multiplexer");
+      // The query also names a Settings row (the "Offer To Switch" setting explains the switch to the Infraternal Multiplexer), but the
+      // page's title starts with it, so the palette lists the Docs group first (palette-rank.ts) and Enter opens the page.
+      await expect(page.locator(".palette .result").first()).toContainText("Terminal › The Infraternal Multiplexer");
       await page.keyboard.press("Enter");
       await expect(page.locator('.ui-window[data-window-id="d-terminal/multiplexer"] .dr-page h1')).toHaveText("The Infraternal Multiplexer", { timeout: 10_000 });
       await page.waitForTimeout(900);

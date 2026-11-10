@@ -1,5 +1,6 @@
 /** Independent #244 retained-typing lifetime and consent controls; all input is synthetic. */
 import { expect, test } from "bun:test";
+import { Osc52Scanner } from "./osc52";
 import { TerminalClient } from "./terminal";
 import type { ToastMessage } from "../../../packages/ui/src/toast";
 import type { WireFrame } from "../../../packages/protocol/src/codec";
@@ -36,6 +37,8 @@ function fixture() {
   };
   const client = Object.assign(Object.create(TerminalClient.prototype), {
     synchronizedOutput: { reset() {}, dispose() {} },
+    // The constructor builds this private field, and Object.create skips it; a real scanner keeps the OSC 52 path honest (#440).
+    clipboardWrites: new Osc52Scanner(),
     parsedOutputVersion: 0,
     closed: false, attachmentConfirmed: false, inputNeedsResend: false, retainedInput: undefined,
     inputQueue: queue, inputScratch: new Uint8Array(16 * 1024),

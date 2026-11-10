@@ -26,6 +26,7 @@
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { beginInlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
@@ -39,11 +40,12 @@ import { isTerminal } from "../views/body";
 import { ICON, SESSION_ICON } from "../views/icons";
 import { paintLink } from "./link";
 import type { RefusalAction } from "../../terminal-refusal";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 
 /** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
 export interface SessionUiPart {
   paint(rec: WinRec): void;
-  toggleManager(rec: WinRec, anchor: HTMLElement, source: PopoverSource): void;
+  toggleManager(rec: WinRec, anchor: HTMLElement): void;
   closeManager(): void;
   arrived(rec: WinRec): void;
   /** The host refused this window's shell: the strip says why and offers the one action that helps. False when the window already has a session (the caller shows a toast). */
@@ -55,7 +57,6 @@ export interface SessionUiPart {
   dispose(): void;
 }
 
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const STATE_LABEL: Record<SessionState, string> = { open: "Open", detached: "Detached", exited: "Exited" };
 
 const button = (cls: string, label: string, paths: string): HTMLButtonElement => {
@@ -123,7 +124,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     ...(action === "retry" ? { action: { label: "Try again", icon: SESSION_ICON.again, run: () => newShell(rec) } }
       : action === "add-host" && cx.adapters.addHost ? { action: { label: "Add host", icon: ICON.plus, run: () => cx.adapters.addHost?.() } }
       // A host short of memory asks the person to close sessions: the strip opens that host's list, as the toast's button did.
-      : action === "sessions" ? { action: { label: "Sessions", icon: SESSION_ICON.sessions, run: () => cx.sessionUi?.toggleManager(rec, rec.card.root.querySelector<HTMLElement>('[data-action="sessions"]'), "pointer") } } : {}),
+      : action === "sessions" ? { action: { label: "Sessions", icon: SESSION_ICON.sessions, run: () => cx.sessionUi?.toggleManager(rec, rec.card.root.querySelector<HTMLElement>('[data-action="sessions"]')) } } : {}),
     dismiss: closeStrip(rec),
   });
   /** A window that stayed connecting too long: the same strip, with a retry that asks again without dropping its session. */
@@ -259,7 +260,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
   };
   const slideLabel = (rec: WinRec): void => {
     if (reduced.matches) return;
-    rec.card.pill.querySelector<HTMLElement>(".ui-window-session")?.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE });
+    rec.card.pill.querySelector<HTMLElement>(".ui-window-session")?.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE_OUT });
   };
 
   // ---- ending and dismissing --------------------------------------------------------------------
@@ -323,11 +324,14 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     private renaming: string | undefined;
     /** Which status card was showing, so a change between two of them crossfades instead of swapping. */
     private shown: string = "ready";
-    constructor(readonly rec: WinRec, anchor: HTMLElement, source: PopoverSource) {
+    /** Opens the session manager for `rec` under `anchor`; the card reads the input source for where focus goes and its popover for its motion. */
+    constructor(readonly rec: WinRec, anchor: HTMLElement) {
+      // Only focus placement still needs to know; the popover itself reads the input source for its motion (#427).
+      const source: PopoverSource = triggeredByKeyboard() ? "keyboard" : "pointer";
       this.popover = openAnchoredPopover({
         stage, anchor, label: `Sessions on ${rec.model.host}`, className: "cl-sx-pop", align: "end", maxWidth: 380,
         bottomLimit: () => { const tray = stage.querySelector<HTMLElement>("#keybar"); return tray && getComputedStyle(tray).display !== "none" ? tray.getBoundingClientRect().top - 8 : undefined; },
-      }, source, () => { this.dispose(); manager = undefined; });
+      }, () => { this.dispose(); manager = undefined; });
       const root = this.popover.root;
       root.innerHTML = `<header class="cl-sx-head"><span class="cl-sx-logo"></span><span class="cl-sx-names"><span class="cl-sx-title"></span><span class="cl-sx-sub">Sessions</span></span></header><div class="cl-sx-scroll"></div>`;
       root.querySelector<HTMLElement>(".cl-sx-logo")!.innerHTML = rec.model.os ? hostIconMarkup(rec.model.os, "ui-host-mark") : "";
@@ -343,12 +347,13 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         if (next) { event.preventDefault(); next.focus(); }
       });
       // The canvas moving under it ends it: the card belongs to its window, not to the screen.
-      cx.viewport.addEventListener("wheel", () => this.close("pointer"), { passive: true, signal: this.life.signal });
+      cx.viewport.addEventListener("wheel", () => this.close(), { passive: true, signal: this.life.signal });
       this.render();
       if (source === "keyboard") this.scroll.querySelector<HTMLElement>(".cl-sx-main")?.focus({ preventScroll: true });
     }
     private readonly life = new AbortController();
-    close(source: PopoverSource): void { this.popover.close(source); }
+    /** Closes the manager: at once after a key, with the popover fade after a pointer. */
+    close(): void { this.popover.close(); }
     private dispose(): void {
       this.life.abort();
       this.swipes.forEach((stop) => stop());
@@ -456,6 +461,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       return li;
     }
 
+    /** Handles a press on a session row or one of its actions (switch, run again, beside, end). */
     private onClick(event: MouseEvent): void {
       const target = event.target as Element;
       const li = target.closest<HTMLElement>(".cl-sx-row");
@@ -468,8 +474,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       if (act === "rename") { this.edit(li, host, s); return; }
       if (act === "end") { this.confirmEnd(target.closest<HTMLElement>(".cl-sx-act")!, li, host, s); return; }
       if (act === "dismiss") { this.remove(li, () => dismissSession(host, s)); return; }
-      if (act === "again") { this.popover.close(how); inventory.runAgain(host, s.id); this.choose(s, how, false); return; }
-      if (act === "beside") { this.popover.close(how); void cx.win.newWindow(this.rec, "right", false, s.id); return; }
+      if (act === "again") { this.popover.close(); inventory.runAgain(host, s.id); this.choose(s, how, false); return; }
+      if (act === "beside") { this.popover.close(); void cx.win.newWindow(this.rec, "right", s.id); return; }
       if (target.closest(".cl-sx-name-input")) return;
       if (li.hasAttribute("data-swiped")) { li.dispatchEvent(new CustomEvent("sx-close")); return; }
       this.choose(s, how, true);
@@ -478,13 +484,14 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     /** One open elsewhere takes you to its window; any other attaches this window to it. */
     private choose(s: SessionRecord, how: PopoverSource, closeFirst: boolean): void {
       const rec = this.rec;
-      if (closeFirst) this.popover.close(how);
+      if (closeFirst) this.popover.close();
       if (rec.model.sessionId === s.id) return;
       const elsewhere = windowFor(rec.model.host, s.id);
       if (elsewhere) { cx.win.setActive(elsewhere); cx.nav.focusWindow(elsewhere); return; }
       cx.win.attach(rec, s.id);
     }
 
+    /** Asks before ending session `s` of `host`, in a confirmation anchored to the row. */
     private confirmEnd(anchor: HTMLElement, li: HTMLElement, host: string, s: SessionRecord): void {
       confirm?.close(false);
       confirm = mountConfirmTip(anchor, {
@@ -497,7 +504,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         onConfirm: () => {
           confirm = undefined;
           // Ending this window's own session closes the window, and the card with it.
-          if (s.id === this.rec.model.sessionId) { this.popover.close("pointer"); inventory.end(host, s.id); closeWindowOf(host, s.id); return; }
+          if (s.id === this.rec.model.sessionId) { this.popover.close(); inventory.end(host, s.id); closeWindowOf(host, s.id); return; }
           this.remove(li, () => { inventory.end(host, s.id); closeWindowOf(host, s.id); });
         },
         onCancel: () => { confirm = undefined; },
@@ -515,7 +522,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
           const was = tops.get(row.dataset.id);
           if (was === undefined) continue;
           const dy = was - row.getBoundingClientRect().top;
-          if (Math.abs(dy) > 1) row.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 260, easing: EASE });
+          if (Math.abs(dy) > 1) row.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 260, easing: EASE_OUT });
         }
       };
       if (reduced.matches) { finish(); return; }
@@ -599,17 +606,17 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
 
   return {
     paint,
-    toggleManager(rec, anchor, source) {
-      if (manager?.rec === rec) { manager.close(source); return; }
-      manager?.close("keyboard");
+    toggleManager(rec, anchor) {
+      if (manager?.rec === rec) { manager.close(); return; }
+      manager?.close();
       cx.win.setActive(rec);
-      manager = new Manager(rec, anchor, source);
+      manager = new Manager(rec, anchor);
     },
-    closeManager() { manager?.close("keyboard"); },
+    closeManager() { manager?.close(); },
     arrived(rec) { slideLabel(rec); flash(rec); },
     refused,
     unreachable,
     render() { manager?.render(); },
-    dispose() { manager?.close("keyboard"); confirm?.close(false); },
+    dispose() { manager?.close(); confirm?.close(false); },
   };
 }

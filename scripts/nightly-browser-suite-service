@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Root entry point of the nightly browser suite system unit on dev-02 (D373, #443).
+
+Installed root-owned at /usr/local/libexec/infraternal-browser-suite-service by
+`scripts/install-nightly-browser-suite`; systemd runs it as root. Like the
+fuzz helper it runs no repository code as root, and it keeps the Forgejo
+token away from the code under test:
+
+1. holds one shared build slot as `claude` (through `runuser`) until step 5 ends.
+   Waiting for the slot has its own bound (QUEUE_WAIT_SECONDS): on a timeout
+   the unit fails with exit 75 and one `QUEUE WAIT TIMEOUT` journal line, and no
+   suite runs. The suite's own budget (`timeout`, 6 h) starts only after the
+   slot is granted; a timeout is exit 124 and one `SUITE TIMEOUT` line;
+2. as `infraternal-browser` (no token, no sudo): fetches the newest origin/dev
+   (hooks off) and runs `scripts/nightly-browser-suite.py run` in the dev shell,
+   niced, then kills whatever that account still runs;
+3. as root, copies the run's three result files into a staging folder (created
+   by descriptor, never following a link) that belongs to the token account. Everything in the run folder is hostile (the
+   suite wrote it), so each file is opened without following links, must be a
+   regular file owned by the suite account and under a size cap, and is
+   written out as a fresh private copy;
+4. checks the staged copies are all there;
+5. as `infraternal-fuzz` (the account that holds the token): runs the
+   root-owned, reviewed copy of the reporter on the staged copies only. That
+   account never opens a path the suite account controls.
+
+`infraternal-browser-suite-service --report-only [--run-name NAME]` (as root) runs
+only step 5 again on the files already staged in `browser-staging`, with no slot,
+no suite and no staging: use it to file a night's results after fixing the token or
+the login. `--run-name` is needed for staging left by an older helper (it has no
+`staged.json`); otherwise the name comes from there.
+
+The Forgejo account the token belongs to is configured by the installer in
+`/etc/infraternal-browser-suite.login` (root-owned) and handed to the reporter:
+the token deliberately lacks the `read:user` scope, so the reporter cannot ask Forgejo.
+
+Its exit status is 1 when the build or the suite could not run, a result file
+was refused, or a report could not be filed; failing specs that were filed
+are a success, as in the fuzz.
+"""
+import os
+import pwd
+import re
+import argparse
+import datetime
+import json
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+BROWSER_USER = 'infraternal-browser'
+BROWSER_HOME = '/var/lib/infraternal-browser'
+REPORT_USER = 'infraternal-fuzz'
+REPORT_HOME = '/var/lib/infraternal-fuzz'
+REPORTER = '/usr/local/libexec/infraternal-browser-suite-report'
+BUILD_SLOT = '/home/claude/infraternal-ops/build-slot'
+READY = b'INFRATERNAL_BROWSER_SLOT_READY\n'
+# Two separate budgets, so a long build-slot queue can never look like a suite failure (#443):
+# the wait for a slot, and the suite itself (which starts only once a slot is held).
+# The unit's own TimeoutStartSec (24 h) is only a backstop above both plus the report.
+QUEUE_WAIT_SECONDS = 12 * 3600
+SUITE_BUDGET = '9h'
+QUEUE_TIMEOUT_EXIT = 75
+SUITE_TIMEOUT_EXIT = 124
+# What the suite may leave in a run folder, and the most the helper will copy of each. `results.json` and
+# `results.jsonl` are each optional (a suite stopped by its budget has only the streamed lines), but one must exist.
+CAPS = {'meta.json': 64 << 10, 'results.json': 32 << 20, 'results.jsonl': 32 << 20, 'suite.log': 16 << 20}
+OPTIONAL = ('results.json', 'results.jsonl')
+LOGIN_FILE = '/etc/infraternal-browser-suite.login'
+LOGIN_OWNER = 0
+LOGIN = re.compile(r'\A[A-Za-z0-9][A-Za-z0-9._-]{0,38}\Z', re.ASCII)
+# Stops every process of the suite account. Run as that account, so it can touch nobody else's. `kill` is not used:
+# procps' `kill -s KILL -- -1` prints its usage and signals nothing. A target of -1 means all processes of the
+# account except this one; no process left to signal (ESRCH) is success; anything else is an error.
+KILL_SNIPPET = ('import os, signal, sys\n'
+                'try:\n    os.kill(int(sys.argv[1]), signal.SIGKILL)\n'
+                'except ProcessLookupError:\n    pass\n')
+KILL_COMMAND = ['/usr/bin/python3', '-c', KILL_SNIPPET, '-1']
+RUN_NAME = re.compile(r'\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7}\Z', re.ASCII)
+PATH = 'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin'
+
+
+class Refused(Exception):
+    """A run folder or file that is not what an honest suite run leaves behind."""
+
+
+class Missing(Refused):
+    """The file is simply not there (an optional result file, say)."""
+
+
+def ids(user):
+    """The numeric user and group id of an account."""
+    entry = pwd.getpwnam(user)
+    return entry.pw_uid, entry.pw_gid
+
+
+def read_login(path, owner):
+    """The Forgejo account name from the root-owned config file, or Refused.
+
+    The file must be a plain file owned by `owner` (root) and hold one
+    plausible account name. It is read without following links.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f'{path}: {error.strerror}') from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_size > 256:
+            raise Refused(f'{path}: not a small regular file owned by root')
+        text = os.read(descriptor, 300).decode(errors='replace')
+    finally:
+        os.close(descriptor)
+    name = text[:-1] if text.endswith('\n') else text
+    if not LOGIN.fullmatch(name):
+        raise Refused(f'{path}: does not hold a Forgejo account name')
+    return name
+
+
+def run_is_from_tonight(name, since):
+    """Whether the run folder `name` was made at or after `since` (a UTC datetime), allowing a minute of slack.
+
+    The suite names its folder after the time it started, so a `latest` that is
+    older than this helper's own start belongs to an earlier night.
+    """
+    try:
+        stamp = datetime.datetime.strptime(name[:16], '%Y%m%dT%H%M%SZ').replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return False
+    return stamp >= since - datetime.timedelta(minutes=1)
+
+
+def write_staged_info(destination, name, suite_timeout, chown_to):
+    """Leave `staged.json` in the staging folder, so `--report-only` knows which run these files are from."""
+    descriptor = os.open('staged.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=destination)
+    with os.fdopen(descriptor, 'w') as handle:
+        handle.write(json.dumps({'run_name': name, 'suite_timeout': suite_timeout}) + '\n')
+        if chown_to:
+            os.fchown(handle.fileno(), *chown_to)
+
+
+def as_user(user, home, *command, cwd):
+    """Run `command` as `user` with a clean environment and return the exit status.
+
+    `cwd` is entered by `env -C` *after* `setpriv` has dropped privileges. Root
+    itself stays in `/`: the suite account owns its checkout and could make it
+    a link, and a root `chdir` would follow that link.
+    """
+    return subprocess.run(['setpriv', f'--reuid={user}', f'--regid={user}', '--init-groups', '--reset-env', '--',
+                           'env', '-C', cwd, f'HOME={home}', 'LANG=C.UTF-8', PATH, *command], cwd='/').returncode
+
+
+def read_owned(directory, name, cap, owner, tail=False):
+    """Read one regular file of `directory` (an open descriptor) owned by `owner`, never following links.
+
+    Opened with O_NOFOLLOW and O_NONBLOCK, so a symlink is refused and a FIFO
+    cannot hang the helper; then `fstat` on the open descriptor, so nothing
+    can be swapped in after the check. A file over `cap` is refused, except a
+    log (`tail=True`), where the last `cap` bytes are kept.
+    """
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    except FileNotFoundError as error:
+        raise Missing(f'{name}: {error.strerror}') from error
+    except OSError as error:
+        raise Refused(f'{name}: {error.strerror}') from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_nlink != 1:
+            raise Refused(f'{name}: not a regular, singly named file owned by the suite account')
+        if info.st_size > cap:
+            if not tail:
+                raise Refused(f'{name}: larger than {cap} bytes')
+            os.lseek(descriptor, info.st_size - cap, os.SEEK_SET)
+        data = b''
+        while len(data) <= cap:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            data += chunk
+        return data[:cap]
+    finally:
+        os.close(descriptor)
+
+
+def open_directory(parent, name):
+    """Open a subdirectory by name, refusing a symlink in its place."""
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    except OSError as error:
+        raise Refused(f'{name}: {error.strerror}') from error
+
+
+def latest_name(runs, owner):
+    """The run folder name the suite left in `runs/latest`, which must have the shape of a run folder."""
+    try:
+        root = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f'runs: {error.strerror}') from error
+    try:
+        text = read_owned(root, 'latest', 128, owner).decode(errors='replace')
+    finally:
+        os.close(root)
+    name = text[:-1] if text.endswith('\n') else text
+    if not RUN_NAME.fullmatch(name):
+        raise Refused('latest does not name a run folder')
+    return name
+
+
+def fresh_staging(home, chown_to):
+    """Create an empty private staging folder in the token account's `home`; return it as an open descriptor.
+
+    That home belongs to the token account, so nothing here goes by path: the
+    home is opened without following a link, the old folder is removed through
+    that descriptor, the new one is made and opened with O_NOFOLLOW, and only
+    then given to `chown_to` with `fchown`. The caller closes the descriptor.
+    """
+    parent = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        try:
+            os.unlink('browser-staging', dir_fd=parent)
+        except IsADirectoryError:
+            shutil.rmtree('browser-staging', dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.mkdir('browser-staging', 0o700, dir_fd=parent)
+        staging = os.open('browser-staging', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    finally:
+        os.close(parent)
+    os.fchown(staging, *chown_to)
+    return staging
+
+
+def stage(runs, name, destination, owner, chown_to):
+    """Copy a run's result files into the open directory `destination` as private regular files, or raise Refused.
+
+    `owner` is the suite account's uid; the run folder and each file must
+    belong to it. `chown_to` is the `(uid, gid)` that gets the copies, or None.
+    The copies are created relative to the `destination` descriptor, never by path.
+    """
+    if not RUN_NAME.fullmatch(name):
+        raise Refused('bad run name')
+    try:
+        root = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f'runs: {error.strerror}') from error
+    try:
+        run = open_directory(root, name)
+    finally:
+        os.close(root)
+    try:
+        if os.fstat(run).st_uid != owner:
+            raise Refused('run folder is not owned by the suite account')
+        copies = {}
+        for file, cap in CAPS.items():
+            try:
+                copies[file] = read_owned(run, file, cap, owner, tail=(file == 'suite.log'))
+            except Missing:
+                if file not in OPTIONAL:
+                    raise
+        if not any(file in copies for file in OPTIONAL):
+            raise Refused('the run left neither results.json nor results.jsonl')
+    finally:
+        os.close(run)
+    for file, data in copies.items():
+        descriptor = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=destination)
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(data)
+            if chown_to:
+                os.fchown(handle.fileno(), *chown_to)
+
+
+def stop_holder(holder):
+    """End a slot holder that is still queued: signal its whole process group, then let it go."""
+    try:
+        os.killpg(holder.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, TypeError):
+        holder.terminate()
+
+
+def wait_for_slot(holder):
+    """Wait up to QUEUE_WAIT_SECONDS for the holder to say it has a slot: True, False (it died) or None (still queued).
+
+    The wait is a short-lived reader thread, so the bound is enforced without
+    touching the pipe from two places. On a timeout the holder is stopped,
+    which also ends the reader.
+    """
+    answer = []
+    reader = threading.Thread(target=lambda: answer.append(holder.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(QUEUE_WAIT_SECONDS)
+    if reader.is_alive():
+        stop_holder(holder)
+        reader.join(5)
+        return None
+    return bool(answer) and answer[0] == READY
+
+
+def report_step(login, name, suite_timeout=None):
+    """Run the reviewed reporter as the token account on the staged files; return its exit status."""
+    staging = Path(REPORT_HOME) / 'browser-staging'
+    extra = ['--suite-timeout', suite_timeout] if suite_timeout else []
+    return as_user(REPORT_USER, REPORT_HOME, '/usr/bin/python3', '-I', REPORTER, 'report', '--results', str(staging),
+                   '--run-name', name, *extra, '--login', login, '--token-file', f'{REPORT_HOME}/forgejo-token', cwd=REPORT_HOME)
+
+
+def main(argv=None):
+    """Take a slot, run the suite without the token, report with it, release the slot (or only re-run the report, see the module doc)."""
+    parser = argparse.ArgumentParser(description='Nightly browser suite service helper (D373, #443).')
+    parser.add_argument('--report-only', action='store_true', help='only re-run the reporter on the files already staged')
+    parser.add_argument('--run-name', default=None, help='with --report-only: the run folder name, for staging from an older helper')
+    args = parser.parse_args(argv)
+    if args.run_name is not None and (not args.report_only or not RUN_NAME.fullmatch(args.run_name)):
+        parser.error('--run-name needs --report-only and a run folder name like 20261109T134307Z-c442500')
+    try:
+        login = read_login(LOGIN_FILE, LOGIN_OWNER)
+    except Refused as error:
+        print(f'nightly browser suite: no Forgejo login configured ({error}); the installer writes {LOGIN_FILE}', file=sys.stderr)
+        return 1
+    if args.report_only:
+        if args.run_name is None:
+            # Staged by this helper: the name is in staged.json, which the reporter reads itself.
+            staging = Path(REPORT_HOME) / 'browser-staging'
+            return as_user(REPORT_USER, REPORT_HOME, '/usr/bin/python3', '-I', REPORTER, 'report', '--results', str(staging),
+                           '--login', login, '--token-file', f'{REPORT_HOME}/forgejo-token', cwd=REPORT_HOME)
+        return report_step(login, args.run_name)
+    started = datetime.datetime.now(datetime.timezone.utc)
+    holder = subprocess.Popen(
+        ['runuser', '-u', 'claude', '--', BUILD_SLOT, '/usr/bin/python3', '-c',
+         f'import sys; sys.stdout.buffer.write({READY!r}); sys.stdout.flush(); sys.stdin.buffer.read(1)'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+    try:
+        slot = wait_for_slot(holder)
+        if slot is None:
+            print(f'nightly browser suite: QUEUE WAIT TIMEOUT: no build slot after {QUEUE_WAIT_SECONDS // 3600} h in the queue; '
+                  'no suite ran and nothing was reported', file=sys.stderr)
+            return QUEUE_TIMEOUT_EXIT
+        if not slot:
+            print('nightly browser suite: could not take a build slot', file=sys.stderr)
+            return 1
+        checkout = f'{BROWSER_HOME}/checkout'
+        runs = f'{BROWSER_HOME}/runs'
+        # The nightly follows the latest dev (D361/D373), so the checkout moves every night.
+        if as_user(BROWSER_USER, BROWSER_HOME, 'sh', '-c',
+                   'git -c core.hooksPath=/dev/null -c core.fsmonitor=false fetch --quiet origin dev '
+                   '&& git -c core.hooksPath=/dev/null -c core.fsmonitor=false checkout --quiet --detach origin/dev',
+                   cwd=checkout) != 0:
+            return 1
+        status = as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', 'timeout', '--kill-after=60', SUITE_BUDGET, 'nix', 'develop', '-c', 'python3',
+                         'scripts/nightly-browser-suite.py', 'run', '--runs-dir', runs, cwd=checkout)
+        # Whatever the suite left running (browsers, servers) must not outlive its run or race the staging below.
+        # If this cannot be done, nothing is staged: the files could still be changing.
+        if as_user(BROWSER_USER, BROWSER_HOME, *KILL_COMMAND, cwd='/') != 0:
+            print('nightly browser suite: could not stop the suite account\'s leftover processes; nothing was staged or reported', file=sys.stderr)
+            return 1
+        timed_out = status == 124
+        if timed_out:
+            print(f'nightly browser suite: SUITE TIMEOUT: the suite did not finish within {SUITE_BUDGET} of running '
+                  '(the time in the build-slot queue is not counted); reporting the tests that finished', file=sys.stderr)
+        elif status != 0:
+            return 1
+        # The run account wrote everything below `runs`: treat it as data (see stage).
+        owner = ids(BROWSER_USER)[0]
+        reporter = ids(REPORT_USER)
+        try:
+            name = latest_name(runs, owner)
+            if not run_is_from_tonight(name, started):
+                raise Refused(f'latest names {name}, which is older than this run: the suite never made its own folder')
+            descriptor = fresh_staging(REPORT_HOME, reporter)
+            try:
+                stage(runs, name, descriptor, owner, reporter)
+                write_staged_info(descriptor, name, SUITE_BUDGET if timed_out else None, reporter)
+            finally:
+                os.close(descriptor)
+        except (Refused, OSError) as error:
+            print(f'nightly browser suite: refusing the run folder: {error}', file=sys.stderr)
+            return SUITE_TIMEOUT_EXIT if timed_out else 1
+        code = report_step(login, name, SUITE_BUDGET if timed_out else None)
+        return SUITE_TIMEOUT_EXIT if timed_out else code
+    finally:
+        try:
+            holder.stdin.write(b'x')
+            holder.stdin.close()
+        except BrokenPipeError:
+            pass
+        holder.wait()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

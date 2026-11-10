@@ -1,15 +1,15 @@
 # `scripts/verify quick`: the few-minute pre-check that runs before the full gate (#329).
 #
 # It runs what fails most often, cheapest first, and stops at the first failure:
-#   0. migration names (D347): no new sequential files or duplicate numeric versions
+#   0. migration names (D347), Nix Cargo vendoring, and the pinned native terminal source recipe
 #   1. cargo fmt --check (whole workspace; it needs no compilation)
 #   1b. the doc-coverage ratchet (D345): coverage per crate or package never goes down
 #   2. cargo clippy (workspace, same flags as the gate) when any Rust package changed against the
 #      merge base with origin/dev
 #   3. the unit tests (lib and bin targets) of the changed packages, never of a cargo-fuzz package
 #      (its bins loop forever, #329) and under a hard timeout that fails loudly instead of hanging
-#   4. the tracer typecheck, only when TypeScript changed; before it, "ui literals" (ui-literals.py):
-#      the change must not add pixel font sizes, pixel corner radii or pasted easing curves (#345)
+#   4. the tracer typecheck and D365 theme contrast audit, only when TypeScript changed; before them,
+#      "ui literals" (ui-literals.py): the change must not add pixel font sizes, pixel corner radii or pasted easing curves (#345)
 # It is NOT the gate. It does not check dependents of a changed crate, integration tests, the
 # static release builds, cargo-deny, the architecture checks or the size report. A green quick
 # run is never quoted as the gate; `scripts/verify fast` stays the gate (docs/PROCESS.md).
@@ -46,6 +46,8 @@ verify_quick() {
     rust_run_gate "migration names" python3 "${script_dir}/verify.d/migration-names.py"
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
     rust_run_gate "Nix Cargo vendoring" scripts/check-nix-vendor
+    rust_run_gate "VT source recipe" python3 scripts/test-build-vt-pinned.py
+    if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
     rust_run_gate "fmt" cargo fmt --all --check
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 
@@ -111,6 +113,10 @@ for pkg in meta["packages"]:
         if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
         rust_run_gate "tracer typecheck" bash -c \
             'cd "$1/apps/tracer" && bun install --frozen-lockfile && bun run check' _ "$(cd -- "${script_dir}/.." && pwd)"
+        if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
+        # D365 makes every text token meet 4.5:1 in each theme, so run the same audit from the pre-check whenever tracer changes.
+        rust_run_gate "D365 theme contrast audit" bash -c \
+            'cd "$1/apps/tracer" && bun test ../../packages/ui/src/theme-audit.test.ts' _ "$(cd -- "${script_dir}/.." && pwd)"
     fi
     rust_print_summary
     if ((RUST_GATE_FAILED)); then return 1; fi
