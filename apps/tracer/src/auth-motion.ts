@@ -41,7 +41,7 @@ export function swapCard(host: HTMLElement, direction: 1 | -1 | 0, render: () =>
   next.animate([{ opacity: 0, transform: `translateX(${direction * SLIDE}px)` }, { opacity: 1, transform: "translateX(0)" }], { duration: 260, easing: EASE_OUT });
   const height = next.getBoundingClientRect().height;
   if (Math.abs(height - from.height) > 1) {
-    next.animate([{ height: `${from.height}px`, overflow: "hidden" }, { height: `${height}px`, overflow: "hidden" }], { duration: 320, easing: EASE_OUT });
+    next.animate([{ height: `${from.height}px`, overflow: "hidden" }, { height: `${height}px`, overflow: "hidden" }], { duration: 260, easing: EASE_OUT });
   }
   const out = ghost.animate([{ opacity: from.opacity, transform: from.transform }, { opacity: 0, transform: `translateX(${-direction * SLIDE}px)` }], { duration: 200, easing: "ease-out", fill: "forwards" });
   out.onfinish = () => layer.remove();

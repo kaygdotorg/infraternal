@@ -108,7 +108,7 @@ export function toolbarSection(model: ToolbarSettingsModel): SettingsSection {
           if (el === item) continue;
           const dy = top - el.getBoundingClientRect().top;
           if (Math.abs(dy) < 1) continue;
-          const sp = new Spring(1, (p) => { el.style.transform = p === 0 ? "" : `translateY(${dy * p}px)`; }, { visualDuration: 0.3 });
+          const sp = new Spring(1, (p) => { el.style.transform = p === 0 ? "" : `translateY(${dy * p}px)`; }, { visualDuration: 0.24 });
           sp.set(0);
         }
       };
@@ -139,7 +139,7 @@ export function toolbarSection(model: ToolbarSettingsModel): SettingsSection {
             item.style.transform = "";
             const dy = from - item.getBoundingClientRect().top;
             delete item.dataset.dragging;
-            if (!reduced.matches && Math.abs(dy) > 1) new Spring(1, (p) => { item.style.transform = p === 0 ? "" : `translateY(${dy * p}px)`; }, { visualDuration: 0.3 }).set(0);
+            if (!reduced.matches && Math.abs(dy) > 1) new Spring(1, (p) => { item.style.transform = p === 0 ? "" : `translateY(${dy * p}px)`; }, { visualDuration: 0.24 }).set(0);
             commit();
           };
           grip.addEventListener("pointermove", move);

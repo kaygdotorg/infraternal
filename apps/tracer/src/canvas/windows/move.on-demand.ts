@@ -48,7 +48,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
     c.lift.append(root);
     let dx = 0, dy = 0;
     const applyMoveTransform = (): void => { root.style.transform = `translate(${dx}px, ${dy}px) scale(${root.style.getPropertyValue("--lift") || 1})`; cx.invalidate(); };
-    const lift = new Spring(1, (s) => { root.style.setProperty("--lift", String(s)); applyMoveTransform(); }, { visualDuration: 0.3 });
+    const lift = new Spring(1, (s) => { root.style.setProperty("--lift", String(s)); applyMoveTransform(); }, { visualDuration: 0.2 });
     restAt(lift, SCALE_REST);
     lift.set(1.025);
     const target = { col: colEl as HTMLElement | undefined, index: 0, fresh: false };
@@ -113,7 +113,7 @@ export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x:
         root.style.transform = p === 0 ? "" : `translate(${gx * p}px, ${gy * p}px) scale(${1 + 0.025 * Math.max(0, p)})`;
         cx.invalidate();
         if (p === 0) endActivity("drag");
-      }, { visualDuration: 0.42 });
+      }, { visualDuration: 0.28 });
       restAt(land, Math.min(SCALE_REST, quarterDevicePx() / Math.max(1, Math.abs(gx), Math.abs(gy))));
       land.set(0);
     };

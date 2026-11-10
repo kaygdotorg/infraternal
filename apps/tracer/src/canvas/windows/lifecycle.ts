@@ -102,7 +102,7 @@ export function createWindows(cx: Ctx): WindowsModule {
 
   /** `opaque`: the window's content is there from the first frame (a session already exists); only its size springs. */
   const enterAnimation = (rec: WinRec, opaque = false): void => {
-    if (reduced.matches) { rec.card.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160 }); return; }
+    if (reduced.matches) { rec.card.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT }); return; }
     const root = rec.card.root;
     const spring = new Spring(1, (p) => {
       if (p === 0) { root.style.transform = ""; root.style.opacity = ""; root.style.transformOrigin = ""; return; }
@@ -110,7 +110,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       root.style.transform = `scale(${1 - 0.06 * p})`;
       root.style.opacity = opaque ? "" : String(clamp(1 - p * 1.4, 0, 1));
       cx.invalidate();
-    }, { visualDuration: 0.5 });
+    }, { visualDuration: 0.28 });
     // p scales the window by 6 % and fades it: it rests when the scale is within 0.0005 (p about 0.008).
     restAt(spring, SCALE_REST / 0.06);
     spring.set(0);
@@ -233,9 +233,10 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.geometry(c);
       cx.view.paintEmpty(c);
       cx.view.settle(c.view.id);
-      // Neighbours close the gap without overshoot (a critically damped spring): no value passes its final place. A keyboard
-      // close moves nothing on screen with a motion: the layout is simply the new one.
-      if (!instant) flip.play(before, true, { visualDuration: 0.38 });
+      // Neighbours close the gap without overshoot (the ease-out curve): no value passes its final place. A keyboard
+      // close moves nothing on screen with a motion: the layout is simply the new one. The reflow follows the 100 ms
+      // exit below, so 200 ms here keeps the whole close within 300 ms (#471).
+      if (!instant) flip.play(before, true, { visualDuration: 0.2 });
       for (const w of c.wins.values()) w.binding?.refit();
       cx.tree.render();
       // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
@@ -244,11 +245,13 @@ export function createWindows(cx: Ctx): WindowsModule {
     };
     if (reduced.matches || instant) { finish(); return; }
     root.style.pointerEvents = "none";
+    // The exit is quicker than any entrance: on the ease-out curve the window is 90 % gone in about 35 ms, so the
+    // reflow that follows starts almost at once.
     const spring = new Spring(0, (p) => {
       root.style.transform = `scale(${1 - 0.04 * p})`;
       root.style.opacity = String(1 - p);
       if (p >= 1) finish();
-    }, { visualDuration: 0.22 });
+    }, { visualDuration: 0.1 });
     restAt(spring, SCALE_REST);
     spring.set(1);
   };
@@ -332,7 +335,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   /** The small "this is the window" swell. A key never plays it (#427): the person asked for the window and is looking at it. */
   const pulse = (rec: WinRec): void => {
     if (triggeredByKeyboard()) return;
-    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 360, easing: EASE_OUT });
+    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 240, easing: EASE_OUT });
   };
 
   /**
