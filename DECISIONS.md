@@ -4764,3 +4764,23 @@ access (#341 B19).
        on the vmnet bridge, shaped to 10 Gbit/s, in announced windows of 20
        minutes or less. These are arm64 numbers. x86 at 10G needs real
        hardware.
+
+383. **Clipboard from programs, phone text sizes, permanent API keys (owner, 2026-11-10, #440, #345, #341):**
+     - **Programs can copy to the clipboard (OSC 52).** A remote program's
+       copy request writes the clipboard automatically and shows a visible
+       "Copied from the terminal" notice. If the browser refuses, a Copy
+       button appears for 15 s. A Settings switch, "Programs can copy to your
+       clipboard", is on by default and is stored per account so it follows
+       the person. Rejected: asking every time, and having no switch. The
+       owner chose "Auto + notice + switch".
+     - **Phone rows stay 15 px (amends D372).** On phones, palette results
+       and sidebar rows use body size (15 px). Only true labels, such as
+       section headings and tags, use the 13 px label size. TASTE row 46
+       ("phone text 15-16 px or larger") stands. The owner chose "Rows 15 px,
+       labels 13".
+     - **API keys have two dates, and both can be "forever" (amends D375 A1).**
+       The owner, verbatim: "keys have two dates: expiry and inactivity dates,
+       both can be set to forever for truly permanent keys." Each key has a
+       hard expiry and an inactivity limit. Either can be set to forever, and
+       a key with both set to forever is truly permanent.
+     - **Sign-in stays usernameless** (re-confirmed; already D375 A2).
