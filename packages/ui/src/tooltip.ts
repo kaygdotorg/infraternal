@@ -31,7 +31,6 @@
  * Labels are read live, so a control whose aria-label changes (copy → "Copied")
  * updates an open tooltip through `refreshTip`.
  */
-import { attachGlassBed } from "./glass-bed";
 import { markMotion } from "./input-source";
 import { EASE_OUT } from "./motion";
 
@@ -89,10 +88,11 @@ const STYLE = `
 :is(.ui-confirm-tip, .ui-confirm-bar) button:focus { outline: none; }
 :root[data-focus-ring="on"] :is(.ui-confirm-tip, .ui-confirm-bar) button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) { :is(.ui-confirm-tip, .ui-confirm-bar) button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
-/* The overlay material gives its text a soft halo in the tint colour (styles.css), meant for text that sits straight on
-   a busy terminal. The confirmation is a near-opaque card of its own, where the halo is only a dark smear around the
-   glyphs (it read as blurred text on the confirm button and the grey effect line), so nothing inside it takes one. */
-.ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
+/* The confirmation is the shared floating-card glass (D380, reversing #391's opaque card): the same overlay material and
+   blur as every other card, with nothing under it to hide the page. Its text is readable through the shared glass contrast
+   guarantee (D365, #448), including the overlay material's soft halo, so the card sets no material of its own. The buttons'
+   own text keeps no halo: on the filled confirm button it only smears the glyphs. */
+.ui-confirm-tip button { text-shadow: none; }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes svg { stroke-width: 2; }
 /* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
@@ -275,8 +275,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
   document.body.append(tip);
-  // A confirmation's own blur fades at its small box's edges and lets the page show through; the bed under it keeps text unreadable.
-  const bed = attachGlassBed(tip);
 
   anchor.setAttribute("aria-expanded", "true");
   anchor.setAttribute("aria-controls", tip.id);
@@ -297,7 +295,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
       tip.style.top = `${Math.max(9, (bound ? bound.top + bound.height / 2 : innerHeight / 2) - h / 2)}px`;
       tip.style.transformOrigin = "50% 50%";
       tip.dataset.side = "center";
-      bed.sync();
       return;
     }
     const anchorRect = anchor.getBoundingClientRect();
@@ -319,7 +316,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     // Grow from the tail, so the popover visibly comes out of its trigger.
     tip.style.transformOrigin = `${tail}px ${side === "bottom" ? "0%" : "100%"}`;
     tip.dataset.side = side;
-    bed.sync();
   };
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
@@ -347,13 +343,12 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
       anchor.removeAttribute("aria-controls");
       markMotion(tip);
       tip.dataset.open = "false";
-      bed.setOpen(false);
       if (restoreFocus) {
         if (centred && options.returnFocus) options.returnFocus();
         else { const returnTo = centred ? previouslyFocused : anchor; if (returnTo?.isConnected) returnTo.focus({ preventScroll: true }); }
       }
       if (activeConfirmTip === controller) activeConfirmTip = undefined;
-      window.setTimeout(() => { tip.remove(); bed.dispose(); }, 190);
+      window.setTimeout(() => { tip.remove(); }, 190);
     },
   };
   controller = instance;
@@ -371,7 +366,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     // Opened with a key (palette, then Enter on a row that asks): the question appears whole. Read here, where it flips (#427).
     markMotion(tip);
     tip.dataset.open = "true";
-    bed.setOpen(true);
     cancel.focus({ preventScroll: true });
   });
   return instance;

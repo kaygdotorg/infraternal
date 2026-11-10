@@ -35,6 +35,10 @@
    here tunes every floating thing at once. */
 :root { --ui-overlay-blur: 1rem; --ui-overlay-saturation: 160%; }
 
+/* Selected text in the interface (D380, #426): the theme's pair from `selectionColors` (themes.ts), which keeps the text at 4.5:1 on the
+   highlight in every theme, light or dark. Before a theme is applied the browser's own colours show. */
+::selection { background: var(--selection-bg, Highlight); color: var(--selection-fg, HighlightText); text-shadow: none; }
+
 /* One theme-aware glass material for every floating surface (D72, D160): popovers, sheets,
    palette, sidebar and tooltips, never in-page controls. No top-edge highlight (TASTE §1).
    Instances can tune the blur, saturation, border or shadow through custom properties. */
