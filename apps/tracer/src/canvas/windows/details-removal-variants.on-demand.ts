@@ -7,7 +7,7 @@
  * `?removalui=menu` or `?removalui=inline`:
  *
  * - **menu**: the action is not on the card's face at all. A quiet ⋯ button at the right of the card's header opens the
- *   shared actions menu, whose one entry, "Remove host…", opens the same glass confirmation card (D380) as the default.
+ *   shared actions menu, whose one entry, "Remove host…", opens the same glass confirmation card (D380) as the default, anchored to the card's header (full width, short) so it stays inside the window on a phone.
  *   The ellipsis in the entry says a question follows.
  * - **inline**: a danger row under the facts, like the default, but pressing it turns the row into the question in the
  *   panel itself: the host's name, what happens ("Revokes its access, then uninstalls the infraternal agent from it.") and
@@ -47,7 +47,7 @@ function mountMenu(root: HTMLElement, action: DetailsAction, stage: HTMLElement)
   button.dataset.tip = "Host actions";
   button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON_DOTS}</svg>`;
   button.addEventListener("click", () => {
-    openWindowMenu(stage, button, [{ id: "remove-host", label: `${action.label}…`, icon: ICON_REMOVE, danger: true, run: () => action.run(button) }], triggeredByKeyboard() ? "keyboard" : "pointer", () => {}, { label: "Host actions", hug: true, align: "end" });
+    openWindowMenu(stage, button, [{ id: "remove-host", label: `${action.label}…`, icon: ICON_REMOVE, danger: true, run: () => action.run(head) }], triggeredByKeyboard() ? "keyboard" : "pointer", () => {}, { label: "Host actions", hug: true, align: "end" });
   });
   head.append(button);
 }

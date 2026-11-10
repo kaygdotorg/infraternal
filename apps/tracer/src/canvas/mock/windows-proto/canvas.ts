@@ -41,6 +41,7 @@ import { prototypeFacts } from "./details-facts";
 import type { BranchSection, BranchedMenu } from "../../../../../../packages/ui/src/branched";
 import type { CoreScreen } from "../../../core-screen";
 import { EASE_OUT } from "../../../../../../packages/ui/src/motion";
+import { REMOVAL_EFFECT, confirmHostRemoval } from "../../host-removal-confirm";
 
 /** A session as the prototype windows show it: its name, size and age, and the lines of its screen. */
 export interface CanvasSession {
@@ -512,7 +513,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       windowId: target.id,
       read: () => prototypeFacts(target.host, target.session, target.live ? hostName : target.host.name, icons),
       // `?removal=1` shows the product's destructive row so its look is reviewable here; the prototype has no host to remove.
-      ...(new URLSearchParams(location.search).has("removal") ? { action: { label: "Remove host", hint: "Remove a host and uninstall its infraternal agent.", run: () => undefined } } : {}),
+      ...(new URLSearchParams(location.search).has("removal") ? { action: { label: "Remove host", hint: REMOVAL_EFFECT, subject: target.host.name, run: (anchor: HTMLElement) => { confirmHostRemoval(target.host.name, anchor, () => undefined); }, runConfirmed: () => undefined } } : {}),
     }, source, () => { popover = undefined; });
   };
 

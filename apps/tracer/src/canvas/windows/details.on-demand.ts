@@ -189,7 +189,8 @@ export function openDetailsPopover(
   // Outside presses close it (the pill toggles it itself); Escape closes it instantly.
   document.addEventListener("pointerdown", (event) => {
     const target = event.target as Node;
-    if (root.contains(target) || anchor.contains(target)) return;
+    // The host-actions menu opened from the card's ⋯ (a review variant, #486) belongs to the card.
+    if (root.contains(target) || anchor.contains(target) || (target instanceof Element && target.closest(".ui-window-menu"))) return;
     close("pointer");
   }, { capture: true, signal: events.signal });
   document.addEventListener("keydown", (event) => {
