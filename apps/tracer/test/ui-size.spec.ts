@@ -13,10 +13,11 @@ const open = async (page: Page, width = 1440, height = 900): Promise<void> => {
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(900);
 };
+/** Opens the Appearance › Themes settings window through the command palette. */
 const showAppearance = async (page: Page): Promise<void> => {
   await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(350);
-  await page.keyboard.type("Appearance › Size", { delay: 6 });
+  await page.keyboard.type("Appearance › Themes", { delay: 6 });
   await page.waitForTimeout(400);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(1500);
@@ -37,7 +38,7 @@ test("the slider goes from 50 % to 150 % in 5 % steps and starts at 100 %", asyn
   expect(await input.getAttribute("max")).toBe("150");
   expect(await input.getAttribute("step")).toBe("5");
   await expect(input).toHaveValue("100");
-  await expect(page.locator(".ui-slider-value")).toHaveText("100 %");
+  await expect(slider(page).locator("xpath=../output")).toHaveText("100%");
   expect(await rootPx(page)).toBeCloseTo(BASE, 5);
   expect(await page.evaluate(() => document.documentElement.style.getPropertyValue("--ui-scale"))).toBe("");
 });
@@ -60,18 +61,18 @@ test("it scales the whole UI live: the root font size, the controls and the type
   const input = slider(page);
   await input.focus();
   await page.keyboard.press("End");
-  await expect(page.locator(".ui-slider-value")).toHaveText("150 %");
+  await expect(slider(page).locator("xpath=../output")).toHaveText("150%");
   expect(await rootPx(page)).toBeCloseTo(BASE * 1.5, 5);
   expect(Math.abs((await pillHeight(page)) - standard * 1.5)).toBeLessThan(0.6);
   await page.keyboard.press("Home");
-  await expect(page.locator(".ui-slider-value")).toHaveText("50 %");
+  await expect(slider(page).locator("xpath=../output")).toHaveText("50%");
   expect(await rootPx(page)).toBeCloseTo(BASE * 0.5, 5);
   expect(Math.abs((await pillHeight(page)) - standard * 0.5)).toBeLessThan(0.6);
   // One step up is 5 %.
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator(".ui-slider-value")).toHaveText("55 %");
+  await expect(slider(page).locator("xpath=../output")).toHaveText("55%");
   expect(await rootPx(page)).toBeCloseTo(BASE * 0.55, 5);
-  await expect(input).toHaveAttribute("aria-valuetext", "55 %");
+  await expect(input).toHaveAttribute("aria-valuetext", "55%");
 });
 
 test("the size is remembered in this browser, and 100 % leaves nothing behind", async ({ page }) => {
@@ -79,7 +80,7 @@ test("the size is remembered in this browser, and 100 % leaves nothing behind", 
   await showAppearance(page);
   await slider(page).focus();
   for (let i = 0; i < 4; i += 1) await page.keyboard.press("ArrowRight"); // 120 %
-  await expect(page.locator(".ui-slider-value")).toHaveText("120 %");
+  await expect(slider(page).locator("xpath=../output")).toHaveText("120%");
   await page.reload();
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   expect(await rootPx(page)).toBeCloseTo(BASE * 1.2, 5);
@@ -88,7 +89,7 @@ test("the size is remembered in this browser, and 100 % leaves nothing behind", 
   for (let i = 0; i < 4; i += 1) await page.keyboard.press("ArrowLeft");
   await slider(page).focus();
   for (let i = 0; i < 4; i += 1) await page.keyboard.press("ArrowLeft");
-  await expect(page.locator(".ui-slider-value")).toHaveText("100 %");
+  await expect(slider(page).locator("xpath=../output")).toHaveText("100%");
   expect(await page.evaluate(() => document.documentElement.style.getPropertyValue("--ui-scale"))).toBe("");
   expect(await rootPx(page)).toBeCloseTo(BASE, 5);
 });
@@ -134,7 +135,7 @@ test.describe("on a phone", () => {
   test("the slider is a 44 px target and works by touch", async ({ page }) => {
     await open(page, 393, 852);
     await showAppearance(page).catch(async () => { await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "K", code: "KeyK", ctrlKey: true, shiftKey: true, bubbles: true }))); });
-    await page.keyboard.type("Appearance › Size", { delay: 6 }).catch(() => undefined);
+    await page.keyboard.type("Appearance › Themes", { delay: 6 }).catch(() => undefined);
     await page.keyboard.press("Enter").catch(() => undefined);
     await page.waitForTimeout(1500);
     const box = await slider(page).boundingBox();

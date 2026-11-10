@@ -33,10 +33,11 @@ const drawn = (page: Page): Promise<number[]> => page.evaluate((sel) => [...docu
  *  itself drawn in rem (its gutters grow and shrink with the UI size), so it is read where it is. */
 const expectedDefault = async (page: Page, f: number): Promise<number> => Math.min(Math.round((await canvasWidth(page)) * 0.99), Math.round(Math.max(400, Math.min(640, Math.round(((await canvasWidth(page)) - 24) / 3))) * f));
 const canvasWidth = (page: Page): Promise<number> => page.evaluate((sel) => document.querySelector<HTMLElement>(sel)!.clientWidth, VIEWPORT);
+/** Opens the Appearance › Themes settings window through the command palette. */
 const showAppearance = async (page: Page): Promise<void> => {
   await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(350);
-  await page.keyboard.type("Appearance › Size", { delay: 6 });
+  await page.keyboard.type("Appearance › Themes", { delay: 6 });
   await page.waitForTimeout(400);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(1800);
@@ -162,6 +163,8 @@ test("at 150 % on 1440 x 900 no window title is cut and no Settings row is clipp
       const pane = win.querySelector<HTMLElement>(".ui-settings-pane");
       if (pane && pane.scrollWidth > pane.clientWidth + 1) out.push(`${name}: the pane scrolls sideways (${pane.scrollWidth} > ${pane.clientWidth})`);
       for (const row of pane?.querySelectorAll<HTMLElement>("*") ?? []) {
+        // The pictures on a theme's card (a few lines of terminal text under the glass) are cut by the card on purpose and hidden from assistive technology.
+        if (row.closest(".ui-theme-pick")) continue;
         const cs = getComputedStyle(row);
         if ((cs.textOverflow === "ellipsis" || cs.overflowX === "hidden") && row.scrollWidth > row.clientWidth + 1 && row.textContent?.trim()) out.push(`${name}: "${row.textContent.trim().slice(0, 24)}" is clipped`);
       }

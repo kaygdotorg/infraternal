@@ -1,9 +1,9 @@
 /**
  * Where the browser keeps data that belongs to one account (D245, #171).
  *
- * Every account-scoped key is built here and nowhere else, so the one function that removes an account's data on
- * sign-out (`clearAccountStorage`) and the code that writes it can never drift apart. Device-wide preferences that
- * hold no account data (theme, font, window sizes, toolbar order, device name) deliberately do not live here.
+ * Account-scoped caches are removed with the signed-in account on sign-out. The derived appearance cache uses the
+ * same account id as the server document; only explicitly device-bound choices such as the toolbar override and device
+ * name stay outside this scope.
  *
  * Two accounts can share a browser: each key ends in the account id, and clearing removes only the keys of the account
  * that signed out. When the id is not known the sweep removes every account's keys, which loses a layout the server
@@ -16,6 +16,13 @@ const INVENTORY = "tracer.sessions.";
 const TAB_SESSION = "tracer.session.";
 const LAST_ACCOUNT = "tracer.user-id";
 const HINTS = "tracer.hints.";
+/** localStorage: the public id of the account that owns the not-yet-migrated device-wide appearance values. */
+export const LEGACY_OWNER_KEY = "tracer.look.legacy-owner";
+/** Device-wide appearance keys of earlier releases; they move into the account look and are removed once the server confirms it. */
+export const LEGACY_APPEARANCE_KEYS = [
+  "tracer.look", "tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size",
+  "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info", "tracer.card", "tracer.windows", "tracer.background", "tracer.ui-font",
+] as const;
 
 /** localStorage: the canvas document (windows, columns, views) of one account. */
 export const canvasKey = (account: string): string => CANVAS + account;
@@ -44,8 +51,12 @@ export function clearAccountStorage(account: string | undefined): boolean {
     sweep(localStorage, "infraternal.canvas-lifetime.", account);
     sweep(localStorage, DRAWING_IDENTITY, account);
     sweep(localStorage, INVENTORY, account);
+    sweep(localStorage, "tracer.look.account.", account);
     sweep(localStorage, HINTS, account);
     sweep(sessionStorage, TAB_SESSION, account);
+    // The marker names the account that owns the unmigrated old appearance values; it must not outlive that account's
+    // sign-out (D245). The old values themselves are device-wide choices and stay, like the toolbar override.
+    if (account === undefined || localStorage.getItem(LEGACY_OWNER_KEY) === account) localStorage.removeItem(LEGACY_OWNER_KEY);
     // The last-account pointer names a person; it goes unless another account has since replaced it.
     if (account === undefined || localStorage.getItem(LAST_ACCOUNT) === account) localStorage.removeItem(LAST_ACCOUNT);
     return true;

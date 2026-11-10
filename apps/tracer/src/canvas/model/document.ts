@@ -15,7 +15,7 @@
 import { CELL, type Metrics } from "../layout/geometry";
 import type { ColumnModel, ViewModel, WindowModel } from "./types";
 
-import { FORMAT, VERSION, type CanvasDocument, type DocTarget, type DocColumn, type DocWindow, type DocLayout, type DocView } from "./schema";
+import { FORMAT, VERSION, type CanvasDocument, type DocTarget, type DocColumn, type DocWindow, type DocLayout, type DocLook, type DocView } from "./schema";
 export * from "./schema";
 
 /**
@@ -54,9 +54,10 @@ export function docHasGroups(doc: CanvasDocument): boolean {
   return doc.views.some((v) => v.layout.type === "tiled" && v.layout.columns.some((c) => c.windows.some((w) => (w.span ?? 1) > 1 || (w.rows ?? 1) > 1 || w.row !== undefined)));
 }
 
-export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number, pending = false): CanvasDocument {
+/** The document of the canvas as drawn now. `look` is the account's look (D322), carried through unchanged by the layout code; absent when this page has none to save. */
+export function toDocument(views: readonly ViewModel[], metrics: Metrics, revision: number, pending = false, look?: DocLook): CanvasDocument {
   return {
-    format: FORMAT, version: VERSION, revision,
+    format: FORMAT, version: VERSION, revision, ...(look ? { look } : {}),
     views: views.map((v): DocView => ({
       id: v.id, kind: v.id, name: v.name, cell: { x: Math.round((v.home ?? v).x / CELL), y: Math.round((v.home ?? v).y / CELL) },
       layout: v.layout === "graph"

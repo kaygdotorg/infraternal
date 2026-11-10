@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Cuts the self-hosted terminal and UI fonts down to latin woff2 (called by subset.sh).
 
-Every family is SIL OFL 1.1 and its licence text sits next to its output. For each one this
+Every family is SIL OFL 1.1 (Hack is MIT with the Bitstream Vera licence) and its licence text sits next to its output. For each one this
 script reads the upstream variable (or static) TrueType file, narrows the weight axis to the
 range the UI can ask for, pins every other axis, keeps only the Unicode ranges below and the
 layout features the UI and terminal use, and writes woff2.
@@ -93,6 +93,9 @@ def static(source: Path, target: Path, rename: str | None) -> None:
 def main() -> None:
     root = Path(sys.argv[1])  # directory the shell script extracted the upstream archives into
     out = Path(sys.argv[2])
+    # Optional third argument: only these family ids (comma-separated). Adding a family must not rewrite the files of the others: a newer
+    # fonttools writes different bytes for the same font, and the diff would bury the new files.
+    only = set(sys.argv[3].split(",")) if len(sys.argv) > 3 else None
     # id: (roman source, italic source or None, pins for roman, pins for italic, rename)
     families = {
         "maple-mono-nf": ("maple/MapleMono[wght].ttf", "maple/MapleMono-Italic[wght].ttf", {}, {}, None),
@@ -104,15 +107,53 @@ def main() -> None:
         "cascadia-code": ("cascadia/ttf/CascadiaCode.ttf", "cascadia/ttf/CascadiaCodeItalic.ttf", {}, {}, "IFR Web 3"),
         "fira-code": ("fira/variable_ttf/FiraCode-VF.ttf", None, {}, {}, None),
         "source-code-pro": ("scp/VF/SourceCodeVF-Upright.ttf", "scp/VF/SourceCodeVF-Italic.ttf", {}, {}, "IFR Web 4"),
+        # D329 (#323). The other four Monaspace faces come from the archive Neon comes from. Every family below has its internal names
+        # replaced: a subset is a Modified Version, and Intel One Mono (and others) reserve their names.
+        "monaspace-argon": ("mona/Variable Fonts/Monaspace Argon/Monaspace Argon Var.ttf", "mona/Variable Fonts/Monaspace Argon/Monaspace Argon Var.ttf",
+                            {"wdth": 100, "slnt": 0}, {"wdth": 100, "slnt": -11}, "IFR Web 5"),
+        "monaspace-xenon": ("mona/Variable Fonts/Monaspace Xenon/Monaspace Xenon Var.ttf", "mona/Variable Fonts/Monaspace Xenon/Monaspace Xenon Var.ttf",
+                            {"wdth": 100, "slnt": 0}, {"wdth": 100, "slnt": -11}, "IFR Web 6"),
+        "monaspace-radon": ("mona/Variable Fonts/Monaspace Radon/Monaspace Radon Var.ttf", "mona/Variable Fonts/Monaspace Radon/Monaspace Radon Var.ttf",
+                            {"wdth": 100, "slnt": 0}, {"wdth": 100, "slnt": -11}, "IFR Web 7"),
+        "monaspace-krypton": ("mona/Variable Fonts/Monaspace Krypton/Monaspace Krypton Var.ttf", "mona/Variable Fonts/Monaspace Krypton/Monaspace Krypton Var.ttf",
+                              {"wdth": 100, "slnt": 0}, {"wdth": 100, "slnt": -11}, "IFR Web 8"),
+        # Recursive Mono: the mono axis on, the linear (not casual) design; italic is the cursive slanted one.
+        "recursive-mono": ("recursive/ArrowType-Recursive-1.085/Recursive_Desktop/Recursive_VF_1.085.ttf", "recursive/ArrowType-Recursive-1.085/Recursive_Desktop/Recursive_VF_1.085.ttf",
+                           {"MONO": 1, "CASL": 0, "CRSV": 0.5, "slnt": 0}, {"MONO": 1, "CASL": 0, "CRSV": 1, "slnt": -15}, "IFR Web 11"),
+        # Martian Mono's standard width (its default is the widest, 112.5).
+        "martian-mono": ("martianvf/MartianMonoVF.ttf", None, {"wdth": 100}, {}, "IFR Web 12"),
+        "inconsolata": ("inconsolata/Inconsolata-VF.ttf", None, {"wdth": 100}, {}, "IFR Web 16"),
+        "lilex": ("lilex/variable/Lilex[wght].ttf", "lilex/variable/Lilex-Italic[wght].ttf", {}, {}, "IFR Web 18"),
     }
     for family, (roman, italic, roman_pins, italic_pins, rename) in families.items():
+        if only is not None and family not in only:
+            continue
         variable(root / roman, out / family / "roman.latin.woff2", roman_pins, rename)
         if italic:
             variable(root / italic, out / family / "italic.latin.woff2", italic_pins, rename)
+    # Families that ship static weights only (regular and bold, upright and italic): the registry maps 400-600 to the regular face and 700 to
+    # the bold one. id: (folder under the extracted archive, file stem, the faces it has, the internal name).
+    statics = {
+        "iosevka": ("iosevka", "Iosevka-{}", "IFR Web 9"),
+        "victor-mono": ("victor/TTF", "VictorMono-{}", "IFR Web 10"),
+        "intel-one-mono": ("intel/ttf", "IntelOneMono-{}", "IFR Web 13"),
+        "fantasque-sans-mono": ("fantasque/TTF", "FantasqueSansMono-{}", "IFR Web 14"),
+        "hack": ("hack/ttf", "Hack-{}", "IFR Web 15"),
+        "0xproto": ("oxproto/fonts", "0xProto-{}", "IFR Web 17"),
+    }
+    # The styles each static family has: 0xProto ships no bold italic, so its bold italic is the browser's slant of the bold.
+    faces = {"roman-400": "Regular", "roman-700": "Bold", "italic-400": "Italic", "italic-700": "BoldItalic"}
+    for family, (folder, stem, rename) in statics.items():
+        if only is not None and family not in only:
+            continue
+        for target, style in faces.items():
+            source = root / folder / f"{stem.format(style)}.ttf"
+            if source.exists():
+                static(source, out / family / f"{target}.latin.woff2", rename)
     # Commit Mono ships two static weights only; the registry maps 400-600 to the regular
     # face and 700 to the bold face.
     base = root / "cm/CommitMono-1.143/ttfautohint"
-    for weight in (400, 700):
+    for weight in (400, 700) if only is None or "commit-mono" in only else ():
         static(base / f"CommitMono-{weight}-Regular.ttf", out / "commit-mono" / f"roman-{weight}.latin.woff2", None)
         static(base / f"CommitMono-{weight}-Italic.ttf", out / "commit-mono" / f"italic-{weight}.latin.woff2", None)
 

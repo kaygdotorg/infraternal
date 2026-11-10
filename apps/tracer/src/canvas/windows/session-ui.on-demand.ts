@@ -26,7 +26,7 @@
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
-import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
+import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { beginInlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
@@ -338,18 +338,22 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       root.querySelector<HTMLElement>(".cl-sx-title")!.textContent = rec.model.host;
       this.scroll = root.querySelector<HTMLElement>(".cl-sx-scroll")!;
       this.scroll.addEventListener("click", (event) => this.onClick(event));
+      // A row's actions replace its meta while it holds focus (sessions.css). The browser brings styles up to date when focus() moves, before
+      // it fires focusin, so the popover is marked before each focus() below, not in a focusin handler. A key does it at once; the mouse
+      // moving over the popover afterwards fades again (#427).
+      root.addEventListener("pointerover", () => { if (root.dataset.motion === "instant") root.dataset.motion = "animate"; });
       // Arrows walk the rows.
       root.addEventListener("keydown", (event) => {
         if ((event.key !== "ArrowDown" && event.key !== "ArrowUp") || (event.target as Element).closest(".cl-sx-name-input")) return;
         const rows = [...this.scroll.querySelectorAll<HTMLElement>(".cl-sx-main")];
         const at = rows.indexOf(document.activeElement as HTMLElement);
         const next = rows[Math.max(0, Math.min(rows.length - 1, at + (event.key === "ArrowDown" ? 1 : -1)))];
-        if (next) { event.preventDefault(); next.focus(); }
+        if (next) { event.preventDefault(); markMotion(root); next.focus(); }
       });
       // The canvas moving under it ends it: the card belongs to its window, not to the screen.
       cx.viewport.addEventListener("wheel", () => this.close(), { passive: true, signal: this.life.signal });
       this.render();
-      if (source === "keyboard") this.scroll.querySelector<HTMLElement>(".cl-sx-main")?.focus({ preventScroll: true });
+      if (source === "keyboard") { markMotion(root); this.scroll.querySelector<HTMLElement>(".cl-sx-main")?.focus({ preventScroll: true }); }
     }
     private readonly life = new AbortController();
     /** Closes the manager: at once after a key, with the popover fade after a pointer. */

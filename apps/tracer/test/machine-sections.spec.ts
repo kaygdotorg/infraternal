@@ -61,7 +61,7 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
     await expect(input).toHaveCount(1);
     await expect(page.locator('.ui-window[data-window-id="s-terminal-hosts"]')).toContainText("Details");
     // It is not in Appearance.
-    await expect(page.locator('.ui-window[data-window-id="s-appearance-theme"]').getByRole("switch")).toHaveCount(0);
+    await expect(page.locator('.ui-window[data-window-id="s-appearance-themes"]').getByRole("switch")).toHaveCount(0);
     await expect(input).not.toBeChecked();
     await page.screenshot({ path: `${SHOTS}/settings-hosts-${name}.png` });
     await input.click();

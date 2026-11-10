@@ -6,6 +6,7 @@ The reporter runs against the in-process fake Forgejo from
 and hand-written Playwright JSON reports, so filing, deduplication and the
 "passes again" comments are tested end to end without a browser.
 """
+import contextlib
 import importlib.machinery
 import io
 import importlib.util
@@ -13,6 +14,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -33,6 +36,7 @@ fuzz_tests = load_script('test-nightly-fuzz.py')
 service = load_script('nightly-browser-suite-service')
 installer = load_script('install-nightly-browser-suite')
 TOKEN = 'synthetic-token'
+REAL_RUN_IS_FROM_TONIGHT = service.run_is_from_tonight
 RUN_NAME = '20261109T061806Z-aaaaaaa'
 
 
@@ -66,7 +70,7 @@ class Reporter(unittest.TestCase):
         (self.results / 'results.json').write_text(json.dumps(playwright_report(**outcomes)))
         (self.results / 'meta.json').write_text(json.dumps({'head': head, 'evidence': '/attacker/chosen/path',
                                                             'log': str(self.results / 'suite.log')}))
-        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, f'20261109T061806Z-{head[:7]}')
+        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, f'20261109T061806Z-{head[:7]}', login=self.forgejo.login)
 
     def test_collect_sorts_files(self):
         """Failures name their file; skipped-only files are neither failing nor passing."""
@@ -193,7 +197,7 @@ class Reporter(unittest.TestCase):
         """File a hand-built Playwright report."""
         (self.results / 'results.json').write_text(json.dumps(report))
         (self.results / 'meta.json').write_text(json.dumps(meta or {'head': head}))
-        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, f'20261109T061806Z-{head[:7]}')
+        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, f'20261109T061806Z-{head[:7]}', login=self.forgejo.login)
 
     def test_fields_are_bounded_and_the_head_is_validated(self):
         """Review: a 5000-character `head` is refused, and long log lines are cut."""
@@ -206,18 +210,15 @@ class Reporter(unittest.TestCase):
 
     def test_only_the_token_owners_markers_count(self):
         """Review: someone else's issue carrying the marker does not mute the spec."""
-        self.forgejo.author = 'somebody-else'
+        self.forgejo.issues[300] = {'number': 300, 'state': 'open', 'title': 'x', 'user': {'login': 'somebody-else'},
+                                    'body': suite.spec_marker('docs-palette.spec.ts')}
         self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
-        self.forgejo.author = self.forgejo.login
-        self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
-        self.assertEqual(self.forgejo.creates(), 2)
+        self.assertEqual(self.forgejo.creates(), 1)
 
     def test_a_forged_fixed_comment_is_ignored(self):
         """Review: a comment by another user with the 'fixed' marker does not decide the issue's state."""
         self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
-        self.forgejo.author = 'somebody-else'
         self.forgejo.comments[1] = {'id': 1, 'issue': 345, 'body': suite.state_marker('fixed'), 'user': {'login': 'somebody-else'}}
-        self.forgejo.author = self.forgejo.login
         self.night(head='b' * 40, **{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
         self.assertEqual(len(self.forgejo.comments), 1)
 
@@ -289,6 +290,165 @@ class Reporter(unittest.TestCase):
         self.assertIn('late2.spec.ts', comment)
         self.assertNotIn('r3.spec.ts', comment)
 
+    def test_jsonl_collect_counts_only_real_failures(self):
+        """Follow-up 2: from the streamed per-test lines, only tests that really failed make a spec red."""
+        lines = [{'kind': 'begin', 'total': 9},
+                 {'kind': 'test', 'file': 'a.spec.ts', 'title': 'one', 'outcome': 'expected'},
+                 {'kind': 'test', 'file': 'a.spec.ts', 'title': 'two', 'outcome': 'unexpected', 'error': '\x1b[31mboom\x1b[39m'},
+                 {'kind': 'test', 'file': 'b.spec.ts', 'title': 'ok', 'outcome': 'expected'},
+                 {'kind': 'test', 'file': 'c.spec.ts', 'title': 'skip', 'outcome': 'skipped'},
+                 {'kind': 'test', 'file': 'bad name.spec.ts', 'title': 'x', 'outcome': 'unexpected'},
+                 {'kind': 'test', 'file': 'd.spec.ts', 'title': 'interrupted', 'outcome': 'interrupted'}]
+        data = ('\n'.join(json.dumps(line) for line in lines) + '\nnot json\n[1, 2]\n{"kind": "begin", "total": "many"}\n').encode()
+        failing, passing, finished, total = suite.collect_jsonl(data)
+        self.assertEqual(sorted(failing), sorted(['a.spec.ts', suite.UNPARSEABLE]))
+        self.assertEqual(failing['a.spec.ts'], [('two', 'boom')])
+        self.assertEqual(passing, {'b.spec.ts'})
+        self.assertEqual((finished, total), (6, 9))
+
+    def partial_night(self, lines, head='a' * 40, timeout='9h'):
+        """File a timed-out night: only meta.json, suite.log and the streamed lines exist."""
+        (self.results / 'results.json').unlink(missing_ok=True)
+        (self.results / 'results.jsonl').write_text('\n'.join(json.dumps(line) for line in lines) + '\n')
+        (self.results / 'meta.json').write_text(json.dumps({'head': head}))
+        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, f'20261109T061806Z-{head[:7]}', suite_timeout=timeout, login=self.forgejo.login)
+
+    def test_timed_out_suite_files_the_failures_it_saw_and_one_note(self):
+        """Follow-up 2: issues for tests that really failed, plus one roll-up note 'timed out after 9 h; M of K tests ran'."""
+        lines = [{'kind': 'begin', 'total': 10}] + [{'kind': 'test', 'file': 'docs-palette.spec.ts', 'title': 'opens', 'outcome': 'unexpected', 'error': 'bad'}] \
+            + [{'kind': 'test', 'file': 'ok.spec.ts', 'title': f't{i}', 'outcome': 'expected'} for i in range(3)]
+        self.assertEqual(self.partial_night(lines), 0)
+        titles = [i['title'] for i in self.forgejo.issues.values()]
+        self.assertEqual(len(titles), 2, titles)
+        self.assertTrue([t for t in titles if 'docs-palette.spec.ts' in t])
+        rollup = next(i for i in self.forgejo.issues.values() if 'roll-up' in i['title'])
+        self.assertIn('suite timed out after 9 h; 4 of 10 tests ran', rollup['body'])
+        # The same night again adds nothing.
+        self.partial_night(lines)
+        self.assertEqual(self.forgejo.creates(), 2)
+        self.assertEqual(self.forgejo.comments, {})
+
+    def test_timeout_note_goes_on_the_open_roll_up_once(self):
+        """Follow-up 2: with a roll-up already open, the note is one comment on it, not a new issue."""
+        green = {f'ok{i}.spec.ts': ['expected'] for i in range(60)}
+        self.night(**green, **{f'r{i}.spec.ts': ['unexpected'] for i in range(12)})
+        self.assertEqual(self.forgejo.creates(), 1)
+        lines = [{'kind': 'begin', 'total': 50}, {'kind': 'test', 'file': 'ok0.spec.ts', 'title': 't', 'outcome': 'expected'}]
+        self.partial_night(lines, head='b' * 40)
+        self.partial_night(lines, head='b' * 40)
+        self.assertEqual(self.forgejo.creates(), 1)
+        notes = [c['body'] for c in self.forgejo.comments.values()]
+        self.assertEqual(len(notes), 1)
+        self.assertIn('suite timed out after 9 h; 1 of 50 tests ran', notes[0])
+
+    def test_specs_that_never_ran_are_not_reported_fixed(self):
+        """Follow-up 2: a red spec the timed-out suite never reached gets no 'passes again' comment."""
+        self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        self.partial_night([{'kind': 'begin', 'total': 5}, {'kind': 'test', 'file': 'ok.spec.ts', 'title': 't', 'outcome': 'expected'}], head='b' * 40)
+        self.assertFalse([c for c in self.forgejo.comments.values() if 'passes again' in c['body']])
+
+    def test_suite_timeout_argument_is_validated(self):
+        """The timeout label is inserted into issues, so only a plain number of hours is accepted."""
+        self.partial_night([{'kind': 'begin', 'total': 1}], timeout='9h')
+        for bad in ('9', '9h\n@x', '999999h', 'nine'):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                self.partial_night([{'kind': 'begin', 'total': 1}], timeout=bad)
+
+    def test_run_streams_results_and_announces_its_folder_first(self):
+        """Follow-up 2: the suite streams one line per test, and `latest` and meta.json exist before the first test runs."""
+        runs = Path(self.temp.name) / 'streams'
+        runs.mkdir()
+        seen = {}
+
+        def fake_step(command, cwd, log, env=None):
+            if command[:4] == ['bun', 'x', 'playwright', 'test']:
+                seen['command'], seen['env'] = command, env
+                seen['latest'] = (runs / 'latest').read_text().strip()
+                seen['meta'] = json.loads((runs / seen['latest'] / 'meta.json').read_text())
+            return 0
+        with mock.patch.object(suite, 'run_step', side_effect=fake_step), mock.patch.object(suite.subprocess, 'check_output', return_value='f' * 40 + '\n'):
+            suite.run(Path(self.temp.name), runs)
+        self.assertIn('--reporter=list,json,./nightly-reporter.ts', seen['command'])
+        self.assertEqual(seen['env']['NIGHTLY_JSONL'], str(runs / seen['latest'] / 'results.jsonl'))
+        self.assertEqual(seen['meta']['head'], 'f' * 40)
+        reporter = Path(suite.__file__ if hasattr(suite, '__file__') else Path(__file__).with_name('nightly-browser-suite.py')).resolve().parents[1] / 'apps/tracer/nightly-reporter.ts'
+        text = reporter.read_text()
+        for needle in ('NIGHTLY_JSONL', 'appendFileSync', 'onTestEnd', 'onBegin', 'outcome()'):
+            self.assertIn(needle, text)
+
+    def test_no_request_needs_the_user_scope(self):
+        """Round-5 PoC: a token without read:user gets 403 on /user. The reporter never asks, and a whole night is filed."""
+        self.forgejo.deny = lambda method, path: 403 if path == '/api/v1/user' else None
+        green = {f'ok{i}.spec.ts': ['expected'] for i in range(60)}
+        self.assertEqual(self.night(**green, **{'docs-palette.spec.ts': ['unexpected']}), 0)
+        self.assertEqual(self.night(head='b' * 40, **green, **{'docs-palette.spec.ts': ['expected']}), 0)
+        self.assertFalse([r for r in self.forgejo.requests if r[1].split('?')[0].endswith('/api/v1/user')], 'the reporter must not call /user')
+        self.assertEqual(self.forgejo.creates(), 1)
+        self.assertEqual(len(self.forgejo.comments), 1)
+
+    def test_own_issues_are_recognised_by_the_configured_login(self):
+        """Round-5: a marker counts only when its author is the configured login; a response from another author stops the night."""
+        self.forgejo.issues[300] = {'number': 300, 'state': 'open', 'title': 'x', 'user': {'login': 'somebody-else'}, 'body': suite.spec_marker('d.spec.ts')}
+        self.night(**{'d.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        self.assertEqual(self.forgejo.creates(), 1)
+        # The configured login is wrong for this token: the reporter's own post comes back under another name.
+        self.forgejo.login = self.forgejo.author = 'the-token-owner'
+        with self.assertRaises(ValueError):
+            suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, '20261109T061806Z-aaaaaaa', login='configured-other')
+
+    def test_a_login_is_required_and_validated(self):
+        """No login configured means no night: the reporter refuses rather than guess whose markers to believe."""
+        (self.results / 'results.json').write_text(json.dumps(playwright_report(**{'ok.spec.ts': ['expected']})))
+        (self.results / 'meta.json').write_text(json.dumps({'head': 'a' * 40}))
+        for bad in (None, '', 'a b', 'x\n', 'a' * 80):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, '20261109T061806Z-aaaaaaa', login=bad)
+
+    def run_cli(self, *args, token=TOKEN):
+        """Run the reporter's command line against the fake; return (exit code, stderr text)."""
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        token_file = Path(other.name) / 'token'
+        token_file.write_text(token)
+        err = io.StringIO()
+        argv = ['nightly-browser-suite.py', 'report', '--results', str(self.results), '--token-file', str(token_file), '--api', self.forgejo.api, *args]
+        with mock.patch.object(suite.sys, 'argv', argv), mock.patch.object(suite.sys, 'stderr', err):
+            return suite.main(), err.getvalue()
+
+    def stage_old_style(self, name='20261109T134307Z-c442500'):
+        """The staging folder the first real run left: meta.json, results.json and suite.log, with no staged.json."""
+        head = name[-7:] + 'd' * 33
+        (self.results / 'results.json').write_text(json.dumps(playwright_report(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})))
+        (self.results / 'meta.json').write_text(json.dumps({'head': head, 'evidence': '/old/path', 'log': '/old/log', 'playwright_exit': 1}))
+        return name, head
+
+    def test_forbidden_token_is_said_plainly_and_the_staged_files_stay(self):
+        """Round-5: a 403 on a write ends the night with one clear line (token lacks permission), exit 77, files kept, and a re-run files it."""
+        name, head = self.stage_old_style()
+        self.forgejo.deny = lambda method, path: 403 if method == 'POST' and path.endswith('/issues') else None
+        code, err = self.run_cli('--login', self.forgejo.login, '--run-name', name)
+        self.assertEqual(code, suite.TOKEN_REFUSED_EXIT)
+        lines = [l for l in err.splitlines() if 'TOKEN LACKS PERMISSION' in l]
+        self.assertEqual(len(lines), 1, err)
+        self.assertIn('HTTP 403', lines[0])
+        self.assertIn('--report-only', lines[0])
+        self.assertNotIn(TOKEN, err)
+        self.assertEqual(sorted(p.name for p in self.results.iterdir()), ['meta.json', 'results.json', 'suite.log'])
+        self.forgejo.deny = None
+        self.assertEqual(self.run_cli('--login', self.forgejo.login, '--run-name', name)[0], 0)
+        self.assertEqual(len(self.forgejo.issues), 1)
+
+    def test_report_only_reads_the_run_name_from_staged_info(self):
+        """Round-5: without --run-name, the reporter takes it (and the timeout label) from the staged.json the helper wrote."""
+        name, head = self.stage_old_style('20261109T061806Z-aaaaaaa')
+        (self.results / 'meta.json').write_text(json.dumps({'head': 'a' * 40}))
+        self.assertEqual(self.run_cli('--login', self.forgejo.login)[0], 1, 'no run name anywhere is refused')
+        (self.results / 'staged.json').write_text(json.dumps({'run_name': name, 'suite_timeout': None}))
+        self.assertEqual(self.run_cli('--login', self.forgejo.login)[0], 0)
+        self.assertEqual(self.forgejo.creates(), 1)
+        (self.results / 'staged.json').write_text(json.dumps({'run_name': '../x', 'suite_timeout': None}))
+        self.assertEqual(self.run_cli('--login', self.forgejo.login)[0], 1)
+
     def test_run_without_report_is_an_infrastructure_failure(self):
         """`run` exits 1 and opens nothing when a build step fails or no report exists."""
         runs = Path(self.temp.name) / 'runs'
@@ -314,6 +474,15 @@ class Reporter(unittest.TestCase):
 class SeparateAccount(unittest.TestCase):
     """The suite runs without the token; only the reviewed reporter sees it."""
 
+    def setUp(self):
+        """Every helper run needs a configured login: give each test a root-owned-looking one."""
+        self.login_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.login_dir.cleanup)
+        stack = self.login_file(self.login_dir.name)
+        stack.enter_context(mock.patch.object(service, 'run_is_from_tonight', return_value=True))  # fixture folders carry old stamps
+        stack.__enter__()
+        self.addCleanup(stack.__exit__, None, None, None)
+
     def test_units(self):
         """Fixed root-owned helper, no token in the unit, 05:00 IST after the 02:00 fuzz."""
         unit = installer.service_unit()
@@ -326,6 +495,14 @@ class SeparateAccount(unittest.TestCase):
         self.assertEqual(str(installer.HOME), service.BROWSER_HOME)
         self.assertEqual(installer.USER, service.BROWSER_USER)
         self.assertEqual(str(installer.REPORTER), service.REPORTER)
+
+    def login_file(self, temp):
+        """Patch in a root-owned-looking login file (owned by the current user in tests)."""
+        Path(temp, 'login').write_text('kayg\n')
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(service, 'LOGIN_FILE', str(Path(temp) / 'login')))
+        stack.enter_context(mock.patch.object(service, 'LOGIN_OWNER', os.getuid()))
+        return stack
 
     def run_dir(self, temp, name='20261109T061806Z-aaaaaaa'):
         """A well-formed run folder under `temp/runs`, as the unprivileged suite would leave it."""
@@ -343,13 +520,13 @@ class SeparateAccount(unittest.TestCase):
         holder.stdout.readline.return_value = service.READY
         with tempfile.TemporaryDirectory() as temp:
             self.run_dir(temp)
-            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), self.login_file(temp), \
                     mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), \
                     mock.patch.object(service.os, 'chown'), mock.patch.object(service.os, 'fchown'), \
                     mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                     mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
                 Path(temp, 'report').mkdir()
-                self.assertEqual(service.main(), 0)
+                self.assertEqual(service.main([]), 0)
         steps = [call.args[0] for call in run.call_args_list]
         self.assertEqual(len(steps), 4)
         for step in steps[:3]:
@@ -357,7 +534,7 @@ class SeparateAccount(unittest.TestCase):
             self.assertNotIn('forgejo-token', ' '.join(step))
         self.assertIn('nice', steps[1])
         # Round 4: leftover suite processes are killed (as the suite account) before staging and reporting.
-        self.assertEqual(steps[2][steps[2].index('kill'):], ['kill', '-s', 'KILL', '--', '-1'])
+        self.assertEqual(steps[2][steps[2].index('/usr/bin/python3'):], service.KILL_COMMAND)
         self.assertEqual(steps[3][1], '--reuid=infraternal-fuzz')
         self.assertIn(service.REPORTER, steps[3])
         self.assertIn('-I', steps[3])
@@ -385,30 +562,190 @@ class SeparateAccount(unittest.TestCase):
                 mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                 mock.patch.object(service.subprocess, 'run', side_effect=AssertionError('ran without a slot')), \
                 mock.patch.object(service.sys, 'stderr', err):
-            self.assertEqual(service.main(), service.QUEUE_TIMEOUT_EXIT)
+            self.assertEqual(service.main([]), service.QUEUE_TIMEOUT_EXIT)
         self.assertEqual(len([l for l in err.getvalue().splitlines() if 'QUEUE WAIT TIMEOUT' in l]), 1)
         self.assertNotIn('SUITE TIMEOUT', err.getvalue())
         self.assertNotEqual(service.QUEUE_TIMEOUT_EXIT, service.SUITE_TIMEOUT_EXIT)
 
+    def timed_out_main(self, temp, fresh=True):
+        """Run the helper's main with the suite step timing out (exit 124); return (exit code, stderr text, steps run)."""
+        holder = mock.MagicMock()
+        holder.stdout.readline.return_value = service.READY
+        err = io.StringIO()
+        with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), self.login_file(temp), \
+                mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), \
+                mock.patch.object(service.os, 'chown'), mock.patch.object(service.os, 'fchown'), \
+                mock.patch.object(service, 'run_is_from_tonight', return_value=fresh), \
+                mock.patch.object(service.subprocess, 'Popen', return_value=holder), mock.patch.object(service.sys, 'stderr', err), \
+                mock.patch.object(service.subprocess, 'run', side_effect=lambda cmd, **k: subprocess.CompletedProcess(cmd, 124 if 'nix' in cmd else 0)) as run:
+            Path(temp, 'report').mkdir(exist_ok=True)
+            code = service.main([])
+        return code, err.getvalue(), [call.args[0] for call in run.call_args_list]
+
     def test_suite_budget_starts_after_the_slot_is_granted(self):
-        """Follow-up: the 6 h bound wraps only the suite command, and a timeout is reported as a suite timeout, with no report filed."""
+        """The 9 h bound wraps only the suite command, and a timeout is reported as a suite timeout."""
+        with tempfile.TemporaryDirectory() as temp:
+            self.run_dir(temp)
+            code, err, steps = self.timed_out_main(temp)
+        self.assertEqual(code, service.SUITE_TIMEOUT_EXIT)
+        suite_step = next(step for step in steps if 'nix' in step)
+        at = suite_step.index('timeout')
+        self.assertEqual(suite_step[at:at + 3], ['timeout', '--kill-after=60', '9h'])
+        self.assertEqual(suite_step[at + 3], 'nix')
+        self.assertEqual(len([l for l in err.splitlines() if 'SUITE TIMEOUT' in l]), 1)
+        self.assertNotIn('QUEUE WAIT', err)
+        self.assertLess(service.QUEUE_WAIT_SECONDS / 3600 + int(service.SUITE_BUDGET[:-1]), 24, 'TimeoutStartSec=24h stays a backstop')
+
+    def test_a_timed_out_suite_still_reports_what_it_finished(self):
+        """Follow-up 2: after a suite timeout the partial results are staged and reported, flagged with the budget."""
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            (runs / name / 'results.json').unlink()
+            (runs / name / 'results.jsonl').write_text('{"kind": "begin", "total": 3}\n')
+            code, err, steps = self.timed_out_main(temp)
+            self.assertTrue((Path(temp) / 'report' / 'browser-staging' / 'results.jsonl').is_file())
+        self.assertEqual(code, service.SUITE_TIMEOUT_EXIT)
+        reporter = next(step for step in steps if service.REPORTER in step)
+        self.assertEqual(reporter[reporter.index('--suite-timeout') + 1], '9h')
+        self.assertEqual(reporter[1], '--reuid=infraternal-fuzz')
+
+    def test_a_stale_run_folder_is_not_reported_as_tonights_partial_results(self):
+        """Follow-up 2: if the suite died before it made its own run folder, last night's `latest` is not reported again."""
+        with tempfile.TemporaryDirectory() as temp:
+            self.run_dir(temp)
+            code, err, steps = self.timed_out_main(temp, fresh=False)
+        self.assertEqual(code, service.SUITE_TIMEOUT_EXIT)
+        self.assertFalse([step for step in steps if service.REPORTER in step])
+
+    def test_run_folder_freshness(self):
+        """A run folder counts as tonight's only if its stamp is not older than the helper's start."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 11, 10, 0, 30, tzinfo=timezone.utc)
+        self.assertTrue(REAL_RUN_IS_FROM_TONIGHT('20261110T003100Z-aaaaaaa', now))
+        self.assertTrue(REAL_RUN_IS_FROM_TONIGHT('20261110T002900Z-aaaaaaa', now))  # one minute of slack
+        self.assertFalse(REAL_RUN_IS_FROM_TONIGHT('20261109T134307Z-c442500', now))
+        self.assertFalse(REAL_RUN_IS_FROM_TONIGHT('garbage', now))
+
+    def test_staging_accepts_partial_results_but_not_none(self):
+        """results.json may be missing when results.jsonl is there; with neither, the run is refused."""
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            (runs / name / 'results.json').unlink()
+            with self.assertRaises(service.Refused):
+                self.stage(temp)
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            (runs / name / 'results.json').unlink()
+            (runs / name / 'results.jsonl').write_text('{"kind": "begin", "total": 1}\n')
+            _, dest = self.stage(temp)
+            self.assertEqual(sorted(p.name for p in dest.iterdir()), ['meta.json', 'results.jsonl', 'suite.log'])
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            (runs / name / 'results.jsonl').symlink_to('/etc/hostname')
+            with self.assertRaises(service.Refused):
+                self.stage(temp)
+
+    def test_login_comes_from_a_root_owned_file(self):
+        """Round-5: the helper reads the Forgejo login from a root-owned config file and passes it to the reporter; no file, no night."""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'login'
+            path.write_text('kayg\n')
+            self.assertEqual(service.read_login(path, os.getuid()), 'kayg')
+            with self.assertRaises(service.Refused):
+                service.read_login(path, os.getuid() + 1)       # not owned by root (here: by someone else)
+            for bad in ('', 'a b\n', 'x' * 80, '-x', '../etc'):
+                path.write_text(bad)
+                with self.assertRaises(service.Refused):
+                    service.read_login(path, os.getuid())
+            with self.assertRaises(service.Refused):
+                service.read_login(Path(temp) / 'missing', os.getuid())
+            (Path(temp) / 'link').symlink_to(path)
+            with self.assertRaises(service.Refused):
+                service.read_login(Path(temp) / 'link', os.getuid())
+
+    def reporter_step(self, argv, temp, login='kayg\n'):
+        """Run the helper's main with `argv`, everything mocked; return (exit code, steps run, Popen mock)."""
+        Path(temp, 'login').write_text(login)
+        with mock.patch.object(service, 'LOGIN_FILE', str(Path(temp) / 'login')), mock.patch.object(service, 'LOGIN_OWNER', os.getuid()), \
+                mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+                mock.patch.object(service.subprocess, 'Popen') as popen, \
+                mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            code = service.main(argv)
+        return code, [call.args[0] for call in run.call_args_list], popen
+
+    def test_report_only_reruns_just_the_reporter_on_staged_files(self):
+        """Round-5: `--report-only --run-name N` takes no slot, runs no suite, stages nothing, and runs only the reporter."""
+        with tempfile.TemporaryDirectory() as temp:
+            code, steps, popen = self.reporter_step(['--report-only', '--run-name', '20261109T134307Z-c442500'], temp)
+        self.assertEqual(code, 0)
+        popen.assert_not_called()
+        self.assertEqual(len(steps), 1)
+        step = steps[0]
+        self.assertEqual(step[1], '--reuid=infraternal-fuzz')
+        self.assertIn(service.REPORTER, step)
+        self.assertEqual(step[step.index('--run-name') + 1], '20261109T134307Z-c442500')
+        self.assertEqual(step[step.index('--login') + 1], 'kayg')
+        self.assertIn('/browser-staging', step[step.index('--results') + 1])
+        self.assertNotIn('nix', step)
+
+    def test_report_only_refuses_bad_arguments_and_a_missing_login(self):
+        """A run name that is not a run folder name, an unknown flag, or no configured login stops it before any step."""
+        for argv in (['--report-only', '--run-name', '../x'], ['--report-only', '--run-name', '20261109T134307Z-C442500'], ['--bogus']):
+            with self.subTest(argv), tempfile.TemporaryDirectory() as temp, self.assertRaises(SystemExit):
+                self.reporter_step(argv, temp)
+        with tempfile.TemporaryDirectory() as temp:
+            code, steps, popen = self.reporter_step(['--report-only'], temp, login='')
+            self.assertEqual(code, 1)
+            self.assertEqual(steps, [])
+
+    def test_a_normal_night_stops_early_without_a_login(self):
+        """No login file: the unit fails at once, before it waits for a slot or runs the suite."""
+        with tempfile.TemporaryDirectory() as temp:
+            code, steps, popen = self.reporter_step([], temp, login='')
+        self.assertEqual(code, 1)
+        popen.assert_not_called()
+        self.assertEqual(steps, [])
+
+    def test_cleanup_kill_command_works_for_real(self):
+        """Follow-up: the cleanup kill is a command the real interpreter runs. (procps `kill -s KILL -- -1` printed its usage and killed nothing.)"""
+        child = subprocess.Popen(['sleep', '60'])
+        self.addCleanup(child.kill)
+        command = service.KILL_COMMAND[:-1] + [str(child.pid)]
+        self.assertEqual(subprocess.run(command).returncode, 0)
+        self.assertEqual(child.wait(10), -9)
+        # Nobody left to signal is a success; an argument that is not a process id is a failure.
+        self.assertEqual(subprocess.run(service.KILL_COMMAND[:-1] + ['4000000']).returncode, 0)
+        self.assertNotEqual(subprocess.run(service.KILL_COMMAND[:-1] + ['not-a-pid'], stderr=subprocess.DEVNULL).returncode, 0)
+        self.assertEqual(service.KILL_COMMAND[-1], '-1')
+
+    @unittest.skipUnless(subprocess.run(['unshare', '-Urpf', '--mount-proc', 'true'], capture_output=True).returncode == 0
+                         if shutil.which('unshare') else False, 'needs unprivileged user and pid namespaces')
+    def test_cleanup_kill_reaches_every_process_of_the_account(self):
+        """Follow-up: inside a throwaway pid namespace the exact helper command (pid -1) kills a bystander and the call succeeds."""
+        script = 'sleep 60 & P=$!; ' + ' '.join(shlex.quote(a) for a in service.KILL_COMMAND) + '; echo kill-exit=$?; wait $P; echo bystander-status=$?'
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(['unshare', '-Urpf', '--mount-proc', 'sh', '-c', script, 'sh', str(Path(temp) / 'pid')],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertIn('kill-exit=0', result.stdout, result.stdout + result.stderr)
+        self.assertIn('bystander-status=137', result.stdout, result.stdout + result.stderr)
+        self.assertNotIn('Usage', result.stdout + result.stderr)
+
+    def test_a_cleanup_that_cannot_run_stops_the_night(self):
+        """Follow-up: if the cleanup kill fails, nothing is staged or reported (fail closed) and the journal says why."""
         holder = mock.MagicMock()
         holder.stdout.readline.return_value = service.READY
         err = io.StringIO()
         with tempfile.TemporaryDirectory() as temp:
             self.run_dir(temp)
-            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), self.login_file(temp), \
+                    mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), mock.patch.object(service.os, 'chown'), \
                     mock.patch.object(service.subprocess, 'Popen', return_value=holder), mock.patch.object(service.sys, 'stderr', err), \
-                    mock.patch.object(service.subprocess, 'run', side_effect=lambda cmd, **k: subprocess.CompletedProcess(cmd, 124 if 'nix' in cmd else 0)) as run:
-                self.assertEqual(service.main(), service.SUITE_TIMEOUT_EXIT)
+                    mock.patch.object(service.subprocess, 'run', side_effect=lambda cmd, **k: subprocess.CompletedProcess(cmd, 1 if service.KILL_SNIPPET in cmd else 0)) as run:
+                Path(temp, 'report').mkdir()
+                self.assertEqual(service.main([]), 1)
         steps = [call.args[0] for call in run.call_args_list]
-        suite_step = next(step for step in steps if 'nix' in step)
-        at = suite_step.index('timeout')
-        self.assertEqual(suite_step[at:at + 3], ['timeout', '--kill-after=60', '6h'])
-        self.assertEqual(suite_step[at + 3], 'nix')
-        self.assertEqual(len([l for l in err.getvalue().splitlines() if 'SUITE TIMEOUT' in l]), 1)
-        self.assertNotIn('QUEUE WAIT', err.getvalue())
-        self.assertFalse([step for step in steps if service.REPORTER in step], 'no report after a timed-out suite')
+        self.assertFalse([step for step in steps if service.REPORTER in step])
+        self.assertEqual(len([l for l in err.getvalue().splitlines() if 'could not stop' in l]), 1)
 
     def stage(self, temp, **kwargs):
         """Stage the run folder in `temp` the way the helper does, as the current user."""
@@ -527,12 +864,12 @@ class SeparateAccount(unittest.TestCase):
             runs, name = self.run_dir(temp)
             (runs / name / 'suite.log').unlink()
             (runs / name / 'suite.log').symlink_to('/etc/hostname')
-            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), self.login_file(temp), \
                     mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), mock.patch.object(service.os, 'chown'), mock.patch.object(service.os, 'fchown'), \
                     mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                     mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
                 Path(temp, 'report').mkdir()
-                self.assertEqual(service.main(), 1)
+                self.assertEqual(service.main([]), 1)
         self.assertEqual(run.call_count, 3)
 
     def test_hooks_are_off_for_the_suite_checkout(self):
@@ -557,7 +894,7 @@ class SeparateAccount(unittest.TestCase):
         holder.stdout.readline.return_value = b''
         with mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                 mock.patch.object(service.subprocess, 'run', side_effect=AssertionError('ran without a slot')):
-            self.assertEqual(service.main(), 1)
+            self.assertEqual(service.main([]), 1)
 
 
 class Installer(unittest.TestCase):
@@ -704,6 +1041,17 @@ class Installer(unittest.TestCase):
         self.assertNotRegex(writable, r'(^|[= ])/(var/)?tmp( |$)')
         self.assertEqual(installer.tmpfiles_config(), 'd /tmp/infraternal-build-slots 0775 claude claude -\n')
         self.assertNotIn('777', installer.tmpfiles_config())
+
+    def test_login_file_is_written_root_owned_and_validated(self):
+        """Round-5: the installer writes the account name the helper reads; a bad name is refused, a good one lands 0644 by rename."""
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(installer, 'LOGIN_FILE', Path(temp) / 'login'), mock.patch.object(installer.os, 'chown'):
+            for bad in ('', 'a b', 'x' * 80, '-x', 'a\nb'):
+                with self.subTest(bad), self.assertRaises(SystemExit):
+                    installer.write_login(bad)
+            installer.write_login('kayg')
+            self.assertEqual((Path(temp) / 'login').read_text(), 'kayg\n')
+            self.assertEqual((Path(temp) / 'login').stat().st_mode & 0o777, 0o644)
+            self.assertEqual(service.read_login(Path(temp) / 'login', os.getuid()), 'kayg')
 
     def test_unit_hardening_and_umask(self):
         """The unit confines the helper as far as the suite tolerates, with the fuzz's 0077 umask."""
