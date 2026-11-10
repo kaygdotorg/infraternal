@@ -10,7 +10,11 @@ use super::{Boundary, Process, attribute, boundary, login_leader, members_digest
 /// The id the tests use for the authenticated shim's session.
 const ID: &str = "d2f8649c0123456789abcdef01234567";
 
-/// A process record with the fields attribution reads; `tty` is a raw `tty_nr`.
+/// The (device, inode) the tests use for the system manager's executor, `systemd-executor`.
+const EXECUTOR: (u64, u64) = (9, 9);
+
+/// A process record with the fields attribution reads; `tty` is a raw `tty_nr`. Its executable is
+/// a distinct file per process, never the executor.
 fn member(pid: i32, parent: i32, tty: u32, foreground: bool, program: &str) -> Process {
     Process {
         pid,
@@ -20,6 +24,16 @@ fn member(pid: i32, parent: i32, tty: u32, foreground: bool, program: &str) -> P
         program: program.into(),
         tty,
         foreground,
+        exe: (1, u64::try_from(pid).unwrap()),
+    }
+}
+
+/// The real PAM helper of a host login: the executor process systemd left in the session when it
+/// started the worker, so it runs the executor binary, as the login's account, born with the login.
+fn pam_helper(pid: i32, worker: i32) -> Process {
+    Process {
+        exe: EXECUTOR,
+        ..member(pid, worker, 0, false, "(sd-pam)")
     }
 }
 
@@ -90,6 +104,10 @@ fn every_other_cgroup_is_refused() {
     for path in [
         "/system.slice/infraternal-session-00000000000000000000000000000000.scope".to_owned(),
         "/system.slice/sshd.service".to_owned(),
+        // #433 P3-4: the old layout's scope is a direct child of system.slice, the unit Take over stops.
+        format!("/user.slice/user-0.slice/infraternal-session-{ID}.scope"),
+        format!("/system.slice/other.slice/infraternal-session-{ID}.scope"),
+        format!("/infraternal-session-{ID}.scope"),
         "/user.slice/user-0.slice/session-8.scope/inner".to_owned(),
         "/user.slice/user-0.slice/user@0.service/app.slice".to_owned(),
         "/user.slice/user-0.slice/session-.scope".to_owned(),
@@ -152,7 +170,7 @@ fn an_old_scope_counts_its_background_programs() {
         member(12, 11, pty(3), false, "sleep"),
         member(13, 1, 0, false, "orphan"),
     ];
-    let found = attribute(&members, &[(10, None)], None).unwrap();
+    let found = attribute(&members, &[(10, None)], None, &[EXECUTOR]).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(members[found[0].foreground].program, "bash");
     assert_eq!(found[0].others, 2);
@@ -172,7 +190,13 @@ fn a_login_session_attributes_each_shell_to_its_shim() {
         member(25, 20, pty(4), true, "bash"),
         member(26, 23, 0, false, "daemonish"),
     ];
-    let found = attribute(&members, &[(21, Some(3)), (22, Some(4))], Some(20)).unwrap();
+    let found = attribute(
+        &members,
+        &[(21, Some(3)), (22, Some(4))],
+        Some(20),
+        &[EXECUTOR],
+    )
+    .unwrap();
     assert_eq!(members[found[0].foreground].program, "vim");
     assert_eq!(
         found[0].others, 2,
@@ -193,11 +217,11 @@ fn a_login_session_refuses_what_it_cannot_attribute() {
         member(21, 2, 0, false, "live"),
         member(23, 20, pty(3), true, "bash"),
     ];
-    assert!(attribute(&base, &[(21, Some(3))], Some(20)).is_ok());
+    assert!(attribute(&base, &[(21, Some(3))], Some(20), &[EXECUTOR]).is_ok());
     let with = |extra: Process| {
         let mut members = base.clone();
         members.push(extra);
-        attribute(&members, &[(21, Some(3))], Some(20))
+        attribute(&members, &[(21, Some(3))], Some(20), &[EXECUTOR])
     };
     assert_eq!(
         with(member(30, 1, 0, false, "escaped")),
@@ -215,17 +239,22 @@ fn a_login_session_refuses_what_it_cannot_attribute() {
         "a tty-less child of the worker"
     );
     assert_eq!(
-        attribute(&base, &[(21, None)], Some(20)),
+        attribute(&base, &[(21, None)], Some(20), &[EXECUTOR]),
         Err(73),
         "a shim without a PTY"
     );
     assert_eq!(
-        attribute(&base, &[(21, Some(3))], Some(99)),
+        attribute(&base, &[(21, Some(3))], Some(99), &[EXECUTOR]),
         Err(73),
         "the leader is not a member"
     );
     assert_eq!(
-        attribute(&base, &[(21, Some(3)), (21, Some(3))], Some(20)),
+        attribute(
+            &base,
+            &[(21, Some(3)), (21, Some(3))],
+            Some(20),
+            &[EXECUTOR]
+        ),
         Err(73),
         "a shim listed twice"
     );
@@ -238,7 +267,10 @@ fn a_terminal_without_a_foreground_program_is_refused() {
         member(10, 1, 0, false, "live"),
         member(11, 10, pty(3), false, "bash"),
     ];
-    assert_eq!(attribute(&members, &[(10, None)], None), Err(73));
+    assert_eq!(
+        attribute(&members, &[(10, None)], None, &[EXECUTOR]),
+        Err(73)
+    );
 }
 
 /// Seen on the real guest (#433 e2e L1): `PAMName=login` leaves systemd's `(sd-pam)` helper, a tty-less
@@ -248,12 +280,12 @@ fn a_terminal_without_a_foreground_program_is_refused() {
 fn the_logins_own_pam_helper_belongs_to_the_login() {
     let members = [
         member(2632, 1, 0, false, "infraternal"),
-        member(2634, 2632, 0, false, "(sd-pam)"),
+        pam_helper(2634, 2632),
         member(2636, 2525, 0, false, "infraternal"),
         member(2637, 2632, pty(0), true, "bash"),
         member(2661, 2637, pty(0), false, "sleep"),
     ];
-    let found = attribute(&members, &[(2636, Some(0))], Some(2632)).unwrap();
+    let found = attribute(&members, &[(2636, Some(0))], Some(2632), &[EXECUTOR]).unwrap();
     assert_eq!(members[found[0].foreground].program, "bash");
     assert_eq!(
         found[0].others, 1,
@@ -263,9 +295,58 @@ fn the_logins_own_pam_helper_belongs_to_the_login() {
     renamed[1].ppid = 2637;
     renamed[1].tty = pty(0);
     assert_eq!(
-        attribute(&renamed, &[(2636, Some(0))], Some(2632)).unwrap()[0].others,
+        attribute(&renamed, &[(2636, Some(0))], Some(2632), &[EXECUTOR]).unwrap()[0].others,
         2,
         "a program on the terminal that calls itself (sd-pam) is still that terminal's"
+    );
+}
+
+/// #433 P2-1 (J462): a name is not an identity. The login worker is a child subreaper, so a terminal's
+/// detached program is reparented to it with no tty, exactly where the helper sits. Named `(sd-pam)`
+/// (a binary file called that is enough) it would have been closed unlisted. Each spoof must refuse
+/// the whole offer (73): another executable, born after the login's terminals, another account, or
+/// a second helper.
+#[test]
+fn a_spoofed_pam_helper_refuses_the_offer() {
+    let members = vec![
+        member(3482, 1, 0, false, "infraternal"),
+        pam_helper(3484, 3482),
+        member(3486, 2525, 0, false, "infraternal"),
+        member(3490, 3482, pty(0), true, "bash"),
+    ];
+    let offer =
+        |members: &[Process]| attribute(members, &[(3486, Some(0))], Some(3482), &[EXECUTOR]);
+    assert!(offer(&members).is_ok());
+    let with = |spoof: Process| {
+        let mut all = members.clone();
+        all.push(spoof);
+        offer(&all)
+    };
+    assert_eq!(
+        with(member(3883, 3482, 0, false, "(sd-pam)")),
+        Err(73),
+        "a detached /tmp/(sd-pam) under the worker"
+    );
+    assert_eq!(
+        with(pam_helper(3883, 3482)),
+        Err(73),
+        "the executor binary, started after the login's terminals"
+    );
+    let mut account = pam_helper(3485, 3482);
+    account.uid = 1000;
+    assert_eq!(with(account), Err(73), "another account than the login's");
+    assert_eq!(with(pam_helper(3485, 3482)), Err(73), "a second helper");
+    let mut real = members.clone();
+    real[1].exe = (1, 3484);
+    assert_eq!(
+        offer(&real),
+        Err(73),
+        "the helper's executable is not the executor"
+    );
+    assert_eq!(
+        attribute(&members, &[(3486, Some(0))], Some(3482), &[]),
+        Err(73),
+        "no known executor: nothing passes as the helper"
     );
 }
 
@@ -301,6 +382,13 @@ fn a_shim_reparented_by_the_agent_stop_keeps_its_fingerprint() {
         digest(&moved),
         before,
         "a terminal's program changing parent is a change"
+    );
+    let mut swapped = members.clone();
+    swapped[3].exe = (1, 4242);
+    assert_ne!(
+        digest(&swapped),
+        before,
+        "#433 P3-3: the same pid and name running another binary is a change"
     );
     let mut started = members;
     started.push(member(2800, 2696, pty(0), false, "vim"));
