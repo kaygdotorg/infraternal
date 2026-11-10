@@ -1015,9 +1015,15 @@ fn j363_kill_between_persist_and_fence() {
     let runtime_peers_before_fence = Device::counters().unwrap().len();
     let durable: serde_json::Value =
         serde_json::from_slice(&std::fs::read(state.0.join("mesh-public.json")).unwrap()).unwrap();
+    // The epoch lives in its own record beside the snapshot (D295, #382 P2).
+    let durable_authority: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state.0.join(crate::node_state::AUTHORITY_FILE)).unwrap(),
+    )
+    .unwrap();
     println!(
-        "J363_RUNTIME_PEERS_BEFORE_FENCE={runtime_peers_before_fence} DURABLE_EPOCH={} DURABLE_PEERS={}",
-        durable["config"]["authority_epoch"],
+        "J363_RUNTIME_PEERS_BEFORE_FENCE={runtime_peers_before_fence} DURABLE_EPOCH={} DURABLE_RESET={} DURABLE_PEERS={}",
+        durable_authority["epoch"],
+        durable_authority["reset_pending"],
         durable["config"]["peers"].as_object().unwrap().len()
     );
     child.kill().unwrap();
@@ -1035,7 +1041,8 @@ fn j363_kill_between_persist_and_fence() {
         runtime_peers_before_fence, 1,
         "the checkpoint precedes the runtime fence"
     );
-    assert_eq!(durable["config"]["authority_epoch"], J363_EPOCH_B);
+    assert_eq!(durable_authority["epoch"], J363_EPOCH_B);
+    assert_eq!(durable_authority["reset_pending"], true);
     assert_eq!(durable["config"]["peers"].as_object().unwrap().len(), 0);
     assert_eq!(
         peers, 0,
