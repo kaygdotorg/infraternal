@@ -2592,6 +2592,9 @@ impl Node {
             self.retire_settled_authority_rotation()?;
             identity = self.identity.clone().ok_or(io::ErrorKind::NotConnected)?;
         }
+        // With a Store, a lower same-epoch revision is accepted on purpose: a database restored
+        // under a running server keeps its epoch but rewinds revisions (#382, J418 P3-a). The
+        // exact-base write (`write_public_state_full_snapshot`) keeps that swap atomic.
         let result = stage_chunk(
             &mut self.pending,
             self.config.as_ref(),

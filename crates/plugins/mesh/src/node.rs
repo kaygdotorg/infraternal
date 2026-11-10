@@ -2477,6 +2477,12 @@ impl Node {
         }
         let completes_authority_reset =
             self.authority_reset == AuthorityResetState::AwaitingFullSnapshot && full_snapshot;
+        // A lower revision under the same epoch is accepted on purpose when this node has a
+        // Store: a database restored under a running server keeps that process's epoch but
+        // rewinds its revisions, and refusing would strand every node (#382). The Store's
+        // exact-base compare-and-set (`save_full_snapshot`) makes the swap durable and atomic.
+        // Only a node without a Store, which has no such base, refuses it. This is not a
+        // revision fence for stored nodes (J418 P3-a).
         let lower_revision_replacement = self.config.as_ref().is_some_and(|old| {
             full_snapshot
                 && old.authority_epoch == config.authority_epoch
