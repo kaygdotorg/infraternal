@@ -661,9 +661,10 @@ reviewed_terminal_process() {
  reviewed_unit=
  { while IFS= read -r scan_cgroup; do
     case "$scan_cgroup" in
-     0::*/infraternal-session-*.scope|0::*/infraternal-session-*.scope/*)
-      reviewed_unit=${scan_cgroup##*/infraternal-session-}
-      reviewed_unit=infraternal-session-${reviewed_unit%%/*};;
+     0::/system.slice/infraternal-session-*.scope|0::/system.slice/infraternal-session-*.scope/*)
+      # Only a direct child of system.slice: the unit Take over stops (#433 P3-4).
+      reviewed_rest=${scan_cgroup#0::/system.slice/}
+      reviewed_unit=${reviewed_rest%%/*};;
      0::/user.slice/user-*.slice/session-*.scope)
       reviewed_rest=${scan_cgroup#0::/user.slice/}
       case "$reviewed_rest" in */*/*) :;; *) reviewed_unit=${reviewed_rest#*/};; esac;;

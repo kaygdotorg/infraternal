@@ -53,6 +53,9 @@ struct Process {
     tty: u32,
     /// Foreground ownership is read from the PTY's process group, never argv.
     foreground: bool,
+    /// The (device, inode) of the file it executes: its identity where a name proves nothing, such as
+    /// the login's PAM helper, and bound into the fingerprint so a swapped binary is a change (#433).
+    exe: (u64, u64),
 }
 
 /// Where a terminal's processes live, and the unit Take over stops to close them.
@@ -167,12 +170,41 @@ fn process(pid: i32) -> Result<Process, u8> {
         program: name(&bounded(format!("/proc/{pid}/comm"))?)?,
         tty,
         foreground: tty != 0 && field(5)?.parse::<i32>().map_err(|_| 73)? == pid,
+        exe: {
+            // `/proc/<pid>/exe` resolves to the executed file even when it was replaced or deleted.
+            let file = fs::metadata(format!("/proc/{pid}/exe")).map_err(|_| 73)?;
+            (file.dev(), file.ino())
+        },
     })
+}
+
+/// The (device, inode) of the system manager's own executables that may run the login's PAM helper:
+/// `systemd-executor` beside `/proc/1/exe` (systemd 255 and later) and `/proc/1/exe` itself (earlier
+/// systemd forks the helper from the manager). Each must be a root-owned regular file nobody else can
+/// write. An account cannot make a process run one of these as a long-lived helper of its login, so
+/// they identify the real `(sd-pam)` where its name proves nothing (#433 P2-1).
+fn executors() -> Vec<(u64, u64)> {
+    let Ok(manager) = executable(1) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for path in [manager.with_file_name("systemd-executor"), manager] {
+        if let Ok(file) = fs::symlink_metadata(&path)
+            && file.is_file()
+            && file.uid() == 0
+            && file.permissions().mode() & 0o022 == 0
+        {
+            found.push((file.dev(), file.ino()));
+        }
+    }
+    found
 }
 
 /// Find the close boundary for a shim of session `id` from its cgroup v2 path.
 ///
-/// The old layout is the shim's own `infraternal-session-<id>.scope`, nested cgroups included. A host
+/// The old layout is the shim's own `infraternal-session-<id>.scope`, nested cgroups included. That
+/// scope must be a direct child of `system.slice`: it is the system unit Take over stops, so the
+/// processes read and the unit stopped are the same cgroup (#433 P3-4). A host
 /// login is exactly `/user.slice/user-<uid>.slice/session-<N>.scope`, the shape the agent itself accepts
 /// for a login (`logins::login_cgroup`). Anything else, including another session's scope, is refused.
 fn boundary(path: &str, id: &str) -> Result<(PathBuf, Boundary), u8> {
@@ -181,11 +213,14 @@ fn boundary(path: &str, id: &str) -> Result<(PathBuf, Boundary), u8> {
         return Err(73);
     }
     let wanted = format!("infraternal-session-{id}.scope");
-    if let Some(at) = parts.iter().position(|part| *part == wanted) {
-        let root: PathBuf = std::iter::once("/sys/fs/cgroup")
-            .chain(parts[..=at].iter().copied())
-            .collect();
+    if let ["system.slice", scope, ..] = parts.as_slice()
+        && *scope == wanted
+    {
+        let root: PathBuf = ["/sys/fs/cgroup", "system.slice", scope].iter().collect();
         return Ok((root, Boundary::Scope(wanted)));
+    }
+    if parts.contains(&wanted.as_str()) {
+        return Err(73);
     }
     let ["user.slice", user, scope] = parts.as_slice() else {
         return Err(73);
@@ -337,13 +372,16 @@ fn members(
 /// else in it is that terminal's. With a `leader` (the verified login worker) it is a host login: each
 /// process belongs to the terminal of its nearest ancestor, itself included, that has a PTY, and that
 /// PTY must be one of the shims'. The worker, the shims and systemd's `(sd-pam)` helper are the login
-/// itself and belong to no terminal. A process under neither the worker nor a shim, a PTY no shim serves,
+/// itself and belong to no terminal. The helper is recognised by identity, never by name: it runs one
+/// of the system manager's `executors` (device and inode), as the login's account, as a tty-less child
+/// of the worker born before every other process of the login but the worker, and there is only one. A process under neither the worker nor a shim, a PTY no shim serves,
 /// or a tty-less process with no such ancestor is refused (73), because the person could not have seen
 /// it in the confirmation.
 fn attribute(
     members: &[Process],
     shims: &[(i32, Option<u32>)],
     leader: Option<i32>,
+    executors: &[(u64, u64)],
 ) -> Result<Vec<Attributed>, u8> {
     let index: BTreeMap<_, _> = members
         .iter()
@@ -359,19 +397,29 @@ fn attribute(
     {
         return Err(73);
     }
-    // `PAMName=` leaves systemd's PAM helper, `(sd-pam)`, in the session scope as a tty-less direct
-    // child of the worker. It is part of the login like the worker itself. Anything on a terminal, or
-    // further down, stays that terminal's whatever it calls itself.
-    let pam_helper = |pid: i32| {
-        leader.is_some_and(|leader| {
-            members.iter().any(|process| {
-                process.pid == pid
-                    && process.ppid == leader
-                    && process.tty == 0
-                    && process.program == "(sd-pam)"
-            })
-        })
-    };
+    // `PAMName=` leaves systemd's PAM helper, `(sd-pam)`, in the session scope: the executor process
+    // forked right after the worker, which drops to the login's account and never execs (seen on the
+    // J311b guest, systemd 257). It is part of the login like the worker itself. The worker is a child
+    // subreaper, so a terminal's detached program lands beside it with no tty; only the helper's
+    // identity tells them apart (#433 P2-1, J462). Anything on a terminal stays that terminal's.
+    let helper = leader.and_then(|leader| {
+        let worker = members.iter().find(|process| process.pid == leader)?;
+        let earliest = members
+            .iter()
+            .filter(|process| process.pid != leader)
+            .map(|process| process.birth)
+            .min()?;
+        let mut candidates = members.iter().filter(|process| {
+            process.ppid == leader
+                && process.tty == 0
+                && process.uid == worker.uid
+                && process.program == "(sd-pam)"
+                && executors.contains(&process.exe)
+        });
+        let found = candidates.next()?;
+        (candidates.next().is_none() && found.birth == earliest).then_some(found.pid)
+    });
+    let pam_helper = |pid: i32| helper == Some(pid);
     let infrastructure = |pid: i32| {
         leader == Some(pid) || shims.iter().any(|(shim, _)| *shim == pid) || pam_helper(pid)
     };
@@ -491,7 +539,7 @@ fn shim(path: &Path, before: &fs::Metadata, base: &Path) -> Result<(Shim, PathBu
 }
 
 /// One digest of a boundary and every process in it, bound into each of its records: any process
-/// starting, ending, or changing account, program, terminal, foreground or parent invalidates the
+/// starting, ending, or changing account, program, executable, terminal, foreground or parent invalidates the
 /// confirmation. A shim's parent is left out: a shim is bound by its pid and birth, and on a host login
 /// its parent is the old agent, which Take over stops before it compares the records again (the shim is
 /// then reparented, #433 e2e L1).
@@ -517,6 +565,8 @@ fn members_digest(
         hash.update(&process.birth.to_be_bytes());
         hash.update(&process.uid.to_be_bytes());
         hash.update(&process.tty.to_be_bytes());
+        hash.update(&process.exe.0.to_be_bytes());
+        hash.update(&process.exe.1.to_be_bytes());
         hash.update(process.program.as_bytes());
         hash.update(&[
             0,
@@ -561,7 +611,12 @@ fn boundary_records(
         }
     }
     let pairs: Vec<_> = shims.iter().map(|shim| (shim.pid, shim.tty)).collect();
-    let attributed = attribute(&processes, &pairs, leader)?;
+    let executors = if leader.is_some() {
+        executors()
+    } else {
+        Vec::new()
+    };
+    let attributed = attribute(&processes, &pairs, leader, &executors)?;
     let unit = boundary.unit();
     let shim_pids: Vec<_> = shims.iter().map(|shim| shim.pid).collect();
     let members_hash = members_digest(root, scope_metadata.ino(), &processes, &shim_pids, leader);
