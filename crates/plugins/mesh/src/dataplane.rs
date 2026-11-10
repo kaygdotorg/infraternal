@@ -113,8 +113,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
     /// Authenticated server deployment authority retained beside this peer snapshot.
-    /// Missing values are legacy snapshots; once an epoch is present, an epoch-less replacement
-    /// must retire the old peers and be refused instead of silently downgrading authority.
+    /// Missing values identify legacy snapshots. An authenticated full snapshot bound to the
+    /// current local key may replace an epoch-bearing authority with an epoch-less one, allowing
+    /// coordinator rollback. The transition durably retires the old authority before applying
+    /// changed peers; unchanged peers retain their sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_epoch: Option<String>,
     pub node: NodeId,
