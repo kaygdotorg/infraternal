@@ -12,9 +12,9 @@
  * - `row`: the danger row.
  * - `asking`: the question. Keep or Escape put the row back and give it the focus. Leaving the tab resets it (`reset`).
  * - `pending`: Remove was pressed. Both buttons are disabled, Remove reads "Removing…", and the focus moves to the
- *   question itself so it is never lost to a disabled button. The question's note (a polite live region) says it.
+ *   question itself so it is never lost to a disabled button. The question's note (the polite live region) says it. `sync` leaves a running removal alone.
  * - `done`: it worked (removed, or access revoked with the uninstall waiting for the machine). The note says which.
- * - failed or refused: the note says why, in the danger colour, as an alert; Remove is live again and reads "Try again".
+ * - failed or refused: the alert region says why, in the danger colour; Remove is live again and reads "Try again".
  * - The host's own state (`status`, read on every `sync`): offline adds a line saying the uninstall waits until the machine
  *   connects; gone (already removed elsewhere) turns the question into a note and disables it.
  *
@@ -82,10 +82,13 @@ export function createRemovalFoot(action: DetailsAction): RemovalFoot {
   ask.hidden = true;
   // The panel closes on Escape unless the focused pane owns it (details.on-demand.ts): here Escape only takes the question back.
   ask.dataset.ownsEscape = "";
-  ask.innerHTML = '<p class="canvas-popover-ask-q"></p><p class="canvas-popover-ask-effect"></p><p class="canvas-popover-ask-note" role="status" aria-live="polite" hidden></p><div class="canvas-popover-ask-actions"><button type="button" class="ui-button" data-button="secondary" data-keep></button><button type="button" class="ui-button canvas-popover-ask-yes" data-button="primary" data-yes></button></div>';
+  ask.innerHTML = '<p class="canvas-popover-ask-q"></p><p class="canvas-popover-ask-effect"></p><p class="canvas-popover-ask-note" role="status"></p><p class="canvas-popover-ask-note" role="alert" data-tone="danger"></p><div class="canvas-popover-ask-actions"><button type="button" class="ui-button" data-button="secondary" data-keep></button><button type="button" class="ui-button canvas-popover-ask-yes" data-button="primary" data-yes></button></div>';
   const question = ask.querySelector<HTMLElement>(".canvas-popover-ask-q")!;
   const effect = ask.querySelector<HTMLElement>(".canvas-popover-ask-effect")!;
-  const note = ask.querySelector<HTMLElement>(".canvas-popover-ask-note")!;
+  // Two permanent live regions, never hidden and never changing role: a region that appears, or changes role, in the same tick it
+  // is filled is often not announced. Only their text changes, so every message is read.
+  const statusNote = ask.querySelector<HTMLElement>('.canvas-popover-ask-note[role="status"]')!;
+  const alertNote = ask.querySelector<HTMLElement>('.canvas-popover-ask-note[role="alert"]')!;
   const keep = ask.querySelector<HTMLButtonElement>("[data-keep]")!;
   const yes = ask.querySelector<HTMLButtonElement>("[data-yes]")!;
   question.textContent = `Remove ${action.subject}?`;
@@ -96,12 +99,14 @@ export function createRemovalFoot(action: DetailsAction): RemovalFoot {
   let phase: Phase = "row";
   const foot: RemovalFoot = { root, reset, sync };
 
-  /** Says something in the note: `alert` for a failure (read at once, in the danger colour), otherwise a polite status. */
+  /** Says something: in the alert region for a failure (read at once, in the danger colour), otherwise in the polite status one. The other is emptied. */
   function say(text: string, alert = false): void {
-    note.textContent = text;
-    note.hidden = text === "";
-    note.dataset.tone = alert ? "danger" : "";
-    note.setAttribute("role", alert ? "alert" : "status");
+    (alert ? statusNote : alertNote).textContent = "";
+    (alert ? alertNote : statusNote).textContent = text;
+  }
+  /** Moves the focus to the question when it is inside it, so disabling the buttons never drops it to the page. */
+  function keepFocus(): void {
+    if (ask.contains(document.activeElement) && document.activeElement !== ask) ask.focus({ preventScroll: true });
   }
   /** Shows the row or the question; `instant` for a keyboard open, otherwise a short ease-out crossfade. */
   function show(asking: boolean, instant: boolean, focus: boolean): void {
@@ -123,11 +128,14 @@ export function createRemovalFoot(action: DetailsAction): RemovalFoot {
   function sync(): void {
     const status = action.status?.() ?? "ready";
     effect.textContent = status === "offline" ? `${action.hint} ${action.subject} is offline, so the uninstall waits until it connects.` : action.hint;
+    // A removal in flight owns the note, the buttons and aria-busy until it ends, whatever the host's state says.
+    if (phase === "pending") return;
     if (status === "gone" && phase !== "done") {
       // Removed elsewhere while the question was open: nothing is left to remove, so say so and take the answers away.
       if (phase === "row") { root.dataset.gone = ""; return; }
       phase = "done";
       say(`${action.subject} is already removed.`);
+      keepFocus();
       yes.disabled = true;
       keep.disabled = true;
     }
@@ -168,6 +176,11 @@ export function createRemovalFoot(action: DetailsAction): RemovalFoot {
       if (outcome.state === "removed" || outcome.state === "pending") {
         phase = "done";
         say(outcome.message);
+        yes.textContent = "Remove";
+      } else if ((action.status?.() ?? "ready") === "gone") {
+        // It failed, but the host left the list meanwhile: nothing is left to try again, so the answers stay disabled.
+        phase = "done";
+        say(`${action.subject} is already removed.`);
         yes.textContent = "Remove";
       } else {
         // Failed or never started: the reason stays in the panel, and the person may try again or keep the host.

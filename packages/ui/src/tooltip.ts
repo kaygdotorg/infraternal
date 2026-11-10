@@ -290,7 +290,10 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     // another boundary. A window too small for the card falls back to the viewport, so the card is never cut off.
     const boundEl = options.boundary ?? (centred ? null : anchor.closest<HTMLElement>(".ui-window"));
     const winRect = boundEl?.getBoundingClientRect();
-    const win = winRect ? { left: winRect.left, top: winRect.top, right: winRect.right, bottom: winRect.bottom } : undefined;
+    // A window's header holds its own controls (pill, actions): the card sits below it, never over it. When what is left under the
+    // header is too short for the card, confirmBox hands the card to the viewport, where it opens on the anchor's free side.
+    const head = boundEl?.matches(".ui-window") ? boundEl.querySelector<HTMLElement>(".ui-window-head")?.getBoundingClientRect() : undefined;
+    const win = winRect ? { left: winRect.left, top: Math.max(winRect.top, head?.bottom ?? winRect.top), right: winRect.right, bottom: winRect.bottom } : undefined;
     const view = { width: innerWidth, height: innerHeight };
     /** Sizes the card to the box (its width follows the box) and measures it; the height is layout size, since the open animation scales the card. */
     const fit = (box: Box): { width: number; height: number } => {
