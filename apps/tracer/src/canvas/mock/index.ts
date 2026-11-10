@@ -126,13 +126,16 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       // `?privilege=<scenario>`: the machine details offer the privileged-access consent (the product has no service for it yet).
       // `?removal=1`: the host row's "Remove host…" (D309). The product's removal asks for a passkey; the test double only asks and says so.
-      ...(query.get("removal") === "1" ? { hostRemoval: { label: () => "Remove host", remove: (_id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void) => { confirmHostRemoval(name, anchor, () => core.toast.show({ message: `Test double: ${name} would be removed here.`, duration: 3000 }), returnFocus); } } } : {}),
+      ...(query.get("removal") === "1" ? { hostRemoval: { label: () => "Remove host", remove: (_id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void, confirmed = false) => { const done = (): void => { core.toast.show({ message: `Test double: ${name} would be removed here.`, duration: 3000 }); }; if (confirmed) { done(); return Promise.resolve({ state: "removed" as const, message: `${name} was removed.` }); } confirmHostRemoval(name, anchor, done, returnFocus); return Promise.resolve(undefined); } } } : {}),
       ...(isScenario(query.get("privilege")) ? { privilege: createPrivilegeDouble(query.get("privilege") as Scenario) } : {}),
       addHost: openAddHost,
       authority,
     },
   });
   const cx = canvas.cx;
+  // `?removal=1` also gives specs a way to open the glass confirmation card on any element, to measure where it may sit
+  // (confirm-card-bounds.spec.ts); no screen offers this, and the product build leaves the mock out.
+  if (new URLSearchParams(location.search).get("removal") === "1") (window as unknown as { __removalCard?: (anchor: HTMLElement) => void }).__removalCard = (anchor) => { confirmHostRemoval("edge-arm", anchor, () => undefined); };
   // The docs: a Docs view with a window per page, and searchable in the palette (#302). The production canvas always has them
   // (when the server has docs); the test double adds them only with `?docs=1`, so the scenes keep the views they are about. The "?"
   // buttons are there either way (#304): without the docs they say the page is not available.

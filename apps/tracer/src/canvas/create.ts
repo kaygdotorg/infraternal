@@ -15,7 +15,6 @@ import type { AppWindowsHook } from "./appwin/hook.on-demand";
 import { mountToast } from "../../../../packages/ui/src/toast";
 import type { CoreScreen } from "../core-screen";
 import { createMemory } from "./memory";
-import { warmDroplet } from "./layout/droplet-handle";
 import { warmSplit } from "./windows/split-handle";
 import { createBackdrop, type Backdrop } from "./backdrop";
 import { Camera } from "./camera/camera";
@@ -68,6 +67,7 @@ export interface CanvasController {
   dispose(): void;
 }
 
+/** Builds the canvas on the core screen: the product and the test double both mount through here; the returned controller drives views, windows and the camera. */
 export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasController {
   const { stage } = core;
   // The grouped layout's chunk starts at mount, for every canvas (the product and the test double both come through here).
@@ -227,7 +227,6 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
   coarse.addEventListener("change", () => relayout(true), { signal: events.signal });
   ro.observe(viewport);
   cx.camera.start();
-  warmDroplet();
   warmSplit(cx);
 
   // A hidden page also releases its big surfaces (memory.ts) and must not lose the last edit.

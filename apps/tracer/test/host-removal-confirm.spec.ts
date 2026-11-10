@@ -83,7 +83,7 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of GLASS_
     expect(touchesPill, "not hung on the focused window's pill").toBe(false);
     expect(m.title, "the full host name is in the title").toBe(`Remove ${removed}?`);
     expect(m.labelledBy, "the dialog is named by its title").toBe(m.title);
-    expect(m.describedBy, "the dialog is described by its effect line").toContain("Revoke its access");
+    expect(m.describedBy, "the dialog is described by its effect line").toContain("Revokes its access");
     expect(m.yes.text, "the button is the plain verb").toBe("Remove");
     expect(m.yesLabel).toBe("Remove");
     expect(m.no.text).toBe("Keep");

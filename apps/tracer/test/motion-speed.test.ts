@@ -567,6 +567,17 @@ test("the FLIP reflow curve is the product's ease-out and lasts its duration", (
   }
 });
 
+test("a pointer split fades the new window in within 150 ms on the product ease-out and glides the others within 150 ms (#484)", () => {
+  const text = files.find((f) => f.rel === "apps/tracer/src/canvas/windows/split.on-demand.ts")!.text;
+  expect(Number(/const SPLIT_FADE_MS = (\d+);/.exec(text)?.[1])).toBeLessThanOrEqual(150);
+  expect(text).toMatch(/\{ duration: SPLIT_FADE_MS, easing: EASE_OUT \}/);
+  const glide = Number(/const SPLIT_GLIDE = \{ visualDuration: ([\d.]+) \}/.exec(text)?.[1]);
+  expect(glide).toBeGreaterThan(0);
+  expect(flipEasing({ visualDuration: glide }).duration).toBeLessThanOrEqual(150);
+  // Both reflow calls of a split use that glide, never the 280 ms default.
+  expect(text.match(/flip\.play\(before(?!, false, SPLIT_GLIDE)/g) ?? []).toEqual([]);
+});
+
 /** Runs a Spring from rest from 0 to 1 at 60 fps and returns its value after each frame. */
 function frames(visualDuration: number): number[] {
   const originalRequest = globalThis.requestAnimationFrame;

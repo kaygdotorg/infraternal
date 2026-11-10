@@ -31,6 +31,7 @@
  * Labels are read live, so a control whose aria-label changes (copy → "Copied")
  * updates an open tooltip through `refreshTip`.
  */
+import { confirmBox, type Box } from "./confirm-bounds";
 import { markMotion } from "./input-source";
 import { EASE_OUT } from "./motion";
 
@@ -284,31 +285,46 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   let controller: ConfirmTipController | undefined;
   const place = (): void => {
     if (tip.hidden) return;
-    const bound = options.boundary?.getBoundingClientRect();
+    // A card about something inside a window stays inside that window and the viewport, with the same 9 px inset (confirm-bounds.ts;
+    // TASTE: overlays stay inside the window they belong to; D385: on a phone it is inset, never edge to edge). The caller may name
+    // another boundary. A window too small for the card falls back to the viewport, so the card is never cut off.
+    const boundEl = options.boundary ?? (centred ? null : anchor.closest<HTMLElement>(".ui-window"));
+    const winRect = boundEl?.getBoundingClientRect();
+    const win = winRect ? { left: winRect.left, top: winRect.top, right: winRect.right, bottom: winRect.bottom } : undefined;
+    const view = { width: innerWidth, height: innerHeight };
+    /** Sizes the card to the box (its width follows the box) and measures it; the height is layout size, since the open animation scales the card. */
+    const fit = (box: Box): { width: number; height: number } => {
+      // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps the card compact; only a narrower box shrinks it.
+      tip.style.maxWidth = "";
+      tip.style.maxHeight = "";
+      tip.style.overflowY = "";
+      const room = Math.max(160, Math.floor(box.right - box.left));
+      if (tip.offsetWidth > room) tip.style.maxWidth = `${room}px`;
+      return { width: tip.offsetWidth, height: tip.offsetHeight };
+    };
+    let box = confirmBox(win, view, 0);
+    let size = fit(box);
+    // The box is re-chosen once the card's height is known: a window too short for it hands the card to the viewport.
+    const roomy = confirmBox(win, view, size.height);
+    if (roomy.left !== box.left || roomy.top !== box.top || roomy.right !== box.right || roomy.bottom !== box.bottom) { box = roomy; size = fit(box); }
+    // A viewport shorter than the card itself is the only case left that cannot fit: the card then scrolls inside the box.
+    if (size.height > box.bottom - box.top) { tip.style.maxHeight = `${box.bottom - box.top}px`; tip.style.overflowY = "auto"; size = { width: size.width, height: box.bottom - box.top }; }
+    const { width, height } = size;
     if (centred) {
-      // Centred in the boundary (or the viewport); `data-side="center"` hides the tail.
-      // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps it as compact as an anchored card; only a
-      // narrower boundary (a phone window) shrinks it further.
-      if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
-      const w = tip.offsetWidth, h = tip.offsetHeight;
-      tip.style.left = `${Math.max(9, (bound ? bound.left + bound.width / 2 : innerWidth / 2) - w / 2)}px`;
-      tip.style.top = `${Math.max(9, (bound ? bound.top + bound.height / 2 : innerHeight / 2) - h / 2)}px`;
+      // Centred in the box; `data-side="center"` hides the tail.
+      tip.style.left = `${Math.max(box.left, (box.left + box.right) / 2 - width / 2)}px`;
+      tip.style.top = `${Math.max(box.top, (box.top + box.bottom) / 2 - height / 2)}px`;
       tip.style.transformOrigin = "50% 50%";
       tip.dataset.side = "center";
       return;
     }
     const anchorRect = anchor.getBoundingClientRect();
-    // A narrow card (a phone window) is narrower than the tip's own cap: the tip never outgrows its 9 px insets.
-    if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
-    // Layout size: the open animation scales the tip, and a scaled rect would misplace it.
-    const width = tip.offsetWidth;
-    const height = tip.offsetHeight;
-    const minX = bound ? bound.left + 9 : 12, maxX = (bound ? bound.right - 9 : innerWidth - 12) - width;
-    const minY = bound ? bound.top + 9 : 12, maxY = (bound ? bound.bottom - 9 : innerHeight - 12) - height;
+    const minX = box.left, maxX = box.right - width;
+    const minY = box.top, maxY = box.bottom - height;
     const left = Math.max(minX, Math.min(maxX, anchorRect.left + anchorRect.width / 2 - width / 2));
-    const below = (bound ? bound.bottom : innerHeight) - anchorRect.bottom;
-    const side = below >= height + 18 || below >= anchorRect.top - (bound?.top ?? 0) ? "bottom" : "top";
-    const top = Math.max(minY, Math.min(Math.max(minY, maxY), side === "bottom" ? anchorRect.bottom + 8 : anchorRect.top - height - 8));
+    const below = box.bottom - anchorRect.bottom;
+    const side = below >= height + 18 || below >= anchorRect.top - box.top ? "bottom" : "top";
+    const top = Math.max(minY, Math.min(maxY, side === "bottom" ? anchorRect.bottom + 8 : anchorRect.top - height - 8));
     tip.style.left = `${left}px`;
     tip.style.top = `${top}px`;
     const tail = Math.max(16, Math.min(width - 16, anchorRect.left + anchorRect.width / 2 - left));
