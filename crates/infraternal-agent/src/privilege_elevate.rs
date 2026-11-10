@@ -704,6 +704,120 @@ mod tests {
     /// `/run` swapped for a scratch directory.
     #[test]
     fn the_snippet_runs_nothing_on_a_digest_mismatch() {
+        the_snippet_mismatch_case();
+    }
+
+    /// The snippet as the tests run it: its root-only directory moved under
+    /// `scratch`, and the relay's `exec` replaced by printing the working
+    /// directory, so a matching digest shows where root would run.
+    fn test_snippet(scratch: &Path) -> String {
+        snippet()
+            .replace(
+                "/run/infraternal-privilege",
+                &format!("{}/p", scratch.display()),
+            )
+            .replace("exec \"$dir/relay\"", "pwd; : \"$dir/relay\"")
+    }
+
+    /// Hex SHA-256 of a file, as the server vouches for it.
+    fn digest_of(path: &str) -> String {
+        use sha2::Digest as _;
+        hex(&sha2::Sha256::digest(std::fs::read(path).unwrap()))
+    }
+
+    /// J465 P2-4: the snippet leaves the account's working directory before
+    /// root does anything.
+    #[test]
+    fn the_snippet_runs_from_the_root_directory() {
+        let scratch = std::env::temp_dir().join(format!("j416-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &test_snippet(&scratch), "sh", "/bin/true"])
+            .arg(digest_of("/bin/true"))
+            .args(["/nonexistent", "1"])
+            .current_dir(&scratch)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(text.lines().any(|line| line == "/"), "{text}");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// J465 P3-1: root copies only a regular file. A FIFO (or a link to an
+    /// endless device) in the account's home is refused at once, instead of
+    /// hanging root or filling `/run`; nothing is left behind.
+    #[test]
+    fn the_snippet_refuses_a_binary_that_is_not_a_regular_file() {
+        let scratch = std::env::temp_dir().join(format!("j416-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let fifo = scratch.join("relay-fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let link = scratch.join("relay-link");
+        std::os::unix::fs::symlink("/dev/zero", &link).unwrap();
+        for binary in [&fifo, &link] {
+            let mut child = std::process::Command::new("/bin/sh")
+                .args(["-c", &test_snippet(&scratch), "sh"])
+                .arg(binary)
+                .args([&"0".repeat(64), "/nonexistent", "1"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                // sleep: poll the child under a 5 s bound.
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert!(
+                status.is_some_and(|status| !status.success()),
+                "{}",
+                binary.display()
+            );
+        }
+        let left: Vec<_> = std::fs::read_dir(&scratch)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("p."))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// J465 P3-1: a copy left by an earlier killed try (older than any live
+    /// relay) is swept when the snippet next runs.
+    #[test]
+    fn the_snippet_sweeps_stale_copies() {
+        let scratch = std::env::temp_dir().join(format!("j416-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let stale = scratch.join("p.STALE001");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("relay"), b"old").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let fresh = scratch.join("p.FRESH001");
+        std::fs::create_dir(&fresh).unwrap();
+        let _ = std::process::Command::new("/bin/sh")
+            .args(["-c", &test_snippet(&scratch), "sh", "/bin/true"])
+            .args([&"0".repeat(64), "/nonexistent", "1"])
+            .output()
+            .unwrap();
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The digest-mismatch case, shared with the original test name.
+    fn the_snippet_mismatch_case() {
         let scratch = std::env::temp_dir().join(format!("j410-snippet-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).unwrap();
         let program = snippet().replace(

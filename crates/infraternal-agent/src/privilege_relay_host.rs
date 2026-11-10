@@ -828,6 +828,32 @@ mod tests {
         assert!(dir.path().join("rolled-back").exists());
     }
 
+    /// J465 P2-4: root never works inside the account's directories: every
+    /// step and the rollback run with `/` as their working directory, not
+    /// the cwd sudo or su inherited from the account.
+    #[tokio::test]
+    async fn steps_and_the_rollback_run_from_the_root_directory() {
+        let dir = Scratch::new();
+        let marker = dir.path().join("rollback-cwd");
+        let seen = exchange(vec![
+            Frame::Open {
+                channel: 1,
+                script: "pwd".into(),
+            },
+            Frame::StdinEnd { channel: 1 },
+        ])
+        .await;
+        assert_eq!(stdout(&seen, 1), b"/\n");
+        let frames = vec![
+            Frame::Token { bytes: TOKEN },
+            Frame::Rollback {
+                script: format!("pwd > '{}'", marker.display()),
+            },
+        ];
+        run(frames, TOKEN, LIFETIME, false).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "/\n");
+    }
+
     /// R4: a step is refused until the rollback script is known.
     #[tokio::test]
     async fn no_step_runs_before_the_rollback_is_known() {
