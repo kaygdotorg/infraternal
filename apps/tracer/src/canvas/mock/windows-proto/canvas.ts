@@ -293,8 +293,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     restTimer = window.setTimeout(rest, REST_DELAY);
   };
   let targetX = 0, targetY = 0;
-  const springX = new Spring(0, (value) => { x = value; paint(); if (Math.abs(value - targetX) < 0.01) restSoon(); }, { visualDuration: 0.42 });
-  const springY = new Spring(0, (value) => { y = value; paint(); if (Math.abs(value - targetY) < 0.01) restSoon(); }, { visualDuration: 0.42 });
+  const springX = new Spring(0, (value) => { x = value; paint(); if (Math.abs(value - targetX) < 0.01) restSoon(); }, { visualDuration: 0.28 });
+  const springY = new Spring(0, (value) => { y = value; paint(); if (Math.abs(value - targetY) < 0.01) restSoon(); }, { visualDuration: 0.28 });
   const stopSprings = (): void => {
     springX.set(x, true);
     springY.set(y, true);
@@ -463,7 +463,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
         const height = section.offsetHeight;
         const delay = index * 45;
         if (reducedMotion.matches) {
-          section.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay, easing: "ease", fill: "backwards" });
+          section.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay, easing: EASE_OUT, fill: "backwards" });
         } else {
           // Height and opacity together, short stagger; no fill so nothing stays clipped at rest.
           section.style.overflow = "hidden";

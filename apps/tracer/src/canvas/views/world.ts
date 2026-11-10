@@ -61,7 +61,10 @@ export interface ViewsModule {
   dispose(): void;
 }
 
-/** Makes the views module for the canvas `cx`: builds each view, lays them out in the world and keeps them from overlapping. */
+/**
+ * Makes the views module for the canvas `cx`: builds each view, lays them out in the world and keeps them from overlapping.
+ * A view that moves glides to its new place on the ease-out curve in 280 ms.
+ */
 export function createViews(cx: Ctx): ViewsModule {
   const { viewport, world, overlay, signal, camera, state, views } = cx;
 
@@ -150,7 +153,7 @@ export function createViews(cx: Ctx): ViewsModule {
       sx: undefined as unknown as Spring, sy: undefined as unknown as Spring,
     };
     const place = (): void => { root.style.transform = `translate(${c.x}px, ${c.y}px)`; cx.invalidate(); cx.memory?.cull(); };
-    const POS = { visualDuration: 0.5 } as const;
+    const POS = { visualDuration: 0.28 } as const;
     c.sx = restPx(new Spring(view.x, (v) => { c.x = v; place(); }, POS));
     c.sy = restPx(new Spring(view.y, (v) => { c.y = v; place(); }, POS));
     if (view.layout === "tiled") {

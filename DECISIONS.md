@@ -4718,3 +4718,69 @@ access (#341 B19).
        (this reverses #391's opaque confirm cards). Readability comes from
        the shared glass contrast guarantee (D365, #448). The owner,
        verbatim: "make them follow the same design".
+
+381. **Typing during a flood, and GotaTun's bar (owner, 2026-11-10, #477, #260):**
+     - **A key typed during a flood wins.** When output is waiting for
+       flow-control credit and a key arrives for the same session, the relay
+       drops the queued bulk output and sends a screen repaint from a small
+       reserved credit budget, so the echo shows within about one frame
+       (D375's 8.3 ms target). Output the flood produced just before the key
+       is skipped on screen, as the 250 ms starvation path already does, and
+       stays in the host's scrollback. Flood throughput is unchanged.
+       Rejected: holding back credit so the echo never queues (about 25%
+       slower floods); a bigger browser window (longer queues on slow links,
+       and it still misses the target); limiting D375 to other sessions. The
+       owner chose "Key wins: repaint" in a grill question. This is
+       relay flow-control code and gets the strictest review.
+     - **GotaTun's bar (amends D378).** The owner, verbatim: "yes please,
+       faster than tailscale and netbird on both linux/mac. our protocol must
+       do 10 Gbit/s at the least latency possible consuming as little memory
+       and cpu as possible to keep optimising and better yet, checkpoint and
+       keep shipping." And: "also pleaes simulate bufferbloat as that's a
+       problem with lots of home connections". Mac batching ships once it is
+       faster on both Linux and macOS. Each verified gain ships as a pin bump.
+       Reports give Gbit/s per core alongside totals, and the test matrix
+       gains a bufferbloat profile (a shaped bottleneck with a deep queue).
+
+382. **Revoke report, reconnect budget, D380 build, 10G testbed (owner, 2026-11-10, #355, #478, #260):**
+     - **Console power actions don't count as admin powers.** The revoke
+       report (D367) ignores exactly the 12 polkit login1 actions that stock
+       Linux grants an active local console session: reboot, power-off,
+       suspend, hibernate, their -multiple-sessions variants, and the four
+       set-reboot-* ids. None of them writes files or runs commands. Every
+       other grant still counts, such as Alma's tuned, NetworkManager and
+       fwupd grants. It ships only after a security review signs off. The
+       owner chose "Ignore the 12" in a grill question.
+     - **The reconnect budget covers the first echo, behind real TLS.**
+       D375's reconnect row measures until the session resumes, plus one
+       round trip for the first typed key's echo, and the gate runs behind
+       real TLS, so it matches what a user sees. D267's 4 round trips stop
+       at the resume. Rejected for now: sending keys typed during the outage
+       along with the resume (it touches auth and input ordering). The owner
+       chose "Resume + 1 RTT, real TLS".
+     - **D380 gets built now**, with production-build screenshots of every
+       theme and each confirmation card on the issue for review.
+     - **GotaTun's 10 Gbit/s testbed is std** (the Mac Studio): two Linux VMs
+       on the vmnet bridge, shaped to 10 Gbit/s, in announced windows of 20
+       minutes or less. These are arm64 numbers. x86 at 10G needs real
+       hardware.
+
+383. **Clipboard from programs, phone text sizes, permanent API keys (owner, 2026-11-10, #440, #345, #341):**
+     - **Programs can copy to the clipboard (OSC 52).** A remote program's
+       copy request writes the clipboard automatically and shows a visible
+       "Copied from the terminal" notice. If the browser refuses, a Copy
+       button appears for 15 s. A Settings switch, "Programs can copy to your
+       clipboard", is on by default and is stored per account so it follows
+       the person. Rejected: asking every time, and having no switch. The
+       owner chose "Auto + notice + switch".
+     - **Phone rows stay 15 px (amends D372).** On phones, palette results
+       and sidebar rows use body size (15 px). Only true labels, such as
+       section headings and tags, use the 13 px label size. TASTE row 46
+       ("phone text 15-16 px or larger") stands. The owner chose "Rows 15 px,
+       labels 13".
+     - **API keys have two dates, and both can be "forever" (amends D375 A1).**
+       The owner, verbatim: "keys have two dates: expiry and inactivity dates,
+       both can be set to forever for truly permanent keys." Each key has a
+       hard expiry and an inactivity limit. Either can be set to forever, and
+       a key with both set to forever is truly permanent.
+     - **Sign-in stays usernameless** (re-confirmed; already D375 A2).

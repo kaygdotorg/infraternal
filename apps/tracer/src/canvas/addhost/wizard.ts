@@ -148,7 +148,7 @@ export class Wizard {
   private alive = true;
   private closing = false;
 
-/** Builds the add-host card and shows it: on a spring from a pointer, in place when a key opened it (#427). */
+  /** Builds the add-host card and shows it: from a pointer its card and scrim ease in over 260 ms, in place when a key opened it (#427). */
   constructor(private readonly deps: WizardDeps) {
     installFocusRing();
     this.surface = deps.host.open({ title: "Add hosts" });
@@ -193,7 +193,7 @@ export class Wizard {
       this.float.style.opacity = String(clamped);
       this.float.style.transform = `translateY(${(1 - value) * 12}px) scale(${0.97 + value * 0.03})`;
       this.scrim.style.opacity = String(clamped);
-    }, { visualDuration: 0.32 });
+    }, { visualDuration: 0.26 });
     this.go("discovery", 0);
     requestAnimationFrame(() => this.spring.set(1));
     void this.loadDiscovery();
