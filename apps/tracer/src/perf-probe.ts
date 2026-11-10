@@ -91,8 +91,8 @@ export class PerformanceProbe {
   private resumeTimer = 0;
   /** A distinct printable marker per drop, so an expired echo cannot complete a later measurement. */
   private resumeMarker = "";
-  /** The trailing painted bytes needed to match a marker split across output callbacks. */
-  private resumePainted = "";
+  /** How many leading marker bytes have painted; chunk boundaries need no buffering or per-byte allocation. */
+  private resumeMatched = 0;
   /** The next marker number; it only advances when a new measurement starts. */
   private resumeNumber = 0;
   /** Failed samples remain counted across later successful drops and key runs, so they cannot disappear from a report. */
@@ -216,7 +216,7 @@ export class PerformanceProbe {
     this.resumeDuration = undefined;
     this.resumeMarkerSent = false;
     this.resumeMarker = `~probe-${++this.resumeNumber}~`;
-    this.resumePainted = "";
+    this.resumeMatched = 0;
     this.resumeTimer = window.setTimeout(() => this.failResume(
       this.resumeMarkerSent ? "Timed out waiting for the marker echo." : "Timed out waiting for resumed attachment.",
     ), RESUME_TIMEOUT_MS);
@@ -244,7 +244,7 @@ export class PerformanceProbe {
     this.resumeStartedAt = undefined;
     this.resumeMarkerSent = false;
     this.resumeMarker = "";
-    this.resumePainted = "";
+    this.resumeMatched = 0;
   }
 
   /** Marks output busy on disconnect; forceDrop alone owns the measurement lifetime. */
@@ -300,12 +300,17 @@ export class PerformanceProbe {
     }
   }
 
-  /** Matches this drop's complete marker, retaining at most one marker's worth of trailing painted bytes. */
+  /**
+   * Matches this drop's marker across painted chunks without allocating per byte in the timing probe (P11).
+   * Markers contain `~` only at their ends, so after a mismatch only a leading `~` can remain matched.
+   */
   private matchResumeMarker(bytes: Uint8Array, paintedAt: number): void {
     if (this.resumeStartedAt === undefined || !this.resumeMarkerSent) return;
     for (const byte of bytes) {
-      this.resumePainted = (this.resumePainted + String.fromCharCode(byte)).slice(-this.resumeMarker.length);
-      if (this.resumePainted !== this.resumeMarker) continue;
+      this.resumeMatched = byte === this.resumeMarker.charCodeAt(this.resumeMatched)
+        ? this.resumeMatched + 1
+        : byte === this.resumeMarker.charCodeAt(0) ? 1 : 0;
+      if (this.resumeMatched !== this.resumeMarker.length) continue;
       this.resumeDuration = Math.max(0, paintedAt - this.resumeStartedAt);
       this.clearResume();
       this.renderReport();
