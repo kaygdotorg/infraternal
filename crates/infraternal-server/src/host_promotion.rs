@@ -704,10 +704,7 @@ impl Promotions {
         let install =
             Installation::new_pending(session.clone(), &target, host).map_err(|_| "install")?;
         // R4: before any step, the relay learns how to put the host back.
-        session.arm_rollback(Installation::root_upgrade_rollback_script(
-            host,
-            install.transaction(),
-        ));
+        session.arm_rollback(install.rollback_script());
         // J465 P1: if the relay itself dies later, the uninstall outbox rolls
         // back this exact transaction through the abandoned successor.
         self.store

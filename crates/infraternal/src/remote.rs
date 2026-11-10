@@ -1281,10 +1281,8 @@ pub(crate) fn promotion_abandon_if_requested() -> Option<std::process::ExitCode>
             .map_err(|_| refused())?;
         // sleep: let the agent's accepted reply reach the server first.
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let rollback = infraternal_plugin_ssh::install::Installation::root_upgrade_rollback_script(
-            host,
-            transaction,
-        );
+        let rollback =
+            infraternal_plugin_ssh::install::Installation::root_rollback_script(host, transaction);
         let rolled = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&rollback)
@@ -1328,10 +1326,6 @@ pub(crate) fn promotion_abandon_if_requested() -> Option<std::process::ExitCode>
             );
         }
         sweep_relay_copies(std::path::Path::new("/run"));
-        // The upgrade's payload cache, once no root install is left.
-        if !base.exists() {
-            let _ = std::fs::remove_dir_all("/var/lib/infraternal.bootstrap-cache");
-        }
         Ok(())
     };
     Some(if execute().is_ok() {
