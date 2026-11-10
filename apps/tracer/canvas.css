@@ -69,12 +69,10 @@
   -webkit-mask-image: linear-gradient(transparent, #000 0.625rem, #000 calc(100% - 0.625rem), transparent);
   mask-image: linear-gradient(transparent, #000 0.625rem, #000 calc(100% - 0.625rem), transparent);
 }
-/* The destructive action under the facts: the settings row's own 8 px padding plus this 8 px puts its label on the keys' 16 px edge. */
-.canvas-popover-action { flex: none; padding: 0.375rem 0.5rem 0.5rem; border-top: 1px solid var(--line); }
-/* Review variants of the removal action (#486, details-removal-variants.on-demand.ts). Deleted with the two losing ones. */
-.canvas-popover-more { margin-left: auto; align-self: flex-start; flex: none; display: grid; place-items: center; width: var(--ui-control-h); height: var(--ui-control-h); padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-2); }
-.canvas-popover-more svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-@media (hover: hover) and (pointer: fine) { .canvas-popover-more:hover { background: var(--hover); color: var(--fg); } }
+/* The block sits inside the scrolling list: its own 8 px of row padding, less the same 8 px of margin, puts the label on the keys' edge. */
+.canvas-popover-action { margin: 0.375rem -0.5rem 0; padding-top: 0.375rem; border-top: 1px solid var(--line); }
+.canvas-popover-action[hidden] { display: none; }
+/* Remove host at the end of the Connection tab (D385, details-removal.ts): inline, the row turns into the question. */
 .canvas-popover-ask { display: grid; gap: 0.25rem; padding: 0.5rem 0.5rem 0.25rem; }
 .canvas-popover-ask[hidden] { display: none; }
 .canvas-popover-ask-q { margin: 0; color: var(--fg); font: 500 var(--text-body)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); }

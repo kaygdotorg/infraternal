@@ -286,7 +286,9 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   let controller: ConfirmTipController | undefined;
   const place = (): void => {
     if (tip.hidden) return;
-    const bound = options.boundary?.getBoundingClientRect();
+    // A card about something inside a window stays inside that window, with the same 9 px inset on every side (TASTE: overlays stay
+    // inside the window they belong to; D385: on a phone it is inset, never edge to edge). The caller may name another boundary.
+    const bound = (options.boundary ?? (centred ? null : anchor.closest<HTMLElement>(".ui-window")))?.getBoundingClientRect();
     if (centred) {
       // Centred in the boundary (or the viewport); `data-side="center"` hides the tail.
       // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps it as compact as an anchored card; only a
