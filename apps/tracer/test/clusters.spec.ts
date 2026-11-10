@@ -822,7 +822,7 @@ test("a pointer split fades the new window in over 150 ms and draws no liquid la
   await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').evaluate((b) => (b as HTMLElement).click()); // off screen at the 1.1 default: three windows no longer fit side by side
   await expect.poll(() => page.evaluate(() => (window as unknown as { __splitFade: number[] }).__splitFade), { timeout: 3000 }).toContain(150); // declared duration, not a measured one
   expect(await page.evaluate(() => (window as unknown as { __splitGoo: number }).__splitGoo)).toBe(0);
-  await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a.playState === "running").length), { timeout: 3000 }).toBe(0);
+  await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a.playState === "running" && a.effect?.getComputedTiming().iterations !== Infinity).length), { timeout: 3000 }).toBe(0); // loops that run while a state lasts (a blinking caret) are not the split
   expect(await page.locator(".cl-goo").count()).toBe(0);
 });
 
