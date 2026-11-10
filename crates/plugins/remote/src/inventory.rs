@@ -207,7 +207,6 @@ impl Plugin for InventoryPlugin {
                 subscriptions
                     .retain(|(id, generation)| subscription_current(&registry, *id, *generation));
                 let result = tokio::select! {
-                    biased;
                     completed = reads.join_next(), if !reads.is_empty() => {
                         match completed {
                             Some(Ok((id, result))) => { reading.remove(&id); result }
