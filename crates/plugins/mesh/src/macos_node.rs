@@ -1583,7 +1583,7 @@ impl RuntimeState {
                     .map(MacUtun::name)
                     .ok_or(io::ErrorKind::NotConnected)?
                     .to_owned();
-                self.refresh_unchanged_mesh_mtus(&budgets)?;
+                self.refresh_unchanged_mesh_mtus(budgets).await?;
                 self.config = Some(config);
                 return Ok(RuntimeInfo {
                     interface,
@@ -1597,36 +1597,47 @@ impl RuntimeState {
 
     /// Refresh MTUs without suspending the device or replacing any established peer.
     ///
-    /// The serialized worker's exclusive `&mut self` is the Mac route lock: route updates
-    /// cannot interleave with apply, removal or stop. Raise the interface first so each route
-    /// fits throughout the update, then settle the interface and publish the new budgets.
+    /// The serialized worker's exclusive `&mut self` is the Mac route lock: apply, removal
+    /// and stop cannot interleave while it awaits the blocking pool. The packet reactor keeps
+    /// running while the host utilities update the interface and routes (D351). Stage the
+    /// larger MTU first so every route fits, then publish the final budgets after success.
     /// Probes have already run on the caller's thread, outside the packet runtime.
     /// # Errors
-    /// Reports an interface or route update failure; the authority caller stops the worker.
-    fn refresh_unchanged_mesh_mtus(&mut self, budgets: &PathBudgets) -> io::Result<()> {
+    /// Reports a failed blocking task, interface or route update; the authority caller stops
+    /// the worker instead of restoring the retired authority.
+    async fn refresh_unchanged_mesh_mtus(&mut self, budgets: PathBudgets) -> io::Result<()> {
         if budgets.route_mtus == self.route_mtus && budgets.interface_mtu == self.interface_mtu {
             return Ok(());
         }
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let interface = utun.name().to_owned();
         let staging = self.interface_mtu.max(budgets.interface_mtu);
-        set_interface_mtu(utun.name(), staging)?;
-        utun.set_mtu(staging);
-        for address in route_mtus_to_refresh(
+        let changed = route_mtus_to_refresh(
             &self.routes,
             &self.routes,
             &self.route_mtus,
             &budgets.route_mtus,
-        ) {
-            let mtu = budgets
-                .route_mtus
-                .get(&address)
-                .copied()
-                .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-            route(utun.name(), address, "change", Some(mtu))?;
-        }
-        set_interface_mtu(utun.name(), budgets.interface_mtu)?;
+        );
+        // The watcher accepts both budgets throughout the host update. Outbound packets are
+        // still bounded by the kernel's interface and route MTUs until each utility completes.
+        utun.set_mtu(staging);
+        let budgets = tokio::task::spawn_blocking(move || {
+            set_interface_mtu(&interface, staging)?;
+            for address in changed {
+                let mtu = budgets
+                    .route_mtus
+                    .get(&address)
+                    .copied()
+                    .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
+                route(&interface, address, "change", Some(mtu))?;
+            }
+            set_interface_mtu(&interface, budgets.interface_mtu)?;
+            Ok::<_, io::Error>(budgets)
+        })
+        .await
+        .map_err(|_| io::Error::other("Mesh MTU update worker could not finish."))??;
         utun.set_mtu(budgets.interface_mtu);
-        self.route_mtus.clone_from(&budgets.route_mtus);
+        self.route_mtus = budgets.route_mtus;
         self.interface_mtu = budgets.interface_mtu;
         Ok(())
     }
