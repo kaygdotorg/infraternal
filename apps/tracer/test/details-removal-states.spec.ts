@@ -29,8 +29,8 @@ const ask = (page: Page) => page.locator(".canvas-popover-ask");
 const yes = (page: Page) => ask(page).locator("[data-yes]");
 /** The question's Keep button. */
 const keep = (page: Page) => ask(page).locator("[data-keep]");
-/** The question's note line (pending, failure, outcome). */
-const note = (page: Page) => ask(page).locator(".canvas-popover-ask-note");
+/** The question's note line (pending, failure, outcome): whichever of the two permanent live regions has text. */
+const note = (page: Page) => ask(page).locator(".canvas-popover-ask-note:not(:empty)");
 /** Whether the focused element is `selector`'s element. */
 const focused = (page: Page, selector: string): Promise<boolean> => page.evaluate((s) => document.activeElement === document.querySelector(s), selector);
 /** Plays the host's state changing while the question is open. */
@@ -64,6 +64,7 @@ test("a failure shows its reason in the panel as an alert, Remove becomes Try ag
   await yes(page).click();
   await expect(note(page)).toHaveText("The host could not be removed. Sign in again, then try again.");
   await expect(note(page)).toHaveAttribute("role", "alert");
+  await expect(ask(page).locator('[role="status"]')).toHaveText("");
   await expect(yes(page)).toHaveText("Try again");
   await expect(yes(page)).toBeEnabled();
   await expect(keep(page)).toBeEnabled();
@@ -127,4 +128,53 @@ test("the focus returns to the row after Keep and after Escape, and the card sta
   await page.keyboard.press("Escape");
   expect(await focused(page, ".canvas-popover-action .ui-sp-row")).toBe(true);
   await expect(page.locator(".canvas-popover")).toBeVisible();
+});
+
+test("the status and the alert live regions are both in the page from the start and stay the same elements through every state", async ({ page }) => {
+  await openConnection(page, "fail");
+  const region = (role: string) => ask(page).locator(`.canvas-popover-ask-note[role="${role}"]`);
+  // Not `hidden`, which would take them out of the accessibility tree: a region that appears already filled is often not announced.
+  await expect(region("status")).toHaveCount(1);
+  await expect(region("alert")).toHaveCount(1);
+  const tag = (role: string) => region(role).evaluate((e) => { (e as unknown as { __tag?: number }).__tag = 7; return e.hasAttribute("hidden"); });
+  expect(await tag("status")).toBe(false);
+  expect(await tag("alert")).toBe(false);
+  await row(page).click();
+  await yes(page).click();
+  await expect(region("status")).toHaveText("Removing…");
+  await expect(region("alert")).toHaveText("The host could not be removed. Sign in again, then try again.");
+  await expect(region("status")).toHaveText("");
+  for (const role of ["status", "alert"]) {
+    expect(await region(role).evaluate((e) => (e as unknown as { __tag?: number }).__tag), `the ${role} region is the same element`).toBe(7);
+    expect(await region(role).evaluate((e) => e.hasAttribute("hidden")), `the ${role} region is never hidden`).toBe(false);
+    expect(await region(role).getAttribute("role")).toBe(role);
+  }
+});
+
+test("removed elsewhere while the question is open: the focus moves to the question before the buttons are disabled", async ({ page }) => {
+  await openConnection(page, "1");
+  await row(page).click();
+  expect(await focused(page, ".canvas-popover-ask [data-keep]")).toBe(true);
+  await setStatus(page, "gone");
+  await expect(keep(page)).toBeDisabled();
+  expect(await focused(page, ".canvas-popover-ask"), "the focus is on the question, not lost to the disabled Keep").toBe(true);
+});
+
+test("a host removed elsewhere while this removal runs leaves Removing… and aria-busy alone, and a later failure never re-enables the buttons", async ({ page }) => {
+  await openConnection(page, "slowfail");
+  await row(page).click();
+  await yes(page).click();
+  await expect(note(page)).toHaveText("Removing…");
+  await setStatus(page, "gone");
+  // sleep: two refreshes of the card (150 ms each) so sync() has run with the host gone while the removal is still in flight
+  await page.waitForTimeout(400);
+  await expect(note(page)).toHaveText("Removing…");
+  await expect(ask(page)).toHaveAttribute("aria-busy", "true");
+  await expect(yes(page)).toHaveText("Removing…");
+  await expect(yes(page)).toBeDisabled();
+  await expect(ask(page)).not.toHaveAttribute("aria-busy", "true"); // the removal ends (it fails)
+  await expect(note(page)).toContainText("already removed");
+  await expect(yes(page)).toBeDisabled();
+  await expect(keep(page)).toBeDisabled();
+  await expect(yes(page)).not.toHaveText("Try again");
 });

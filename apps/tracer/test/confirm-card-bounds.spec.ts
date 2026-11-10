@@ -41,6 +41,12 @@ async function measure(page: Page): Promise<{ card: DOMRect; win: DOMRect; view:
   }));
 }
 
+/** The rectangles of the window's own header controls (its pill and action buttons), which a card must never cover. */
+async function headerControls(page: Page): Promise<DOMRect[]> {
+  return page.evaluate(() => [...document.querySelector(".ui-window")!.querySelectorAll(".ui-window-head .ui-window-pill, .ui-window-head .ui-window-action")].map((e) => e.getBoundingClientRect().toJSON()));
+}
+/** Whether two boxes share any area (touching edges do not count). */
+const overlaps = (a: DOMRect, b: DOMRect): boolean => a.left < b.right - TOLERANCE && a.right > b.left + TOLERANCE && a.top < b.bottom - TOLERANCE && a.bottom > b.top + TOLERANCE;
 /** Whether the card lies inside the viewport. */
 const insideView = (m: { card: DOMRect; view: { w: number; h: number } }): boolean => m.card.left >= -TOLERANCE && m.card.top >= -TOLERANCE && m.card.right <= m.view.w + TOLERANCE && m.card.bottom <= m.view.h + TOLERANCE;
 /** Whether the card lies inside its window with the inset on every side. */
@@ -65,6 +71,28 @@ test.describe("desktop", () => {
     expect(insideView(m), `card ${JSON.stringify(m.card)}`).toBe(true);
   });
 
+  test("a window just tall enough for the card keeps the card below its header controls, not on top of them", async ({ page }) => {
+    await open(page);
+    // Probe the card's height once, then make the window only a few pixels taller than the card plus its insets: the box then
+    // fits the card but not the header above it, so a clamp alone would slide the card up over the pill.
+    const probe = await measure(page);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".ui-confirm-tip")).toHaveCount(0);
+    await page.evaluate((h) => { const w = document.querySelector<HTMLElement>(".ui-window")!; w.style.flex = "none"; w.style.minHeight = "0"; w.style.height = `${h}px`; w.style.maxHeight = `${h}px`; }, Math.ceil(probe.card.height) + 2 * INSET + 6);
+    const m = await measure(page);
+    for (const control of await headerControls(page)) expect(overlaps(m.card, control), `card ${JSON.stringify(m.card)} covers control ${JSON.stringify(control)}`).toBe(false);
+    expect(insideView(m)).toBe(true);
+  });
+
+  test("a card that flips above the pill near the screen's bottom does not cover the header controls", async ({ page }) => {
+    await open(page);
+    await page.evaluate(() => { const w = document.querySelector<HTMLElement>(".ui-window")!; w.style.transform = `translateY(${innerHeight - 70 - w.getBoundingClientRect().top}px)`; });
+    const m = await measure(page);
+    expect(m.card.bottom, "the card is above the pill").toBeLessThanOrEqual((await headerControls(page))[0]!.top + TOLERANCE);
+    for (const control of await headerControls(page)) expect(overlaps(m.card, control), `card ${JSON.stringify(m.card)} covers control ${JSON.stringify(control)}`).toBe(false);
+    expect(insideView(m)).toBe(true);
+  });
+
   test("a window too small for the card falls back to the viewport and is never cut off", async ({ page }) => {
     await open(page);
     await page.evaluate(() => { const w = document.querySelector<HTMLElement>(".ui-window")!; w.style.flex = "none"; w.style.minHeight = "0"; w.style.height = "90px"; w.style.maxHeight = "90px"; w.style.width = "220px"; w.style.minWidth = "0"; w.style.maxWidth = "220px"; });
@@ -73,6 +101,7 @@ test.describe("desktop", () => {
     const m = await measure(page);
     expect(m.win.height, "the window is smaller than the card plus its inset").toBeLessThan(m.card.height + 2 * INSET);
     expect(insideView(m), `card ${JSON.stringify(m.card)}`).toBe(true);
+    for (const control of await headerControls(page)) expect(overlaps(m.card, control), `card ${JSON.stringify(m.card)} covers control ${JSON.stringify(control)}`).toBe(false);
   });
 });
 
