@@ -4741,3 +4741,26 @@ access (#341 B19).
        faster on both Linux and macOS. Each verified gain ships as a pin bump.
        Reports give Gbit/s per core alongside totals, and the test matrix
        gains a bufferbloat profile (a shaped bottleneck with a deep queue).
+
+382. **Revoke report, reconnect budget, D380 build, 10G testbed (owner, 2026-11-10, #355, #478, #260):**
+     - **Console power actions don't count as admin powers.** The revoke
+       report (D367) ignores exactly the 12 polkit login1 actions that stock
+       Linux grants an active local console session: reboot, power-off,
+       suspend, hibernate, their -multiple-sessions variants, and the four
+       set-reboot-* ids. None of them writes files or runs commands. Every
+       other grant still counts, such as Alma's tuned, NetworkManager and
+       fwupd grants. It ships only after a security review signs off. The
+       owner chose "Ignore the 12" in a grill question.
+     - **The reconnect budget covers the first echo, behind real TLS.**
+       D375's reconnect row measures until the session resumes, plus one
+       round trip for the first typed key's echo, and the gate runs behind
+       real TLS, so it matches what a user sees. D267's 4 round trips stop
+       at the resume. Rejected for now: sending keys typed during the outage
+       along with the resume (it touches auth and input ordering). The owner
+       chose "Resume + 1 RTT, real TLS".
+     - **D380 gets built now**, with production-build screenshots of every
+       theme and each confirmation card on the issue for review.
+     - **GotaTun's 10 Gbit/s testbed is std** (the Mac Studio): two Linux VMs
+       on the vmnet bridge, shaped to 10 Gbit/s, in announced windows of 20
+       minutes or less. These are arm64 numbers. x86 at 10G needs real
+       hardware.
