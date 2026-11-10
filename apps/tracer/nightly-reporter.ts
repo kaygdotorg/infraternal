@@ -17,8 +17,9 @@ import type { FullConfig, Reporter, Suite, TestCase, TestResult } from "playwrig
 
 /** Where the lines go, or `undefined` when this reporter is not wanted. */
 const target = process.env["NIGHTLY_JSONL"];
-/** This shard's number (`NIGHTLY_SHARD`) and how many there are (`NIGHTLY_SHARDS`); both 0 when the run is not sharded. */
+/** This shard's number (`NIGHTLY_SHARD`); 0 when the run is not sharded. */
 const shard = Number(process.env["NIGHTLY_SHARD"] ?? 0);
+/** How many shards the nightly runs side by side (`NIGHTLY_SHARDS`); 0 when the run is not sharded. */
 const shards = Number(process.env["NIGHTLY_SHARDS"] ?? 0);
 /** The fields every line carries to say which shard wrote it (none when not sharded). */
 const tag = shard > 0 ? { shard, of: shards } : {};
