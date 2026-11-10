@@ -8,6 +8,12 @@ use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
+
+/// At most eight distinct hosts may occupy facts reads or queued replies on one socket.
+const MAX_FACTS_READS: usize = 8;
+/// Admission is non-queuing: callers retry instead of accumulating host work behind a slow read.
+pub const HOST_BUSY: &str = "host busy";
 
 /// Public read action; the source repeats the terminal admission account filter.
 pub const LIST: ActionDef = ActionDef {
@@ -195,15 +201,50 @@ impl Plugin for InventoryPlugin {
         Box::pin(async move {
             let mut changes = source.changes();
             let mut subscriptions = Vec::<(u32, u32)>::new();
+            let mut reads = JoinSet::new();
+            let mut reading = std::collections::HashSet::new();
             loop {
                 subscriptions
                     .retain(|(id, generation)| subscription_current(&registry, *id, *generation));
                 let result = tokio::select! {
+                    biased;
+                    completed = reads.join_next(), if !reads.is_empty() => {
+                        match completed {
+                            Some(Ok((id, result))) => { reading.remove(&id); result }
+                            _ => Err(()),
+                        }
+                    }
                     request = requests.recv() => {
                         let Some(request) = request else { break; };
                         let Ok(decoded) = decode_muxed_frame(&request) else { break; };
                         match decoded.frame {
                             Frame::Call { call_id, action_id, input_json } => {
+                                if action_id == FACTS.id {
+                                    let request = decode_facts(input_json);
+                                    let error = match &request {
+                                        None => Some("invalid input"),
+                                        Some(request) if reading.len() >= MAX_FACTS_READS || reading.contains(&request.host_id) => Some(HOST_BUSY),
+                                        Some(_) => None,
+                                    };
+                                    if let Some(error) = error {
+                                        host.authorized(Box::pin(reply_result(&replies, call_id, Err(error)))).await
+                                    } else if let Some(request) = request {
+                                        reading.insert(request.host_id.clone());
+                                        let host = host.clone();
+                                        let source = source.clone();
+                                        let replies = replies.clone();
+                                        // The task owns its admission through outbound backpressure. Dropping
+                                        // this worker aborts every task; authority loss cancels reads and replies.
+                                        reads.spawn(async move {
+                                            let result = host.authorized(Box::pin(async {
+                                                let output = source.facts(host.user_id(), &request.host_id).await;
+                                                reply_result(&replies, call_id, output).await
+                                            })).await;
+                                            (request.host_id, result)
+                                        });
+                                        Ok(())
+                                    } else { unreachable!() }
+                                } else {
                                 // Keep authorization active through outbound backpressure, not just SQL.
                                 host.authorized(Box::pin(async {
                                     let output = if action_id == LIST.id {
@@ -211,16 +252,10 @@ impl Plugin for InventoryPlugin {
                                             Some(request) => source.list(host.user_id(), request.after.as_deref()).await.map_err(|()| "inventory unavailable"),
                                             None => Err("inventory unavailable"),
                                         }
-                                    } else if action_id == FACTS.id {
-                                        match decode_facts(input_json) {
-                                            Some(request) => source.facts(host.user_id(), &request.host_id).await,
-                                            None => Err("invalid input"),
-                                        }
                                     } else { Err("inventory unavailable") };
-                                    let ok = output.is_ok();
-                                    let json = serde_json::to_vec(&output.unwrap_or_else(|error| json!({"error":error}))).map_err(|_| ())?;
-                                    send(&replies, 0, Frame::Result { call_id, ok, json: &json }).await
+                                    reply_result(&replies, call_id, output).await
                                 })).await
+                                }
                             }
                             Frame::Subscribe { sub_id, .. } => {
                                 let generation = decoded.stream_id >> 1;
@@ -252,6 +287,28 @@ impl Plugin for InventoryPlugin {
         })
     }
 }
+/// Serialize one bounded result while retaining the caller's authorization through socket credit.
+async fn reply_result(
+    replies: &ReplySender,
+    call_id: u32,
+    output: Result<Value, &str>,
+) -> Result<(), ()> {
+    let ok = output.is_ok();
+    let json = serde_json::to_vec(&output.unwrap_or_else(|error| json!({"error":error})))
+        .map_err(|_| ())?;
+    send(
+        replies,
+        0,
+        Frame::Result {
+            call_id,
+            ok,
+            json: &json,
+        },
+    )
+    .await
+}
+
+/// Send one frame through the host-owned bounded reply queue.
 async fn send(replies: &ReplySender, stream_id: u32, frame: Frame<'_>) -> Result<(), ()> {
     let mut wire = Vec::new();
     encode_muxed_frame_into(stream_id, &frame, &mut wire).map_err(|_| ())?;
@@ -456,3 +513,8 @@ mod authority_tests {
         );
     }
 }
+
+/// Selected-host concurrency and admission regressions.
+#[cfg(test)]
+#[path = "inventory_facts_tests.rs"]
+mod facts_tests;
