@@ -1,5 +1,5 @@
 /** Verifies live host-facts presentation and disabled-plugin lifecycle boundaries (D126/D198). */
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { ActionRefused, type MuxConnection } from "../../connection";
 import type { WinRec } from "../context";
 import { createLiveDetails } from "./details-live.on-demand";
@@ -78,12 +78,17 @@ test("a detected operating system supplies the live popover mark", async () => {
 });
 
 /** Runs `body` with the browser globals the live details source reads (timers, the page's own address). */
-async function withPage(body: () => Promise<void>): Promise<void> {
+async function withPage(body: (timers: Map<number, () => void>) => Promise<void>): Promise<void> {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
-  Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout: (): number => 1, clearTimeout: (): void => {} } });
+  const timers = new Map<number, () => void>();
+  let nextTimer = 0;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: {
+    setTimeout: (callback: () => void): number => { timers.set(++nextTimer, callback); return nextTimer; },
+    clearTimeout: (id: number): void => { timers.delete(id); },
+  } });
   Object.defineProperty(globalThis, "location", { configurable: true, value: { hostname: "server.example.invalid", protocol: "https:" } });
-  try { await body(); } finally {
+  try { await body(timers); } finally {
     if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow); else Reflect.deleteProperty(globalThis, "window");
     if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation); else Reflect.deleteProperty(globalThis, "location");
   }
@@ -158,5 +163,89 @@ test("an offline or not-yet-read host says so in plain words and never shows the
     expect(JSON.stringify(facts)).not.toContain("Intel N100");
     expect(row(facts, "Address")).toBe("operator@worker.lan");
     stop2();
+  });
+});
+
+/** Regression: a shared-layout update can retarget a stable window id. */
+test("retargeting one open window must not show the previous host's cached facts", async () => {
+  await withPage(async () => {
+    const asked: Array<[string, Record<string, unknown>]> = [];
+    const connection = { isWelcomed: true, isOpen: true, call: async (action: string, input: Record<string, unknown>) => {
+      asked.push([action, input]); return WORKER_FACTS;
+    } } as unknown as MuxConnection;
+    const source = createLiveDetails({ host: { name: "server" }, connection, roundTrip: () => undefined });
+    const rec = { model: { id: "stable-window", kind: "terminal", host: "worker", hostId: WORKER_ID } } as unknown as WinRec;
+    const stop = source.open!(rec, () => {});
+    for (let i=0; i<8; i++) await Promise.resolve();
+    expect(row(source.facts(rec), "Architecture")).toBe("aarch64");
+    // model/reconcile.ts keeps rec.model and replaces its hostId in place for a shared-layout retarget.
+    Object.assign(rec.model, { host: "different-host", hostId: "22222222-2222-4222-8222-222222222222" });
+    const shown = source.facts(rec);
+    expect(row(shown, "System")).toBe("Not known yet");
+    expect(asked.at(-1)).toEqual(["remote.host.facts", { host_id: "22222222-2222-4222-8222-222222222222" }]);
+    stop();
+    expect(row(shown, "Architecture")).not.toBe("aarch64");
+  });
+});
+
+/** A late read or refusal belongs to the old host even when the window id remains stable. */
+for (const stale of ["success", "offline", "refused"] as const) test(`retargeted polling ignores an old host's ${stale} while the new host is pending`, async () => {
+  await withPage(async (timers) => {
+    const asked: string[] = [];
+    let resolveOld!: (value: Record<string, unknown>) => void;
+    let rejectOld!: (reason: unknown) => void;
+    let resolveNew!: (value: Record<string, unknown>) => void;
+    const connection = { isWelcomed: true, isOpen: true, call: (_action: string, input: Record<string, unknown>) => {
+      asked.push(input.host_id as string);
+      return input.host_id === WORKER_ID
+        ? new Promise<Record<string, unknown>>((resolve, reject) => { resolveOld = resolve; rejectOld = reject; })
+        : new Promise<Record<string, unknown>>((resolve) => { resolveNew = resolve; });
+    } } as unknown as MuxConnection;
+    const source = createLiveDetails({ host: { name: "server" }, connection, roundTrip: () => undefined });
+    const rec = { model: { id: "stable", kind: "terminal", host: "worker", hostId: WORKER_ID } } as unknown as WinRec;
+    const stop = source.open!(rec, () => {});
+    try {
+      Object.assign(rec.model, { host: "new", hostId: "22222222-2222-4222-8222-222222222222" });
+      // The scheduled poll observes the model even if the panel has not rendered again yet.
+      const tick = timers.values().next().value!;
+      timers.clear(); tick();
+      expect(asked).toEqual([WORKER_ID, "22222222-2222-4222-8222-222222222222"]);
+      if (stale === "success") resolveOld(WORKER_FACTS);
+      else rejectOld(new ActionRefused(undefined, stale === "offline" ? "host offline" : "host unavailable"));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(row(source.facts(rec), "System")).toBe("Not known yet");
+      expect(timers.size).toBe(1);
+      resolveNew(SERVER_FACTS);
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(row(source.facts(rec), "Architecture")).toBe("x86_64");
+      expect(row(source.facts(rec), "System")).toBe("AlmaLinux 10.2");
+    } finally { stop(); }
+    expect(timers.size).toBe(0);
+  });
+});
+
+/** Bounded server admission is temporary; it must not permanently stop a visible host's poll. */
+test("a busy host read retries and then displays that host's facts", async () => {
+  await withPage(async (timers) => {
+    const clock = spyOn(performance, "now").mockReturnValue(0);
+    let calls = 0;
+    const connection = { isWelcomed: true, isOpen: true, call: async () => {
+      if (++calls === 1) throw new ActionRefused(undefined, "host busy");
+      return WORKER_FACTS;
+    } } as unknown as MuxConnection;
+    const source = createLiveDetails({ host: { name: "server" }, connection, roundTrip: () => undefined });
+    const rec = { model: { id: "busy", kind: "terminal", host: "worker", hostId: WORKER_ID } } as unknown as WinRec;
+    const stop = source.open!(rec, () => {});
+    try {
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(row(source.facts(rec), "System")).toBe("Not known yet");
+      expect(timers.size).toBe(1);
+      clock.mockReturnValue(1_000);
+      const tick = timers.values().next().value!;
+      timers.clear(); tick();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      expect(row(source.facts(rec), "Architecture")).toBe("aarch64");
+      expect(calls).toBe(2);
+    } finally { stop(); clock.mockRestore(); }
   });
 });

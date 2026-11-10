@@ -16,9 +16,14 @@ function factsTarget(model: WinRec["model"], server: { name: string }): { kind: 
   return !model.noAccess && (model.host === server.name || model.host === "embedded") ? { kind: "server" } : { kind: "none" };
 }
 
+/** A cache/poll identity distinguishes the embedded host, each admitted UUID and unreadable hosts. */
+function factsKey(target: ReturnType<typeof factsTarget>): string {
+  return target.kind === "host" ? target.hostId : target.kind;
+}
+
 /**
  * Makes the details source for the popover: it reads the host's facts, the connection and the session when the popover is asked for, and keeps
- * the last snapshot of each window. Only terminal windows have facts.
+ * the last snapshot of each window with its host identity. Retargeting invalidates old replies and restarts polling. Only terminal windows have facts.
  */
 export function createLiveDetails(options: {
   host: { name: string; user?: string };
@@ -28,8 +33,9 @@ export function createLiveDetails(options: {
 }): DetailsSource {
   const { host, connection, inventory, roundTrip } = options;
   const snapshots = new Map<string, HostFactsSnapshot>();
-  // Windows whose host answered "offline" on the last read; cleared by the next answer or when the popover closes.
+  // Snapshot, offline and throttle keys pair each window with the host identity that answered.
   const offline = new Set<string>();
+  const retarget = new Map<string, () => void>();
   const lastReadAt = new Map<string, number>();
   return {
     facts(rec) {
@@ -37,10 +43,12 @@ export function createLiveDetails(options: {
       const record = rec.model.sessionId ? inventory?.get(rec.model.host, rec.model.sessionId) : undefined;
       const other = rec.model.sessionId ? inventory?.sizedFor(rec.model.host, rec.model.sessionId) : undefined;
       const delay = roundTrip();
-      const facts = snapshots.get(rec.model.id);
+      retarget.get(rec.model.id)?.();
       const target = factsTarget(rec.model, host);
+      const cacheKey = `${rec.model.id}:${factsKey(target)}`;
+      const facts = snapshots.get(cacheKey);
       const server = target.kind === "server";
-      const gone = target.kind === "host" && !facts && offline.has(rec.model.id);
+      const gone = target.kind === "host" && !facts && offline.has(cacheKey);
       return detailsFacts({
         extended: readExtendedInfo(),
         host: {
@@ -64,57 +72,86 @@ export function createLiveDetails(options: {
     },
     open(rec, refresh) {
       const id = rec.model.id;
-      const target = factsTarget(rec.model, host);
-      // A window with no readable host has nothing to ask for; its panel says the facts are not known.
-      if (target.kind === "none") return () => {};
+      let key = factsKey(factsTarget(rec.model, host));
       let active = true;
       let inFlight = false;
+      let refused = false;
+      let generation = 0;
       let timer = 0;
+      /** Polls the current host independently of an older host's outstanding reply. */
       const read = async (): Promise<void> => {
-        if (!active || inFlight) return;
-        const last = lastReadAt.get(id);
-        const remaining = last === undefined ? 0 : Math.max(0, 1_000 - (performance.now() - last));
-        if (remaining > 0 || !connection.isWelcomed) {
-          timer = window.setTimeout(() => { void read(); }, connection.isWelcomed ? remaining : Math.max(1_000, remaining));
-          return;
+        if (!active) return;
+        const target = factsTarget(rec.model, host);
+        const next = factsKey(target);
+        if (next !== key) {
+          snapshots.delete(`${id}:${key}`);
+          offline.delete(`${id}:${key}`);
+          key = next;
+          generation++;
+          inFlight = false;
+          refused = false;
+          window.clearTimeout(timer);
+          refresh();
         }
+        if (target.kind === "none" || refused) return;
+        // Schedule the next observation before awaiting: retargeting must not wait for the old host.
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => { void read(); }, 1_000);
+        if (inFlight || !connection.isWelcomed) return;
+        const readKey = `${id}:${key}`;
+        const last = lastReadAt.get(readKey);
         const now = performance.now();
-        for (const [windowId, at] of lastReadAt) {
-          if (now - at >= 1_000) lastReadAt.delete(windowId);
+        if (last !== undefined && now - last < 1_000) return;
+        for (const [identity, at] of lastReadAt) {
+          if (now - at >= 1_000) lastReadAt.delete(identity);
         }
-        if (lastReadAt.size >= 32 && !lastReadAt.has(id)) {
+        if (lastReadAt.size >= 32 && !lastReadAt.has(readKey)) {
           const oldest = lastReadAt.keys().next().value;
           if (oldest !== undefined) lastReadAt.delete(oldest);
         }
-        lastReadAt.set(id, now);
+        lastReadAt.set(readKey, now);
         inFlight = true;
+        const started = generation;
+        /** Late replies may affect only the same still-open host generation. */
+        const current = (): boolean => active && started === generation && key === factsKey(factsTarget(rec.model, host));
         try {
           const result = target.kind === "host"
             ? await connection.call("remote.host.facts", { host_id: target.hostId })
             : await connection.call("host.facts.read", { includeLive: true });
           const snapshot = decodeHostFacts(result);
-          if (snapshot && active) {
-            snapshots.set(id, snapshot);
-            offline.delete(id);
+          if (snapshot && current()) {
+            snapshots.set(readKey, snapshot);
+            offline.delete(readKey);
             refresh();
           }
         } catch (error) {
+          if (!current()) return;
           if (target.kind === "host" && error instanceof ActionRefused && error.reason === "host offline") {
-            // The machine is admitted but not connected: say so and keep reading, it may come back while the panel is open.
-            snapshots.delete(id);
-            if (active && !offline.has(id)) { offline.add(id); refresh(); }
-          } else if (error instanceof ActionRefused) {
-            // Refused actions will not recover by polling; reopening can retry after state changes.
-            active = false;
+            snapshots.delete(readKey);
+            if (!offline.has(readKey)) { offline.add(readKey); refresh(); }
+          } else if (error instanceof ActionRefused && error.reason !== "host busy") {
+            // A permanent refusal stops this host's poll; retargeting can still start another host.
+            refused = true;
+            window.clearTimeout(timer);
           }
-          // Transport failures remain eligible for the next bounded poll after reconnect.
+          // Transport failures and admission backpressure retry on the next bounded poll.
         } finally {
-          inFlight = false;
-          if (active) timer = window.setTimeout(() => { void read(); }, 1_000);
+          if (current()) inFlight = false;
         }
       };
+      /** A render observes shared-layout retargets immediately, including after a permanent refusal. */
+      const checkTarget = (): void => {
+        if (key !== factsKey(factsTarget(rec.model, host))) void read();
+      };
+      retarget.set(id, checkTarget);
       void read();
-      return () => { active = false; window.clearTimeout(timer); snapshots.delete(id); offline.delete(id); };
+      return () => {
+        active = false;
+        window.clearTimeout(timer);
+        retarget.delete(id);
+        snapshots.delete(`${id}:${key}`);
+        offline.delete(`${id}:${key}`);
+      };
     },
   };
 }
