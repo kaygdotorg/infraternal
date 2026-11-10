@@ -1,4 +1,4 @@
-//! A dedicated thread that reads the Mac node's utun and hands packets to GotaTun in batches.
+//! A dedicated thread that reads the Mac node's utun and hands packets to `GotaTun` in batches.
 //!
 //! **Why a thread (#260, J461).** The Mac node used to read utun from a tokio task: wait for
 //! kqueue readiness, wake a runtime worker, read one packet, go back to waiting. Every outgoing
@@ -8,7 +8,7 @@
 //! every frame that is ready (up to [`READ_BATCH`]) as soon as the kernel queues it, and passes
 //! the whole batch to the async side in one channel send.
 //!
-//! **Backpressure.** The hand-off channel holds at most [`QUEUE_BATCHES`] batches. When GotaTun
+//! **Backpressure.** The hand-off channel holds at most [`QUEUE_BATCHES`] batches. When `GotaTun`
 //! falls behind, the thread blocks in its send, stops reading, and the backlog stays in the
 //! kernel's utun queue, where macOS flow-controls the local TCP senders. At most
 //! `QUEUE_BATCHES × READ_BATCH` packets wait here, plus the one batch the thread holds.
@@ -18,7 +18,7 @@
 //!
 //! **Device gone.** End of file, a closed or invalid descriptor, or a read error that means the
 //! interface went away ends the thread after it delivers that error once. Every later call to
-//! [`UtunReader::next_batch`] waits forever instead of failing again: GotaTun's receive task
+//! [`UtunReader::next_batch`] waits forever instead of failing again: `GotaTun`'s receive task
 //! retries non-fatal errors in a loop, so repeating the error would spin it. The device's own
 //! cancellation still stops that task.
 //!
@@ -27,7 +27,19 @@
 //! gate on socket pairs.
 
 use gotatun::packet::{Ip, Packet, PacketBufPool};
-use std::{io, os::fd::AsFd, sync::Arc, thread::JoinHandle};
+use nix::{
+    errno::Errno,
+    fcntl::{FcntlArg, FdFlag, fcntl},
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+    unistd::{pipe, read},
+};
+use std::{
+    io,
+    os::fd::{AsFd, OwnedFd},
+    sync::Arc,
+    thread::JoinHandle,
+    time::Duration,
+};
 use tokio::sync::mpsc;
 
 /// Most frames the thread reads per wake-up before it hands them over.
@@ -36,28 +48,52 @@ pub(crate) const READ_BATCH: usize = 64;
 /// Most batches waiting in the hand-off channel (8 × 64 = 512 packets, ~5 ms at 1 Gbit/s).
 pub(crate) const QUEUE_BATCHES: usize = 8;
 
+/// Pause after a read error that does not end the device, so a descriptor that keeps failing
+/// costs at most a hundred wake-ups a second instead of a busy loop.
+const ERROR_PAUSE: Duration = Duration::from_millis(10);
+
 /// Turns one raw frame read from the device into an IP packet, or rejects it.
 ///
 /// The Mac node strips and checks the utun address-family header here. A rejected frame is
-/// reported to GotaTun as a non-fatal error, as before; the reader keeps going.
-pub(crate) type Decode = Box<dyn Fn(Packet<[u8]>) -> io::Result<Packet<Ip>> + Send + 'static>;
+/// reported to `GotaTun` as a non-fatal error, as before; the reader keeps going.
+pub(crate) type Decode = Box<dyn FnMut(Packet<[u8]>) -> io::Result<Packet<Ip>> + Send + 'static>;
 
-/// What the thread hands to the async side: a batch of packets or one error.
-type Delivery = io::Result<Vec<Packet<Ip>>>;
+/// What the thread hands to the async side.
+enum Delivery {
+    /// Packets in device order, at most one read batch.
+    Batch(Vec<Packet<Ip>>),
+    /// One frame or read failed; the thread carries on.
+    Rejected(io::Error),
+    /// The device is gone; this is the thread's last message.
+    Ended(io::Error),
+}
+
+/// Counts frames the thread has read, so the tests can check the backpressure bound.
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct ReadCount(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(test)]
+impl ReadCount {
+    /// Record one more frame read from the device.
+    fn add_one(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// Owns the reader thread for one device descriptor; drop it to stop and join the thread.
 pub(crate) struct UtunReader {
     /// Batches from the thread. `None` once dropped, so the thread's send fails and it exits.
     batches: Option<mpsc::Receiver<Delivery>>,
     /// Write end of the stop pipe. Closing it wakes the thread's `poll`.
-    stop: Option<std::os::fd::OwnedFd>,
+    stop: Option<OwnedFd>,
     /// The thread, joined on drop.
     thread: Option<JoinHandle<()>>,
     /// The device is gone (or the thread ended) and that was already reported once.
     finished: bool,
-    /// How many frames the thread has read, for the backpressure tests.
+    /// Frames read so far, shared with the thread (tests only).
     #[cfg(test)]
-    frames_read: Arc<std::sync::atomic::AtomicUsize>,
+    count: ReadCount,
 }
 
 impl UtunReader {
@@ -65,7 +101,7 @@ impl UtunReader {
     /// `read`. Buffers come from `pool`; `decode` turns each frame into a packet.
     ///
     /// `queue_batches` and `read_batch` bound the hand-off (the Mac node passes
-    /// [`QUEUE_BATCHES`] and [`READ_BATCH`]; tests pass small values).
+    /// [`QUEUE_BATCHES`] and [`READ_BATCH`]; tests pass small values). Both are at least 1.
     /// # Errors
     /// Returns failures to create the stop pipe or the thread.
     pub(crate) fn spawn<F: AsFd + Send + Sync + 'static>(
@@ -75,8 +111,39 @@ impl UtunReader {
         queue_batches: usize,
         read_batch: usize,
     ) -> io::Result<Self> {
-        let _ = (device, pool, decode, queue_batches, read_batch);
-        unimplemented!("J461 red: reader thread not written yet")
+        let (stop_read, stop_write) = pipe().map_err(io::Error::from)?;
+        for end in [&stop_read, &stop_write] {
+            fcntl(end, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io::Error::from)?;
+        }
+        let (tx, rx) = mpsc::channel(queue_batches.max(1));
+        #[cfg(test)]
+        let count = ReadCount::default();
+        #[cfg(test)]
+        let thread_count = count.clone();
+        let read_batch = read_batch.max(1);
+        let thread = std::thread::Builder::new()
+            .name("mesh-utun-reader".into())
+            .spawn(move || {
+                let mut reader = ThreadSide {
+                    device: device.as_fd(),
+                    stop: stop_read.as_fd(),
+                    pool: &pool,
+                    decode,
+                    tx: &tx,
+                    read_batch,
+                    #[cfg(test)]
+                    count: &thread_count,
+                };
+                reader.run();
+            })?;
+        Ok(Self {
+            batches: Some(rx),
+            stop: Some(stop_write),
+            thread: Some(thread),
+            finished: false,
+            #[cfg(test)]
+            count,
+        })
     }
 
     /// Wait for the next batch of packets.
@@ -85,13 +152,177 @@ impl UtunReader {
     /// # Errors
     /// A rejected frame (non-fatal) or the error that ended the device.
     pub(crate) async fn next_batch(&mut self) -> io::Result<Vec<Packet<Ip>>> {
-        unimplemented!("J461 red: reader thread not written yet")
+        if !self.finished {
+            let next = match self.batches.as_mut() {
+                Some(batches) => batches.recv().await,
+                None => None,
+            };
+            match next {
+                Some(Delivery::Batch(batch)) => return Ok(batch),
+                Some(Delivery::Rejected(error)) => return Err(error),
+                Some(Delivery::Ended(error)) => {
+                    self.finished = true;
+                    return Err(error);
+                }
+                // The thread stopped without saying why (it panicked): treat it as gone.
+                None => {
+                    self.finished = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "utun reader thread stopped",
+                    ));
+                }
+            }
+        }
+        std::future::pending().await
     }
 
     /// The shared count of frames the thread has read so far.
     #[cfg(test)]
     fn frames_read(&self) -> usize {
-        self.frames_read.load(std::sync::atomic::Ordering::SeqCst)
+        self.count.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for UtunReader {
+    /// Stop the thread from either of its waits, then join it.
+    fn drop(&mut self) {
+        // A thread blocked handing over a batch sees the channel close.
+        self.batches.take();
+        // A thread parked in `poll` sees the stop pipe hang up.
+        self.stop.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Whether a read error means the device went away rather than one bad read.
+fn ends_device(error: Errno) -> bool {
+    matches!(
+        error,
+        Errno::EBADF
+            | Errno::ENXIO
+            | Errno::ENODEV
+            | Errno::ENOTCONN
+            | Errno::EPIPE
+            | Errno::ECONNRESET
+    )
+}
+
+/// Everything the reader thread borrows while it runs.
+struct ThreadSide<'a> {
+    /// The non-blocking device descriptor.
+    device: std::os::fd::BorrowedFd<'a>,
+    /// Read end of the stop pipe.
+    stop: std::os::fd::BorrowedFd<'a>,
+    pool: &'a PacketBufPool,
+    /// Owned by the thread: the Mac decoder reads a live MTU watcher, which needs `&mut`.
+    decode: Decode,
+    tx: &'a mpsc::Sender<Delivery>,
+    read_batch: usize,
+    /// Frames read so far (tests only).
+    #[cfg(test)]
+    count: &'a ReadCount,
+}
+
+impl ThreadSide<'_> {
+    /// Wait in `poll`, drain what is ready, hand it over; return when stopped or the device ends.
+    fn run(&mut self) {
+        loop {
+            let mut fds = [
+                PollFd::new(self.device, PollFlags::POLLIN),
+                PollFd::new(self.stop, PollFlags::POLLIN),
+            ];
+            match poll(&mut fds, PollTimeout::NONE) {
+                Ok(_) => {}
+                Err(Errno::EINTR) => continue,
+                Err(error) => {
+                    self.send(Delivery::Ended(error.into()));
+                    return;
+                }
+            }
+            // Any event on the stop pipe (its writer closed) means the reader was dropped.
+            if fds[1].revents().is_some_and(|events| !events.is_empty()) {
+                return;
+            }
+            if fds[0]
+                .revents()
+                .is_some_and(|events| events.contains(PollFlags::POLLNVAL))
+            {
+                self.send(Delivery::Ended(Errno::EBADF.into()));
+                return;
+            }
+            if !self.drain() {
+                return;
+            }
+        }
+    }
+
+    /// Read every ready frame (up to one batch) and hand it over in order.
+    ///
+    /// Returns `false` when the thread must exit: the device ended or the reader was dropped.
+    fn drain(&mut self) -> bool {
+        let mut batch = Vec::with_capacity(self.read_batch);
+        while batch.len() < self.read_batch {
+            let mut packet = self.pool.get();
+            match read(self.device, &mut packet[..]) {
+                Ok(0) => {
+                    self.finish(&mut batch, io::ErrorKind::UnexpectedEof.into());
+                    return false;
+                }
+                Ok(length) => {
+                    #[cfg(test)]
+                    self.count.add_one();
+                    packet.truncate(length);
+                    match (self.decode)(packet) {
+                        Ok(packet) => batch.push(packet),
+                        // Keep device order: what came before goes first, then the rejection.
+                        Err(error) => {
+                            if !self.flush(&mut batch) || !self.send(Delivery::Rejected(error)) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                Err(Errno::EAGAIN) => break,
+                Err(Errno::EINTR) => {}
+                Err(error) if ends_device(error) => {
+                    self.finish(&mut batch, error.into());
+                    return false;
+                }
+                Err(error) => {
+                    if !self.flush(&mut batch) || !self.send(Delivery::Rejected(error.into())) {
+                        return false;
+                    }
+                    // sleep: pace a descriptor that keeps failing (see `ERROR_PAUSE`)
+                    std::thread::sleep(ERROR_PAUSE);
+                    break;
+                }
+            }
+        }
+        self.flush(&mut batch)
+    }
+
+    /// The device is gone: hand over what was read, then the error, as the last messages.
+    fn finish(&self, batch: &mut Vec<Packet<Ip>>, error: io::Error) {
+        if self.flush(batch) {
+            self.send(Delivery::Ended(error));
+        }
+    }
+
+    /// Hand over the batch if it has packets. `false` once the reader is gone.
+    fn flush(&self, batch: &mut Vec<Packet<Ip>>) -> bool {
+        if batch.is_empty() {
+            return true;
+        }
+        let full = std::mem::replace(batch, Vec::with_capacity(self.read_batch));
+        self.send(Delivery::Batch(full))
+    }
+
+    /// Block until the hand-off queue has room. `false` once the reader is gone.
+    fn send(&self, delivery: Delivery) -> bool {
+        self.tx.blocking_send(delivery).is_ok()
     }
 }
 
