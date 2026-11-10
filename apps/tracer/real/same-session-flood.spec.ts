@@ -12,7 +12,9 @@ import { expect, test, type Page } from "playwright/test";
 import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "serial" });
+/** The real server this file starts with a 150 ms delay each way; disposed after the last test. */
 let server: RealServer;
+/** The signed-in browser page that types into the flooding terminal. */
 let page: Page;
 
 /**
