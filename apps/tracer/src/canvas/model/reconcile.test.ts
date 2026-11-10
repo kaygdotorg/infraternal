@@ -1,5 +1,5 @@
 /** Shared-view reconciliation keeps camera anchors and temporary app streams stable across receipts. */
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import type { Ctx, ViewRec, WinRec } from "../context";
 import { CELL, metricsFor } from "../layout/geometry";
 import { registerGroups, type Groups } from "../layout/groups-handle";
@@ -8,11 +8,18 @@ import type { MeshData } from "../mesh/source";
 import { toDocument } from "./document";
 import type { ViewModel, WindowModel } from "./types";
 
+/** The reconciliation fixture borrows the browser preference API without freezing it for later suites. */
+const previousMatchMedia = Object.getOwnPropertyDescriptor(globalThis, "matchMedia");
 Object.defineProperty(globalThis, "matchMedia", {
   configurable: true,
+  writable: true,
   value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 });
 const { reconcile } = await import("./reconcile");
+afterAll(() => {
+  if (previousMatchMedia) Object.defineProperty(globalThis, "matchMedia", previousMatchMedia);
+  else Reflect.deleteProperty(globalThis, "matchMedia");
+});
 
 test("review: removing the current shared view selects a surviving camera anchor", async () => {
   const consoleView = { view: { id: "console" } } as unknown as ViewRec;
