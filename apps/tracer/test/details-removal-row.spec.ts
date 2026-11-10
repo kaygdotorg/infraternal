@@ -47,7 +47,7 @@ for (const size of sizes) test(`details card ${size.id}: the destructive action 
     expect(m.tone).toBe("danger");
     expect(m.buttons, "no centred button of prose remains").toBe(0);
     expect(m.labelText).toBe("Remove host");
-    expect(m.hintText).toBe("Remove a host and uninstall its infraternal agent.");
+    expect(m.hintText).toBe("Revokes its access, then uninstalls the infraternal agent from it.");
     expect(m.labelColor, "the label wears the app's danger colour").toBe(m.danger);
     expect(Math.abs(m.labelLeft - m.keyLeft), "the label starts on the keys' left edge").toBeLessThanOrEqual(0.5);
     expect(Math.abs(m.hintLeft - m.labelLeft), "the hint starts on the label's left edge").toBeLessThanOrEqual(0.5);

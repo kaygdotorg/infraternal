@@ -118,8 +118,11 @@ export interface Adapters {
     label(): string | undefined;
     /** Forget an expired pending retirement when this adapter supports it. */
     forget?(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void;
-    /** Confirm removal and request cleanup on the machine. */
-    remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void;
+    /**
+     * Confirm removal and request cleanup on the machine. `confirmed` means the caller already asked the person (the
+     * details card's in-panel question, #486), so no second card is shown.
+     */
+    remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void, confirmed?: boolean): void;
   };
   /** Binds terminal windows to sessions (real in the product, previews in mockups). */
   sessions: SessionService;

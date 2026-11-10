@@ -17,6 +17,7 @@ import type { Ctx, WinRec } from "../context";
 import type { DetailsFacts, DetailsSource } from "./details-source";
 import { currentUiScale } from "../../../../../packages/ui/src/ui-scale";
 import { EASE_OUT } from "../../../../../packages/ui/src/motion";
+import { REMOVAL_EFFECT } from "../host-removal-confirm";
 
 export interface DetailsPopover {
   readonly windowId: string;
@@ -28,8 +29,24 @@ interface DetailsInput {
   windowId: string;
   /** Read at open and each time a tab is shown. */
   read: () => DetailsFacts;
-  /** A destructive action under the facts: its short name, what it does (optional) and what runs, anchored to its row. */
-  action?: { label: string; hint?: string; run(anchor: HTMLElement): void };
+  /**
+   * A destructive action under the facts: its short name, what it does (optional) and what runs, anchored to its row.
+   * `subject` is what it acts on ("compute01"); `runConfirmed` does it when the panel itself already asked (#486).
+   */
+  action?: DetailsAction;
+}
+
+/** The details card's one destructive action (remove host). */
+export interface DetailsAction { label: string; hint?: string; subject: string; run(anchor: HTMLElement): void; runConfirmed(): void }
+
+/**
+ * Review variants of how the removal is offered (#486, owner picks): `?removalui=foot` (default, a danger row that opens the
+ * glass confirmation card), `menu` (a ⋯ button in the header opens a menu whose entry opens that card) and `inline`
+ * (the row turns into the question inside the panel). Only `foot` is in this chunk; the others load when asked for.
+ */
+function removalVariant(): "foot" | "menu" | "inline" {
+  const ui = new URLSearchParams(location.search).get("removalui");
+  return ui === "menu" || ui === "inline" ? ui : "foot";
 }
 
 /** The window header's padding: the gap kept between the popover and its window's edges. */
@@ -75,10 +92,14 @@ export function openDetailsPopover(
   const list = createKeyValueList(`${first.title} details`);
   const scroll = root.querySelector<HTMLElement>(".canvas-popover-scroll")!;
   scroll.append(list.root);
-  if (input.action) {
+  const variant = removalVariant();
+  if (input.action && variant !== "foot") {
+    const action = input.action;
+    void import("./details-removal-variants.on-demand").then((m) => { if (root.isConnected) m.mountRemovalVariant(root, variant, action, stage); });
+  } else if (input.action) {
     // A destructive action is a row of its own under the facts: the settings row (shared, packages/ui) in its
     // danger tone, its label left on the keys' edge and what it does under it, never a button of centred prose.
-    // It asks through the anchored confirmation for now; TASTE asks for the in-row question (#242, #291).
+    // It asks through the anchored confirmation card.
     const foot = document.createElement("div");
     foot.className = "canvas-popover-action ui-sp-list";
     foot.dataset.stacked = "";
@@ -219,7 +240,7 @@ export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
       if (cx.adapters.privilege && !access) { void loadAccess().then(() => module.toggle(rec, how)); return; }
       let stop = (): void => {};
       let repaint = (): void => {};
-      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => withAccess(rec, source.facts(rec)!, () => repaint()), ...(rec.model.hostId && cx.adapters.hostRemoval?.label() ? { action: { label: "Remove host", hint: cx.adapters.hostRemoval.label()!, run: (anchor: HTMLElement) => cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, anchor) } } : {}) }, how, () => {
+      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => withAccess(rec, source.facts(rec)!, () => repaint()), ...(rec.model.hostId && cx.adapters.hostRemoval?.label() ? { action: { label: cx.adapters.hostRemoval.label()!, hint: REMOVAL_EFFECT, subject: rec.model.host, run: (anchor: HTMLElement) => cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, anchor), runConfirmed: () => cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, null, undefined, true) } } : {}) }, how, () => {
         stop();
         if (open === popover) open = undefined;
       });
