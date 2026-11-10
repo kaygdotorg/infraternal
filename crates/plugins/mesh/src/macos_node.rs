@@ -4960,4 +4960,85 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(paths.len(), directories.len());
     }
+
+    /// Decode a 64-character hex `WireGuard` key from the bench environment.
+    fn bench_key(name: &str) -> [u8; 32] {
+        let hex = std::env::var(name).expect("bench key variable");
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex key"))
+            .collect();
+        bytes.try_into().expect("32-byte key")
+    }
+
+    /// J461 bench harness (#260): the exact Mac data path (this module's `MacUtun` reader and
+    /// writer, the bound UDP factory, the pinned `GotaTun` device on a current-thread runtime, as
+    /// `Node` builds it) with one static peer and no coordinator, so the macOS send and receive
+    /// cells can be measured against other engines on the same link.
+    ///
+    /// Root only (utun). Environment: `J461_PRIVATE_HEX`, `J461_PEER_PUBLIC_HEX`,
+    /// `J461_ENDPOINT` (peer `ip:port`), `J461_PORT`, `J461_ADDR` and `J461_PEER_ADDR` (tunnel
+    /// IPv4 addresses), `J461_IFNAME_FILE` (the utun name is written there once up) and `J461_STOP` (the
+    /// device stops when that file appears). Run with
+    /// `cargo test --release --features agent --lib mac_bench_device -- --ignored`.
+    #[test]
+    #[ignore = "bench harness: root, a live peer and the J461_* environment"]
+    fn mac_bench_device() {
+        use gotatun::{
+            device::{DeviceBuilder, Peer as WireGuardPeer},
+            x25519::{PublicKey as WgPublicKey, StaticSecret},
+        };
+        let var = |name: &str| std::env::var(name).expect("bench variable");
+        let port: u16 = var("J461_PORT").parse().expect("port");
+        let endpoint: std::net::SocketAddr = var("J461_ENDPOINT").parse().expect("endpoint");
+        let peer_addr: IpAddr = var("J461_PEER_ADDR").parse().expect("peer address");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let utun = super::MacUtun::from_open(super::OpenUtun::open().expect("utun"))
+                .expect("register utun");
+            let mut factory = UdpSocketFactory::default();
+            let params = UdpTransportFactoryParams { addr: None, port };
+            let (send, receive) = factory.bind(&params).await.expect("bind");
+            let factory = BoundUdpFactory {
+                send,
+                receive,
+                port,
+            };
+            let mut peer = WireGuardPeer::new(WgPublicKey::from(bench_key("J461_PEER_PUBLIC_HEX")))
+                .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
+            peer.endpoint = Some(endpoint);
+            peer.keepalive = Some(25);
+            let device = DeviceBuilder::new()
+                .with_udp(factory)
+                .with_private_key(StaticSecret::from(bench_key("J461_PRIVATE_HEX")))
+                .with_listen_port(port)
+                .with_ip_pair(utun.sender(), utun.receiver())
+                .with_peers(vec![peer])
+                .build()
+                .await
+                .expect("device");
+            utun.set_mtu(1280);
+            let status = std::process::Command::new("/sbin/ifconfig")
+                .args([
+                    utun.name(),
+                    "inet",
+                    &var("J461_ADDR"),
+                    &peer_addr.to_string(),
+                ])
+                .args(["mtu", "1280", "up"])
+                .status()
+                .expect("ifconfig");
+            assert!(status.success(), "ifconfig failed");
+            fs::write(var("J461_IFNAME_FILE"), utun.name()).expect("publish the utun name");
+            let stop = PathBuf::from(var("J461_STOP"));
+            while !stop.exists() {
+                // sleep: poll the stop file
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            device.stop().await;
+        });
+    }
 }
