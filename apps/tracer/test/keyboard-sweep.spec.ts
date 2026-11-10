@@ -42,7 +42,7 @@ const SKIP_LABEL = /^(Reload|Sign out of every device|Mockup:)/i;
  */
 const NOT_PRODUCT = /#test-double-badge|terminal-cursor-layer|ui-conn-g/;
 
-/** A palette family of this many rows or fewer is swept row by row (nine fonts, four card levels); a larger one (the themes) takes one row. */
+/** A palette family of this many rows or fewer, and always the fonts (each row moves the pane's tick), is swept row by row (nine fonts, four card levels); a larger one (the themes) takes one row. */
 const FAMILY_ALL = 10;
 
 /** One finding: what was still moving and where. */
@@ -213,7 +213,7 @@ for (const size of SIZES) {
         const family = familyOf(action, label);
         members.set(family, [...(members.get(family) ?? []), { label, action }]);
       }
-      const targets = [...members.values()].flatMap((list) => (list.length <= FAMILY_ALL ? list : [list[0]!]));
+      const targets = [...members.values()].flatMap((list) => (list.length <= FAMILY_ALL || list[0]!.action.startsWith("font:") ? list : [list[0]!]));
       expect(targets.length, "the palette lists its actions").toBeGreaterThan(14);
       expect(targets.filter((target) => target.action.startsWith("font:")).length, "every font row is swept").toBe(rows.filter((row) => row.action.startsWith("font:")).length);
       const failures: string[] = [];
