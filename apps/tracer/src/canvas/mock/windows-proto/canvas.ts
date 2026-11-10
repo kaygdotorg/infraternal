@@ -509,7 +509,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     else if (right + x > rect.width) glideTo(rect.width - right, y);
   };
   /**
-   * The test double's host removal for the details card (`?removal=1` removes, `fail` fails the first attempt, `refused` never
+   * The test double's host removal for the details card (`?removal=1` removes, `fail` fails the first attempt, `slowfail` fails after 1.5 s (a removal still running while the host disappears), `refused` never
    * starts, `pending` leaves the uninstall waiting): it takes 400 ms so the pending state can be seen, and changes nothing.
    * A spec sets `window.__removalStatus` to "offline" or "gone" to play the host's state changing while the question is open.
    */
@@ -519,7 +519,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       const mode = new URLSearchParams(location.search).get("removal");
       attempts += 1;
       // The double's own latency; no real removal happens.
-      await new Promise((resolve) => window.setTimeout(resolve, 400));
+      await new Promise((resolve) => window.setTimeout(resolve, mode === "slowfail" ? 1500 : 400));
+      if (mode === "slowfail") return { state: "failed", message: "The host could not be removed. Sign in again, then try again." };
       if (mode === "fail" && attempts === 1) return { state: "failed", message: "The host could not be removed. Sign in again, then try again." };
       if (mode === "refused") return { state: "refused", message: "Another host removal is still running. Try again in a moment." };
       return mode === "pending" ? { state: "pending", message: "Access revoked. It uninstalls infraternal as soon as it connects." } : { state: "removed", message: "The host was removed." };
