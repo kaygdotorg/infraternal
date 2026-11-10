@@ -48,6 +48,8 @@ export function createRemovalFoot(action: DetailsAction): HTMLElement {
   ask.setAttribute("role", "group");
   ask.setAttribute("aria-label", `Remove ${action.subject}?`);
   ask.hidden = true;
+  // The panel closes on Escape unless the focused pane owns it (details.on-demand.ts): here Escape only takes the question back.
+  ask.dataset.ownsEscape = "";
   ask.innerHTML = '<p class="canvas-popover-ask-q"></p><p class="canvas-popover-ask-effect"></p><div class="canvas-popover-ask-actions"><button type="button" class="ui-button" data-button="secondary" data-keep></button><button type="button" class="ui-button canvas-popover-ask-yes" data-button="primary" data-yes></button></div>';
   ask.querySelector<HTMLElement>(".canvas-popover-ask-q")!.textContent = `Remove ${action.subject}?`;
   ask.querySelector<HTMLElement>(".canvas-popover-ask-effect")!.textContent = action.hint;
