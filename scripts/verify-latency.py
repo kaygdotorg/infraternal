@@ -97,11 +97,14 @@ def settle_echo(state):
 
 
 def return_credit(client, stream, state, length):
-    """Return consumed output credit in 64 KiB batches, as received bytes are handled."""
-    state["credit_pending"] += length
-    if state["credit_pending"] >= 64 * 1024:
-        client.send(stream, 0x14, struct.pack("<I", state["credit_pending"]))
-        state["credit_pending"] = 0
+    """Return the credit of each received frame at once, as the tracer does after painting each write.
+
+    Holding credit back until 64 KiB had built up made the fixture slower to
+    refill the window than any browser, and that alone added ~100 ms to the
+    same-session echo tail (#477).
+    """
+    if length > 0:
+        client.send(stream, 0x14, struct.pack("<I", length))
 
 
 def frame(client, streams):
@@ -203,7 +206,7 @@ def sample_echoes(client, streams, stream, count):
                     f"stream {stream} key {len(echo_ms) + 1} showed no "
                     f"{'Ack' if state['pending_ack'][2] is None else 'echo'} within {SAMPLE_TIMEOUT_S} s "
                     f"(output_bytes={state['output_bytes']} repaints={state['repaints']} "
-                    f"token={state['token']} credit_pending={state['credit_pending']})"
+                    f"token={state['token']})"
                 )
             frame(client, streams)
         ack_ms.append((state["pending_ack"][2] - started) * 1000)
@@ -228,7 +231,6 @@ def run(binary, state_dir, samples):
                 "acked": 0,
                 "echoes": 0,
                 "output_bytes": 0,
-                "credit_pending": 0,
                 "repaints": 0,
                 "echo_by_token": False,
                 "token": 0,
