@@ -500,6 +500,12 @@ async fn send_live(
     }
 }
 
+/// Serves one admitted bootstrap socket until it closes, is revoked or expires.
+///
+/// Reads one client request at a time (start, retry, start-fresh, confirm-host-key, replay) and runs it
+/// to completion. While a host-key confirmation is looking up, a repeat of that same confirmation is
+/// dropped (see [`is_same_confirmation`]) and any other request gets the busy error, so neither can
+/// cancel the batch that owns the confirmation. Dropping the batch on return cancels its hosts.
 async fn run(
     socket: &mut WebSocket,
     api: Arc<Api>,
@@ -719,6 +725,12 @@ async fn run(
                                         }
                                         incoming = socket.recv() => {
                                             match incoming {
+                                                Some(Ok(Message::Text(text))) if is_same_confirmation(&text,&target,&challenge,&fingerprint) => {
+                                                    // A double-click resends the very same confirmation. The reply to
+                                                    // the one in flight answers both (the screen matches it by target
+                                                    // and fingerprint), so say nothing: a busy error here would read
+                                                    // as a failure of a trust that is about to succeed.
+                                                },
                                                 Some(Ok(Message::Text(_))) => {
                                                     // Refuse concurrent requests without retaining private inputs
                                                     // or cancelling the batch that owns this confirmation.
@@ -812,6 +824,20 @@ async fn run(
     }
     // Dropping Batch signals cancellation; host attempts finish their rollback.
     Ok(())
+}
+
+/// True when `text` is a `confirm-host-key` request for exactly this target, challenge and fingerprint.
+///
+/// Used while that confirmation is in flight: a repeat of it (a double-click) is already being answered,
+/// so it is dropped instead of refused as busy. Anything else, including the same challenge with another
+/// fingerprint, is not the same confirmation and keeps getting the busy error. Unparseable text is never
+/// "the same".
+fn is_same_confirmation(text: &str, target: &str, challenge: &str, fingerprint: &str) -> bool {
+    matches!(
+        serde_json::from_str::<Request>(text),
+        Ok(Request::ConfirmHostKey { target: t, challenge: c, fingerprint: f })
+            if t == target && c == challenge && f == fingerprint
+    )
 }
 
 fn now() -> Result<i64, ()> {

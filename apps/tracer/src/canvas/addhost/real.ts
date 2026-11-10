@@ -93,6 +93,10 @@ function refusal(response: Response, what: string): ServiceError {
 export function createRealProvisioning(): ProvisioningService {
   const secrets = new Map<string, { target: string; address: string; auth: OneUseAuth; expires: number }>();
   const observations = new Map<string, { run: ProvisioningRun; target: string; challenge: string; fingerprints: string[] }>();
+  /** Trusts in flight, by the challenge they confirm; a repeated call for the same one joins the promise already running. */
+  const trusting = new Map<string, { fingerprint: string; work: Promise<void> }>();
+  /** Host and fingerprint pairs already confirmed; a repeat answers success until the host shows a new observation. */
+  const trusted = new Set<string>();
   const prune = (): void => { for (const [key, value] of secrets) if (value.expires <= Date.now()) secrets.delete(key); };
   return {
     authorityStatus: () => onDemand(() => import("./authority.on-demand")).then((module) => module.authorityStatus()),
@@ -123,7 +127,11 @@ export function createRealProvisioning(): ProvisioningService {
         onEvent(event) {
           const address = addresses.get(event.target);
           const challenge = event.failure?.host_key_challenge;
-          if (address && challenge && event.failure?.fingerprints) observations.set(address, { run, target: event.target, challenge, fingerprints: event.failure.fingerprints });
+          if (address && challenge && event.failure?.fingerprints) {
+            // A new observation means the earlier trust did not hold: it must be confirmed again for real.
+            for (const key of trusted) if (key.startsWith(`${address}\n`)) trusted.delete(key);
+            observations.set(address, { run, target: event.target, challenge, fingerprints: event.failure.fingerprints });
+          }
           handlers.onEvent(event);
         },
         onClose() {
@@ -158,13 +166,31 @@ export function createRealProvisioning(): ProvisioningService {
       return reference;
     },
 
-    dispose() { secrets.clear(); observations.clear(); },
+    dispose() { secrets.clear(); observations.clear(); trusting.clear(); trusted.clear(); },
 
-    async trustHostKey(host, fingerprint) {
+    /**
+     * Trusting is idempotent: any number of calls for the same observation make one confirmation.
+     * A call while one is in flight for the same challenge and fingerprint joins it; a call after it succeeded
+     * (and before the host shows another key) resolves at once. A newer observation of the host is its own
+     * trust, never joined to an older one. A fingerprint the server never showed is refused every time.
+     */
+    trustHostKey(host, fingerprint) {
+      const refuse = (): Promise<void> => Promise.reject(new ServiceError("Check the host key again before trusting it."));
+      const key = `${host}\n${fingerprint}`;
       const observed = observations.get(host);
-      if (!observed || !observed.fingerprints.includes(fingerprint)) throw new ServiceError("Check the host key again before trusting it.");
-      await observed.run.confirmHostKey(observed.target, observed.challenge, fingerprint);
-      observations.delete(host);
+      if (!observed) return trusted.has(key) ? Promise.resolve() : refuse();
+      if (!observed.fingerprints.includes(fingerprint)) return refuse();
+      const flying = trusting.get(observed.challenge);
+      if (flying && flying.fingerprint === fingerprint) return flying.work;
+      const work = observed.run.confirmHostKey(observed.target, observed.challenge, fingerprint).then(() => {
+        // Only the observation this trust confirmed is finished; a newer one for the host stays.
+        if (observations.get(host) === observed) {
+          observations.delete(host);
+          trusted.add(key);
+        }
+      }).finally(() => { trusting.delete(observed.challenge); });
+      trusting.set(observed.challenge, { fingerprint, work });
+      return work;
     },
 
     async installCommand(host) {
