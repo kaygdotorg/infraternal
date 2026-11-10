@@ -41,7 +41,7 @@ for (const size of sizes) test(`details card ${size.id}: the destructive action 
       const danger = getComputedStyle(probe).color;
       probe.remove();
       return {
-        tone: row.dataset.tone, rowTag: row.tagName, rowHeight: row.getBoundingClientRect().height, buttons: card.querySelectorAll(".ui-button").length,
+        tone: row.dataset.tone, rowTag: row.tagName, rowHeight: row.getBoundingClientRect().height, buttons: [...card.querySelectorAll<HTMLElement>(".ui-button")].filter((b) => b.offsetParent !== null).length, // the question's buttons exist but stay hidden until it asks
         keyLeft: key.getBoundingClientRect().left, labelLeft: label.getBoundingClientRect().left, hintLeft: hint.getBoundingClientRect().left,
         labelColor: getComputedStyle(label).color, danger, labelText: label.textContent, hintText: hint.textContent,
         hintBelow: hint.getBoundingClientRect().top >= label.getBoundingClientRect().bottom - 1,
