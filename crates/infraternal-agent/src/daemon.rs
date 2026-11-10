@@ -2020,12 +2020,14 @@ async fn terminal_run(
                             #[cfg(feature = "remote")]
                             Command::Cursor(_) => return Err(sessions::invalid("unnegotiated terminal cursor")),
                         }
-                        if detached {
+                        if detached && key_repaint_target.is_none() {
                             // Reconnecting the same writer can supersede
                             // this socket before it reads an already-written
                             // command. An ordered State reply proves input was
                             // accepted (or resize handled) before peer loss;
                             // accepted input survives until the PTY writes it.
+                            // A key-triggered repaint keeps this replacement
+                            // link until its SnapshotRequest and capture finish.
                             let written = input_state(peer).await?;
                             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
                             acknowledged = acknowledged.max(written);

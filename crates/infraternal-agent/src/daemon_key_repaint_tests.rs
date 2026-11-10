@@ -4,7 +4,7 @@ use super::*;
 use crate::sessions::Reader;
 use infraternal_shim::frame::{MULTI_WRITER, SEQUENCED_INPUT};
 use std::{path::PathBuf, time::Duration};
-use tokio::{net::UnixStream, sync::mpsc, task::JoinHandle};
+use tokio::{io::AsyncReadExt, net::UnixStream, sync::mpsc, task::JoinHandle};
 
 /// The ordinary raw-output allowance retained beside the repaint reserve.
 const BULK_CREDIT: u32 = 1024 * 1024;
@@ -22,7 +22,9 @@ const EVENT_GUARD: Duration = Duration::from_secs(3);
 /// One terminal relay paired with a fake shim data socket.
 struct RelayFixture {
     root: PathBuf,
+    id: [u8; 16],
     stream: u32,
+    listener: tokio::net::UnixListener,
     peer: UnixStream,
     reader: Reader,
     commands: Option<session_commands::Sender>,
@@ -83,7 +85,9 @@ async fn start_relay(stream: u32) -> RelayFixture {
 
     let mut fixture = RelayFixture {
         root,
+        id,
         stream,
+        listener,
         peer,
         reader,
         commands: Some(commands),
@@ -117,6 +121,62 @@ async fn next_message(fixture: &mut RelayFixture) -> Message {
         .expect("terminal relay closed its message channel")
 }
 
+/// Wait until the ordinary starvation timer has detached the current shim link.
+async fn wait_for_link_close(fixture: &mut RelayFixture) {
+    tokio::time::timeout(EVENT_GUARD, async {
+        let mut bytes = [0_u8; 4096];
+        loop {
+            if fixture.peer.read(&mut bytes).await.unwrap() == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the 250 ms starvation recovery did not detach its shim link");
+}
+
+/// Accept a replacement shim link and complete its ordered input-state fence.
+async fn accept_relinked_peer(fixture: &mut RelayFixture) {
+    let (mut peer, _) = tokio::time::timeout(EVENT_GUARD, fixture.listener.accept())
+        .await
+        .expect("input did not reconnect the detached shim link")
+        .unwrap();
+    let mut reader = Reader::default();
+    sessions::send(
+        &mut peer,
+        &Shim::Hello {
+            version: 1,
+            caps: SEQUENCED_INPUT | MULTI_WRITER,
+            session: fixture.id,
+            pid: std::process::id(),
+            cols: 80,
+            rows: 24,
+            created: 0,
+            head: u64::from(BULK_CREDIT) + u64::try_from(STARVING_OUTPUT).unwrap(),
+            start: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read_shim(&mut reader, &mut peer).await,
+        Shim::Attach(_)
+    ));
+    assert_eq!(
+        read_shim(&mut reader, &mut peer).await,
+        Shim::SelectWriter(fixture.stream)
+    );
+    assert_eq!(
+        read_shim(&mut reader, &mut peer).await,
+        Shim::InputStateRequest
+    );
+    sessions::send(&mut peer, &Shim::InputState(0, 0))
+        .await
+        .unwrap();
+    fixture.peer = peer;
+    fixture.reader = reader;
+}
+
 /// Forward a message read until the requested `InputAck`, skipping already-sent flood bytes.
 async fn wait_for_input_ack(fixture: &mut RelayFixture, written: u64) -> bool {
     loop {
@@ -126,6 +186,7 @@ async fn wait_for_input_ack(fixture: &mut RelayFixture, written: u64) -> bool {
             {
                 return true;
             }
+            Ok(Some(Message::Shim(stream, Shim::InputAck(_)))) if stream == fixture.stream => {}
             Ok(Some(Message::Shim(stream, Shim::Output(..)))) if stream == fixture.stream => {}
             Ok(Some(Message::Event(stream, _))) if stream == fixture.stream => {}
             Ok(Some(_) | None) | Err(_) => return false,
@@ -247,6 +308,70 @@ async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
     assert_eq!(
         repaint,
         Some((u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec()))
+    );
+}
+
+/// Keep a key-triggered repaint alive when the ordinary starvation path detached first.
+#[tokio::test]
+async fn key_after_starvation_detach_still_requests_its_repaint() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window(&mut fixture).await;
+    wait_for_link_close(&mut fixture).await;
+
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Input(0, vec![b'k']))
+        .unwrap();
+    accept_relinked_peer(&mut fixture).await;
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SequencedInput(0, vec![b'k'])
+    );
+    sessions::send(&mut fixture.peer, &Shim::InputAck(1))
+        .await
+        .unwrap();
+    assert!(wait_for_input_ack(&mut fixture, 1).await);
+    let request = tokio::time::timeout(EVENT_GUARD, fixture.reader.read(&mut fixture.peer))
+        .await
+        .expect("the acknowledged key should request a repaint")
+        .unwrap();
+    let requested = request == Shim::SnapshotRequest;
+    if !requested && request == Shim::InputStateRequest {
+        sessions::send(&mut fixture.peer, &Shim::InputState(1, 1))
+            .await
+            .unwrap();
+        let _ = wait_for_input_ack(&mut fixture, 1).await;
+    }
+    if requested {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Snapshot(
+                u64::from(BULK_CREDIT) + u64::try_from(STARVING_OUTPUT).unwrap(),
+                b"echo:k".to_vec(),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let repaint = if requested {
+        wait_for_repaint(&mut fixture).await
+    } else {
+        None
+    };
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        requested,
+        "a detached relay must keep the replacement link through the key repaint"
+    );
+    assert_eq!(
+        repaint,
+        Some((
+            u64::from(BULK_CREDIT) + u64::try_from(STARVING_OUTPUT).unwrap(),
+            b"echo:k".to_vec()
+        ))
     );
 }
 
