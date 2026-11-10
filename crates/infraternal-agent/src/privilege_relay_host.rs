@@ -12,7 +12,12 @@
 //!   its directory and the process listening on it all belong to `--uid`,
 //!   and then refuses unless the first frame on it is that same token
 //!   (J415 B5). Another process of the same account could swap the socket,
-//!   but it can't read the agent's terminal where ptrace is restricted.
+//!   but it can't make the relay run its bytes: the token never leaves the
+//!   agent, which is non-dumpable from its start (no same-uid ptrace or
+//!   memory reads, whatever Yama's setting). Such a process can open the
+//!   terminal and read the typed token, but not type into the agent's
+//!   socket; at worst the relay refuses and exits, a denial of service only
+//!   (J465 P3-6).
 //! - It runs only what arrives in [`Frame::Open`]: the server's root install
 //!   steps (the same scripts a root Add host runs over SSH), each under
 //!   `/bin/sh -c` with an empty environment, in its own process group.
@@ -382,6 +387,7 @@ async fn run_rollback(script: &str) {
         .env("HOME", "/root")
         .env("LANG", "C")
         .env("LC_ALL", "C")
+        .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -419,6 +425,8 @@ fn open(channel: u32, script: &str, out: mpsc::Sender<Frame>) -> Channel {
         .env("HOME", "/root")
         .env("LANG", "C")
         .env("LC_ALL", "C")
+        // Root never works inside the account's directories (J465 P2-4).
+        .current_dir("/")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

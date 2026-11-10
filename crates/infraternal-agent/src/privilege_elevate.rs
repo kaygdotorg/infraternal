@@ -240,13 +240,24 @@ fn trim_end(bytes: &[u8]) -> &[u8] {
 /// file swapped after the check is never run. The relay removes that
 /// directory when it exits. The relay's stdin stays the terminal: it reads
 /// its one-time token from there (see [`elevate`]).
+///
+/// Root first leaves the account's working directory (`cd /`, J465 P2-4),
+/// sweeps relay copies older than any live relay's lifetime that killed
+/// tries left in `/run`, and copies only a regular file that isn't a link,
+/// so a FIFO or a link to an endless device can't hang root or fill `/run`
+/// (P3-1); either refusal reads as a digest mismatch.
 #[must_use]
 pub fn snippet() -> String {
     format!(
         r#"set -eu
+cd /
 umask 077
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH LANG=C LC_ALL=C
+for old in /run/infraternal-privilege.*; do
+    [ -d "$old" ] && [ ! -L "$old" ] && [ -n "$(find "$old" -maxdepth 0 -mmin +20)" ] && rm -rf -- "$old"
+done
+[ -f "$1" ] && [ ! -L "$1" ] || {{ echo INFRATERNAL_DIGEST_MISMATCH; exit {MISMATCH_CODE}; }}
 dir=$(mktemp -d /run/infraternal-privilege.XXXXXXXX)
 cp -- "$1" "$dir/relay"
 if [ "$(sha256sum "$dir/relay" | cut -c1-64)" != "$2" ]; then
@@ -543,6 +554,7 @@ pub async fn elevate(
 mod tests {
     //! Prompts, refusals and the one-try rule, from real transcripts (locale C).
     use super::*;
+    use std::os::unix::process::CommandExt as _;
 
     /// A stand-in for the random sudo prompt marker.
     const MARK: &str = "[infraternal-0123] ";
@@ -760,15 +772,19 @@ mod tests {
                 .arg(binary)
                 .args([&"0".repeat(64), "/nonexistent", "1"])
                 .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0)
                 .spawn()
                 .unwrap();
+            let group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let status = loop {
                 if let Some(status) = child.try_wait().unwrap() {
                     break Some(status);
                 }
                 if std::time::Instant::now() > deadline {
-                    let _ = child.kill();
+                    // The whole group: a hung `cp` must not outlive the test.
+                    let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
                     let _ = child.wait();
                     break None;
                 }
