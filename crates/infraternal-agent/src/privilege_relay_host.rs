@@ -448,7 +448,11 @@ async fn arm_guard(rollback: &str) {
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(&undo)
         .and_then(|mut file| {
-            std::io::Write::write_all(&mut file, undo_script(rollback).as_bytes())
+            let own = GUARDED
+                .get()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            std::io::Write::write_all(&mut file, undo_script(rollback, &own).as_bytes())
         });
     if written.is_err() {
         return;
