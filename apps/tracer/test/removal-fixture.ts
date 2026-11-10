@@ -14,9 +14,13 @@ export const SIZES = [
 ] as const;
 /** Both card themes the owner reviews. */
 export const THEMES = ["ink", "paper"] as const;
-/** The card transparency levels the user can pick (`data-card` on the root): Solid is the lowest transparency, Frosted the highest. */
-export const LEVELS = ["solid", "tinted", "clear", "frosted"] as const;
-/** One card transparency level, as the root's `data-card` value. */
+/**
+ * The glass levels a person can pick: the three built-in looks (D338), Solid (100% tint) the least transparent and Frosted the most.
+ * A look sets the floating cards' fill through `--look-tint` on the root; `data-card` is always "tinted" in the product, so writing
+ * `data-card` by hand does not choose a level (it is how this spec once "ran" Solid with a 75% fill, #490).
+ */
+export const LEVELS = ["solid", "tinted", "frosted"] as const;
+/** One glass level, as a built-in look's id. */
 export type Level = (typeof LEVELS)[number];
 
 /** A dense directory listing, long enough to fill a window on every viewport and wide enough to run under the whole card. */
@@ -26,14 +30,19 @@ export function listing(): string[] {
 }
 
 /**
- * Opens the clusters mockup in `theme` at card transparency `level`, flies into the Console view, and fills every
+ * Opens the clusters mockup in `theme`, picks the `level` look the way a person does from the palette (its `themes:<id>` action, the
+ * same store call as the Settings pick), flies into the Console view, and fills every
  * terminal with the dense listing. The live terminal is where a person would be typing.
  */
 export async function openDenseConsole(page: Page, theme: string, level: Level): Promise<void> {
   await page.context().request.post("/__mock/reset").catch(() => undefined);
   await page.goto(`/?mock=1&proto=clusters&scene=1&bg=none&removal=1&theme=${theme}`);
   await expect(page.locator(".ui-window").nth(1)).toBeVisible({ timeout: 30_000 });
-  await page.evaluate((name) => { document.documentElement.dataset.card = name; }, level);
+  await page.keyboard.press("Control+Shift+K");
+  await expect(page.locator("#palette-input")).toBeFocused();
+  await page.locator("#palette-input").fill(level);
+  await page.locator(`#palette-results .result[data-action="themes:${level}"]`).click();
+  await expect(page.locator("html")).toHaveAttribute("data-look", level);
   await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette-input")).toBeFocused();
   await page.locator("#palette-input").fill("Console");
