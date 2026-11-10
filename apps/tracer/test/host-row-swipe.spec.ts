@@ -8,7 +8,9 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
+/** The clusters double with the removal double on. */
 const URL = "/?mock=1&proto=clusters&scene=1&theme=ink&bg=none&removal=1";
+/** The sidebar's row for the host edge-arm. */
 const HOST = 'li.bm-subhead[data-id="h:edge-arm"]';
 
 /** Opens the Console view with the sidebar open and the row actions ready. */
@@ -48,7 +50,9 @@ const offset = (page: Page): Promise<number> => page.evaluate((sel) => {
   const leaf = document.querySelector(sel)!.closest(".bm-row")!.firstElementChild as HTMLElement;
   return new DOMMatrix(getComputedStyle(leaf).transform).m41;
 }, HOST);
+/** The revealed Remove button of the swipe. */
 const action = (page: Page) => page.locator("#tree .ui-row-swipe-act[data-action='remove']");
+/** The open glass confirmation card. */
 const card = (page: Page) => page.locator(".ui-confirm-tip[data-open='true']");
 
 test.describe("phone", () => {

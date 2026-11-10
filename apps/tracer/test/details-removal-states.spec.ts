@@ -21,13 +21,19 @@ async function openConnection(page: Page, mode: string): Promise<void> {
   await page.locator(".canvas-popover .ui-tab", { hasText: "Connection" }).click();
   await expect(page.locator(".canvas-popover-action .ui-sp-row")).toBeVisible();
 }
+/** The danger row at the end of the Connection tab. */
 const row = (page: Page) => page.locator(".canvas-popover-action .ui-sp-row");
+/** The in-panel question. */
 const ask = (page: Page) => page.locator(".canvas-popover-ask");
+/** The question's confirming button. */
 const yes = (page: Page) => ask(page).locator("[data-yes]");
+/** The question's Keep button. */
 const keep = (page: Page) => ask(page).locator("[data-keep]");
+/** The question's note line (pending, failure, outcome). */
 const note = (page: Page) => ask(page).locator(".canvas-popover-ask-note");
 /** Whether the focused element is `selector`'s element. */
 const focused = (page: Page, selector: string): Promise<boolean> => page.evaluate((s) => document.activeElement === document.querySelector(s), selector);
+/** Plays the host's state changing while the question is open. */
 const setStatus = (page: Page, status: Status): Promise<void> => page.evaluate((s) => { (window as unknown as { __removalStatus?: string }).__removalStatus = s; }, status);
 
 test("Remove: both buttons are disabled and say Removing… while it runs, the focus stays in the question, then the card closes", async ({ page }) => {

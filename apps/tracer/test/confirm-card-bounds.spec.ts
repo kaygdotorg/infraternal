@@ -9,7 +9,9 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
+/** The inset a card keeps from its window's edge, in pixels. */
 const INSET = 9;
+/** Sub-pixel slack when comparing boxes. */
 const TOLERANCE = 0.5;
 
 /** Opens the Console view of the clusters double with the card hook installed. */
@@ -39,7 +41,9 @@ async function measure(page: Page): Promise<{ card: DOMRect; win: DOMRect; view:
   }));
 }
 
+/** Whether the card lies inside the viewport. */
 const insideView = (m: { card: DOMRect; view: { w: number; h: number } }): boolean => m.card.left >= -TOLERANCE && m.card.top >= -TOLERANCE && m.card.right <= m.view.w + TOLERANCE && m.card.bottom <= m.view.h + TOLERANCE;
+/** Whether the card lies inside its window with the inset on every side. */
 const insideWindow = (m: { card: DOMRect; win: DOMRect }): boolean => m.card.left >= m.win.left + INSET - TOLERANCE && m.card.top >= m.win.top + INSET - TOLERANCE && m.card.right <= m.win.right - INSET + TOLERANCE && m.card.bottom <= m.win.bottom - INSET + TOLERANCE;
 
 test.describe("desktop", () => {

@@ -58,6 +58,7 @@ const FADE = 150;
 /** Whether the person asked for reduced motion; the question then swaps without a fade. */
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/** Where the block is: the row, the open question, a removal running, or a removal that went through. */
 type Phase = "row" | "asking" | "pending" | "done";
 
 /** Builds the block. */

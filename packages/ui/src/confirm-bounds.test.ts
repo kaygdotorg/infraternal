@@ -2,6 +2,7 @@
 import { expect, test } from "bun:test";
 import { confirmBox } from "./confirm-bounds";
 
+/** A phone-sized viewport. */
 const view = { width: 393, height: 852 };
 
 test("a card about something in a window stays inside that window with a 9 px inset", () => {
