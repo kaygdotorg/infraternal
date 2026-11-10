@@ -458,7 +458,11 @@ async fn arm_guard(rollback: &str) {
         return;
     }
     let unit = Path::new("/etc/systemd/system").join(GUARD_UNIT);
-    if std::fs::write(&unit, guard_unit()).is_ok() {
+    // 0644 like every unit file (the relay's umask is 077).
+    let written = std::fs::write(&unit, guard_unit()).and_then(|()| {
+        std::fs::set_permissions(&unit, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+    });
+    if written.is_ok() {
         let wants = Path::new("/etc/systemd/system/multi-user.target.wants");
         let _ = std::fs::create_dir_all(wants);
         let _ = std::os::unix::fs::symlink(&unit, wants.join(GUARD_UNIT));
