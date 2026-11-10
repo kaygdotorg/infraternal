@@ -58,6 +58,9 @@ pub struct Store {
     #[cfg(target_os = "linux")]
     engine_path: PathBuf,
     key_path: PathBuf,
+    // Authority epoch and reset marker live beside the public snapshot, which keeps the shape
+    // the previous release parses (D295, #382 P2). See [`AuthorityRecord`].
+    authority_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
@@ -135,10 +138,11 @@ impl Store {
         #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
         let key_path = parent.join("mesh-private-key");
+        let authority_path = parent.join(AUTHORITY_FILE);
         sweep_private_temporaries(&key_path)?;
         sweep_private_temporaries(&key_path)?;
         sweep_rotation_temporaries(&rotation_path)?;
-        let state: State = read_public(&path)?.unwrap_or_default();
+        let state = read_state(&path, &authority_path)?.unwrap_or_default();
         if state
             .config
             .as_ref()
@@ -149,8 +153,7 @@ impl Store {
         }
         if state.authority_reset_pending
             && state.config.as_ref().is_none_or(|config| {
-                config.authority_epoch.is_none()
-                    || !config.peers.is_empty()
+                !config.peers.is_empty()
                     || config.default_policy != crate::dataplane::DefaultPolicy::Deny
             })
         {
@@ -167,6 +170,7 @@ impl Store {
                 #[cfg(target_os = "linux")]
                 engine_path,
                 key_path,
+                authority_path,
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -200,6 +204,7 @@ impl Store {
             interface_path: parent.join("mesh-interface.json"),
             rotation_path,
             key_path,
+            authority_path: parent.join(AUTHORITY_FILE),
             route_body: Mutex::new(route_body),
         })
     }
@@ -687,8 +692,7 @@ impl Store {
     fn save_checked(&self, state: &State, full_snapshot_base: Option<&Config>) -> io::Result<()> {
         if state.authority_reset_pending
             && state.config.as_ref().is_none_or(|config| {
-                config.authority_epoch.is_none()
-                    || !config.peers.is_empty()
+                !config.peers.is_empty()
                     || config.default_policy != crate::dataplane::DefaultPolicy::Deny
             })
         {
@@ -709,7 +713,7 @@ impl Store {
         let previous = if state.config.is_none() && full_snapshot_base.is_none() {
             None
         } else {
-            read_public::<State>(&self.path)?
+            read_state(&self.path, &self.authority_path)?
         };
         if let Some(expected) = full_snapshot_base {
             let previous = previous.as_ref().ok_or(io::ErrorKind::InvalidData)?;
@@ -778,14 +782,17 @@ impl Store {
         let encode = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_encode")
         });
-        let body = serde_json::to_vec(state).map_err(io::Error::other)?;
+        let (body, authority) = encode_state(state)?;
         #[cfg(feature = "cutoff-measure")]
         drop(encode);
         #[cfg(feature = "cutoff-measure")]
         let _write = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_write")
         });
-        write_public(&self.path, &body)
+        // The snapshot goes first: a stop before the authority record leaves the older record,
+        // which restore honours only where it is safe (see [`merge_authority`]).
+        write_public(&self.path, &body)?;
+        write_authority(&self.authority_path, &authority)
     }
     /// Persist peer-free intent before fencing an authority at runtime.
     ///
@@ -803,7 +810,7 @@ impl Store {
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let body = serde_json::to_vec(state).map_err(io::Error::other)?;
+        let (body, authority) = encode_state(state)?;
         if body.len() as u64 > MAX_PUBLIC_STATE_BYTES {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -816,7 +823,16 @@ impl Store {
                         fallback_error_kind = ?fallback_error.kind(),
                         "atomic and in-place fail-closed mesh state writes both failed"
                     );
-                })
+                })?;
+                // The peer-free snapshot is the safety-critical write. Without the record, restore
+                // keeps that peer-free state and waits for the server's next full snapshot.
+                if let Err(error) = write_authority(&self.authority_path, &authority) {
+                    tracing::warn!(
+                        error_kind = ?error.kind(),
+                        "mesh authority record not updated after an in-place fail-closed write"
+                    );
+                }
+                Ok(())
             }
         }
     }
@@ -836,6 +852,148 @@ fn rotation_public_key(private_key: &[u8]) -> io::Result<crate::policy::model::P
     let secret = gotatun::x25519::StaticSecret::from(*private_bytes);
     let public = gotatun::x25519::PublicKey::from(&secret);
     Ok(crate::policy::model::PublicKey(*public.as_bytes()))
+}
+
+/// File beside `mesh-public.json` that holds a node's authority metadata.
+pub(crate) const AUTHORITY_FILE: &str = "mesh-authority.json";
+
+/// Authority metadata kept outside the public snapshot (D295 rollback, #382 P2).
+///
+/// The previous release parses `mesh-public.json` with `deny_unknown_fields`, so the epoch and
+/// the reset marker cannot live there: a rolled-back binary would fail to read its own state and
+/// leave the node without a mesh. They live in this separate file, which older releases never
+/// open. The snapshot file keeps exactly the older shape.
+///
+/// Writers update the snapshot first and this record second. Readers treat a missing or stale
+/// record as harmless: a wrong or missing epoch only makes the next server snapshot count as an
+/// authority change, and a reset marker is honoured only over a peer-free deny snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthorityRecord {
+    /// The server authority epoch the saved snapshot came from, if it carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) epoch: Option<String>,
+    /// True after a new authority was fenced and until its first full snapshot is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) reset_pending: bool,
+}
+
+/// Read the authority record, treating a missing, unreadable or malformed file as empty.
+///
+/// An empty record is always safe to act on (see [`AuthorityRecord`]), so a damaged file is
+/// logged and skipped rather than blocking restore.
+pub(crate) fn read_authority(path: &Path) -> AuthorityRecord {
+    match read_public::<AuthorityRecord>(path) {
+        Ok(record) => {
+            let record = record.unwrap_or_default();
+            if record
+                .epoch
+                .as_deref()
+                .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+            {
+                tracing::warn!("mesh authority record ignored: its epoch is malformed");
+                return AuthorityRecord::default();
+            }
+            record
+        }
+        Err(error) => {
+            tracing::warn!(error_kind = ?error.kind(), "mesh authority record ignored: unreadable");
+            AuthorityRecord::default()
+        }
+    }
+}
+
+/// Persist `record`, or remove the file when it is empty. Unchanged records are not rewritten,
+/// so ordinary snapshot saves cost no extra fsync.
+/// # Errors
+/// Reports a failed durable write or removal.
+pub(crate) fn write_authority(path: &Path, record: &AuthorityRecord) -> io::Result<()> {
+    // A malformed file reads as empty; leaving it in place is harmless for the same reason.
+    if read_authority(path) == *record {
+        return Ok(());
+    }
+    if *record == AuthorityRecord::default() {
+        return match fs::remove_file(path) {
+            Ok(()) => fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    write_public(path, &serde_json::to_vec(record).map_err(io::Error::other)?)
+}
+
+/// Move the authority metadata out of a snapshot about to be written, returning the stripped
+/// copy for the snapshot file and the record for [`AUTHORITY_FILE`].
+pub(crate) fn split_authority(
+    config: Option<&Config>,
+    reset_pending: bool,
+) -> (Option<Config>, AuthorityRecord) {
+    let mut stripped = config.cloned();
+    let epoch = stripped
+        .as_mut()
+        .and_then(|config| config.authority_epoch.take());
+    (
+        stripped,
+        AuthorityRecord {
+            epoch,
+            reset_pending,
+        },
+    )
+}
+
+/// Fill a just-read snapshot's authority metadata from its record.
+///
+/// Values written inline by earlier builds of this change win. The record's epoch applies only
+/// to an epoch-less snapshot. Its reset marker applies only when the snapshot is peer-free and
+/// deny-by-default, the state a reset writes first; anything else means the record is older
+/// than the snapshot, and is ignored.
+pub(crate) fn merge_authority(
+    config: Option<&mut Config>,
+    reset_pending: &mut bool,
+    record: AuthorityRecord,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    if config.authority_epoch.is_none() {
+        config.authority_epoch = record.epoch;
+    }
+    if record.reset_pending
+        && config.peers.is_empty()
+        && config.default_policy == crate::dataplane::DefaultPolicy::Deny
+    {
+        *reset_pending = true;
+    }
+}
+
+/// Encode `state` for `mesh-public.json` in the previous release's shape, plus its record.
+/// # Errors
+/// Reports a serialization failure.
+fn encode_state(state: &State) -> io::Result<(Vec<u8>, AuthorityRecord)> {
+    let (config, authority) = split_authority(state.config.as_ref(), state.authority_reset_pending);
+    let legacy = State {
+        enabled: state.enabled,
+        config,
+        authority_reset_pending: false,
+        #[cfg(target_os = "linux")]
+        backend: state.backend,
+    };
+    Ok((serde_json::to_vec(&legacy).map_err(io::Error::other)?, authority))
+}
+
+/// Read `mesh-public.json` and merge its authority record (see [`merge_authority`]).
+/// # Errors
+/// Reports an unsafe or unreadable snapshot file.
+fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
+    let Some(mut state) = read_public::<State>(path)? else {
+        return Ok(None);
+    };
+    merge_authority(
+        state.config.as_mut(),
+        &mut state.authority_reset_pending,
+        read_authority(authority_path),
+    );
+    Ok(Some(state))
 }
 
 // Both public files must pass the same ownership, mode and no-follow boundary.
@@ -1119,6 +1277,98 @@ pub(crate) mod tests {
             #[cfg(target_os = "linux")]
             backend: Some(crate::firewall::Backend::Nft),
         }
+    }
+
+    /// The public snapshot shape the previous release reads with `deny_unknown_fields`
+    /// (dev `966c52e07`, before authority epochs). A rollback (D295) must still parse it.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreviousReleaseState {
+        #[allow(dead_code)]
+        enabled: bool,
+        #[allow(dead_code)]
+        config: Option<PreviousReleaseConfig>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        backend: Option<serde_json::Value>,
+    }
+
+    /// The previous release's `Config` fields; any other key makes it refuse the file.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct PreviousReleaseConfig {
+        #[serde(default)]
+        local_key: Option<serde_json::Value>,
+        #[serde(default)]
+        server: Option<serde_json::Value>,
+        node: serde_json::Value,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        dns_suffix: Option<String>,
+        version: u64,
+        addresses: serde_json::Value,
+        default_policy: serde_json::Value,
+        #[serde(default)]
+        exposure: Option<serde_json::Value>,
+        peers: serde_json::Value,
+        #[serde(default)]
+        peer_names: Option<serde_json::Value>,
+    }
+
+    /// #382 P2 (J418): a node that saved an authority epoch and a pending reset must leave a
+    /// snapshot the previous release can parse, and must restore both values itself.
+    #[test]
+    fn authority_metadata_keeps_the_snapshot_readable_by_the_previous_release() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("empty state");
+        let mut state = binding_state(crate::policy::model::PublicKey([4; 32]));
+        let epoch = "00000000-0000-4000-8000-0000000002c1";
+        if let Some(config) = state.config.as_mut() {
+            config.authority_epoch = Some(epoch.to_owned());
+        }
+        state.authority_reset_pending = true;
+        store.save_retired(&state).expect("save fenced authority state");
+
+        let body = fs::read(&store.path).expect("public snapshot");
+        serde_json::from_slice::<PreviousReleaseState>(&body)
+            .expect("the previous release parses the snapshot");
+
+        let (_, restored) = Store::open(&directory.0).expect("restore");
+        assert_eq!(
+            restored
+                .config
+                .as_ref()
+                .and_then(|config| config.authority_epoch.as_deref()),
+            Some(epoch)
+        );
+        assert!(restored.authority_reset_pending);
+    }
+
+    /// A reset marker left over from before a later peer-bearing save is not applied to it,
+    /// so a stop between the two files can never reopen as a reset over live peers.
+    #[test]
+    fn stale_reset_record_is_ignored_over_a_peer_bearing_snapshot() {
+        let mut state = binding_state(crate::policy::model::PublicKey([5; 32]));
+        let config = state.config.as_mut().expect("config");
+        config.default_policy = crate::dataplane::DefaultPolicy::Allow;
+        merge_authority(
+            state.config.as_mut(),
+            &mut state.authority_reset_pending,
+            AuthorityRecord {
+                epoch: Some("00000000-0000-4000-8000-0000000002c1".to_owned()),
+                reset_pending: true,
+            },
+        );
+        assert!(!state.authority_reset_pending);
+        assert_eq!(
+            state
+                .config
+                .as_ref()
+                .and_then(|config| config.authority_epoch.as_deref()),
+            Some("00000000-0000-4000-8000-0000000002c1")
+        );
     }
 
     /// A committed `GotaTun` journal authorizes persisting its candidate binding at the same revision.

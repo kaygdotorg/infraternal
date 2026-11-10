@@ -1145,3 +1145,43 @@ fn j363b_authority_replacement_keeps_identical_peers_live_until_complete() {
         "the replacement peer disappeared"
     );
 }
+
+/// #382 P2 (J418): a server rolled back to a release without epochs (D295) sends epoch-less
+/// snapshots. A node that saw an epoch adopts the full one as a new authority, keeps the
+/// unchanged peer installed, and records no epoch, instead of dropping its mesh for good.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j418_epochless_rollback_snapshot_is_adopted() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    let current = j363_config(identity.public_key);
+    for chunk in crate::configuration::chunks(None, &current).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let mut rolled_back = current.clone();
+    rolled_back.authority_epoch = None;
+    rolled_back.version = 3;
+    let mut applied = Ok(false);
+    for mut chunk in crate::configuration::chunks(None, &rolled_back).unwrap() {
+        chunk.authority_epoch = None;
+        applied = node.chunk(chunk);
+    }
+    let accepted = node.config().cloned();
+    let installed = Device::counters().unwrap().len();
+    let (_, restored) = crate::node_state::Store::open(&state.0).unwrap();
+    node.down().unwrap();
+
+    assert!(
+        matches!(applied, Ok(true)),
+        "the epoch-less full snapshot must be adopted: {applied:?}"
+    );
+    assert_eq!(accepted, Some(rolled_back));
+    assert_eq!(installed, 1, "the unchanged peer must stay installed");
+    assert_eq!(
+        restored.config.map(|config| config.authority_epoch),
+        Some(None),
+        "the durable state must no longer claim the old epoch"
+    );
+}

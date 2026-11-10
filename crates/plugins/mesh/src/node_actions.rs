@@ -766,10 +766,11 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
 
-    /// A refused epoch downgrade leaves a peer-free node waiting for a trusted server snapshot.
+    /// #382 P2 (J418): after a server rollback (D295) to a release without authority epochs, a
+    /// node that saw an epoch adopts the epoch-less full snapshot instead of waiting forever.
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
-    fn refused_epoch_downgrade_reports_waiting_for_server() {
+    fn epochless_snapshot_after_an_epoch_is_adopted() {
         use crate::{
             dataplane::{DefaultPolicy, Identity},
             policy::model::{Addresses, NodeId},
@@ -813,24 +814,20 @@ mod tests {
                 &serde_json::to_vec(&accepted).expect("accepted snapshot"),
             )
             .expect("accept epoch snapshot");
-        let mut downgrade = accepted;
-        downgrade.authority_epoch = None;
-        downgrade.version = 2;
-        assert!(
-            plugin
-                .call(
-                    "mesh.configure",
-                    &serde_json::to_vec(&downgrade).expect("downgrade snapshot"),
-                )
-                .is_err(),
-            "an epoch-bound node must refuse an epoch-less snapshot"
-        );
+        let mut rolled_back = accepted;
+        rolled_back.authority_epoch = None;
+        rolled_back.version = 2;
+        plugin
+            .call(
+                "mesh.configure",
+                &serde_json::to_vec(&rolled_back).expect("rolled-back snapshot"),
+            )
+            .expect("a rolled-back server's full snapshot is adopted");
 
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
                 .expect("status JSON");
-        assert_eq!(status["state"], "Waiting");
-        assert_eq!(status["peer_count"], 0);
+        assert_ne!(status["state"], "Waiting", "the node is not left waiting: {status}");
         plugin.call("mesh.down", b"{}").expect("mesh down");
     }
 

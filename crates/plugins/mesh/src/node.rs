@@ -1950,13 +1950,14 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
             self.validate_binding(&chunk)?;
-            if old_epoch.is_some() && chunk.authority_epoch.is_none() {
-                self.pending = None;
-                self.retire_authority(old_epoch.map(str::to_owned))?;
+            if old_epoch.is_some() && chunk.authority_epoch.is_none() && chunk.index == 0 {
+                // A server rolled back to a release without epochs (D295) is one more authority
+                // change, not an attack: whoever can send `mesh.configure` already controls peers.
+                // Its full snapshot replaces the old peer set like any other (#382 P2).
                 tracing::warn!(
-                    "mesh configuration chunk refused after retirement: an epoch-bound authority cannot be downgraded"
+                    old_epoch,
+                    "mesh server stopped sending an authority epoch, likely a rollback; adopting its full snapshot"
                 );
-                return Err(io::ErrorKind::InvalidData.into());
             }
             let pending_new_authority = self.pending.as_ref().is_some_and(|pending| {
                 pending.config.authority_epoch == chunk.authority_epoch
@@ -2007,93 +2008,6 @@ impl Node {
         }
         result
     }
-    /// Irreversibly retire one authenticated server authority before accepting its replacement.
-    ///
-    /// The peer-free deny snapshot is persisted before the runtime is fenced. Ordinary `apply`
-    /// never sees a retired peer as a rollback target.
-    /// # Errors
-    /// Returns runtime or persistence failures after keeping the previous peers fenced out.
-    fn retire_authority(&mut self, authority_epoch: Option<String>) -> io::Result<()> {
-        let Some(mut deny) = self.config.clone() else {
-            self.pending = None;
-            return Ok(());
-        };
-        deny.authority_epoch = authority_epoch;
-        deny.default_policy = crate::dataplane::DefaultPolicy::Deny;
-        deny.peers.clear();
-        #[cfg(feature = "mesh-dns")]
-        deny.peer_names.clear();
-        self.pending = None;
-        let rotation_error = self.settle_authority_rotation().err();
-        if let Some(identity) = &self.identity {
-            deny.local_key = Some(identity.public_key);
-        }
-        self.config = Some(deny.clone());
-        self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
-        let persistence_error = self.persist_retired_snapshot(&deny).err();
-        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
-            self.store
-                .as_ref()
-                .map(crate::node_state::Store::discard_rotation_journal)
-                .transpose()
-                .err()
-        } else {
-            None
-        };
-
-        #[cfg(test)]
-        rotation_tests::j363_retirement_crash_checkpoint();
-        let mut runtime_error = self.fence_retired_runtime(&deny).err();
-        if let Some(error) = runtime_error.as_ref() {
-            tracing::warn!(
-                error_kind = ?error.kind(),
-                "mesh authority peer fence failed; stopping its runtime after durable retirement"
-            );
-            if let Err(stop_error) = self.stop_retired_runtime() {
-                tracing::error!(
-                    fence_error_kind = ?error.kind(),
-                    stop_error_kind = ?stop_error.kind(),
-                    "mesh authority peer fence and runtime shutdown both failed"
-                );
-                runtime_error = Some(stop_error);
-            }
-        }
-        if persistence_error.is_some() {
-            // Do not leave an in-memory denied state backed by the previous live runtime when
-            // persistence failed. Stop it and retry the durable deny state after cleanup.
-            if runtime_error.is_none() {
-                self.enabled = false;
-                if let Err(error) = self.stop_retired_runtime() {
-                    runtime_error = Some(error);
-                }
-            }
-            if let Err(error) = self.persist_retired_snapshot(&deny) {
-                tracing::error!(
-                    error_kind = ?error.kind(),
-                    "could not persist disabled peer-free mesh state after retirement write failed"
-                );
-            }
-        }
-        if let Some(error) = runtime_error {
-            return Err(error);
-        }
-        if let Some(error) = persistence_error {
-            tracing::warn!(
-                error_kind = ?error.kind(),
-                "mesh authority is fenced but its peer-free epoch snapshot could not be persisted"
-            );
-            return Err(error);
-        }
-        if let Some(error) = rotation_error.or(journal_error) {
-            tracing::warn!(
-                error_kind = ?error.kind(),
-                "mesh authority is fenced but its previous rotation journal could not be retired"
-            );
-            return Err(error);
-        }
-        Ok(())
-    }
-
     /// Commit a complete new-authority snapshot without cutting the runtime while it is staged.
     ///
     /// A durable peer-free snapshot replaces the old authority before any runtime mutation. A
@@ -2273,33 +2187,6 @@ impl Node {
             .discard_rotation_journal()
     }
 
-    /// Drop the old peer set before any replacement snapshot can be installed.
-    ///
-    /// This path does not call `apply`, so it cannot create a normal transaction that rolls back
-    /// to the old config. A failed peer operation is followed by runtime shutdown.
-    /// # Errors
-    /// Returns the first failed peer, route, or firewall retirement operation.
-    fn fence_retired_runtime(&mut self, deny: &Config) -> io::Result<()> {
-        match self.engine_kind {
-            EngineKind::Kernel => self
-                .client
-                .as_mut()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .clear_peers()?,
-            EngineKind::GotaTun => self
-                .gotatun
-                .as_ref()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .apply(deny.clone())
-                .map(|_| ())?,
-        }
-        Device::routes(&[], false)?;
-        Device::retain_recorded_routes(&self.routes, &[])?;
-        self.firewall.apply(deny)?;
-        self.routes.clear();
-        self.pending = None;
-        Ok(())
-    }
     /// Persist the peer-free epoch snapshot before the runtime fence, with an in-place fail-closed fallback.
     /// # Errors
     /// Reports route or snapshot persistence failures without restoring the previous peers.

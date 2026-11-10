@@ -33,6 +33,16 @@ fn chunks_with_epoch(old: Option<&Config>, new: &Config, authority_epoch: &str) 
 }
 
 /// Give each persistence regression its own short state directory.
+/// The authority epoch a node recorded beside its public snapshot (`mesh-authority.json`).
+///
+/// The snapshot itself keeps the previous release's shape (D295, #382 P2), so the epoch is
+/// read from its own record; `Null` when none is recorded.
+fn durable_epoch(path: &std::path::Path) -> serde_json::Value {
+    std::fs::read(path.join("mesh-authority.json")).map_or(serde_json::Value::Null, |body| {
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["epoch"].clone()
+    })
+}
+
 fn j330_state_path(test_name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("j330-{test_name}-{}", std::process::id()))
 }
@@ -294,6 +304,7 @@ fn j330_persisted_rollback_accepts_replacement() {
     let installed_peers = Device::counters().unwrap().len();
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("mesh-public.json")).unwrap()).unwrap();
+    let durable = durable_epoch(&path);
     println!(
         "J330_RESULT={result:?} RETAINED_VERSION={:?} DURABLE={saved}",
         retained.as_ref().map(|c| c.version)
@@ -306,7 +317,8 @@ fn j330_persisted_rollback_accepts_replacement() {
     );
     assert_eq!(retained, Some(restored));
     assert_eq!(saved["enabled"], true);
-    assert_eq!(saved["config"]["authority_epoch"], AUTHORITY_EPOCH_A);
+    assert!(saved["config"].get("authority_epoch").is_none());
+    assert_eq!(durable, AUTHORITY_EPOCH_A);
     assert_eq!(saved["config"]["version"], 2);
     assert!(saved["config"]["peers"].as_object().unwrap().is_empty());
     assert_eq!(installed_peers, 0, "the replaced peer remained installed");
@@ -378,6 +390,7 @@ fn j330_failed_retirement_stops_mesh_even_if_disabled_write_fails() {
     let retained = node.config().cloned();
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("mesh-public.json")).unwrap()).unwrap();
+    let durable = durable_epoch(&path);
     println!(
         "J330_RESULT={result:?} RETAINED_VERSION={:?} DURABLE={saved}",
         retained.as_ref().map(|c| c.version)
@@ -389,7 +402,7 @@ fn j330_failed_retirement_stops_mesh_even_if_disabled_write_fails() {
     std::fs::remove_dir_all(path).unwrap();
     assert!(result.is_err());
     assert_eq!(
-        saved["config"]["authority_epoch"], AUTHORITY_EPOCH_B,
+        durable, AUTHORITY_EPOCH_B,
         "a failed replacement must retain the new peer-free authority epoch"
     );
     assert!(saved["config"]["peers"].as_object().unwrap().is_empty());
