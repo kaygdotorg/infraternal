@@ -101,6 +101,11 @@ pub mod macos_key;
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub mod macos_node;
 
+// Plain Unix code; its tests also run in the Linux gate on socket pairs.
+/// The Mac node's dedicated utun reader thread and its bounded hand-off to GotaTun.
+#[cfg(all(feature = "agent", any(target_os = "macos", test)))]
+pub(crate) mod macos_utun_reader;
+
 // Pure byte parsing, so its tests also run in the Linux gate.
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_image;
