@@ -126,7 +126,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       // `?privilege=<scenario>`: the machine details offer the privileged-access consent (the product has no service for it yet).
       // `?removal=1`: the host row's "Remove host…" (D309). The product's removal asks for a passkey; the test double only asks and says so.
-      ...(query.get("removal") === "1" ? { hostRemoval: { label: () => "Remove host", remove: (_id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void, confirmed = false) => { const done = (): void => { core.toast.show({ message: `Test double: ${name} would be removed here.`, duration: 3000 }); }; if (confirmed) done(); else confirmHostRemoval(name, anchor, done, returnFocus); } } } : {}),
+      ...(query.get("removal") === "1" ? { hostRemoval: { label: () => "Remove host", remove: (_id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void, confirmed = false) => { const done = (): void => { core.toast.show({ message: `Test double: ${name} would be removed here.`, duration: 3000 }); }; if (confirmed) { done(); return Promise.resolve({ state: "removed" as const, message: `${name} was removed.` }); } confirmHostRemoval(name, anchor, done, returnFocus); return Promise.resolve(undefined); } } } : {}),
       ...(isScenario(query.get("privilege")) ? { privilege: createPrivilegeDouble(query.get("privilege") as Scenario) } : {}),
       addHost: openAddHost,
       authority,

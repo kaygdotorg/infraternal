@@ -18,7 +18,7 @@ import type { DetailsFacts, DetailsSource } from "./details-source";
 import { currentUiScale } from "../../../../../packages/ui/src/ui-scale";
 import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 import { REMOVAL_EFFECT } from "../host-removal-confirm";
-import { createRemovalFoot, type DetailsAction } from "./details-removal";
+import { createRemovalFoot, type DetailsAction, type RemovalStatus } from "./details-removal";
 
 export interface DetailsPopover {
   readonly windowId: string;
@@ -79,8 +79,13 @@ export function openDetailsPopover(
   const scroll = root.querySelector<HTMLElement>(".canvas-popover-scroll")!;
   scroll.append(list.root);
   // D385: Remove host sits at the end of the Connection tab only, inline: its row turns into the question in the panel.
-  const foot = input.action ? createRemovalFoot(input.action) : undefined;
-  if (foot) { foot.hidden = true; scroll.append(foot); }
+  const removal = input.action ? createRemovalFoot(input.action) : undefined;
+  if (removal) {
+    removal.root.hidden = true;
+    scroll.append(removal.root);
+    // A removal that went through closes the card (its window goes with the host); a failure or refusal stays, said inline.
+    removal.onOutcome = (outcome) => { if (outcome.state === "removed") close("pointer"); };
+  }
   let scrolled = false;
   scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
   let selected = first.sections[0]?.id ?? "";
@@ -91,7 +96,12 @@ export function openDetailsPopover(
     list.root.setAttribute("aria-label", `${facts.title} details`);
     const section = facts.sections.find((x) => x.id === id) ?? first.sections[0];
     list.set((section?.rows ?? []).filter((row) => row.value.trim() !== ""));
-    if (foot) foot.hidden = section?.id !== "connection";
+    if (removal) {
+      // Leaving the tab takes an open question back to the row (a refresh on the tab itself must not); the host's state is read each time.
+      if (section?.id !== "connection") removal.reset();
+      removal.root.hidden = section?.id !== "connection";
+      removal.sync();
+    }
     // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
     if (scrolled) { scroll.scrollTop = 0; scrolled = false; }
     if (animate && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -180,6 +190,12 @@ export interface DetailsModule {
   dispose(): void;
 }
 
+/** The host's state for the removal question: gone when the host list no longer has it, offline when the server last saw its infraternal agent disconnected. */
+function hostStatus(cx: Ctx, hostId: string): RemovalStatus {
+  const entry = cx.adapters.sessions.hosts().find((h) => h.id === hostId);
+  return !entry ? "gone" : entry.online === false ? "offline" : "ready";
+}
+
 /** Makes the details module for a canvas: it opens, toggles and closes the popover for a window and adds the product's extra rows to it. */
 export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
   let open: DetailsPopover | undefined;
@@ -209,7 +225,7 @@ export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
       if (cx.adapters.privilege && !access) { void loadAccess().then(() => module.toggle(rec, how)); return; }
       let stop = (): void => {};
       let repaint = (): void => {};
-      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => withAccess(rec, source.facts(rec)!, () => repaint()), ...(rec.model.hostId && cx.adapters.hostRemoval?.label() ? { action: { label: cx.adapters.hostRemoval.label()!, hint: REMOVAL_EFFECT, subject: rec.model.host, runConfirmed: () => cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, null, undefined, true) } } : {}) }, how, () => {
+      const popover = openDetailsPopover(cx.stage, rec.card.pill, { windowId: rec.model.id, read: () => withAccess(rec, source.facts(rec)!, () => repaint()), ...(rec.model.hostId && cx.adapters.hostRemoval?.label() ? { action: { label: cx.adapters.hostRemoval.label()!, hint: REMOVAL_EFFECT, subject: rec.model.host, status: () => hostStatus(cx, rec.model.hostId!), runConfirmed: async () => (await cx.adapters.hostRemoval?.remove(rec.model.hostId!, rec.model.host, null, undefined, true)) ?? { state: "refused", message: "Removing hosts is not available right now." } } } : {}) }, how, () => {
         stop();
         if (open === popover) open = undefined;
       });

@@ -42,6 +42,8 @@ import type { BranchSection, BranchedMenu } from "../../../../../../packages/ui/
 import type { CoreScreen } from "../../../core-screen";
 import { EASE_OUT } from "../../../../../../packages/ui/src/motion";
 import { REMOVAL_EFFECT } from "../../host-removal-confirm";
+import type { RemovalOutcome } from "../../context";
+import type { RemovalStatus } from "../../windows/details-removal";
 
 /** A session as the prototype windows show it: its name, size and age, and the lines of its screen. */
 export interface CanvasSession {
@@ -506,15 +508,36 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     if (left + x < 0) glideTo(-left, y);
     else if (right + x > rect.width) glideTo(rect.width - right, y);
   };
+  /**
+   * The test double's host removal for the details card (`?removal=1` removes, `fail` fails the first attempt, `refused` never
+   * starts, `pending` leaves the uninstall waiting): it takes 400 ms so the pending state can be seen, and changes nothing.
+   * A spec sets `window.__removalStatus` to "offline" or "gone" to play the host's state changing while the question is open.
+   */
+  const protoRemoval = (() => {
+    let attempts = 0;
+    return async (): Promise<RemovalOutcome> => {
+      const mode = new URLSearchParams(location.search).get("removal");
+      attempts += 1;
+      // The double's own latency; no real removal happens.
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
+      if (mode === "fail" && attempts === 1) return { state: "failed", message: "The host could not be removed. Sign in again, then try again." };
+      if (mode === "refused") return { state: "refused", message: "Another host removal is still running. Try again in a moment." };
+      return mode === "pending" ? { state: "pending", message: "Access revoked. It uninstalls infraternal as soon as it connects." } : { state: "removed", message: "The host was removed." };
+    };
+  })();
   const togglePopover = (target: CanvasWindow, source: "pointer" | "keyboard"): void => {
     if (popover?.windowId === target.id) { popover.close(source); return; }
     popover?.close("keyboard");
+    const removalOn = new URLSearchParams(location.search).has("removal");
     popover = openDetailsPopover(stage, target.card.pill, {
       windowId: target.id,
       read: () => prototypeFacts(target.host, target.session, target.live ? hostName : target.host.name, icons),
-      // `?removal=1` shows the product's destructive row so its look is reviewable here; the prototype has no host to remove.
-      ...(new URLSearchParams(location.search).has("removal") ? { action: { label: "Remove host", hint: REMOVAL_EFFECT, subject: target.host.name, runConfirmed: () => undefined } } : {}),
-    }, source, () => { popover = undefined; });
+      // `?removal=...` shows the product's destructive block so its look and states are reviewable here; the prototype has no host to remove.
+      ...(removalOn ? { action: { label: "Remove host", hint: REMOVAL_EFFECT, subject: target.host.name, status: () => (window as unknown as { __removalStatus?: RemovalStatus }).__removalStatus ?? "ready", runConfirmed: protoRemoval } } : {}),
+    }, source, () => { window.clearInterval(poll); popover = undefined; });
+    // The product's source refreshes the card as the host's state changes; the double does it on a timer, only when asked to show removal.
+    const open = popover;
+    const poll = removalOn ? window.setInterval(() => open.refresh(), 150) : 0;
   };
 
   // ---- resizing a window (window-resize.ts owns the gestures; this owns the geometry) ----
