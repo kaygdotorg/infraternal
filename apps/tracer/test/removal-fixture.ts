@@ -106,13 +106,13 @@ export async function measureOpenCard(page: Page, name: string): Promise<CardPix
   const withoutCard = await page.screenshot({ animations: "disabled" });
   const text = await measureLegibility(page, withCard, withoutCard);
   await setCardHidden(page, false);
-  // Three hard-edged colour bands behind the card (under the bed, over the terminal), far past the card on every side.
+  // Three hard-edged colour bands behind the card (under the card, over the terminal), far past the card on every side.
   await page.evaluate(() => {
     const box = document.querySelector<HTMLElement>(".ui-confirm-tip")!.getBoundingClientRect();
     const block = document.createElement("div");
     block.id = "j300-colour-block";
     Object.assign(block.style, {
-      position: "fixed", zIndex: "999", pointerEvents: "none", left: `${box.left - 160}px`, top: `${box.top - 160}px`, width: `${box.width + 320}px`, height: `${box.height + 320}px`,
+      position: "fixed", zIndex: "65", pointerEvents: "none", left: `${box.left - 160}px`, top: `${box.top - 160}px`, width: `${box.width + 320}px`, height: `${box.height + 320}px`,
       background: "linear-gradient(90deg, #e03030 0 30%, #2060e0 30% 55%, #e0c020 55% 80%, #20a060 80%)",
     });
     document.body.append(block);
