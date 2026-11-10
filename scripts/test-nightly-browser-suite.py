@@ -471,6 +471,20 @@ class Reporter(unittest.TestCase):
         # Longest first: the two biggest files do not share a shard.
         self.assertNotEqual({a for a in c1 if a.startswith('test/a')} and 1, {a for a in c2 if a.startswith('test/a')} and 1)
 
+    def test_base_port_can_be_moved_for_a_second_run_on_the_same_host(self):
+        """Found by the manual run: another run's test server on 4731 made shard 1 fail. NIGHTLY_BASE_PORT moves the whole port range."""
+        base = {'A': '1'}
+        self.assertEqual(suite.shard_env(base, Path('/o'), Path('/o/j'), 1, 2, 4731)['TRACER_TEST_PORT'], '4731')
+        e2 = suite.shard_env(base, Path('/o'), Path('/o/j'), 2, 2, 4731)
+        self.assertEqual((e2['TRACER_TEST_PORT'], e2['TRACER_BACKEND_PORT']), ('4733', '4734'))
+        e = suite.shard_env(base, Path('/o'), Path('/o/j'), 2, 2, 5001)
+        self.assertEqual((e['TRACER_TEST_PORT'], e['TRACER_BACKEND_PORT']), ('5003', '5004'))
+        self.assertEqual(suite.base_port({}), 4731)
+        self.assertEqual(suite.base_port({'NIGHTLY_BASE_PORT': '5001'}), 5001)
+        for bad in ('x', '80', '70000', '5001\n', '-1', ''):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                suite.base_port({'NIGHTLY_BASE_PORT': bad})
+
     def test_run_without_times_uses_playwrights_own_shard(self):
         """First night, nothing to go by: each shard runs `--shard=i/2` and names no files."""
         ok = lambda shard: (lambda env: (self.stream(env, shard, 1, [('a.spec.ts', 'expected', 10)]), 0)[1])

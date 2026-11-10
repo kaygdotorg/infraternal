@@ -754,7 +754,7 @@ server), becomes one roll-up issue. A spec that passes again gets one comment,
 and a later regression one more; issues are never closed. A build or suite
 that cannot run at all fails the unit and opens no spec issue.
 **Shards.** The nightly runs `SHARDS` (2) Playwright shards side by side. Each has its own test
-server (a port pair: 4731/4732 and 4733/4734), its own build folder (`TRACER_DIST`) and its own evidence
+server (a port pair: 4731/4732 and 4733/4734; `NIGHTLY_BASE_PORT` moves the range, for a manual run beside the service), its own build folder (`TRACER_DIST`) and its own evidence
 folder, because every spec of one server shares one test double (#377); the service helper holds one
 build slot per shard. Spec files are split longest-first by the previous night's seconds
 (`runs/file-times.json`, rewritten at the end of every run), or by Playwright's own `--shard=i/N` when

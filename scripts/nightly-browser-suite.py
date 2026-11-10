@@ -220,9 +220,19 @@ def start_shard(command, cwd, env, log, lock, label):
     return process, thread
 
 
-def shard_env(base, out, jsonl, shard, shards):
+def base_port(environment):
+    """The first port of the shards' range: 4731, or `NIGHTLY_BASE_PORT` (1024-65000) to run beside another run on the same host."""
+    raw = environment.get('NIGHTLY_BASE_PORT')
+    if raw is None:
+        return int(TEST_PORT)
+    if not re.fullmatch(r'[0-9]{4,5}', raw, re.ASCII) or not 1024 <= int(raw) <= 65000:
+        raise ValueError('NIGHTLY_BASE_PORT must be a TCP port between 1024 and 65000')
+    return int(raw)
+
+
+def shard_env(base, out, jsonl, shard, shards, first_port=int(TEST_PORT)):
     """The environment of one shard: its own port pair, build folder, evidence folder and JSON report; the shared jsonl and its number."""
-    port = int(TEST_PORT) + 2 * (shard - 1)
+    port = first_port + 2 * (shard - 1)
     return dict(base, TRACER_TEST_PORT=str(port), TRACER_BACKEND_PORT=str(port + 1), TRACER_DIST=str(out / f'shard{shard}' / 'dist'),
                 INFRATERNAL_EVIDENCE_DIR=str(out / 'evidence' / f'shard{shard}'),
                 PLAYWRIGHT_JSON_OUTPUT_NAME=str(out / f'shard{shard}' / 'results.json'),
@@ -286,6 +296,7 @@ def run(root, runs, shards=SHARDS):
             print(f'browser suite: {" ".join(command)} failed, see {log}', flush=True)
             return 1
     shutil.rmtree(out / 'build-check', ignore_errors=True)
+    first_port = base_port(os.environ)
     files = sorted(path.name for path in (tracer / 'test').glob('*.spec.ts'))
     groups = assign(files, load_times(runs), shards) if shards > 1 else None
     lock = threading.Lock()
@@ -300,7 +311,7 @@ def run(root, runs, shards=SHARDS):
         else:
             command.extend('test/' + re.escape(name) + '$' for name in groups[shard - 1])
         (out / f'shard{shard}').mkdir()
-        started.append((shard, time.monotonic(), *start_shard(command, tracer, shard_env(env, out, jsonl, shard, shards), log, lock, f's{shard}')))
+        started.append((shard, time.monotonic(), *start_shard(command, tracer, shard_env(env, out, jsonl, shard, shards, first_port), log, lock, f's{shard}')))
     for shard, began, process, thread in started:
         code = process.wait()
         thread.join(10)
