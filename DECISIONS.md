@@ -4812,3 +4812,21 @@ access (#341 B19).
        userspace only.
      - **Every per-packet cost is measured** against the current GotaTun
        numbers before it ships.
+
+385. **Remove host placement, machine pill tabs, phone confirmation inset (owner, 2026-11-10, #486):**
+     - **Remove host lives in two places:** a sidebar button plus a swipe
+       action on the machine row, and the end of the connection tab in the
+       machine pill. In the pill it is inline: the foot of the tab turns into
+       the question, with Keep and a red Remove. The row says what happens:
+       "Revokes its access, then uninstalls the infraternal agent from it."
+     - **The machine pill has two tabs: machine details and connection
+       details.** All connection, link and mesh details collapse into the one
+       connection tab. The owner, verbatim: "basically all the connection
+       detail stuff shoudl be in the same tab, I don't know if all the
+       connection and mesh details can be collapsed to one tab (basically one
+       tab machine details and one tab connectino details)" and "the remove
+       host button can be at the end of that mesh/connection tab with the
+       style inline".
+     - **On phones, the glass confirmation card is inset** from the screen
+       edges like the other floating cards, not edge to edge. The owner chose
+       "Inset it".
