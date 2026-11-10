@@ -109,7 +109,7 @@
 }
 /* Nested outer frame: it surrounds windows whose corners are --r-lg, so its own corner is larger than the largest step (D372, UI-CONSISTENCY-AUDIT section 5). (.cl-ghost) */
 .cl-ghost {
-  position: absolute; left: 0; top: 0; z-index: 0; border-radius: 1.75rem; pointer-events: none; opacity: 0; transition: opacity var(--t-pop) ease;
+  position: absolute; left: 0; top: 0; z-index: 0; border-radius: 1.75rem; pointer-events: none; opacity: 0; transition: opacity var(--t-pop) var(--ease-out);
   border: 1.5px dashed color-mix(in oklab, var(--accent) 55%, transparent); background: color-mix(in oklab, var(--accent) 5%, transparent);
 }
 .cl-ghost[data-on] { opacity: 1; }
@@ -162,13 +162,13 @@
 .cl-world[data-lod="thumb"] .cl-node-meta { opacity: 1; }
 
 /* ---- arrows ------------------------------------------------------------------------------ */
-.cl-arrow { --arrow: var(--accent); transition: opacity var(--t-pop) ease; }
+.cl-arrow { --arrow: var(--accent); transition: opacity var(--t-pop) var(--ease-out); }
 .cl-arrow[data-tone="quiet"] { --arrow: color-mix(in oklab, var(--accent) 80%, var(--fg)); }
 .cl-arrow-line { fill: none; stroke: var(--arrow); stroke-width: 1.5; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .cl-arrow-head { fill: var(--arrow); stroke: none; }
 /* Editing a grant (Mesh): hover thickens the line and shows a grab handle on each end; a wide invisible line makes it easy to hit. */
 .cl-arrow-hit { fill: none; stroke: transparent; stroke-width: 1rem; vector-effect: non-scaling-stroke; pointer-events: stroke; }
-.cl-arrow-handle { fill: var(--bg); stroke: var(--arrow); stroke-width: 1.5px; vector-effect: non-scaling-stroke; pointer-events: none; cursor: grab; opacity: 0; transition: opacity var(--t-press) ease; }
+.cl-arrow-handle { fill: var(--bg); stroke: var(--arrow); stroke-width: 1.5px; vector-effect: non-scaling-stroke; pointer-events: none; cursor: grab; opacity: 0; transition: opacity var(--t-press) var(--ease-out); }
 /* Only the hovered arrow's handles take the pointer, so arrows that share an end never fight over it. */
 .cl-arrow:hover .cl-arrow-handle { pointer-events: all; }
 .cl-arrow:hover .cl-arrow-handle, .cl-arrow[data-editing] .cl-arrow-handle { opacity: 1; }
@@ -187,7 +187,7 @@
 .cl-arrow-label { fill: var(--ui-text-secondary); font: 450 var(--ui-size-eyebrow) var(--font-ui, "Geist Mono", ui-monospace, monospace); paint-order: stroke; stroke: var(--bg); stroke-width: 0.1875rem; stroke-linejoin: round; pointer-events: none; }
 .cl-arrow-label[display="none"] { display: none; }
 /* On-demand arrows: faint, and they fade in one after another. */
-.cl-reach .cl-arrow { opacity: 0.55; transition: opacity var(--t-panel) ease calc(var(--i, 0) * 50ms); }
+.cl-reach .cl-arrow { opacity: 0.55; transition: opacity var(--t-panel) var(--ease-out) calc(var(--i, 0) * 50ms); }
 .cl-reach[data-open="false"] .cl-arrow { opacity: 0; transition-delay: 0ms; }
 
 /* The connector next to a pill: shown while arrows are, drag it onto another terminal. */
@@ -195,7 +195,7 @@
   position: relative; display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; margin-left: -2px; padding: 0;
   border: 1px solid color-mix(in oklab, var(--accent) 70%, transparent); border-radius: 50%; background: var(--accent-soft); color: var(--accent);
   opacity: 0; transform: scale(0.6); pointer-events: none; cursor: crosshair; touch-action: none;
-  transition: opacity var(--t-press) ease, transform var(--t-panel) var(--ease-out, var(--ease-out));
+  transition: opacity var(--t-press) var(--ease-out), transform var(--t-panel) var(--ease-out, var(--ease-out));
 }
 .cl-port svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-window[data-reach] .cl-port { opacity: 1; transform: none; pointer-events: auto; }
@@ -266,7 +266,7 @@
 .cl-badge {
   position: absolute; z-index: calc(var(--z-overlay) + 3); translate: -50% 0; padding: 0.375rem 0.75rem; border-radius: var(--r-pill); pointer-events: none; white-space: nowrap;
   font: var(--ui-type-label); letter-spacing: var(--ui-tracking); opacity: 0; transform: translateY(-0.25rem) scale(0.96);
-  transition: opacity var(--t-pop) ease, transform var(--t-panel) var(--ease-out, var(--ease-out));
+  transition: opacity var(--t-pop) var(--ease-out), transform var(--t-panel) var(--ease-out, var(--ease-out));
 }
 .cl-badge[hidden] { display: none; }
 .cl-badge[data-open="true"] { opacity: 1; transform: none; }
@@ -296,7 +296,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ui-window[data-active] .cl-cursor { animation: none; }
-  .cl-region, .cl-port, .cl-badge, .cl-summary { transition: opacity var(--t-press) ease; transform: none; }
+  .cl-region, .cl-port, .cl-badge, .cl-summary { transition: opacity var(--t-press) var(--ease-out); transform: none; }
 }
 
 /* On a phone the host matters more than the user, as on the product canvas: drop `user@` in the pill. */
@@ -320,7 +320,7 @@
 .cl-viewlist-rows > li.cl-divided { margin-top: 0.25rem; padding-top: 0.25rem; box-shadow: 0 -1px 0 var(--line); }
 
 /* The one-time "Continue from <device>?" chip: the shared pill, centred under the top pill, fades on its own. */
-.cl-continue { position: absolute; z-index: calc(var(--z-overlay) + 3); left: 50%; top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h, 2.375rem) + 0.625rem); translate: -50% 0; gap: 0.25rem; padding: 0 0.25rem 0 0.875rem; white-space: nowrap; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); opacity: 0; transform: translateY(-0.375rem) scale(0.97); transition: opacity var(--t-pop) ease, transform var(--t-panel) var(--ease-out, var(--ease-out)); }
+.cl-continue { position: absolute; z-index: calc(var(--z-overlay) + 3); left: 50%; top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h, 2.375rem) + 0.625rem); translate: -50% 0; gap: 0.25rem; padding: 0 0.25rem 0 0.875rem; white-space: nowrap; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); opacity: 0; transform: translateY(-0.375rem) scale(0.97); transition: opacity var(--t-pop) var(--ease-out), transform var(--t-panel) var(--ease-out, var(--ease-out)); }
 .cl-continue[data-open="true"] { opacity: 1; transform: none; }
 .cl-continue-text { padding-right: 0.375rem; }
 @media (prefers-reduced-motion: reduce) { .cl-continue { transform: none; } }
@@ -336,7 +336,7 @@
 .cl-share-foot { display: flex; justify-content: flex-end; padding: 0.375rem 0.625rem 0.625rem; }
 .cl-share-send { --pill-h: var(--ui-control-h, 1.875rem); color: var(--accent); }
 .cl-share-send:disabled { color: var(--fg-3); opacity: 0.6; }
-.cl-unlink { position: absolute; z-index: calc(var(--z-overlay) + 3); left: 50%; top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h, 2.375rem) + 0.625rem); translate: -50% 0; gap: 0.5rem; padding: 0 0.875rem 0 0.625rem; white-space: nowrap; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); cursor: pointer; opacity: 0; transform: translateY(-0.375rem) scale(0.97); transition: opacity var(--t-pop) ease, transform var(--t-panel) var(--ease-out, var(--ease-out)); }
+.cl-unlink { position: absolute; z-index: calc(var(--z-overlay) + 3); left: 50%; top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h, 2.375rem) + 0.625rem); translate: -50% 0; gap: 0.5rem; padding: 0 0.875rem 0 0.625rem; white-space: nowrap; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); cursor: pointer; opacity: 0; transform: translateY(-0.375rem) scale(0.97); transition: opacity var(--t-pop) var(--ease-out), transform var(--t-panel) var(--ease-out, var(--ease-out)); }
 .cl-unlink[data-open="true"] { opacity: 1; transform: none; }
 .cl-unlink[hidden] { display: none; }
 .cl-unlink svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -423,3 +423,93 @@
    product's cap is half of it, for the lock, and cut "Published Services" to "Published Serv…"). The room left is the group's: 28 px per button and the gap. */
 .cl[data-view="settings"] .ui-window-pill { max-width: calc(100% - 3rem); }
 .cl-keys .ui-sp-sub { white-space: pre-line; }
+
+/* ---- Appearance themes (D322, D338, D341, #323; canvas/themes) ----
+   One tint and one blur for the page, written on the root by themes/apply.ts as --look-tint (0 to 1) and --look-blur (px).
+   Windows and floating cards both read them: the owner's answer in D322 is that the cards follow the theme. A card's blur is --look-card-blur: the theme's blur but never under the shared 16 px overlay blur. The selectors are one
+   attribute heavier than the product's level rules (:root[data-window-level][data-scheme] .ui-window), so they win without
+   !important and without touching those rules; the product's level (1 or 2) only decides whether a terminal paints its own background. */
+:root[data-look][data-window-level][data-scheme] .ui-window { background: color-mix(in srgb, var(--bg) calc(var(--look-tint) * 100%), transparent); }
+:root[data-look][data-look-blur][data-scheme] .ui-window[data-onscreen] { -webkit-backdrop-filter: blur(var(--look-blur)); backdrop-filter: blur(var(--look-blur)); }
+/* The floating material is the card tint (overlayMaterial: the theme's background lifted toward white, 6% on dark and 60% on light) at the theme's tint. */
+:root[data-look][data-scheme="dark"] :is(.ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button) { --overlay: color-mix(in srgb, color-mix(in srgb, var(--bg) 94%, #fff) calc(var(--look-tint) * 100%), transparent); --ui-overlay-blur: var(--look-card-blur); }
+:root[data-look][data-scheme="light"] :is(.ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button) { --overlay: color-mix(in srgb, color-mix(in srgb, var(--bg) 40%, #fff) calc(var(--look-tint) * 100%), transparent); --ui-overlay-blur: var(--look-card-blur); }
+/* The Name row of a theme the person made opens and closes by height and opacity (nothing below it jumps); room for the focus ring is inside it. */
+.cl-theme-name { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms var(--ease-out); }
+.cl-theme-name[data-open] { grid-template-rows: 1fr; opacity: 1; }
+.cl-theme-name > div { min-height: 0; overflow: hidden; padding: var(--focus-ring-room); margin: calc(-1 * var(--focus-ring-room)); }
+.cl-theme-name-input { width: 100%; }
+/* The row is outside the controls' grid, so it brings the same gap the grid puts between sections. */
+.cl-theme-name section { padding-bottom: 0.875rem; }
+.cl-theme-top { margin-bottom: 0.25rem; }
+@media (prefers-reduced-motion: reduce) { .cl-theme-name { transition: opacity 160ms var(--ease-out); } }
+
+/* The background of a theme (themes/editor.on-demand.ts): the scheme's gradients as a grid of swatches, and the person's own.
+   Each swatch is a picture of the gradient and its name; the selected one has the accent edge, as a card does. */
+.cl-glide { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms var(--ease-out); }
+.cl-glide[data-open] { grid-template-rows: 1fr; opacity: 1; }
+.cl-glide > div { min-height: 0; overflow: hidden; padding: var(--focus-ring-room); margin: calc(-1 * var(--focus-ring-room)); }
+.cl-bg-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(2.75rem, 1fr)); gap: 0.5rem; padding-top: 0.5rem; }
+.cl-bg-block[hidden] { display: none; }
+.cl-bg-swatch { display: block; padding: 0; border: 0; background: none; cursor: pointer; transition: transform 140ms var(--ease-out, ease-out); }
+.cl-bg-swatch:active { transform: scale(var(--ui-press-scale-soft, 0.98)); }
+.cl-bg-preview { position: relative; display: grid; place-items: center; height: 2.25rem; border-radius: 0.5rem; box-shadow: inset 0 0 0 1px rgb(128 128 128 / 0.32); }
+@media (pointer: coarse) { .cl-bg-preview { height: 2.75rem; } }
+.cl-bg-swatch[aria-checked="true"] .cl-bg-preview { box-shadow: inset 0 0 0 2px var(--accent); }
+/* Custom is the one a person makes: a dashed ring and a small pen on it (the owner: "a subtle way to indicate which one is custom"). */
+.cl-bg-swatch[data-custom] .cl-bg-preview { box-shadow: none; border: 1.5px dashed rgb(128 128 128 / 0.75); }
+.cl-bg-swatch[data-custom][aria-checked="true"] .cl-bg-preview { border-color: var(--accent); }
+.cl-bg-pen { width: 1rem; height: 1rem; fill: none; stroke: #fff; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 0 1.5px rgb(0 0 0 / 0.7)); }
+[data-focus-ring="on"] .cl-bg-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0.5rem; }
+.cl-bg-custom { display: grid; gap: 0.5rem; padding-top: 0.75rem; }
+.cl-bg-stops { display: flex; align-items: center; gap: 0.5rem; }
+.cl-bg-stop { flex: none; width: 2.25rem; height: 2.25rem; padding: 0; border: 0; border-radius: 0.5rem; background: none; cursor: pointer; }
+.cl-bg-stop::-webkit-color-swatch-wrapper { padding: 0; }
+.cl-bg-stop::-webkit-color-swatch { border: 1px solid rgb(128 128 128 / 0.4); border-radius: 0.5rem; }
+.cl-bg-act:disabled { opacity: 0.35; pointer-events: none; }
+/* Keep the visible capsule and icon compact while giving coarse-pointer controls a full touch target. */
+@media (pointer: coarse) { .cl-bg-tabs .ui-tab { min-height: 44px; } .cl-bg-act { min-width: 44px; min-height: 44px; } .cl-bg-stop { width: 2.75rem; height: 2.75rem; } }
+@media (prefers-reduced-motion: reduce) { .cl-glide { transition: opacity 160ms var(--ease-out); } .cl-bg-swatch { transition: none; } }
+
+/* The Colour list (themes/editor.on-demand.ts, D338): the product's option row with two columns of its own. The name is one
+   column; the circles are another, light first and dark second, so the circles of one kind stay in one column down the list, and a
+   scheme with one version leaves the other slot empty. A circle is the version's background with its accent; the chosen one has a ring. */
+.cl-colour-name { display: flex; align-items: center; flex: 1 1 auto; align-self: stretch; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; letter-spacing: inherit; text-align: left; white-space: nowrap; cursor: pointer; }
+.cl-colour-label { display: block; height: 1lh; line-height: normal; }
+.cl-colour-modes { flex: none; display: grid; grid-template-columns: repeat(2, 1.5rem); align-items: center; justify-items: center; height: 1lh; line-height: normal; }
+.cl-colour-slot { width: 1.125rem; height: 1.125rem; }
+.cl-colour-dot { position: relative; width: 1.125rem; height: 1.125rem; padding: 0; border: 1px solid rgb(128 128 128 / 0.55); border-radius: 50%; background: var(--c-bg); cursor: pointer; transition: opacity 120ms ease-out; }
+.cl-colour-dot::after { content: ""; position: absolute; right: 2px; bottom: 2px; width: 0.375rem; height: 0.375rem; border-radius: 50%; background: var(--c-accent); }
+.cl-colour-dot[aria-checked="true"] { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
+/* A press is a plain opacity change, never a scale (TASTE section 3, D99: no overshoot, no bounce). The product's option row scales to 0.97 while it is
+   pressed, which moved a circle 8 px or more from under a held pointer on a wide row, so the click was lost and the whole row jolted: a Colour row does
+   not move on a press, only the circle answers. */
+.cl-colour-row:active { transform: none; }
+.cl-colour-dot:active { opacity: 0.55; }
+/* On touch, the button is the whole 44 px target; its pseudo-element keeps the visible circle small and quiet. */
+@media (pointer: coarse) {
+  .cl-colour-modes { grid-template-columns: repeat(2, 2.75rem); height: 2.75rem; }
+  .cl-colour-slot { width: 2.75rem; height: 2.75rem; }
+  .cl-colour-dot { display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  .cl-colour-dot::before { content: ""; width: 1.125rem; height: 1.125rem; box-sizing: border-box; border: 1px solid rgb(128 128 128 / 0.55); border-radius: 50%; background: radial-gradient(circle at 72% 72%, var(--c-accent) 0 3px, transparent 3.5px), var(--c-bg); }
+  .cl-colour-dot::after { display: none; }
+  .cl-colour-dot[aria-checked="true"] { box-shadow: none; }
+  .cl-colour-dot[aria-checked="true"]::before { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
+}
+[data-focus-ring="on"] .cl-colour-dot:focus-visible, [data-focus-ring="on"] .cl-colour-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 0.375rem; }
+@media (prefers-reduced-motion: reduce) { .cl-colour-dot { transition: none; } }
+/* Film grain on the window surfaces (themes/grain.ts, D338 round 4: "applied to the window, not the background"): a tile of noise as a second background
+   image of a window and of the floating cards that follow the theme (the palette, the sidebar, the popovers), only while the theme has some (data-look-grain).
+   It is part of the surface: under the text, clipped and blurred with it, and the canvas behind is left alone. One more attribute than the rule that sets a window's
+   fill, so it only adds the image. */
+:root[data-look-grain][data-look][data-window-level][data-scheme] .ui-window { background-image: var(--look-grain-url); background-size: var(--look-grain-size); background-repeat: repeat; }
+:root[data-look-grain] :is(.ui-overlay-surface, .ui-panel) { background-image: var(--look-grain-url); background-size: var(--look-grain-size); background-repeat: repeat; }
+
+/* Tint, Blur and Grain, under the heading "Windows" (themes/editor.on-demand.ts, D338): one column, each slider under its own label, in a narrow window;
+   three columns in a wide one, because a very wide slider is hard to use. The wrapper is the container, so the window's own content width decides, never the
+   viewport. Container queries are in rem, so the choice holds at every UI size (the window and its content grow together). */
+.cl-triple { container-type: inline-size; min-width: 0; }
+.cl-field { min-width: 0; }
+.cl-field-label { display: block; padding-bottom: 0.125rem; color: var(--fg-2); font-size: var(--text-secondary); line-height: 1.25; letter-spacing: var(--ui-tracking); }
+.cl-triple-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
+@container (min-width: 34rem) { .cl-triple-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 1.5rem; } }

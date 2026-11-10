@@ -87,7 +87,7 @@ export function createIconMorph(svg: SVGSVGElement, spec: MorphSpec): IconMorph 
     b.setAttribute("d", line(g.b));
     b.setAttribute("opacity", n(Math.min(1, Math.max(0, g.bOpacity))));
   };
-  const spring = new Spring(0, paint, { visualDuration: 0.26 });
+  const spring = new Spring(0, paint, { visualDuration: 0.2 });
   let alt = false;
   return {
     set(next, instant = false) {

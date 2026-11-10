@@ -127,6 +127,214 @@ pub(crate) fn view(value: &Value) -> bool {
             _ => false,
         }
 }
+/// How many themes one account's look may hold. An intent carries the whole list, and an intent is at most `MAX_INPUT` bytes.
+pub(crate) const MAX_THEMES: usize = 16;
+/// Accepts an integer numeric field inside the supplied inclusive bounds.
+fn whole(value: &Value, key: &str, low: f64, high: f64) -> bool {
+    numeric(value, key, low, high)
+        && value
+            .get(key)
+            .and_then(Value::as_f64)
+            .is_some_and(|v| v.fract() == 0.0)
+}
+/// Checks for a six-digit CSS hex colour string.
+fn hex(value: &Value) -> bool {
+    value.as_str().is_some_and(|s| {
+        s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+/// Colour schemes offered by `packages/ui/src/themes.ts`. Keep the server's wire validation in step with the browser's fixed choices.
+const SCHEME_IDS: &[&str] = &[
+    "paper",
+    "ink",
+    "latte",
+    "mocha",
+    "dawn",
+    "rosepine",
+    "nord",
+    "tokyo",
+    "gruvbox",
+    "dracula",
+    "solarized-light",
+    "solarized-dark",
+    "everforest-light",
+    "everforest-dark",
+    "kanagawa-lotus",
+    "kanagawa-wave",
+    "ayu-light",
+    "ayu-dark",
+    "github-light",
+    "github-dark",
+    "flexoki-light",
+    "flexoki-dark",
+    "gruvbox-light",
+    "tokyo-day",
+    "frappe",
+    "macchiato",
+    "owl-light",
+    "owl-night",
+];
+
+/// Font ids offered by `packages/ui/src/fonts.ts`; these are account data, not arbitrary labels.
+const FONT_IDS: &[&str] = &[
+    "maple-mono-nf",
+    "geist-mono",
+    "jetbrains-mono",
+    "commit-mono",
+    "monaspace-neon",
+    "ibm-plex-mono",
+    "cascadia-code",
+    "fira-code",
+    "source-code-pro",
+    "iosevka",
+    "victor-mono",
+    "recursive-mono",
+    "martian-mono",
+    "intel-one-mono",
+    "fantasque-sans-mono",
+    "hack",
+    "inconsolata",
+    "0xproto",
+    "lilex",
+    "monaspace-argon",
+    "monaspace-xenon",
+    "monaspace-radon",
+    "monaspace-krypton",
+];
+
+/// Background ids offered by `apps/tracer/src/canvas/themes/backgrounds.ts` and `gradients.ts`.
+const BACKGROUND_IDS: &[&str] = &[
+    "custom",
+    "solid-custom",
+    "solid",
+    "solid-accent",
+    "solid-red",
+    "solid-yellow",
+    "solid-green",
+    "solid-cyan",
+    "solid-blue",
+    "solid-magenta",
+    "aurora",
+    "dusk",
+    "lagoon",
+    "ember",
+    "meadow",
+    "orchid",
+    "sunrise",
+    "haze",
+    "horizon",
+];
+
+/// Checks that a JSON string is one of the choices shipped by the client.
+fn known_id(value: Option<&Value>, choices: &[&str]) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|id| choices.contains(&id))
+}
+
+/// Confirms that the selected theme id points to an entry carried by this account look.
+fn selected_theme_exists(value: &Value) -> bool {
+    let Some(selected) = string(value, "selected") else {
+        return false;
+    };
+    value
+        .get("themes")
+        .and_then(Value::as_array)
+        .is_some_and(|themes| {
+            themes
+                .iter()
+                .any(|entry| entry.get("id").and_then(Value::as_str) == Some(selected))
+        })
+}
+
+/// One theme of the account's look: ids must name shipped fonts, Colour schemes and backgrounds, with numbers within their ranges.
+fn theme(value: &Value) -> bool {
+    shape(
+        value,
+        &[
+            "id",
+            "name",
+            "tint",
+            "blur",
+            "grain",
+            "font",
+            "colors",
+            "uiSize",
+            "background",
+            "customSolid",
+            "custom",
+        ],
+    ) && ["id", "name", "font", "colors", "background"]
+        .iter()
+        .all(|key| string(value, key).is_some())
+        && known_id(value.get("font"), FONT_IDS)
+        && known_id(value.get("colors"), SCHEME_IDS)
+        && known_id(value.get("background"), BACKGROUND_IDS)
+        && ["tint", "blur", "grain"]
+            .iter()
+            .all(|key| whole(value, key, 0.0, 100.0))
+        && whole(value, "uiSize", 50.0, 150.0)
+        && value.get("customSolid").is_some_and(hex)
+        && value.get("custom").is_some_and(|custom| {
+            shape(custom, &["stops", "angle"])
+                && whole(custom, "angle", 0.0, 360.0)
+                && custom
+                    .get("stops")
+                    .and_then(Value::as_array)
+                    .is_some_and(|stops| (2..=4).contains(&stops.len()) && stops.iter().all(hex))
+        })
+}
+/// The account's look (D322): the list of themes, which one is selected, and the starting Colour, font and size the built-in themes were made from.
+/// It lives in the canvas document so every device of the account shows the same look; only the camera stays per device (D178).
+pub(crate) fn look(value: &Value) -> bool {
+    shape(
+        value,
+        &[
+            "v",
+            "selected",
+            "uiFont",
+            "basics",
+            "themes",
+            "windowSizes",
+            "extendedInfo",
+        ],
+    ) && value.get("v").and_then(Value::as_u64) == Some(1)
+        && string(value, "selected").is_some()
+        && value
+            .get("uiFont")
+            .is_none_or(|font| matches!(font.as_str(), Some("mono" | "sans")))
+        && value.get("basics").is_some_and(|basics| {
+            shape(basics, &["colors", "font", "uiSize"])
+                && known_id(basics.get("colors"), SCHEME_IDS)
+                && known_id(basics.get("font"), FONT_IDS)
+                && whole(basics, "uiSize", 50.0, 150.0)
+        })
+        && value
+            .get("themes")
+            .and_then(Value::as_array)
+            .is_some_and(|themes| {
+                themes.len() <= MAX_THEMES
+                    && themes.iter().all(theme)
+                    && themes.iter().enumerate().all(|(at, t)| {
+                        !themes[..at]
+                            .iter()
+                            .any(|seen| seen.get("id") == t.get("id"))
+                    })
+            })
+        && selected_theme_exists(value)
+        && value.get("windowSizes").is_none_or(|sizes| {
+            shape(sizes, &["phone", "desktop"])
+                && matches!(
+                    sizes.get("phone").and_then(Value::as_str),
+                    Some("full" | "edge" | "comfortable")
+                )
+                && matches!(
+                    sizes.get("desktop").and_then(Value::as_str),
+                    Some("comfortable" | "wide" | "full")
+                )
+        })
+        && value.get("extendedInfo").is_none_or(Value::is_boolean)
+}
 pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
     doc.get("views")
         .and_then(Value::as_array)
@@ -175,7 +383,8 @@ impl Document {
     #[must_use]
     pub fn valid(&self) -> bool {
         let doc = &self.0;
-        if !shape(doc, &["format", "version", "revision", "views"])
+        if !shape(doc, &["format", "version", "revision", "views", "look"])
+            || doc.get("look").is_some_and(|value| !look(value))
             || string(doc, "format") != Some("infraternal.canvas")
             || doc.get("version").and_then(Value::as_u64) != Some(1)
             || !doc
@@ -295,6 +504,54 @@ mod tests {
         doc.0["views"][0]["cell"]["x"] = json!(2000);
         assert!(!doc.valid());
         assert!(!text(&"x".repeat(201)));
+    }
+
+    /// Requires every account look identifier to name a shipped choice and the selected theme to exist.
+    #[test]
+    fn account_look_ids_are_known_and_selection_is_present() {
+        let valid = json!({
+            "v": 1,
+            "selected": "solid",
+            "uiFont": "sans",
+            "basics": {"colors": "ink", "font": "geist-mono", "uiSize": 100},
+            "themes": [{
+                "id": "solid", "name": "Solid", "tint": 100, "blur": 0, "grain": 0,
+                "font": "geist-mono", "colors": "ink", "uiSize": 100,
+                "background": "aurora", "customSolid": "#3b4252",
+                "custom": {"stops": ["#7a9cff", "#cba6f7"], "angle": 135}
+            }]
+        });
+        let mut document = Document::default();
+        document.0["look"] = valid.clone();
+        assert!(document.valid());
+
+        let mut older = valid.clone();
+        older.as_object_mut().unwrap().remove("uiFont");
+        document.0["look"] = older;
+        assert!(document.valid(), "rejected an older look without uiFont");
+
+        for pointer in [
+            "/selected",
+            "/uiFont",
+            "/basics/colors",
+            "/basics/font",
+            "/themes/0/font",
+            "/themes/0/colors",
+            "/themes/0/background",
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = json!("unknown-id");
+            document.0["look"] = invalid;
+            assert!(!document.valid(), "accepted unknown id at {pointer}");
+        }
+
+        let mut invalid = valid;
+        invalid["selected"] = json!("custom-9");
+        document.0["look"] = invalid;
+        assert!(
+            !document.valid(),
+            "accepted a selected theme missing from the list"
+        );
     }
 
     #[test]

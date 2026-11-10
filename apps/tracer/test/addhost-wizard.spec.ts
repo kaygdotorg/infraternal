@@ -246,6 +246,37 @@ test("an unknown host key shows its fingerprint and is never trusted without a c
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
+/**
+ * Clicks "Trust and continue" several times at once (a double or triple click, as under load) and proves the
+ * flow simply continues: one confirmation reaches the server, no error line, no failure screen (#449).
+ */
+async function trustWithRapidClicks(page: Page, clicks: number): Promise<void> {
+  await open(page);
+  await openWizard(page);
+  await watchForFailure(page);
+  const confirmations: string[] = [];
+  page.on("websocket", (socket) => socket.on("framesent", (frame) => {
+    if (typeof frame.payload === "string" && frame.payload.includes("confirm-host-key")) confirmations.push(frame.payload);
+  }));
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const trust = inWizard(page, "Trust and continue");
+  await expect(trust).toBeVisible();
+  await trust.click({ clickCount: clicks, delay: 0 });
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".ah-error")).toHaveCount(0);
+  expect(await sawFailure(page)).toEqual([]);
+  expect(confirmations).toHaveLength(1);
+}
+
+test("a double click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
+  await trustWithRapidClicks(page, 2);
+});
+
+test("a triple click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
+  await trustWithRapidClicks(page, 3);
+});
+
 /** Records every moment a failure screen, a failed row or a danger-toned hero is on screen, so a flow can prove it never showed one. */
 async function watchForFailure(page: Page): Promise<void> {
   await page.evaluate(() => {

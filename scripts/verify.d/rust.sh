@@ -113,11 +113,11 @@ rust_check_static_binary() {
     # Keep the last merged measurements for per-slice attribution, not approval.
     case "$target" in
         x86_64-unknown-linux-musl)
-            baseline_bytes=22418256
+            baseline_bytes=28268440
             expected_machine='Advanced Micro Devices X86-64'
             ;;
         aarch64-unknown-linux-musl)
-            baseline_bytes=20453280
+            baseline_bytes=25378504
             expected_machine='AArch64'
             ;;
         *)
@@ -316,6 +316,8 @@ rust_verify_fast() {
     RUST_GATE_FAILED=0
 
     rust_run_gate "Nix Cargo vendoring" scripts/check-nix-vendor
+    # Pinned inputs of the shipped Nix package; cached unless a pin moved (#476).
+    rust_run_gate "Nix release inputs" scripts/check-nix-release-inputs
     rust_run_gate "fmt" cargo fmt --all --check
     rust_run_gate "migration names" python3 scripts/verify.d/migration-names.py
     rust_run_gate "migration tooling tests" python3 scripts/test-migration-names.py

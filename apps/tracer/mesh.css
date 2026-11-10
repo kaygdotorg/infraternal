@@ -86,4 +86,4 @@
 
 /* A host's new name is on the card while the server decides; it settles to full strength when the server accepts it (and the old name returns with the refusal). */
 .cl-graph .ui-window[data-renaming="pending"] .ui-window-host { opacity: 0.6; }
-.cl-graph .ui-window-host { transition: opacity var(--t-press) ease; }
+.cl-graph .ui-window-host { transition: opacity var(--t-press) var(--ease-out); }

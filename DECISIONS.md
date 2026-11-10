@@ -4676,3 +4676,157 @@ access (#341 B19).
        finger on empty canvas moves it"). Nothing there can scroll, so the
        drag can't be an accident. A one-finger drag that starts on a window
        only ever scrolls that window's content.
+
+378. **macOS batched UDP sends in GotaTun (owner, 2026-11-09, #260):** The
+     Mac build turns on batched sends through Apple's private `sendmsg_x`.
+     A runtime check falls back to one send per packet, and
+     `GOTATUN_MACOS_BATCH_UDP=0` turns it off. The owner, verbatim: "don't
+     worry too much about private apis, we aren't going to ship that macos
+     one to the app store. so yes as long as it's faster than tailscale and
+     netbird, ship it on".
+     - **Condition:** it ships on only once a measurement shows GotaTun on
+       macOS beating both Tailscale and NetBird on the same machines and
+       links (throughput, loaded latency and CPU).
+     - The Mac App Store build is out of scope, so private macOS APIs are
+       acceptable in the Mac build when they are measured to help and have
+       a runtime fallback.
+
+379. **The server database moves from sqlx to rusqlite (owner, 2026-11-09,
+     #473):** rusqlite 0.41 with one writer thread and reader threads, and our
+     own migration runner that keeps the existing `_sqlx_migrations` history.
+     The owner answered "agreed" to that recommendation, and added: "ask
+     calternal which sql driver it's using since it's a rust project too and
+     ask it to switch to russql too if it's using sqlx".
+     - **Why (J438, #473 comment 88933):**
+       - It is the only route that fixes RUSTSEC-2026-0459 today.
+       - It was faster on every hot query measured (median 25–78% lower).
+       - Session p99 at 64 tasks drops from 13.1 to 3.9 ms.
+       - The binary is 363 KiB smaller and cold compiles are about 35% faster.
+     - **How:** in reviewed slices: the pool and the migration runner, then the
+       hot paths, then the rest, then the plugin API. Each slice is measured
+       against sqlx and checked on a copy of production's data. The
+       time-limited RUSTSEC exception in deny.toml stays until the port lands.
+
+380. **Selected text and confirmation cards (owner, 2026-11-09, #426, #391):**
+     - **Selected text adapts in every theme.** Dark themes already switch to
+       white (nord: its background colour) when their own text colour can't
+       reach 4.5:1 on the selection. Light themes now follow the same rule
+       and switch to a dark colour when theirs can't. The owner, verbatim:
+       "yes i think apple's liquid glass adapts somewhat like this".
+     - **Confirmation cards follow the floating-card design.** They are
+       translucent glass like every other floating card, no longer opaque
+       (this reverses #391's opaque confirm cards). Readability comes from
+       the shared glass contrast guarantee (D365, #448). The owner,
+       verbatim: "make them follow the same design".
+
+381. **Typing during a flood, and GotaTun's bar (owner, 2026-11-10, #477, #260):**
+     - **A key typed during a flood wins.** When output is waiting for
+       flow-control credit and a key arrives for the same session, the relay
+       drops the queued bulk output and sends a screen repaint from a small
+       reserved credit budget, so the echo shows within about one frame
+       (D375's 8.3 ms target). Output the flood produced just before the key
+       is skipped on screen, as the 250 ms starvation path already does, and
+       stays in the host's scrollback. Flood throughput is unchanged.
+       Rejected: holding back credit so the echo never queues (about 25%
+       slower floods); a bigger browser window (longer queues on slow links,
+       and it still misses the target); limiting D375 to other sessions. The
+       owner chose "Key wins: repaint" in a grill question. This is
+       relay flow-control code and gets the strictest review.
+     - **GotaTun's bar (amends D378).** The owner, verbatim: "yes please,
+       faster than tailscale and netbird on both linux/mac. our protocol must
+       do 10 Gbit/s at the least latency possible consuming as little memory
+       and cpu as possible to keep optimising and better yet, checkpoint and
+       keep shipping." And: "also pleaes simulate bufferbloat as that's a
+       problem with lots of home connections". Mac batching ships once it is
+       faster on both Linux and macOS. Each verified gain ships as a pin bump.
+       Reports give Gbit/s per core alongside totals, and the test matrix
+       gains a bufferbloat profile (a shaped bottleneck with a deep queue).
+
+382. **Revoke report, reconnect budget, D380 build, 10G testbed (owner, 2026-11-10, #355, #478, #260):**
+     - **Console power actions don't count as admin powers.** The revoke
+       report (D367) ignores exactly the 12 polkit login1 actions that stock
+       Linux grants an active local console session: reboot, power-off,
+       suspend, hibernate, their -multiple-sessions variants, and the four
+       set-reboot-* ids. None of them writes files or runs commands. Every
+       other grant still counts, such as Alma's tuned, NetworkManager and
+       fwupd grants. It ships only after a security review signs off. The
+       owner chose "Ignore the 12" in a grill question.
+     - **The reconnect budget covers the first echo, behind real TLS.**
+       D375's reconnect row measures until the session resumes, plus one
+       round trip for the first typed key's echo, and the gate runs behind
+       real TLS, so it matches what a user sees. D267's 4 round trips stop
+       at the resume. Rejected for now: sending keys typed during the outage
+       along with the resume (it touches auth and input ordering). The owner
+       chose "Resume + 1 RTT, real TLS".
+     - **D380 gets built now**, with production-build screenshots of every
+       theme and each confirmation card on the issue for review.
+     - **GotaTun's 10 Gbit/s testbed is std** (the Mac Studio): two Linux VMs
+       on the vmnet bridge, shaped to 10 Gbit/s, in announced windows of 20
+       minutes or less. These are arm64 numbers. x86 at 10G needs real
+       hardware.
+
+383. **Clipboard from programs, phone text sizes, permanent API keys (owner, 2026-11-10, #440, #345, #341):**
+     - **Programs can copy to the clipboard (OSC 52).** A remote program's
+       copy request writes the clipboard automatically and shows a visible
+       "Copied from the terminal" notice. If the browser refuses, a Copy
+       button appears for 15 s. A Settings switch, "Programs can copy to your
+       clipboard", is on by default and is stored per account so it follows
+       the person. Rejected: asking every time, and having no switch. The
+       owner chose "Auto + notice + switch".
+     - **Phone rows stay 15 px (amends D372).** On phones, palette results
+       and sidebar rows use body size (15 px). Only true labels, such as
+       section headings and tags, use the 13 px label size. TASTE row 46
+       ("phone text 15-16 px or larger") stands. The owner chose "Rows 15 px,
+       labels 13".
+     - **API keys have two dates, and both can be "forever" (amends D375 A1).**
+       The owner, verbatim: "keys have two dates: expiry and inactivity dates,
+       both can be set to forever for truly permanent keys." Each key has a
+       hard expiry and an inactivity limit. Either can be set to forever, and
+       a key with both set to forever is truly permanent.
+     - **Sign-in stays usernameless** (re-confirmed; already D375 A2).
+
+384. **Mesh access rules are enforced in userspace; the kernel firewall becomes an optional guard (owner, 2026-11-10, #483, #265; extends D340, amends D216):**
+     - **Why:** a missing `/usr/sbin/nft` stopped the production mesh without
+       a word. Prod's nft lives in a Nix store path (#483).
+     - **Access rules move into GotaTun's packet path on Linux, as D340
+       already planned for the Mac.** That gives one implementation for both
+       platforms. A GotaTun node enforces per-peer grants (D164) with no
+       firewall tool installed.
+     - **The kernel table is an optional extra guard.** It covers what only
+       the kernel can see: mesh addresses arriving on a non-mesh interface
+       (anti-spoofing), forwarding into or out of the mesh, and the public
+       80/443 gate. It is installed whenever nft or iptables-nft is found at a
+       fixed, root-owned path, including Nix-provided ones, and never through
+       a PATH search. Without it the mesh still runs, and `mesh status` and the
+       UI say plainly which protection is missing.
+     - **Still needs the kernel firewall:** the kernel-WireGuard opt-out
+       (D346), whose packets bypass userspace, and future routing features
+       such as exit nodes and subnet routers (forwarding and NAT). Mesh SSH's
+       port-22 redirect moves into userspace with the rules.
+     - **Research behind it:** Tailscale enforces its rules inside its own
+       process, and its netfilter rules are optional (netfilter-mode off).
+       NetBird prefers kernel rules and falls back to a userspace filter.
+     - **The owner chose "Userspace rules + optional kernel guard",** and
+       noted that nftables/iptables machinery will eventually be needed for
+       reverse-proxy work. Rejected: requiring the kernel guard to start, and
+       userspace only.
+     - **Every per-packet cost is measured** against the current GotaTun
+       numbers before it ships.
+
+385. **Remove host placement, machine pill tabs, phone confirmation inset (owner, 2026-11-10, #486):**
+     - **Remove host lives in two places:** a sidebar button plus a swipe
+       action on the machine row, and the end of the connection tab in the
+       machine pill. In the pill it is inline: the foot of the tab turns into
+       the question, with Keep and a red Remove. The row says what happens:
+       "Revokes its access, then uninstalls the infraternal agent from it."
+     - **The machine pill has two tabs: machine details and connection
+       details.** All connection, link and mesh details collapse into the one
+       connection tab. The owner, verbatim: "basically all the connection
+       detail stuff shoudl be in the same tab, I don't know if all the
+       connection and mesh details can be collapsed to one tab (basically one
+       tab machine details and one tab connectino details)" and "the remove
+       host button can be at the end of that mesh/connection tab with the
+       style inline".
+     - **On phones, the glass confirmation card is inset** from the screen
+       edges like the other floating cards, not edge to edge. The owner chose
+       "Inset it".

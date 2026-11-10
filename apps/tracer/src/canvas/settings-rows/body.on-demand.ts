@@ -71,6 +71,7 @@ function renderKeys(pane: HTMLElement, keys: readonly KeyDef[]): () => void {
 /** The panels a window shows, from the table's `panel` (one or several). */
 const panelsOf = (group: GroupDef): readonly PanelId[] => group.panel === undefined ? [] : typeof group.panel === "string" ? [group.panel] : group.panel;
 
+/** Mounts one settings group and returns cleanup for its rows and subscriptions. */
 export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp, group }: Spot): () => void {
   const disposers: Array<() => void> = [];
   const mine = new Map<string, SettingRow>();
@@ -104,6 +105,14 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
   const data = source.data?.(comp.id, group.id);
   if (data?.facts?.length) { disposers.push(renderFacts(pane, group.title, data.facts.map((g) => ({ title: g.title, rows: g.rows })))); shown++; }
   if (data?.keys) { disposers.push(renderKeys(pane, data.keys)); shown++; }
+
+  // The Appearance Themes window: the strip of theme cards, then the controls that edit the selected one. Loaded when the window draws (D188).
+  if (group.themes) {
+    let gone = false, stop: (() => void) | undefined;
+    void onDemand(() => import("../themes/editor.on-demand")).then((mod) => { if (!gone) stop = mod.renderThemeEditor(pane); });
+    disposers.push(() => { gone = true; stop?.(); });
+    shown++;
+  }
 
   // Existing panels, unchanged. A panel the source does not offer (devices, in the product today) is not shown.
   const panels = panelsOf(group).filter((id) => id !== "devices" || source.sections.includes("devices"));
