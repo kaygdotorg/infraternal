@@ -432,8 +432,9 @@ not_live() {
 }
 # Start fresh with listed terminals: after the activated agent stopped, the
 # terminals must still be exactly the ones the person reviewed (else 75, with
-# nothing closed); then their units stop. A later refusal (73) leaves 74, so
-# the message can say that terminals were closed.
+# nothing closed); then their units stop. A unit that will not stop ends it
+# with 79 (some may be closed, the rest are open). Once every one stopped, a
+# holder refusal (73) leaves 74, so the message can say they were all closed.
 close_stale_terminals() {
  [ -n "${stale_terminals:-}" ] || return 0
  [ "$(finished_terminal_records)" = "$stale_terminals" ] || exit 75
@@ -445,7 +446,7 @@ close_stale_terminals() {
  stale_closed=no
  trap 'stale_status=$?; [ "$stale_status:$stale_closed" != 73:yes ] || stale_status=74; exit "$stale_status"' EXIT
  for stale_close in "$@"; do
-  $manager stop "$stale_close" >/dev/null 2>&1 || exit 73
+  $manager stop "$stale_close" >/dev/null 2>&1 || exit 79
   stale_closed=yes
  done
 }
@@ -1279,7 +1280,10 @@ supersede_stuck_install() {
  printf '%s %s\n' "$replace_enabled" "$replace_active" > "$aside/.superseded-service"
  mv "$unit" "$aside/.superseded-unit"
  rm -f "$launcher"
- $manager daemon-reload >/dev/null 2>&1 || exit 73
+ if ! $manager daemon-reload >/dev/null 2>&1; then
+  [ "$takeover_closed" = no ] || exit 79
+  exit 73
+ fi
  replace_done
 }
 # Put back an install set aside by supersede_stuck_install after the new
@@ -1385,8 +1389,10 @@ take_over_finished_install() {
  [ "$(cat "$takeover_part/unit")" = "$(cat "$unit")" ] || exit 71
  mv -T "$takeover_part" "$aside"
  # From here every way out puts the old install back, until the end.
- # A refusal (73) after a confirmed terminal was closed leaves 74, so the
- # message can say that terminals were closed; every earlier 73 closed none.
+ # A terminal unit that will not stop, or a service step failing after a
+ # terminal closed, ends with 79: some confirmed terminals may be closed and
+ # the rest are open. Once every confirmed terminal closed, a holder refusal
+ # (73) leaves 74; every 73 before that closed none (#433 P2, P3-1).
  takeover_closed=no
  trap 'takeover_status=$?; replace_untrap; put_back_taken_over; [ "$takeover_status:$takeover_closed" != 73:yes ] || takeover_status=74; exit "$takeover_status"' EXIT
  trap 'replace_untrap; put_back_taken_over; exit 129' HUP
@@ -1407,10 +1413,13 @@ take_over_finished_install() {
   case " $* " in *" $terminal_unit "*) :;; *) set -- "$@" "$terminal_unit";; esac
  done
  for takeover_close in "$@"; do
-  $manager stop "$takeover_close" >/dev/null 2>&1 || exit 73
+  $manager stop "$takeover_close" >/dev/null 2>&1 || exit 79
   takeover_closed=yes
  done
- $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
+ if ! $manager disable infraternal-agent.service >/dev/null 2>&1; then
+  [ "$takeover_closed" = no ] || exit 79
+  exit 73
+ fi
  # The old unit and only the confirmed terminals' units have stopped.
  live_session_sockets
  scan_holders takeover-all

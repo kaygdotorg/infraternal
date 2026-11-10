@@ -477,9 +477,16 @@ pub const TAKEOVER_OFFER: &str = "This machine already has an infraternal agent 
 /// it never claims that nothing changed (J342 P3-4), and it never mentions closed terminals (#433 P2).
 pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something besides its own terminals is using it, such as a program that runs from its folder. No terminal was closed, and the old install was left as it was found. Stop that program, then try again.";
 
-/// The refusal when something still used the old install after Take over closed the terminals the
-/// person confirmed (host exit 74, #433 P2). The install is put back; closed terminals cannot be.
+/// The refusal when something still used the old install after Take over closed every terminal the
+/// person confirmed (host exit 74, #433 P2). The host leaves 74 only once all their units stopped;
+/// a unit that would not stop is [`TAKEOVER_CLOSE_UNFINISHED`]. The install is put back; closed
+/// terminals cannot be.
 pub const TAKEOVER_BUSY_AFTER_CLOSE: &str = "Take over closed the terminals you confirmed, then found something else still using the old infraternal agent, such as a program that runs from its folder. The old install was put back as it was, and those terminals stay closed. Stop that program, then try again.";
+
+/// The refusal when a confirmed terminal's unit, or the old service, would not stop after Take over
+/// began closing (host exit 79, #433 P3-1, J462). Some confirmed terminals may be closed and the
+/// rest are still open; no other program is to blame, and the install is put back.
+pub const TAKEOVER_CLOSE_UNFINISHED: &str = "A terminal you confirmed, or the old infraternal agent's service, would not stop, so Take over stopped. Terminals it had already closed stay closed and the others are still open. The old install was put back as it was. Try again.";
 
 /// The refusal when the install or its terminals changed between review and confirmation (host exit
 /// 75). Every 75 happens before any terminal is closed (#433 P2).
@@ -608,6 +615,10 @@ impl FinishedInstall {
                     Some(73) => {
                         error.kind = FailureKind::UnrecognizedInstall;
                         error.message = TAKEOVER_BUSY;
+                    }
+                    Some(79) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_CLOSE_UNFINISHED;
                     }
                     Some(74) => {
                         error.kind = FailureKind::UnrecognizedInstall;
@@ -1292,6 +1303,7 @@ impl PreviousAttempt {
                 match (closes, error.exit_status) {
                     (true, Some(73)) => error.message = START_FRESH_BUSY,
                     (_, Some(74)) => error.message = START_FRESH_BUSY_AFTER_CLOSE,
+                    (_, Some(79)) => error.message = START_FRESH_CLOSE_UNFINISHED,
                     (true, Some(75)) => error.message = START_FRESH_CHANGED,
                     _ => {}
                 }
@@ -1305,9 +1317,14 @@ impl PreviousAttempt {
 /// earlier setup's own terminals still uses it (#433, D368).
 pub const START_FRESH_BUSY: &str = "Something besides the earlier setup's own terminals is still using it, such as a program that runs from its folder. No terminal was closed and nothing was removed. Stop that program, then try again.";
 
-/// Start fresh closed the confirmed terminals, then something else still used the earlier setup
-/// (host exit 74). Nothing was removed; closed terminals cannot be reopened.
+/// Start fresh closed every confirmed terminal, then something else still used the earlier setup
+/// (host exit 74, left only once all their units stopped). Nothing was removed; closed terminals
+/// cannot be reopened.
 pub const START_FRESH_BUSY_AFTER_CLOSE: &str = "Start fresh closed the terminals you confirmed, then found something else still using the earlier setup, such as a program that runs from its folder. Nothing was removed, and those terminals stay closed. Stop that program, then try again.";
+
+/// A confirmed terminal's unit would not stop during Start fresh (host exit 79, #433 P3-1): some may be
+/// closed and the rest are still open; nothing was removed.
+pub const START_FRESH_CLOSE_UNFINISHED: &str = "A terminal you confirmed would not close, so Start fresh stopped. Terminals it had already closed stay closed and the others are still open. Nothing was removed. Try again.";
 
 /// The earlier setup or its terminals changed between review and confirmation (host exit 75);
 /// every 75 happens before any terminal is closed.
