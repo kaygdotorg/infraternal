@@ -1,6 +1,7 @@
 //! Restores the Mac userspace Mesh node and its utun routes across daemon lifetimes.
 
 use crate::dataplane::Config;
+use crate::macos_utun_reader::{self as reader, Decode, UtunReader};
 use bytes::Buf;
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
@@ -19,7 +20,7 @@ use nix::{
         AddressFamily, SockFlag, SockProtocol, SockType, SysControlAddr, connect, getsockopt,
         socket, sockopt::UtunIfname,
     },
-    unistd::{read, write},
+    unistd::write,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -37,7 +38,7 @@ use std::{
     thread::JoinHandle,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::io::unix::AsyncFd;
+use tokio::io::{Interest, unix::AsyncFd};
 use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::{
@@ -225,8 +226,10 @@ impl MacUtun {
     fn from_open(open: OpenUtun) -> io::Result<Self> {
         // Tokio's safe constructor is deprecated but remains the only safe API;
         // the replacement requires unsafe code, which this crate forbids.
+        // Write readiness only: reads happen on the dedicated reader thread
+        // (`macos_utun_reader`), so read events would only wake the runtime for nothing.
         #[allow(deprecated)]
-        let fd = AsyncFd::new(open.fd)?;
+        let fd = AsyncFd::with_interest(open.fd, Interest::WRITABLE)?;
         let (mtu, _) = watch::channel(crate::mesh_mtu::IPV6_MINIMUM_MTU);
         Ok(Self {
             fd: Arc::new(fd),
@@ -249,10 +252,14 @@ impl MacUtun {
     }
 
     /// Build the receive adapter with a watcher for this utun's current shared interface MTU.
+    ///
+    /// Its reader thread starts on the first receive and stops when the adapter is dropped.
     fn receiver(&self) -> MacUtunRx {
         MacUtunRx {
             fd: self.fd.clone(),
             mtu: self.mtu.subscribe().into(),
+            reader: None,
+            start_failed: false,
         }
     }
 
@@ -292,36 +299,66 @@ impl IpSend for MacUtunTx {
 }
 
 /// Receives packets from one owned utun and rejects frames above its live interface MTU.
+///
+/// A dedicated thread reads the utun and hands packets over in bounded batches (#260, J461):
+/// see [`crate::macos_utun_reader`] for why, and for its backpressure and shutdown rules.
 struct MacUtunRx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
+    /// The reader thread, started on the first receive with `GotaTun`'s packet pool.
+    reader: Option<UtunReader>,
+    /// Starting the thread failed and that was reported once; later receives wait forever,
+    /// because `GotaTun` retries non-fatal errors in a loop and repeating one would spin it.
+    start_failed: bool,
 }
+
+impl MacUtunRx {
+    /// Start the reader thread, decoding each frame against this utun's live MTU.
+    /// # Errors
+    /// Returns stop-pipe or thread creation failures.
+    fn start_reader(&self, pool: &PacketBufPool) -> io::Result<UtunReader> {
+        let mut mtu = self.mtu.clone();
+        let decode: Decode = Box::new(move |mut packet: Packet<[u8]>| {
+            parse_utun_payload(packet.as_ref(), mtu.get())?;
+            packet.buf_mut().advance(4);
+            packet
+                .try_into_ip()
+                .map_err(|_| io::ErrorKind::InvalidData.into())
+        });
+        UtunReader::spawn(
+            self.fd.clone(),
+            pool.clone(),
+            decode,
+            reader::QUEUE_BATCHES,
+            reader::READ_BATCH,
+        )
+    }
+}
+
+/// What [`MacUtunRx::recv`] yields: one reader batch, in device order.
+type UtunBatch = std::vec::IntoIter<Packet<Ip>>;
 
 impl IpRecv for MacUtunRx {
     async fn recv<'a>(
         &'a mut self,
         pool: &mut PacketBufPool,
     ) -> io::Result<impl Iterator<Item = Packet<Ip>> + Send + 'a> {
-        let mut packet = pool.get();
-        loop {
-            let mut ready = self.fd.readable().await?;
-            let result =
-                ready.try_io(|fd| read(fd.get_ref(), &mut packet[..]).map_err(io::Error::from));
-            match result {
-                Err(_) => continue,
-                Ok(Err(error)) => return Err(error),
-                Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(Ok(length)) => {
-                    packet.truncate(length);
-                    parse_utun_payload(packet.as_ref(), self.mtu.get())?;
-                    packet.buf_mut().advance(4);
-                    let packet = packet
-                        .try_into_ip()
-                        .map_err(|_| io::ErrorKind::InvalidData)?;
-                    return Ok(std::iter::once(packet));
+        if self.start_failed {
+            return std::future::pending::<io::Result<UtunBatch>>().await;
+        }
+        if self.reader.is_none() {
+            match self.start_reader(pool) {
+                Ok(started) => self.reader = Some(started),
+                Err(error) => {
+                    self.start_failed = true;
+                    return Err(error);
                 }
             }
         }
+        let Some(reader) = self.reader.as_mut() else {
+            return std::future::pending::<io::Result<UtunBatch>>().await;
+        };
+        reader.next_batch().await.map(Vec::into_iter)
     }
 
     fn mtu(&self) -> MtuWatcher {
