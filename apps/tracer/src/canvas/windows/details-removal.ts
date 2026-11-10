@@ -28,6 +28,7 @@ export interface DetailsAction {
 
 /** Matches the CSS-free crossfade below. */
 const FADE = 150;
+/** Whether the person asked for reduced motion; the question then swaps without a fade. */
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /** Builds the block. The caller appends `root` and shows or hides it with the Connection tab. */

@@ -1,3 +1,7 @@
+/**
+ * The session mockup scenes' list: what the palette shows for them. It is a plain list so the palette never loads the scenes' code.
+ */
+
 /** The sessions scenes' names and hints, for the palette; their code (session-scenes.on-demand.ts) loads when one runs. */
 export const SESSION_SCENES: Array<{ title: string; hint: string }> = [
   { title: "Session manager", hint: "grouped by state, by frecency" },

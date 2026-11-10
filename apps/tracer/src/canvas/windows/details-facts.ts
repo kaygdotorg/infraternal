@@ -50,6 +50,7 @@ function uptime(seconds: number | undefined): string {
   return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
 }
 
+/** The machine card's facts for one window: the Machine tab (host facts) and the Connection tab (link and session rows), in plain words (D385). */
 export function detailsFacts(input: DetailsInput): DetailsFacts {
   const { host, connection, session } = input;
   const facts = host.facts;

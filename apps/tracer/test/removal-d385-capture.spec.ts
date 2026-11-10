@@ -11,8 +11,11 @@ import { tracerEvidencePath } from "./evidence-path";
 
 test.skip(process.env.J475B_CAPTURE !== "1", "set J475B_CAPTURE=1 to capture");
 
+/** The two viewports the owner reviews: desktop and phone. */
 const sizes = [{ id: "desktop", width: 1440, height: 900, scale: 2, touch: false }, { id: "phone", width: 393, height: 852, scale: 3, touch: true }] as const;
+/** One dark and one light theme. */
 const themes = ["ink", "paper"] as const;
+/** Where one capture is written. */
 const out = (name: string): string => tracerEvidencePath("removal-d385", `${name}.png`);
 
 /** Opens the first window's machine card on the windows prototype, with removal on. */
@@ -35,13 +38,16 @@ for (const size of sizes) for (const theme of themes) {
       const window = page.locator(".ui-window").first();
       await window.screenshot({ path: out(`${size.id}-${theme}-1-machine-tab`) });
       await page.locator(".canvas-popover .ui-tab", { hasText: "Connection" }).click();
+      // sleep: a tab change or scroll settles
       await page.waitForTimeout(300);
       await page.locator(".canvas-popover-action").scrollIntoViewIfNeeded();
+      // sleep: a tab change or scroll settles
       await page.waitForTimeout(300);
       await window.screenshot({ path: out(`${size.id}-${theme}-2-connection-tab-end`) });
       await page.locator(".canvas-popover-action .ui-sp-row").click();
       await expect(page.locator(".canvas-popover-ask")).toBeVisible();
       await page.locator(".canvas-popover-ask").scrollIntoViewIfNeeded();
+      // sleep: a tab change or scroll settles
       await page.waitForTimeout(300);
       await window.screenshot({ path: out(`${size.id}-${theme}-3-inline-question`) });
     } finally { await context.close(); }
@@ -56,15 +62,18 @@ for (const size of sizes) for (const theme of themes) {
       // sleep: the mock scene settles before the camera flight
       await page.waitForTimeout(700);
       await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(v: string): void } }).__tracerClusters.flyView("console"));
+      // sleep: the camera flight to the view lasts under 300 ms; margin for a loaded VM
       await page.waitForTimeout(900);
       await page.locator("#sidebar-toggle").click();
       await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1);
       const host = page.locator('#tree li.bm-subhead[data-id="h:edge-arm"]');
       await expect(host).toBeVisible();
+      // sleep: the card's open animation settles
       await page.waitForTimeout(500);
       if (!size.touch) {
         const box = (await host.boundingBox())!;
         await page.mouse.move(box.x + 60, box.y + box.height / 2);
+        // sleep: a tab change or scroll settles
         await page.waitForTimeout(300);
         await page.screenshot({ path: out(`${size.id}-${theme}-4-sidebar-hover-button`) });
         await page.locator(".cl-ha button[data-act='remove']").click();
@@ -74,15 +83,19 @@ for (const size of sizes) for (const theme of themes) {
         const y = b.y + b.height / 2;
         const send = (type: "touchStart" | "touchMove" | "touchEnd", x = 0): Promise<unknown> => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] });
         await send("touchStart", b.x + b.width - 30);
+        // sleep: one touch step per frame
         for (let i = 1; i <= 7; i += 1) { await send("touchMove", b.x + b.width - 30 - i * 8); await page.waitForTimeout(8); }
         await page.screenshot({ path: out(`${size.id}-${theme}-5-swipe-mid-gesture`) });
+        // sleep: one touch step per frame
         for (let i = 8; i <= 14; i += 1) { await send("touchMove", b.x + b.width - 30 - i * 8); await page.waitForTimeout(8); }
         await send("touchEnd");
+        // sleep: the swipe settles back to its revealed rest
         await page.waitForTimeout(700);
         await page.screenshot({ path: out(`${size.id}-${theme}-6-swipe-revealed`) });
         await page.locator("#tree .ui-row-swipe-act[data-action='remove']").tap();
       }
       await expect(page.locator(".ui-confirm-tip[data-open='true']")).toBeVisible();
+      // sleep: the confirmation card's entrance (under 300 ms)
       await page.waitForTimeout(450);
       await page.screenshot({ path: out(`${size.id}-${theme}-7-sidebar-confirm-card`) });
     } finally { await context.close(); }

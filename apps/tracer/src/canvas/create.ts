@@ -67,6 +67,7 @@ export interface CanvasController {
   dispose(): void;
 }
 
+/** Builds the canvas on the core screen: the product and the test double both mount through here; the returned controller drives views, windows and the camera. */
 export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasController {
   const { stage } = core;
   // The grouped layout's chunk starts at mount, for every canvas (the product and the test double both come through here).

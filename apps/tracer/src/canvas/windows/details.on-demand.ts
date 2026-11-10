@@ -26,6 +26,7 @@ export interface DetailsPopover {
   refresh(): void;
 }
 
+/** What the popover shows and can do: the facts to read, and the optional destructive action. */
 interface DetailsInput {
   windowId: string;
   /** Read at open and each time a tab is shown. */
@@ -179,6 +180,7 @@ export interface DetailsModule {
   dispose(): void;
 }
 
+/** Makes the details module for a canvas: it opens, toggles and closes the popover for a window and adds the product's extra rows to it. */
 export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
   let open: DetailsPopover | undefined;
   // The "Access level" row (#215) exists only on an instance that can raise the agent's privileges; its code loads with the first popover that needs it.

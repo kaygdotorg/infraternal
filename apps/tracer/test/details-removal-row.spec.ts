@@ -11,6 +11,7 @@ import { tracerEvidencePath } from "./evidence-path";
 
 const sizes = [{ id: "desktop", width: 1440, height: 900, scale: 1, touch: false }, { id: "phone", width: 393, height: 852, scale: 3, touch: true }] as const;
 
+/** Opens the first window's machine card on the windows prototype and switches to the Connection tab, where Remove host sits. */
 async function openCard(page: Page, width: number, height: number): Promise<void> {
   await page.setViewportSize({ width, height });
   await page.context().request.post("/__mock/reset").catch(() => page.context().request.post("/__mock/reset"));

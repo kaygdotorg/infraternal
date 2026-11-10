@@ -20,6 +20,7 @@ import { flipEasing } from "../src/canvas/layout/flip";
 const repo = join(import.meta.dir, "../../..");
 const ROOTS = ["apps/tracer", "packages/ui"];
 const SKIP_DIRS = new Set(["node_modules", "dist", "vendor", "fonts", "test", "real", "docs-dist"]);
+/** Files that may run a raw spring: the spring itself and the count-up. */
 const RAW_SPRING_ALLOWED = new Set(["packages/ui/src/countup.ts", "packages/ui/src/spring.ts"]);
 
 function sources(dir: string, out: string[] = []): string[] {
