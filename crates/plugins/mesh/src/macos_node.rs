@@ -3066,10 +3066,10 @@ fn validate_config(config: &Config, identity: crate::policy::model::PublicKey) -
     Ok(())
 }
 
-/// Checks Mac peer routing, configuration validation, and atomic snapshot staging.
 #[cfg(test)]
 mod tests {
-    //! Checks that the Mac adapter maps authenticated peers to `WireGuard` host routes.
+    //! Checks Mac peer routing, configuration validation, and atomic snapshot staging: that the
+    //! Mac adapter maps authenticated peers to `WireGuard` host routes.
     #![allow(clippy::expect_used)]
 
     /// Real-Mac authority refresh proofs with encrypted traffic and kernel MTU checks.
