@@ -1436,6 +1436,19 @@ fi
         Self::rollback_script_for(InstallMode::Root, host, transaction)
     }
 
+    /// [`Self::root_rollback_script`] for a root upgrade (D376): after the
+    /// install's own rollback, the root payload cache that the upgrade's
+    /// stage step created goes too, but only when no root install is left.
+    /// An Add host keeps that cache for a fast retry; an upgrade that failed
+    /// must leave the host exactly as it was (J465 P1).
+    #[must_use]
+    pub fn root_upgrade_rollback_script(host: uuid::Uuid, transaction: uuid::Uuid) -> String {
+        format!(
+            "( {} ) || status=$?\n[ -e /var/lib/infraternal ] || [ -L /var/lib/infraternal ] || rm -rf /var/lib/infraternal.bootstrap-cache\nexit \"${{status:-0}}\"",
+            Self::root_rollback_script(host, transaction)
+        )
+    }
+
     /// The one rollback text, for any mode; see [`Self::rollback`].
     fn rollback_script_for(mode: InstallMode, host: uuid::Uuid, transaction: uuid::Uuid) -> String {
         let guarded = format!(
@@ -2127,6 +2140,9 @@ mod tests {
             script,
             Installation::root_rollback_script(host, uuid::Uuid::from_u128(0x23))
         );
+        let upgrade = Installation::root_upgrade_rollback_script(host, transaction);
+        assert!(upgrade.contains(&script));
+        assert!(upgrade.contains("rm -rf /var/lib/infraternal.bootstrap-cache"));
     }
 
     #[test]
