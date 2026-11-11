@@ -20,6 +20,10 @@ use std::{
     process::Command,
 };
 
+/// Shared socket ownership fixture for parallel DNS tests.
+#[path = "support/dns.rs"]
+mod dns_support;
+
 fn query(name: &str, qtype: u16) -> Vec<u8> {
     let mut wire = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
     for label in name.split('.') {
@@ -556,26 +560,20 @@ fn denied_remote_names_match_the_nonexistent_name_response() {
         .peer
         .addresses
         .ipv4 = Ipv4Addr::new(127, 68, 0, 2);
-    let resolver = Resolver::bind(&server).unwrap();
+    let resolver = dns_support::TestResolver::bind(&server).unwrap();
     let client = std::net::UdpSocket::bind("127.68.0.2:0").unwrap();
     client
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .unwrap();
     let mut buffer = [0; 512];
     client
-        .send_to(
-            &query("host-3.internal", 1),
-            (server.addresses.ipv4, DNS_PORT),
-        )
+        .send_to(&query("host-3.internal", 1), resolver.udp_address)
         .unwrap();
     let (length, _) = client.recv_from(&mut buffer).unwrap();
     let denied_wire = buffer[..length].to_vec();
 
     client
-        .send_to(
-            &query("nonexistent.internal", 1),
-            (server.addresses.ipv4, DNS_PORT),
-        )
+        .send_to(&query("nonexistent.internal", 1), resolver.udp_address)
         .unwrap();
     let (length, _) = client.recv_from(&mut buffer).unwrap();
     let nonexistent_wire = buffer[..length].to_vec();
@@ -585,10 +583,7 @@ fn denied_remote_names_match_the_nonexistent_name_response() {
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .unwrap();
     local_client
-        .send_to(
-            &query("host-3.internal", 1),
-            (server.addresses.ipv4, DNS_PORT),
-        )
+        .send_to(&query("host-3.internal", 1), resolver.udp_address)
         .unwrap();
     let (local_length, _) = local_client.recv_from(&mut buffer).unwrap();
     let local_reply = Message::from_vec(&buffer[..local_length]).unwrap();
@@ -666,5 +661,62 @@ fn review_j78_ascii_punycode_labels_keep_resolving() {
             "{qname}"
         );
         assert_eq!(reply.answers.len(), 1, "{qname}");
+    }
+}
+
+/// Two resolvers for the same mesh address keep independently assigned sockets until shutdown.
+#[test]
+fn parallel_resolvers_keep_their_ephemeral_socket_reservations() {
+    let mut snapshot = config();
+    snapshot.addresses.ipv4 = Ipv4Addr::LOCALHOST;
+    let first = dns_support::TestResolver::bind(&snapshot).unwrap();
+    let second = dns_support::TestResolver::bind(&snapshot).unwrap();
+    assert_ne!(first.udp_address, second.udp_address);
+    assert_ne!(first.tcp_address, second.tcp_address);
+    let client = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    for resolver in [&first, &second] {
+        assert_eq!(
+            std::net::UdpSocket::bind(resolver.udp_address)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        assert_eq!(
+            std::net::TcpListener::bind(resolver.tcp_address)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+        client
+            .send_to(&query("laptop.internal", 1), resolver.udp_address)
+            .unwrap();
+        let mut buffer = [0; 512];
+        let (length, source) = client.recv_from(&mut buffer).unwrap();
+        assert_eq!(source, resolver.udp_address);
+        assert_eq!(
+            Message::from_vec(&buffer[..length]).unwrap().answers.len(),
+            1
+        );
+        let stream = std::net::TcpStream::connect(resolver.tcp_address).unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), resolver.tcp_address);
+    }
+}
+
+/// Supplied sockets cannot silently serve records belonging to a different mesh address.
+#[test]
+fn prebound_resolver_rejects_sockets_outside_the_snapshot_address() {
+    let mut snapshot = config();
+    snapshot.addresses.ipv4 = Ipv4Addr::LOCALHOST;
+    let other = Ipv4Addr::new(127, 0, 0, 2);
+    for (udp_address, tcp_address) in [(other, Ipv4Addr::LOCALHOST), (Ipv4Addr::LOCALHOST, other)] {
+        let socket = std::net::UdpSocket::bind((udp_address, 0)).unwrap();
+        let listener = std::net::TcpListener::bind((tcp_address, 0)).unwrap();
+        let error = Resolver::from_sockets(&snapshot, socket, listener)
+            .err()
+            .expect("both supplied sockets must belong to the snapshot address");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

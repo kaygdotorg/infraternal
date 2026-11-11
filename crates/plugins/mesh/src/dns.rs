@@ -664,7 +664,7 @@ fn run_tcp_worker(
 
 /// The mesh DNS server of one node.
 ///
-/// It listens on UDP and TCP port [`DNS_PORT`] of the node's mesh IPv4 address only, with separate
+/// By default it listens on UDP and TCP port [`DNS_PORT`] of the node's mesh IPv4 address, with separate
 /// `mesh-dns-udp` and `mesh-dns-tcp` workers. TCP clients have bounded connection state and share
 /// the UDP source-privacy rules. Queries from another source receive the same NXDOMAIN as an
 /// absent name (see [`response`]). Names can be replaced while it runs; each query sees a whole
@@ -689,6 +689,32 @@ impl Resolver {
     pub fn bind(config: &Config) -> io::Result<Self> {
         let records = Records::from_config(config)?;
         Self::bind_records(config.addresses.ipv4, records, false)
+    }
+
+    /// Serves the snapshot through already-bound UDP and TCP sockets, taking ownership of both.
+    ///
+    /// Callers may bind each protocol to port zero and read its assigned destination before
+    /// handing it over. Ports may differ; both sockets must use the snapshot's mesh IPv4 address.
+    /// No socket is closed and rebound, so a concurrent listener cannot steal a reserved port.
+    /// This constructor does not add the optional standard-port listeners.
+    ///
+    /// # Errors
+    /// Rejects invalid records or socket addresses that differ from the snapshot's address,
+    /// and reports failures configuring the listener or starting either worker.
+    pub fn from_sockets(
+        config: &Config,
+        socket: UdpSocket,
+        listener: TcpListener,
+    ) -> io::Result<Self> {
+        let records = Records::from_config(config)?;
+        let address = IpAddr::V4(config.addresses.ipv4);
+        if socket.local_addr()?.ip() != address || listener.local_addr()?.ip() != address {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DNS sockets must bind the configured mesh IPv4 address",
+            ));
+        }
+        Self::serve_sockets(records, socket, listener, None)
     }
 
     /// Starts serving one node snapshot and, on root Linux nodes, also claims port 53 when free.
@@ -740,7 +766,6 @@ impl Resolver {
     ) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::from((address, DNS_PORT)))?;
         let listener = TcpListener::bind(SocketAddr::from((address, DNS_PORT)))?;
-        listener.set_nonblocking(true)?;
         #[cfg(target_os = "linux")]
         let system_pair = if try_system_port {
             match (
@@ -762,6 +787,18 @@ impl Resolver {
             let _ = try_system_port;
             None::<(UdpSocket, TcpListener)>
         };
+        Self::serve_sockets(initial, socket, listener, system_pair)
+    }
+
+    /// Starts workers with continuous ownership of all bound sockets and joins them on shutdown.
+    fn serve_sockets(
+        initial: Records,
+        socket: UdpSocket,
+        listener: TcpListener,
+        system_pair: Option<(UdpSocket, TcpListener)>,
+    ) -> io::Result<Self> {
+        let address = initial.local_address;
+        listener.set_nonblocking(true)?;
         #[cfg(target_os = "linux")]
         let system_port = system_pair.is_some();
         let mut worker_sockets = vec![socket];
