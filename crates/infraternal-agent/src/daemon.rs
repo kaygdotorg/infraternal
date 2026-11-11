@@ -11,10 +11,14 @@
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //!
 //! D381 keeps four relay invariants: a repaint spends client credit before it
-//! is sent; a key-triggered repaint follows that key's `InputAck`, including
-//! when already-sent bulk bytes remain unreturned; dropping stalled output
-//! affects only its own stream; and key input cannot refill the finite repaint
-//! reserve. Keys may coalesce behind one in-flight capture.
+//! is sent, and raw output cannot spend the 64 KiB reserve; a key-triggered
+//! capture follows that key's `InputAck` and leaves one frame for its PTY echo,
+//! even when sent bulk bytes remain unreturned; dropping stalled output affects
+//! only its own stream; and key input cannot refill the finite repaint reserve.
+//! After the latest coalesced key is acknowledged, its capture waits one 8 ms
+//! terminal frame so the PTY program can render the echo. Keys may coalesce
+//! behind one in-flight capture, and the 250 ms starvation deadline remains
+//! independent of this short repaint grace.
 //! A key preempts only when bulk credit is exhausted or at least 16 KiB of
 //! output credit is in flight, so a small quiet write does not trigger a repaint.
 //! A closed shim or failed terminal task closes only its mux stream. A session
@@ -39,6 +43,46 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
+
+/// Give the PTY program one 120 Hz display frame to render an acknowledged key.
+const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Request one capture once its acknowledged input has had a frame to render.
+///
+/// The cumulative target coalesces key bursts. This common gate keeps credit
+/// returns and completed captures from bypassing the frame grace, and it spends
+/// no credit itself; the later `Snapshot` must still pass `repaint_reserved`.
+async fn request_key_repaint_if_ready(
+    session: &mut Option<Link>,
+    target: Option<u64>,
+    requested: &mut Option<u64>,
+    acknowledged: u64,
+    reserved_credit: u64,
+    ready: &mut bool,
+    finished_peer: bool,
+) -> io::Result<()> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    if finished_peer
+        || session.is_none()
+        || requested.is_some()
+        || target > acknowledged
+        || reserved_credit == 0
+        || !*ready
+    {
+        return Ok(());
+    }
+
+    session
+        .as_mut()
+        .ok_or_else(|| sessions::invalid("missing shim"))?
+        .send(&Shim::SnapshotRequest)
+        .await?;
+    *requested = Some(target);
+    *ready = false;
+    Ok(())
+}
 
 #[path = "session_commands.rs"]
 mod session_commands;
@@ -1699,6 +1743,8 @@ async fn terminal_run(
     // the one SnapshotRequest already sent to the shim, if any.
     let mut key_repaint_target: Option<u64> = None;
     let mut key_repaint_requested: Option<u64> = None;
+    let mut key_repaint_ready_at: Option<tokio::time::Instant> = None;
+    let mut key_repaint_ready = false;
     let mut finished_peer = false;
     // One state fence in flight bounds shim work even if probes are pipelined over the network.
     // It belongs to the data socket: parking that socket must clear its pending fence.
@@ -1814,16 +1860,19 @@ async fn terminal_run(
                         if let Some(requested) = key_repaint_requested.take() {
                             if key_repaint_target.is_some_and(|target| target <= requested) {
                                 key_repaint_target = None;
-                            } else if let Some(target) = key_repaint_target
-                                && acknowledged >= target
-                                && output.reserved_credit() > 0
-                            {
-                                session
-                                    .as_mut()
-                                    .ok_or_else(|| sessions::invalid("missing shim"))?
-                                    .send(&Shim::SnapshotRequest)
-                                    .await?;
-                                key_repaint_requested = Some(target);
+                                key_repaint_ready_at = None;
+                                key_repaint_ready = false;
+                            } else {
+                                request_key_repaint_if_ready(
+                                    &mut session,
+                                    key_repaint_target,
+                                    &mut key_repaint_requested,
+                                    acknowledged,
+                                    output.reserved_credit(),
+                                    &mut key_repaint_ready,
+                                    finished_peer,
+                                )
+                                .await?;
                             }
                         }
                     } else {
@@ -1900,20 +1949,16 @@ async fn terminal_run(
                         if session.is_none() && bytes > 0 {
                             output.retry_recovery();
                         }
-                        if !finished_peer
-                            && session.is_some()
-                            && key_repaint_requested.is_none()
-                            && let Some(target) = key_repaint_target
-                            && acknowledged >= target
-                            && output.reserved_credit() > 0
-                        {
-                            session
-                                .as_mut()
-                                .ok_or_else(|| sessions::invalid("missing shim"))?
-                                .send(&Shim::SnapshotRequest)
-                                .await?;
-                            key_repaint_requested = Some(target);
-                        }
+                        request_key_repaint_if_ready(
+                            &mut session,
+                            key_repaint_target,
+                            &mut key_repaint_requested,
+                            acknowledged,
+                            output.reserved_credit(),
+                            &mut key_repaint_ready,
+                            finished_peer,
+                        )
+                        .await?;
                         deadline = None;
                     }
                     _ if finished_peer => {}
@@ -1928,6 +1973,8 @@ async fn terminal_run(
                         deadline = None;
                         key_repaint_target = None;
                         key_repaint_requested = None;
+                        key_repaint_ready_at = None;
+                        key_repaint_ready = false;
                         if session.is_none() {
                             let Some(mut next) = relink(&path, id, stream, &tx, true).await? else { return Ok(()); };
                             let written = input_state(&mut next).await?;
@@ -2036,6 +2083,26 @@ async fn terminal_run(
                     }
                 }
             }
+            () = async {
+                if let Some(ready_at) = key_repaint_ready_at {
+                    tokio::time::sleep_until(ready_at).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                key_repaint_ready_at = None;
+                key_repaint_ready = true;
+                request_key_repaint_if_ready(
+                    &mut session,
+                    key_repaint_target,
+                    &mut key_repaint_requested,
+                    acknowledged,
+                    output.reserved_credit(),
+                    &mut key_repaint_ready,
+                    finished_peer,
+                )
+                .await?;
+            }
             () = async { if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => {
                 finished_peer = match session.as_ref() {
                     Some(peer) => peer.read_closed().await?,
@@ -2045,6 +2112,8 @@ async fn terminal_run(
                     output.expire(Instant::now()); session = None; probe = None; pending = None;
                     key_repaint_target = None;
                     key_repaint_requested = None;
+                    key_repaint_ready_at = None;
+                    key_repaint_ready = false;
                 }
                 deadline = None;
             }
@@ -2059,19 +2128,27 @@ async fn terminal_run(
                     frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
                     Shim::InputAck(seq) => {
                         emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
+                        let ack_advanced = seq > acknowledged;
                         acknowledged = acknowledged.max(seq);
                         if let Some(target) = key_repaint_target
-                            && key_repaint_requested.is_none()
+                            && key_repaint_requested.is_none_or(|requested| target > requested)
                             && seq >= target
-                            && output.reserved_credit() > 0
+                            && (ack_advanced || (!key_repaint_ready && key_repaint_ready_at.is_none()))
                         {
-                            session
-                                .as_mut()
-                                .ok_or_else(|| sessions::invalid("missing shim"))?
-                                .send(&Shim::SnapshotRequest)
-                                .await?;
-                            key_repaint_requested = Some(target);
+                            key_repaint_ready_at =
+                                Some(tokio::time::Instant::now() + KEY_REPAINT_GRACE);
+                            key_repaint_ready = false;
                         }
+                        request_key_repaint_if_ready(
+                            &mut session,
+                            key_repaint_target,
+                            &mut key_repaint_requested,
+                            acknowledged,
+                            output.reserved_credit(),
+                            &mut key_repaint_ready,
+                            finished_peer,
+                        )
+                        .await?;
                     }
                     Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
                         input_progress(&tx, stream, &mut acknowledged, written).await?;

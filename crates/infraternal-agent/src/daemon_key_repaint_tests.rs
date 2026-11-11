@@ -315,6 +315,61 @@ async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
     );
 }
 
+/// Give the PTY program one frame to render its response before the repaint captures the screen.
+#[tokio::test(start_paused = true)]
+async fn key_repaint_waits_a_frame_for_pty_echo_after_input_ack() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window(&mut fixture).await;
+    assert!(type_key_and_wait_for_ack(&mut fixture, 0).await);
+    tokio::task::yield_now().await;
+
+    let early = tokio::time::timeout(
+        KEY_REPAINT_GRACE.saturating_sub(Duration::from_millis(1)),
+        fixture.reader.read(&mut fixture.peer),
+    )
+    .await;
+    let requested_early = matches!(early, Ok(Ok(Shim::SnapshotRequest)));
+    let repaint = if requested_early {
+        None
+    } else {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Output(u64::from(BULK_CREDIT), b"echo:k".to_vec()),
+        )
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        // sleep: advance through the final millisecond of the PTY screen-update grace.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        let requested = matches!(
+            tokio::time::timeout(EVENT_GUARD, fixture.reader.read(&mut fixture.peer)).await,
+            Ok(Ok(Shim::SnapshotRequest))
+        );
+        if requested {
+            sessions::send(
+                &mut fixture.peer,
+                &Shim::Snapshot(u64::from(BULK_CREDIT) + 6, b"echo:k".to_vec()),
+            )
+            .await
+            .unwrap();
+            wait_for_repaint(&mut fixture).await
+        } else {
+            None
+        }
+    };
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        !requested_early,
+        "a key repaint must leave one PTY frame for the application's echo before capture"
+    );
+    assert_eq!(
+        repaint,
+        Some((u64::from(BULK_CREDIT) + 6, b"echo:k".to_vec()))
+    );
+}
+
 /// A key still preempts raw bytes that are in flight before the bulk window empties.
 #[tokio::test]
 async fn key_repaint_preempts_unreturned_bulk_before_window_is_empty() {
