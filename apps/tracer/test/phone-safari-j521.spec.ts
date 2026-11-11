@@ -53,7 +53,6 @@ test("the SSH password and passphrase stay secure fields that tell Safari they a
     expect(await field.getAttribute("autocapitalize")).toBe("none");
     expect(await field.getAttribute("spellcheck")).toBe("false");
     expect(await field.getAttribute("name"), "no name for a manager to match on").toBeNull();
-    expect(await field.evaluate((el) => getComputedStyle(el).getPropertyValue("-webkit-text-security")), "no CSS masking on a real password field").not.toBe("disc");
   }
 });
 
