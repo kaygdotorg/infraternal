@@ -13,6 +13,7 @@ use std::{
     process::{Command, Stdio},
 };
 const TABLE: &str = "infraternal_mesh";
+/// Provides a sandbox-owned nft executable for the mesh firewall's namespace tests.
 #[cfg(test)]
 #[path = "../tests/support/nft_fixture.rs"]
 mod nft_fixture;

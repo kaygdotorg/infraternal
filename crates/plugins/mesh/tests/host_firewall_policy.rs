@@ -21,6 +21,7 @@ use infraternal_plugin_mesh::host_firewall::{
     render, validate, validate_ssh_connection_on,
 };
 
+/// Supplies the private nft command and namespace setup used by these policy tests.
 #[path = "support/nft_fixture.rs"]
 mod nft_fixture;
 
