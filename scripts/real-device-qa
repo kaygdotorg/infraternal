@@ -11,6 +11,8 @@
 #   scripts/real-device-qa owner-setup              # first-run owner with a real Face ID passkey (fresh server only)
 #   scripts/real-device-qa add-host                 # Add host through the phone UI (fresh server only)
 #   scripts/real-device-qa check [--themes light,dark] [--phases "shell pill"] [--out DIR]
+#   scripts/real-device-qa mac-setup                # once: second QA server (stage2), host account 2, first-run owner in Mac Safari
+#   scripts/real-device-qa mac [--themes latte,mocha] [--out DIR]   # desktop Safari 1440 + phone-narrow DOM checks, signed in
 #   scripts/real-device-qa teardown                 # remove everything created on dev-02, stop the QA units
 #
 # Why a copy of the server: a browser cannot be signed in to an existing account on a second device (the account key
@@ -125,6 +127,56 @@ cmd_check() {
   echo "evidence: $out (screenshots, videos, qa-lines.txt per phase). Never commit it: attach it to the issue."
 }
 
+MAC="${QA_MAC:-lume@infraternal-macos-01-std.vpn.kayg.org}"
+QA2_URL="${QA2_URL:-https://mesh-staging.vpn.kayg.org:9000}"
+mac() { timeout "${QA_TIMEOUT:-1200}" ssh -o ConnectTimeout=20 "$MAC" "$@"; }
+
+# Ships the desktop-Safari driver files to the Mac VM (they live in /tmp/j509 there; secrets are 0600 files in it).
+mac_ship() {
+  mac 'mkdir -p /tmp/j509/out && chmod 700 /tmp/j509'
+  for f in real-device-qa-mac-flow.py:real-device-qa-mac-flow.py real-device-qa-mac-wd.py:wd.py real-device-qa-sw-authenticator.js:sw-authenticator.js; do
+    mac "cat > /tmp/j509/${f#*:}" < "$HERE/${f%%:*}"
+  done
+}
+
+# Runs one flow command on the Mac as lume, holding the Mac lock and stopping safaridriver by PID (Safari allows one
+# automation session, and a driver left running blocks every other job).
+mac_flow() {
+  mac "lockf -k -t 900 /tmp/mac-bench.lock bash -c '/usr/bin/safaridriver -p 4444 >/tmp/j509/sd.log 2>&1 & DRV=\$!; for i in \$(seq 1 20); do curl -s http://127.0.0.1:4444/status | grep -q ready && break; sleep 1; done; cd /tmp/j509 && python3 real-device-qa-mac-flow.py $*; kill \$DRV; sleep 1; pgrep -x safaridriver >/dev/null && echo DRIVER-STILL-RUNNING; true'"
+}
+
+cmd_mac_setup() {
+  # Second QA server for the Mac's own owner (see stage/install-qa2-instance.sh), the second throwaway host login on dev-02,
+  # then the owner is created in real Safari with the in-page software authenticator.
+  scp -q "$RUNNER_SRC/stage/install-qa2-instance.sh" "$STAGING:/tmp/install-qa2-instance.sh"
+  ssh "$STAGING" 'sudo bash /tmp/install-qa2-instance.sh'
+  local pw; pw="$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)"
+  [ "${#pw}" -eq 24 ] || die "could not make a password"
+  ssh "$DEV02" 'id qa-device2 >/dev/null 2>&1 || sudo -n useradd -m -s /bin/bash -c "device QA throwaway 2" qa-device2; sudo -n loginctl enable-linger qa-device2'
+  printf 'qa-device2:%s\n' "$pw" | ssh "$DEV02" 'sudo -n chpasswd'
+  ssh "$DEV02" "sudo -n systemctl stop qa-sshd 2>/dev/null; sudo -n systemd-run --unit=qa-sshd --description='device-QA sshd (temporary)' /usr/sbin/sshd -D -e -p $HOST_PORT -o AllowUsers='qa-device qa-device2' -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no"
+  mac_ship
+  printf '%s\n' "$pw" | mac 'umask 077; cat > /tmp/j509/host-password.txt'
+  ssh "$STAGING" 'sudo /opt/qa/current/infraternal server setup-token --data /var/lib/infraternal-qa2' 2>/dev/null | mac 'umask 077; cat > /tmp/j509/setup-token.txt'
+  mac_flow "$QA2_URL" /tmp/j509/out owner-setup
+}
+
+cmd_mac() {
+  local themes="latte,mocha" out="" ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  while [ $# -gt 0 ]; do case "$1" in --themes) themes="$2"; shift 2;; --out) out="$2"; shift 2;; *) die "unknown option $1";; esac; done
+  out="${out:-$HOME/.cache/codex-scratch/real-device-qa/mac-$ts}"; mkdir -p "$out"
+  mac_ship
+  for theme in ${themes//,/ }; do
+    mkdir -p "$out/$theme"
+    for flow in all extras; do
+      mac_flow "$QA2_URL" /tmp/j509/out $flow $theme | tee -a "$out/$theme/log.txt"
+    done
+    mac 'tar -C /tmp/j509/out -cf - .' | tar -C "$out/$theme" -xf - 2>/dev/null || true
+  done
+  grep -h -E 'MAC_RESULT' "$out"/*/log.txt | sort | uniq -c | sort -rn | head -40
+  echo "evidence: $out (log.txt = every MAC_RESULT and MAC_METRIC line; screenshots). Attach it to the issue; never commit it."
+}
+
 cmd_teardown() {
   ssh "$DEV02" 'sudo -n systemctl stop qa-sshd 2>/dev/null; sudo -n userdel -r qa-device 2>/dev/null; sudo -n rm -f /usr/local/share/ca-certificates/qa-ca.crt; sudo -n update-ca-certificates --fresh >/dev/null 2>&1; echo dev-02 cleaned' || true
   ssh "$STAGING" 'sudo systemctl stop infraternal-qa-server infraternal-qa-proxy; echo QA units stopped (data kept in /var/lib/infraternal-qa)' || true
@@ -137,6 +189,8 @@ case "${1:-}" in
   owner-setup) cmd_owner_setup;;
   add-host) cmd_add_host;;
   check) shift; cmd_check "$@";;
+  mac-setup) cmd_mac_setup;;
+  mac) shift; cmd_mac "$@";;
   teardown) cmd_teardown;;
   *) sed -n 2,22p "$0"; exit 2;;
 esac

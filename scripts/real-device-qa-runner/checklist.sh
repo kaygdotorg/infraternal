@@ -31,8 +31,12 @@ run() { wanted "$1" || return 0; ./run.sh run "$theme-$1" "$2" || true; }
 # 1. Sign in. With a session already stored this only proves the app opens signed in; without one it does the passkey ceremony.
 run signin "$fresh|tapif~Continue with passkey~5|tapsbif~Use Passkey~6|face|wait~6|shot~console|exists~Console~console-visible~contains"
 
+# 1b. Unlock host connections. After a server restart (or a new session) the host CA is locked until one passkey tap, and a
+# locked host is offline: its shell opens but takes no input. The palette row exists only while the CA is locked.
+run unlock "$fresh|xy~0.093~0.85|wait~3|type~Unlock host connections|wait~3|return|wait~4|tapsbif~Use Passkey~8|face|wait~10|shot~unlocked"
+
 # 2 and 3. Open a shell, type, `exit`: does the window close, and does every window fit the 402 pt viewport?
-run shell "$fresh|xy~$NEW_SHELL|wait~8|shot~shell-opened|frames~region~regions-before|xy~0.5~0.3|wait~2|type~echo qa-ok|return|wait~2|shot~shell-typed|type~exit|return|wait~5|shot~after-exit|absent~shell ended~exit-closes-window|frames~shell, region~win-after-exit"
+run shell "$fresh|tapif~New shell~10|wait~6|xy~0.5~0.3|wait~2|shot~shell-opened|frames~region~regions-before|type~echo qa-ok|return|wait~2|shot~shell-typed|type~exit|return|wait~5|shot~after-exit|absent~shell ended~exit-closes-window|frames~shell, region~win-after-exit"
 
 # 4. The machine pill: both tabs, the facts, and whether a scrolled panel stays where it was for 35 s.
 run pill "$fresh|xy~$PILL|wait~3|shot~pill-machine|labels|frames~Kernel~kernel-y0|swipe~0.5~0.72~0.5~0.3~1.2|wait~1|shot~pill-scrolled-now|frames~Kernel~kernel-y1|wait~35|frames~Kernel~kernel-y2|shot~pill-scrolled-35s|xy~$CONNECTION_TAB|wait~2|shot~pill-connection"

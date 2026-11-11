@@ -144,19 +144,17 @@ def check_theme(theme_dir: Path, facts: dict):
         else:
             add("2 shell + exit", "PASS" if closes == "PASS" else "FAIL", evidence)
 
-    # 3 window fits the viewport
-    wide = [f for name in ("regions-before", "win-after-exit") for f in frames(sh, name)
-            if f["label"].lower().find("shell") >= 0 or f["label"].lower().find("terminal") >= 0]
-    wide = [f for f in wide if "_region" in f["label"] or "region" in f["label"]]
-    own = [f for f in wide if re.search(r"\d+\.\d+\.\d+\.\d+|shell|terminal", f["label"], re.I)]
-    overflow = [f for f in own if f["x"] >= -0.5 and f["x"] < f["screen"] and f["w"] > f["screen"] + 0.5 and f["w"] < 3 * f["screen"]]
-    if not own:
-        add("3 window fits viewport", "REVIEW", "no window frame was measured")
-    elif overflow:
-        worst = max(overflow, key=lambda f: f["w"])
-        add("3 window fits viewport", "FAIL", f"window `{worst['label']}` is {worst['w']:.0f} pt wide in a {worst['screen']:.0f} pt viewport (rule: width <= viewport)")
+    # 3 window fits the viewport. The accessibility frame of a window region can read wider than the screen while the card
+    # itself ends at the screen edge (seen on 2026-11-11: region 449 pt, card visibly 402 pt), so this row never says FAIL
+    # from frames alone: it reports them and sends the verdict to the screenshots and to the DOM measurement on Mac Safari.
+    wide = [f for name in ("regions-before", "win-after-exit") for f in frames(sh, name) if "shell" in f["label"].lower()]
+    over = [f for f in wide if f["x"] >= -0.5 and f["w"] > f["screen"] + 0.5 and f["w"] < 3 * f["screen"]]
+    if not wide:
+        add("3 window fits viewport", "REVIEW", "no window frame was measured; look at the shell screenshots")
+    elif over:
+        add("3 window fits viewport", "REVIEW", f"accessibility region `{over[0]['label']}` reads {over[0]['w']:.0f} pt in a {over[0]['screen']:.0f} pt viewport; check in the shell screenshots that the card ends at the screen edge, and use the Mac Safari DOM numbers as the verdict")
     else:
-        add("3 window fits viewport", "PASS", f"{len(own)} window frame(s) all <= {own[0]['screen']:.0f} pt")
+        add("3 window fits viewport", "PASS", f"{len(wide)} window frame(s) all <= {wide[0]['screen']:.0f} pt")
 
     # 4 machine pill
     pl = phase_lines(theme_dir, "pill")
