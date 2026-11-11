@@ -57,6 +57,8 @@ pub struct Store {
     rotation_path: PathBuf,
     #[cfg(target_os = "linux")]
     engine_path: PathBuf,
+    /// The non-secret UDP port selected for the next automatic node start.
+    listen_port_path: PathBuf,
     key_path: PathBuf,
     // Authority epoch and reset marker live beside the public snapshot, which keeps the shape
     // the previous release parses (D295, #382 P2). See [`AuthorityRecord`].
@@ -137,6 +139,7 @@ impl Store {
         let rotation_path = parent.join("mesh-key-rotation.bin");
         #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
+        let listen_port_path = parent.join("mesh-listen-port.json");
         let key_path = parent.join("mesh-private-key");
         let authority_path = parent.join(AUTHORITY_FILE);
         sweep_private_temporaries(&key_path)?;
@@ -169,6 +172,7 @@ impl Store {
                 rotation_path,
                 #[cfg(target_os = "linux")]
                 engine_path,
+                listen_port_path,
                 key_path,
                 authority_path,
                 route_body: Mutex::new(route_body),
@@ -203,6 +207,7 @@ impl Store {
             route_path: parent.join("mesh-routes.json"),
             interface_path: parent.join("mesh-interface.json"),
             rotation_path,
+            listen_port_path: parent.join("mesh-listen-port.json"),
             key_path,
             authority_path: parent.join(AUTHORITY_FILE),
             route_body: Mutex::new(route_body),
@@ -511,6 +516,36 @@ impl Store {
     pub(crate) fn recorded_engine(&self) -> io::Result<Option<crate::gotatun_node::EngineKind>> {
         read_public(&self.engine_path)
     }
+
+    /// Remember the automatic listener choice outside the public peer snapshot.
+    ///
+    /// The record keeps the default port stable and lets a node reuse an ephemeral fallback
+    /// after the default was occupied. Explicit environment overrides still win on each start;
+    /// callers record the standard port after a successful override so removing it resets to the
+    /// product default.
+    /// # Errors
+    /// Rejects zero and the reserved kernel `WireGuard` port, or reports an unsafe state file.
+    pub(crate) fn record_listen_port(&self, port: u16) -> io::Result<()> {
+        if port == 0 || port == 51_820 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        write_public(
+            &self.listen_port_path,
+            &serde_json::to_vec(&port).map_err(io::Error::other)?,
+        )
+    }
+
+    /// Read the saved automatic listener choice, if this node has started before.
+    /// # Errors
+    /// Rejects malformed or reserved values and unsafe state-file metadata.
+    pub(crate) fn recorded_listen_port(&self) -> io::Result<Option<u16>> {
+        let port = read_public(&self.listen_port_path)?;
+        if port.is_some_and(|port| port == 0 || port == 51_820) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(port)
+    }
+
     /// Create a durable private key file without replacing an existing identity.
     /// The bytes never enter the public state snapshot or a log.
     /// # Errors
@@ -1951,6 +1986,44 @@ pub(crate) mod tests {
                 .any(|window| window == b"gotatun")
         );
     }
+
+    /// A default listener choice survives a new Store without entering the public peer snapshot.
+    #[test]
+    fn selected_mesh_listener_port_is_durable_and_private() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+
+        assert_eq!(store.recorded_listen_port().expect("no saved port"), None);
+        store
+            .record_listen_port(10_254)
+            .expect("save listener port");
+        drop(store);
+
+        let (store, state) = Store::open(&directory.0).expect("reopen listener state");
+        assert_eq!(
+            store.recorded_listen_port().expect("saved port"),
+            Some(10_254)
+        );
+        assert_eq!(
+            state.config, None,
+            "the listener port stays outside the peer snapshot"
+        );
+        assert_eq!(
+            fs::metadata(&store.listen_port_path)
+                .expect("listener metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store
+            .record_listen_port(49_123)
+            .expect("replace fallback port");
+        assert_eq!(
+            store.recorded_listen_port().expect("updated port"),
+            Some(49_123)
+        );
+    }
+
     /// Records owned routes separately while preserving the legacy accepted-state bytes.
     #[test]
     fn route_recording_preserves_the_legacy_accepted_state_format() {

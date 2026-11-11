@@ -1194,7 +1194,7 @@ impl PendingWorker {
     fn begin(
         open: OpenUtun,
         private_key: gotatun::x25519::StaticSecret,
-        requested_port: u16,
+        requested_port: crate::listen_port::Request,
         config: Option<Config>,
         routes: BTreeSet<IpAddr>,
         budgets: PathBudgets,
@@ -1216,27 +1216,13 @@ impl PendingWorker {
                 };
                 let initialized = runtime.block_on(async move {
                     let utun = MacUtun::from_open(open)?;
-                    let mut factory = UdpSocketFactory::default();
-                    let params = UdpTransportFactoryParams {
-                        addr: None,
-                        port: requested_port,
-                    };
-                    let (send, receive) = factory.bind(&params).await?;
-                    let port = send.local_addr()?.port();
+                    let (factory, port) = bind_udp(requested_port).await?;
                     let info = RuntimeInfo {
                         interface: utun.name().to_owned(),
                         port,
                         routes,
                     };
-                    Ok((
-                        utun,
-                        BoundUdpFactory {
-                            send,
-                            receive,
-                            port,
-                        },
-                        info,
-                    ))
+                    Ok((utun, factory, info))
                 });
                 let (utun, factory, info) = match initialized {
                     Ok(initialized) => initialized,
@@ -1381,6 +1367,62 @@ impl PendingWorker {
             self.info.clone(),
         ))
     }
+}
+
+/// Bind the requested Mac UDP port, using one automatic fallback when that listener is occupied.
+///
+/// The bound socket remains owned by the worker, and the returned port is persisted and advertised
+/// so coordinator peers target the actual listener. An explicit operator override stays exact.
+/// # Errors
+/// Returns socket errors, rejects the reserved kernel `WireGuard` port, or reports allocation failure.
+async fn bind_udp(request: crate::listen_port::Request) -> io::Result<(BoundUdpFactory, u16)> {
+    if request.port == 51_820 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut factory = UdpSocketFactory::default();
+    if request.port != 0 {
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port: request.port,
+        };
+        match factory.bind(&params).await {
+            Ok((send, receive)) => {
+                let port = send.local_addr()?.port();
+                if port == 0 || port == 51_820 {
+                    return Err(io::ErrorKind::AddrInUse.into());
+                }
+                return Ok((
+                    BoundUdpFactory {
+                        send,
+                        receive,
+                        port,
+                    },
+                    port,
+                ));
+            }
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+    for _ in 0..16 {
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port: 0,
+        };
+        let (send, receive) = factory.bind(&params).await?;
+        let port = send.local_addr()?.port();
+        if port != 0 && port != 51_820 {
+            return Ok((
+                BoundUdpFactory {
+                    send,
+                    receive,
+                    port,
+                },
+                port,
+            ));
+        }
+    }
+    Err(io::ErrorKind::AddrInUse.into())
 }
 
 impl Drop for PendingWorker {
@@ -2152,6 +2194,15 @@ impl Node {
         self.enabled && self.identity.is_some() && self.worker.is_some()
     }
 
+    /// Return the active UDP listener port advertised by this node's mesh identity.
+    ///
+    /// `None` means the worker has not bound a socket. The value is the actual port after an
+    /// automatic fallback, so `mesh status` reports the endpoint peers should reach.
+    #[must_use]
+    pub fn listen_port(&self) -> Option<u16> {
+        self.identity.as_ref().map(|identity| identity.port)
+    }
+
     /// Whether a retired authority still needs a complete snapshot from the enrolled server.
     #[must_use]
     pub fn awaiting_server_snapshot(&self) -> bool {
@@ -2189,6 +2240,8 @@ impl Node {
             .and_then(Path::parent)
             .ok_or(io::ErrorKind::NotFound)?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let saved_port = store.recorded_listen_port()?;
+        let listen_port = crate::listen_port::from_environment(saved_port)?;
         let (private_key, public_key) = if let Some(rotation) = store.rotation_secret()? {
             let (journal_key, journal_public) = recover_macos_rotation_key(store, &rotation)?;
             let (secret, keychain_public) = crate::macos_key::load_or_create(state)?;
@@ -2238,12 +2291,18 @@ impl Node {
         let startup = PendingWorker::begin(
             open,
             private_key,
-            self.port,
+            listen_port,
             self.config.clone(),
             desired_routes.clone(),
             PathBudgets::probe(self.config.as_ref()),
         )?;
         let info = startup.info().clone();
+        let saved_port = if listen_port.allow_fallback {
+            info.port
+        } else {
+            crate::listen_port::DEFAULT_PORT
+        };
+        store.record_listen_port(saved_port)?;
         self.interface = Some(info.interface.clone());
         self.port = info.port;
         self.routes = desired_routes.clone();

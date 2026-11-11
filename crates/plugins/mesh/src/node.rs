@@ -1425,6 +1425,14 @@ impl Node {
     pub fn active(&self) -> bool {
         self.identity.is_some()
     }
+    /// Return the active UDP listener port advertised by this node's mesh identity.
+    ///
+    /// `None` means the data plane is stopped or has not bound a socket yet. The value is the
+    /// actual port after automatic fallback, so `mesh status` can report what peers should reach.
+    #[must_use]
+    pub fn listen_port(&self) -> Option<u16> {
+        self.identity.as_ref().map(|identity| identity.port)
+    }
     /// Whether a retired authority still needs a complete snapshot from the enrolled server.
     #[must_use]
     pub fn awaiting_server_snapshot(&self) -> bool {
@@ -1784,6 +1792,13 @@ impl Node {
             self.ensure_route_repair()?;
             return Ok(identity);
         }
+        let saved_port = self
+            .store
+            .as_ref()
+            .map(crate::node_state::Store::recorded_listen_port)
+            .transpose()?
+            .flatten();
+        let listen_port = crate::listen_port::from_environment(saved_port)?;
         if self.engine_kind == EngineKind::GotaTun
             && let Some(store) = &self.store
         {
@@ -1813,7 +1828,17 @@ impl Node {
                 {
                     hook();
                 }
-                if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                let configure = Device::configure(created, public_key, &key, listen_port.port);
+                let configure = match configure {
+                    Err(error)
+                        if listen_port.allow_fallback
+                            && error.kind() == io::ErrorKind::AddrInUse =>
+                    {
+                        Device::configure(created, public_key, &key, 0)
+                    }
+                    result => result,
+                };
+                if let Err(error) = configure {
                     // Delete exactly the link this call created: `down` proves links by the
                     // shared name, which may no longer lead to ours (#260 J242).
                     let _ = Device::delete_ifindex(created);
@@ -1824,6 +1849,14 @@ impl Node {
                     let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    if let Some(store) = &self.store {
+                        let saved = if listen_port.allow_fallback {
+                            port
+                        } else {
+                            crate::listen_port::DEFAULT_PORT
+                        };
+                        store.record_listen_port(saved)?;
                     }
                     let client = Client::new()?;
                     let route_repair =
@@ -1864,7 +1897,7 @@ impl Node {
                 let engine = Engine::start(
                     key.gotatun_secret()?,
                     public_key,
-                    0,
+                    listen_port,
                     None,
                     adopt,
                     route_endpoint_updater,
@@ -1878,6 +1911,18 @@ impl Node {
                     let mut engine = engine;
                     let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
+                }
+                if let Some(store) = &self.store {
+                    let saved = if listen_port.allow_fallback {
+                        port
+                    } else {
+                        crate::listen_port::DEFAULT_PORT
+                    };
+                    if let Err(error) = store.record_listen_port(saved) {
+                        let mut engine = engine;
+                        let _ = engine.stop();
+                        return Err(error);
+                    }
                 }
                 let route_repair =
                     match RouteRepairWorker::start(Arc::clone(&self.peer_route_state)) {

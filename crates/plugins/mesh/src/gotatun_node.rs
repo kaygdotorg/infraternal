@@ -33,6 +33,7 @@ use tokio::{
     time::Instant,
 };
 
+use crate::listen_port::Request as ListenPortRequest;
 use crate::{dataplane::Config, gotatun_tun::LinuxTun, policy::model::PublicKey};
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, LinuxPacketIo, LinuxPacketIo)>;
@@ -303,7 +304,7 @@ impl Engine {
     pub(crate) fn start(
         private_key: StaticSecret,
         local_public_key: PublicKey,
-        requested_port: u16,
+        requested_port: ListenPortRequest,
         config: Option<Config>,
         adopt: Option<u32>,
         route_endpoint_updater: RouteEndpointUpdater,
@@ -535,7 +536,7 @@ struct Started {
 async fn initialize(
     private_key: StaticSecret,
     local_public_key: PublicKey,
-    requested_port: u16,
+    requested_port: ListenPortRequest,
     config: Option<&Config>,
     refused: Arc<AtomicU64>,
     thp_disabled: bool,
@@ -1186,22 +1187,53 @@ async fn build_device(
 /// used only while packets queue.
 const UDP_BUFFER_BYTES: usize = 7 * 1024 * 1024;
 
-/// Bind the engine's underlay UDP socket on `requested_port` (0 lets the kernel pick) and return
-/// it with the port it actually got.
+/// Bind the requested port, falling back to a stable ephemeral choice only for automatic requests.
 ///
-/// Port 51820 stays free for the kernel engine, so a kernel pick that lands on it is retried, up
-/// to 16 times. Every bound socket sends IPv4 with Don't Fragment clear (#483).
+/// A fallback socket remains bound for the life of the engine, and its actual port is returned
+/// for identity publication and durable restart state. Explicit operator ports fail on collision.
+/// Every bound socket sends IPv4 with Don't Fragment clear (#483).
 /// # Errors
-/// Returns the socket error from binding, or `AddrInUse` when no usable port came back.
-async fn bind_udp(requested_port: u16) -> io::Result<(BoundUdpFactory, u16)> {
+/// Returns socket errors, rejects the reserved port, or reports bounded ephemeral allocation failure.
+async fn bind_udp(request: ListenPortRequest) -> io::Result<(BoundUdpFactory, u16)> {
+    if request.port == 51_820 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     let mut factory = UdpSocketFactory {
         recv_buffer_size: Some(UDP_BUFFER_BYTES),
         send_buffer_size: Some(UDP_BUFFER_BYTES),
     };
+    if request.port != 0 {
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port: request.port,
+            fwmark: None,
+        };
+        match factory.bind(&params).await {
+            Ok((send, receive)) => {
+                // Routers may fragment our IPv4 packets, as with kernel WireGuard (#483 PMTU black hole).
+                #[cfg(target_os = "linux")]
+                infraternal_linux_tun::allow_ipv4_fragmentation(&send)?;
+                let port = send.local_addr()?.port();
+                if port == 0 || port == 51_820 {
+                    return Err(io::ErrorKind::AddrInUse.into());
+                }
+                return Ok((
+                    BoundUdpFactory {
+                        send,
+                        receive,
+                        port,
+                    },
+                    port,
+                ));
+            }
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
     for _ in 0..16 {
         let params = UdpTransportFactoryParams {
             addr: None,
-            port: requested_port,
+            port: 0,
             fwmark: None,
         };
         let (send, receive) = factory.bind(&params).await?;
@@ -1304,6 +1336,8 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
         let mut current =
             WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
         current.endpoint = peer.endpoint;
+        // The first due keepalive initiates a handshake after endpoint discovery,
+        // before user traffic exists.
         current.keepalive = Some(25);
         return Ok(vec![current]);
     };
@@ -1328,6 +1362,8 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
         &mut current_peer
     };
     active.endpoint = peer.endpoint;
+    // Both peers initiate after learning the endpoint to open conntrack state
+    // through strict input firewalls.
     active.keepalive = Some(25);
     Ok(vec![previous_peer, current_peer])
 }
@@ -1359,6 +1395,7 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
 mod tests {
     #![allow(clippy::expect_used)]
     use super::{EngineKind, peers_for_config};
+    use crate::listen_port::Request;
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
         policy::{
@@ -1400,7 +1437,12 @@ mod tests {
     #[tokio::test]
     async fn engine_udp_socket_requests_the_large_buffers() {
         use nix::sys::socket::{getsockopt, setsockopt, sockopt};
-        let (factory, _) = super::bind_udp(0).await.expect("bound engine socket");
+        let (factory, _) = super::bind_udp(Request {
+            port: 0,
+            allow_fallback: true,
+        })
+        .await
+        .expect("bound engine socket");
         let reference = std::net::UdpSocket::bind("127.0.0.1:0").expect("reference socket");
         setsockopt(&reference, sockopt::RcvBuf, &super::UDP_BUFFER_BYTES).expect("receive request");
         setsockopt(&reference, sockopt::SndBuf, &super::UDP_BUFFER_BYTES).expect("send request");
@@ -1416,6 +1458,44 @@ mod tests {
             engine.0 >= requested.0 && engine.1 >= requested.1,
             "engine buffers {engine:?} are below an explicit request {requested:?}"
         );
+    }
+
+    /// An automatic listener falls back when its preferred UDP port is held; an explicit choice fails.
+    #[tokio::test]
+    async fn occupied_listener_falls_back_only_for_automatic_selection() {
+        let occupied = std::net::UdpSocket::bind("0.0.0.0:0").expect("reserve test port");
+        let preferred = occupied.local_addr().expect("reserved port").port();
+        assert_ne!(
+            preferred, 51_820,
+            "the fallback test does not use the reserved port"
+        );
+
+        let (factory, actual) = super::bind_udp(Request {
+            port: preferred,
+            allow_fallback: true,
+        })
+        .await
+        .expect("automatic listener falls back");
+        assert_ne!(actual, preferred, "the occupied preference was not reused");
+        assert_eq!(
+            factory.port, actual,
+            "the reported port matches the bound socket"
+        );
+        assert_eq!(
+            factory.send.local_addr().expect("bound listener").port(),
+            actual
+        );
+        drop(factory);
+
+        let Err(error) = super::bind_udp(Request {
+            port: preferred,
+            allow_fallback: false,
+        })
+        .await
+        else {
+            panic!("an explicit occupied port unexpectedly succeeded")
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
     }
 
     #[test]
@@ -1495,7 +1575,12 @@ mod tests {
             crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
                 .expect("TUN stand-in registers"),
         );
-        let (factory, port) = bind_udp(0).await.expect("engine socket");
+        let (factory, port) = bind_udp(Request {
+            port: 0,
+            allow_fallback: true,
+        })
+        .await
+        .expect("engine socket");
         let private_key = StaticSecret::from([7; 32]);
         let config = one_peer_config(None);
         let peers = peers_for_config(&config).expect("peers");

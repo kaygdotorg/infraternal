@@ -59,6 +59,14 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         let address: std::net::Ipv6Addr = address.parse().map_err(|_| PluginError::Rejected)?;
         rows.push(("Address", address.to_string()));
     }
+    if let Some(port) = value.get("udp_port").filter(|port| !port.is_null()) {
+        let port = port
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port != 0)
+            .ok_or(PluginError::Rejected)?;
+        rows.push(("UDP listen port", port.to_string()));
+    }
     if let Some(policy) = value["default_policy"].as_str() {
         rows.push((
             "Access",
@@ -494,6 +502,26 @@ mod tests {
             "{shown}"
         );
     }
+
+    /// Human status includes the listener selected after a default-port collision.
+    #[test]
+    fn status_reports_the_udp_listener_port() {
+        let shown = status(
+            serde_json::json!({"state":"On","peer_count":0,"udp_port":49123}),
+            100,
+        )
+        .expect("listener status");
+        assert!(shown.body.contains("49123"), "{}", shown.body);
+        assert!(shown.body.contains("UDP listen port"), "{}", shown.body);
+        assert!(
+            status(
+                serde_json::json!({"state":"On","peer_count":0,"udp_port":0}),
+                100,
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn legacy_status_remains_readable_and_invalid_link_is_refused() {
         assert!(status(serde_json::json!({"state":"On","peer_count":0}), 80).is_ok());

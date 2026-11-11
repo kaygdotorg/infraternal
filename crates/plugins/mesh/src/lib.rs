@@ -19,6 +19,9 @@ pub use socket::{MeshPlugin, parse_subscription};
 /// Public-only configuration shared by the coordinator and node component.
 pub mod dataplane;
 
+/// Chooses the stable mesh UDP listener and its configured fallback behavior.
+mod listen_port;
+
 pub mod configuration;
 
 pub mod access_updates;
