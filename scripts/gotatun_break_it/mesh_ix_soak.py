@@ -209,6 +209,51 @@ class PipelineQueueClock:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PipelineLockEvent:
+    """One ordered-delivery lock event observed while tailing an infraternal agent log."""
+
+    timestamp_ns: int
+    side: str
+    event: str
+    lane: str
+    first_slot: int
+
+
+class PipelineLockClock:
+    """Timestamp lock events that do not yet include GotaTun's monotonic field."""
+
+    _PATTERN = re.compile(
+        r"pipeline(?:\s+mono_ns=\d+)? stage=ordered_delivery_lock_"
+        r"(?P<event>wait|acquired)\b(?P<fields>.*)"
+    )
+
+    def __init__(self, side: str):
+        """Create a lock-event reader for the app node labelled `a` or `b`."""
+        if side not in {"a", "b"}:
+            raise ValueError("pipeline side must be 'a' or 'b'")
+        self.side = side
+
+    def observe(self, line: str, *, observed_ns: int) -> PipelineLockEvent | None:
+        """Use host monotonic observation time for an untimestamped lock-stage line."""
+        if observed_ns < 0:
+            raise ValueError("observed monotonic timestamp must be non-negative")
+        match = self._PATTERN.search(line)
+        if match is None:
+            return None
+        lane = re.search(r"\blane=(\S+)", match.group("fields"))
+        first_slot = re.search(r"\bfirst_slot=(\d+)", match.group("fields"))
+        if lane is None or first_slot is None:
+            return None
+        return PipelineLockEvent(
+            timestamp_ns=observed_ns,
+            side=self.side,
+            event=match.group("event"),
+            lane=lane.group(1),
+            first_slot=int(first_slot.group(1)),
+        )
+
+
 class PipelineQueueAggregator:
     """Keep queue peaks in short host-monotonic buckets instead of one row per packet."""
 
@@ -218,6 +263,8 @@ class PipelineQueueAggregator:
             raise ValueError("pipeline queue bucket must be positive")
         self.bucket_ns = bucket_ns
         self._buckets: dict[int, dict[str, int]] = {}
+        self._pending_lock_waits: dict[tuple[str, str, int], int] = {}
+        self._pending_lock_waiters = {"a": 0, "b": 0}
 
     def record(self, sample: PipelineQueueSample) -> None:
         """Add one queue-depth event to its host-monotonic bucket."""
@@ -232,6 +279,47 @@ class PipelineQueueAggregator:
         )
         event_name = f"{sample.side}_crypto_queue_events"
         counters[event_name] = counters.get(event_name, 0) + 1
+
+    def record_lock_event(self, sample: PipelineLockEvent) -> None:
+        """Count a lock wait or acquisition and retain unmatched waiters across buckets."""
+        if (
+            sample.side not in {"a", "b"}
+            or sample.timestamp_ns < 0
+            or sample.event not in {"wait", "acquired"}
+            or sample.first_slot < 0
+            or not sample.lane
+        ):
+            raise ValueError("pipeline lock sample has invalid event identity or time")
+        started_ns = sample.timestamp_ns // self.bucket_ns * self.bucket_ns
+        counters = self._buckets.setdefault(started_ns, {})
+        event_name = f"{sample.side}_ordered_delivery_lock_{sample.event}_events"
+        counters[event_name] = counters.get(event_name, 0) + 1
+        key = (sample.side, sample.lane, sample.first_slot)
+        pending = self._pending_lock_waits.get(key, 0)
+        if sample.event == "wait":
+            self._pending_lock_waits[key] = pending + 1
+            self._pending_lock_waiters[sample.side] += 1
+        elif pending > 1:
+            self._pending_lock_waits[key] = pending - 1
+            self._pending_lock_waiters[sample.side] -= 1
+        elif pending == 1:
+            del self._pending_lock_waits[key]
+            self._pending_lock_waiters[sample.side] -= 1
+        else:
+            unmatched_name = f"{sample.side}_ordered_delivery_lock_unmatched_acquired_events"
+            counters[unmatched_name] = counters.get(unmatched_name, 0) + 1
+        self.sample_lock_waiters(sample.timestamp_ns, side=sample.side)
+
+    def sample_lock_waiters(self, timestamp_ns: int, *, side: str) -> None:
+        """Sample the pending lock-wait gauge while the log tail is polled."""
+        if timestamp_ns < 0 or side not in {"a", "b"}:
+            raise ValueError("pipeline lock sample has invalid side or time")
+        started_ns = timestamp_ns // self.bucket_ns * self.bucket_ns
+        counters = self._buckets.setdefault(started_ns, {})
+        name = f"{side}_ordered_delivery_lock_waiters"
+        value = self._pending_lock_waiters[side]
+        counters[name] = value
+        counters[f"{name}_max"] = max(counters.get(f"{name}_max", value), value)
 
     def drain_before(self, before_ns: int) -> list[dict[str, Any]]:
         """Return complete buckets whose end is at or before `before_ns`."""
@@ -279,6 +367,7 @@ def main() -> None:
     pipeline_output = arguments.pipeline_counters.open("w", encoding="utf-8")
     pipeline_readers: dict[str, Any] = {}
     pipeline_clocks: dict[str, PipelineQueueClock] = {}
+    pipeline_lock_clocks: dict[str, PipelineLockClock] = {}
     pipeline_bucket_ns = 100_000_000
     pipeline_aggregator = PipelineQueueAggregator(bucket_ns=pipeline_bucket_ns)
     coordinator: Any | None = None
@@ -303,6 +392,7 @@ def main() -> None:
                     "r", encoding="utf-8", errors="replace"
                 )
                 pipeline_clocks[side] = PipelineQueueClock(side)
+                pipeline_lock_clocks[side] = PipelineLockClock(side)
         identities = [json.loads(node.stdout.readline()) for node in (left, right)]
         compiled = coordinator.configuration("allow", identities)
         applied = []
@@ -327,11 +417,20 @@ def main() -> None:
                 if arguments.pipeline_diagnostics:
                     for side, reader in pipeline_readers.items():
                         for line in reader:
+                            observed_ns = time.monotonic_ns()
                             sample = pipeline_clocks[side].observe(
-                                line, observed_ns=time.monotonic_ns()
+                                line, observed_ns=observed_ns
                             )
                             if sample is not None:
                                 pipeline_aggregator.record(sample)
+                            lock_event = pipeline_lock_clocks[side].observe(
+                                line, observed_ns=observed_ns
+                            )
+                            if lock_event is not None:
+                                pipeline_aggregator.record_lock_event(lock_event)
+                    observed_ns = time.monotonic_ns()
+                    for side in pipeline_readers:
+                        pipeline_aggregator.sample_lock_waiters(observed_ns, side=side)
                     pipeline_rows = pipeline_aggregator.drain_before(
                         time.monotonic_ns() - pipeline_bucket_ns
                     )
@@ -370,11 +469,17 @@ def main() -> None:
         if arguments.pipeline_diagnostics:
             for side, reader in pipeline_readers.items():
                 for line in reader:
+                    observed_ns = time.monotonic_ns()
                     sample = pipeline_clocks[side].observe(
-                        line, observed_ns=time.monotonic_ns()
+                        line, observed_ns=observed_ns
                     )
                     if sample is not None:
                         pipeline_aggregator.record(sample)
+                    lock_event = pipeline_lock_clocks[side].observe(
+                        line, observed_ns=observed_ns
+                    )
+                    if lock_event is not None:
+                        pipeline_aggregator.record_lock_event(lock_event)
             for row in pipeline_aggregator.finish():
                 pipeline_output.write(json.dumps(row, separators=(",", ":")) + "\n")
             for reader in pipeline_readers.values():

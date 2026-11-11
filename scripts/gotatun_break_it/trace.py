@@ -530,8 +530,34 @@ def summarize_soak_files(
         slow_threshold_ms=slow_threshold_ms,
         scheduler_trace_window_ns=scheduler_trace_window_ns,
     )
-    report["pipeline_queue_sample_count"] = len(pipeline_counters)
-    report["pipeline_queue_trace_status"] = "captured" if pipeline_counters else "missing"
+    queue_samples = sum(
+        any(
+            name in sample.counters
+            for name in (
+                "a_crypto_queue_jobs",
+                "a_crypto_queue_jobs_max",
+                "b_crypto_queue_jobs",
+                "b_crypto_queue_jobs_max",
+            )
+        )
+        for sample in pipeline_counters
+    )
+    lock_event_count = sum(
+        int(sample.counters.get(f"{side}_ordered_delivery_lock_wait_events", 0))
+        + int(sample.counters.get(f"{side}_ordered_delivery_lock_acquired_events", 0))
+        + int(sample.counters.get(f"{side}_ordered_delivery_lock_unmatched_acquired_events", 0))
+        for sample in pipeline_counters
+        for side in ("a", "b")
+    )
+    report["pipeline_queue_sample_count"] = queue_samples
+    report["pipeline_queue_trace_status"] = "captured" if queue_samples else "missing"
+    report["pipeline_lock_event_count"] = lock_event_count
+    report["pipeline_lock_trace_status"] = "captured" if lock_event_count else "missing"
+    report["pipeline_lock_timestamp_basis"] = (
+        "host monotonic log-tail observations (nominal 10 ms polling; backlog can widen)"
+        if lock_event_count
+        else "missing"
+    )
     return report
 
 

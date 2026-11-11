@@ -132,6 +132,53 @@ class SoakTraceTests(unittest.TestCase):
         )
         self.assertEqual(remaining[0]["counters"]["a_crypto_queue_jobs_max"], 3)
 
+    def test_keeps_ordered_lock_waiters_on_the_host_monotonic_timeline(self):
+        """Record untimestamped ordered-lock events and their pending gauge in 100 ms buckets."""
+        clock = mesh_ix_soak_module.PipelineLockClock("a")
+        aggregator = mesh_ix_soak_module.PipelineQueueAggregator(bucket_ns=100_000_000)
+        wait = clock.observe(
+            "pipeline stage=ordered_delivery_lock_wait lane=0x2 first_slot=40",
+            observed_ns=1_020_000_000,
+        )
+        aggregator.record_lock_event(wait)
+        aggregator.sample_lock_waiters(1_080_000_000, side="a")
+
+        during_wait = aggregator.drain_before(1_100_000_000)
+        acquired = clock.observe(
+            "pipeline stage=ordered_delivery_lock_acquired lane=0x2 first_slot=40",
+            observed_ns=1_120_000_000,
+        )
+        aggregator.record_lock_event(acquired)
+        aggregator.sample_lock_waiters(1_180_000_000, side="a")
+        after_wait = aggregator.finish()
+
+        self.assertEqual(
+            during_wait,
+            [
+                {
+                    "timestamp_ns": 1_000_000_000,
+                    "counters": {
+                        "a_ordered_delivery_lock_wait_events": 1,
+                        "a_ordered_delivery_lock_waiters": 1,
+                        "a_ordered_delivery_lock_waiters_max": 1,
+                    },
+                }
+            ],
+        )
+        self.assertEqual(
+            after_wait,
+            [
+                {
+                    "timestamp_ns": 1_100_000_000,
+                    "counters": {
+                        "a_ordered_delivery_lock_acquired_events": 1,
+                        "a_ordered_delivery_lock_waiters": 0,
+                        "a_ordered_delivery_lock_waiters_max": 0,
+                    },
+                }
+            ],
+        )
+
     def test_reports_stall_with_correlated_goodput_counters_and_scheduler_waits(self):
         """A probe stall retains the queue, throughput and runnable-delay evidence at its time."""
         report = summarize_soak(
@@ -340,7 +387,15 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
                 encoding="utf-8",
             )
             pipeline_path.write_text(
-                json.dumps({"timestamp_ns": 1_150_000_000, "counters": {"a_crypto_queue_jobs": 16}})
+                json.dumps(
+                    {
+                        "timestamp_ns": 1_150_000_000,
+                        "counters": {
+                            "a_crypto_queue_jobs": 16,
+                            "a_ordered_delivery_lock_wait_events": 2,
+                        },
+                    }
+                )
                 + "\n",
                 encoding="utf-8",
             )
@@ -361,6 +416,12 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
         )
         self.assertEqual(report["pipeline_queue_sample_count"], 1)
         self.assertEqual(report["pipeline_queue_trace_status"], "captured")
+        self.assertEqual(report["pipeline_lock_event_count"], 2)
+        self.assertEqual(report["pipeline_lock_trace_status"], "captured")
+        self.assertEqual(
+            report["pipeline_lock_timestamp_basis"],
+            "host monotonic log-tail observations (nominal 10 ms polling; backlog can widen)",
+        )
 
     def test_flattens_product_peer_and_engine_counters_for_the_trace(self):
         """Retain GotaTun health and peer byte counters without public key material."""

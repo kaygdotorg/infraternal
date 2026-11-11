@@ -214,6 +214,7 @@ def main() -> None:
         "tcp_flows": 1,
         "underlay_mtu": arguments.underlay_mtu,
         "pipeline_diagnostics_enabled": arguments.pipeline_diagnostics,
+        "pipeline_log_tail_poll_interval_ms": 10 if arguments.pipeline_diagnostics else None,
         "pipeline_counter_path": str(pipeline_counter_path),
         "manual_fixes": [],
     }
