@@ -14,6 +14,13 @@ export function exitStatusText(status: number): string {
   return `Shell was stopped by signal ${-status}. Open a new shell to continue.`;
 }
 
+/** Names the recorded reason in an ended window; missing statuses mean the host vanished, and negative statuses name signals. */
+export function endedStripText(status: number | undefined): string {
+  if (status === undefined) return "Session ended";
+  if (status < 0) return `Stopped by signal ${-status}`;
+  return `Session ended · Exit ${status}`;
+}
+
 /** Creates a detached status element for one terminal and relays its text to the toast. Returns both. */
 export function createStatusRelay(toast: ToastController): { element: HTMLElement; dispose(): void } {
   const element = document.createElement("p");

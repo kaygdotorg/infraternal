@@ -108,6 +108,7 @@ test("an actual shell signal preserves the window and reports its signal", async
     process.kill(Number(/shell-pid-(\d+)/.exec(output())![1]), "SIGKILL");
     await expect.poll(toasts).toContain("Shell was stopped by signal 9. Open a new shell to continue.");
     await expect(windows(page)).toHaveCount(1);
+    await expect(page.locator(".cl-sx-strip-text")).toHaveText("Stopped by signal 9");
     await page.screenshot({ path: tracerEvidencePath("shell-exit-killed-393.png") });
   } finally { await context.close(); }
 });
