@@ -16,17 +16,22 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-/// The per-peer route state shared by config updates, route recovery, and relay callbacks (#381).
+/// The per-peer route state shared by config updates, authenticated live endpoints, route
+/// recovery, and relay callbacks (#381).
 ///
-/// One mutex guards both maps, and every peer host-route write happens while it is held.
+/// One mutex guards all maps, and every peer host-route write happens while it is held.
 /// `peers` is the set of peers whose routes this node last installed, keyed by public key,
 /// so a relay callback resolves the *current* endpoint and membership at write time instead
-/// of a copy taken when its relay shim started. A key missing from `peers` means the
-/// coordinator removed that peer: callbacks for it write nothing.
+/// of a copy taken when its relay shim started. `live_endpoints` holds authenticated endpoints
+/// learned by `GotaTun`; it only overrides route selection and never changes the accepted snapshot.
+/// A key missing from `peers` means the coordinator removed that peer: callbacks for it write
+/// nothing.
 #[derive(Clone, Debug, Default)]
 struct PeerRouteState {
     /// Active relay budgets; a peer without an entry uses its direct-path budget.
     overrides: BTreeMap<crate::policy::model::PublicKey, u16>,
+    /// Live direct endpoints learned after the coordinator's configured endpoint.
+    live_endpoints: BTreeMap<crate::policy::model::PublicKey, std::net::SocketAddr>,
     /// Installed peers, refreshed with their routes for repair and relay path updates.
     peers: BTreeMap<crate::policy::model::PublicKey, crate::dataplane::Peer>,
 }
@@ -34,7 +39,24 @@ struct PeerRouteState {
 impl PeerRouteState {
     /// Record `peers` as the installed set, replacing the previous one.
     fn set_peers(&mut self, peers: &[crate::dataplane::Peer]) {
-        self.peers = peers.iter().map(|peer| (peer.key, peer.clone())).collect();
+        let installed: BTreeMap<_, _> = peers.iter().map(|peer| (peer.key, peer.clone())).collect();
+        self.live_endpoints
+            .retain(|key, _| installed.contains_key(key));
+        self.peers = installed;
+    }
+
+    /// Copy a peer with its authenticated live endpoint for route-MTU selection.
+    fn route_peer(&self, peer: &crate::dataplane::Peer) -> crate::dataplane::Peer {
+        let mut route_peer = peer.clone();
+        if let Some(endpoint) = self.live_endpoints.get(&peer.key) {
+            route_peer.endpoint = Some(*endpoint);
+        }
+        route_peer
+    }
+
+    /// Return route copies with live endpoints applied while leaving accepted peers unchanged.
+    fn route_peers(&self, peers: &[crate::dataplane::Peer]) -> Vec<crate::dataplane::Peer> {
+        peers.iter().map(|peer| self.route_peer(peer)).collect()
     }
 }
 
@@ -212,10 +234,12 @@ fn lock_route_state(state: &Mutex<PeerRouteState>) -> MutexGuard<'_, PeerRouteSt
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Apply a full route snapshot while retaining relay budgets, restoring state if the write fails.
+/// Apply a full route snapshot while retaining relay budgets and valid live endpoints.
 ///
 /// On success `peers` becomes the installed set that relay callbacks resolve against. The
-/// returned snapshot lets an enclosing transaction roll both maps back.
+/// returned snapshot lets an enclosing transaction roll route state back. Keys in
+/// `clear_overrides_for` also forget their learned endpoint because the coordinator changed or
+/// removed that peer's direct route definition.
 fn refresh_peer_routes_from(
     state: &Mutex<PeerRouteState>,
     peers: &[crate::dataplane::Peer],
@@ -225,13 +249,67 @@ fn refresh_peer_routes_from(
     let previous = state.clone();
     for key in clear_overrides_for {
         state.overrides.remove(key);
+        state.live_endpoints.remove(key);
     }
-    if let Err(error) = Device::routes_with_mtu_overrides(peers, &state.overrides, false) {
+    state.set_peers(peers);
+    let route_peers = state.route_peers(peers);
+    if let Err(error) = Device::routes_with_mtu_overrides(&route_peers, &state.overrides, false) {
         *state = previous;
         return Err(error);
     }
-    state.set_peers(peers);
     Ok(previous)
+}
+
+/// Remember learned endpoints and refresh direct routes without displacing relay MTU overrides.
+///
+/// A `None` live endpoint returns to the accepted coordinator endpoint. Endpoints for peers that
+/// are no longer installed are ignored, so a late packet cannot restore a retired host route.
+/// # Errors
+/// Returns route-netlink errors and restores learned endpoint state if a direct route update fails.
+fn update_live_peer_endpoints(
+    state: &Mutex<PeerRouteState>,
+    endpoints: &[(
+        crate::policy::model::PublicKey,
+        Option<std::net::SocketAddr>,
+    )],
+) -> io::Result<()> {
+    let mut state = lock_route_state(state);
+    let previous_endpoints = state.live_endpoints.clone();
+    let mut changed = BTreeSet::new();
+    for (key, endpoint) in endpoints {
+        let Some(configured) = state.peers.get(key).map(|peer| peer.endpoint) else {
+            continue;
+        };
+        let desired = (*endpoint).filter(|endpoint| Some(*endpoint) != configured);
+        if state.live_endpoints.get(key).copied() == desired {
+            continue;
+        }
+        match desired {
+            Some(endpoint) => {
+                state.live_endpoints.insert(*key, endpoint);
+            }
+            None => {
+                state.live_endpoints.remove(key);
+            }
+        }
+        changed.insert(*key);
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let route_peers: Vec<_> = changed
+        .iter()
+        .filter(|key| !state.overrides.contains_key(key))
+        .filter_map(|key| state.peers.get(key))
+        .map(|peer| state.route_peer(peer))
+        .collect();
+    if !route_peers.is_empty()
+        && let Err(error) = Device::routes_with_mtu_overrides(&route_peers, &state.overrides, false)
+    {
+        state.live_endpoints = previous_endpoints;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Write one peer's route from the accepted state, for a relay path change or MTU refresh.
@@ -257,8 +335,12 @@ fn update_relay_route_mtu(
         Some(mtu) => state.overrides.insert(key, mtu),
         None => state.overrides.remove(&key),
     };
-    let result =
-        Device::routes_with_mtu_overrides(std::slice::from_ref(&peer), &state.overrides, false);
+    let route_peer = state.route_peer(&peer);
+    let result = Device::routes_with_mtu_overrides(
+        std::slice::from_ref(&route_peer),
+        &state.overrides,
+        false,
+    );
     if result.is_err() {
         match previous {
             Some(previous) => state.overrides.insert(key, previous),
@@ -1246,6 +1328,15 @@ impl Node {
         Arc::new(move |relay_mtu| update_relay_route_mtu(&state, key, relay_mtu))
     }
 
+    /// Return a callback for learned endpoints reported by the `GotaTun` worker.
+    ///
+    /// The callback only updates installed peers and leaves relay budgets active. It runs route
+    /// netlink writes on Tokio's blocking pool, outside the packet workers' runtime tasks.
+    pub(crate) fn route_endpoint_updater(&self) -> crate::gotatun_node::RouteEndpointUpdater {
+        let state = Arc::clone(&self.peer_route_state);
+        Arc::new(move |endpoints| update_live_peer_endpoints(&state, endpoints))
+    }
+
     /// Refresh peer host routes using active relay budgets where present.
     ///
     /// `peers` is the complete installed set (an accepted snapshot or the one a rollback
@@ -1258,7 +1349,12 @@ impl Node {
         remove: bool,
     ) -> io::Result<()> {
         let mut state = lock_route_state(&self.peer_route_state);
-        Device::routes_with_mtu_overrides(peers, &state.overrides, remove)?;
+        let route_peers = if remove {
+            peers.to_vec()
+        } else {
+            state.route_peers(peers)
+        };
+        Device::routes_with_mtu_overrides(&route_peers, &state.overrides, remove)?;
         if !remove {
             state.set_peers(peers);
         }
@@ -1478,7 +1574,15 @@ impl Node {
             }
             EngineKind::GotaTun => {
                 let adopt = self.persisted_tun_to_adopt(public_key)?;
-                let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None, adopt)?;
+                let route_endpoint_updater = self.route_endpoint_updater();
+                let engine = Engine::start(
+                    key.gotatun_secret()?,
+                    public_key,
+                    0,
+                    None,
+                    adopt,
+                    route_endpoint_updater,
+                )?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
                     || port == 0
@@ -3398,6 +3502,41 @@ impl Retirement {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    /// A direct endpoint update remains available when a relay budget currently owns the route.
+    #[test]
+    fn live_endpoint_refresh_preserves_relay_budget_for_direct_fallback() {
+        use crate::policy::model::Addresses;
+
+        let key = crate::policy::model::PublicKey([7; 32]);
+        let configured: std::net::SocketAddr =
+            "192.0.2.2:51820".parse().expect("configured endpoint");
+        let learned: std::net::SocketAddr = "198.51.100.2:51820".parse().expect("learned endpoint");
+        let peer = crate::dataplane::Peer {
+            key,
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("mesh IPv4"),
+                ipv6: "fd01::2".parse().expect("mesh IPv6"),
+            },
+            endpoint: Some(configured),
+        };
+        let state = Mutex::new(PeerRouteState::default());
+        {
+            let mut route_state = lock_route_state(&state);
+            route_state.set_peers(std::slice::from_ref(&peer));
+            route_state.overrides.insert(key, 1392);
+        }
+
+        update_live_peer_endpoints(&state, &[(key, Some(learned))])
+            .expect("relay owns the route while the live endpoint is recorded");
+
+        let route_state = lock_route_state(&state);
+        assert_eq!(route_state.overrides.get(&key), Some(&1392));
+        assert_eq!(route_state.route_peer(&peer).endpoint, Some(learned));
+    }
+
     /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
     #[test]
     fn retirement_removes_the_private_key_file() {

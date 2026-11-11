@@ -13,12 +13,10 @@ use gotatun::{
 use ipnetwork::IpNetwork;
 use nix::sys::prctl::{get_thp_disable, set_thp_disable};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "relay")]
-use std::net::SocketAddr;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -29,6 +27,7 @@ use std::{
 };
 use tokio::{
     runtime::Builder as RuntimeBuilder,
+    sync::Notify,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinSet,
     time::Instant,
@@ -38,6 +37,66 @@ use crate::{dataplane::Config, gotatun_tun::LinuxTun, policy::model::PublicKey};
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, LinuxPacketIo, LinuxPacketIo)>;
 type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
+
+/// Refresh Linux host-route budgets from live `GotaTun` endpoints after decrypted traffic arrives.
+pub(crate) type RouteEndpointUpdater =
+    Arc<dyn Fn(&[(PublicKey, Option<SocketAddr>)]) -> io::Result<()> + Send + Sync>;
+
+/// Coalesces decrypted packet notifications into bounded live-endpoint refreshes.
+///
+/// This signal stays quiet when a node has no incoming mesh traffic. The generation counter lets
+/// the worker detect packets that arrived while it was reading endpoints, without polling the
+/// device or allocating a message for every packet.
+#[derive(Default)]
+pub(crate) struct EndpointRefreshSignal {
+    generation: AtomicU64,
+    pending: AtomicBool,
+    notify: Notify,
+}
+
+impl EndpointRefreshSignal {
+    /// Tell the `GotaTun` worker that a decrypted packet may have taught it a new endpoint.
+    pub(crate) fn packet_received(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        if !self.pending.swap(true, Ordering::AcqRel) {
+            self.notify.notify_one();
+        }
+    }
+
+    /// Wait for the next coalesced decrypted-packet notification.
+    async fn notified(&self) {
+        self.notify.notified().await;
+    }
+
+    /// Return the packet generation used to validate one endpoint snapshot.
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Re-arm the signal, scheduling one more refresh if packets arrived during the snapshot.
+    fn finish_refresh(&self, observed_generation: u64) {
+        self.pending.store(false, Ordering::Release);
+        if self.generation.load(Ordering::Acquire) != observed_generation
+            && !self.pending.swap(true, Ordering::AcqRel)
+        {
+            self.notify.notify_one();
+        }
+    }
+}
+
+/// Wait for a scheduled route refresh, or stay asleep until traffic requests one.
+async fn endpoint_refresh_due(at: Option<tokio::time::Instant>) {
+    if let Some(at) = at {
+        tokio::time::sleep_until(at).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Coalesce closely spaced packet deliveries before reading all live peer endpoints.
+const ENDPOINT_REFRESH_DEBOUNCE: Duration = Duration::from_millis(25);
+/// Bound endpoint reads to four per second during a sustained inbound stream.
+const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long a forced relay handshake may wait; `GotaTun`'s own wait has no deadline.
 /// One `WireGuard` handshake attempt is 5 s, after which the peer timers retry.
@@ -216,6 +275,8 @@ pub const TUN_TX_QUEUE_LEN: u32 = 1024;
 impl Engine {
     /// Start `GotaTun` with the fork's Linux TUN adapter and offload handling.
     /// The worker thread disables THP before constructing the runtime or engine state.
+    /// `route_endpoint_updater` applies learned endpoint budgets only to routes the node owns;
+    /// the TUN writer signals it after authenticated packets reach the host stack.
     ///
     /// The TUN is persistent (D332): it outlives this process, as a kernel `WireGuard` link does,
     /// so the addresses, the routes a person added and open flows survive an infraternal agent
@@ -232,12 +293,16 @@ impl Engine {
         requested_port: u16,
         config: Option<Config>,
         adopt: Option<u32>,
+        route_endpoint_updater: RouteEndpointUpdater,
     ) -> io::Result<Self> {
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (commands, receiver) = mpsc::unbounded_channel();
         let health = Arc::new(Health::default());
         let worker_health = Arc::clone(&health);
         let refused = Arc::clone(&health.refused);
+        let endpoint_refresh = Arc::new(EndpointRefreshSignal::default());
+        let initialize_refresh = Arc::clone(&endpoint_refresh);
+        let worker_refresh = Arc::clone(&endpoint_refresh);
         let join = thread::Builder::new()
             .name("infraternal-mesh-gotatun".to_owned())
             .spawn(move || {
@@ -256,6 +321,7 @@ impl Engine {
                     refused,
                     thp_disabled,
                     adopt,
+                    initialize_refresh,
                 ));
                 let Started {
                     tx_queue_len,
@@ -289,7 +355,12 @@ impl Engine {
                     health: worker_health,
                     restart_at: None,
                 };
-                runtime.block_on(run_worker(receiver, state));
+                runtime.block_on(run_worker(
+                    receiver,
+                    state,
+                    worker_refresh,
+                    route_endpoint_updater,
+                ));
             })?;
         let info = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
             Ok(info) => info,
@@ -456,6 +527,7 @@ async fn initialize(
     refused: Arc<AtomicU64>,
     thp_disabled: bool,
     adopt: Option<u32>,
+    endpoint_refresh: Arc<EndpointRefreshSignal>,
 ) -> io::Result<Started> {
     let ours = |link: Option<crate::wireguard::ActiveLink>| {
         adopt.is_some()
@@ -473,11 +545,17 @@ async fn initialize(
     // snapshot applies the smaller route-derived MTU after Node::apply has installed addresses.
     let mtu = crate::mesh_mtu::for_config(config).max(crate::mesh_mtu::IPV6_MINIMUM_MTU);
     // A persistent TUN another process holds refuses this attach with EBUSY.
-    let tun = LinuxTun::create(crate::wireguard::INTERFACE, mtu, local_public_key, refused)
-        .map_err(|error| match error.raw_os_error() {
-            Some(code) if code == nix::libc::EBUSY => io::Error::from(io::ErrorKind::AlreadyExists),
-            _ => error,
-        })?;
+    let tun = LinuxTun::create(
+        crate::wireguard::INTERFACE,
+        mtu,
+        local_public_key,
+        refused,
+        endpoint_refresh,
+    )
+    .map_err(|error| match error.raw_os_error() {
+        Some(code) if code == nix::libc::EBUSY => io::Error::from(io::ErrorKind::AlreadyExists),
+        _ => error,
+    })?;
     // The check above and the attach are two steps: confirm the attached link is still the
     // proven one, or a fresh one under this name.
     let attached = crate::wireguard::Device::active_link();
@@ -615,8 +693,18 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// Serializes device, relay, health-recovery, and shutdown commands on the `GotaTun` worker.
-async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
+/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the worker.
+///
+/// Endpoint reads happen only after a decrypted packet may have changed a live peer endpoint.
+/// Closely spaced packets share one refresh, and route-netlink writes run on Tokio's blocking pool.
+async fn run_worker(
+    mut commands: UnboundedReceiver<WorkerCommand>,
+    mut state: RuntimeState,
+    endpoint_refresh: Arc<EndpointRefreshSignal>,
+    route_endpoint_updater: RouteEndpointUpdater,
+) {
+    let mut endpoint_refresh_at = None;
+    let mut last_endpoint_refresh = None;
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -650,6 +738,22 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                     return;
                 }
             },
+            () = endpoint_refresh.notified(), if endpoint_refresh_at.is_none() => {
+                let now = tokio::time::Instant::now();
+                let debounce = now + ENDPOINT_REFRESH_DEBOUNCE;
+                let minimum = last_endpoint_refresh
+                    .map_or(now, |last| last + ENDPOINT_REFRESH_MIN_INTERVAL);
+                endpoint_refresh_at = Some(debounce.max(minimum));
+            }
+            () = endpoint_refresh_due(endpoint_refresh_at) => {
+                endpoint_refresh_at = None;
+                let generation = endpoint_refresh.generation();
+                if let Err(error) = state.refresh_live_peer_endpoints(&route_endpoint_updater).await {
+                    tracing::warn!(error = %error, "could not refresh mesh routes from live peer endpoints");
+                }
+                endpoint_refresh.finish_refresh(generation);
+                last_endpoint_refresh = Some(tokio::time::Instant::now());
+            }
             // Reap finished handshake tasks; their result is visible in the peer counters.
             Some(_) = state.handshakes.join_next(), if !state.handshakes.is_empty() => {}
             // A packet task that ends on an error ends that direction of traffic for good while
@@ -665,6 +769,44 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
 }
 
 impl RuntimeState {
+    /// Read authenticated live endpoints and refresh their route budgets away from the runtime.
+    ///
+    /// Only active identities own host routes. The stable peer key is passed to the node so
+    /// rotation overlap and relay overrides keep using the same route-state entry.
+    /// # Errors
+    /// Reports a blocking-pool join failure or a route-netlink update failure.
+    async fn refresh_live_peer_endpoints(&self, updater: &RouteEndpointUpdater) -> io::Result<()> {
+        let (Some(device), Some(config)) = (self.device.as_ref(), self.config.as_ref()) else {
+            return Ok(());
+        };
+        let route_keys: BTreeMap<_, _> = config
+            .peers
+            .values()
+            .map(|policy| (active_peer_key(&policy.peer), policy.peer.key))
+            .collect();
+        if route_keys.is_empty() {
+            return Ok(());
+        }
+        let peers = device.read(async |read| read.peers().await).await;
+        let mut endpoints = Vec::with_capacity(route_keys.len());
+        for peer in peers {
+            if peer.peer.allowed_ips.is_empty() {
+                continue;
+            }
+            let active_key = PublicKey(*peer.peer.public_key.as_bytes());
+            if let Some(route_key) = route_keys.get(&active_key) {
+                endpoints.push((*route_key, peer.peer.endpoint));
+            }
+        }
+        if endpoints.is_empty() {
+            return Ok(());
+        }
+        let updater = Arc::clone(updater);
+        tokio::task::spawn_blocking(move || updater(&endpoints))
+            .await
+            .map_err(|_| io::Error::other("mesh route refresh task stopped"))?
+    }
+
     /// Change the live device key and retain that key for a later device rebuild.
     ///
     /// The pending key changes only after the device accepts the new key, so a failed update
@@ -1124,7 +1266,6 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
 }
 
 /// Select the identity that currently owns this peer's host routes.
-#[cfg(feature = "relay")]
 fn active_peer_key(peer: &crate::dataplane::Peer) -> PublicKey {
     if peer.previous_active {
         peer.previous_key.unwrap_or(peer.key)
@@ -1224,8 +1365,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_rebuilds_the_device_after_a_fatal_error() {
         use super::{
-            Health, LinuxPacketIo, PendingDevice, RuntimeInfo, RuntimeState, WorkerCommand,
-            bind_udp, build_device, run_worker,
+            EndpointRefreshSignal, Health, LinuxPacketIo, PendingDevice, RouteEndpointUpdater,
+            RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device, run_worker,
         };
         use gotatun::x25519::StaticSecret;
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
@@ -1274,7 +1415,9 @@ mod tests {
             restart_at: None,
         };
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let worker = tokio::spawn(run_worker(receiver, state));
+        let endpoint_refresh = Arc::new(EndpointRefreshSignal::default());
+        let updater: RouteEndpointUpdater = Arc::new(|_| Ok(()));
+        let worker = tokio::spawn(run_worker(receiver, state, endpoint_refresh, updater));
         let initial = health.snapshot();
         assert!(!initial.stopped && initial.restarts == 0 && initial.refused_frames == 0);
 
