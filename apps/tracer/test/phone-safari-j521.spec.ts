@@ -61,15 +61,19 @@ test("the sign-in step keeps its options in view on a short phone card", async (
   await open(page);
   await typeHost(page, "kayg@needs-key.lab");
   await expect(page.getByRole("heading", { name: /Sign in to needs-key.lab/ })).toBeVisible({ timeout: 15_000 });
-  const m = await page.evaluate(() => {
+  const geometry = () => page.evaluate(() => {
     const scroll = document.querySelector<HTMLElement>(".ah-scroll")!.getBoundingClientRect();
     const foot = document.querySelector<HTMLElement>(".ah-foot")!.getBoundingClientRect();
-    const option = [...document.querySelectorAll<HTMLElement>(".ah-option")].find((o) => /password/i.test(o.textContent ?? ""))!.getBoundingClientRect();
-    return { scrollH: scroll.height, footH: foot.height, optionTop: option.top, optionBottom: option.bottom, scrollTop: scroll.top, scrollBottom: scroll.bottom };
+    const field = document.querySelector<HTMLElement>("[data-secret='password']")!.getBoundingClientRect();
+    return { scrollH: scroll.height, footH: foot.height, fieldTop: field.top, fieldBottom: field.bottom, scrollTop: scroll.top, scrollBottom: scroll.bottom };
   });
-  test.info().annotations.push({ type: "measured", description: JSON.stringify(m) });
-  expect(m.footH, "Back and Sign in share one row").toBeLessThan(90);
-  expect(m.optionBottom, "the password option is visible without scrolling").toBeLessThanOrEqual(m.scrollBottom);
+  const before = await geometry();
+  test.info().annotations.push({ type: "measured", description: JSON.stringify(before) });
+  expect(before.footH, "Back and Sign in share one row, not two stacked buttons").toBeLessThan(90);
+  expect(before.scrollH, "the scroll body has room for the title and the options").toBeGreaterThanOrEqual(300);
+  // Choosing the password option shows its field inside the scroll body without any scrolling by the person.
+  await page.getByText("Sign in with a password").click();
+  await expect.poll(async () => { const g = await geometry(); return g.fieldTop >= g.scrollTop && g.fieldBottom <= g.scrollBottom; }, { timeout: 3_000 }).toBe(true);
 });
 
 test("the host-key and sign-in titles name the typed port", async ({ page }) => {
