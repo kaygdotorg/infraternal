@@ -1251,15 +1251,12 @@ impl Bootstrap {
             let mut refreshed = false;
             let link_started = Instant::now();
             let (output, checked) = loop {
-                let result = if early_candidate {
-                    session.check_stream(&script).await
-                } else {
-                    session
-                        .run(&script, Input::Empty)
-                        .await
-                        .map(|output| (output, None))
-                        .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)))
-                };
+                // Both enrollment paths need the bounded check reader for complete
+                // terminal confirmation records, without widening ordinary command output.
+                let result = session
+                    .check_stream(&script)
+                    .await
+                    .map_err(|error| previous_attempt::classify(error.at(InstallStep::Connect)));
                 match result {
                     Err(error) if error.exit_status == Some(76) && !refreshed => {
                         refreshed = true;
@@ -1276,6 +1273,9 @@ impl Bootstrap {
                     result => break result?,
                 }
             };
+            // A server-enrollment check needs only its record; keep a staging
+            // channel solely when early terminal publication will consume it.
+            let checked = if early_candidate { checked } else { None };
             let link_round_trip = link_started.elapsed();
             // Automatic sign-in selects its authenticated adapter during the
             // read-only check; query bridge support after that selection.
@@ -1478,7 +1478,8 @@ impl Bootstrap {
                         started,
                         session.as_ref(),
                         &previous,
-                        if automatic {
+                        // Terminals never close without the person's confirmation (D368).
+                        if automatic && previous.terminals().is_empty() {
                             FreshMode::Automatic
                         } else {
                             FreshMode::Confirm
@@ -2058,7 +2059,9 @@ impl Bootstrap {
                 if mode == FreshMode::PutBack {
                     previous.set_aside_failure()
                 } else {
-                    previous.stuck_failure(mode == FreshMode::Reenroll)
+                    previous
+                        .stuck_failure(mode == FreshMode::Reenroll)
+                        .with_terminal_confirmation(challenge)
                 },
                 match mode {
                     FreshMode::Reenroll => previous.reenroll_findings(target.mode, challenge),
@@ -2073,7 +2076,8 @@ impl Bootstrap {
     }
 
     /// Pause this attempt on `offer` and its `leftovers` until the person
-    /// confirms with the leftovers' challenge ([`Self::start_fresh`]). Changes
+    /// confirms with the leftovers' challenge, or the terminal-close offer's
+    /// challenge when it lists terminals ([`Self::start_fresh`]). Changes
     /// nothing on the host. The wait has its own limit, and hands back the
     /// add-host slot meanwhile (#305 P2-1, P3-2).
     async fn await_confirmation(
@@ -2084,9 +2088,17 @@ impl Bootstrap {
         started: Instant,
         message: &'static str,
         offer: Failure,
-        leftovers: crate::model::Leftovers,
+        mut leftovers: crate::model::Leftovers,
         resources: &mut AttemptResources,
     ) -> Result<(), Failure> {
+        let challenge = if let Some(close) = offer.terminal_confirmation() {
+            // Older UIs submit only this generic challenge, without showing terminals.
+            // Keep their action harmless; the terminal-aware step submits the offer's challenge.
+            leftovers.challenge = uuid::Uuid::nil();
+            close
+        } else {
+            leftovers.challenge
+        };
         {
             let (resume, resumed) = oneshot::channel();
             {
@@ -2094,10 +2106,7 @@ impl Bootstrap {
                 let state = states
                     .get_mut(&target.id)
                     .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
-                state.start_fresh = Some(PendingFresh {
-                    challenge: leftovers.challenge,
-                    resume,
-                });
+                state.start_fresh = Some(PendingFresh { challenge, resume });
             }
             emit_with_leftovers(
                 batch,
@@ -2169,7 +2178,9 @@ impl Bootstrap {
             attempt,
             started,
             "This machine has an infraternal agent from an earlier setup",
-            installed.takeover_failure(target.mode),
+            installed
+                .takeover_failure(target.mode)
+                .with_terminal_confirmation(challenge),
             installed.takeover_findings(target.mode, challenge),
             resources,
         )
@@ -2213,14 +2224,9 @@ impl Bootstrap {
             // install back, and nothing is set aside.
             resources.set_aside = None;
         }
-        acted.map_err(|mut error| {
-            // 75: the install changed since Check, for example its agent
-            // started while the person decided; Check shows it again.
-            if error.exit_status == Some(75) {
-                error.message = CHANGED_WHILE_WAITING;
-            }
-            error
-        })?;
+        // The host's refusal names changed terminal records and preserves the
+        // distinction between restoring the install and reopening closed terminals.
+        acted?;
         emit(
             batch,
             target,

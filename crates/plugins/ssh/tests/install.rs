@@ -2819,6 +2819,47 @@ async fn one_command_channel_carries_check_verified_upload_and_bridge_bytes() {
     transaction.rollback().await.unwrap();
 }
 
+/// D368: terminal-bearing offers must survive the retained SSH check channel before any upload.
+#[tokio::test]
+async fn duplex_check_carries_terminal_confirmation_records_larger_than_512_bytes() {
+    let fixture = Fixture::new();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let terminals = (1_u128..=40)
+        .map(|id| {
+            format!(
+                "{},726f6f74,62617368,1792195200,7074732f33,0,session-8.scope,{}",
+                uuid::Uuid::from_u128(id).simple(),
+                "a".repeat(64)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let record = format!(
+        "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n0\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_INSTALLED {} 64:1234 live ready {terminals}\n",
+        "1".repeat(32)
+    );
+    assert!(record.len() > 4096);
+    let check = format!(
+        "printf %s {}",
+        infraternal_plugin_ssh::transport::shell_quote(&record)
+    );
+    let (output, checked) = Installation::check_channel(&session, &check).await.unwrap();
+    assert_eq!(output.stdout, record.as_bytes());
+    assert!(matches!(
+        infraternal_plugin_ssh::previous_attempt::parse_check_with_absence(&output.stdout)
+            .unwrap()
+            .2,
+        infraternal_plugin_ssh::previous_attempt::Remains::Installed(_)
+    ));
+    assert!(
+        !fixture.base().exists(),
+        "no staging while asking for consent"
+    );
+    drop(checked);
+}
+
 #[tokio::test]
 async fn duplex_check_refuses_named_failures_and_oversized_records_before_staging() {
     for status in [71, 73, 75] {

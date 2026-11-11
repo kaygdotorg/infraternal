@@ -33,6 +33,12 @@ export const RUNNING_TEXT: Record<StageId, string> = {
   session: "Opening a terminal on the host",
 };
 
+/** These host statuses report a failed Take over, including terminal or service-manager operations (#433). */
+function takeoverStopped(failure: FailureDetail): boolean {
+  return failure.exit_status === 73 || failure.exit_status === 74 || failure.exit_status === 75
+    || failure.exit_status === 79 || failure.exit_status === 80 || failure.exit_status === 81;
+}
+
 /** One plain sentence for a failure. An unknown or missing failure gets the generic one; the raw text stays in the details. */
 export function failureLine(failure: FailureDetail | undefined): string {
   switch (failure?.kind) {
@@ -43,10 +49,12 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "unsupported": return "This host can't run the infraternal agent yet";
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
-    case "unrecognized_install": return "Already set up elsewhere";
+    case "unrecognized_install": return takeoverStopped(failure) ? "Take over didn't finish" : "Already set up elsewhere";
     case "unproven_files": return "Setup files it can't vouch for";
     case "no_account": return "Couldn't find that account on this host";
     case "install":
+      // Manager failures use the old generic kind so cached clients remain truthful (#433).
+      if (failure.exit_status === 80 || failure.exit_status === 81) return "Take over didn't finish";
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
         return `Download infraternal (${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"}): ${failure.message}`;
       }
@@ -278,7 +286,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     // D359: in root mode the server offers to take a finished install of another server over. The page offers
     // Take over, which opens a confirmation that names the old install; nothing changes until then.
     case "unrecognized_install": return {
-      title: `${name} is set up elsewhere`,
+      title: takeoverStopped(failure) ? `Take over on ${name} didn't finish` : `${name} is set up elsewhere`,
       happened: failure.message,
       next: "",
       fix: failure.takeover ? "take-over" : "retry", tone: "info",
@@ -304,12 +312,20 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       next: "",
       fix: "none", tone: "danger",
     };
-    case "install": return {
-      title: `Setting up ${name} didn't finish`,
-      happened: failure.failed_step ? installSentence(failure) : "Setup stopped before this host was ready.",
-      next: failure.missing_binary ? "Add the file on the server, then try again." : failure.failed_step ? STEP_ADVICE[failure.failed_step] : GENERIC_ADVICE,
-      fix: "retry", tone: "danger",
-    };
+    case "install":
+      // Current clients retain the specific Take over copy; older clients show a generic setup failure.
+      if (failure.exit_status === 80 || failure.exit_status === 81) return {
+        title: `Take over on ${name} didn't finish`,
+        happened: failure.message,
+        next: "",
+        fix: "retry", tone: "info",
+      };
+      return {
+        title: `Setting up ${name} didn't finish`,
+        happened: failure.failed_step ? installSentence(failure) : "Setup stopped before this host was ready.",
+        next: failure.missing_binary ? "Add the file on the server, then try again." : failure.failed_step ? STEP_ADVICE[failure.failed_step] : GENERIC_ADVICE,
+        fix: "retry", tone: "danger",
+      };
     default: return {
       title: `Something went wrong with ${name}`,
       happened: "Something went wrong while setting up this host.",
@@ -427,4 +443,26 @@ export function failureDiagnostics(failure: FailureDetail | undefined, guide: Gu
   const visible = `${guide.happened} ${guide.next}`;
   const evidence = [failure.kind !== "stale_previous_attempt" ? failure.message : "", ...failure.log_tail];
   return [...new Set(evidence.filter((line) => line && !visible.includes(line)))];
+}
+
+/** Reuse the opening-time formatter across the terminal list without charging every row its own setup. */
+let takeoverDateFormat: Intl.DateTimeFormat | undefined;
+
+/**
+ * One terminal row reviewed before Take over (D368): account, foreground program, its `pts/<n>`, how
+ * many other programs close with it, and when it opened, to the minute, so rows of the same account and
+ * program can be told apart (#433 P3-1, P3-2). For example "root, bash on pts/3 and 2 other programs,
+ * since 9 Nov 2026, 14:05".
+ */
+export function takeoverTerminalLabel(terminal: { account: string; program: string; since: number; tty?: string; others?: number }): string {
+  takeoverDateFormat ??= new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const date = takeoverDateFormat.format(new Date(terminal.since * 1000));
+  const tty = terminal.tty ? ` on ${terminal.tty}` : "";
+  const others = terminal.others ? ` and ${terminal.others} other program${terminal.others === 1 ? "" : "s"}` : "";
+  return `${terminal.account}, ${terminal.program}${tty}${others}, since ${date}`;
+}
+
+/** Explain the irreversible terminal close separately from restoring the install on failure (D368). */
+export function takeoverTerminalSummary(count: number): string {
+  return count === 1 ? "1 open terminal. Take over closes it." : `${count} open terminals. Take over closes them.`;
 }

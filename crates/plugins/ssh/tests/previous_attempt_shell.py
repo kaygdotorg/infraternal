@@ -2112,7 +2112,7 @@ manager=dropin_manager'''
         """A new install committed in $base for `owner`, built from the files of
         `source`, with its own unit, wants link and launcher."""
         shutil.copytree(source, self.base, symlinks=True,
-                        ignore=shutil.ignore_patterns('.bootstrap-lock', '.superseded-service', '.superseded-unit'))
+                        ignore=shutil.ignore_patterns('.bootstrap-lock', '.superseded-service', '.superseded-unit', '*.sock', '*.stop', '*.ending'))
         (self.base / '.bootstrap-owner').write_text(owner + '\n')
         binary_dir = self.base / 'bin'
         self.unit.write_text(
@@ -2239,6 +2239,26 @@ manager=holding_manager''')
             self.assertFalse(self.takeover_aside().exists())
         finally:
             os.kill(int(pid_file.read_text()), 15)
+
+    def test_takeover_manager_failures_before_closing_have_their_own_status(self):
+        """#433 P3: stop, disable and reload failures are not evidence of another holder."""
+        for operation in ('stop', 'disable', 'daemon-reload'):
+            with self.subTest(operation=operation):
+                record = self.make_takeover_fixture()
+                found = self.found_install()
+                result = self.take_over(record, prefix=f'''
+manager_failed=no
+failing_manager() {{
+ if [ "$1" = "{operation}" ] && [ "$manager_failed" = no ]; then
+  manager_failed=yes
+  return 1
+ fi
+ mock_manager "$@"
+}}
+manager=failing_manager''')
+                self.assertEqual(result.returncode, 80, result.stderr.decode())
+                self.assertEqual(self.found_install(), found, 'rollback restores the old install')
+                self.assertFalse(self.takeover_aside().exists())
 
     def test_a_termination_after_the_stop_still_puts_it_back(self):
         record = self.make_takeover_fixture()

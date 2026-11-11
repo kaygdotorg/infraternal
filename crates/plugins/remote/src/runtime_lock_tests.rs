@@ -776,3 +776,42 @@ fn only_roots_up_base_may_be_traversable() {
     assert!(!traversable_base(up, 0, 0o755), "never readable by others");
     assert!(!traversable_base(up, 0, 0o701));
 }
+
+/// D368: an owned live endpoint whose shim is not this install's binary, outside its own session
+/// scope or login, cannot authorize a close (#433). Even a matching Hello never receives an Attach or
+/// signal from read-only inspection.
+#[test]
+fn takeover_refuses_an_authenticated_endpoint_outside_its_session_scope() {
+    let fixture = Fixture::short();
+    let path = fixture.state().join(format!("{}.sock", "3".repeat(32)));
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut peer, _) = listener.accept().unwrap();
+        write_session_frame(
+            &mut peer,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                session: [0x33; 16],
+                pid: std::process::id(),
+                cols: 80,
+                rows: 24,
+                created: 1_792_195_200_000,
+                head: 0,
+                start: 0,
+            },
+        )
+        .unwrap();
+        let mut input = [0_u8];
+        assert_eq!(
+            peer.read(&mut input).unwrap(),
+            0,
+            "inspection sends no terminal input"
+        );
+    });
+    let runtime = directory(&fixture.state()).unwrap();
+    let base = fixture.state().parent().unwrap().to_owned();
+    assert_eq!(takeover_terminals::records(&runtime, &base), Err(73));
+    server.join().unwrap();
+}

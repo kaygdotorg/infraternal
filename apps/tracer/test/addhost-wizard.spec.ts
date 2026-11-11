@@ -36,13 +36,14 @@ async function resetDouble(page: Page): Promise<void> {
 
 /**
  * Opens the clusters canvas at 1440x900 on a freshly reset double, with the double's `settings` applied first, and waits
- * until the canvas has views. `query` is appended to the page address. Every case starts here.
+ * until the canvas has views. `query` is appended to the page address, and `theme` picks the display theme (D368's
+ * terminal list is checked in both). Every case starts here.
  */
-async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
+async function open(page: Page, query = "", settings: Record<string, string> = {}, theme = "ink"): Promise<void> {
   await resetDouble(page);
   if (Object.keys(settings).length) await config(page, settings);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/?mock=1&proto=clusters&scene=3&theme=ink&bg=none${query}`);
+  await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 45_000 });
   await expect.poll(() => probe(page, (p) => p.views().length), { timeout: 45_000 }).toBeGreaterThan(0);
   await page.waitForTimeout(400);
@@ -579,6 +580,35 @@ test("leftovers: one Start fresh continues the same setup to done", async ({ pag
   await expect.poll(() => consoleWindows(page)).toContain("w-stale.lab");
 });
 
+/**
+ * D368 (#433, J205c legacy1): a stuck first install's own open terminal is listed before Start fresh closes it.
+ * The progress row's quick Start fresh must open that page too, never confirm from the row with the generic
+ * (nil) challenge, which the server refuses.
+ */
+test("leftovers with a terminal: the row opens the list, and only its button confirms", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  const sent: Array<Record<string, unknown>> = [];
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+    if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* binary frames */ } }
+  }));
+  await addTyped(page, "stale-terminals.lab");
+  const failure = page.locator(".ah-page[data-page='failure']");
+  await expect(failure.locator("[data-terminal-summary]")).toHaveText("1 open terminal. Start fresh closes it.", { timeout: 15_000 });
+  await expect(failure.locator(".ui-kv-value")).toContainText(["root, bash on pts/0, since 17 Oct 2026, "]);
+  await expect(inWizard(page, "Close it and start fresh")).toBeVisible();
+  // Back to the list: the row's quick fix opens the same page and sends nothing.
+  await wizard(page).locator('[data-ah="back-progress"]').click();
+  await wizard(page).locator('[data-ah="fix-job"]').first().click();
+  await expect(failure.locator("[data-terminal-summary]")).toBeVisible();
+  expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+  await inWizard(page, "Close it and start fresh").click();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  const fresh = sent.filter((command) => command.action === "start-fresh");
+  expect(fresh).toHaveLength(1);
+  expect(fresh[0]?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+});
+
 test("leftovers: Back returns to the host list and Start fresh needs the server's challenge", async ({ page }) => {
   await open(page);
   await openWizard(page);
@@ -853,3 +883,89 @@ test("rootless: a finished install of another server offers no Take over", async
   await expect(inWizard(page, "Try again")).toBeVisible();
   await page.screenshot({ path: tracerEvidencePath("addhost-takeover", "rootless-1440.png") });
 });
+
+/** D368: terminal details are visible before consent, at both required sizes and themes. */
+for (const theme of ["ink", "paper"]) for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`Take over lists terminals before closing them: ${theme} ${viewport.width}`, async ({ page }) => {
+    await open(page, "", {}, theme);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    const sent: Array<Record<string, unknown>> = [];
+    page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* binary frames */ } }
+    }));
+    await addTyped(page, "root@takeover-terminals.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
+    const confirm = wizard(page).locator(".ah-page[data-page='takeover']");
+    await expect(confirm.locator("[data-terminal-summary]")).toHaveText("1 open terminal. Take over closes it.");
+    await expect(inWizard(page, "Close it and take over")).toBeVisible();
+    await expect(page.locator(".ah-float")).toHaveCount(1);
+    await expect(confirm.locator(".ui-kv-value")).toContainText([TAKEOVER_INSTALL, "root, bash on pts/0 and 1 other program, since 17 Oct 2026, "]);
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    const edges = await confirm.evaluate((root) => {
+      const title = root.querySelector(".ah-title")!.getBoundingClientRect();
+      const summary = root.querySelector("[data-terminal-summary]")!.getBoundingClientRect();
+      return { title: title.left, summary: summary.left, right: summary.right, width: innerWidth };
+    });
+    expect(Math.abs(edges.title - edges.summary)).toBeLessThanOrEqual(0.5);
+    expect(edges.right).toBeLessThanOrEqual(edges.width);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `terminals-${theme}-${viewport.width}.png`) });
+    await inWizard(page, "Back").click();
+    await expect(wizard(page).locator('[data-ah="review-take-over"]')).toBeVisible();
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
+    await wizard(page).locator('[data-ah="take-over"]').click();
+    await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(1);
+    expect(sent.find((command) => command.action === "start-fresh")?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+  });
+}
+
+/** #433 P3: the production failure page preserves each close state from the server without guessing. */
+for (const [status, message] of [
+  [79, "A terminal you confirmed would not close, so Take over stopped. Some terminals may already be closed; any that closed stay closed. The old install was put back as it was. Try again."],
+  [80, "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again."],
+  [81, "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again."],
+] as const) for (const width of [1440, 393]) {
+  test(`takeover failure copy and alignment: status ${status} width ${width}`, async ({ page }) => {
+    await page.routeWebSocket("**/v1/bootstrap/ws", (socket) => {
+      const server = socket.connectToServer();
+      server.onMessage((data) => {
+        const event = JSON.parse(String(data)) as { step?: string; message?: string; failure?: { kind: string; message: string; exit_status?: number; takeover?: unknown }; leftovers?: unknown };
+        if (event.failure?.kind === "unrecognized_install") {
+          event.step = "failed";
+          event.message = "Take over didn't finish";
+          event.failure.message = message;
+          event.failure.kind = status >= 80 ? "install" : "unrecognized_install";
+          event.failure.exit_status = status;
+          delete event.failure.takeover;
+          delete event.leftovers;
+        }
+        socket.send(JSON.stringify(event));
+      });
+    });
+    await open(page);
+    await page.setViewportSize({ width, height: width === 1440 ? 900 : 852 });
+    await openWizard(page);
+    await addTyped(page, "root@takeover.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    await expect(page.getByRole("heading", { name: "Take over on takeover.lab didn't finish", exact: true })).toBeVisible();
+    const failure = onScreen(page, "failure");
+    await expect(failure.locator(".ah-lede")).toHaveText(message);
+    await expect(inWizard(page, "Try again")).toBeVisible();
+    await expect(wizard(page).locator('[data-ah="review-take-over"]')).toHaveCount(0);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    const edges = await failure.evaluate((root) => {
+      const title = root.querySelector(".ah-title")!.getBoundingClientRect();
+      const text = root.querySelector(".ah-lede")!.getBoundingClientRect();
+      return { title: title.left, text: text.left, right: text.right, width: innerWidth };
+    });
+    expect(Math.abs(edges.title - edges.text)).toBeLessThanOrEqual(0.5);
+    expect(edges.right).toBeLessThanOrEqual(edges.width);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `failure-${status}-${width}.png`) });
+  });
+}

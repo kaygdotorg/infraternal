@@ -32,7 +32,7 @@ import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
 import { ICON, escapeHtml, svg } from "./icons";
-import { failureDiagnostics, failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES } from "./model";
+import { failureDiagnostics, failureLine, guideFor, looksLikeSshConfig, parseSshConfig, parseTarget, RUNNING_TEXT, stagesOf, STAGES, takeoverTerminalLabel, takeoverTerminalSummary } from "./model";
 import type { Guide, ParsedTarget } from "./model";
 import { matchListed } from "./model";
 import { ServiceError } from "./service";
@@ -676,17 +676,17 @@ export class Wizard {
   }
 
   /**
-   * Removes what an earlier setup left on this host and continues the same attempt (#169). No confirmation: the
-   * server removes only what infraternal provably created. Without an open run (the connection ended) there is no
-   * attempt to continue, so a fresh run starts and finds the leftovers again with a new handle.
+   * Continue the paused attempt with its reviewed challenge (#169). Terminal closure supplies the challenge from
+   * its own confirmation offer (D368), which a generic cleanup action cannot use. If the connection ended,
+   * start a fresh check with a new handle rather than reusing an expired confirmation.
    */
-  private startFresh(job: Job): void {
+  private startFresh(job: Job, confirmation?: string): void {
     const leftovers = job.view.leftovers;
     if (!leftovers || !job.run?.open) { this.retryJob(job); return; }
     this.fixing = undefined;
     // Same attempt number, and the sign-in that already succeeded stays on screen while the cleanup runs.
     job.view = { ...pendingTarget(), attempt: job.view.attempt, authentication: job.view.authentication };
-    job.run.startFresh(job.target, leftovers.challenge);
+    job.run.startFresh(job.target, confirmation ?? leftovers.challenge);
     if (this.page !== "progress") this.go("progress", -1);
     else { this.paint(job); this.summarise(); }
     this.setFoot("");
@@ -834,13 +834,26 @@ export class Wizard {
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red. Only a running
     // setup, which the person waits for, gets the clock (TASTE: the icon matches the news, #394).
     const icon = guide.fix === "start-fresh" || guide.fix === "take-over" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
+    // D368 (#433): a Start fresh that closes the stuck setup's own terminals lists each one before consent.
+    const closing = guide.fix === "start-fresh" && !replaceStuck ? job.view.failure?.closes?.terminals ?? [] : [];
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
-      <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${this.detailsBlock(job)}`;
+      <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${closing.length ? `
+      <p class="ah-text" data-terminal-summary>${closing.length === 1 ? "1 open terminal. Start fresh closes it." : `${closing.length} open terminals. Start fresh closes them.`}</p>
+      <div class="ah-keyblock" data-kv></div>` : ""}${this.detailsBlock(job)}`;
+    if (closing.length) {
+      const list = createKeyValueList("The terminals Start fresh closes");
+      list.set(closing.map((terminal, index) => ({ key: `Terminal ${index + 1}`, value: takeoverTerminalLabel(terminal) })));
+      page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
+    }
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
     const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${guide.fix === "none" || guide.fix === "take-over" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    if (closing.length) {
+      const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
+      if (label) label.textContent = closing.length === 1 ? "Close it and start fresh" : "Close them and start fresh";
+    }
     if (replaceStuck) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       const lock = job.view.failure?.setup_lock;
@@ -857,20 +870,23 @@ export class Wizard {
     const job = this.fixing!;
     const offer = job.view.failure?.takeover;
     const name = escapeHtml(job.entry.label);
+    const terminals = offer?.terminals ?? [];
+    const action = terminals.length === 1 ? "Close it and take over" : terminals.length ? "Close them and take over" : "Take over";
     page.innerHTML = `${this.hero(ICON.servers)}<h1 class="ah-title">Take over ${name}?</h1>
       <p class="ah-lede">Its old infraternal agent is ${offer?.live ? "stopped and " : ""}set aside, and a new one is installed for this server.</p>
+      ${terminals.length ? `<p class="ah-text" data-terminal-summary>${takeoverTerminalSummary(terminals.length)}</p>` : ""}
       <div class="ah-keyblock" data-kv></div>
-      <p class="ah-text">If setup fails, the old one is put back as it was. Once ${name} has joined, the old one is deleted.</p>${this.detailsBlock(job)}`;
+      <p class="ah-text">If setup fails, the old one is put back as it was.${terminals.length ? " Terminals you close stay closed." : ""} Once ${name} has joined, the old one is deleted.</p>${this.detailsBlock(job)}`;
     const list = createKeyValueList("The install that is taken over");
-    list.set(offer ? [{ key: "Old install", value: offer.install }] : []);
+    list.set(offer ? [{ key: "Old install", value: offer.install }, ...terminals.map((terminal, index) => ({ key: `Terminal ${index + 1}`, value: takeoverTerminalLabel(terminal) }))] : []);
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-failure">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="take-over"><span>Take over</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-failure">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="take-over"><span>${action}</span></button>`);
   }
 
   /** Confirmed on the Take over page: continue the paused attempt, only for a root-mode offer (D359). */
   private takeOver(job: Job): void {
     if (!job.view.failure?.takeover || job.view.leftovers?.mode !== "root") { this.go("failure", -1); return; }
-    this.startFresh(job);
+    this.startFresh(job, job.view.failure.takeover.close_challenge);
   }
 
   private renderHostKey(page: HTMLElement): void {
@@ -1149,7 +1165,7 @@ export class Wizard {
     else if (action === "cancel-install") this.dismiss();
     else if (action === "reload") void this.loadDiscovery();
     else if (action === "retry") { if (this.fixing) this.retryJob(this.fixing); }
-    else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing); }
+    else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing, this.fixing.view.failure?.closes?.close_challenge); }
     else if (action === "review-take-over") { if (this.fixing) this.go("takeover"); }
     else if (action === "take-over") { if (this.fixing) this.takeOver(this.fixing); }
     else if (action === "back-failure") this.go("failure", -1);
@@ -1161,8 +1177,8 @@ export class Wizard {
     else if (action === "fix-job") {
       const job = jobOf();
       // Leftovers are cleared right from the row; every other fix opens its own page. A Take over always asks
-      // first, on its own page (D359).
-      if (job) { if (job.view.leftovers && !job.view.failure?.takeover) this.startFresh(job); else this.openFix(job); }
+      // first, on its own page (D359), and so does a Start fresh that closes terminals, which lists them (D368).
+      if (job) { if (job.view.leftovers && !job.view.failure?.takeover && !job.view.failure?.closes) this.startFresh(job); else this.openFix(job); }
     }
     else if (action === "toggle-job") {
       const row = target.closest<HTMLElement>(".ah-run");

@@ -413,8 +413,42 @@ not_live() {
    case "$agent_main_pid" in ''|*[!0-9]*) agent_main_pid=0;; esac
   fi
  fi
- live_session_sockets
+ # D368 (#433, J205c legacy1): a first install that crashed while activating
+ # can leave a terminal of its own running. When the helper attributes every
+ # live endpoint to this install's own shims, those terminals are listed in
+ # the record and Start fresh closes them after confirmation; any endpoint it
+ # cannot attribute still refuses (73) through live_session_sockets.
+ stale_terminals=
+ if [ "$not_live_scan" = unit ]; then
+  set +e
+  stale_terminals=$(set -e; finished_terminal_records)
+  stale_status=$?
+  set -e
+  case "$stale_status" in 0) :;; 76) exit 76;; *) stale_terminals=;; esac
+ fi
+ installed_terminals=$stale_terminals
+ [ -n "$stale_terminals" ] || live_session_sockets
  scan_holders "$not_live_scan"
+}
+# Start fresh with listed terminals: after the activated agent stopped, the
+# terminals must still be exactly the ones the person reviewed (else 75, with
+# nothing closed); then their units stop. A unit that will not stop ends it
+# with 79 (some may be closed, the rest are open). Once every one stopped, a
+# holder refusal (73) leaves 74, so the message can say they were all closed.
+close_stale_terminals() {
+ [ -n "${stale_terminals:-}" ] || return 0
+ [ "$(finished_terminal_records)" = "$stale_terminals" ] || exit 75
+ set --
+ for stale_terminal in $stale_terminals; do
+  terminal_unit "$stale_terminal"
+  case " $* " in *" $terminal_unit "*) :;; *) set -- "$@" "$terminal_unit";; esac
+ done
+ stale_closed=no
+ trap 'stale_status=$?; [ "$stale_status:$stale_closed" != 73:yes ] || stale_status=74; exit "$stale_status"' EXIT
+ for stale_close in "$@"; do
+  $manager stop "$stale_close" >/dev/null 2>&1 || exit 79
+  stale_closed=yes
+ done
 }
 # Refuse (73) while a shim serves a session socket under $base. Non-dumpable
 # shims: the helper asks the kernel by owner+inode, never by name.
@@ -433,6 +467,7 @@ live_session_sockets() {
 stop_activated_agent() {
  [ "${not_live_scan:-all}" = unit ] || return 0
  stop_agent_unit
+ close_stale_terminals
  live_session_sockets
  scan_holders all
  for marker in "$base/sessions/sessions"/*.readiness; do
@@ -444,11 +479,12 @@ stop_activated_agent() {
 # Stop the infraternal agent's unit, then refuse (73) while anything else it
 # started is still running. KillMode=process leaves it: a shim that started
 # after the earlier checks, or never bound a socket, is still in the unit's
-# cgroup (#305 J272).
+# cgroup (#305 J272). Take over passes 80 for a manager failure, distinct
+# from a holder refusal; callers without terminal-aware messages keep 73.
 stop_agent_unit() {
  # Read the unit's cgroup while it runs; systemd may forget it once stopped.
  agent_cgroup=$($manager show -p ControlGroup --value infraternal-agent.service 2>/dev/null || :)
- $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
+ $manager stop infraternal-agent.service >/dev/null 2>&1 || exit "${1:-73}"
  case "$agent_cgroup" in
   /*) agent_procs="${agent_cgroup_root:-/sys/fs/cgroup}$agent_cgroup/cgroup.procs"
       if [ -e "$agent_procs" ]; then
@@ -484,9 +520,15 @@ agent_unit_process() {
 # payload's shims, which a replacement is about to stop itself (#305). "unit"
 # skips only the unit's main process (see not_live). "agent" skips every
 # process in the agent's unit and nothing else, not even a terminal's shim: a
-# Take over stops only the old agent (D359).
+# Take over stops only the old agent (D359). "takeover" additionally skips
+# exactly the authenticated terminal scopes reviewed in the confirmation (D368).
+# "takeover-all" keeps the all-account root scan after closing, with no skips.
+# Those close units are an old terminal's own scope or, since host login, the
+# logind session of the login its shim runs in.
 scan_holders() {
  scan_skip=$1
+ scan_root=no
+ [ "$(id -u)" != 0 ] || scan_root=yes
  if [ -e "$base" ] || [ -L "$base" ]; then
   base_real=$(CDPATH= cd -P "$base" 2>/dev/null && pwd -P) || refuse tool
  else
@@ -496,14 +538,20 @@ scan_holders() {
  case "$base_real" in *[\*\?\[]*) refuse tool;; esac
  set --
  for process in /proc/[0-9]*; do
-  [ -O "$process" ] || continue
+  case "$scan_skip:$scan_root" in
+   takeover:yes|takeover-all:yes) :;;
+   *) [ -O "$process" ] || continue;;
+  esac
   if [ "$scan_skip" = service ]; then
    [ ! "$base/.bootstrap-lock/payload" -ef "$process/exe" ] || continue
    ! agent_unit_process "$process" || continue
   elif [ "$scan_skip" = unit ] && [ "${process##*/}" = "${agent_main_pid:-0}" ]; then
    agent_unit_process "$process" && continue
-  elif [ "$scan_skip" = agent ]; then
+  elif [ "$scan_skip" = unit ] && [ -n "${stale_terminals:-}" ] && reviewed_terminal_process "$process"; then
+   continue
+  elif [ "$scan_skip" = agent ] || [ "$scan_skip" = takeover ]; then
    ! agent_unit_process "$process" || continue
+   if [ "$scan_skip" = takeover ] && reviewed_terminal_process "$process"; then continue; fi
   fi
   # A non-dumpable process (every infraternal agent and shim, and OpenSSH's own
   # session process) hides its exe and fds even from its owner. Never read that
@@ -590,6 +638,44 @@ install_process() {
 # account can use the same manager. Bind the scope's canonical session id to
 # an owned endpoint here, including a stale endpoint whose hidden holder is
 # still alive. A shim not yet bound is checked by its install path above.
+# The close unit a reviewed terminal record names (its seventh field), in one
+# of the only two shapes the helper produces (D368, #433): an old terminal's
+# own scope, or the logind session scope of a host login. Anything else refuses.
+terminal_unit() {
+ terminal_unit=$(printf '%s\n' "$1" | cut -d, -f7)
+ case "$terminal_unit" in
+  infraternal-session-*.scope)
+   terminal_unit_id=${terminal_unit#infraternal-session-}
+   hex_id "${terminal_unit_id%.scope}";;
+  session-*.scope)
+   terminal_unit_id=${terminal_unit#session-}
+   terminal_unit_id=${terminal_unit_id%.scope}
+   case "$terminal_unit_id" in ''|*[!0-9A-Za-z]*) refuse id;; esac;;
+  *) refuse id;;
+ esac
+}
+# Whether /proc entry $1 runs inside the close unit of a terminal record in
+# $installed_terminals. The helper authenticated those units from each shim;
+# this only keeps the holder scan from counting what Take over is about to
+# close. A login scope matches only as exactly
+# /user.slice/user-<uid>.slice/session-<N>.scope, never nested or elsewhere.
+reviewed_terminal_process() {
+ reviewed_unit=
+ { while IFS= read -r scan_cgroup; do
+    case "$scan_cgroup" in
+     0::/system.slice/infraternal-session-*.scope|0::/system.slice/infraternal-session-*.scope/*)
+      # Only a direct child of system.slice: the unit Take over stops (#433 P3-4).
+      reviewed_rest=${scan_cgroup#0::/system.slice/}
+      reviewed_unit=${reviewed_rest%%/*};;
+     0::/user.slice/user-*.slice/session-*.scope)
+      reviewed_rest=${scan_cgroup#0::/user.slice/}
+      case "$reviewed_rest" in */*/*) :;; *) reviewed_unit=${reviewed_rest#*/};; esac;;
+    esac
+   done < "$1/cgroup"; } 2>/dev/null || :
+ [ -n "$reviewed_unit" ] || return 1
+ case " $installed_terminals " in *",$reviewed_unit,"*) return 0;; esac
+ return 1
+}
 session_scope_process() {
  session_scope=no
  { while IFS= read -r scan_cgroup; do
@@ -713,34 +799,55 @@ probe() {
  probed=$?
  set -e
 }
-# Refuse (73) while a terminal's shim serves a session of this install, or
-# any process outside the agent's own unit uses it (scan_holders agent).
+# D368: authenticated records bind every bound endpoint to this install's own
+# shim and to the unit that closes it: the terminal's own scope (before host
+# login) or its host login's logind session (#433). Missing runtime state means
+# there are no terminals.
+finished_terminal_records() {
+ for terminal_socket in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
+  [ -S "$terminal_socket" ] && [ ! -L "$terminal_socket" ] || continue
+  [ "$terminal_socket" != "$base/sessions/plugins.sock" ] || continue
+  runtime_helper
+  "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" takeover-terminals </dev/null || exit $?
+  break
+ done
+}
+# Refuse any holder outside the old unit and the authenticated scopes. A
+# scope name or an unbound socket alone never authorizes stopping a process.
 holders_beside_agent() {
- live_session_sockets
- scan_holders agent
+ scan_holders takeover
 }
 # A finished install (#394), with what Take over needs (D359):
 # `INFRATERNAL_SETUP_INSTALLED <host> <dev:ino> <live|idle> <takeover>`.
 # The takeover field is "ready" only for root's own base whose every entry,
 # launcher and unit are proven infraternal's (validate_upgrade_root) and that
-# nothing but the agent's own unit uses; "busy" when proven but in use (an
-# open terminal, another process); "unproven" otherwise, including every
+# only its own unit and authenticated terminal scopes use; "busy" when
+# another holder uses it or a terminal cannot be attributed; "unproven" otherwise, including every
 # rootless install. Only "ready" is ever offered. A runtime helper that needs
 # a refresh (76) ends the check, which then asks for one.
 report_installed() {
  installed_takeover=unproven
+ installed_terminals=
  if [ "$base" = "$up_root_base" ]; then
   probe validate_finished_install
   if [ "$probed" = 0 ]; then
-   probe holders_beside_agent
-   case "$probed" in
-    0) installed_takeover=ready;;
+   set +e
+   installed_terminals=$(set -e; finished_terminal_records)
+   terminals_status=$?
+   set -e
+   case "$terminals_status" in
+    0)
+     probe holders_beside_agent
+     case "$probed" in 0) installed_takeover=ready;; 73) installed_takeover=busy;; 76) exit 76;; esac;;
     73) installed_takeover=busy;;
     76) exit 76;;
    esac
   fi
  fi
- printf 'INFRATERNAL_SETUP_INSTALLED %s %s %s %s\n' "$(cat "$base/.bootstrap-owner")" "$(stat -c '%d:%i' "$base")" "$(upgrade_liveness)" "$installed_takeover"
+ [ "$installed_takeover" = ready ] || installed_terminals=
+ printf 'INFRATERNAL_SETUP_INSTALLED %s %s %s %s' "$(cat "$base/.bootstrap-owner")" "$(stat -c '%d:%i' "$base")" "$(upgrade_liveness)" "$installed_takeover"
+ [ -z "$installed_terminals" ] || printf ' %s' "$installed_terminals"
+ printf '\n'
 }
 inspect_previous() {
  no_redirect
@@ -939,7 +1046,9 @@ inspect_previous() {
    [ "$sockets" -le 1024 ] || refuse size
   done
  done
- printf 'INFRATERNAL_SETUP_STALE %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$sockets"
+ printf 'INFRATERNAL_SETUP_STALE %s %s %s %s' "$previous_host" "$previous_transaction" "$identity" "$sockets"
+ [ -z "${stale_terminals:-}" ] || printf ' %s' "$stale_terminals"
+ printf '\n'
 }
 stop_stage_shims() {
  runtime_helper
@@ -1172,7 +1281,10 @@ supersede_stuck_install() {
  printf '%s %s\n' "$replace_enabled" "$replace_active" > "$aside/.superseded-service"
  mv "$unit" "$aside/.superseded-unit"
  rm -f "$launcher"
- $manager daemon-reload >/dev/null 2>&1 || exit 73
+ if ! $manager daemon-reload >/dev/null 2>&1; then
+  [ "$takeover_closed" = no ] || exit 79
+  exit 73
+ fi
  replace_done
 }
 # Put back an install set aside by supersede_stuck_install after the new
@@ -1248,14 +1360,19 @@ take_over_finished_install() {
  refuse_cancelled "$takeover_token"
  takeover_observed=$(inspect_previous)
  set -- $takeover_expected
- [ "$#" = 5 ] && [ "$1" = INFRATERNAL_SETUP_INSTALLED ] && [ "$5" = ready ] || exit 75
+ [ "$#" -ge 5 ] && [ "$1" = INFRATERNAL_SETUP_INSTALLED ] && [ "$5" = ready ] || exit 75
  takeover_host=$2
- # The same install (owner and root identity) and still ready to take over.
- [ "${takeover_observed% * *}" = "${takeover_expected% * *}" ] || exit 75
- case "${takeover_observed##* }" in ready) :;; busy) exit 73;; *) exit 75;; esac
- # Its agent started since the person confirmed an idle install: ask again.
- takeover_liveness=${takeover_observed% *}
- [ "$4" != idle ] || [ "${takeover_liveness##* }" != live ] || exit 75
+ takeover_identity=$3
+ takeover_live=$4
+ shift 5
+ takeover_terminals_expected=$*
+ set -- $takeover_observed
+ [ "$#" -ge 5 ] && [ "$1" = INFRATERNAL_SETUP_INSTALLED ] || exit 75
+ [ "$2" = "$takeover_host" ] && [ "$3" = "$takeover_identity" ] || exit 75
+ case "$5" in ready) :;; busy) exit 73;; *) exit 75;; esac
+ [ "$takeover_live" != idle ] || [ "$4" != live ] || exit 75
+ shift 5
+ [ "$*" = "$takeover_terminals_expected" ] || exit 75
  validate_finished_install
  aside="$base.bootstrap-takeover-$takeover_token"
  takeover_part="$base.bootstrap-taking-$takeover_token"
@@ -1273,20 +1390,40 @@ take_over_finished_install() {
  [ "$(cat "$takeover_part/unit")" = "$(cat "$unit")" ] || exit 71
  mv -T "$takeover_part" "$aside"
  # From here every way out puts the old install back, until the end.
- trap 'takeover_status=$?; replace_untrap; put_back_taken_over; exit "$takeover_status"' EXIT
+ # A terminal unit that will not stop leaves 79. A manager failure leaves
+ # 80 before any terminal closed, or 81 after every confirmed unit stopped.
+ # Only a holder refusal (73) becomes 74 after every terminal closed.
+ takeover_closed=no
+ trap 'takeover_status=$?; replace_untrap; put_back_taken_over; case "$takeover_status:$takeover_closed" in 73:yes) takeover_status=74;; 80:yes) takeover_status=81;; esac; exit "$takeover_status"' EXIT
  trap 'replace_untrap; put_back_taken_over; exit 129' HUP
  trap 'replace_untrap; put_back_taken_over; exit 130' INT
  trap 'replace_untrap; put_back_taken_over; exit 143' TERM
  trap 'replace_untrap; put_back_taken_over; exit 141' PIPE
- stop_agent_unit
- $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
- # Only the old agent was allowed to use it, and it has stopped.
+ stop_agent_unit 80
+ # Stop the source of new terminals first, then compare every record again
+ # immediately before stopping exactly the units the person reviewed (D368).
+ installed_terminals=$takeover_terminals_expected
+ holders_beside_agent
+ installed_terminals=$(finished_terminal_records)
+ [ "$installed_terminals" = "$takeover_terminals_expected" ] || exit 75
+ # Several terminals of one host login share its logind session: stop it once.
+ set --
+ for takeover_terminal in $installed_terminals; do
+  terminal_unit "$takeover_terminal"
+  case " $* " in *" $terminal_unit "*) :;; *) set -- "$@" "$terminal_unit";; esac
+ done
+ for takeover_close in "$@"; do
+  $manager stop "$takeover_close" >/dev/null 2>&1 || exit 79
+  takeover_closed=yes
+ done
+ $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 80
+ # The old unit and only the confirmed terminals' units have stopped.
  live_session_sockets
- scan_holders all
+ scan_holders takeover-all
  mv -T "$base" "$aside/install"
  rm -f "$unit"
  rm -f "$launcher"
- $manager daemon-reload >/dev/null 2>&1 || exit 73
+ $manager daemon-reload >/dev/null 2>&1 || exit 80
  replace_done
 }
 # Put back what take_over_finished_install set aside in $aside, whatever step
