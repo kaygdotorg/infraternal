@@ -1704,7 +1704,10 @@ mod tests {
         expected.extend(output.encode().unwrap());
         let mut received = vec![0; expected.len()];
         client.read_exact(&mut received).unwrap();
-        assert_eq!(received, expected, "the unstarted output frame stays intact after the Ack");
+        assert_eq!(
+            received, expected,
+            "the unstarted output frame stays intact after the Ack"
+        );
         drop(client);
         drop(session);
         fs::remove_dir_all(state).unwrap();

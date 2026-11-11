@@ -163,9 +163,7 @@ fn maximum_snapshot_can_spend_unused_bulk_credit() {
         .expect("every frame-valid Snapshot fits one unspent browser grant");
 
     assert_eq!(output.reserved_credit(), 0);
-    let remaining = u64::from(BULK_CREDIT + REPAINT_RESERVE)
-        - BACKLOG as u64
-        - MAX_REPAINT as u64;
+    let remaining = u64::from(BULK_CREDIT + REPAINT_RESERVE) - BACKLOG as u64 - MAX_REPAINT as u64;
     assert_eq!(output.repaint_budget(), remaining);
     output
         .repaint_reserved(BACKLOG as u64 + 2, usize::try_from(remaining).unwrap())

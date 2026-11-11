@@ -448,7 +448,9 @@ pub(crate) fn insert_input_ack_before_unstarted_output(
                 .try_into()
                 .map_err(|_| invalid())?,
         ) as usize;
-        let Some(frame_end) = insertion.checked_add(4).and_then(|n| n.checked_add(body_len))
+        let Some(frame_end) = insertion
+            .checked_add(4)
+            .and_then(|n| n.checked_add(body_len))
         else {
             return Ok(false);
         };
