@@ -81,7 +81,11 @@ def check_theme(theme_dir: Path, facts: dict):
     else:
         closes = r.get("exit-closes-window")
         evidence = "after typing `exit` the 'shell ended' window must be gone (`exit-closes-window`); shots: " + ", ".join(shots(theme_dir, "shell", ["shell-typed", "after-exit"]))
-        add("2 shell + exit", "PASS" if closes == "PASS" else "FAIL", evidence)
+        if closes is None:
+            # The runner stops at the first failed keystroke, so no verdict was reached: say so instead of guessing.
+            add("2 shell + exit", "REVIEW", "the phase aborted before the `exit` check (no keyboard focus; see test.log); rerun with `check --phases shell`")
+        else:
+            add("2 shell + exit", "PASS" if closes == "PASS" else "FAIL", evidence)
 
     # 3 window fits the viewport
     wide = [f for name in ("regions-before", "win-after-exit") for f in frames(sh, name)

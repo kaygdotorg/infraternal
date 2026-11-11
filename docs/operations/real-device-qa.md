@@ -104,6 +104,13 @@ first-run). Shut the simulator down with `xcrun simctl shutdown` when you are do
 
 ## Known gaps
 
+- **The dark run is not dark yet.** `run.sh` switches the simulator to dark appearance (verified: `simctl ui
+  appearance` reads `dark`, and Safari's own bar goes grey), but on 2026-11-11 the app itself stayed in its light
+  theme in every dark screenshot. Whether the app ignores the system scheme on iOS or a stored theme wins is not
+  isolated. Until it is, a dark check has to pick a dark theme in Settings > Themes first (not yet automated);
+  treat "dark" columns as light-theme runs.
+- The shell phase can abort in one theme if the "New shell" tap misses (it did once, in dark); the table then says
+  REVIEW, and `check --phases shell` reruns it.
 - Production cannot be signed in to from a simulator without the owner's own passkey, so prod gets no real-device run
   yet.
 - Mac Safari is not covered. On 2026-11-11 `claude@infraternal-macos-01-std` could not `sudo -n` (a password is
