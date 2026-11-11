@@ -78,4 +78,3 @@
 - [ ] Implement only the required adoption/path behavior, then prove admin access, both mesh directions, and default-drop.
 - [ ] Document how product installation replaces the hand unit; do not change prod.
 - [ ] Run `scripts/verify fast` on compute01, record measured outputs, and post finish receipts on #483 and #489 after any staging window is granted.
-
