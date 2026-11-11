@@ -1905,6 +1905,79 @@ mod tests {
         opens: Arc<AtomicUsize>,
         refuse_key_payload_upload: bool,
     }
+    /// Holds invitation delivery after publication so concurrent admission stays overlapped.
+    struct InvitationGate {
+        /// Reports at most one arrival per test batch through a bounded channel.
+        arrivals: tokio::sync::mpsc::Sender<usize>,
+        /// Keeps the invitation setup step pending until the test releases all batches.
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+    impl InvitationGate {
+        /// Reports this batch's invitation, then waits for the test to release setup.
+        async fn hold(&self, batch: usize) {
+            self.arrivals
+                .send(batch)
+                .await
+                .expect("invitation test stopped observing arrivals");
+            let mut release = self.release.clone();
+            tokio::time::timeout(TEST_HANG_BOUND, async {
+                while !*release.borrow_and_update() {
+                    release
+                        .changed()
+                        .await
+                        .expect("invitation test dropped its release signal");
+                }
+            })
+            .await
+            .expect("invitation test did not release setup within its hang bound");
+        }
+    }
+    /// Wraps the ordinary fixture transport to hold invitation setup for one batch.
+    struct GatedSniff {
+        sniff: Sniff,
+        gate: Arc<InvitationGate>,
+        batch: usize,
+    }
+    impl SshTransport for GatedSniff {
+        fn open(
+            &self,
+            destination: Destination,
+            credentials: Credentials,
+            evidence: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            Box::pin(async move {
+                let session = self.sniff.open(destination, credentials, evidence).await?;
+                Ok(Arc::new(GatedSession {
+                    session,
+                    gate: self.gate.clone(),
+                    batch: self.batch,
+                }) as Arc<dyn SshSession>)
+            })
+        }
+    }
+    /// Holds invitation stdin until the concurrency test releases its batch.
+    struct GatedSession {
+        session: Arc<dyn SshSession>,
+        gate: Arc<InvitationGate>,
+        batch: usize,
+    }
+    impl SshSession for GatedSession {
+        fn trust_lookup(&self) -> Option<String> {
+            self.session.trust_lookup()
+        }
+
+        fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+            let session = self.session.clone();
+            let gate = self.gate.clone();
+            let batch = self.batch;
+            Box::pin(async move {
+                if matches!(input, Input::Bytes(_)) {
+                    gate.hold(batch).await;
+                }
+                session.run(script, input).await
+            })
+        }
+    }
     impl SshTransport for Sniff {
         fn open(
             &self,
@@ -2094,24 +2167,43 @@ mod tests {
     fn start(f: &Fixture, owner: &str) -> Batch {
         start_backend(f, owner, f.backend.clone())
     }
+    /// Starts a fixture batch using the supplied backend and ordinary setup refusal.
     fn start_backend(f: &Fixture, owner: &str, backend: Arc<dyn Backend>) -> Batch {
-        start_backend_with_payload_refusal(f, owner, backend, false)
+        start_backend_with_payload_refusal(f, owner, backend, false, None)
     }
+    /// Starts a fixture batch that refuses the staged SSH key payload upload.
     fn start_backend_refusing_key_payload_upload(f: &Fixture, owner: &str) -> Batch {
-        start_backend_with_payload_refusal(f, owner, f.backend.clone(), true)
+        start_backend_with_payload_refusal(f, owner, f.backend.clone(), true, None)
     }
+    /// Starts one batch whose issued invitation waits until the test releases its gate.
+    fn start_with_invitation_gate(
+        f: &Fixture,
+        owner: &str,
+        batch: usize,
+        gate: Arc<InvitationGate>,
+    ) -> Batch {
+        start_backend_with_payload_refusal(f, owner, f.backend.clone(), false, Some((gate, batch)))
+    }
+    /// Starts a fixture runner, optionally holding a published invitation for a concurrency test.
     fn start_backend_with_payload_refusal(
         f: &Fixture,
         owner: &str,
         backend: Arc<dyn Backend>,
         refuse_key_payload_upload: bool,
+        invitation_gate: Option<(Arc<InvitationGate>, usize)>,
     ) -> Batch {
         let fixture_payload = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let sniff = Sniff {
+            opens: f.opens.clone(),
+            refuse_key_payload_upload,
+        };
+        let transport: Arc<dyn SshTransport> = if let Some((gate, batch)) = invitation_gate {
+            Arc::new(GatedSniff { sniff, gate, batch })
+        } else {
+            Arc::new(sniff)
+        };
         let runner = Bootstrap::new(
-            Arc::new(Sniff {
-                opens: f.opens.clone(),
-                refuse_key_payload_upload,
-            }),
+            transport,
             backend,
             BinaryPaths {
                 x86_64: fixture_payload.clone(),
@@ -3269,11 +3361,42 @@ mod tests {
         );
     }
 
+    /// Holds one invitation open while all same-destination competitors reach admission.
     #[tokio::test]
     async fn breakit2_concurrent_same_destination_issues_only_one_invitation() {
         let f = fixture(true).await;
-        let batches: Vec<_> = (0..8).map(|_| start(&f, "owner")).collect();
+        // At most one invitation can be reported by each of these eight batches.
+        let (arrivals, mut arrived) = tokio::sync::mpsc::channel(8);
+        let (release, release_signal) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(InvitationGate {
+            arrivals,
+            release: release_signal,
+        });
+        let batches: Vec<_> = (0..8)
+            .map(|batch| start_with_invitation_gate(&f, "owner", batch, gate.clone()))
+            .collect();
+        let first_invitation = tokio::time::timeout(TEST_HANG_BOUND, arrived.recv())
+            .await
+            .expect("no invitation was published within the test hang bound")
+            .expect("all invitation reporters closed before publishing");
+        assert!(first_invitation < batches.len());
+        let second_invitation = tokio::time::timeout(TEST_HANG_BOUND, async {
+            tokio::select! {
+                _ = futures_util::future::join_all(batches.iter().enumerate().filter_map(|(batch, started)| {
+                    (batch != first_invitation).then_some(finished(started))
+                })) => false,
+                extra = arrived.recv() => extra.is_some(),
+            }
+        })
+        .await
+        .expect("same-destination competitors did not reach a terminal event");
+        // Release even after observing a duplicate so every fixture task can clean up.
+        release.send_replace(true);
         let events = futures_util::future::join_all(batches.iter().map(finished)).await;
+        assert!(
+            !second_invitation,
+            "a second invitation was published while the first attempt remained reserved"
+        );
         assert_eq!(
             events
                 .iter()
