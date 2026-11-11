@@ -671,8 +671,6 @@ fn run_tcp_worker(
 /// snapshot, never a half-updated one. Dropping the resolver stops both workers and waits for them.
 pub struct Resolver {
     address: Ipv4Addr,
-    #[cfg(target_os = "linux")]
-    system_port: bool,
     records: Arc<RwLock<Records>>,
     udp_shutdown: UnixStream,
     tcp_shutdown: UnixStream,
@@ -719,8 +717,8 @@ impl Resolver {
 
     /// Starts serving one node snapshot and, on root Linux nodes, also claims port 53 when free.
     ///
-    /// Port 53 is optional because systemd-resolved accepts the high port directly. The extra
-    /// listener is only needed by `NetworkManager`'s dnsmasq split-DNS forwarding.
+    /// Port 53 is optional because host DNS forwarding can target [`DNS_PORT`] directly. A root
+    /// Linux node also offers it as a compatibility listener when the address and port are free.
     /// # Errors
     /// Fails if the high mesh DNS port cannot be bound or the snapshot is invalid.
     pub fn bind_for_node(config: &Config) -> io::Result<Self> {
@@ -745,12 +743,6 @@ impl Resolver {
     #[cfg(target_os = "linux")]
     pub(crate) const fn address(&self) -> Ipv4Addr {
         self.address
-    }
-
-    /// Reports whether the node also owns the standard DNS port on its mesh address.
-    #[cfg(target_os = "linux")]
-    pub(crate) const fn has_system_port(&self) -> bool {
-        self.system_port
     }
 
     /// Binds the UDP and TCP sockets and starts independent protocol workers.
@@ -799,8 +791,6 @@ impl Resolver {
     ) -> io::Result<Self> {
         let address = initial.local_address;
         listener.set_nonblocking(true)?;
-        #[cfg(target_os = "linux")]
-        let system_port = system_pair.is_some();
         let mut worker_sockets = vec![socket];
         let mut worker_listeners = vec![listener];
         if let Some((system_socket, system_listener)) = system_pair {
@@ -828,8 +818,6 @@ impl Resolver {
         };
         Ok(Self {
             address,
-            #[cfg(target_os = "linux")]
-            system_port,
             records,
             udp_shutdown,
             tcp_shutdown,
@@ -869,7 +857,7 @@ impl Resolver {
     }
 }
 
-/// Root Linux nodes try port 53 for `NetworkManager`; other nodes stay high-port-only.
+/// Root Linux nodes also offer the optional port 53 compatibility listener.
 #[cfg(target_os = "linux")]
 fn system_port_for_node() -> bool {
     nix::unistd::Uid::effective().is_root()

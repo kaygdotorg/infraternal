@@ -3120,7 +3120,6 @@ impl Node {
             crate::wireguard::INTERFACE,
             &records,
             nix::unistd::Uid::effective().as_raw(),
-            resolver.has_system_port(),
         ) {
             tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
         }

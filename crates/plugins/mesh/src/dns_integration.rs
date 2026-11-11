@@ -10,12 +10,17 @@ use std::{
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
-use std::{fs, io, net::Ipv4Addr, os::unix::fs::MetadataExt, path::Path};
 #[cfg(target_os = "linux")]
 use std::{
+    fmt::Write as _,
+    fs::{File, OpenOptions},
+    io::Write as _,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
 };
+use std::{fs, io, net::Ipv4Addr, os::unix::fs::MetadataExt, path::Path};
 
 /// Identifies resolver files owned by the infraternal agent on macOS.
 #[cfg(target_os = "macos")]
@@ -32,8 +37,17 @@ const NMCLI_PATHS: &[&str] = &["/usr/bin/nmcli", "/bin/nmcli"];
 /// Fixed `NetworkManager` daemon binaries used only to inspect its active DNS mode.
 #[cfg(target_os = "linux")]
 const NETWORKMANAGER_PATHS: &[&str] = &["/usr/sbin/NetworkManager", "/usr/bin/NetworkManager"];
+/// The directory where `NetworkManager` reads dnsmasq plugin drop-ins.
+#[cfg(target_os = "linux")]
+const NETWORKMANAGER_DNSMASQ_DIRECTORY: &str = "/etc/NetworkManager/dnsmasq.d";
+/// The one `NetworkManager` dnsmasq drop-in owned by mesh DNS.
+#[cfg(target_os = "linux")]
+const NETWORKMANAGER_MESH_DNS_FILE: &str = "infraternal-mesh.conf";
+/// Identifies the only dnsmasq configuration file this module may replace or remove.
+#[cfg(target_os = "linux")]
+const NETWORKMANAGER_MESH_DNS_MARKER: &str = "# Managed by infraternal agent.";
 /// Gives atomic resolver-file writes distinct temporary names within one process.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Owns just the mesh suffix routes installed in the host resolver.
@@ -57,34 +71,32 @@ pub(crate) struct DnsIntegration {
 enum LinuxMode {
     /// systemd-resolved has a per-link DNS server and search domains.
     Resolved,
-    /// `NetworkManager`'s dnsmasq plugin routes the suffix over one link.
+    /// `NetworkManager`'s dnsmasq plugin forwards mesh suffixes from an owned drop-in.
     NetworkManager,
 }
 
-/// Describes the `NetworkManager` capabilities needed for mesh-only DNS routing.
+/// Describes the `NetworkManager` capabilities needed for mesh-only DNS forwarding.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 struct NetworkManagerSupport {
     /// Whether the daemon forwards DNS through its dnsmasq plugin.
     dnsmasq_enabled: bool,
-    /// Whether the daemon currently manages the infraternal mesh link.
-    manages_link: bool,
-    /// Whether the node owns the standard DNS port on its mesh address.
-    standard_listener: bool,
+    /// Whether the trusted client can ask `NetworkManager` to reload only DNS state.
+    nmcli_available: bool,
 }
 
 #[cfg(target_os = "linux")]
 impl NetworkManagerSupport {
-    /// Reports whether every `NetworkManager` requirement for per-link routing is present.
+    /// Reports whether `NetworkManager` can forward DNS through its dnsmasq plugin.
     const fn usable(self) -> bool {
-        self.dnsmasq_enabled && self.manages_link && self.standard_listener
+        self.dnsmasq_enabled && self.nmcli_available
     }
 }
 
 /// The input needed to reverse one Linux host-resolver installation.
 #[cfg(target_os = "linux")]
 struct LinuxInstall {
-    /// The mesh-owned interface whose resolver state was changed.
+    /// The mesh interface used by the per-link systemd-resolved route.
     interface: String,
     /// The split-DNS mechanism configured, or none if this host supports neither one.
     mode: Option<LinuxMode>,
@@ -115,7 +127,6 @@ impl DnsIntegration {
         interface: &str,
         records: &Records,
         effective_uid: u32,
-        standard_listener: bool,
     ) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         if effective_uid != 0 {
@@ -126,14 +137,14 @@ impl DnsIntegration {
             return Ok(());
         }
         #[cfg(target_os = "macos")]
-        let _ = (interface, standard_listener);
+        let _ = interface;
         #[cfg(target_os = "macos")]
         let address = records.local_address();
         #[cfg(target_os = "macos")]
         let suffixes = records.suffixes();
         #[cfg(target_os = "linux")]
         {
-            self.configure_linux(interface, records, standard_listener)
+            self.configure_linux(interface, records)
         }
         #[cfg(target_os = "macos")]
         {
@@ -160,14 +171,10 @@ impl DnsIntegration {
         Ok(())
     }
 
-    /// Updates only the mesh link's Linux resolver state.
+    /// Updates the Linux host resolver for the accepted mesh suffixes.
+    /// `NetworkManager` uses its DNS plugin and never reapplies the mesh interface.
     #[cfg(target_os = "linux")]
-    fn configure_linux(
-        &mut self,
-        interface: &str,
-        records: &Records,
-        standard_listener: bool,
-    ) -> io::Result<()> {
+    fn configure_linux(&mut self, interface: &str, records: &Records) -> io::Result<()> {
         let address = records.local_address();
         let suffixes = records.suffixes();
         if let Some(current) = self.linux.as_mut()
@@ -187,21 +194,16 @@ impl DnsIntegration {
             .filter(|program| program_succeeds(program, &["status"]));
         let nmcli = trusted_program(NMCLI_PATHS);
         let nm_dnsmasq = networkmanager_dnsmasq_enabled();
-        let nm_manages_link = nmcli
-            .as_deref()
-            .is_some_and(|program| networkmanager_device_is_managed(program, interface));
         let nm_support = NetworkManagerSupport {
             dnsmasq_enabled: nm_dnsmasq,
-            manages_link: nm_manages_link,
-            standard_listener,
+            nmcli_available: nmcli.is_some(),
         };
         let mode = select_linux_mode(resolvectl.is_some(), nm_support);
 
         if mode.is_none() {
             // Without a recorded install or a supported split-DNS mode, there is no
-            // resolver state this process can safely claim. In particular, an
-            // unconditional `nmcli device modify` reapplies the mesh device even
-            // when NetworkManager cannot route split DNS on this host.
+            // resolver state this process can safely claim. In particular, DNS
+            // setup must never reapply the mesh device as a fallback.
             self.linux = Some(LinuxInstall {
                 interface: interface.to_owned(),
                 mode: None,
@@ -213,8 +215,8 @@ impl DnsIntegration {
 
         if mode == Some(LinuxMode::Resolved)
             && let Some(resolvectl) = resolvectl.as_ref()
-            && let Some(commands) = linux_route_commands(mode, interface, address, suffixes)
         {
+            let commands = resolved_route_commands(interface, address, suffixes);
             if run_commands(resolvectl, &commands).is_ok() {
                 self.linux = Some(LinuxInstall {
                     interface: interface.to_owned(),
@@ -234,10 +236,8 @@ impl DnsIntegration {
         if matches!(mode, Some(LinuxMode::NetworkManager | LinuxMode::Resolved))
             && fallback_mode == Some(LinuxMode::NetworkManager)
             && let Some(nmcli) = nmcli
-            && let Some(commands) =
-                linux_route_commands(fallback_mode, interface, address, suffixes)
         {
-            if run_commands(&nmcli, &commands).is_ok() {
+            if install_networkmanager_dns(&nmcli, address, suffixes).is_ok() {
                 self.linux = Some(LinuxInstall {
                     interface: interface.to_owned(),
                     mode: Some(LinuxMode::NetworkManager),
@@ -246,7 +246,7 @@ impl DnsIntegration {
                 });
                 return Ok(());
             }
-            let _ = run_commands(&nmcli, &networkmanager_clear_commands(interface));
+            let _ = clear_networkmanager_dns(&nmcli);
         }
 
         // A host without an available split-DNS mechanism keeps all existing DNS settings.
@@ -310,43 +310,158 @@ fn resolved_route_commands(
     ]
 }
 
-/// Builds `nmcli` arguments with search and route-only domains on one mesh link.
+/// Builds the `NetworkManager` command that reloads only the DNS plugin.
 #[cfg(target_os = "linux")]
-fn networkmanager_route_commands(
-    interface: &str,
-    address: Ipv4Addr,
-    suffixes: &[String],
-) -> Vec<Vec<String>> {
-    // nmcli consumes one argv value per property; list values use comma separators.
-    let search_domains = suffixes
-        .iter()
-        .flat_map(|suffix| [suffix.clone(), format!("~{suffix}")])
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut arguments = vec![
-        "device".to_owned(),
-        "modify".to_owned(),
-        interface.to_owned(),
-        "ipv4.dns".to_owned(),
-        address.to_string(),
-        "ipv4.dns-search".to_owned(),
-    ];
-    arguments.push(search_domains);
-    vec![arguments]
+fn networkmanager_route_commands() -> Vec<Vec<String>> {
+    networkmanager_dns_reload_commands()
 }
 
-/// Builds the `nmcli` reset for only the mesh device's temporary DNS properties.
+/// Builds the `NetworkManager` command that applies a removed dnsmasq drop-in.
 #[cfg(target_os = "linux")]
-fn networkmanager_clear_commands(interface: &str) -> Vec<Vec<String>> {
+fn networkmanager_clear_commands() -> Vec<Vec<String>> {
+    networkmanager_dns_reload_commands()
+}
+
+/// Reloads `NetworkManager`'s DNS plugin without reapplying any network device.
+#[cfg(target_os = "linux")]
+fn networkmanager_dns_reload_commands() -> Vec<Vec<String>> {
     vec![vec![
-        "device".to_owned(),
-        "modify".to_owned(),
-        interface.to_owned(),
-        "ipv4.dns".to_owned(),
-        String::new(),
-        "ipv4.dns-search".to_owned(),
-        String::new(),
+        "general".to_owned(),
+        "reload".to_owned(),
+        "dns-full".to_owned(),
     ]]
+}
+
+/// Renders `NetworkManager` dnsmasq routes without changing the host's search list.
+#[cfg(target_os = "linux")]
+fn render_networkmanager_dnsmasq_config(
+    address: Ipv4Addr,
+    suffixes: &[String],
+) -> io::Result<String> {
+    // Only suffix servers belong here; NetworkManager keeps its existing search list and upstreams.
+    let mut contents = format!("{NETWORKMANAGER_MESH_DNS_MARKER}\n");
+    for suffix in suffixes {
+        crate::policy::model::validate_dns(suffix, false)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mesh DNS suffix"))?;
+        writeln!(
+            &mut contents,
+            "server=/{suffix}/{address}#{}",
+            crate::dns::DNS_PORT
+        )
+        .map_err(|_| io::Error::other("could not render mesh DNS forwarding rule"))?;
+    }
+    Ok(contents)
+}
+
+/// Writes and applies the one `NetworkManager` dnsmasq file owned by mesh DNS.
+#[cfg(target_os = "linux")]
+fn install_networkmanager_dns(
+    nmcli: &Path,
+    address: Ipv4Addr,
+    suffixes: &[String],
+) -> io::Result<()> {
+    let contents = render_networkmanager_dnsmasq_config(address, suffixes)?;
+    let directory = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY);
+    ensure_networkmanager_directory(directory, 0)?;
+    let path = directory.join(NETWORKMANAGER_MESH_DNS_FILE);
+    write_networkmanager_dns_file(&path, contents.as_bytes(), 0)?;
+    run_commands(nmcli, &networkmanager_route_commands())
+}
+
+/// Creates the dnsmasq drop-in directory only beneath an already safe parent.
+#[cfg(target_os = "linux")]
+fn ensure_networkmanager_directory(path: &Path, owner_uid: u32) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_networkmanager_directory(path, owner_uid),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+            validate_networkmanager_directory(parent, owner_uid)?;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o755).create(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+            validate_networkmanager_directory(path, owner_uid)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Verifies a real directory is owned by the service account and cannot be changed by others.
+#[cfg(target_os = "linux")]
+fn validate_networkmanager_directory(path: &Path, owner_uid: u32) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir() && metadata.uid() == owner_uid && metadata.mode() & 0o022 == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "NetworkManager dnsmasq directory is not a safe owned directory",
+        ))
+    }
+}
+
+/// Replaces the owned dnsmasq file atomically, refusing an unmarked file at that path.
+#[cfg(target_os = "linux")]
+fn write_networkmanager_dns_file(path: &Path, contents: &[u8], owner_uid: u32) -> io::Result<()> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    validate_networkmanager_directory(parent, owner_uid)?;
+    let already_managed = networkmanager_dns_file_is_managed(path, owner_uid)?;
+    let mode = if already_managed {
+        fs::symlink_metadata(path)?.mode() & 0o777
+    } else {
+        0o644
+    };
+    atomic_write(path, contents, mode, parent)
+}
+
+/// Removes only a regular, owned dnsmasq file carrying this module's marker.
+#[cfg(target_os = "linux")]
+fn remove_networkmanager_dns_file(path: &Path, owner_uid: u32) -> io::Result<bool> {
+    if !networkmanager_dns_file_is_managed(path, owner_uid)? {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    Ok(true)
+}
+
+/// Recognizes a mesh DNS file by its owner, safe permissions and first-line marker.
+#[cfg(target_os = "linux")]
+fn networkmanager_dns_file_is_managed(path: &Path, owner_uid: u32) -> io::Result<bool> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    match fs::symlink_metadata(parent) {
+        Ok(_) => validate_networkmanager_directory(parent, owner_uid)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.uid() != owner_uid
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "NetworkManager dnsmasq file is not a safe owned regular file",
+        ));
+    }
+    if fs::read_to_string(path)?.lines().next() == Some(NETWORKMANAGER_MESH_DNS_MARKER) {
+        Ok(true)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "NetworkManager dnsmasq file is not owned by the infraternal agent",
+        ))
+    }
+}
+
+/// Removes the owned `NetworkManager` file and reloads only its DNS plugin.
+#[cfg(target_os = "linux")]
+fn clear_networkmanager_dns(nmcli: &Path) -> io::Result<()> {
+    let path = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY).join(NETWORKMANAGER_MESH_DNS_FILE);
+    let _ = remove_networkmanager_dns_file(&path, 0)?;
+    run_commands(nmcli, &networkmanager_clear_commands())
 }
 
 /// Renders one macOS resolver file for a suffix and the node's high DNS port.
@@ -376,23 +491,6 @@ fn select_linux_mode(
     }
 }
 
-/// Builds only the route update for the selected resolver, leaving unsupported hosts untouched.
-#[cfg(target_os = "linux")]
-fn linux_route_commands(
-    mode: Option<LinuxMode>,
-    interface: &str,
-    address: Ipv4Addr,
-    suffixes: &[String],
-) -> Option<Vec<Vec<String>>> {
-    match mode {
-        Some(LinuxMode::Resolved) => Some(resolved_route_commands(interface, address, suffixes)),
-        Some(LinuxMode::NetworkManager) => {
-            Some(networkmanager_route_commands(interface, address, suffixes))
-        }
-        None => None,
-    }
-}
-
 /// Removes the resolver mechanism recorded for one Linux node.
 #[cfg(target_os = "linux")]
 fn remove_linux_install(install: &LinuxInstall) -> io::Result<()> {
@@ -413,7 +511,7 @@ fn remove_linux_install(install: &LinuxInstall) -> io::Result<()> {
             let nmcli = trusted_program(NMCLI_PATHS).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, "nmcli is unavailable for cleanup")
             })?;
-            run_commands(&nmcli, &networkmanager_clear_commands(&install.interface))?;
+            clear_networkmanager_dns(&nmcli)?;
         }
         None => {}
     }
@@ -458,22 +556,6 @@ fn config_uses_dnsmasq(configuration: &str) -> bool {
         }
     }
     dns_plugin == Some("dnsmasq")
-}
-
-/// Reports whether `NetworkManager` currently manages the mesh interface.
-#[cfg(target_os = "linux")]
-fn networkmanager_device_is_managed(nmcli: &Path, interface: &str) -> bool {
-    let Ok(output) = Command::new(nmcli)
-        .args(["-g", "GENERAL.STATE", "device", "show", interface])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    let state = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-    output.status.success() && state.contains("connected") && !state.contains("unmanaged")
 }
 
 /// Runs one fixed system resolver probe and reports its exit status.
@@ -598,7 +680,8 @@ fn validate_managed_file_target(path: &Path) -> io::Result<()> {
 fn write_managed_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     validate_managed_file_target(path)?;
     let mode = fs::symlink_metadata(path).map_or(0o644, |metadata| metadata.mode() & 0o777);
-    atomic_write(path, contents, mode)
+    let staging_directory = macos_staging_directory(path)?;
+    atomic_write(path, contents, mode, staging_directory)
 }
 
 /// Removes only stale resolver files that carry the infraternal marker.
@@ -723,12 +806,16 @@ fn macos_staging_directory(path: &Path) -> io::Result<&Path> {
     }
 }
 
-/// Atomically replaces one root-owned resolver file while preserving its mode.
-/// Its temporary file stays outside `/etc/resolver`, where macOS treats every file as a route.
-#[cfg(target_os = "macos")]
-fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+/// Atomically replaces one owned resolver file while preserving its mode.
+/// `staging_directory` stays outside active resolver directories when the OS scans every entry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn atomic_write(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    staging_directory: &Path,
+) -> io::Result<()> {
     let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let staging_directory = macos_staging_directory(path)?;
     let name = path
         .file_name()
         .ok_or(io::ErrorKind::InvalidInput)?
@@ -738,6 +825,7 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
         ".{name}.infraternal-{}-{unique}.tmp",
         std::process::id()
     ));
+    // The `.tmp` suffix is ignored by dnsmasq; macOS also stages outside its active resolver directory.
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -761,13 +849,16 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    //! Check Linux split-route selection and Mac per-suffix resolver-file contents.
+    //! Check Linux split-DNS forwarding and Mac per-suffix resolver-file contents.
     #![allow(clippy::expect_used)]
 
     #[cfg(target_os = "linux")]
     use super::{
-        LinuxMode, NetworkManagerSupport, linux_route_commands, networkmanager_clear_commands,
-        networkmanager_route_commands, resolved_route_commands, select_linux_mode,
+        LinuxMode, NETWORKMANAGER_MESH_DNS_MARKER, NetworkManagerSupport,
+        ensure_networkmanager_directory, networkmanager_clear_commands,
+        networkmanager_route_commands, remove_networkmanager_dns_file,
+        render_networkmanager_dnsmasq_config, resolved_route_commands, select_linux_mode,
+        write_networkmanager_dns_file,
     };
     #[cfg(target_os = "macos")]
     use super::{
@@ -775,6 +866,22 @@ mod tests {
         render_macos_resolver,
     };
     use std::net::Ipv4Addr;
+    #[cfg(target_os = "linux")]
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+
+    /// Creates a private test directory for `NetworkManager`-owned file operations.
+    #[cfg(target_os = "linux")]
+    fn temporary_dns_config_directory() -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "infraternal-dns-config-{}-{}",
+            std::process::id(),
+            super::NEXT_TEMP_FILE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir(&directory).expect("create DNS config test directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("secure DNS config test directory");
+        directory
+    }
 
     /// The systemd-resolved route stays on the mesh interface and includes both DNS aliases.
     #[cfg(target_os = "linux")]
@@ -799,48 +906,47 @@ mod tests {
         );
     }
 
-    /// `NetworkManager` receives search and route-only domains on the mesh link alone.
+    /// `NetworkManager` reloads only its DNS plugin for mesh route changes.
     #[cfg(target_os = "linux")]
     #[test]
-    fn networkmanager_route_is_per_link_and_keeps_bare_names_searchable() {
-        let commands = networkmanager_route_commands(
-            "infraternal0",
-            Ipv4Addr::new(10, 254, 0, 2),
-            &["internal".to_owned(), "mesh.kayg.org".to_owned()],
-        );
+    fn networkmanager_route_update_does_not_reapply_the_mesh_device() {
+        let commands = networkmanager_route_commands();
 
         assert_eq!(
             commands,
-            vec![vec![
-                "device",
-                "modify",
-                "infraternal0",
-                "ipv4.dns",
-                "10.254.0.2",
-                "ipv4.dns-search",
-                "internal,~internal,mesh.kayg.org,~mesh.kayg.org",
-            ]]
-            .into_iter()
-            .map(|arguments| arguments.into_iter().map(str::to_owned).collect())
-            .collect::<Vec<Vec<String>>>()
+            vec![vec!["general", "reload", "dns-full"]]
+                .into_iter()
+                .map(|arguments| arguments.into_iter().map(str::to_owned).collect())
+                .collect::<Vec<Vec<String>>>()
         );
     }
 
-    /// Clearing `NetworkManager` DNS touches only the mesh interface's DNS properties.
+    /// `NetworkManager` DNS cleanup also reloads only the DNS plugin.
     #[cfg(target_os = "linux")]
     #[test]
-    fn networkmanager_cleanup_is_scoped_to_the_mesh_link() {
+    fn networkmanager_cleanup_does_not_reapply_the_mesh_device() {
         assert_eq!(
-            networkmanager_clear_commands("infraternal0"),
-            vec![vec![
-                "device".to_owned(),
-                "modify".to_owned(),
-                "infraternal0".to_owned(),
-                "ipv4.dns".to_owned(),
-                String::new(),
-                "ipv4.dns-search".to_owned(),
-                String::new(),
-            ]]
+            networkmanager_clear_commands(),
+            vec![vec!["general", "reload", "dns-full"]]
+                .into_iter()
+                .map(|arguments| arguments.into_iter().map(str::to_owned).collect())
+                .collect::<Vec<Vec<String>>>()
+        );
+    }
+
+    /// The dnsmasq fallback works without `NetworkManager` managing the mesh link or port 53.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn networkmanager_fallback_does_not_require_a_managed_link_or_system_port() {
+        assert_eq!(
+            select_linux_mode(
+                false,
+                NetworkManagerSupport {
+                    dnsmasq_enabled: true,
+                    nmcli_available: true,
+                },
+            ),
+            Some(LinuxMode::NetworkManager)
         );
     }
 
@@ -853,25 +959,23 @@ mod tests {
                 true,
                 NetworkManagerSupport {
                     dnsmasq_enabled: true,
-                    manages_link: true,
-                    standard_listener: false,
+                    nmcli_available: true,
                 },
             ),
             Some(LinuxMode::Resolved)
         );
     }
 
-    /// `NetworkManager` is used only with dnsmasq, a managed mesh link and port 53 bound.
+    /// `NetworkManager` needs dnsmasq and its trusted reload client for split forwarding.
     #[cfg(target_os = "linux")]
     #[test]
-    fn networkmanager_fallback_requires_a_split_dns_link_and_standard_listener() {
+    fn networkmanager_fallback_requires_dnsmasq_and_nmcli() {
         assert_eq!(
             select_linux_mode(
                 false,
                 NetworkManagerSupport {
                     dnsmasq_enabled: true,
-                    manages_link: true,
-                    standard_listener: true,
+                    nmcli_available: true,
                 },
             ),
             Some(LinuxMode::NetworkManager)
@@ -881,19 +985,7 @@ mod tests {
                 false,
                 NetworkManagerSupport {
                     dnsmasq_enabled: true,
-                    manages_link: true,
-                    standard_listener: false,
-                },
-            ),
-            None
-        );
-        assert_eq!(
-            select_linux_mode(
-                false,
-                NetworkManagerSupport {
-                    dnsmasq_enabled: true,
-                    manages_link: false,
-                    standard_listener: true,
+                    nmcli_available: false,
                 },
             ),
             None
@@ -903,8 +995,7 @@ mod tests {
                 false,
                 NetworkManagerSupport {
                     dnsmasq_enabled: false,
-                    manages_link: true,
-                    standard_listener: true,
+                    nmcli_available: true,
                 },
             ),
             None
@@ -919,17 +1010,75 @@ mod tests {
             false,
             NetworkManagerSupport {
                 dnsmasq_enabled: false,
-                manages_link: false,
-                standard_listener: false,
+                nmcli_available: false,
             },
         );
 
         assert_eq!(mode, None);
+    }
+
+    /// Each mesh suffix forwards to the node's high-port listener without replacing host search.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn networkmanager_dnsmasq_config_routes_suffixes_to_mesh_listener() {
         assert_eq!(
-            linux_route_commands(mode, "infraternal0", Ipv4Addr::new(10, 254, 0, 2), &[]),
-            None,
-            "an unsupported host must not receive a resolver mutation or NetworkManager reapply"
+            render_networkmanager_dnsmasq_config(
+                Ipv4Addr::new(10, 254, 0, 2),
+                &["internal".to_owned(), "mesh.kayg.org".to_owned()],
+            )
+            .expect("valid mesh DNS suffixes"),
+            format!(
+                "{NETWORKMANAGER_MESH_DNS_MARKER}\nserver=/internal/10.254.0.2#1053\nserver=/mesh.kayg.org/10.254.0.2#1053\n"
+            )
         );
+    }
+
+    /// Invalid suffix text cannot add extra dnsmasq directives to the root-owned file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn networkmanager_dnsmasq_config_rejects_invalid_suffixes() {
+        let error = render_networkmanager_dnsmasq_config(
+            Ipv4Addr::new(10, 254, 0, 2),
+            &["internal\nlisten-address=0.0.0.0".to_owned()],
+        )
+        .expect_err("invalid DNS text must not reach the root-owned plugin config");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// The `NetworkManager` file lifecycle updates and removes only its marked config.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn networkmanager_dns_file_lifecycle_preserves_unowned_files() {
+        let owner_uid = nix::unistd::Uid::effective().as_raw();
+        let base = temporary_dns_config_directory();
+        let directory = base.join("dnsmasq.d");
+        ensure_networkmanager_directory(&directory, owner_uid)
+            .expect("create owned dnsmasq directory");
+        let path = directory.join("infraternal-mesh.conf");
+        let first = format!("{NETWORKMANAGER_MESH_DNS_MARKER}\nserver=/internal/10.254.0.2#1053\n");
+        write_networkmanager_dns_file(&path, first.as_bytes(), owner_uid)
+            .expect("write the owned dnsmasq file");
+        let second =
+            format!("{NETWORKMANAGER_MESH_DNS_MARKER}\nserver=/mesh.kayg.org/10.254.0.2#1053\n");
+        write_networkmanager_dns_file(&path, second.as_bytes(), owner_uid)
+            .expect("replace the owned dnsmasq file");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read owned dnsmasq file"),
+            second
+        );
+        assert!(remove_networkmanager_dns_file(&path, owner_uid).expect("remove owned file"));
+        assert!(!path.exists());
+
+        let unowned = b"# locally managed\nserver=/internal/192.0.2.1\n";
+        fs::write(&path, unowned).expect("write an unowned test file");
+        assert!(write_networkmanager_dns_file(&path, first.as_bytes(), owner_uid).is_err());
+        assert!(remove_networkmanager_dns_file(&path, owner_uid).is_err());
+        assert_eq!(
+            fs::read(&path).expect("preserved unowned dnsmasq file"),
+            unowned
+        );
+        fs::remove_dir_all(base).expect("remove DNS config test directory");
     }
 
     /// The macOS resolver file points only at the mesh listener on its unprivileged port.
