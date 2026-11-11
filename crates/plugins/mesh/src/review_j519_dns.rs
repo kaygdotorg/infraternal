@@ -187,3 +187,44 @@ fn review_j529_failed_cleanup_does_not_cache_previous_success() {
     assert_eq!(contents, format!("{NETWORKMANAGER_MESH_DNS_MARKER}\n"));
     integration.configure("infraternal0", &original, 0).expect_err("returning to the old snapshot must retry the failed cleanup, not return cached success for the now-empty file");
 }
+
+/// Changed or deleted forwarding files must be rebuilt even for an identical snapshot.
+#[test]
+#[ignore = "Run in the J519 private resolver filesystem namespace."]
+fn review_j485c_changed_file_invalidates_success() {
+    install_nix_profile_tool("nmcli");
+    let daemon = install_nix_profile_tool("NetworkManager");
+    fs::write(&daemon, "#!/bin/sh\nprintf '[main]\\ndns=dnsmasq\\n'\n")
+        .expect("resolver fixture setup or inspection");
+    let records = records();
+    let mut integration = DnsIntegration::default();
+    integration
+        .configure("infraternal0", &records, 0)
+        .expect("resolver fixture setup or inspection");
+    let path = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY).join(NETWORKMANAGER_MESH_DNS_FILE);
+    let expected = fs::read_to_string(&path).expect("resolver fixture setup or inspection");
+    fs::write(&path, format!("{NETWORKMANAGER_MESH_DNS_MARKER}\n"))
+        .expect("resolver fixture setup or inspection");
+    integration
+        .configure("infraternal0", &records, 0)
+        .expect("resolver fixture setup or inspection");
+    assert_eq!(
+        fs::read_to_string(&path).expect("resolver fixture setup or inspection"),
+        expected
+    );
+    fs::remove_file(&path).expect("resolver fixture setup or inspection");
+    integration
+        .configure("infraternal0", &records, 0)
+        .expect("resolver fixture setup or inspection");
+    assert_eq!(
+        fs::read_to_string(&path).expect("resolver fixture setup or inspection"),
+        expected
+    );
+    fs::write(&path, "# unrelated\n").expect("resolver fixture setup or inspection");
+    assert!(integration.configure("infraternal0", &records, 0).is_err());
+    assert_eq!(
+        fs::read_to_string(&path).expect("resolver fixture setup or inspection"),
+        "# unrelated\n"
+    );
+    fs::remove_file(path).expect("resolver fixture setup or inspection");
+}

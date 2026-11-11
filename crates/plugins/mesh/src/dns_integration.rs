@@ -126,6 +126,8 @@ impl NetworkManagerSupport {
 /// The input needed to reverse one Linux host-resolver installation.
 #[cfg(target_os = "linux")]
 struct LinuxInstall {
+    /// Cleanup ownership survives failures, but only an intact successful install may be reused.
+    valid: bool,
     /// The mesh interface used by the per-link systemd-resolved route.
     interface: String,
     /// The split-DNS mechanism installed successfully for this node.
@@ -189,7 +191,8 @@ impl DnsIntegration {
     pub(crate) fn remove(&mut self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            if let Some(install) = self.linux.as_ref() {
+            if let Some(install) = self.linux.as_mut() {
+                install.valid = false;
                 remove_linux_install(install)?;
                 self.linux = None;
             }
@@ -215,8 +218,14 @@ impl DnsIntegration {
             && current.interface == interface
             && current.address == address
             && current.suffixes == suffixes
+            && current.valid
         {
-            return Ok(());
+            // Invalidate before any fallible inspection: an unsafe or missing file is not success.
+            current.valid = false;
+            current.valid = linux_install_is_intact(current)?;
+            if current.valid {
+                return Ok(());
+            }
         }
 
         // A previous process may have left a marked dnsmasq drop-in without an in-memory install.
@@ -225,7 +234,9 @@ impl DnsIntegration {
             clear_stale_networkmanager_dns()?;
         }
 
-        if let Some(current) = self.linux.as_ref() {
+        if let Some(current) = self.linux.as_mut() {
+            // Retain the cleanup recipe on error, never its previous success shortcut.
+            current.valid = false;
             remove_linux_install(current)?;
             self.linux = None;
         }
@@ -300,6 +311,7 @@ impl DnsIntegration {
             match run_commands(resolvectl, &commands) {
                 Ok(()) => {
                     self.linux = Some(LinuxInstall {
+                        valid: true,
                         interface: interface.to_owned(),
                         mode: LinuxMode::Resolved,
                         address,
@@ -334,6 +346,7 @@ impl DnsIntegration {
             match install_networkmanager_dns(nmcli, address, suffixes) {
                 Ok(()) => {
                     self.linux = Some(LinuxInstall {
+                        valid: true,
                         interface: interface.to_owned(),
                         mode: LinuxMode::NetworkManager,
                         address,
@@ -626,6 +639,21 @@ fn resolver_setup_error(failures: &[String]) -> io::Error {
             failures.join("; ")
         ),
     )
+}
+
+/// Checks the durable forwarding file before reusing a successful Linux installation.
+/// systemd-resolved has no forwarding file; its existing per-link cache behaviour is unchanged.
+#[cfg(target_os = "linux")]
+fn linux_install_is_intact(install: &LinuxInstall) -> io::Result<bool> {
+    if install.mode == LinuxMode::Resolved {
+        return Ok(true);
+    }
+    let path = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY).join(NETWORKMANAGER_MESH_DNS_FILE);
+    if !networkmanager_dns_file_is_managed(&path, 0)? {
+        return Ok(false);
+    }
+    Ok(fs::read_to_string(path)?
+        == render_networkmanager_dnsmasq_config(install.address, &install.suffixes)?)
 }
 
 /// Removes the resolver mechanism recorded for one Linux node.
