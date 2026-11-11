@@ -1,27 +1,32 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Real-device QA runner: one XCUITest that drives iOS Safari in the iPhone Simulator from an action script.
-//
-// Why a script instead of one test per step: every `xcodebuild test` costs about ten seconds of start-up, and the
-// checklist is dozens of taps and screenshots. `scripts/real-device-qa` hands this test an ACTIONS string such as
-// `open~https://host/|wait~3|tap~Continue|shot~after-continue` and gets screenshots and `QA_RESULT` lines back.
-//
-// Safari is the system app, so everything goes through accessibility labels and screen coordinates. The page's own DOM
-// is not readable here; layout checks use the frames of accessibility elements (`frame~`), and the rest is judged from
-// the screenshots the script saves.
+/// Real-device QA runner: one XCUITest that drives iOS Safari in the iPhone Simulator from an action script.
+///
+/// Why a script instead of one test per step: every `xcodebuild test` costs about ten seconds of start-up, and the
+/// checklist is dozens of taps and screenshots. `scripts/real-device-qa` hands this test an ACTIONS string such as
+/// `open~https://host/|wait~3|tap~Continue|shot~after-continue` and gets screenshots and `QA_RESULT` lines back.
+///
+/// Safari is the system app, so everything goes through accessibility labels and screen coordinates. The page's own DOM
+/// is not readable here; layout checks use the frames of accessibility elements (`frame~`), and the rest is judged from
+/// the screenshots the script saves.
 import XCTest
 import notify
 
+/// The one UI test of the runner: reads the ACTIONS script and executes it step by step against Safari.
 final class DeviceQA: XCTestCase {
+    /// Mobile Safari, addressed by bundle id; the page under test is whatever it shows.
     let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+    /// The home screen process: system sheets (passkey prompts) and screen-coordinate taps belong to it, not to Safari.
     let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    /// How many steps reported FAIL; the test fails at the end if it is not zero, but a FAIL never stops the run.
     var failures = 0
 
-    /// Reads a parameter that `ui.sh` forwarded as `TEST_RUNNER_<NAME>`.
+    /// Reads a parameter that `run.sh` forwarded as `TEST_RUNNER_<NAME>`.
     func parameter(_ name: String, default fallback: String = "") -> String {
         ProcessInfo.processInfo.environment[name] ?? ProcessInfo.processInfo.environment["TEST_RUNNER_" + name] ?? fallback
     }
 
+    /// Lets a failed step carry on, so one missing control still leaves screenshots of everything after it.
     override func setUp() { continueAfterFailure = true }
 
     /// Saves a full-screen screenshot as a kept XCTest attachment; the wrapper exports and renames it by `name`.

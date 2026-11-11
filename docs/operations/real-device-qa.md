@@ -119,8 +119,12 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
   until then. The simulator checklist has an `unlock` phase for that.
 - A removed host that is offline stays listed with its cleanup pending, so removal is proven by the re-add needing the full
   host-key and password flow, not by the toast (it disappears).
-- The signed-in app takes its theme from the account's saved look: `?theme=mocha` darkens only the sign-in screens. A dark
-  run of the app has to pick a dark theme in Settings > Themes first (not automated yet).
+- **A dark run needs an account whose own look is dark.** The signed-in app takes its theme from the account's saved
+  look (D352: the account's theme wins), so `?theme=mocha` only darkens the sign-in screens and the simulator's system
+  dark appearance only darkens Safari's chrome; on 2026-11-11 every "dark" app screenshot was light. Either pick a dark
+  theme in Settings > Themes on the QA account before the dark run (not automated yet), or create a fresh QA owner while
+  the browser or simulator is in dark mode so its first saved look is dark. Treat a dark column as invalid until a
+  screenshot shows a dark app. There is an owner question about this (D352) for the morning.
 - Never `kill` by pattern on std: its `kayg` user is shared with other lanes (calternal). Kill by exact PID.
 
 ## Known gaps

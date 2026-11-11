@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only (test-only; copy of the ops tool, shipped only to the Mac VM driver)
-// Test-only software WebAuthn authenticator, injected into the page with addInitScript (never shipped).
-// Durable replacement for Chrome's virtual authenticator, whose PRF secret cannot be exported.
-// Implements "none" attestation, ES256 assertions and the WebAuthn PRF extension. The PRF output is
-// HMAC-SHA-256(per-credential secret, SHA-256("WebAuthn PRF\0" || input)), the construction browsers use
-// on top of CTAP hmac-secret. State lives on the Node side (window.__swLoad / window.__swSave).
+/**
+ * Test-only software WebAuthn authenticator, injected into the page (never shipped). The desktop-Safari driver adds it as a
+ * `<script>` element and installs it on `CredentialsContainer.prototype`.
+ * Durable replacement for Chrome's virtual authenticator, whose PRF secret cannot be exported.
+ * Implements "none" attestation, ES256 assertions and the WebAuthn PRF extension. The PRF output is
+ * HMAC-SHA-256(per-credential secret, SHA-256("WebAuthn PRF\0" || input)), the construction browsers use
+ * on top of CTAP hmac-secret. State lives outside the page: the driver defines `window.__swLoad` / `window.__swSave`.
+ */
 (() => {
   const ORIGIN = "__SW_ORIGIN__";
   if (location.origin !== ORIGIN || !navigator.credentials) return;
