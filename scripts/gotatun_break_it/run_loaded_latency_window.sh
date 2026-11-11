@@ -41,7 +41,7 @@ mkdir -p "$out"
 trace_start_ns=$("$python" -c 'import time; print(time.monotonic_ns())')
 record_status=0
 set +e
-perf sched record -a --clockid mono -o "$out/perf.data" -- \
+perf sched record --clockid mono -o "$out/perf.data" -- \
     unshare -Urn "$python" -I "$script_dir/loaded_latency_soak.py" \
         --binary "$binary" \
         --coordinator "$coordinator" \
@@ -52,6 +52,9 @@ perf sched record -a --clockid mono -o "$out/perf.data" -- \
 record_status=$?
 set -e
 trace_end_ns=$("$python" -c 'import time; print(time.monotonic_ns())')
+if [[ -f $out/perf.data ]]; then
+    chmod 0644 "$out/perf.data"
+fi
 if ((record_status != 0)); then
     exit "$record_status"
 fi

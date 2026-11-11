@@ -500,6 +500,64 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
         with self.assertRaises(ValueError):
             command_builder(Path("/opt/j88c/bin/h2h"), "10.254.0.2", 0)
 
+    def test_perf_capture_is_load_scoped_and_readable_after_root_capture(self):
+        """Keep scheduler traces small and readable after perf-run captures them as root."""
+        runner = Path(__file__).parent / "gotatun_break_it" / "run_loaded_latency_window.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            capture_args = root / "perf-args.json"
+            fake_perf = fake_bin / "perf"
+            fake_perf.write_text(
+                "#!/usr/bin/env python3\n"
+                "\"\"\"Record the harness arguments and a root-only fake trace file.\"\"\"\n"
+                "import json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if args[:2] == ['sched', 'record']:\n"
+                "    pathlib.Path(os.environ['PERF_CAPTURE_ARGS']).write_text(json.dumps(args))\n"
+                "    trace = pathlib.Path(args[args.index('-o') + 1])\n"
+                "    trace.write_bytes(b'fake trace')\n"
+                "    trace.chmod(0o600)\n"
+                "    trace.parent.joinpath('probes.jsonl').write_text('')\n"
+                "    trace.parent.joinpath('counters.jsonl').write_text('')\n"
+                "elif args[:1] != ['script']:\n"
+                "    raise SystemExit(2)\n",
+                encoding="utf-8",
+            )
+            fake_perf.chmod(0o755)
+            binary = root / "infraternal"
+            coordinator = root / "coordinator"
+            for executable in (binary, coordinator):
+                executable.write_bytes(b"fixture")
+                executable.chmod(0o755)
+            kit = root / "kit"
+            (kit / "bin").mkdir(parents=True)
+            (kit / "lib").mkdir()
+            h2h = kit / "bin" / "h2h"
+            h2h.write_bytes(b"fixture")
+            h2h.chmod(0o755)
+            (kit / "lib" / "mesh_agent_fixture.py").write_text("\n", encoding="utf-8")
+            output = root / "output"
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+            environment["PERF_CAPTURE_ARGS"] = str(capture_args)
+
+            result = subprocess.run(
+                ["bash", str(runner), str(output), "60", str(kit), str(coordinator), str(binary)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            perf_args = json.loads(capture_args.read_text(encoding="utf-8"))
+            self.assertEqual(perf_args[:2], ["sched", "record"])
+            self.assertNotIn("-a", perf_args)
+            self.assertEqual((output / "perf.data").stat().st_mode & 0o777, 0o644)
+            self.assertTrue((output / "report.json").is_file())
+
     def test_probe_echo_server_reports_readiness_after_binding(self):
         """Let the soak start fixed-rate probes only after the tunnel echo socket binds."""
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reservation:
