@@ -103,6 +103,24 @@ for (const width of [1440, 393]) {
       await page.getByRole("button", { name: "Keep host", exact: true }).click();
       await expect(page.locator(".ui-toast").filter({ hasText: "Passkey confirmation was cancelled. The host was not removed." })).toBeVisible();
     });
+    /** A cancelled platform prompt sends no proof and never retries the removal (#498). */
+    test("cancelled platform prompt leaves removal untouched", async ({ page }) => {
+      let renewals = 0;
+      let removals = 0;
+      page.on("request", request => {
+        const path = new URL(request.url()).pathname;
+        if (path === "/remote/hosts/reauth/finish") renewals += 1;
+        if (path === "/remote/hosts/remove/finish") removals += 1;
+      });
+      await page.addInitScript(() => {
+        navigator.credentials.get = () => Promise.reject(new DOMException("cancelled", "NotAllowedError"));
+      });
+      await removeOffline(page, "pending", true);
+      await page.getByRole("button", { name: "Confirm with passkey", exact: true }).click();
+      await expect(page.locator(".ui-toast").filter({ hasText: "Passkey confirmation was cancelled or timed out." })).toBeVisible();
+      expect(renewals).toBe(0);
+      expect(removals).toBe(0);
+    });
     /** The real production toast copies the command without withdrawing the pending host. */
     test("pending removal offers Copy command", async ({ page }) => {
       const manual = await removeOffline(page, "unreachable");
