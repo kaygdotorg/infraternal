@@ -151,7 +151,13 @@ fn server_flags_render_the_prod_host_policy() {
         "--host-firewall-allow",
         "wt0,10.69.69.99,tcp,7011",
         "--host-firewall-allow",
+        "eth0,10.69.0.99,tcp,7011",
+        "--host-firewall-allow",
         "eth0,10.69.0.99,tcp,7012",
+        "--host-firewall-allow",
+        "wt0,10.69.69.0/24,tcp,7443",
+        "--host-firewall-allow",
+        "wt0,10.69.69.0/24,udp,7443",
     ]);
     let policy = crate::host_firewall_policy(&args).expect("valid production policy flags");
     let rules = infraternal_plugin_mesh::host_firewall::render(&policy)
@@ -172,7 +178,10 @@ fn server_flags_render_the_prod_host_policy() {
             "        iifname \"eth0\" udp dport 51820 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 22 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.99 tcp dport 7011 accept\n",
+            "        iifname \"eth0\" ip saddr 10.69.0.99 tcp dport 7011 accept\n",
             "        iifname \"eth0\" ip saddr 10.69.0.99 tcp dport 7012 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 7443 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 udp dport 7443 accept\n",
             "        iifname \"eth0\" ip saddr 10.69.0.99 ip daddr 10.69.0.89 tcp dport 7011 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 tcp dport 7443 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 udp dport 7443 accept\n",

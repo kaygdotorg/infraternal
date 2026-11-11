@@ -69,16 +69,20 @@ infraternal server init --system --force \
   --host-firewall-allow 'eth0,*,udp,51820' \
   --host-firewall-allow 'wt0,10.69.69.0/24,tcp,22' \
   --host-firewall-allow 'wt0,10.69.69.99,tcp,7011' \
-  --host-firewall-allow 'eth0,10.69.0.99,tcp,7012'
+  --host-firewall-allow 'eth0,10.69.0.99,tcp,7011' \
+  --host-firewall-allow 'eth0,10.69.0.99,tcp,7012' \
+  --host-firewall-allow 'wt0,10.69.69.0/24,tcp,7443' \
+  --host-firewall-allow 'wt0,10.69.69.0/24,udp,7443'
 ```
 
 The main listener's TCP rule comes from `--listen` and is restricted to
 `--trusted-proxy` while `--behind-proxy` is enabled. The remote listener's TCP
 and UDP rules come from `--remote-listen`, its interface and its allowed source
 networks. The extra rules cover NetBird UDP ingress, SSH, fridge ingress and
-the proxy health listener. A system install needs an explicit TCP/22 admin
-rule; when installed over SSH, the active connection is checked before the
-host table is replaced.
+the proxy health listener. They retain each existing source/interface/port
+allowance while listener-derived rules also match the configured destination.
+A system install needs an explicit TCP/22 admin rule; when installed over SSH,
+the active connection is checked before the host table is replaced.
 
 ## Expected product ruleset
 
@@ -101,7 +105,10 @@ table inet infraternal_host {
         iifname "eth0" udp dport 51820 accept
         iifname "wt0" ip saddr 10.69.69.0/24 tcp dport 22 accept
         iifname "wt0" ip saddr 10.69.69.99 tcp dport 7011 accept
+        iifname "eth0" ip saddr 10.69.0.99 tcp dport 7011 accept
         iifname "eth0" ip saddr 10.69.0.99 tcp dport 7012 accept
+        iifname "wt0" ip saddr 10.69.69.0/24 tcp dport 7443 accept
+        iifname "wt0" ip saddr 10.69.69.0/24 udp dport 7443 accept
         iifname "eth0" ip saddr 10.69.0.99 ip daddr 10.69.0.89 tcp dport 7011 accept
         iifname "wt0" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 tcp dport 7443 accept
         iifname "wt0" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 udp dport 7443 accept
