@@ -132,6 +132,33 @@ class DeploymentTests(unittest.TestCase):
             "pre-upgrade snapshots must not contain Mesh private-key bytes",
         )
 
+    def test_pre_upgrade_snapshot_excludes_mesh_rotation_journal_and_aliases(self):
+        """Keep the private rotation journal out of snapshots, even through a hard link."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+
+        journal = mesh / "mesh-key-rotation.bin"
+        journal.write_bytes(b"synthetic-rotation-secret")
+        journal.chmod(0o600)
+        os.link(journal, data / "backup-selected-journal")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = [
+            path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ]
+        self.assertFalse(
+            any(b"synthetic-rotation-secret" in saved for saved in saved_files),
+            "pre-upgrade snapshots must not contain Mesh rotation secrets",
+        )
+
     def test_d295_rollback_restores_latest_mesh_state_before_old_binary_starts(self):
         """Make the old binary's legacy Mesh path ready before a warm rollback."""
         root = self.root / "deployment"
