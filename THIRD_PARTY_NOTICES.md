@@ -111,11 +111,11 @@ distribution alongside this AGPL-3.0-only application when each font keeps its
 own terms and attribution. This notice does not relicense those assets as AGPL.
 Attribution and complete licence texts ship with the production build.
 
-- `gotatun` (Rust crate, built into the infraternal agent's mesh engine on Linux):
+- `gotatun` (Rust crate, built into the infraternal agent's mesh engine on Linux and macOS):
   - Licence: MPL-2.0. infraternal builds it, unchanged, from our fork. Under MPL-2.0
     §3.2, its Source Code Form is available from
     <https://github.com/kaygdotorg/gotatun> at commit
-    `a3dbd0c637fa4982b30e3b2df395b357679c8e26`, the commit pinned in
+    `15da03655840981c7029058a675d0ddd1bb7f9c8`, the commit pinned in
     `crates/plugins/mesh/Cargo.toml`. The licence text is the file `LICENSE`
     there, and at <https://www.mozilla.org/MPL/2.0/>.
   - Code contributed before 5 March 2026 is also under the BSD 3-Clause licence
