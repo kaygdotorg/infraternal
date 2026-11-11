@@ -8,6 +8,10 @@ flooding session can legitimately never arrive. The initial credit includes
 the relay's 64 KiB repaint reserve. The same-session phase therefore measures
 each key's visible effect: a numbered token drawn on row 1, read from raw
 output or from a repaint, whichever comes first.
+
+Repaint bytes are terminal-control programs, so marker and token checks strip
+those controls before searching. Credit is still refunded by the wire byte
+length, as it is after the browser paints the frame.
 """
 import argparse
 import os
@@ -62,6 +66,49 @@ def metric(name, samples, budget_ms):
         flush=True,
     )
     return p50, p99
+
+
+def visible_snapshot_text(data):
+    """Return screen characters from an ANSI repaint without changing wire accounting.
+
+    Snapshot frames position and style cells with terminal controls, often
+    between every visible character. The fixture searches the flattened screen
+    text for markers and key tokens; callers must still refund the original
+    snapshot byte length because those controls were sent to the client.
+    """
+    visible = bytearray()
+    offset = 0
+    while offset < len(data):
+        current = data[offset]
+        if current == 0x1B:
+            offset += 1
+            if offset >= len(data):
+                break
+            kind = data[offset]
+            offset += 1
+            if kind == ord("["):
+                while offset < len(data) and not 0x40 <= data[offset] <= 0x7E:
+                    offset += 1
+                if offset < len(data):
+                    offset += 1
+            elif kind in (ord("]"), ord("P"), ord("X"), ord("^"), ord("_")):
+                while offset < len(data):
+                    if kind == ord("]") and data[offset] == 0x07:
+                        offset += 1
+                        break
+                    if data[offset] == 0x1B and offset + 1 < len(data) and data[offset + 1] == ord("\\"):
+                        offset += 2
+                        break
+                    offset += 1
+            elif kind in (ord("("), ord(")"), ord("*"), ord("+"), ord("-"), ord("."), ord("/"), ord("#")):
+                if offset < len(data):
+                    offset += 1
+        elif current < 0x20 or current == 0x7F:
+            offset += 1
+        else:
+            visible.append(current)
+            offset += 1
+    return bytes(visible)
 
 
 def update_state_output(client, streams, stream, body):
@@ -134,10 +181,10 @@ def frame(client, streams):
         state["out"] = sequence
         state["repaints"] += 1
         state["token_tail"] = b""
-        # Marker waits follow the current screen too, so a key-triggered repaint
-        # can prove a flood-stop marker even when its raw bytes were skipped.
-        state["recent_output"] = bytearray(data[-4096:])
-        observe_tokens(state, data)
+        # Screen matching uses visible cells; flow control still uses wire bytes.
+        visible = visible_snapshot_text(data)
+        state["recent_output"] = bytearray(visible[-4096:])
+        observe_tokens(state, visible)
         return_credit(client, stream, state, len(data))
         settle_echo(state)
     elif kind == 0x33:

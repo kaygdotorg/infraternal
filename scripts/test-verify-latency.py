@@ -36,10 +36,15 @@ class SnapshotFrame:
 class SnapshotMarkerTests(unittest.TestCase):
     """Ensure repaint state supplies the markers used by the latency fixture."""
 
-    def test_snapshot_refreshes_recent_output_with_visible_marker(self):
-        """A repaint must let flood-stop waits see a marker visible on screen."""
+    def test_snapshot_restores_visible_marker_and_token_from_encoded_repaint(self):
+        """Strip per-cell terminal controls before searching the repainted screen."""
         marker = b"__FLOOD_STOPPED__"
-        client = SnapshotFrame(b"screen contents " + marker)
+        visible = b"screen contents " + marker + b" <K000042>"
+        repaint = b"\x1bc\x1b(B\x0f" + b"".join(
+            b"\x1b[24;" + str(column).encode() + b"H\x1b[0m" + bytes((character,))
+            for column, character in enumerate(visible, 1)
+        )
+        client = SnapshotFrame(repaint)
         state = {
             "out": 0,
             "output_bytes": 0,
@@ -54,9 +59,11 @@ class SnapshotMarkerTests(unittest.TestCase):
 
         verify_latency.frame(client, {7: state})
 
-        self.assertEqual(state["recent_output"], bytearray(b"screen contents " + marker))
+        self.assertNotIn(marker, repaint, "screen text is interleaved with cursor controls")
+        self.assertEqual(state["recent_output"], bytearray(visible))
         self.assertIn(marker, state["recent_output"])
-        self.assertEqual(client.credits, [(7, 0x14, struct.pack("<I", len(b"screen contents " + marker)))])
+        self.assertEqual(state["token"], 42)
+        self.assertEqual(client.credits, [(7, 0x14, struct.pack("<I", len(repaint)))])
 
 
 if __name__ == "__main__":
