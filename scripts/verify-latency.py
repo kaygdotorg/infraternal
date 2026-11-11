@@ -130,11 +130,15 @@ def frame(client, streams):
         # and the tracer returns that credit once painted; a fixture that kept
         # it would shrink the window by one repaint per starvation cycle.
         sequence = struct.unpack("<Q", body[:8])[0]
+        data = body[8:]
         state["out"] = sequence
         state["repaints"] += 1
         state["token_tail"] = b""
-        observe_tokens(state, body[8:])
-        return_credit(client, stream, state, len(body) - 8)
+        # Marker waits follow the current screen too, so a key-triggered repaint
+        # can prove a flood-stop marker even when its raw bytes were skipped.
+        state["recent_output"] = bytearray(data[-4096:])
+        observe_tokens(state, data)
+        return_credit(client, stream, state, len(data))
         settle_echo(state)
     elif kind == 0x33:
         pass
