@@ -33,6 +33,23 @@ class SnapshotFrame:
         self.credits.append((stream, kind, body))
 
 
+class OutputFrame:
+    """Supply one raw output frame and record credit returned after its paint."""
+
+    def __init__(self, payload):
+        """Keep the sequenced output bytes and collect Credit frames from the fixture."""
+        self.payload = payload
+        self.credits = []
+
+    def read(self):
+        """Return one raw output frame for the fixture's stream parser."""
+        return 7, 0x11, struct.pack("<Q", 0) + self.payload
+
+    def send(self, stream, kind, body):
+        """Record the flow-control frame returned to this output's stream."""
+        self.credits.append((stream, kind, body))
+
+
 class SnapshotMarkerTests(unittest.TestCase):
     """Ensure repaint state supplies the markers used by the latency fixture."""
 
@@ -57,13 +74,46 @@ class SnapshotMarkerTests(unittest.TestCase):
             "pending_echo": None,
         }
 
-        verify_latency.frame(client, {7: state})
+        streams = {7: state}
+        verify_latency.frame(client, streams)
+        verify_latency.paint_frame(client, streams)
 
         self.assertNotIn(marker, repaint, "screen text is interleaved with cursor controls")
         self.assertEqual(state["recent_output"], bytearray(visible))
         self.assertIn(marker, state["recent_output"])
         self.assertEqual(state["token"], 42)
         self.assertEqual(client.credits, [(7, 0x14, struct.pack("<I", len(repaint)))])
+
+
+class PaintCreditTests(unittest.TestCase):
+    """Ensure the fixture returns output credit only at its simulated paint boundary."""
+
+    def test_output_credit_and_echo_settlement_wait_for_paint(self):
+        """Parsing visible output does not send credit or finish a key before paint."""
+        payload = b"<K000001>"
+        client = OutputFrame(payload)
+        state = {
+            "out": 0,
+            "output_bytes": 0,
+            "echoes": 0,
+            "token": 0,
+            "token_tail": b"",
+            "recent_output": bytearray(),
+            "echo_by_token": True,
+            "pending_echo": [1, 0.0, None],
+            "paint_credit_pending": 0,
+        }
+        streams = {7: state}
+
+        verify_latency.frame(client, streams)
+
+        self.assertEqual(client.credits, [])
+        self.assertIsNone(state["pending_echo"][2])
+
+        verify_latency.paint_frame(client, streams)
+
+        self.assertEqual(client.credits, [(7, 0x14, struct.pack("<I", len(payload)))])
+        self.assertIsNotNone(state["pending_echo"][2])
 
 
 if __name__ == "__main__":

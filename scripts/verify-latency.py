@@ -11,12 +11,15 @@ output or from a repaint, whichever comes first.
 
 Repaint bytes are terminal-control programs, so marker and token checks strip
 those controls before searching. Credit is still refunded by the wire byte
-length, as it is after the browser paints the frame.
+length after a simulated 120 Hz paint frame. The fixture batches all frames
+already waiting before that boundary; the browser profile separately uses the
+real Ghostty paint callback.
 """
 import argparse
 import os
 from pathlib import Path
 import re
+import select
 import struct
 import sys
 import time
@@ -34,6 +37,8 @@ ECHO_KEY = b"x"
 # Longest wait for one key's Ack and echo. A key that never shows is a typing
 # freeze: fail with the stream's flow state instead of hanging the gate.
 SAMPLE_TIMEOUT_S = 30
+# The fixture returns queued wire bytes at its next simulated terminal paint.
+PAINT_INTERVAL_S = 1 / 120
 # The same-session program draws `<K000001>`, `<K000002>`, ... on row 1 for
 # successive keys and starts `yes` when it reads FLOOD_KEY. One write(2) per
 # token keeps it whole between `yes` writes; the scroll region `ESC [2r` keeps
@@ -126,8 +131,7 @@ def update_state_output(client, streams, stream, body):
         del state["recent_output"][:-4096]
     observe_tokens(state, state["token_tail"] + data)
     state["token_tail"] = (state["token_tail"] + data)[-TOKEN_TAIL:]
-    return_credit(client, stream, state, len(data))
-    settle_echo(state)
+    queue_paint_credit(client, stream, state, len(data))
 
 
 def observe_tokens(state, data):
@@ -146,19 +150,43 @@ def settle_echo(state):
         pending[2] = time.perf_counter()
 
 
-def return_credit(client, stream, state, length):
-    """Return the credit of each received frame at once, as the tracer does after painting each write.
-
-    Holding credit back until 64 KiB had built up made the fixture slower to
-    refill the window than any browser, and that alone added ~100 ms to the
-    same-session echo tail (#477).
-    """
+def queue_paint_credit(client, stream, state, length):
+    """Hold received wire bytes until the next paint callback returns their credit."""
     if length > 0:
-        client.send(stream, 0x14, struct.pack("<I", length))
+        state["paint_credit_pending"] = state.get("paint_credit_pending", 0) + length
+        if getattr(client, "paint_frame_due", None) is None:
+            client.paint_frame_due = time.monotonic() + PAINT_INTERVAL_S
+
+
+def paint_frame(client, streams):
+    """Paint all visible updates and return their exact wire-byte credit afterward."""
+    for stream, state in streams.items():
+        pending = state.get("paint_credit_pending", 0)
+        if pending > 0:
+            state["paint_credit_pending"] = 0
+            client.send(stream, 0x14, struct.pack("<I", pending))
+        settle_echo(state)
+    client.paint_frame_due = None
+
+
+def paint_if_due(client, streams):
+    """Wait at most one frame, batching ready wire frames before paint and credit return."""
+    if not any(state.get("paint_credit_pending", 0) for state in streams.values()):
+        return
+    sock = getattr(client, "sock", None)
+    if sock is None:
+        return
+    remaining = getattr(client, "paint_frame_due", time.monotonic()) - time.monotonic()
+    if remaining > 0:
+        readable, _, _ = select.select([sock], [], [], remaining)
+        if readable:
+            return
+    paint_frame(client, streams)
 
 
 def frame(client, streams):
     """Read one mux frame and update its stream's Ack/Output state."""
+    paint_if_due(client, streams)
     stream, kind, body = client.read()
     state = streams.get(stream)
     if state is None:
@@ -185,8 +213,7 @@ def frame(client, streams):
         visible = visible_snapshot_text(data)
         state["recent_output"] = bytearray(visible[-4096:])
         observe_tokens(state, visible)
-        return_credit(client, stream, state, len(data))
-        settle_echo(state)
+        queue_paint_credit(client, stream, state, len(data))
     elif kind == 0x33:
         pass
     else:

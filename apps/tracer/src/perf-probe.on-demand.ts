@@ -1,8 +1,8 @@
 /** Measures synthetic terminal keydown-to-paint latency and forced-drop recovery. Loaded only by `?probe=1` pages (an on-demand module, D188). */
 import type { TerminalClient, TerminalHooks, TerminalTraceHop } from "./terminal";
 
-/** The characters the probe types, one after another. */
-const KEY_SET = "abcdefghijklmnopqrstuvwxyz0123456789";
+/** Distinct adjacent keys stay out of `yes !` output so a stale screen cannot finish the next sample. */
+const KEY_SET = "abcdfghijklmnopqrtuvwxz0123456789";
 /** The most keys one run may send. */
 const MAX_PROBE_KEYS = 5_000;
 /** The minimum deadline for a key run, including quiet links with a few slow echoes. */

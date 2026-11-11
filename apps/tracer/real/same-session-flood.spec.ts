@@ -5,8 +5,9 @@
  * Under a flood the infraternal agent may skip raw output and send a repaint instead (its 250 ms credit starvation
  * path), so a key's raw echo can legitimately never arrive. The shell here therefore draws a numbered token on row 1 for
  * every key while `yes` scrolls a region below it: the token survives in raw output and in a repaint alike, which is
- * what a person sees. The spec asserts only that every key's token arrives and its input is acknowledged; it reports
- * the times without asserting them (speed belongs to the latency harness on the perf VM).
+ * what a person sees. The first test checks delivery and acknowledgment; the second records 200 actual paint callbacks
+ * and compares same-session p99 growth with D375's one-frame budget. Its paint workload overwrites one cell with a key
+ * outside `yes !`, so an old key or flood output cannot satisfy a later sample.
  */
 import { expect, test, type Page } from "playwright/test";
 import { personName, startRealServer, type RealServer } from "./server";
@@ -26,14 +27,13 @@ const TOKEN_PROGRAM =
   "bash --norc -c 'stty raw -echo; printf \"\\033[2J\\033[2r\"; n=0; flood_pid=; while IFS= read -rsn1 c; do " +
   "if [ \"$c\" = F ]; then yes & flood_pid=$!; elif [ \"$c\" = S ]; then kill \"$flood_pid\" 2>/dev/null || :; wait \"$flood_pid\" 2>/dev/null || :; break; " +
   "else n=$((n+1)); printf \"\\0337\\033[1;1H<K%06d>\\0338\" \"$n\"; fi; done; stty sane'";
-/** Keep each probe key in a screen cell the independent scroll region cannot remove. */
+/** Keep each probe key in one overwritten cell outside the independent flood scroll region. */
 const PAINT_PROGRAM =
-  "bash --norc -c 'stty raw -echo; printf \"\\033[2J\\033[11r\\033[11;1HREADY\\n\"; n=0; flood_pid=; " +
+  "bash --norc -c 'stty raw -echo; printf \"\\033[2J\\033[11r\\033[11;1HREADY\\n\"; flood_pid=; " +
   "while IFS= read -rsn1 key; do if [ \"$key\" = F ]; then yes \\! & flood_pid=$!; " +
   "elif [ \"$key\" = S ]; then kill \"$flood_pid\" 2>/dev/null || :; wait \"$flood_pid\" 2>/dev/null || :; break; " +
-  "elif [ \"$key\" = R ]; then n=0; printf \"\\033[2J\\033[11r\\033[11;1H\"; " +
-  "else if [ $n -gt 0 ]; then pr=$(((n-1)/20+1)); pc=$(((n-1)%20+1)); printf \"\\033[%s;%sH \" \"$pr\" \"$pc\"; fi; " +
-  "n=$((n+1)); row=$(((n-1)/20+1)); col=$(((n-1)%20+1)); printf \"\\033[%s;%sH%s\" \"$row\" \"$col\" \"$key\"; fi; done; stty sane'";
+  "elif [ \"$key\" = R ]; then printf \"\\033[2J\\033[11r\\033[11;1HREADY\\n\"; " +
+  "else printf \"\\033[1;1H\\033[2K%s\" \"$key\"; fi; done; stty sane'";
 /** How many keys are typed in each phase. */
 const KEYS = 20;
 /** Quiet baseline count; shorten only diagnostic runs, while the flood p99 always uses 200 samples. */
@@ -179,31 +179,50 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   await expect(page.locator("#probe-results")).toContainText(`Painted echoes: ${QUIET_PAINT_KEYS} / ${QUIET_PAINT_KEYS}`, { timeout: 150_000 });
   const quietReport = await page.locator("#probe-results").innerText();
   const quietP99 = probeP99(quietReport);
+  const quietProbeTrace = await page.evaluate(() => ({
+    timeOriginMs: performance.timeOrigin,
+    samples: window.__tracerPerformanceProbe?.trace() ?? [],
+  }));
   console.log(`SAME_SESSION_PAINT_STAGE quiet_complete samples=${QUIET_PAINT_KEYS} p99_ms=${quietP99.toFixed(2)}`);
 
   await expect(page.locator("#probe-run")).toBeEnabled({ timeout: FREEZE_MS });
+  await page.locator("#probe-count").fill(String(FLOOD_PAINT_KEYS));
   await probePanel.evaluate((element) => { (element as HTMLElement).hidden = true; });
   await page.locator(".terminal-host").first().click({ position: { x: 60, y: 60 } });
   await page.keyboard.press("R");
   await expect(page.locator("#probe-run")).toBeEnabled({ timeout: FREEZE_MS });
   console.log("SAME_SESSION_PAINT_STAGE reset_complete");
 
-  const flowStart = bridge.flowTimes?.length ?? 0;
-  const priorCredits = (bridge.flowTimes ?? []).slice(0, flowStart).filter((event) => event.type === "Credit");
-  await probePanel.evaluate((element) => { (element as HTMLElement).hidden = true; });
-  await page.locator(".terminal-host").first().click({ position: { x: 60, y: 60 } });
-  const floodStartBytes = bridge.outputBytesSeen ?? 0;
+  const { stream } = terminalStream();
+  const rawOutput = bridge.rawOutputBytesSeen;
+  if (!rawOutput) throw new Error("the real-server trace did not count raw Output by stream");
+  const floodStartBytes = rawOutput.get(stream) ?? 0;
   console.log("SAME_SESSION_PAINT_STAGE flood_key_begin");
   await page.keyboard.press("F");
   console.log("SAME_SESSION_PAINT_STAGE flood_key_sent");
-  // Start the paint samples only after the raw 1 MiB window is exhausted. A
-  // screenful of output is a flood, but it is not yet waiting for credit.
-  await expect.poll(() => (bridge.outputBytesSeen ?? 0) - floodStartBytes, { timeout: FREEZE_MS }).toBeGreaterThanOrEqual(BULK_WINDOW_BYTES);
-  console.log(`SAME_SESSION_PAINT_STAGE bulk_window_spent bytes=${(bridge.outputBytesSeen ?? 0) - floodStartBytes}`);
+  // Finish all probe setup before the flood. Count only this terminal's raw
+  // Output bytes, then dispatch as soon as its 1 MiB bulk window has been sent.
+  await expect.poll(() => (rawOutput.get(stream) ?? 0) - floodStartBytes, {
+    timeout: FREEZE_MS,
+    intervals: [5],
+  }).toBeGreaterThanOrEqual(BULK_WINDOW_BYTES);
+  console.log(`SAME_SESSION_PAINT_STAGE raw_bulk_window_spent stream=${stream} bytes=${(rawOutput.get(stream) ?? 0) - floodStartBytes}`);
 
-  await probePanel.evaluate((element) => { (element as HTMLElement).hidden = false; });
-  await page.locator("#probe-count").fill(String(FLOOD_PAINT_KEYS));
-  await page.locator("#probe-run").click();
+  // Prior quiet keys filled the recorder. Start a focused trace at the input
+  // boundary so measured keys retain their Input, Ack, Snapshot and Credit events.
+  bridge.flowFilter = new Set([
+    "up:backend-send:Input",
+    "down:backend-receive:Ack",
+    "down:backend-receive:Snapshot",
+    "up:backend-send:Credit",
+  ]);
+  bridge.flowTimes?.splice(0);
+  const flowStart = 0;
+  const runButton = page.locator("#probe-run");
+  await expect(runButton).toBeDisabled();
+  // Normal UI runs wait for quiet output. Dispatch the same handler directly;
+  // its count is already prepared and it sends the first key immediately.
+  await runButton.dispatchEvent("click");
   await expect(page.locator("#probe-message")).toHaveText("Sending synthetic keys. They are not followed by Enter.", { timeout: FREEZE_MS });
   try {
     await expect(page.locator("#probe-results")).toContainText(`Painted echoes: ${FLOOD_PAINT_KEYS} / ${FLOOD_PAINT_KEYS}`, { timeout: FLOOD_PAINT_TIMEOUT_MS });
@@ -217,14 +236,13 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
         message: await page.locator("#probe-message").innerText(),
       },
       relay: {
-        priorCredits,
-        inputs: flow.filter((event) => event.direction === "up" && event.type === "Input"),
-        outputs: flow.filter((event) => event.direction === "down" && event.type === "Output"),
-        acks: flow.filter((event) => event.direction === "down" && event.type === "Ack"),
-        credits: flow.filter((event) => event.direction === "up" && event.type === "Credit"),
-        snapshots: flow.filter((event) => event.direction === "down" && event.type === "Snapshot"),
+        inputs: flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Input"),
+        acks: flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Ack"),
+        credits: flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Credit"),
+        snapshots: flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Snapshot"),
       },
     };
+    await page.screenshot({ path: test.info().outputPath("same-session-paint-incomplete.png") });
     await writeFile(test.info().outputPath("same-session-paint-incomplete.json"), JSON.stringify(partial, null, 2));
     console.error("SAME_SESSION_PAINT_INCOMPLETE " + JSON.stringify({
       painted: partial.probe.results.split("\n", 1)[0],
@@ -239,21 +257,44 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   const floodReport = await page.locator("#probe-results").innerText();
   const floodP99 = probeP99(floodReport);
   const growth = floodP99 - quietP99;
+  const floodProbeTrace = await page.evaluate(() => ({
+    timeOriginMs: performance.timeOrigin,
+    samples: window.__tracerPerformanceProbe?.trace() ?? [],
+  }));
+  expect(floodProbeTrace.samples.length, "the browser trace must retain all 200 paint callbacks").toBe(FLOOD_PAINT_KEYS);
+  const floodPaintDurations = floodProbeTrace.samples.flatMap((sample) => {
+    const started = sample.stages.keydown;
+    const painted = sample.stages.paint;
+    return started !== undefined && painted !== undefined ? [painted - started] : [];
+  });
+  expect(floodPaintDurations.length, "each measured sample must contain a real paint callback").toBe(FLOOD_PAINT_KEYS);
+  const tracePaintP99 = p(floodPaintDurations, 0.99);
+  expect(tracePaintP99).toBeCloseTo(floodP99, 2);
   const flow = bridge.flowTimes?.slice(flowStart) ?? [];
-  const snapshots = flow.filter((event) => event.direction === "down" && event.type === "Snapshot" && event.stage === "backend-receive");
-  const outputs = flow.filter((event) => event.direction === "down" && event.type === "Output");
-  const inputs = flow.filter((event) => event.direction === "up" && event.type === "Input" && event.stage === "backend-send");
-  const acks = flow.filter((event) => event.direction === "down" && event.type === "Ack" && event.stage === "backend-receive");
-  const credits = flow.filter((event) => event.direction === "up" && event.type === "Credit" && event.stage === "backend-send");
-  const ackSpans = inputs.flatMap((input) => {
-    if (!input.sequence) return [];
-    const target = (BigInt(input.sequence) + BigInt(input.bytes)).toString();
+  const snapshots = flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Snapshot" && event.stage === "backend-receive");
+  const inputs = flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Input" && event.stage === "backend-send");
+  const acks = flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Ack" && event.stage === "backend-receive");
+  const credits = flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Credit" && event.stage === "backend-send");
+  const ackSpans = floodProbeTrace.samples.flatMap((sample) => {
+    const input = inputs.find((candidate) => candidate.sequence === sample.id);
+    if (!input || !sample.id) return [];
+    const target = (BigInt(sample.id) + 1n).toString();
     const ack = acks.find((candidate) => candidate.sequence === target && candidate.at >= input.at);
     return ack ? [ack.at - input.at] : [];
   });
-  expect(inputs.length, "the flood profile must send all 200 measured browser inputs").toBeGreaterThanOrEqual(FLOOD_PAINT_KEYS);
-  expect(ackSpans.length, "the bridge trace must pair measured inputs with their server acknowledgements").toBeGreaterThan(0);
+  expect(inputs.length, "the flood profile must send all 200 measured browser inputs").toBe(FLOOD_PAINT_KEYS);
+  expect(ackSpans.length, "the bridge trace must pair measured inputs with their server acknowledgements").toBe(FLOOD_PAINT_KEYS);
+  expect(snapshots.length, "the first measured key must exercise the repaint fast path").toBeGreaterThan(0);
+  expect(credits.length, "painted output must return client credit to the relay").toBeGreaterThan(0);
   const inputAckP99 = p(ackSpans, 0.99);
+  const inputSnapshotSpans = floodProbeTrace.samples.flatMap((sample, index) => {
+    const input = sample.id ? inputs.find((candidate) => candidate.sequence === sample.id) : undefined;
+    const nextId = floodProbeTrace.samples[index + 1]?.id;
+    const nextInput = nextId === undefined ? undefined : inputs.find((candidate) => candidate.sequence === nextId);
+    if (!input) return [];
+    const snapshot = snapshots.find((candidate) => candidate.at >= input.at && (!nextInput || candidate.at < nextInput.at));
+    return snapshot ? [snapshot.at - input.at] : [];
+  });
   const trace = {
     profile: "real-browser-150ms-each-way",
     keysPerRun: 200,
@@ -261,22 +302,27 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
     floodP99Ms: floodP99,
     growthMs: growth,
     targetMs: 1000 / 120,
+    paintCallbackP99Ms: tracePaintP99,
     inputAckP99Ms: inputAckP99,
-    probe: { quiet: quietReport, flood: floodReport },
-    relay: { priorCredits, inputs, outputs, acks, credits, snapshots },
+    inputSnapshotP99Ms: inputSnapshotSpans.length > 0 ? p(inputSnapshotSpans, 0.99) : null,
+    probe: { quiet: quietReport, flood: floodReport, quietTrace: quietProbeTrace, floodTrace: floodProbeTrace },
+    relay: { inputs, acks, credits, snapshots },
   };
   await writeFile(test.info().outputPath("same-session-paint-trace.json"), JSON.stringify(trace, null, 2));
   console.log("SAME_SESSION_PAINT keys=200 quiet_p99_ms=" + quietP99.toFixed(2) +
     " flood_p99_ms=" + floodP99.toFixed(2) + " growth_ms=" + growth.toFixed(2) +
     " input_ack_p99_ms=" + inputAckP99.toFixed(2) +
-    " target_ms=" + (1000 / 120).toFixed(2) + " snapshots=" + snapshots.length + " outputs=" + outputs.length +
+    " paint_callback_p99_ms=" + tracePaintP99.toFixed(2) +
+    " input_snapshot_p99_ms=" + (inputSnapshotSpans.length > 0 ? p(inputSnapshotSpans, 0.99).toFixed(2) : "none") +
+    " target_ms=" + (1000 / 120).toFixed(2) + " snapshots=" + snapshots.length + " credits=" + credits.length +
     " source=Ghostty-paint-callback rtt_ms=300");
 
+  await probePanel.evaluate((element) => { (element as HTMLElement).hidden = false; });
+  await page.screenshot({ path: test.info().outputPath("same-session-paint.png") });
   const beforeStop = bridge.outputBytesSeen ?? 0;
   await probePanel.evaluate((element) => { (element as HTMLElement).hidden = true; });
   await page.locator(".terminal-host").first().click({ position: { x: 60, y: 60 } });
   await page.keyboard.press("S");
   await expect.poll(() => bridge.outputBytesSeen ?? 0, { timeout: FREEZE_MS }).toBeGreaterThan(beforeStop);
-  await page.screenshot({ path: test.info().outputPath("same-session-paint.png") });
   expect(growth, "same-session flood growth measured through Ghostty paint").toBeLessThanOrEqual(1000 / 120);
 });

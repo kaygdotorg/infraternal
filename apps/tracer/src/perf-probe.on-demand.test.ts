@@ -220,12 +220,48 @@ describe("PerformanceProbe forced drops", () => {
 });
 
 describe("PerformanceProbe key samples", () => {
+  test("cycles through adjacent probe keys that are absent from the yes flood", () => {
+    const { probe, terminal, hooks, run, quiet } = setup(200);
+    const encoder = new TextEncoder();
+    const sent: string[] = [];
+    quiet();
+    run.click();
+
+    for (let index = 0; index < 200; index += 1) {
+      const key = terminal.typed.at(-1)!;
+      expect("yes !").not.toContain(key);
+      expect(key).not.toBe(sent.at(-1));
+      sent.push(key);
+      hooks.onPaintedOutput?.(encoder.encode(key), now, BigInt(index));
+      advance(0);
+    }
+    expect(sent).toHaveLength(200);
+    probe.dispose();
+  });
+
   test("keeps a 200-key latency run open long enough for the 300 ms profile", () => {
     const { probe, run, results, quiet } = setup(200);
     quiet();
     run.click();
     advance(15_000);
     expect(results.textContent).toBe("Painted 0 / 200");
+    probe.dispose();
+  });
+
+  test("does not count a flood's `yes` output as the pending key echo", () => {
+    const { probe, terminal, hooks, run, results, quiet } = setup(25);
+    const encoder = new TextEncoder();
+    quiet();
+    run.click();
+
+    for (let index = 0; index < 24; index += 1) {
+      hooks.onPaintedOutput?.(encoder.encode(terminal.typed.at(-1)!), now, BigInt(index));
+      advance(0);
+    }
+    expect(terminal.typed.every((key) => !"yes !".includes(key))).toBe(true);
+
+    hooks.onPaintedOutput?.(encoder.encode("yes !"), now, 0n);
+    expect(results.textContent).toBe("Painted 24 / 25");
     probe.dispose();
   });
 });

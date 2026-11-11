@@ -103,8 +103,12 @@ export interface Bridge {
     sequence?: string;
     at: number;
   }>;
+  /** Optional direction:stage:type keys that keep a busy trace within its fixed event limit. */
+  flowFilter?: ReadonlySet<string>;
   /** Total Output and Snapshot bytes seen without retaining their contents. */
   outputBytesSeen?: number;
+  /** Cumulative raw Output bytes by stream, excluding Snapshot replacements. */
+  rawOutputBytesSeen?: Map<number, number>;
   /** Optional terminal recovery events and closes, enabled only by focused redraw traces. */
   terminalEvents?: Array<{ stream: number; type: string; at: number }>;
   terminalCloses?: Array<{ stream: number; code: number; reason: string; at: number }>;
@@ -207,6 +211,7 @@ function recordFlow(
   stage: NonNullable<Bridge["flowTimes"]>[number]["stage"],
   note: FlowNote,
 ): void {
+  if (bridge.flowFilter && !bridge.flowFilter.has(`${direction}:${stage}:${note.type}`)) return;
   const times = bridge.flowTimes;
   if (!times || times.length >= FLOW_TRACE_LIMIT) return;
   times.push({ direction, stage, ...note, at: performance.timeOrigin + performance.now() });
@@ -397,6 +402,7 @@ export async function startRealServer(options: {
       if (options.recordFlow) {
         bridge.flowTimes = [];
         bridge.outputBytesSeen = 0;
+        bridge.rawOutputBytesSeen = new Map();
       }
       if (options.recordCloses) bridge.terminalCloses = [];
       if (process.env.REAL_OUTPUT_TIMES === "1") {
@@ -491,6 +497,10 @@ export async function startRealServer(options: {
           recordAttachment(bridge.attached, stream, f);
           if (f.type === "Output" || f.type === "Snapshot") {
             bridge.outputBytesSeen = (bridge.outputBytesSeen ?? 0) + f.bytes.byteLength;
+          }
+          if (f.type === "Output" && bridge.rawOutputBytesSeen) {
+            bridge.rawOutputBytesSeen.set(stream,
+              (bridge.rawOutputBytesSeen.get(stream) ?? 0) + f.bytes.byteLength);
           }
           const note = options.recordFlow ? flowNote(stream, f) : undefined;
           if (note) {
