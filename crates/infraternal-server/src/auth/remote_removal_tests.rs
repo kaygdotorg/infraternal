@@ -816,9 +816,16 @@ async fn removal_passkey_renews_same_session_and_cannot_replay() {
     let proof = f.software.login(&start, ORIGIN, true);
     let cross_session = crate::auth::random_capability();
     let mut tx = f.auth.pool.begin().await.unwrap();
-    insert_session(&mut tx, &cross_session, &f.user, "second browser", now, None)
-        .await
-        .unwrap();
+    insert_session(
+        &mut tx,
+        &cross_session,
+        &f.user,
+        "second browser",
+        now,
+        None,
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     assert!(f.auth.session(&cross_session, now).await.is_ok());
     assert!(
@@ -956,12 +963,14 @@ async fn concurrent_second_removal_is_refused_before_a_second_commit() {
         second.is_ok(),
         "exactly one concurrent removal can commit"
     );
-    let removals: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM remote_host_removals WHERE host_id=?",
-    )
-    .bind(host.as_bytes().as_slice())
-    .fetch_one(&f.auth.pool)
-    .await
-    .unwrap();
-    assert_eq!(removals, 1, "the second request cannot publish another removal");
+    let removals: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_host_removals WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        removals, 1,
+        "the second request cannot publish another removal"
+    );
 }
