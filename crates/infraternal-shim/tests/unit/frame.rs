@@ -86,6 +86,7 @@ mod tests {
             }
         }
     }
+    /// Reject malformed lengths, unsupported frame types and invalid error text.
     #[test]
     fn invalid_lengths_types_and_utf8() {
         for bytes in [

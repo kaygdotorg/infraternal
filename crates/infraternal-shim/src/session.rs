@@ -749,6 +749,7 @@ pub fn run_with_prestarted_login(
     run_configured(config, retention, group, Some(pty))
 }
 
+/// Run a PTY session with the selected output retention and optional prestarted PTY.
 fn run_configured(
     mut config: Config,
     retention: Duration,
