@@ -140,39 +140,32 @@ export function createLiveDetails(options: {
         /** Late replies may affect only the same still-open host generation. */
         const current = (): boolean => active && started === generation && key === factsKey(factsTarget(rec.model, host));
         try {
-          const factsPromise = target.kind === "host"
-            ? connection.call("remote.host.facts", { host_id: target.hostId })
-            : connection.call("host.facts.read", { includeLive: true });
-          const meshPromise = target.kind === "server" ? meshStatus() : Promise.resolve(undefined);
-          const [factsResult, meshResult] = await Promise.allSettled([
-            factsPromise,
-            meshPromise,
-          ]);
-          if (factsResult.status === "fulfilled") {
-            const snapshot = decodeHostFacts(factsResult.value);
-            if (snapshot && current()) {
-              snapshots.set(readKey, snapshot);
-              offline.delete(readKey);
-              refresh();
-            }
-          } else if (current()) {
-            const error = factsResult.reason;
-            if (target.kind === "host" && error instanceof ActionRefused && error.reason === "host offline") {
-              snapshots.delete(readKey);
-              if (!offline.has(readKey)) { offline.add(readKey); refresh(); }
-            } else if (error instanceof ActionRefused && error.reason !== "host busy") {
-              // A permanent refusal stops this host's poll; retargeting can still start another host.
-              refused = true;
-              refusedKeys.add(readKey);
-              window.clearTimeout(timer);
-              refresh();
-            }
-            // Transport failures and admission backpressure retry on the next bounded poll.
+          if (target.kind === "server") {
+            // Mesh details have their own refresh path and must not hold up host facts or refusal handling.
+            void meshStatus().then(() => { if (current()) refresh(); });
           }
-          if (target.kind === "server" && meshResult.status === "fulfilled" && current()) {
-            meshStatusSnapshot = meshResult.value;
+          const result = target.kind === "host"
+            ? await connection.call("remote.host.facts", { host_id: target.hostId })
+            : await connection.call("host.facts.read", { includeLive: true });
+          const snapshot = decodeHostFacts(result);
+          if (snapshot && current()) {
+            snapshots.set(readKey, snapshot);
+            offline.delete(readKey);
             refresh();
           }
+        } catch (error) {
+          if (!current()) return;
+          if (target.kind === "host" && error instanceof ActionRefused && error.reason === "host offline") {
+            snapshots.delete(readKey);
+            if (!offline.has(readKey)) { offline.add(readKey); refresh(); }
+          } else if (error instanceof ActionRefused && error.reason !== "host busy") {
+            // A permanent refusal stops this host's poll; retargeting can still start another host.
+            refused = true;
+            refusedKeys.add(readKey);
+            window.clearTimeout(timer);
+            refresh();
+          }
+          // Transport failures and admission backpressure retry on the next bounded poll.
         } finally {
           if (current()) inFlight = false;
         }
