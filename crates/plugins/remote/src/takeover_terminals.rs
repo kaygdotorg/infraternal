@@ -374,7 +374,8 @@ fn members(
 /// PTY must be one of the shims'. The worker, the shims and systemd's `(sd-pam)` helper are the login
 /// itself and belong to no terminal. The helper is recognised by identity, never by name: it runs one
 /// of the system manager's `executors` (device and inode), as the login's account, as a tty-less child
-/// of the worker born before every other process of the login but the worker, and there is only one. A process under neither the worker nor a shim, a PTY no shim serves,
+/// of the worker born strictly after the worker and strictly before every other process of the login,
+/// and there is only one. A process under neither the worker nor a shim, a PTY no shim serves,
 /// or a tty-less process with no such ancestor is refused (73), because the person could not have seen
 /// it in the confirmation.
 fn attribute(
@@ -415,6 +416,7 @@ fn attribute(
         // Birth times use coarse kernel ticks. A tie proves no ordering, even for the real
         // executor inode, so never omit that process from confirmation on the strength of a tie.
         (candidates.next().is_none()
+            && worker.birth < found.birth
             && members.iter().all(|other| {
                 other.pid == leader || other.pid == found.pid || found.birth < other.birth
             }))

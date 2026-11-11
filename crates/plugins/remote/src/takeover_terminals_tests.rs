@@ -351,7 +351,7 @@ fn a_spoofed_pam_helper_refuses_the_offer() {
 }
 
 /// #433 P2-1 (J379d): a real executor inode cannot identify the helper when its birth tick ties
-/// another non-worker. Coarse kernel ticks do not prove which process started first.
+/// any other login member, including its worker. Coarse ticks do not prove ordering.
 #[test]
 fn a_pam_helper_tied_for_earliest_tick_refuses_the_offer() {
     let mut members = vec![
@@ -373,7 +373,17 @@ fn a_pam_helper_tied_for_earliest_tick_refuses_the_offer() {
         members[other].birth = birth;
     }
     members[0].birth = members[1].birth;
-    assert!(offer(&members).is_ok(), "the worker is the sole exception");
+    assert_eq!(
+        offer(&members),
+        Err(73),
+        "the worker shares the helper tick"
+    );
+    members[0].birth = members[1].birth + 1;
+    assert_eq!(
+        offer(&members),
+        Err(73),
+        "the worker must precede the helper"
+    );
 }
 
 /// Seen on the real guest (#433 e2e L1, second run): a host-login shim's parent is the old agent, and
