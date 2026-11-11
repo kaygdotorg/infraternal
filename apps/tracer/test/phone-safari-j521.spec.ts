@@ -2,8 +2,8 @@
 /**
  * The phone bugs J509 found in iPhone Simulator Safari (#500, J521), each checked in a production build:
  *
- * 1. The SSH password (and key passphrase) field is not a password-typed field, so Safari offers neither "Use Strong
- *    Password?" nor "Save Password?" for a credential that is used once and belongs to someone else's machine.
+ * 1. The SSH password (and key passphrase) field stays a secure password field (dots to VoiceOver, no copy) and says it is an
+ *    existing password, so Safari does not offer a generated one for a credential that is used once and belongs to another machine.
  * 2. The layout leaves its keyboard state when the keyboard goes away, even if the last `visualViewport` event was early or lost.
  * 3. The Add host sign-in step keeps its options in view on a short phone card: the footer is one row, not two stacked buttons.
  * 4. After the only window ends, the screen says "No windows open" while a host exists; "No hosts yet" is for no host.
@@ -38,25 +38,23 @@ async function typeHost(page: Page, host: string): Promise<void> {
   await inWizard(page, "Continue").click();
 }
 
-test("the SSH password and passphrase are masked text fields, never password-typed", async ({ page }) => {
+test("the SSH password and passphrase stay secure fields that tell Safari they are existing passwords", async ({ page }) => {
   await open(page);
   await typeHost(page, "kayg@needs-key.lab");
   await expect(page.getByRole("heading", { name: /Sign in to needs-key.lab/ })).toBeVisible({ timeout: 15_000 });
   await page.getByText("Sign in with a password").click();
-  expect(await page.locator("input[type='password']").count(), "Safari offers Strong Password and Save Password for any password-typed field").toBe(0);
   for (const name of ["password", "passphrase"]) {
     const field = page.locator(`[data-secret='${name}']`);
-    expect(await field.getAttribute("type")).toBe("text");
-    expect(await field.getAttribute("autocomplete")).toBe("off");
+    // A real password field: iOS exposes dots (never the text) to VoiceOver and blocks copy. A text field drawn as dots did neither.
+    expect(await field.getAttribute("type")).toBe("password");
+    // "current-password" is the token that keeps Safari from offering a generated password; "off" is ignored on password fields.
+    expect(await field.getAttribute("autocomplete")).toBe("current-password");
     expect(await field.getAttribute("autocorrect")).toBe("off");
     expect(await field.getAttribute("autocapitalize")).toBe("none");
     expect(await field.getAttribute("spellcheck")).toBe("false");
     expect(await field.getAttribute("name"), "no name for a manager to match on").toBeNull();
+    expect(await field.evaluate((el) => getComputedStyle(el).getPropertyValue("-webkit-text-security")), "no CSS masking on a real password field").not.toBe("disc");
   }
-  // Typed text is drawn as dots, the placeholder is not.
-  const password = page.locator("[data-secret='password']");
-  await password.fill("hunter2-not-real");
-  expect(await password.evaluate((el) => getComputedStyle(el).getPropertyValue("-webkit-text-security"))).toBe("disc");
 });
 
 test("the sign-in step keeps its options in view on a short phone card", async ({ page }) => {

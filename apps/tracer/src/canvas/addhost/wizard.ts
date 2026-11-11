@@ -104,12 +104,15 @@ export interface WizardDeps {
 
 /**
  * Attributes for a secret that belongs to someone else's machine and is used once: an SSH password or a key passphrase.
- * It is a plain text field that draws dots (`.ah-masked`, `-webkit-text-security`), never `type="password"`: Safari
- * offers "Use Strong Password?" and "Save Password?" for any password-typed field and ignores `autocomplete="off"` on
- * it, while neither a generated nor a saved password is right for a credential we never store. The `data-*` flags
- * ask third-party password managers to stay out as well.
+ *
+ * It stays `type="password"`: iOS then treats it as a secure field, so VoiceOver and the accessibility tree see dots, copy
+ * and cut are blocked, and the keyboard learns nothing from it. (A text field drawn as dots with `-webkit-text-security` was
+ * tried and rejected: on the iPhone Simulator its accessibility value was the plain secret, and its menu offered Select.)
+ * `autocomplete="current-password"` says this is an existing password being entered, not a new one, which is the signal
+ * Safari's generator ("Use Strong Password?") keys off; `autocomplete="off"` is not honoured for password fields (MDN,
+ * "Turning off form autocompletion"). The `data-*` flags ask third-party password managers to stay out as well.
  */
-const ONE_OFF_SECRET_ATTRS = `type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="go" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"`;
+const ONE_OFF_SECRET_ATTRS = `type="password" autocomplete="current-password" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="go" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"`;
 
 /** The add-host wizard: discovery, CA unlock when needed, then enrollment. */
 export class Wizard {
@@ -933,9 +936,9 @@ export class Wizard {
         ${this.savedKey ? option("saved", `Use ${escapeHtml(this.savedKey.label)}`, "Unlocked with your passkey, used for this one connection.") : ""}
         ${option("key", "Use a key from your computer", "SSH private key. Sent once for this connection, not stored.")}
         ${reveal("key", `<textarea class="ah-secret" data-secret="key" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Private key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" tabindex="-1"></textarea>
-          <input class="ah-input ah-masked" data-secret="passphrase" ${ONE_OFF_SECRET_ATTRS} aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
+          <input class="ah-input" data-secret="passphrase" ${ONE_OFF_SECRET_ATTRS} aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
         ${option("password", "Sign in with a password", "SSH password authentication. Sent once for this connection, not stored.")}
-        ${reveal("password", `<input class="ah-input ah-masked" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
+        ${reveal("password", `<input class="ah-input" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
       </div>
       <button class="ah-link ah-alt" type="button" data-ah="install">Or install from the host instead</button>`;
     if (this.serverKey) {
