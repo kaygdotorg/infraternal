@@ -1,7 +1,18 @@
 /** Proves admitted-host synchronization is independent of storage, deduplicated, and fenced across welcomes. */
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { syncAdmittedHosts } from "./hosts";
 import type { HostEntry } from "./adapter";
+import { ensureHostMarks } from "../../../../../packages/ui/src/host-icons";
+
+/** Host discovery loads artwork asynchronously even when this fixture draws no SVG elements. */
+const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+Object.defineProperty(globalThis, "document", { configurable: true, value: { querySelectorAll: () => [] } });
+afterAll(async () => {
+  // Keep the DOM available until the real artwork import has finished, then restore the next suite's environment.
+  await ensureHostMarks(["debian"]);
+  if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument);
+  else Reflect.deleteProperty(globalThis, "document");
+});
 
 const id = "11111111-2222-3333-4444-555555555555";
 const row = { id, name: "worker", user: "operator", os: "Debian GNU/Linux", address: "operator@worker", online: false };

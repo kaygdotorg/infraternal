@@ -119,6 +119,7 @@ pub static BEFORE_SETTLE_SAVE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>
 #[cfg(feature = "test-support")]
 pub static BEFORE_SHARED_FILTER_DECISION: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
+/// Holds an incomplete mesh snapshot until all ordered configuration chunks arrive.
 struct Pending {
     server: Option<crate::policy::model::NodeId>,
     next: u32,
@@ -126,6 +127,16 @@ struct Pending {
     from_version: Option<u64>,
     default_policy: crate::dataplane::DefaultPolicy,
     config: Config,
+}
+
+/// Tracks whether a new authority has fenced old peers and still needs a full replacement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AuthorityResetState {
+    /// No authority reset is pending.
+    #[default]
+    Stable,
+    /// The old peer set is fenced; only a complete snapshot may restore mesh access.
+    AwaitingFullSnapshot,
 }
 
 fn restore_routes(
@@ -483,6 +494,8 @@ pub struct Node {
     enabled: bool,
     store: Option<crate::node_state::Store>,
     config: Option<Config>,
+    /// Records the irreversible authority fence until its full replacement snapshot arrives.
+    authority_reset: AuthorityResetState,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
     /// Installed peers and live relay budgets; relay callbacks share it (see [`PeerRouteState`]).
@@ -514,6 +527,7 @@ impl Default for Node {
             enabled: true,
             store: None,
             config: None,
+            authority_reset: AuthorityResetState::Stable,
             pending: None,
             routes: BTreeSet::new(),
             peer_route_state: Arc::default(),
@@ -562,6 +576,8 @@ impl Node {
     }
 
     /// Restore public intent and the selected, marked mesh data plane.
+    /// An ordinary account with no retained mesh ownership gets an inactive node;
+    /// inspection alone never creates privileged networking for that account.
     /// # Errors
     /// Refuses unsafe state, unrelated interface ownership or failed policy recovery.
     pub fn restore(path: &std::path::Path) -> io::Result<Self> {
@@ -591,6 +607,28 @@ impl Node {
     ) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
         let engine_kind = requested_engine.unwrap_or_default();
+        // A rootless installation without mesh ownership has nothing to restore.
+        // Reading peers/status must not probe the host firewall or implicitly start
+        // a TUN. Retained state still takes the full recovery path below; an explicit
+        // up still attempts the ordinary privileged setup and reports its failure.
+        if !nix::unistd::Uid::effective().is_root()
+            && state.config.is_none()
+            && state.backend.is_none()
+            && !state.authority_reset_pending
+            && store.recorded_interface()?.is_none()
+            && store.recorded_engine()?.is_none()
+            && store.route_inventory()?.is_empty()
+            && store.read_private_key()?.is_none()
+            && store.rotation_secret()?.is_none()
+        {
+            return Ok(Self {
+                engine_kind,
+                engine_source,
+                enabled: false,
+                store: Some(store),
+                ..Self::default()
+            });
+        }
         let snapshot_key = state.config.as_ref().and_then(|c| c.local_key);
         let mut active_link = Device::active_link()?;
         if active_link
@@ -623,6 +661,11 @@ impl Node {
             engine_source,
             routes,
             enabled: state.enabled,
+            authority_reset: if state.authority_reset_pending {
+                AuthorityResetState::AwaitingFullSnapshot
+            } else {
+                AuthorityResetState::Stable
+            },
             store: Some(store),
             firewall: state
                 .backend
@@ -678,6 +721,7 @@ impl Node {
                 dns_names: cfg!(target_os = "linux"),
                 // Kernel `WireGuard` rotates its key in place (#285, D166).
                 key_rotation: true,
+                authority_epoch: true,
             });
             node.client = Some(Client::new()?);
             if !node.enabled {
@@ -841,6 +885,11 @@ impl Node {
     pub fn active(&self) -> bool {
         self.identity.is_some()
     }
+    /// Whether a retired authority still needs a complete snapshot from the enrolled server.
+    #[must_use]
+    pub fn awaiting_server_snapshot(&self) -> bool {
+        self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
+    }
     /// Apply the proxy's Mesh routes and public gate to the owned firewall.
     ///
     /// `confirmed` is true only when Traefik has confirmed a route snapshot rendered from the
@@ -883,14 +932,33 @@ impl Node {
             Ok(None)
         }
     }
+    /// Persist the accepted config and local enabled choice without a replacement rollback base.
     fn save(&self, config: Option<&Config>, enabled: bool) -> io::Result<()> {
+        self.save_with_snapshot_base(config, enabled, None)
+    }
+    /// Persist an accepted config, using the exact old snapshot only for a complete replacement.
+    /// # Errors
+    /// Reports route-journal or public snapshot persistence failures.
+    fn save_with_snapshot_base(
+        &self,
+        config: Option<&Config>,
+        enabled: bool,
+        full_snapshot_base: Option<&Config>,
+    ) -> io::Result<()> {
         if let Some(store) = &self.store {
             store.record_routes(&self.routes)?;
-            store.save(&crate::node_state::State {
+            let state = crate::node_state::State {
                 enabled,
                 config: config.cloned(),
+                authority_reset_pending: full_snapshot_base.is_none()
+                    && self.authority_reset == AuthorityResetState::AwaitingFullSnapshot,
                 backend: self.firewall.backend(),
-            })?;
+            };
+            if let Some(base) = full_snapshot_base {
+                store.save_full_snapshot(&state, base)?;
+            } else {
+                store.save(&state)?;
+            }
         }
         Ok(())
     }
@@ -1200,6 +1268,7 @@ impl Node {
                             #[cfg(feature = "mesh-dns")]
                             dns_names: cfg!(target_os = "linux"),
                             key_rotation: true,
+                            authority_epoch: true,
                         };
                         self.identity = Some(identity.clone());
                         Ok(identity)
@@ -1242,8 +1311,10 @@ impl Node {
                     compact_access: true,
                     #[cfg(feature = "mesh-dns")]
                     dns_names: cfg!(target_os = "linux"),
-                    // Linux GotaTun uses the durable journal and live reconfigure command (#367).
+                    // Linux GotaTun has durable live key rotation (#367); authority epochs stay
+                    // available on the authenticated, enrollment-bound channel (#382, D166, D352).
                     key_rotation: true,
+                    authority_epoch: true,
                 };
                 self.identity = Some(identity.clone());
                 Ok(identity)
@@ -1748,7 +1819,12 @@ impl Node {
     pub fn down(&mut self) -> io::Result<()> {
         // This durable intent precedes every kernel operation. A process stop
         // between the independent kernel transactions must reconcile as Off.
-        self.save(None, false)?;
+        let reset_state = self.authority_reset;
+        self.authority_reset = AuthorityResetState::Stable;
+        if let Err(error) = self.save(None, false) {
+            self.authority_reset = reset_state;
+            return Err(error);
+        }
         self.enabled = false;
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         {
@@ -1864,27 +1940,388 @@ impl Node {
             self.refusing_at_ns = None;
         }
         self.finish_connection_cleanup()?;
-        let result = self.stage(chunk);
-        if result.is_err() {
+        if chunk
+            .authority_epoch
+            .as_deref()
+            .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+        {
             self.pending = None;
+            tracing::warn!("mesh configuration chunk refused: authority epoch is malformed");
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let old_epoch = self
+            .config
+            .as_ref()
+            .and_then(|old| old.authority_epoch.as_deref());
+        let authority_changed = self
+            .config
+            .as_ref()
+            .is_some_and(|old| old.authority_epoch != chunk.authority_epoch);
+        if authority_changed {
+            // Epoch-bearing snapshots are bound to the enabled local key before they can retire
+            // any peers. Routing node IDs and revisions are not authority identities.
+            if (old_epoch.is_some() || chunk.authority_epoch.is_some())
+                && self
+                    .identity
+                    .as_ref()
+                    .is_none_or(|identity| chunk.local_key != Some(identity.public_key))
+            {
+                self.pending = None;
+                tracing::warn!(
+                    error_kind = ?io::ErrorKind::InvalidData,
+                    "mesh authority transition refused without the enrolled local key binding"
+                );
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            self.validate_binding(&chunk)?;
+            if old_epoch.is_some() && chunk.authority_epoch.is_none() && chunk.index == 0 {
+                // A server rolled back to a release without epochs (D295) is one more authority
+                // change, not an attack: whoever can send `mesh.configure` already controls peers.
+                // Its full snapshot replaces the old peer set like any other (#382 P2).
+                tracing::warn!(
+                    old_epoch,
+                    "mesh server stopped sending an authority epoch, likely a rollback; adopting its full snapshot"
+                );
+            }
+            let pending_new_authority = self.pending.as_ref().is_some_and(|pending| {
+                pending.config.authority_epoch == chunk.authority_epoch
+                    && pending.from_version.is_none()
+            });
+            if chunk.index == 0 {
+                if chunk.from_version.is_some() {
+                    self.pending = None;
+                    tracing::warn!(
+                        "mesh configuration chunk refused: a new authority must start with a full snapshot"
+                    );
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.pending = None;
+                tracing::info!(
+                    old_epoch,
+                    new_epoch = ?chunk.authority_epoch,
+                    old_version = ?self.config.as_ref().map(|config| config.version),
+                    new_version = chunk.version,
+                    "staging a full mesh snapshot from the changed authority"
+                );
+            } else if !pending_new_authority {
+                self.pending = None;
+                tracing::warn!(
+                    "mesh configuration chunk refused: a new authority must start with a full snapshot"
+                );
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        }
+        if self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
+            && chunk.index == 0
+            && chunk.from_version.is_none()
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
+        {
+            self.validate_binding(&chunk)?;
+            self.retire_settled_authority_rotation()?;
+        }
+        let result = self.stage(chunk);
+        if let Err(error) = &result {
+            self.pending = None;
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "mesh configuration chunk refused"
+            );
         }
         result
     }
-    // Keep enabled-key authority separate from contiguous snapshot staging.
-    fn validate_binding(&self, chunk: &Chunk) -> io::Result<()> {
-        if self.identity.is_none() {
-            return Err(io::ErrorKind::NotConnected.into());
+    /// Commit a complete new-authority snapshot without cutting the runtime while it is staged.
+    ///
+    /// A durable peer-free snapshot replaces the old authority before any runtime mutation. A
+    /// changed peer set then reaches the engine through one replacement transaction. When only
+    /// authority or revision metadata changed, the installed peer inventory is retained so its
+    /// handshakes continue uninterrupted.
+    /// # Errors
+    /// Refuses an unbound snapshot, persistence failure, or replacement that cannot fail closed.
+    fn apply_authority_replacement(&mut self, config: Config) -> io::Result<bool> {
+        let previous = self.config.clone().ok_or(io::ErrorKind::InvalidData)?;
+        let runtime_matches = crate::dataplane::same_runtime_content(&previous, &config)
+            && self.runtime_peer_inventory_matches(&config);
+        let denied = self.prepare_authority_replacement(&config)?;
+        // The fast path keeps peers, but endpoint-derived MTUs can still move with the underlay
+        // path (#381). A failed refresh falls back to the full replacement below.
+        if runtime_matches && self.refresh_unchanged_mesh_mtus(&config).is_ok() {
+            if let Err(error) = self.save_with_snapshot_base(Some(&config), true, Some(&denied)) {
+                return Err(self.fail_closed_authority_replacement(error, &denied));
+            }
+            self.authority_reset = AuthorityResetState::Stable;
+            self.config = Some(config);
+            return Ok(true);
         }
-        if chunk.local_key.is_some_and(|key| {
-            self.identity
+        match self.apply_authority_snapshot(config, &denied) {
+            Ok(()) => Ok(true),
+            Err(error) => Err(self.fail_closed_authority_replacement(error, &denied)),
+        }
+    }
+
+    /// Re-derive the route and interface MTUs for an unchanged peer set (#381) without touching
+    /// peers, so a same-content authority replacement cuts no session yet keeps MTUs current.
+    ///
+    /// The interface MTU first rises to the larger of the old and new values, so no route ever
+    /// exceeds it, then settles on the new value once the host routes are written. The route
+    /// state's installed peers become `config`'s, which relay callbacks look up under the lock.
+    /// # Errors
+    /// Reports a link or route-netlink failure; the caller then runs the full replacement.
+    fn refresh_unchanged_mesh_mtus(&self, config: &Config) -> io::Result<()> {
+        let link = match self.engine_kind {
+            EngineKind::Kernel => self.owned_kernel_link()?,
+            EngineKind::GotaTun => self.owned_gotatun_link()?,
+        };
+        let target = crate::mesh_mtu::for_config(Some(config));
+        self.set_mesh_mtu(link.ifindex, Device::mtu(link.ifindex)?.max(target))?;
+        let peers: Vec<_> = config
+            .peers
+            .values()
+            .map(|policy| policy.peer.clone())
+            .collect();
+        self.refresh_peer_routes(&peers, &BTreeSet::new())?;
+        self.set_mesh_mtu(link.ifindex, target)
+    }
+
+    /// Check that the live data plane contains exactly the keys in a same-content snapshot.
+    fn runtime_peer_inventory_matches(&self, config: &Config) -> bool {
+        let Ok(counters) = self.peer_counters() else {
+            return false;
+        };
+        let installed: std::collections::BTreeSet<_> = counters.keys().copied().collect();
+        let desired: std::collections::BTreeSet<_> = config
+            .peers
+            .values()
+            .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
+            .flatten()
+            .collect();
+        installed == desired
+    }
+
+    /// Persist the deny state and retire the old journal without touching live peers.
+    ///
+    /// This runs only after the new authority's complete snapshot has passed chunk validation.
+    /// A process stop between persistence and replacement then restores no peers from the old
+    /// authority.
+    /// # Errors
+    /// Stops the owned runtime if the durable reset or journal retirement cannot complete.
+    fn prepare_authority_replacement(&mut self, replacement: &Config) -> io::Result<Config> {
+        let mut denied = replacement.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns")]
+        denied.peer_names.clear();
+        self.pending = None;
+        let rotation_error = self.settle_authority_rotation().err();
+        if let Some(identity) = &self.identity {
+            denied.local_key = Some(identity.public_key);
+        }
+        self.config = Some(denied.clone());
+        self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
+        let persistence_error = self.persist_retired_snapshot(&denied).err();
+        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
+            self.store
                 .as_ref()
-                .is_none_or(|identity| identity.public_key != key)
-        }) || self.config.as_ref().is_some_and(|old| {
-            old.node != chunk.node
-                && (chunk.local_key.is_none()
-                    || chunk.from_version.is_some()
-                    || chunk.version <= old.version)
-        }) {
+                .map(crate::node_state::Store::discard_rotation_journal)
+                .transpose()
+                .err()
+        } else {
+            None
+        };
+        if let Some(error) = persistence_error.or(rotation_error).or(journal_error) {
+            return Err(self.fail_closed_authority_replacement(error, &denied));
+        }
+        #[cfg(test)]
+        rotation_tests::j363_retirement_crash_checkpoint();
+        Ok(denied)
+    }
+
+    /// Stop instead of restoring old-authority peers after a replacement error.
+    fn fail_closed_authority_replacement(
+        &mut self,
+        error: io::Error,
+        denied: &Config,
+    ) -> io::Error {
+        self.config = Some(denied.clone());
+        self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
+        self.pending = None;
+        let stop_error = self.stop_retired_runtime().err();
+        if let Err(persist_error) = self.persist_retired_snapshot(denied) {
+            tracing::error!(
+                error_kind = ?persist_error.kind(),
+                "could not persist disabled peer-free mesh state after authority replacement failed"
+            );
+        }
+        stop_error.unwrap_or(error)
+    }
+
+    /// Settle an open key rotation on the live identity before retiring its authority journal.
+    ///
+    /// The journal belongs to the previous server's sequence space, but its active key remains
+    /// this node's identity. Completing it first lets the subsequent durable authority snapshot
+    /// bind to that key before the journal file is removed.
+    /// # Errors
+    /// Refuses an unproven active key or any failed rotation-state update.
+    fn settle_authority_rotation(&mut self) -> io::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let Some(rotation) = store.rotation_secret()? else {
+            return Ok(());
+        };
+        let link = self.rotation_link()?;
+        if rotation.completed {
+            let candidate = Key::from_private(&rotation.candidate)?.1;
+            if self.rotation_public_key(&link)? != candidate
+                || self.identity.as_ref().map(|identity| identity.public_key) != Some(candidate)
+                || link.owner != Some(candidate)
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        } else {
+            self.settle_superseded_rotation(&link, &rotation)?;
+        }
+        if let (Some(config), Some(identity)) = (&mut self.config, &self.identity) {
+            config.local_key = Some(identity.public_key);
+        }
+        Ok(())
+    }
+
+    /// Retry retirement cleanup before accepting a full snapshot after an interrupted reset.
+    ///
+    /// A durable peer-free state records the pending reset. If its journal removal failed, settle
+    /// and save the active key binding again before unlinking that previous authority's journal.
+    /// # Errors
+    /// Refuses an unproven rotation or a failed state or journal write.
+    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        if store.rotation_secret()?.is_none() {
+            return Ok(());
+        }
+        self.settle_authority_rotation()?;
+        let config = self.config.clone().ok_or(io::ErrorKind::InvalidData)?;
+        self.save(Some(&config), self.enabled)?;
+        self.store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .discard_rotation_journal()
+    }
+
+    /// Persist the peer-free epoch snapshot before the runtime fence, with an in-place fail-closed fallback.
+    /// # Errors
+    /// Reports route or snapshot persistence failures without restoring the previous peers.
+    fn persist_retired_snapshot(&mut self, deny: &Config) -> io::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let routes = store.record_routes(&self.routes);
+        let state = crate::node_state::State {
+            enabled: self.enabled,
+            config: Some(deny.clone()),
+            authority_reset_pending: true,
+            backend: self.firewall.backend(),
+        };
+        let saved = store.save_retired(&state);
+        saved?;
+        routes
+    }
+    /// Stop the owned runtime without asking persistence to authorize the stop first.
+    ///
+    /// This is used only after a direct peer fence fails. It deletes only a link proved to belong
+    /// to this node; a link owned by another installation is left alone.
+    /// # Errors
+    /// Reports the first failed link, engine, route, or firewall cleanup operation.
+    fn stop_retired_runtime(&mut self) -> io::Result<()> {
+        self.enabled = false;
+        self.pending = None;
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+        {
+            self.dns_resolver = None;
+        }
+        let mut first_error = None;
+        match self.engine_kind {
+            EngineKind::Kernel => match Device::active_link() {
+                Ok(Some(link)) if proven_kernel_link(&link, &self.kernel_owner) => {
+                    if let Err(error) = Device::delete_ifindex(link.ifindex) {
+                        first_error = Some(error);
+                    }
+                }
+                Ok(None) => {}
+                Ok(Some(_)) => first_error = Some(io::ErrorKind::AlreadyExists.into()),
+                Err(error) => first_error = Some(error),
+            },
+            EngineKind::GotaTun => {
+                if let Some(mut engine) = self.gotatun.take()
+                    && let Err(error) = engine.stop()
+                {
+                    first_error = Some(error);
+                }
+                let snapshot_key = self.config.as_ref().and_then(|config| config.local_key);
+                let proof = self
+                    .store
+                    .as_ref()
+                    .map(|store| gotatun_owner_proof(store, snapshot_key))
+                    .transpose();
+                match proof.and_then(|proof| match Device::active_link()? {
+                    Some(link)
+                        if proof
+                            .as_ref()
+                            .is_some_and(|proof| proven_gotatun_link(&link, proof)) =>
+                    {
+                        Device::delete_ifindex(link.ifindex)?;
+                        Ok(())
+                    }
+                    Some(_) => Err(io::ErrorKind::AlreadyExists.into()),
+                    None => Ok(()),
+                }) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        self.client = None;
+        self.gotatun = None;
+        if let Err(error) = Device::routes(&[], false) {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) = Device::retain_recorded_routes(&self.routes, &[]) {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) = self.retire_routes() {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) = self.remove_unshared_filter() {
+            first_error.get_or_insert(error);
+        }
+        self.firewall = Firewall::default();
+        self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
+        self.identity = None;
+        self.owned = false;
+        self.kernel_owner = KernelProof::default();
+        self.connection_cleanup_pending = false;
+        first_error.map_or(Ok(()), Err)
+    }
+    /// Check the authenticated node key before a chunk can change the accepted binding.
+    fn validate_binding(&self, chunk: &Chunk) -> io::Result<()> {
+        let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        if chunk
+            .local_key
+            .is_some_and(|key| identity.public_key != key)
+            || chunk.authority_epoch.is_some() && chunk.local_key != Some(identity.public_key)
+            || self.config.as_ref().is_some_and(|old| {
+                old.node != chunk.node
+                    && (chunk.local_key.is_none()
+                        || chunk.from_version.is_some()
+                        || old.authority_epoch == chunk.authority_epoch
+                            && chunk.version <= old.version)
+            })
+        {
             // Only an authenticated full coordinator snapshot, bound to our
             // enabled kernel key at a newer revision, can authorize replacement.
             // Unbound snapshots and deltas retain the accepted identity fence.
@@ -1892,9 +2329,24 @@ impl Node {
         }
         Ok(())
     }
-    /// Validates and stages a coordinator chunk without applying a partial snapshot.
-    /// Version and identity binding checks run before any network state is installed.
+    /// Validate ordering and assemble complete snapshots before changing the runtime.
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
+        let pending_new_authority = self.pending.as_ref().is_some_and(|pending| {
+            pending.config.authority_epoch == chunk.authority_epoch
+                && pending.from_version.is_none()
+        });
+        if self.config.as_ref().is_some_and(|old| {
+            old.authority_epoch != chunk.authority_epoch && !pending_new_authority
+        }) && (chunk.index != 0 || chunk.from_version.is_some())
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
+            && chunk.from_version.is_some()
+        {
+            self.pending = None;
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         if !chunk.access_updates.is_empty()
             && (chunk.from_version.is_none()
                 || chunk.index != 0
@@ -1915,9 +2367,7 @@ impl Node {
         if chunk.index == 0 {
             let current = self.config.as_ref().map(|config| config.version);
             if chunk.from_version.is_some() && chunk.from_version != current
-                || current.is_some_and(|v| {
-                    chunk.version < v || chunk.from_version.is_some() && chunk.version == v
-                })
+                || current.is_some_and(|v| chunk.from_version.is_some() && chunk.version <= v)
             {
                 return Err(io::ErrorKind::InvalidData.into());
             }
@@ -1925,6 +2375,7 @@ impl Node {
                 self.config.clone().ok_or(io::ErrorKind::InvalidData)?
             } else {
                 Config {
+                    authority_epoch: chunk.authority_epoch.clone(),
                     local_key: chunk.local_key,
                     server: chunk.server,
                     node: chunk.node,
@@ -1967,6 +2418,7 @@ impl Node {
         #[cfg(not(feature = "mesh-dns"))]
         let dns_suffix_changed = false;
         if pending.server != chunk.server
+            || pending.config.authority_epoch != chunk.authority_epoch
             || pending.next != chunk.index
             || pending.config.local_key != chunk.local_key
             || pending.config.node != chunk.node
@@ -2037,22 +2489,66 @@ impl Node {
         if !chunk.last {
             return Ok(false);
         }
-        let config = self
-            .pending
-            .take()
-            .ok_or(io::ErrorKind::InvalidData)?
-            .config;
+        let pending = self.pending.take().ok_or(io::ErrorKind::InvalidData)?;
+        let full_snapshot = pending.from_version.is_none();
+        let config = pending.config;
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|old| old.authority_epoch != config.authority_epoch)
+        {
+            return self.apply_authority_replacement(config);
+        }
+        let completes_authority_reset =
+            self.authority_reset == AuthorityResetState::AwaitingFullSnapshot && full_snapshot;
+        // A lower revision under the same epoch is accepted on purpose when this node has a
+        // Store: a database restored under a running server keeps that process's epoch but
+        // rewinds its revisions, and refusing would strand every node (#382). The Store's
+        // exact-base compare-and-set (`save_full_snapshot`) makes the swap durable and atomic.
+        // Only a node without a Store, which has no such base, refuses it. This is not a
+        // revision fence for stored nodes (J418 P3-a).
+        let lower_revision_replacement = self.config.as_ref().is_some_and(|old| {
+            full_snapshot
+                && old.authority_epoch == config.authority_epoch
+                && config.version < old.version
+        });
+        if lower_revision_replacement && !completes_authority_reset && self.store.is_none() {
+            tracing::warn!(
+                old_version = ?self.config.as_ref().map(|old| old.version),
+                new_version = config.version,
+                "mesh lower-revision snapshot refused without a durable replacement base"
+            );
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let snapshot_base = self
+            .config
+            .as_ref()
+            .filter(|old| {
+                full_snapshot
+                    && old.authority_epoch == config.authority_epoch
+                    && (completes_authority_reset || config.version < old.version)
+            })
+            .cloned();
         if self.config.as_ref() == Some(&config) {
+            if completes_authority_reset {
+                self.save_with_snapshot_base(Some(&config), true, snapshot_base.as_ref())?;
+                self.authority_reset = AuthorityResetState::Stable;
+            }
             return Ok(true);
         }
         if self
             .config
             .as_ref()
             .is_some_and(|old| old.version == config.version)
+            && !completes_authority_reset
         {
             return self.upgrade_legacy_binding(config);
         }
-        self.apply(config)?;
+        if let Some(base) = snapshot_base.as_ref() {
+            self.apply_with_snapshot_base(config, base)?;
+        } else {
+            self.apply(config)?;
+        }
         Ok(true)
     }
     fn upgrade_legacy_binding(&mut self, config: Config) -> io::Result<bool> {
@@ -2102,9 +2598,33 @@ impl Node {
             .apply_with_aliases(fence, &aliases, connections)?;
         Ok(())
     }
-    /// Applies a complete configuration through the route and firewall transaction.
-    /// The fence and rollback ordering keep the previously accepted state usable on failure.
+    /// Apply an ordinary config with the accepted state available for rollback.
     fn apply(&mut self, config: Config) -> io::Result<()> {
+        self.apply_transaction(config, None, false)
+    }
+    /// Apply a full snapshot whose exact prior config authorizes a revision replacement.
+    fn apply_with_snapshot_base(
+        &mut self,
+        config: Config,
+        snapshot_base: &Config,
+    ) -> io::Result<()> {
+        self.apply_transaction(config, Some(snapshot_base), false)
+    }
+    /// Apply a changed authority snapshot while reconciling every live peer against its full set.
+    fn apply_authority_snapshot(
+        &mut self,
+        config: Config,
+        snapshot_base: &Config,
+    ) -> io::Result<()> {
+        self.apply_transaction(config, Some(snapshot_base), true)
+    }
+    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
+    fn apply_transaction(
+        &mut self,
+        config: Config,
+        snapshot_base: Option<&Config>,
+        force_reconcile: bool,
+    ) -> io::Result<()> {
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_records = crate::dns::Records::from_config(&config)?;
         #[cfg(feature = "cutoff-measure")]
@@ -2155,7 +2675,8 @@ impl Node {
         #[cfg(feature = "cutoff-measure")]
         drop(validation);
         if let Some(old) = &self.config {
-            let endpoints_only = old.node == config.node
+            let endpoints_only = !force_reconcile
+                && old.node == config.node
                 && old.addresses == config.addresses
                 && old.peers.len() == config.peers.len()
                 && old.default_policy == config.default_policy
@@ -2199,7 +2720,10 @@ impl Node {
                 }
                 // Persist intent before installing endpoints. Restore replays it
                 // if the process stops between the save and kernel installation.
-                self.save(Some(&config), true)?;
+                self.save_with_snapshot_base(Some(&config), true, snapshot_base)?;
+                if snapshot_base.is_some() {
+                    self.authority_reset = AuthorityResetState::Stable;
+                }
                 self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.1.max(mesh_mtu.2))?;
                 let route_overrides_to_clear: BTreeSet<_> =
                     updates.iter().map(|(previous, _)| previous.key).collect();
@@ -2365,10 +2889,13 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
-            if let Err(error) = self.save(Some(&config), true) {
+            if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
+            }
+            if snapshot_base.is_some() {
+                self.authority_reset = AuthorityResetState::Stable;
             }
             #[cfg(feature = "cutoff-measure")]
             drop(persistence);
@@ -2462,7 +2989,7 @@ impl Node {
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
-            let saved = self.save(Some(&config), true);
+            let saved = self.save_with_snapshot_base(Some(&config), true, snapshot_base);
             if saved.is_err() {
                 self.routes = recorded;
             }
@@ -2521,13 +3048,13 @@ impl Node {
                 self.firewall.apply(old)?;
             } else {
                 if self.engine_kind == EngineKind::Kernel {
+                    // A transition without a rollback config has already retired the previous
+                    // authority; clear every kernel peer, including keys that were orphaned at
+                    // restart and therefore were not in `changed`.
                     self.client
                         .as_mut()
                         .ok_or(io::ErrorKind::NotConnected)?
-                        .peers(
-                            &[],
-                            &changed.iter().map(|peer| peer.key).collect::<Vec<_>>(),
-                        )?;
+                        .clear_peers()?;
                 } else {
                     let mut empty = config.clone();
                     empty.peers.clear();
@@ -2536,6 +3063,7 @@ impl Node {
                         .ok_or(io::ErrorKind::NotConnected)?
                         .apply(empty)?;
                 }
+                Device::routes(&[], false)?;
                 Device::retain_recorded_routes(&self.routes, &[])?;
             }
             self.set_mesh_mtu(
@@ -2543,6 +3071,9 @@ impl Node {
                 mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
             )?;
             return Err(error);
+        }
+        if snapshot_base.is_some() {
+            self.authority_reset = AuthorityResetState::Stable;
         }
         self.config = Some(config);
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
@@ -2812,12 +3343,14 @@ mod tests {
                 #[cfg(feature = "mesh-dns")]
                 dns_names: cfg!(target_os = "linux"),
                 key_rotation: true,
+                authority_epoch: true,
                 public_key: PublicKey([1; 32]),
                 port: 44000,
             }),
             ..Node::default()
         };
         let config = Config {
+            authority_epoch: None,
             server: Some(NodeId(1)),
             local_key: None,
             node: NodeId(2),
@@ -2888,6 +3421,7 @@ mod tests {
             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
         };
         let config = Config {
+            authority_epoch: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -2968,3 +3502,8 @@ mod tests {
 #[cfg(test)]
 #[path = "node_rotation_tests.rs"]
 mod rotation_tests;
+
+/// Root-only measurement of live traffic across a same-content coordinator restart (#382 P2-c).
+#[cfg(test)]
+#[path = "node_restart_continuity_bench.rs"]
+mod restart_continuity_bench;

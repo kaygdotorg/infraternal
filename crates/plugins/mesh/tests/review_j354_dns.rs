@@ -6,19 +6,18 @@ use hickory_proto::{
     op::{Message, ResponseCode},
     rr::RecordType,
 };
-use infraternal_plugin_mesh::{
-    dataplane::Config,
-    dns::{self, DNS_PORT, Resolver},
-};
+use infraternal_plugin_mesh::{dataplane::Config, dns};
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket},
-    sync::Mutex,
     time::Duration,
 };
 
-/// Serializes tests that bind the resolver's fixed high DNS port.
-static DNS_TEST_LOCK: Mutex<()> = Mutex::new(());
+/// Shared socket ownership fixture for parallel DNS tests.
+#[path = "support/dns.rs"]
+mod dns_support;
+
+use dns_support::TestResolver;
 
 /// Builds a local-only resolver with a name that a remote caller must never discover.
 fn snapshot() -> Config {
@@ -44,10 +43,8 @@ fn question(name: &str, kind: u16) -> Vec<u8> {
 }
 
 /// Queries the running UDP worker and retains its complete wire response.
-fn exchange(socket: &UdpSocket, bytes: &[u8]) -> Vec<u8> {
-    socket
-        .send_to(bytes, (snapshot().addresses.ipv4, DNS_PORT))
-        .unwrap();
+fn exchange(socket: &UdpSocket, destination: SocketAddr, bytes: &[u8]) -> Vec<u8> {
+    socket.send_to(bytes, destination).unwrap();
     let mut buf = [0; 8192];
     let len = socket.recv(&mut buf).unwrap();
     buf[..len].to_vec()
@@ -66,7 +63,7 @@ fn exchange_tcp(stream: &mut TcpStream, bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Connects from an explicit loopback source address to exercise per-source accounting.
-fn tcp_stream_from(source: Ipv4Addr, destination: Ipv4Addr) -> TcpStream {
+fn tcp_stream_from(source: Ipv4Addr, destination: SocketAddr) -> TcpStream {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::STREAM,
@@ -77,10 +74,7 @@ fn tcp_stream_from(source: Ipv4Addr, destination: Ipv4Addr) -> TcpStream {
         .bind(&socket2::SockAddr::from(SocketAddr::from((source, 0))))
         .unwrap();
     socket
-        .connect(&socket2::SockAddr::from(SocketAddr::from((
-            destination,
-            DNS_PORT,
-        ))))
+        .connect(&socket2::SockAddr::from(destination))
         .unwrap();
     socket.into()
 }
@@ -88,10 +82,7 @@ fn tcp_stream_from(source: Ipv4Addr, destination: Ipv4Addr) -> TcpStream {
 /// Compares all header and record fields, excluding only the question chosen by the caller.
 #[test]
 fn review_j354_remote_denied_and_missing_wire_matrix() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let resolver = Resolver::bind(&snapshot()).unwrap();
+    let resolver = TestResolver::bind(&snapshot()).unwrap();
     for source in ["127.69.54.2:0", "127.0.0.1:0"] {
         let socket = UdpSocket::bind(source).unwrap();
         socket
@@ -102,8 +93,8 @@ fn review_j354_remote_denied_and_missing_wire_matrix() {
                 ("secret.internal", "absent.internal"),
                 ("SeCrEt.InTeRnAl.", "AbSeNt.InTeRnAl."),
             ] {
-                let a = exchange(&socket, &question(denied, kind));
-                let b = exchange(&socket, &question(missing, kind));
+                let a = exchange(&socket, resolver.udp_address, &question(denied, kind));
+                let b = exchange(&socket, resolver.udp_address, &question(missing, kind));
                 assert_eq!(a.len(), b.len());
                 let mut a = Message::from_vec(&a).unwrap();
                 let mut b = Message::from_vec(&b).unwrap();
@@ -121,10 +112,14 @@ fn review_j354_remote_denied_and_missing_wire_matrix() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     assert_eq!(
-        Message::from_vec(&exchange(&socket, &question("secret.internal", 1)))
-            .unwrap()
-            .answers
-            .len(),
+        Message::from_vec(&exchange(
+            &socket,
+            resolver.udp_address,
+            &question("secret.internal", 1)
+        ))
+        .unwrap()
+        .answers
+        .len(),
         1
     );
     drop(resolver);
@@ -180,14 +175,8 @@ fn review_j354_parser_corpus_and_recovery() {
 /// DNS clients using TCP must be able to contact the default-on resolver.
 #[test]
 fn review_j354_tcp_dns_is_available() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let resolver = Resolver::bind(&snapshot()).unwrap();
-    let connection = TcpStream::connect_timeout(
-        &(snapshot().addresses.ipv4, DNS_PORT).into(),
-        Duration::from_secs(2),
-    );
+    let resolver = TestResolver::bind(&snapshot()).unwrap();
+    let connection = TcpStream::connect_timeout(&resolver.tcp_address, Duration::from_secs(2));
     drop(resolver);
     assert!(
         connection.is_ok(),
@@ -198,13 +187,10 @@ fn review_j354_tcp_dns_is_available() {
 /// TCP framing preserves allowed answers and gives denied names the absent-name answer.
 #[test]
 fn review_j254_tcp_frames_reuse_the_udp_privacy_policy() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut allowed_config = snapshot();
     allowed_config.addresses.ipv4 = Ipv4Addr::LOCALHOST;
-    let allowed_resolver = Resolver::bind(&allowed_config).unwrap();
-    let mut allowed = TcpStream::connect((Ipv4Addr::LOCALHOST, DNS_PORT)).unwrap();
+    let allowed_resolver = TestResolver::bind(&allowed_config).unwrap();
+    let mut allowed = TcpStream::connect(allowed_resolver.tcp_address).unwrap();
     allowed
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -218,8 +204,8 @@ fn review_j254_tcp_frames_reuse_the_udp_privacy_policy() {
     drop(allowed_resolver);
 
     let denied_config = snapshot();
-    let denied_resolver = Resolver::bind(&denied_config).unwrap();
-    let mut denied = TcpStream::connect((denied_config.addresses.ipv4, DNS_PORT)).unwrap();
+    let denied_resolver = TestResolver::bind(&denied_config).unwrap();
+    let mut denied = TcpStream::connect(denied_resolver.tcp_address).unwrap();
     denied
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -247,14 +233,11 @@ fn review_j254_tcp_frames_reuse_the_udp_privacy_policy() {
 /// TCP closes idle connections and rejects a frame above the shared DNS packet cap.
 #[test]
 fn review_j254_tcp_bounds_idle_and_oversized_connections() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut config = snapshot();
     config.addresses.ipv4 = Ipv4Addr::LOCALHOST;
-    let resolver = Resolver::bind(&config).unwrap();
+    let resolver = TestResolver::bind(&config).unwrap();
 
-    let mut idle = TcpStream::connect((config.addresses.ipv4, DNS_PORT)).unwrap();
+    let mut idle = TcpStream::connect(resolver.tcp_address).unwrap();
     idle.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
     let mut byte = [0];
     assert_eq!(
@@ -263,7 +246,7 @@ fn review_j254_tcp_bounds_idle_and_oversized_connections() {
         "idle TCP connections close"
     );
 
-    let mut oversized = TcpStream::connect((config.addresses.ipv4, DNS_PORT)).unwrap();
+    let mut oversized = TcpStream::connect(resolver.tcp_address).unwrap();
     oversized
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -280,17 +263,14 @@ fn review_j254_tcp_bounds_idle_and_oversized_connections() {
 /// Refuses a connection above the global active-client bound across distinct source addresses.
 #[test]
 fn review_j254_tcp_rejects_connections_over_the_bound() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut config = snapshot();
     config.addresses.ipv4 = Ipv4Addr::LOCALHOST;
-    let resolver = Resolver::bind(&config).unwrap();
+    let resolver = TestResolver::bind(&config).unwrap();
     let mut clients = Vec::new();
     for source_last_octet in 1..=8 {
         let source = Ipv4Addr::new(127, 0, 0, source_last_octet);
         for _ in 0..8 {
-            let mut client = tcp_stream_from(source, config.addresses.ipv4);
+            let mut client = tcp_stream_from(source, resolver.tcp_address);
             client
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -305,7 +285,7 @@ fn review_j254_tcp_rejects_connections_over_the_bound() {
             clients.push(client);
         }
     }
-    let mut excess = tcp_stream_from(Ipv4Addr::new(127, 0, 0, 9), config.addresses.ipv4);
+    let mut excess = tcp_stream_from(Ipv4Addr::new(127, 0, 0, 9), resolver.tcp_address);
     excess
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -322,15 +302,12 @@ fn review_j254_tcp_rejects_connections_over_the_bound() {
 /// One source cannot consume the global listener's entire TCP connection budget.
 #[test]
 fn review_j360_tcp_limits_connections_per_source() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut config = snapshot();
     config.addresses.ipv4 = Ipv4Addr::LOCALHOST;
-    let resolver = Resolver::bind(&config).unwrap();
+    let resolver = TestResolver::bind(&config).unwrap();
     let mut clients = Vec::new();
     for _ in 0..8 {
-        let mut client = tcp_stream_from(Ipv4Addr::LOCALHOST, config.addresses.ipv4);
+        let mut client = tcp_stream_from(Ipv4Addr::LOCALHOST, resolver.tcp_address);
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -344,7 +321,7 @@ fn review_j360_tcp_limits_connections_per_source() {
         clients.push(client);
     }
 
-    let mut excess = tcp_stream_from(Ipv4Addr::LOCALHOST, config.addresses.ipv4);
+    let mut excess = tcp_stream_from(Ipv4Addr::LOCALHOST, resolver.tcp_address);
     excess
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -376,19 +353,17 @@ fn review_j354_reverse_queries_are_unclaimed() {
 /// Concurrent clients exercise queue pressure without a functional wall-clock performance assertion.
 #[test]
 fn review_j354_udp_query_flood_preserves_service() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let resolver = Resolver::bind(&snapshot()).unwrap();
+    let resolver = TestResolver::bind(&snapshot()).unwrap();
+    let destination = resolver.udp_address;
     let workers: Vec<_> = (0..4)
         .map(|_| {
-            std::thread::spawn(|| {
+            std::thread::spawn(move || {
                 let client = UdpSocket::bind("127.69.54.1:0").unwrap();
                 client
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
                 for _ in 0..1000 {
-                    let wire = exchange(&client, &question("secret.internal", 1));
+                    let wire = exchange(&client, destination, &question("secret.internal", 1));
                     assert_eq!(Message::from_vec(&wire).unwrap().answers.len(), 1);
                 }
             })
@@ -406,13 +381,10 @@ fn review_j354_udp_query_flood_preserves_service() {
 /// A partial frame must expire even when a client drips bytes below the idle timeout (#266).
 #[test]
 fn review_j360_partial_frame_has_an_absolute_read_deadline() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut config = snapshot();
     config.addresses.ipv4 = Ipv4Addr::LOCALHOST;
-    let resolver = Resolver::bind(&config).unwrap();
-    let mut client = TcpStream::connect((config.addresses.ipv4, DNS_PORT)).unwrap();
+    let resolver = TestResolver::bind(&config).unwrap();
+    let mut client = TcpStream::connect(resolver.tcp_address).unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
@@ -438,11 +410,8 @@ fn review_j360_partial_frame_has_an_absolute_read_deadline() {
 /// A TCP peer is disconnected after repeatedly sending malformed DNS frames.
 #[test]
 fn review_j360_tcp_drops_repeated_malformed_frames() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let resolver = Resolver::bind(&snapshot()).unwrap();
-    let mut stream = TcpStream::connect((snapshot().addresses.ipv4, DNS_PORT)).unwrap();
+    let resolver = TestResolver::bind(&snapshot()).unwrap();
+    let mut stream = TcpStream::connect(resolver.tcp_address).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -467,11 +436,8 @@ fn review_j360_tcp_drops_repeated_malformed_frames() {
 /// A continuously readable invalid TCP stream must not delay UDP answers (#266).
 #[test]
 fn review_j360_invalid_tcp_stream_yields_to_udp() {
-    let _guard = DNS_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let resolver = Resolver::bind(&snapshot()).unwrap();
-    let mut stream = TcpStream::connect((snapshot().addresses.ipv4, DNS_PORT)).unwrap();
+    let resolver = TestResolver::bind(&snapshot()).unwrap();
+    let mut stream = TcpStream::connect(resolver.tcp_address).unwrap();
     stream
         .set_write_timeout(Some(Duration::from_millis(200)))
         .unwrap();
@@ -496,10 +462,7 @@ fn review_j360_invalid_tcp_stream_yields_to_udp() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     socket
-        .send_to(
-            &question("secret.internal", 1),
-            (snapshot().addresses.ipv4, DNS_PORT),
-        )
+        .send_to(&question("secret.internal", 1), resolver.udp_address)
         .unwrap();
     let mut bytes = [0; 4096];
     let during_flood = socket.recv(&mut bytes);

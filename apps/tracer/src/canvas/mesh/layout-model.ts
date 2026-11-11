@@ -17,14 +17,17 @@ import { layoutMesh, type Cluster } from "./layout";
 import type { WireNode } from "./protocol";
 import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./source";
 
+/** Return the node subtitle, including its restore-safety warning when epoch support is unproved. */
 const subOf = (n: WireNode): string => {
-  if (n.state === "offline") return "offline";
-  if (n.state === "behind") return "not up to date";
+  if (n.state === "offline") return n.restoreSafe === false ? "offline · unsafe after restore" : "offline";
+  if (n.state === "behind") return n.restoreSafe === false ? "not up to date · unsafe after restore" : "not up to date";
   const path = n.path === "relay" ? `via ${n.via ?? "another host"}` : n.path === "direct" ? "direct" : "";
   const rtt = n.rttMs === undefined ? "" : `${Math.round(n.rttMs)} ms`;
-  return [path, rtt].filter(Boolean).join(" · ") || "online";
+  const online = [path, rtt].filter(Boolean).join(" · ") || "online";
+  return n.restoreSafe === false ? `${online} · unsafe after restore` : online;
 };
 
+/** Build a cached, positioned Mesh layout while preserving card identity and stored pin coordinates. */
 export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: () => Readonly<Record<string, { x: number; y: number }>> | undefined): (m: Metrics) => MeshLayout {
   const objects = new Map<string, NodeModel>();
   let cache: { key: string; layout: MeshLayout; pins: unknown } | undefined;
@@ -51,7 +54,7 @@ export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: ()
       const w = p.kind === "host" ? nodes.get(p.id) : undefined;
       const members = p.kind === "tag" ? tags[p.id.slice(4)] ?? [] : [];
       const fields = p.kind === "host" && w
-        ? { label: w.name, detail: w.address ?? (memberOf.get(w.name)?.map((t) => tagNodeId(t)).join(", ") || "no tags"), sub: subOf(w), state: w.state, ...(w.os ? { os: w.os } : {}), ...(!w.address && memberOf.get(w.name)?.length ? { tagList: memberOf.get(w.name)!.map((t) => tagNodeId(t)) } : {}) }
+        ? { label: w.name, detail: w.address ?? (memberOf.get(w.name)?.map((t) => tagNodeId(t)).join(", ") || "no tags"), sub: subOf(w), state: w.state, restoreSafe: w.restoreSafe, ...(w.os ? { os: w.os } : {}), ...(!w.address && memberOf.get(w.name)?.length ? { tagList: memberOf.get(w.name)!.map((t) => tagNodeId(t)) } : {}) }
         : { label: p.id, detail: `${members.length} member${members.length === 1 ? "" : "s"}`, sub: members.slice(0, 3).join(", ") };
       let n = objects.get(p.id);
       if (!n) { n = { id: p.id, kind: p.kind, x: p.x + origin.x, y: p.y + origin.y, ...fields } as NodeModel; objects.set(p.id, n); }

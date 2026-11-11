@@ -98,12 +98,22 @@ const grouped = (extended: boolean) => {
 
 test("by default the machine tab shows the D126 facts under System, Resources and Access, with no More section", () => {
   const facts = detailsFacts(FULL);
-  expect(facts.sections.map((section) => section.id)).toEqual(["host", "connection", "session"]);
+  expect(facts.sections.map((section) => section.id)).toEqual(["host", "connection"]); // D385: two tabs
   const groups = grouped(false);
   expect([...groups.keys()]).toEqual(["System", "Resources", "Access"]);
   expect(groups.get("System")).toEqual(["Name", "System", "Kernel", "Architecture", "Model"]);
   expect(groups.get("Resources")).toEqual(["CPU", "Memory", "Disk used on /", "Uptime", "Load average"]);
-  expect(groups.get("Access")).toEqual(["Infraternal agent", "Engines", "Login", "Address"]);
+  expect(groups.get("Access")).toEqual(["Infraternal agent", "Engines", "Login"]);
+});
+
+test("the Connection tab holds the link and the session's own facts, under their own headings (D385)", () => {
+  const facts = detailsFacts({ ...FULL, extended: true, session: { name: "deploy", started: "10:02", size: "120×32" } });
+  const connection = facts.sections.find((section) => section.id === "connection")!;
+  expect(facts.sections.map((section) => section.label)).toEqual(["Machine", "Connection"]);
+  const keys = connection.rows.filter((row) => row.value.trim() !== "");
+  expect(keys.map((row) => row.group)).toEqual([...keys.map((row) => row.group)].sort((a, b) => ["Link", "Session"].indexOf(a!) - ["Link", "Session"].indexOf(b!))); // Link rows first, then Session
+  expect(keys.filter((row) => row.group === "Link").map((row) => row.key)).toContain("Address");
+  expect(keys.filter((row) => row.group === "Session").map((row) => row.key)).toEqual(["Name", "Started", "Size"]);
 });
 
 test("extended info adds only init, virtualization, how it is reached, shell and locale", () => {

@@ -34,6 +34,8 @@ struct Loaded {
     endpoints: std::sync::Arc<BTreeMap<NodeId, SocketAddr>>,
     default: DefaultPolicy,
     revision: u64,
+    /// The durable authenticated deployment authority for every compiled node snapshot.
+    authority_epoch: String,
     /// Durable key rotation phase per node; compiling a view rewrites peer keys from it.
     rotations: std::sync::Arc<BTreeMap<NodeId, RotationRecord>>,
     /// Synthetic unnamed labels remain reachable without creating DNS records.
@@ -123,6 +125,7 @@ impl Snapshot {
             MeshError::UnknownNode => MeshApiError::NotFound,
             _ => storage_error("configuration compilation failed"),
         })?;
+        config.authority_epoch = Some(self.loaded.authority_epoch.clone());
         #[cfg(feature = "mesh-dns")]
         {
             if self.loaded.dns_placeholders.contains(&node) {
@@ -585,6 +588,8 @@ async fn audit_renames(
 pub struct Store {
     pool: SqlitePool,
     cache: std::sync::Arc<tokio::sync::Mutex<Option<Loaded>>>,
+    /// Server-process authority shared by every Store handle and persisted before a snapshot is published.
+    authority_epoch: std::sync::Arc<str>,
     // Applied-view receipts are valid only for this server process lifetime.
     server_instance: std::sync::Arc<str>,
     load_diagnostics: StorageDiagnostics,
@@ -606,6 +611,15 @@ pub type ControlPlane = std::sync::Arc<dyn Fn() -> TrafficPolicy + Send + Sync>;
 /// timer (J273 P3-2, J284 P3-a).
 pub(crate) const ROTATION_IN_PROGRESS: &str = "Mesh key rotation is in progress.";
 
+/// Share one authority across all stores in this server process; a new process gets a fresh UUID.
+static PROCESS_AUTHORITY_EPOCH: std::sync::LazyLock<std::sync::Arc<str>> =
+    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string().into());
+
+/// Return this process's stable Mesh authority epoch to every Store handle.
+fn process_authority_epoch() -> std::sync::Arc<str> {
+    std::sync::Arc::clone(&PROCESS_AUTHORITY_EPOCH)
+}
+
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
@@ -619,10 +633,20 @@ impl Store {
     /// An explicit Mesh suffix still takes precedence when that resolver feature is enabled.
     #[must_use]
     pub fn with_public_origin(pool: SqlitePool, public_origin: &str) -> Self {
+        Self::with_authority_epoch(pool, public_origin, process_authority_epoch())
+    }
+
+    /// Create a store that shares its process authority with every other handle from this server.
+    fn with_authority_epoch(
+        pool: SqlitePool,
+        public_origin: &str,
+        authority_epoch: std::sync::Arc<str>,
+    ) -> Self {
         let default_dns_suffix = configuration::default_dns_suffix_from_origin(public_origin);
         Self {
             pool,
             cache: std::sync::Arc::default(),
+            authority_epoch,
             server_instance: uuid::Uuid::new_v4().to_string().into(),
             load_diagnostics: StorageDiagnostics::new("mesh.coordinator.load"),
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
@@ -630,6 +654,15 @@ impl Store {
             default_dns_suffix,
             control_plane: std::sync::Arc::default(),
         }
+    }
+
+    /// Give unit tests a distinct process authority without changing the production singleton.
+    #[cfg(test)]
+    pub(crate) fn with_authority_epoch_for_test(
+        pool: SqlitePool,
+        authority_epoch: std::sync::Arc<str>,
+    ) -> Self {
+        Self::with_authority_epoch(pool, "", authority_epoch)
     }
     /// The server instance ID that tags acknowledgment receipts.
     #[cfg(test)]
@@ -1413,13 +1446,14 @@ impl Store {
         reported: Option<&str>,
         key_rotation_supported: bool,
     ) -> Result<(NodeId, bool), &'static str> {
-        self.attach_named_with_probed_capability(
+        self.attach_named_with_probed_capabilities(
             host,
             key,
             endpoint,
             server,
             reported,
             Some(key_rotation_supported),
+            None,
         )
         .await
     }
@@ -1440,6 +1474,34 @@ impl Store {
         reported: Option<&str>,
         key_rotation: Option<bool>,
     ) -> Result<(NodeId, bool), &'static str> {
+        self.attach_named_with_probed_capabilities(
+            host,
+            key,
+            endpoint,
+            server,
+            reported,
+            key_rotation,
+            None,
+        )
+        .await
+    }
+
+    /// Attach with the independently probed rotation and authority-epoch capabilities.
+    ///
+    /// A `None` epoch result stays unknown in storage. The inventory maps both unknown and
+    /// unsupported to restore-unsafe, while a later successful identity probe can prove support.
+    /// # Errors
+    /// Returns fixed public errors, not database input or authentication data.
+    pub async fn attach_named_with_probed_capabilities(
+        &self,
+        host: &str,
+        key: PublicKey,
+        endpoint: Option<SocketAddr>,
+        server: bool,
+        reported: Option<&str>,
+        key_rotation: Option<bool>,
+        authority_epoch: Option<bool>,
+    ) -> Result<(NodeId, bool), &'static str> {
         let key_rotation_supported = key_rotation.unwrap_or(false);
         if server != (host == "server") {
             return Err("Mesh host identity invalid.");
@@ -1452,7 +1514,7 @@ impl Store {
         // The authenticated host is the sole selector; uniqueness refuses any
         // conflicting key without changing another node's grants [164,166,235].
         let existing = sqlx::query(
-            "SELECT n.id,n.name,n.name_source,n.public_key,n.endpoint,n.dataplane_host,n.key_rotation_supported,\
+            "SELECT n.id,n.name,n.name_source,n.public_key,n.endpoint,n.dataplane_host,n.key_rotation_supported,n.authority_epoch_supported,\
                     r.rotation_phase,r.candidate_public_key,r.previous_public_key \
              FROM mesh_nodes AS n LEFT JOIN mesh_node_key_rotation AS r ON r.node_id=n.id \
              WHERE n.dataplane_host=?",
@@ -1515,6 +1577,7 @@ impl Store {
                 && row.get::<Vec<u8>, _>("public_key") == public_key
                 && row.get::<Option<String>, _>("endpoint").as_deref() == endpoint.as_deref()
                 && row.get::<bool, _>("key_rotation_supported") == key_rotation_supported
+                && row.get::<Option<bool>, _>("authority_epoch_supported") == authority_epoch
             {
                 return Ok((
                     NodeId(u64::try_from(id).map_err(|_| "Mesh identity invalid.")?),
@@ -1522,12 +1585,13 @@ impl Store {
                 ));
             }
             sqlx::query(
-                "UPDATE mesh_nodes SET public_key=?,endpoint=?,dataplane_host=?,key_rotation_supported=? WHERE id=?",
+                "UPDATE mesh_nodes SET public_key=?,endpoint=?,dataplane_host=?,key_rotation_supported=?,authority_epoch_supported=? WHERE id=?",
             )
             .bind(public_key)
             .bind(&endpoint)
             .bind(host)
             .bind(key_rotation_supported)
+            .bind(authority_epoch)
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -1540,7 +1604,7 @@ impl Store {
                 .ok_or("Mesh identity invalid.")?;
             renamed = naming.moved;
             rename(&mut tx, &renamed).await?;
-            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint,key_rotation_supported) VALUES(?,?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).bind(key_rotation_supported).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
+            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint,key_rotation_supported,authority_epoch_supported) VALUES(?,?,?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).bind(key_rotation_supported).bind(authority_epoch).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
             high
         };
         let revision = sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
@@ -1762,19 +1826,22 @@ impl Store {
             )
         }).await
     }
+    /// Load mesh policy and refresh the cache when its revision or authority epoch changes.
     async fn load(&self) -> Result<Loaded, crate::api::MeshApiError> {
         self.load_diagnostics
             .run(async {
                 let mut cached = self.cache.lock().await;
-                let revision: i64 =
-                    sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
-                        .fetch_one(&self.pool)
-                        .await
-                        .map_err(|error| storage_sql_error(error))?;
+                let (revision, authority_epoch): (i64, Option<String>) = sqlx::query_as(
+                    "SELECT revision,authority_epoch FROM mesh_state WHERE singleton=1",
+                )
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| storage_sql_error(error))?;
                 let revision =
                     u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?;
                 if let Some(loaded) = cached.as_ref()
                     && loaded.revision == revision
+                    && authority_epoch.as_deref() == Some(loaded.authority_epoch.as_str())
                 {
                     return Ok(loaded.clone());
                 }
@@ -1790,6 +1857,33 @@ impl Store {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await
             .map_err(|error| storage_sql_error(error))?;
+        let stored_authority_epoch: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT authority_epoch FROM mesh_state WHERE singleton=1",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| storage_sql_error(error))?;
+        let authority_epoch = match stored_authority_epoch {
+            Some(epoch) if !crate::dataplane::valid_authority_epoch(&epoch) => {
+                return Err(storage_error("Mesh authority epoch invalid."));
+            }
+            Some(epoch) if epoch.as_str() == self.authority_epoch.as_ref() => epoch,
+            _ => {
+                // Each server process gets a fresh authority. Commit it inside this writer
+                // transaction before compiling a snapshot, so a failed write publishes nothing.
+                let epoch = self.authority_epoch.to_string();
+                let updated =
+                    sqlx::query("UPDATE mesh_state SET authority_epoch=? WHERE singleton=1")
+                        .bind(&epoch)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|error| storage_sql_error(error))?;
+                if updated.rows_affected() != 1 {
+                    return Err(storage_error("Mesh authority epoch reset was not stored."));
+                }
+                epoch
+            }
+        };
         let serialized: Option<String> = sqlx::query_scalar::<_, Option<String>>(
             "SELECT allocation_json FROM mesh_dataplane WHERE singleton=1",
         )
@@ -2162,6 +2256,7 @@ impl Store {
             default,
             revision: u64::try_from(revision)
                 .map_err(|_| storage_error("Mesh revision invalid."))?,
+            authority_epoch,
             rotations: std::sync::Arc::new(rotations),
             #[cfg(feature = "mesh-dns")]
             dns_placeholders: std::sync::Arc::new(dns_placeholders),

@@ -347,8 +347,10 @@ impl Default for MeshNodePlugin {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 /// Optional explicit negotiation keeps ordinary replies compatible with strict older decoders.
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+// Each flag is an independently negotiated field; using a state enum would change the wire shape.
+#[allow(clippy::struct_excessive_bools)]
 struct IdentityProbe {
     #[serde(default)]
     compact_access: bool,
@@ -357,6 +359,8 @@ struct IdentityProbe {
     dns_names: bool,
     #[serde(default)]
     key_rotation: bool,
+    #[serde(default)]
+    authority_epoch: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -406,6 +410,7 @@ pub enum Request {
         #[cfg(feature = "mesh-dns")]
         dns_names: bool,
         key_rotation: bool,
+        authority_epoch: bool,
     },
     RotationPrepare(RotationOperation),
     RotationCommit(RotationOperation),
@@ -428,6 +433,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 #[cfg(feature = "mesh-dns")]
                 dns_names: probe.dns_names,
                 key_rotation: probe.key_rotation,
+                authority_epoch: probe.authority_epoch,
             })
         }
         "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
@@ -479,23 +485,22 @@ fn rotation_response(
 /// The identity reply, offering each optional capability only when both the node and the requester support it.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
-    requested_compact_access: bool,
-    requested_dns_names: bool,
-    requested_key_rotation: bool,
+    requested: IdentityProbe,
 ) -> Option<IdentityResponse> {
-    #[cfg(not(feature = "mesh-dns"))]
-    let _ = requested_dns_names;
     identity.map(|identity| IdentityResponse {
         public_key: identity.public_key,
         port: identity.port,
-        compact_access: identity.compact_access && requested_compact_access,
-        key_rotation: identity.key_rotation && requested_key_rotation,
+        compact_access: identity.compact_access && requested.compact_access,
+        key_rotation: identity.key_rotation && requested.key_rotation,
+        authority_epoch: identity.authority_epoch && requested.authority_epoch,
         #[cfg(feature = "mesh-dns")]
-        dns_names: identity.dns_names && requested_dns_names,
+        dns_names: identity.dns_names && requested.dns_names,
     })
 }
 /// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
 #[derive(serde::Serialize)]
+// These flags are independent optional wire fields so older strict decoders keep their current shape.
+#[allow(clippy::struct_excessive_bools)]
 struct IdentityResponse {
     public_key: crate::policy::model::PublicKey,
     port: u16,
@@ -503,6 +508,8 @@ struct IdentityResponse {
     compact_access: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     key_rotation: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    authority_epoch: bool,
     #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dns_names: bool,
@@ -569,24 +576,24 @@ impl AgentPlugin for MeshNodePlugin {
                     #[cfg(feature = "mesh-dns")]
                     dns_names,
                     key_rotation,
+                    authority_epoch,
                 } => {
-                    #[cfg(feature = "mesh-dns")]
-                    let requested_dns_names = dns_names;
-                    #[cfg(not(feature = "mesh-dns"))]
-                    let requested_dns_names = false;
+                    let requested = IdentityProbe {
+                        compact_access,
+                        #[cfg(feature = "mesh-dns")]
+                        dns_names,
+                        key_rotation,
+                        authority_epoch,
+                    };
                     json!(identity_response(
                         node.ensure().map_err(|_| PluginError::Rejected)?,
-                        compact_access,
-                        requested_dns_names,
-                        key_rotation,
+                        requested,
                     ))
                 }
                 Request::Up => {
                     json!(identity_response(
                         Some(node.up().map_err(|_| PluginError::Rejected)?),
-                        false,
-                        false,
-                        false,
+                        IdentityProbe::default(),
                     ))
                 }
                 request @ (Request::RotationPrepare(_)
@@ -603,7 +610,18 @@ impl AgentPlugin for MeshNodePlugin {
                     json!({"state":"Off","version":null})
                 }
                 Request::Status => {
-                    let mut status = json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node)});
+                    let state = if node.stopping() {
+                        "Stopping"
+                    } else if !node.enabled() {
+                        "Off"
+                    } else if node.awaiting_server_snapshot() {
+                        "Waiting"
+                    } else if node.active() && node.config().is_some() {
+                        "On"
+                    } else {
+                        "Waiting"
+                    };
+                    let mut status = json!({"state":state,"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node)});
                     if let Some(probe) = &self.proxy_containment {
                         let (kind, detail) = probe();
                         status["proxy_containment"] = json!({"kind": kind, "detail": detail});
@@ -747,6 +765,108 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// An unenrolled rootless mesh component can be inspected without probing a privileged firewall.
+    #[test]
+    fn rootless_owner_can_read_an_inactive_mesh_without_kernel_setup() {
+        assert!(
+            !nix::unistd::Uid::effective().is_root(),
+            "run as an ordinary account"
+        );
+        let directory = crate::node_state::tests::Directory::new();
+        let mut plugin = MeshNodePlugin::new(&directory.0);
+        let peers: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.peers", b"{}").expect("rootless peers"))
+                .expect("peer JSON");
+        assert_eq!(peers["peers"], json!([]));
+        assert_eq!(peers["version"], serde_json::Value::Null);
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("rootless status"))
+                .expect("status JSON");
+        assert_eq!(status["state"], "Off");
+        assert_eq!(std::fs::read_dir(&directory.0).expect("state").count(), 0);
+    }
+
+    /// Inactive rootless inspection must not conceal an unsafe retained ownership record.
+    #[test]
+    fn rootless_mesh_reads_refuse_an_unsafe_retained_owner() {
+        use std::os::unix::fs::symlink;
+        let directory = crate::node_state::tests::Directory::new();
+        let unrelated = directory.0.join("unrelated");
+        std::fs::write(&unrelated, b"keep").expect("unrelated file");
+        symlink(&unrelated, directory.0.join("mesh-interface.json")).expect("unsafe owner");
+        let mut plugin = MeshNodePlugin::new(&directory.0);
+        assert!(plugin.call("mesh.peers", b"{}").is_err());
+        assert_eq!(std::fs::read(&unrelated).expect("preserved file"), b"keep");
+    }
+
+    /// #382 P2 (J418): after a server rollback (D295) to a release without authority epochs, a
+    /// node that saw an epoch adopts the epoch-less full snapshot instead of waiting forever.
+    #[test]
+    #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
+    fn epochless_snapshot_after_an_epoch_is_adopted() {
+        use crate::{
+            dataplane::{DefaultPolicy, Identity},
+            policy::model::{Addresses, NodeId},
+        };
+
+        let mut plugin = MeshNodePlugin::default();
+        let identity: Identity =
+            serde_json::from_slice(&plugin.call("mesh.up", b"{}").expect("mesh up"))
+                .expect("public identity");
+        let accepted = Chunk {
+            access_updates: Vec::new(),
+            authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            server: Some(NodeId(2)),
+            local_key: Some(identity.public_key),
+            node: NodeId(1),
+            #[cfg(feature = "mesh-dns")]
+            name: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            from_version: None,
+            version: 1,
+            index: 0,
+            last: true,
+            addresses: Addresses {
+                ipv4: "10.254.0.1".parse().expect("IPv4"),
+                ipv6: "fd01::1".parse().expect("IPv6"),
+            },
+            default_policy: DefaultPolicy::Deny,
+            exposure: None,
+            upserted: std::collections::BTreeMap::new(),
+            merged: std::collections::BTreeMap::new(),
+            removed: Vec::new(),
+            #[cfg(feature = "mesh-dns")]
+            peer_names: std::collections::BTreeMap::new(),
+            #[cfg(feature = "mesh-dns")]
+            removed_peer_names: Vec::new(),
+        };
+        plugin
+            .call(
+                "mesh.configure",
+                &serde_json::to_vec(&accepted).expect("accepted snapshot"),
+            )
+            .expect("accept epoch snapshot");
+        let mut rolled_back = accepted;
+        rolled_back.authority_epoch = None;
+        rolled_back.version = 2;
+        plugin
+            .call(
+                "mesh.configure",
+                &serde_json::to_vec(&rolled_back).expect("rolled-back snapshot"),
+            )
+            .expect("a rolled-back server's full snapshot is adopted");
+
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
+                .expect("status JSON");
+        assert_ne!(
+            status["state"], "Waiting",
+            "the node is not left waiting: {status}"
+        );
+        plugin.call("mesh.down", b"{}").expect("mesh down");
+    }
+
     /// Keeps kernel setup, staged intent and explicit cleanup in one namespace owner.
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
@@ -777,6 +897,7 @@ mod tests {
         let (_, key) = crate::wireguard::Key::generate().expect("public peer fixture");
         let mut chunk = Chunk {
             access_updates: Vec::new(),
+            authority_epoch: None,
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
@@ -904,6 +1025,7 @@ mod tests {
         );
         let (_, peer_key) = Key::generate().expect("peer key");
         let chunk = Chunk {
+            authority_epoch: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -1032,6 +1154,7 @@ mod tests {
         plugin.call("mesh.up", b"{}").expect("start");
         let chunk = Chunk {
             access_updates: Vec::new(),
+            authority_epoch: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -1114,30 +1237,40 @@ mod identity_upgrade_tests {
             #[cfg(feature = "mesh-dns")]
             dns_names: true,
             key_rotation: true,
+            authority_epoch: true,
         };
         let legacy = serde_json::json!(super::identity_response(
             Some(identity.clone()),
-            false,
-            false,
-            false
+            super::IdentityProbe::default(),
         ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
         assert!(legacy.get("compact_access").is_none());
         let negotiated = serde_json::json!(super::identity_response(
             Some(identity.clone()),
-            true,
-            true,
-            true
+            super::IdentityProbe {
+                compact_access: true,
+                #[cfg(feature = "mesh-dns")]
+                dns_names: true,
+                key_rotation: true,
+                authority_epoch: true,
+            },
         ));
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
+        assert_eq!(negotiated["authority_epoch"], true);
         #[cfg(feature = "mesh-dns")]
         assert_eq!(negotiated["dns_names"], true);
-        let compact_only =
-            serde_json::json!(super::identity_response(Some(identity), true, false, false));
+        let compact_only = serde_json::json!(super::identity_response(
+            Some(identity),
+            super::IdentityProbe {
+                compact_access: true,
+                ..super::IdentityProbe::default()
+            },
+        ));
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
+        assert!(compact_only.get("authority_epoch").is_none());
         #[cfg(feature = "mesh-dns")]
         assert!(compact_only.get("dns_names").is_none());
     }
@@ -1165,6 +1298,7 @@ mod peer_page_tests {
             }
         };
         Config {
+            authority_epoch: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(1),

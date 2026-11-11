@@ -328,6 +328,7 @@ mod durable_state {
                 enabled: true,
                 config: Some(Config {
                     local_key: None,
+                    authority_epoch: None,
                     server: None,
                     node: NodeId(1),
                     #[cfg(feature = "mesh")]
@@ -345,6 +346,7 @@ mod durable_state {
                     #[cfg(feature = "mesh")]
                     peer_names: std::collections::BTreeMap::new(),
                 }),
+                authority_reset_pending: false,
                 backend: None,
             })
             .unwrap();

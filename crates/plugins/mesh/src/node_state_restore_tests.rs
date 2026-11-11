@@ -37,6 +37,7 @@ fn prior_reader<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Optio
 /// A public state with `peers` peers, for restore measurements.
 fn public_state(peers: u16) -> State {
     let mut config = Config {
+        authority_epoch: None,
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),
@@ -81,6 +82,7 @@ fn public_state(peers: u16) -> State {
     State {
         enabled: false,
         config: Some(config),
+        authority_reset_pending: false,
         backend: Some(crate::firewall::Backend::Nft),
     }
 }
