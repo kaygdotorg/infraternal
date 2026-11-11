@@ -23,9 +23,9 @@ export type StepDirection = 1 | -1 | 0;
 /** How far (px) a pane travels sideways between its slot positions. */
 const SLIDE = 20;
 /** Spring timing of a pane's slide. */
-const PANE_SPRING = { visualDuration: 0.34 } as const;
+const PANE_SPRING = { visualDuration: 0.26 } as const;
 /** Spring timing of the viewport's height. */
-const HEIGHT_SPRING = { visualDuration: 0.36 } as const;
+const HEIGHT_SPRING = { visualDuration: 0.28 } as const;
 
 /**
  * Switches between the panes of a multi-step card with a slide and a height glide.

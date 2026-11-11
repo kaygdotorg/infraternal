@@ -39,7 +39,7 @@
 .aw-pillmark[data-kind="controlled"] { color: var(--fg); }
 .aw-pillmark svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 @keyframes aw-in { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .aw-pillmark { animation: none; } .aw-surface, .aw-card { transition: opacity var(--t-press) linear; } }
+@media (prefers-reduced-motion: reduce) { .aw-pillmark { animation: none; } .aw-surface, .aw-card { transition: opacity var(--t-press) var(--ease-out); } }
 /* An app's or a screen's pill reads title first (the text that tells two windows of one app apart), and the quiet part,
    the machine and the app, gives way before the title does: it shrinks far faster than the title, so the title is cut only
    once nothing else is left to cut. */

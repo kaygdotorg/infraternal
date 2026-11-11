@@ -512,3 +512,93 @@ async fn sign_in_refuses_a_scope_that_no_action_uses() {
         Err(Error::Invalid)
     ));
 }
+
+/// D371: the shared action route accepts host readers, denies other scopes and keeps person ownership.
+#[tokio::test]
+async fn host_facts_keys_use_scopes_and_refuse_foreign_host_ids() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    let f = fixture().await;
+    let pool = f.auth.pool.clone();
+    let now = crate::runtime::unix_seconds().unwrap().max(NOW);
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('other','other',0,'unused','other','Other')")
+        .execute(&pool).await.unwrap();
+    let own = Uuid::from_u128(41);
+    let foreign = Uuid::from_u128(42);
+    for (id, owner) in [(own, f.user.as_str()), (foreign, "other")] {
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)")
+            .bind(id.as_bytes().as_slice()).bind(owner).execute(&pool).await.unwrap();
+        let mut fingerprint = [0_u8; 32];
+        fingerprint[..16].copy_from_slice(id.as_bytes());
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,zeroblob(32),zeroblob(32),100,604900)")
+            .bind(fingerprint.as_slice()).bind(id.as_bytes().as_slice()).execute(&pool).await.unwrap();
+    }
+    for (token, scope) in [
+        ("fixture-facts-reader", "hosts:read"),
+        ("fixture-facts-denied", "status:read"),
+    ] {
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'facts-test',?,?,?,0)")
+            .bind(hash(token)).bind(&f.user).bind(json!([scope]).to_string()).bind(now).bind(now+3600).execute(&pool).await.unwrap();
+    }
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        f.auth.clone(),
+        pool.clone(),
+        EmbeddedAgent::from_test_socket(socket),
+    )
+    .await
+    .unwrap();
+    let app = crate::api_actions::router(
+        pool.clone(),
+        crate::remote_removal::Removal::new(
+            f.auth.clone(),
+            pool.clone(),
+            crate::enrollment::EnrollmentStore::new(pool.clone()),
+            crate::remote_runtime::RemoteHosts::default(),
+            PathBuf::new(),
+        ),
+        state,
+        crate::api_actions::ActionGuard::new(f.auth.clone(), pool),
+    );
+    for (case, (token, id, status, error)) in [
+        (
+            "fixture-facts-reader",
+            own,
+            StatusCode::BAD_REQUEST,
+            Some("host offline"),
+        ),
+        ("fixture-facts-denied", own, StatusCode::FORBIDDEN, None),
+        (
+            "fixture-facts-reader",
+            foreign,
+            StatusCode::BAD_REQUEST,
+            Some("host unavailable"),
+        ),
+        (
+            "fixture-facts-reader",
+            Uuid::from_u128(43),
+            StatusCode::BAD_REQUEST,
+            Some("host unavailable"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request = Request::post("/v1/actions/remote.host.facts")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({"host_id":id}).to_string()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status, "case {case}");
+        if let Some(error) = error {
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value, json!({"error":error}));
+        }
+    }
+}

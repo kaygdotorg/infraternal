@@ -157,7 +157,23 @@ export type TerminalTraceHop =
   | "paint"
   | "prediction";
 
+/**
+ * Thrown by {@link TerminalClient.open} when its `isCurrent` check says the session that asked for the terminal has ended
+ * (sign-out, a revoked session) before the client was built. Nothing was constructed and no connection was opened, so the
+ * caller only has to stop; it is not a failure to report to the person.
+ */
+export class TerminalOpenCancelled extends Error {
+  /** Takes no arguments: the message is fixed and the name lets callers tell this from a failure. */
+  constructor() { super("The terminal was not opened: its session ended first."); this.name = "TerminalOpenCancelled"; }
+}
+
+/** Everything {@link TerminalClient.open} needs to build one terminal: its host element, theme, font, hooks and callbacks. */
 export interface TerminalConfig {
+  /**
+   * Asked once the font and the WebAssembly module are ready and before anything is constructed, because building the client
+   * opens its connection. When it answers false, `open` rejects with {@link TerminalOpenCancelled}. Absent means always current.
+   */
+  isCurrent?: () => boolean;
   /** The owning window still wants initial desktop focus when initialization finishes. */
   shouldFocusOnOpen?: () => boolean;
   /** Readable label for refusal guidance; hostId remains the routing authority. */
@@ -568,6 +584,9 @@ export class TerminalClient {
       // task so dozens of initializations cannot hold queued socket replies in
       // one microtask batch (#245); the first window pays only one task turn.
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      // Last chance to stop without a trace: the constructor below opens the connection, and after a sign-out that is a
+      // connection nobody is entitled to make.
+      if (config.isCurrent && !config.isCurrent()) throw new TerminalOpenCancelled();
       const terminal = TerminalClient.createRenderer(font, config);
       const client = new TerminalClient(config, terminal, font);
       // Weights go in before the first measurement so the grid is measured from the face it draws.

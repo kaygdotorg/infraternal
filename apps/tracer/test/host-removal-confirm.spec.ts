@@ -1,23 +1,21 @@
 /**
  * The host-removal confirmation belongs to what it acts on (TASTE: "A confirmation belongs to what it acts on"; owner,
- * 2026-11-06: "wtf?" and "it's just that the removal design is really bad!", #391), and it stays glass that shows colour
- * and never legible text (TASTE: "Glass shows colour, never legible text"; owner: "Keep glass, fix contrast").
+ * 2026-11-06: "wtf?" and "it's just that the removal design is really bad!", #391), and it is the shared floating-card glass
+ * (D380, "make them follow the same design"; this reverses #391's rule that no text behind it may be legible). It shows
+ * colour and shape from behind like every other floating card, and its own text is readable through the shared glass
+ * contrast guarantee (D365, #448), not through a hidden-text bed under it.
  *
  * On the clusters prototype (scene 1) with `?removal=1`, every terminal shows a dense `ls -la` listing (the live terminal
  * is written to, the preview windows are filled), another host's window is focused, and "Remove host: <other>" is started
  * from the palette, at every card transparency level the user can pick. The confirmation must: be centred, compact and not
  * hang on the focused window's pill, have two plain buttons ("Remove", "Keep") side by side inside the card (44 px high on
- * a phone, which these cases run as a touch device), put the full host name in the title, and keep every character behind
- * it illegible (`glyph-legibility.ts`: the strokes of the unblurred text must not survive in the glass). Escape returns
+ * a phone, which these cases run as a touch device), put the full host name in the title, and sit directly on the page's glass: nothing hides what is behind
+ * it (no glass bed under the card). Escape returns
  * focus to where it was, and Enter right after opening keeps the host.
  */
-import { expect, test } from "playwright/test";
+import { expect, type Page, test } from "playwright/test";
 import { type CardPixels, LEVELS, measureOpenCard, openDenseConsole, openRemovalOverDenseTerminal, SIZES, startRemovalFromPalette, startRemovalFromSidebar, THEMES } from "./removal-fixture";
 
-/** Above this correlation with the unblurred text (whole card, rim included), characters are still legible through the glass. */
-const LEGIBLE_CORRELATION = 0.15;
-/** The same limit for the card's outer 14 px rim alone, where the blur of a small card used to fade out. */
-const LEGIBLE_RIM_CORRELATION = 0.3;
 /** Below this stroke energy behind the card the case proved nothing: the card must sit over dense text. */
 const MIN_TEXT_BEHIND_PALETTE = 30;
 /** The same floor for the sidebar-started card, set from measurement (see the numbers in the issue). */
@@ -28,22 +26,22 @@ const GLASS_COLOUR_CORRELATION = 0.4;
 const OPAQUE_COLOUR_CORRELATION = 0.2;
 
 /**
- * The glass checks for one open card: no character legible through the whole card or its rim, dense text really behind it
- * (so a card over a blank part of the terminal cannot pass), and at the translucent levels colour and shape from behind
- * showing through (so an opaque card cannot pass as glass); the Solid level is opaque by design and must show none.
+ * The glass checks for one open card: dense text really behind it (so a card over a blank part of the terminal proves
+ * nothing), no glass bed under it (D380), and at the translucent looks colour and shape from behind showing through (so an
+ * opaque card cannot pass as glass); the Solid look is opaque by design and must show none. The legibility numbers are
+ * logged for the issue, not limited: readability is the shared glass contrast guarantee's job.
  */
-function expectGlass(label: string, pixels: CardPixels, level: string, minTextBehind: number): void {
+async function expectGlass(page: Page, label: string, pixels: CardPixels, level: string, minTextBehind: number): Promise<void> {
   const { text, colour } = pixels;
   const numbers = `corr ${text.corr.toFixed(3)}, rim ${text.ringCorr.toFixed(3)}, inner ${text.innerCorr.toFixed(3)}, text behind ${text.behindRms.toFixed(2)}, colour ${colour.corr.toFixed(3)}`;
   console.log(`LEGIBILITY ${label}: ${numbers}`);
   expect(text.behindRms, `the test has teeth: dense text sits behind the card (${numbers})`).toBeGreaterThan(minTextBehind);
-  expect(text.corr, `no character behind the card is legible (${numbers})`).toBeLessThan(LEGIBLE_CORRELATION);
-  expect(text.ringCorr, `no character is legible in the card's rim (${numbers})`).toBeLessThan(LEGIBLE_RIM_CORRELATION);
+  await expect(page.locator(".ui-glass-bed"), "a confirmation has no glass bed under it").toHaveCount(0);
   if (level === "solid") expect(colour.corr, `Solid is opaque (${numbers})`).toBeLessThan(OPAQUE_COLOUR_CORRELATION);
   else expect(colour.corr, `the card is glass: colour and shape from behind show through (${numbers})`).toBeGreaterThan(GLASS_COLOUR_CORRELATION);
 }
 
-for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS) test(`removal from the palette ${size.id} ${theme} ${level}: centred, plain buttons, no legible text behind`, async ({ browser }) => {
+for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS) test(`removal from the palette ${size.id} ${theme} ${level}: centred, plain buttons, glass`, async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, hasTouch: size.touch, isMobile: size.touch });
   const page = await context.newPage();
   try {
@@ -78,7 +76,7 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS
     expect(touchesPill, "not hung on the focused window's pill").toBe(false);
     expect(m.title, "the full host name is in the title").toBe(`Remove ${removed}?`);
     expect(m.labelledBy, "the dialog is named by its title").toBe(m.title);
-    expect(m.describedBy, "the dialog is described by its effect line").toContain("Revoke its access");
+    expect(m.describedBy, "the dialog is described by its effect line").toContain("Revokes its access");
     expect(m.yes.text, "the button is the plain verb").toBe("Remove");
     expect(m.yesLabel).toBe("Remove");
     expect(m.no.text).toBe("Keep");
@@ -96,12 +94,12 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS
     expect(m.box.r).toBeLessThanOrEqual(m.vw);
 
     const pixels = await measureOpenCard(page, `${size.id}-${theme}-${level}`);
-    expectGlass(`${size.id} ${theme} ${level}`, pixels, level, MIN_TEXT_BEHIND_PALETTE);
+    await expectGlass(page, `${size.id} ${theme} ${level}`, pixels, level, MIN_TEXT_BEHIND_PALETTE);
   } finally { await context.close(); }
 });
 
 /** The card started from the sidebar's host row is anchored to that row and is glass too (same checks, a lower text floor: the sidebar's own rows are half of what is behind it). */
-for (const size of SIZES) for (const theme of THEMES) for (const level of ["tinted", "frosted"] as const) test(`removal from the sidebar ${size.id} ${theme} ${level}: anchored, no legible text behind`, async ({ browser }) => {
+for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS) test(`removal from the sidebar ${size.id} ${theme} ${level}: anchored, glass, centred`, async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, hasTouch: size.touch, isMobile: size.touch });
   const page = await context.newPage();
   try {
@@ -113,7 +111,7 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of ["tint
     expect(["top", "bottom"], "anchored to the host's own row, with a tail").toContain(side);
     expect(await page.locator(".ui-confirm-tip-message").textContent()).toBe("Remove edge-arm?");
     const pixels = await measureOpenCard(page, `sidebar-${size.id}-${theme}-${level}`);
-    expectGlass(`sidebar ${size.id} ${theme} ${level}`, pixels, level, MIN_TEXT_BEHIND_SIDEBAR);
+    await expectGlass(page, `sidebar ${size.id} ${theme} ${level}`, pixels, level, MIN_TEXT_BEHIND_SIDEBAR);
   } finally { await context.close(); }
 });
 

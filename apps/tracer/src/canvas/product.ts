@@ -31,6 +31,7 @@ import { CELL, boxOf } from "./layout/geometry";
 import { columnsFromDocument, viewFromDocument, docHasGroups, type DocTarget } from "./model/document";
 import { loadGroups } from "./layout/groups-handle";
 import { ServerCanvasStore, type RevokedWork } from "./model/server-store";
+import { lookBridge } from "./themes/controller";
 import { reconcile } from "./model/reconcile";
 import type { ViewModel, WindowModel } from "./model/types";
 import { createLazyMeshApi } from "./mesh/lazy";
@@ -160,7 +161,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     else if (definitive) core.toast.show({ message: "That layout change was not saved. The saved layout is back.", tone: "error", duration: 5000 });
     // A delayed save (`_delayed`) gets no toast of its own: the persistent "Not saved" status below is shown for exactly as long as
     // the layout is waiting and already says to keep the tab open. A second transient toast said the same and stacked on it (#377).
-  }, options.onSessionRevoked);
+  }, options.onSessionRevoked, (look) => {
+    if (!disposed) lookBridge()?.lookRefused(look);
+  });
   const pendingNotice = mountToast(core.stage, { aboveNotifications: true });
   // Shown only when an edit is still unsaved after about a second, so a normal move never flashes it (D358).
   const pendingWatch = watchPendingNotice(() => store.pending === true, {
@@ -199,7 +202,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     welcomedOnce = true;
   });
   let readyRemoval: import("./context").Adapters["hostRemoval"];
-  const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), forget: (id, name, anchor, returnFocus) => readyRemoval?.forget?.(id, name, anchor, returnFocus), remove: (id, name, anchor, returnFocus) => readyRemoval?.remove(id, name, anchor, returnFocus) };
+  const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), forget: (id, name, anchor, returnFocus) => readyRemoval?.forget?.(id, name, anchor, returnFocus), remove: (id, name, anchor, returnFocus, confirmed) => readyRemoval?.remove(id, name, anchor, returnFocus, confirmed) ?? Promise.resolve({ state: "refused" as const, message: "Host removal is still loading. Try again in a moment." }) };
   // Registry metadata is optional chrome: load it without delaying the first terminal.
   void onDemand(() => import("./host-removal.on-demand")).then((module) => module.createHostRemoval(core, (id) => {
     setupPendingHostIds.delete(id);
@@ -247,7 +250,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   } : undefined;
   const productRows = createProductRows(() => true);
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], ...productRows, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void loadAccount().then((session) => session.model.refresh?.()).catch(() => undefined); } } : {}) }, mesh, docs: createRowsDocs(() => docs), hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows: createAppWindowsAdapter(connection), startupHints },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, ...(lookBridge() ? { look: lookBridge()! } : {}), settings: { sections: [], ...productRows, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void loadAccount().then((session) => session.model.refresh?.()).catch(() => undefined); } } : {}) }, mesh, docs: createRowsDocs(() => docs), hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -288,6 +291,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   }
   // A touch screen draws wider columns than the layout saved (D309): views they now overlap move clear, for display only.
   if (canvas.cx.state.metrics.minW > 0) canvas.cx.view.settle(canvas.cx.state.currentView);
+  // The account's look (D322) comes with the document: the one this account saved replaces what this page started with, and an account with none yet is offered this page's.
+  const bridge = lookBridge();
+  bridge?.apply(saved?.look);
+  if (store.pending !== true) bridge?.confirmed(saved?.look);
   // Capture initial structure once; subsequent server paints reset the comparison baseline.
   if (saved?.views.some((view) => view.id === "console")) canvas.cx.store.reset(); else canvas.cx.store.changed();
   let paintRevision = 0, paintAfterDrop = false;
@@ -303,6 +310,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const dropped = (): void => { if (paintAfterDrop) { paintAfterDrop = false; queueMicrotask(paintLayout); } };
   window.addEventListener("pointerup", dropped);
   window.addEventListener("pointercancel", dropped);
+  // A look another device saved arrives with the document, through the same subscription as the layout.
+  const offLook = store.current && bridge ? store.subscribe(() => {
+    const document = store.current!();
+    bridge.apply(document.look);
+    if (store.pending !== true) bridge.confirmed(document.look);
+  }) : () => {};
   const offLayout = store.current ? store.subscribe(paintLayout) : () => {};
   // Changes can arrive while grouped-layout code loads during mount.
   if (store.current) paintLayout();
@@ -373,7 +386,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       versionArea?.dispose();
       account?.dispose();
       canvas.flush();
-      offLayout(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose();
+      offLook(); offLayout(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose();
       window.removeEventListener("pointerup", dropped);
       window.removeEventListener("pointercancel", dropped);
       offRoundTrip();

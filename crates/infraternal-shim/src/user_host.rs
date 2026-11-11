@@ -1154,31 +1154,48 @@ mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
 
-    /// Type bytes into a real PTY and finish one bounded output turn.
+    /// Type bytes into a real PTY, await the complete line-discipline echo,
+    /// then require one bounded session turn to drain all of it.
     ///
     /// The ring head is the replay position even when the configured ring has
     /// no retained capacity, so this helper checks both PTY drainage and that
-    /// the replay position advanced with the output.
-    fn type_and_drain(session: &mut Session, input: &[u8]) -> io::Result<u64> {
+    /// the replay position advanced with the output. `echo_bytes` is one for
+    /// an ASCII key and three for its erase (backspace, space, backspace).
+    fn type_and_drain(session: &mut Session, input: &[u8], echo_bytes: usize) -> io::Result<u64> {
         use std::os::fd::AsFd;
 
         let head = session.ring.head();
         session.pty.master.write_all(input)?;
-        let mut descriptors = [nix::poll::PollFd::new(
-            session.pty.master.as_fd(),
-            PollFlags::POLLIN,
-        )];
-        let ready = nix::poll::poll(&mut descriptors, 5000_u16)?;
-        assert_ne!(ready, 0, "typed input did not produce PTY echo");
-        let master = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
-        session.step(PollFlags::empty(), master, &[], true)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::pty::available_output(&session.pty.master)? < echo_bytes {
+            assert!(
+                Instant::now() < deadline,
+                "typed input did not finish PTY echo"
+            );
+            let mut descriptors = [nix::poll::PollFd::new(
+                session.pty.master.as_fd(),
+                PollFlags::POLLIN,
+            )];
+            let timeout = nix::poll::PollTimeout::try_from(
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .map_err(io::Error::other)?;
+            assert_ne!(nix::poll::poll(&mut descriptors, timeout)?, 0);
+            assert!(
+                descriptors[0]
+                    .revents()
+                    .is_some_and(|flags| flags.contains(PollFlags::POLLIN))
+            );
+            // Readability is level-triggered: an erase's first byte can be
+            // visible before its remaining bytes. Let the producer finish;
+            // neither an empty queue nor one readable byte ends an echo.
+            std::thread::yield_now();
+        }
+        session.step(PollFlags::empty(), PollFlags::POLLIN, &[], true)?;
         let unread = crate::pty::available_output(&session.pty.master)?;
         assert_eq!(unread, 0, "session step left {unread} PTY bytes unread");
         let advanced = session.ring.head() - head;
-        assert!(
-            advanced > 0,
-            "drained PTY output did not advance replay head"
-        );
+        assert_eq!(advanced, u64::try_from(echo_bytes).unwrap());
         assert_eq!(session.ring.start(), session.ring.head());
         Ok(advanced)
     }
@@ -1517,10 +1534,10 @@ mod tests {
                         let before = session.terminal.snapshot().unwrap();
                         let key = b"abcdefghijklmnopqrstuvwxyz"
                             [usize::try_from(next(&mut seed) % 26).unwrap()];
-                        assert_eq!(type_and_drain(session, &[key]).unwrap(), 1);
+                        assert_eq!(type_and_drain(session, &[key], 1).unwrap(), 1);
                         let after = session.terminal.snapshot().unwrap();
                         assert_ne!(before, after, "live screen did not display typed input");
-                        type_and_drain(session, b"\x7f").unwrap();
+                        type_and_drain(session, b"\x7f", 3).unwrap();
                         if host.total_used() == cap {
                             full_pool_drains += 1;
                         }
@@ -1537,10 +1554,10 @@ mod tests {
                     let before = session.terminal.snapshot().unwrap();
                     let key = b"abcdefghijklmnopqrstuvwxyz"
                         [usize::try_from(next(&mut seed) % 26).unwrap()];
-                    assert_eq!(type_and_drain(session, &[key]).unwrap(), 1);
+                    assert_eq!(type_and_drain(session, &[key], 1).unwrap(), 1);
                     let after = session.terminal.snapshot().unwrap();
                     assert_ne!(before, after, "live screen did not display typed input");
-                    type_and_drain(session, b"\x7f").unwrap();
+                    type_and_drain(session, b"\x7f", 3).unwrap();
                     full_pool_drains += 1;
                 }
             }
@@ -1597,11 +1614,11 @@ mod tests {
         for index in 0..SAMPLES {
             let key = b"abcdefghijklmnopqrstuvwxyz"[index % 26];
             let started = Instant::now();
-            assert_eq!(type_and_drain(&mut session, &[key]).unwrap(), 1);
+            assert_eq!(type_and_drain(&mut session, &[key], 1).unwrap(), 1);
             session.housekeeping().unwrap();
             assert_eq!(snapshot_head(&mut viewer).unwrap(), session.ring.head());
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
-            type_and_drain(&mut session, b"\x7f").unwrap();
+            type_and_drain(&mut session, b"\x7f", 3).unwrap();
             session.housekeeping().unwrap();
             assert_eq!(snapshot_head(&mut viewer).unwrap(), session.ring.head());
         }

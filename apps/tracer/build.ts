@@ -71,6 +71,8 @@ await Promise.all([
   ...(clustersPreview ? [cp("data-toggle.css", `${dist}/data-toggle.css`)] : []),
   cp("../../packages/ui/styles.css", `${dist}/ui.css`),
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
+  cp("licenses", `${dist}/licenses`, { recursive: true }),
+  cp("../../THIRD_PARTY_NOTICES.md", `${dist}/THIRD_PARTY_NOTICES.md`),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", `${dist}/fonts/Geist-Variable.woff2`),
 ]);
 // The pages for the version this build is (the app's ? links open them); plain HTML and CSS, outside the JS budget.

@@ -19,7 +19,7 @@ russh-sftp = "=3.0.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "sync"] }
 url.workspace = true
 uuid.workspace = true
 zeroize = "1.9"

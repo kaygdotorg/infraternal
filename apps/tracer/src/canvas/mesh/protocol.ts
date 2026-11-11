@@ -24,6 +24,8 @@
  * A node's `live` and `path` come from the server's own device (#236): `live` while the server's Mesh is On (the
  * server) or a WireGuard session with the node is up (a peer), `path: "direct"` for such a session; neither needs a
  * stored observation, so `last_seen` may be null on a live node. Its `host` is the machine's name.
+ * `restore_safe: false` means the node has no proved authority-epoch support, so a server restore may leave peers
+ * from its previous authority installed. Older servers omit this field and retain the older display.
  *
  * What the server does not send yet, and the canvas reads as absent (never invented), is marked PROPOSED and is on
  * the issue: `access` (what the person may do, D187), a node's `os`, `address`, `via`, `behind` and the `relay`
@@ -36,6 +38,7 @@ import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 export type NodeState = "online" | "behind" | "offline";
 export type NodePath = "direct" | "relay";
 
+/** One validated Mesh node row with omitted server capabilities left unknown. */
 export interface WireNode {
   /** The server's stable node id (the canvas shows and keys by `name`). */
   id: number;
@@ -47,6 +50,8 @@ export interface WireNode {
   address: string | undefined;
   path: NodePath | undefined;
   via: string | undefined;
+  /** Whether the attached node can retire stale peers after a server authority restore. */
+  restoreSafe?: boolean;
 }
 export interface WireGrant {
   /** The arrow's stable id, as a string. */
@@ -117,6 +122,7 @@ function parseAccess(v: unknown): WireAccess | undefined {
   return { view: v.view, manageGrants: v.view && v.manage_grants };
 }
 
+/** Parse one node row, rejecting malformed identity while preserving only recognized optional fields. */
 function parseNode(v: unknown): WireNode | undefined {
   if (!isObject(v)) return undefined;
   const core = isObject(v.node) ? v.node : v; // `{ node: { id, host, tags }, live, ... }`
@@ -127,7 +133,19 @@ function parseNode(v: unknown): WireNode | undefined {
   const rttMs = typeof rtt === "number" && Number.isFinite(rtt) && rtt >= 0 && rtt < 60_000_000 ? rtt / 1000 : undefined;
   const os = typeof v.os === "string" && PLATFORMS.includes(v.os) ? (v.os as HostPlatform) : undefined;
   const path = v.path === "direct" || v.path === "relay" ? v.path : undefined;
-  return { id: core.id, name: core.host, tags, state, rttMs, os, address: optText(v.address), path, via: optText(v.via) };
+  const restoreSafe = typeof v.restore_safe === "boolean" ? v.restore_safe : undefined;
+  return {
+    id: core.id,
+    name: core.host,
+    tags,
+    state,
+    rttMs,
+    os,
+    address: optText(v.address),
+    path,
+    via: optText(v.via),
+    ...(restoreSafe === undefined ? {} : { restoreSafe }),
+  };
 }
 
 function parseEndpoint(v: unknown, nameOf: ReadonlyMap<number, string>): string | undefined {

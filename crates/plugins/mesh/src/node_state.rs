@@ -16,12 +16,19 @@ use std::{
     sync::Mutex,
 };
 use zeroize::{Zeroize, Zeroizing};
+
+/// Bound public snapshots consistently with the macOS node's state reader.
+const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
+/// Public runtime state needed to restore mesh intent without storing private key material.
 /// The accepted public mesh snapshot saved for restart, with a firewall choice on Linux.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
     pub enabled: bool,
     pub config: Option<Config>,
+    /// True after a new authority is fenced and until its first full snapshot is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_reset_pending: bool,
     #[serde(default)]
     #[cfg(target_os = "linux")]
     pub backend: Option<crate::firewall::Backend>,
@@ -31,6 +38,7 @@ impl Default for State {
         Self {
             enabled: true,
             config: None,
+            authority_reset_pending: false,
             #[cfg(target_os = "linux")]
             backend: None,
         }
@@ -50,6 +58,9 @@ pub struct Store {
     #[cfg(target_os = "linux")]
     engine_path: PathBuf,
     key_path: PathBuf,
+    // Authority epoch and reset marker live beside the public snapshot, which keeps the shape
+    // the previous release parses (D295, #382 P2). See [`AuthorityRecord`].
+    authority_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
@@ -127,9 +138,27 @@ impl Store {
         #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
         let key_path = parent.join("mesh-private-key");
+        let authority_path = parent.join(AUTHORITY_FILE);
+        sweep_private_temporaries(&key_path)?;
         sweep_private_temporaries(&key_path)?;
         sweep_rotation_temporaries(&rotation_path)?;
-        let state = read_public(&path)?.unwrap_or_default();
+        let state = read_state(&path, &authority_path)?.unwrap_or_default();
+        if state
+            .config
+            .as_ref()
+            .and_then(|config| config.authority_epoch.as_deref())
+            .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if state.authority_reset_pending
+            && state.config.as_ref().is_none_or(|config| {
+                !config.peers.is_empty()
+                    || config.default_policy != crate::dataplane::DefaultPolicy::Deny
+            })
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
         Ok((
@@ -141,6 +170,7 @@ impl Store {
                 #[cfg(target_os = "linux")]
                 engine_path,
                 key_path,
+                authority_path,
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -174,6 +204,7 @@ impl Store {
             interface_path: parent.join("mesh-interface.json"),
             rotation_path,
             key_path,
+            authority_path: parent.join(AUTHORITY_FILE),
             route_body: Mutex::new(route_body),
         })
     }
@@ -243,6 +274,42 @@ impl Store {
         #[cfg(all(test, target_os = "macos"))]
         crate::macos_node::rotation_crash_checkpoint("rotation_private_key_saved");
         Ok(())
+    }
+
+    /// Remove only the rotation journal after its live key has been settled.
+    ///
+    /// An authority replacement abandons the previous server's sequence space but must keep the
+    /// interface ownership marker and selected private key. The directory lock prevents removal
+    /// from racing a journal writer, and the parent sync makes retirement durable.
+    /// # Errors
+    /// Refuses unsafe journal files and reports failed removal or directory syncs.
+    pub(crate) fn discard_rotation_journal(&self) -> io::Result<()> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let parent = self
+            .rotation_path
+            .parent()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(parent)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        sweep_rotation_temporaries_locked(&self.rotation_path)?;
+        match fs::symlink_metadata(&self.rotation_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+                    && metadata.mode() & 0o777 == 0o600 =>
+            {
+                fs::remove_file(&self.rotation_path)?;
+                FileSync::parent(&self.rotation_path)
+            }
+            Ok(_) => Err(io::ErrorKind::PermissionDenied.into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Remove the saved interface identity and rotation journal when this node forgets or retires its mesh identity.
@@ -607,6 +674,30 @@ impl Store {
     /// temporary file is overwritten. Identical replay, legacy binding upgrades and journal-proven
     /// `GotaTun` binding advances retain their established semantics.
     pub fn save(&self, state: &State) -> io::Result<()> {
+        self.save_checked(state, None)
+    }
+    /// Save a complete snapshot against the exact accepted config it replaces.
+    ///
+    /// This narrow compare-and-set permits a same-authority full snapshot to lower its revision,
+    /// and permits the first full snapshot after an authority reset to complete at an equal
+    /// revision. Ordinary saves keep the monotonic revision fence.
+    /// # Errors
+    /// Refuses a stale base, a changed authority, or an equal-revision conflict outside a reset.
+    pub(crate) fn save_full_snapshot(&self, state: &State, expected: &Config) -> io::Result<()> {
+        self.save_checked(state, Some(expected))
+    }
+    /// Validate revision ownership under the directory lock before replacing the public file.
+    /// # Errors
+    /// Reports a stale revision, a mismatched base, or a durable write failure.
+    fn save_checked(&self, state: &State, full_snapshot_base: Option<&Config>) -> io::Result<()> {
+        if state.authority_reset_pending
+            && state.config.as_ref().is_none_or(|config| {
+                !config.peers.is_empty()
+                    || config.default_policy != crate::dataplane::DefaultPolicy::Deny
+            })
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         // The directory inode is stable across atomic snapshot replacement.
         // Lock it, not the replaced file, so independent Store instances cannot
         // race the revision check and rename. No idle descriptor is retained.
@@ -616,19 +707,60 @@ impl Store {
             .open(self.path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
         let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
             .map_err(|(_, error)| error)?;
-        // Disabled/unconfigured intent carries no access revision. It must
-        // remain publishable even if the retained public snapshot is unreadable.
-        if let Some(next) = &state.config
-            && let Some(previous) = read_public::<State>(&self.path)?
-            && let Some(old) = previous.config
-        {
-            if next.version < old.version {
+        // No-config intent carries no access revision. Avoid parsing the old file
+        // so explicit off can replace unreadable retained state; peer-bearing and
+        // full-snapshot writes still require a readable revision base.
+        let previous = if state.config.is_none() && full_snapshot_base.is_none() {
+            None
+        } else {
+            read_state(&self.path, &self.authority_path)?
+        };
+        if let Some(expected) = full_snapshot_base {
+            let previous = previous.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+            let old = previous.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+            let next = state.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+            let completes_reset = previous.authority_reset_pending
+                && !state.authority_reset_pending
+                && next.authority_epoch == old.authority_epoch;
+            if old != expected
+                || next.authority_epoch != old.authority_epoch
+                || !(next.version < old.version || completes_reset)
+            {
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            if next.version == old.version && next != &old {
-                // Legacy snapshots may gain their first binding. An existing binding may advance
-                // only when the local GotaTun commit journal and identity files prove that exact
-                // candidate; equal revision alone never authorizes new policy.
+        }
+        if let Some(next) = &state.config
+            && let Some(previous) = previous.as_ref()
+            && let Some(old) = previous.config.as_ref()
+        {
+            if next
+                .authority_epoch
+                .as_deref()
+                .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let same_authority = next.authority_epoch == old.authority_epoch;
+            if !same_authority
+                && (!next.peers.is_empty()
+                    || next.default_policy != crate::dataplane::DefaultPolicy::Deny)
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let authorized_reset_completion = full_snapshot_base == Some(old)
+                && previous.authority_reset_pending
+                && !state.authority_reset_pending;
+            // A lower revision is accepted only by the exact-base replacement transaction above.
+            if next.version < old.version && same_authority && full_snapshot_base != Some(old) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if next.version == old.version
+                && same_authority
+                && next != old
+                && !authorized_reset_completion
+            {
+                // Equal-revision changes only normalize an enrollment binding or a journal-proven
+                // GotaTun key advance; the revision itself never authorizes new policy.
                 let binding_advance = match (old.local_key, next.local_key) {
                     (Some(previous), Some(candidate)) if previous != candidate => {
                         self.rotation_binding_advance_is_proven(previous, candidate)?
@@ -639,7 +771,7 @@ impl Store {
                 if !binding_advance && !legacy_binding {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
-                let mut bound = old;
+                let mut bound = old.clone();
                 bound.local_key = next.local_key;
                 if &bound != next {
                     return Err(io::ErrorKind::InvalidData.into());
@@ -650,14 +782,59 @@ impl Store {
         let encode = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_encode")
         });
-        let body = serde_json::to_vec(state).map_err(io::Error::other)?;
+        let (body, authority) = encode_state(state)?;
         #[cfg(feature = "cutoff-measure")]
         drop(encode);
         #[cfg(feature = "cutoff-measure")]
         let _write = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_write")
         });
-        write_public(&self.path, &body)
+        // The snapshot goes first: a stop before the authority record leaves the older record,
+        // which restore honours only where it is safe (see [`merge_authority`]).
+        write_public(&self.path, &body)?;
+        write_authority(&self.authority_path, &authority)
+    }
+    /// Persist peer-free intent before fencing an authority at runtime.
+    ///
+    /// Atomic replacement is preferred. If that fails, the existing private snapshot is rewritten
+    /// in place so a failed temporary-file write cannot make the retired peer copy restartable.
+    /// A torn in-place write is invalid JSON and therefore fails closed at the next restore.
+    /// # Errors
+    /// Refuses snapshots that still carry peers and reports when neither safe write can complete.
+    pub(crate) fn save_retired(&self, state: &State) -> io::Result<()> {
+        if state.authority_reset_pending && state.config.is_none()
+            || state.config.as_ref().is_some_and(|config| {
+                !config.peers.is_empty()
+                    || config.default_policy != crate::dataplane::DefaultPolicy::Deny
+            })
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let (body, authority) = encode_state(state)?;
+        if body.len() as u64 > MAX_PUBLIC_STATE_BYTES {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        match self.save(state) {
+            Ok(()) => Ok(()),
+            Err(atomic_error) => {
+                write_public_in_place(&self.path, &body).inspect_err(|fallback_error| {
+                    tracing::error!(
+                        atomic_error_kind = ?atomic_error.kind(),
+                        fallback_error_kind = ?fallback_error.kind(),
+                        "atomic and in-place fail-closed mesh state writes both failed"
+                    );
+                })?;
+                // The peer-free snapshot is the safety-critical write. Without the record, restore
+                // keeps that peer-free state and waits for the server's next full snapshot.
+                if let Err(error) = write_authority(&self.authority_path, &authority) {
+                    tracing::warn!(
+                        error_kind = ?error.kind(),
+                        "mesh authority record not updated after an in-place fail-closed write"
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -675,6 +852,151 @@ fn rotation_public_key(private_key: &[u8]) -> io::Result<crate::policy::model::P
     let secret = gotatun::x25519::StaticSecret::from(*private_bytes);
     let public = gotatun::x25519::PublicKey::from(&secret);
     Ok(crate::policy::model::PublicKey(*public.as_bytes()))
+}
+
+/// File beside `mesh-public.json` that holds a node's authority metadata.
+pub(crate) const AUTHORITY_FILE: &str = "mesh-authority.json";
+
+/// Authority metadata kept outside the public snapshot (D295 rollback, #382 P2).
+///
+/// The previous release parses `mesh-public.json` with `deny_unknown_fields`, so the epoch and
+/// the reset marker cannot live there: a rolled-back binary would fail to read its own state and
+/// leave the node without a mesh. They live in this separate file, which older releases never
+/// open. The snapshot file keeps exactly the older shape.
+///
+/// Writers update the snapshot first and this record second. Readers treat a missing or stale
+/// record as harmless: a wrong or missing epoch only makes the next server snapshot count as an
+/// authority change, and a reset marker is honoured only over a peer-free deny snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthorityRecord {
+    /// The server authority epoch the saved snapshot came from, if it carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) epoch: Option<String>,
+    /// True after a new authority was fenced and until its first full snapshot is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) reset_pending: bool,
+}
+
+/// Read the authority record, treating a missing, unreadable or malformed file as empty.
+///
+/// An empty record is always safe to act on (see [`AuthorityRecord`]), so a damaged file is
+/// logged and skipped rather than blocking restore.
+pub(crate) fn read_authority(path: &Path) -> AuthorityRecord {
+    match read_public::<AuthorityRecord>(path) {
+        Ok(record) => {
+            let record = record.unwrap_or_default();
+            if record
+                .epoch
+                .as_deref()
+                .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+            {
+                tracing::warn!("mesh authority record ignored: its epoch is malformed");
+                return AuthorityRecord::default();
+            }
+            record
+        }
+        Err(error) => {
+            tracing::warn!(error_kind = ?error.kind(), "mesh authority record ignored: unreadable");
+            AuthorityRecord::default()
+        }
+    }
+}
+
+/// Persist `record`, or remove the file when it is empty. Unchanged records are not rewritten,
+/// so ordinary snapshot saves cost no extra fsync.
+/// # Errors
+/// Reports a failed durable write or removal.
+pub(crate) fn write_authority(path: &Path, record: &AuthorityRecord) -> io::Result<()> {
+    // A malformed file reads as empty; leaving it in place is harmless for the same reason.
+    if read_authority(path) == *record {
+        return Ok(());
+    }
+    if *record == AuthorityRecord::default() {
+        return match fs::remove_file(path) {
+            Ok(()) => fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    write_public(path, &serde_json::to_vec(record).map_err(io::Error::other)?)
+}
+
+/// Move the authority metadata out of a snapshot about to be written, returning the stripped
+/// copy for the snapshot file and the record for [`AUTHORITY_FILE`].
+pub(crate) fn split_authority(
+    config: Option<&Config>,
+    reset_pending: bool,
+) -> (Option<Config>, AuthorityRecord) {
+    let mut stripped = config.cloned();
+    let epoch = stripped
+        .as_mut()
+        .and_then(|config| config.authority_epoch.take());
+    (
+        stripped,
+        AuthorityRecord {
+            epoch,
+            reset_pending,
+        },
+    )
+}
+
+/// Fill a just-read snapshot's authority metadata from its record.
+///
+/// Values written inline by earlier builds of this change win. The record's epoch applies only
+/// to an epoch-less snapshot. Its reset marker applies only when the snapshot is peer-free and
+/// deny-by-default, the state a reset writes first; anything else means the record is older
+/// than the snapshot, and is ignored.
+pub(crate) fn merge_authority(
+    config: Option<&mut Config>,
+    reset_pending: &mut bool,
+    record: AuthorityRecord,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    if config.authority_epoch.is_none() {
+        config.authority_epoch = record.epoch;
+    }
+    if record.reset_pending
+        && config.peers.is_empty()
+        && config.default_policy == crate::dataplane::DefaultPolicy::Deny
+    {
+        *reset_pending = true;
+    }
+}
+
+/// Encode `state` for `mesh-public.json` in the previous release's shape, plus its record.
+/// # Errors
+/// Reports a serialization failure.
+fn encode_state(state: &State) -> io::Result<(Vec<u8>, AuthorityRecord)> {
+    let (config, authority) = split_authority(state.config.as_ref(), state.authority_reset_pending);
+    let legacy = State {
+        enabled: state.enabled,
+        config,
+        authority_reset_pending: false,
+        #[cfg(target_os = "linux")]
+        backend: state.backend,
+    };
+    Ok((
+        serde_json::to_vec(&legacy).map_err(io::Error::other)?,
+        authority,
+    ))
+}
+
+/// Read `mesh-public.json` and merge its authority record (see [`merge_authority`]).
+/// # Errors
+/// Reports an unsafe or unreadable snapshot file.
+fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
+    let Some(mut state) = read_public::<State>(path)? else {
+        return Ok(None);
+    };
+    merge_authority(
+        state.config.as_mut(),
+        &mut state.authority_reset_pending,
+        read_authority(authority_path),
+    );
+    Ok(Some(state))
 }
 
 // Both public files must pass the same ownership, mode and no-follow boundary.
@@ -706,6 +1028,7 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
         Err(error) => Err(error),
     }
 }
+/// Atomically replace a public state file through a synced temporary file.
 // Write the journal before kernel mutation and the accepted snapshot afterwards.
 // A crash between writes can recover ownership from the journal, the accepted
 // peer list and the retained kernel peer list; no cross-file atomicity is assumed.
@@ -726,6 +1049,48 @@ fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+/// Overwrite an existing private public-state file after runtime peers are already fenced.
+///
+/// This is the last safe write when a directory rename fails: truncation can leave invalid JSON,
+/// which restore rejects, but it cannot silently retain the old peer snapshot after a complete
+/// write. The regular atomic writer remains the normal path.
+/// # Errors
+/// Refuses unsafe parent/file metadata, oversized state or failed durable writes.
+fn write_public_in_place(path: &Path, body: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    if body.len() as u64 > MAX_PUBLIC_STATE_BYTES {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(parent)?;
+    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    let file_metadata = file.metadata()?;
+    if !file_metadata.is_file()
+        || file_metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || file_metadata.mode() & 0o777 != 0o600
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    file.set_len(0)?;
+    file.write_all(body)?;
+    file.sync_all()?;
+    FileSync::parent(path)
 }
 
 fn write_private(path: &Path, key: &[u8]) -> io::Result<()> {
@@ -857,6 +1222,7 @@ pub(crate) mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     use std::{
+        collections::BTreeMap,
         os::unix::fs::{PermissionsExt, symlink},
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -890,7 +1256,9 @@ pub(crate) mod tests {
     fn binding_state(local_key: crate::policy::model::PublicKey) -> State {
         State {
             enabled: true,
+            authority_reset_pending: false,
             config: Some(Config {
+                authority_epoch: None,
                 local_key: Some(local_key),
                 server: None,
                 node: crate::policy::model::NodeId(1),
@@ -912,6 +1280,100 @@ pub(crate) mod tests {
             #[cfg(target_os = "linux")]
             backend: Some(crate::firewall::Backend::Nft),
         }
+    }
+
+    /// The public snapshot shape the previous release reads with `deny_unknown_fields`
+    /// (dev `966c52e07`, before authority epochs). A rollback (D295) must still parse it.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreviousReleaseState {
+        #[allow(dead_code)]
+        enabled: bool,
+        #[allow(dead_code)]
+        config: Option<PreviousReleaseConfig>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        backend: Option<serde_json::Value>,
+    }
+
+    /// The previous release's `Config` fields; any other key makes it refuse the file.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct PreviousReleaseConfig {
+        #[serde(default)]
+        local_key: Option<serde_json::Value>,
+        #[serde(default)]
+        server: Option<serde_json::Value>,
+        node: serde_json::Value,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        dns_suffix: Option<String>,
+        version: u64,
+        addresses: serde_json::Value,
+        default_policy: serde_json::Value,
+        #[serde(default)]
+        exposure: Option<serde_json::Value>,
+        peers: serde_json::Value,
+        #[serde(default)]
+        peer_names: Option<serde_json::Value>,
+    }
+
+    /// #382 P2 (J418): a node that saved an authority epoch and a pending reset must leave a
+    /// snapshot the previous release can parse, and must restore both values itself.
+    #[test]
+    fn authority_metadata_keeps_the_snapshot_readable_by_the_previous_release() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("empty state");
+        let mut state = binding_state(crate::policy::model::PublicKey([4; 32]));
+        let epoch = "00000000-0000-4000-8000-0000000002c1";
+        if let Some(config) = state.config.as_mut() {
+            config.authority_epoch = Some(epoch.to_owned());
+        }
+        state.authority_reset_pending = true;
+        store
+            .save_retired(&state)
+            .expect("save fenced authority state");
+
+        let body = fs::read(&store.path).expect("public snapshot");
+        serde_json::from_slice::<PreviousReleaseState>(&body)
+            .expect("the previous release parses the snapshot");
+
+        let (_, restored) = Store::open(&directory.0).expect("restore");
+        assert_eq!(
+            restored
+                .config
+                .as_ref()
+                .and_then(|config| config.authority_epoch.as_deref()),
+            Some(epoch)
+        );
+        assert!(restored.authority_reset_pending);
+    }
+
+    /// A reset marker left over from before a later peer-bearing save is not applied to it,
+    /// so a stop between the two files can never reopen as a reset over live peers.
+    #[test]
+    fn stale_reset_record_is_ignored_over_a_peer_bearing_snapshot() {
+        let mut state = binding_state(crate::policy::model::PublicKey([5; 32]));
+        let config = state.config.as_mut().expect("config");
+        config.default_policy = crate::dataplane::DefaultPolicy::Allow;
+        merge_authority(
+            state.config.as_mut(),
+            &mut state.authority_reset_pending,
+            AuthorityRecord {
+                epoch: Some("00000000-0000-4000-8000-0000000002c1".to_owned()),
+                reset_pending: true,
+            },
+        );
+        assert!(!state.authority_reset_pending);
+        assert_eq!(
+            state
+                .config
+                .as_ref()
+                .and_then(|config| config.authority_epoch.as_deref()),
+            Some("00000000-0000-4000-8000-0000000002c1")
+        );
     }
 
     /// A committed `GotaTun` journal authorizes persisting its candidate binding at the same revision.
@@ -1110,6 +1572,7 @@ pub(crate) mod tests {
         );
     }
 
+    /// Explicitly disabled state survives restart without persisting private keys.
     #[test]
     fn explicit_off_survives_restart_and_snapshot_contains_only_public_fields() {
         let directory = Directory::new();
@@ -1119,6 +1582,7 @@ pub(crate) mod tests {
             .save(&State {
                 enabled: false,
                 config: None,
+                authority_reset_pending: false,
                 backend: Some(crate::firewall::Backend::Nft),
             })
             .expect("save");
@@ -1131,6 +1595,55 @@ pub(crate) mod tests {
         assert_eq!(
             fs::metadata(&store.path).expect("mode").mode() & 0o777,
             0o600
+        );
+    }
+    /// Ordinary persistence cannot move an accepted authority's revision backwards.
+    #[test]
+    fn ordinary_save_rejects_a_lower_same_authority_revision() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let mut config = Config {
+            authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            local_key: None,
+            server: Some(crate::policy::model::NodeId(1)),
+            node: crate::policy::model::NodeId(2),
+            #[cfg(feature = "mesh-dns")]
+            name: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            version: 11,
+            addresses: crate::policy::model::Addresses {
+                ipv4: "10.254.0.2".parse().expect("IPv4"),
+                ipv6: "fd01::2".parse().expect("IPv6"),
+            },
+            default_policy: crate::dataplane::DefaultPolicy::Deny,
+            exposure: None,
+            peers: BTreeMap::new(),
+            #[cfg(feature = "mesh-dns")]
+            peer_names: BTreeMap::new(),
+        };
+        store
+            .save(&State {
+                enabled: true,
+                config: Some(config.clone()),
+                authority_reset_pending: false,
+                backend: None,
+            })
+            .expect("accepted snapshot");
+        config.version = 2;
+
+        let result = store.save(&State {
+            enabled: true,
+            config: Some(config),
+            authority_reset_pending: false,
+            backend: None,
+        });
+
+        assert_eq!(
+            result
+                .expect_err("ordinary save must keep its revision fence")
+                .kind(),
+            io::ErrorKind::InvalidData
         );
     }
     /// Finishing a rotation removes only the predecessor key, and finishing it again is harmless.
@@ -1444,6 +1957,7 @@ pub(crate) mod tests {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let config = Config {
+            authority_epoch: None,
             local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),
@@ -1466,6 +1980,7 @@ pub(crate) mod tests {
             .save(&State {
                 enabled: false,
                 config: Some(config.clone()),
+                authority_reset_pending: false,
                 backend: Some(crate::firewall::Backend::Nft),
             })
             .expect("accepted intent");

@@ -25,6 +25,10 @@ export interface PillModule {
   dispose(): void;
 }
 
+/**
+ * Builds the top pill for the canvas `cx` and returns its controls. A committed swipe slides the old content out and
+ * the new one in on the ease-out curve (each leg at most 260 ms); a short drag settles back the same way.
+ */
 export function createPill(cx: Ctx): PillModule {
   const { stage, signal, state, views, camera } = cx;
   const capsule = stage.querySelector<HTMLElement>("#capsule")!;
@@ -112,13 +116,13 @@ export function createPill(cx: Ctx): PillModule {
     const target = ids[at + dir];
     const commits = target && (Math.abs(dx) > 56 || Math.abs(v) > 0.5) && Math.sign(v || dx) === Math.sign(dx);
     const width = capsule.offsetWidth;
-    if (!commits) { shiftSpring(dx, 0, { visualDuration: 0.4 }); return; }
+    if (!commits) { shiftSpring(dx, 0, { visualDuration: 0.26 }); return; }
     hold = true;
     cx.nav.flyView(target as ViewId);
     shiftSpring(dx, -dir * width * 0.6, { visualDuration: 0.18 }, () => {
       hold = false;
       paint();
-      shiftSpring(dir * width * 0.6, 0, { visualDuration: 0.42 });
+      shiftSpring(dir * width * 0.6, 0, { visualDuration: 0.26 });
     });
   };
   capsule.addEventListener("pointerup", end, { signal });

@@ -36,6 +36,7 @@ every issue and comment was filed, 1 when a request failed.
 """
 import argparse
 import datetime
+import functools
 import hashlib
 import json
 import os
@@ -44,6 +45,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -77,7 +79,14 @@ MAX_OPEN_ISSUES = 30
 ROLLUP_MIN_FAILING = 5
 
 # Byte caps for what the reporter will read, and text caps for what it will write.
+# Exit status when Forgejo refuses the token (401 or 403): distinct, so the journal and the unit say so.
+TOKEN_REFUSED_EXIT = 77
+# A Forgejo account name as the reporter accepts it (it is compared with issue and comment authors).
+LOGIN = re.compile(r'\A[A-Za-z0-9][A-Za-z0-9._-]{0,38}\Z', re.ASCII)
 MAX_RESULTS_BYTES = 32 << 20
+MAX_JSONL_BYTES = 32 << 20
+MAX_JSONL_LINES = 200000
+TIMEOUT_LABEL = re.compile(r'\A[0-9]{1,3}h\Z', re.ASCII)
 MAX_LOG_BYTES = 16 << 20
 MAX_META_BYTES = 64 << 10
 MAX_LINE = 300
@@ -141,12 +150,17 @@ def prune_runs(runs, keep):
 
 
 def run(root, runs):
-    """Build the tracer, run the whole suite, and leave `results.json`, `suite.log` and `meta.json`.
+    """Build the tracer, run the whole suite, and leave `results.json`, `results.jsonl`, `suite.log` and `meta.json`.
 
-    The run directory is `<runs>/<UTC stamp>-<sha7>`; its path goes into
-    `<runs>/latest` (the bare run name) once the suite has produced a report. The evidence folder
-    inside it is where specs and the Playwright output directory write
-    screenshots and other raw receipts, outside the checkout.
+    The run directory is `<runs>/<UTC stamp>-<sha7>`. Its name goes into
+    `<runs>/latest` (the bare run name) and a first `meta.json` is written
+    *before* the suite starts, so that if the suite is stopped by its time
+    budget the helper still knows where to find the partial results. The
+    custom reporter (`apps/tracer/nightly-reporter.ts`) streams one line per
+    finished test into `results.jsonl`; Playwright's own `results.json` only
+    appears when the run ends. The evidence folder inside the run directory is
+    where specs and the Playwright output directory write screenshots and
+    other raw receipts, outside the checkout.
     """
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -155,22 +169,25 @@ def run(root, runs):
     log = out / 'suite.log'
     tracer = root / 'apps/tracer'
     env = dict(os.environ, TRACER_TEST_PORT=TEST_PORT, INFRATERNAL_EVIDENCE_DIR=str(out / 'evidence'),
-               PLAYWRIGHT_JSON_OUTPUT_NAME=str(out / 'results.json'))
+               PLAYWRIGHT_JSON_OUTPUT_NAME=str(out / 'results.json'), NIGHTLY_JSONL=str(out / 'results.jsonl'))
+    meta = {'head': head, 'evidence': str(out / 'evidence'), 'log': str(log), 'playwright_exit': None}
+    (out / 'meta.json').write_text(json.dumps(meta) + '\n')
+    (runs / 'latest').write_text(out.name + '\n')
     # Build failures are infrastructure failures: no spec issue is opened for them.
     for command in (['bun', 'install', '--frozen-lockfile'], ['bun', 'run', 'build'],
                     ['bun', 'x', 'playwright', 'install', 'chromium']):
         if run_step(command, tracer, log, env) != 0:
             print(f'browser suite: {" ".join(command)} failed, see {log}', flush=True)
             return 1
-    # `list` keeps readable progress in the log; `json` is what the reporter reads.
-    status = run_step(['bun', 'x', 'playwright', 'test', '--reporter=list,json'], tracer, log, env)
+    # `list` keeps readable progress in the log, `json` is the full report at the end, and the custom
+    # reporter streams a line per test so a run stopped by its budget still leaves results.
+    status = run_step(['bun', 'x', 'playwright', 'test', '--reporter=list,json,./nightly-reporter.ts'], tracer, log, env)
     results = out / 'results.json'
     if not results.is_file():
         print(f'browser suite: no report written (playwright exit {status}), see {log}', flush=True)
         return 1
-    (out / 'meta.json').write_text(json.dumps({'head': head, 'evidence': str(out / 'evidence'), 'log': str(log),
-                                               'playwright_exit': status}) + '\n')
-    (runs / 'latest').write_text(out.name + '\n')
+    meta['playwright_exit'] = status
+    (out / 'meta.json').write_text(json.dumps(meta) + '\n')
     prune_runs(runs, KEEP_RUNS)
     print(f'BROWSER_SUITE_DONE playwright_exit={status} head={head} out={out}', flush=True)
     return 0
@@ -219,6 +236,38 @@ def collect(report):
     return failing, ran - set(failing) - {UNPARSEABLE}
 
 
+def collect_jsonl(data):
+    """Read the streamed per-test lines of a run that did not finish; return `(failing, passing, finished, total)`.
+
+    Same shape as `collect`, plus how many tests finished and how many the run
+    planned (None if unknown). Only a test whose outcome is `unexpected`
+    counts as failed. A spec with no finished test is neither failing nor
+    passing, so a timed-out suite never reports a spec fixed that it did not
+    reach, and an `interrupted` test (cut off by the stop) is not a failure.
+    The lines are untrusted: bad lines are skipped, names are cleaned, text is cut.
+    """
+    failing, ran, finished, total = {}, set(), 0, None
+    for line in data.decode(errors='replace').splitlines()[:MAX_JSONL_LINES]:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        if item.get('kind') == 'begin':
+            if isinstance(item.get('total'), int) and 0 <= item['total'] <= 10 ** 7:
+                total = item['total']
+        elif item.get('kind') == 'test':
+            finished += 1
+            name = clean_name(item.get('file'))
+            if item.get('outcome') == 'unexpected':
+                failing.setdefault(name, []).append((str(item.get('title', '?'))[:MAX_LINE],
+                                                     clip_lines(ANSI.sub('', str(item.get('error', ''))).strip(), MAX_ERROR)))
+            elif item.get('outcome') in ('expected', 'flaky'):
+                ran.add(name)
+    return failing, ran - set(failing) - {UNPARSEABLE}, finished, total
+
+
 def failure_text(test):
     """The last attempt's error message, colour codes removed and each line cut to MAX_LINE."""
     results = test.get('results') or [{}]
@@ -244,13 +293,46 @@ def fence_for(*texts):
     return '`' * max(3, longest + 1)
 
 
+class TokenRefused(Exception):
+    """Forgejo answered 401 or 403: the token may not do this. Not an OSError, so no per-spec handler swallows it."""
+
+
 def api(base, route, token, payload=None):
-    """One Forgejo API call. The token travels only in a header, never in argv or logs."""
+    """One Forgejo API call. The token travels only in a header, never in argv or logs.
+
+    A 401 or 403 raises TokenRefused with the status, the route and Forgejo's own
+    message (which names a missing scope), because every later call would fail the same way.
+    """
     request = urllib.request.Request(base.rstrip('/') + '/api/v1/' + route,
                                      data=None if payload is None else json.dumps(payload).encode(),
                                      headers={'Authorization': 'token ' + token, 'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code not in (401, 403):
+            raise
+        try:
+            detail = str(json.load(error).get('message', ''))
+        except (ValueError, AttributeError, OSError):
+            detail = ''
+        detail = ''.join(ch for ch in detail if ch.isprintable())[:200]
+        raise TokenRefused(f'HTTP {error.code} on {"GET" if payload is None else "POST"} {route} ({detail or "no message"})') from None
+
+
+def post_as(base, route, token, payload, login):
+    """POST one issue or comment and check that it was written under the configured `login`.
+
+    The author comes back on the response itself, so no permission beyond issue
+    write is needed. A different author means the configured login is not this
+    token's account: markers would be matched against the wrong name, so stop
+    (ValueError) before more is filed.
+    """
+    result = api(base, route, token, payload)
+    author = (result.get('user') or {}).get('login') if isinstance(result, dict) else None
+    if author is not None and author != login:
+        raise ValueError(f'the configured Forgejo login is {login!r}, but this token posts as {author!r}')
+    return result
 
 
 def pages(base, route, token):
@@ -318,6 +400,7 @@ def note_pooled(base, repo, token, login, number, new, run_name, head, runs_root
     The roll-up's own body and the account's earlier comments are the memory:
     a name already written there is not repeated, so a rerun adds nothing.
     """
+    post = functools.partial(post_as, login=login)
     issue = api(base, f'repos/{repo}/issues/{number}', token)
     seen = (issue.get('body') or '') if written_by(issue, login) else ''
     for comment in issue_comments(base, repo, token, number):
@@ -326,7 +409,7 @@ def note_pooled(base, repo, token, login, number, new, run_name, head, runs_root
     fresh = [name for name in sorted(new) if name not in seen]
     if fresh:
         listed = '\n'.join(fresh[:200])
-        api(base, f'repos/{repo}/issues/{number}/comments', token,
+        post(base, f'repos/{repo}/issues/{number}/comments', token,
             {'body': f'{len(fresh)} more spec files failed on `{head}` and are pooled here (evidence `{runs_root}/{run_name}/evidence`):\n\n{fence_for(listed)}\n{listed}\n{fence_for(listed)}'[:MAX_BODY]})
         print(f'roll-up #{number}: {len(fresh)} more names', flush=True)
 
@@ -356,45 +439,94 @@ def spec_issue(spec, failures, tail, run_name, head, runs_root):
             'body': issue_body(spec_marker(spec), intro, blocks, run_name, head, runs_root)}
 
 
-def rollup_issue(names, total, run_name, head, runs_root):
-    """Title and body of the single issue that stands for a night with too many new failures."""
-    listed = '\n'.join(sorted(names)[:200])
+def timeout_marker(run_name):
+    """The hidden marker of the timeout note for one run, so a rerun of the same night adds no second note."""
+    return f'<!-- infraternal-browser-timeout: {run_name} -->'
+
+
+def timeout_note(suite_timeout, finished, total):
+    """The one sentence a timed-out night adds to the roll-up."""
+    return f'suite timed out after {suite_timeout[:-1]} h; {finished} of {"?" if total is None else total} tests ran'
+
+
+def rollup_issue(names, total, run_name, head, runs_root, note=None):
+    """Title and body of the single issue that stands for a night with too many new failures, or a suite that timed out."""
+    listed = '\n'.join(sorted(names)[:200]) or '(none pooled tonight)'
     intro = (f'{len(names)} new spec files failed out of {total} that ran. That is more than {MAX_NEW_ISSUES} new issues '
              f'or a mostly red suite, so it is filed once, not per spec: look for a dead test server or a broken build first.\n')
-    return {'title': f'browser suite: {len(names)} spec files fail on dev (roll-up)',
+    title = f'browser suite: {len(names)} spec files fail on dev (roll-up)'
+    if note and not names:
+        intro, title = '', 'browser suite: the suite timed out (roll-up)'
+    if note:
+        intro += f'\nNote: {note}.\n{timeout_marker(run_name)}\n'
+    return {'title': title,
             'body': issue_body(spec_marker(ROLLUP), intro, [('Failing spec files (names as Playwright reported them)', listed)],
                                run_name, head, runs_root)}
 
 
-def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS):
+def note_timeout(base, repo, token, login, number, note, run_name):
+    """Comment the timeout note on the roll-up `number`, once per run (its body or one of our comments may already carry it)."""
+    marker = timeout_marker(run_name)
+    issue = api(base, f'repos/{repo}/issues/{number}', token)
+    if written_by(issue, login) and marker in (issue.get('body') or ''):
+        return
+    if any(marker in (c.get('body') or '') for c in issue_comments(base, repo, token, number) if written_by(c, login)):
+        return
+    post_as(base, f'repos/{repo}/issues/{number}/comments', token, {'body': f'Note: {note}.\n\n{marker}'}, login)
+    print(f'timeout note on roll-up #{number}: {note}', flush=True)
+
+
+def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_timeout=None, login=None):
     """File the night's results and return the number of requests that failed.
 
     New red specs open an issue (or one roll-up issue when there are too many),
     specs that came back get one comment, and everything else is left alone
     (see the module doc). Raises ValueError when the inputs are not what the
     suite should have written, and RuntimeError when the issue list is too long.
+    `login` is the Forgejo account the token belongs to, configured by the
+    installer. Whose markers to believe cannot be asked of Forgejo (`/user` needs
+    the `read:user` scope, which the token deliberately lacks); every issue or
+    comment this function posts is checked against it, so a wrong value stops the night.
+    `suite_timeout` (like `9h`) says the suite was stopped by its time budget: the
+    results then come from the streamed `results.jsonl` when `results.json` is
+    missing, and the roll-up gets one note saying how many tests ran.
     """
+    if not isinstance(login, str) or not LOGIN.fullmatch(login):
+        raise ValueError('no valid Forgejo login configured')
+    post = functools.partial(post_as, login=login)
+    if suite_timeout is not None and not TIMEOUT_LABEL.fullmatch(suite_timeout):
+        raise ValueError('bad suite timeout label')
     if not RUN_NAME.fullmatch(run_name):
         raise ValueError('bad run name')
     meta = json.loads(read_regular(results / 'meta.json', MAX_META_BYTES))
     head = meta.get('head') if isinstance(meta, dict) else None
     if not isinstance(head, str) or not HEAD.fullmatch(head) or not head.startswith(run_name[-7:]):
         raise ValueError('meta.json: head is not the commit named by the run folder')
-    failing, passing = collect(json.loads(read_regular(results / 'results.json', MAX_RESULTS_BYTES)))
+    finished, total = 0, None
+    jsonl = results / 'results.jsonl'
+    if (results / 'results.json').exists() or not suite_timeout:
+        failing, passing = collect(json.loads(read_regular(results / 'results.json', MAX_RESULTS_BYTES)))
+        if suite_timeout and jsonl.exists():
+            finished, total = collect_jsonl(read_regular(jsonl, MAX_JSONL_BYTES))[2:]
+    else:
+        failing, passing, finished, total = collect_jsonl(read_regular(jsonl, MAX_JSONL_BYTES))
     log_text = read_regular(results / 'suite.log', MAX_LOG_BYTES, tail=True).decode(errors='replace')
-    login = api(base, 'user', token)['login']
     known = open_issues(base, repo, token, login)
     new = sorted(spec for spec in failing if hashlib.sha256(spec.encode()).hexdigest()[:16] not in known)
     errors = 0
+    rollup = None
+    timeout_done = False
     # A mostly red suite is a dead server, not that many bugs.
     pool = len(new) > MAX_NEW_ISSUES or len(known) + len(new) > MAX_OPEN_ISSUES or (len(failing) >= ROLLUP_MIN_FAILING and len(failing) * 2 >= len(failing) + len(passing))
     if pool and new:
         try:
             rollup = known.get(hashlib.sha256(ROLLUP.encode()).hexdigest()[:16])
             if rollup is None:
-                number = api(base, f'repos/{repo}/issues', token,
-                             rollup_issue(new, len(failing) + len(passing), run_name, head, runs_root))['number']
-                print(f'opened roll-up issue #{number} specs={len(new)} head={head}', flush=True)
+                note = timeout_note(suite_timeout, finished, total) if suite_timeout else None
+                rollup = post(base, f'repos/{repo}/issues', token,
+                             rollup_issue(new, len(failing) + len(passing), run_name, head, runs_root, note))['number']
+                print(f'opened roll-up issue #{rollup} specs={len(new)} head={head}', flush=True)
+                timeout_done = True
             else:
                 note_pooled(base, repo, token, login, rollup, new, run_name, head, runs_root)
         except OSError as error:
@@ -406,11 +538,11 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS):
             if marker not in known:
                 if pool:
                     continue
-                number = api(base, f'repos/{repo}/issues', token,
+                number = post(base, f'repos/{repo}/issues', token,
                              spec_issue(spec, failing[spec], log_tail(log_text, spec), run_name, head, runs_root))['number']
                 print(f'opened issue #{number} spec={spec} head={head}', flush=True)
             elif last_state(base, repo, token, login, known[marker]) == 'fixed':
-                api(base, f'repos/{repo}/issues/{known[marker]}/comments', token,
+                post(base, f'repos/{repo}/issues/{known[marker]}/comments', token,
                     {'body': f"`{spec}` fails again on `{head}`.\n\nEvidence: `{runs_root}/{run_name}/evidence`\n\n{state_marker('failing')}"})
                 print(f'failing again: issue #{known[marker]} spec={spec}', flush=True)
         except OSError as error:
@@ -423,26 +555,49 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS):
         try:
             if last_state(base, repo, token, login, known[marker]) == 'fixed':
                 continue
-            api(base, f'repos/{repo}/issues/{known[marker]}/comments', token,
+            post(base, f'repos/{repo}/issues/{known[marker]}/comments', token,
                 {'body': f"`{spec}` passes again on `{head}`. Closing is left to the owner.\n\n{state_marker('fixed')}"})
             print(f'passes again: issue #{known[marker]} spec={spec}', flush=True)
         except OSError as error:
             errors += 1
             print(f'report FAILED spec={spec}: {type(error).__name__}: {error}', flush=True)
+    if suite_timeout:
+        # One note per timed-out run, on the roll-up (opened here if none is open yet).
+        try:
+            note = timeout_note(suite_timeout, finished, total)
+            rollup = rollup or known.get(hashlib.sha256(ROLLUP.encode()).hexdigest()[:16])
+            if rollup is None:
+                rollup = post(base, f'repos/{repo}/issues', token, rollup_issue([], len(failing) + len(passing), run_name, head, runs_root, note))['number']
+                print(f'opened roll-up issue #{rollup} for the timeout note head={head}', flush=True)
+            elif not timeout_done:
+                note_timeout(base, repo, token, login, rollup, note, run_name)
+        except OSError as error:
+            errors += 1
+            print(f'report FAILED timeout note: {type(error).__name__}: {error}', flush=True)
     print(f'BROWSER_REPORT_DONE failing={len(failing)} passing={len(passing)} request_errors={errors} head={head}', flush=True)
     return errors
 
 
+def staged_info(results):
+    """What the helper wrote beside the staged files: `{"run_name": ..., "suite_timeout": ...}` (read as untrusted data)."""
+    info = json.loads(read_regular(results / 'staged.json', 4096))
+    if not isinstance(info, dict):
+        raise ValueError('staged.json is not an object')
+    return info.get('run_name'), info.get('suite_timeout')
+
+
 def main():
-    """Command line: `run --runs-dir D` or `report --results D --token-file F`."""
+    """Command line: `run --runs-dir D` or `report --results D --token-file F --login NAME [--run-name N]`."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
     runner = sub.add_parser('run', help='build and run the suite (no token needed)')
     runner.add_argument('--runs-dir', type=Path, required=True)
     reporter = sub.add_parser('report', help='file issues from a finished run')
-    reporter.add_argument('--results', type=Path, required=True, help='staging folder with meta.json, results.json and suite.log')
-    reporter.add_argument('--run-name', required=True, help='the validated run folder name, e.g. 20261109T061806Z-c751e99')
+    reporter.add_argument('--results', type=Path, required=True, help='staging folder with meta.json, results.json or results.jsonl, and suite.log')
+    reporter.add_argument('--run-name', default=None, help='the validated run folder name, e.g. 20261109T061806Z-c751e99 (default: from staged.json)')
     reporter.add_argument('--runs-root', default=BROWSER_RUNS, help='where those runs live, for the paths printed in issues')
+    reporter.add_argument('--suite-timeout', default=None, help='the suite was stopped by its budget, e.g. 9h: report what finished')
+    reporter.add_argument('--login', required=True, help='the Forgejo account the token belongs to (configured by the installer)')
     reporter.add_argument('--token-file', type=Path, required=True)
     reporter.add_argument('--api', default='https://git.kayg.org')
     reporter.add_argument('--repo', default='kayg/infraternal')
@@ -450,12 +605,23 @@ def main():
     if args.command == 'run':
         args.runs_dir.mkdir(parents=True, exist_ok=True)
         return run(Path(__file__).resolve().parents[1], args.runs_dir.resolve())
-    token = read_regular(args.token_file, 4096).decode().strip()
-    if not token:
-        print('empty Forgejo token file', file=sys.stderr)
-        return 1
     try:
-        return int(report(args.api, args.repo, token, args.results, args.run_name, args.runs_root) > 0)
+        token = read_regular(args.token_file, 4096).decode().strip()
+        if not token:
+            print('empty Forgejo token file', file=sys.stderr)
+            return 1
+        run_name, suite_timeout = args.run_name, args.suite_timeout
+        if run_name is None:
+            run_name, staged_timeout = staged_info(args.results)
+            suite_timeout = suite_timeout or staged_timeout
+        if not isinstance(run_name, str):
+            raise ValueError('no run name')
+        return int(report(args.api, args.repo, token, args.results, run_name, args.runs_root, suite_timeout, args.login) > 0)
+    except TokenRefused as error:
+        print(f'nightly browser suite: TOKEN LACKS PERMISSION: {error}. Nothing was lost: the staged files stay in {args.results}. '
+              'Once the token is fixed, re-run only the reporter with: sudo /usr/local/libexec/infraternal-browser-suite-service '
+              f'--report-only --run-name {args.run_name or "<run name>"}', file=sys.stderr)
+        return TOKEN_REFUSED_EXIT
     except (ValueError, RuntimeError, OSError) as error:
         print(f'browser suite report refused: {type(error).__name__}: {error}', file=sys.stderr)
         return 1

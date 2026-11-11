@@ -26,7 +26,7 @@ build slot (dev-02 has three).
 Usage, as root (on dev-02 that is `sudo` from the cua account). Run the
 installer from a clone you made in a `mktemp -d` folder, never from a fixed
 path in /tmp that another account could have created first:
-    install-nightly-browser-suite --ref <full 40-character reviewed commit>
+    install-nightly-browser-suite --ref <full 40-character reviewed commit> [--forgejo-login <account>]
 """
 import argparse
 import os
@@ -43,6 +43,10 @@ USER = 'infraternal-browser'
 HOME = Path('/var/lib/infraternal-browser')
 SERVICE_HELPER = Path('/usr/local/libexec/infraternal-browser-suite-service')
 REPORTER = Path('/usr/local/libexec/infraternal-browser-suite-report')
+# The Forgejo account the token belongs to. The token has no `read:user` scope, so the reporter cannot ask Forgejo
+# who it is; it is told here, and checks it against every issue and comment it posts.
+LOGIN_FILE = Path('/etc/infraternal-browser-suite.login')
+LOGIN = re.compile(r'\A[A-Za-z0-9][A-Za-z0-9._-]{0,38}\Z', re.ASCII)
 UNITS = Path('/etc/systemd/system')
 REPOSITORY = 'https://git.kayg.org/kayg/infraternal.git'
 
@@ -66,7 +70,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart={SERVICE_HELPER}
-# Only a backstop: the helper bounds the queue wait (12 h) and the suite itself (6 h, counted
+# Only a backstop: the helper bounds the queue wait (12 h) and the suite itself (9 h, counted
 # from when the slot is granted) on its own, so a long queue is never mistaken for a slow suite.
 TimeoutStartSec=24h
 KillMode=control-group
@@ -206,6 +210,18 @@ def reviewed_tree(ref):
     return tree
 
 
+def write_login(name):
+    """Write the Forgejo account name to the root-owned config file the service helper reads (mode 0644, written by rename)."""
+    if not LOGIN.fullmatch(name):
+        raise SystemExit('--forgejo-login is not a plausible Forgejo account name')
+    temporary = LOGIN_FILE.with_name(LOGIN_FILE.name + '.new')
+    temporary.unlink(missing_ok=True)
+    temporary.write_text(name + '\n')
+    os.chown(temporary, 0, 0)
+    temporary.chmod(0o644)
+    os.replace(temporary, LOGIN_FILE)
+
+
 def install_file(source, destination):
     """Copy a reviewed script to a root-owned, world-executable place.
 
@@ -229,6 +245,7 @@ def main():
     """Create the account, pin the checkout, install both root-owned copies and the timer."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--ref', required=True, help='full 40-character reviewed commit that supplies the helper and the reporter')
+    parser.add_argument('--forgejo-login', help='the Forgejo account the token belongs to (required the first time)')
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit('run as root (dev-02: sudo from the cua account)')
@@ -236,6 +253,10 @@ def main():
         raise SystemExit('install the nightly browser suite on dev-02')
     if not Path('/var/lib/infraternal-fuzz/forgejo-token').is_file():
         raise SystemExit('run install-nightly-fuzz first: the reporter uses its token')
+    if args.forgejo_login:
+        write_login(args.forgejo_login)
+    elif not LOGIN_FILE.is_file():
+        raise SystemExit(f'pass --forgejo-login <account> once: {LOGIN_FILE} does not exist')
     ensure_user()
     # The browser account's checkout is only the suite's working copy (the service moves it to dev nightly).
     checkout(args.ref)

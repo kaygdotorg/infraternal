@@ -7,6 +7,11 @@ const KEY_SET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const MAX_PROBE_KEYS = 5_000;
 /** The shortest time a run waits for its echoes before giving up; longer runs wait 50 ms per key. */
 const ECHO_TIMEOUT_MS = 15_000;
+/**
+ * A deadlock guard, not a latency budget: two minutes is over 70 times the 1700 ms worst-case bound at 300 ms RTT
+ * plus jitter. It also leaves slow successes (including a minute-long reconnect) measured at their full duration.
+ */
+const RESUME_TIMEOUT_MS = 120_000;
 
 /** One measured key (or the resume marker): its trace `id`, when it started, and the time at each stage it passed. */
 interface ProbeSample {
@@ -82,6 +87,18 @@ export class PerformanceProbe {
   private resumeStartedAt: number | undefined;
   /** Whether the resume marker key has been sent for the current drop. */
   private resumeMarkerSent = false;
+  /** The independent deadline covering both resumed attachment and the marker echo. */
+  private resumeTimer = 0;
+  /** A distinct printable marker per drop, so an expired echo cannot complete a later measurement. */
+  private resumeMarker = "";
+  /** How many leading marker bytes have painted; chunk boundaries need no buffering or per-byte allocation. */
+  private resumeMatched = 0;
+  /** The next marker number; it only advances when a new measurement starts. */
+  private resumeNumber = 0;
+  /** Failed samples remain counted across later successful drops and key runs, so they cannot disappear from a report. */
+  private resumeFailures = 0;
+  /** The latest failure's duration and reason, alongside the cumulative failure count. */
+  private resumeFailure: string | undefined;
   /** How long the last resume took, in milliseconds. */
   private resumeDuration: number | undefined;
   /** The text of the last report, which the copy button copies. */
@@ -125,6 +142,7 @@ export class PerformanceProbe {
   dispose(): void {
     window.clearTimeout(this.timeout);
     window.clearTimeout(this.quietTimer);
+    window.clearTimeout(this.resumeTimer);
     window.clearTimeout(this.nextKeyTimer);
     document.removeEventListener("keydown", this.onKeydown, true);
     this.pending.clear();
@@ -157,7 +175,7 @@ export class PerformanceProbe {
       this.message.textContent = `Choose between 1 and ${MAX_PROBE_KEYS} keys.`;
       return;
     }
-    if (this.runActive) return;
+    if (this.runActive || this.resumeStartedAt !== undefined) return;
 
     window.clearTimeout(this.timeout);
     window.clearTimeout(this.nextKeyTimer);
@@ -176,42 +194,77 @@ export class PerformanceProbe {
     this.sendNextKey();
   }
 
-  /** Drops the socket to measure how long the resume takes. */
+  /**
+   * Drops the socket to measure how long the resume takes.
+   *
+   * One sample is one reconnect. The report shows "pending" (not the previous time) until this drop's marker echo is
+   * painted, so a reader polling for `Time to resume: <n> ms` gets this drop's number, not the last one. The button
+   * stays disabled until then (see `syncButtons`). Before both rules, a test that read the stale number clicked the
+   * next drop while the marker was still in flight, and that marker's echo later ended a sample that spanned two
+   * reconnects: 1432–1528 ms at a 300 ms round trip, where one reconnect takes 895–964 ms (#478).
+   */
   private forceDrop(): void {
     if (!this.terminal?.isConnected) {
       this.message.textContent = "Connect the terminal before forcing a socket drop.";
       return;
     }
+    if (this.resumeStartedAt !== undefined) {
+      this.message.textContent = "Wait for the current resume to finish before dropping again.";
+      return;
+    }
     this.resumeStartedAt = performance.now();
     this.resumeDuration = undefined;
     this.resumeMarkerSent = false;
+    this.resumeMarker = `~probe-${++this.resumeNumber}~`;
+    this.resumeMatched = 0;
+    this.resumeTimer = window.setTimeout(() => this.failResume(
+      this.resumeMarkerSent ? "Timed out waiting for the marker echo." : "Timed out waiting for resumed attachment.",
+    ), RESUME_TIMEOUT_MS);
     this.message.textContent = "Dropping the socket and measuring the first resumed echo…";
+    this.renderReport();
+    this.syncButtons();
     this.terminal.forceDrop();
   }
 
-  /** Notes a disconnect; a forced one starts the resume stopwatch. */
+  /** Records an explicit failed sample and releases the measurement lock without losing earlier failures. */
+  private failResume(reason: string): void {
+    if (this.resumeStartedAt === undefined) return;
+    this.resumeFailures += 1;
+    this.resumeFailure = `${format(Math.max(0, performance.now() - this.resumeStartedAt))} ms: ${reason}`;
+    this.clearResume();
+    this.renderReport();
+    this.message.textContent = `Resume failed: ${reason}`;
+    this.syncButtons();
+  }
+
+  /** Cancels the deadline and forgets only the current marker and stopwatch, keeping recorded results intact. */
+  private clearResume(): void {
+    window.clearTimeout(this.resumeTimer);
+    this.resumeTimer = 0;
+    this.resumeStartedAt = undefined;
+    this.resumeMarkerSent = false;
+    this.resumeMarker = "";
+    this.resumeMatched = 0;
+  }
+
+  /** Marks output busy on disconnect; forceDrop alone owns the measurement lifetime. */
   private onDisconnected(forced: boolean): void {
     this.quiet = false;
     window.clearTimeout(this.quietTimer);
-    if (forced) {
-      this.resumeStartedAt ??= performance.now();
-      this.resumeMarkerSent = false;
-      this.syncButtons();
-    }
+    // Only forceDrop starts a sample; later disconnect notifications must not resurrect an expired measurement.
+    if (forced) this.syncButtons();
   }
 
-  /** After a resumed attach, types one marker key whose painted echo ends the resume stopwatch. */
+  /** After a resumed attach, types the unique marker whose complete painted echo ends the resume stopwatch. */
   private onAttached(resumed: boolean, terminal: TerminalClient): void {
     this.terminal = terminal;
     this.waitForOutputQuiet();
     if (resumed && this.resumeStartedAt !== undefined && !this.resumeMarkerSent) {
       this.resumeMarkerSent = true;
-      const sample: ProbeSample = { id: undefined, startedAt: this.resumeStartedAt, kind: "resume", stages: {} };
-      this.enqueue("~", sample);
       try {
-        terminal.injectInput("~");
+        terminal.injectInput(this.resumeMarker);
       } catch {
-        this.message.textContent = "The resumed terminal could not accept the probe marker.";
+        this.failResume("The resumed terminal could not accept the probe marker.");
       }
     }
     this.syncButtons();
@@ -220,6 +273,7 @@ export class PerformanceProbe {
   /** Matches painted bytes to waiting samples, records their latency and sends the next key when the previous ones are done. */
   private onPaintedOutput(bytes: Uint8Array, paintedAt: number): void {
     this.waitForOutputQuiet();
+    this.matchResumeMarker(bytes, paintedAt);
     for (const byte of bytes) {
       const queue = this.pending.get(byte);
       if (!queue) continue;
@@ -232,12 +286,7 @@ export class PerformanceProbe {
       if (queue.next >= queue.samples.length) this.pending.delete(byte);
       sample.stages.paint = paintedAt;
       const duration = Math.max(0, paintedAt - sample.startedAt);
-      if (sample.kind === "resume") {
-        this.resumeDuration = duration;
-        this.resumeStartedAt = undefined;
-        this.renderReport();
-        this.message.textContent = "Resume completed after the first echoed marker painted.";
-      } else if (this.runActive) {
+      if (this.runActive) {
         this.latencies.push(duration);
         this.results.textContent = `Painted ${this.latencies.length} / ${this.runTarget}`;
         if (this.latencies.length >= this.runTarget) this.finishRun(false);
@@ -248,6 +297,25 @@ export class PerformanceProbe {
         this.nextKeyTimer = 0;
         this.sendNextKey();
       }, 0);
+    }
+  }
+
+  /**
+   * Matches this drop's marker across painted chunks without allocating per byte in the timing probe (P11).
+   * Markers contain `~` only at their ends, so after a mismatch only a leading `~` can remain matched.
+   */
+  private matchResumeMarker(bytes: Uint8Array, paintedAt: number): void {
+    if (this.resumeStartedAt === undefined || !this.resumeMarkerSent) return;
+    for (const byte of bytes) {
+      this.resumeMatched = byte === this.resumeMarker.charCodeAt(this.resumeMatched)
+        ? this.resumeMatched + 1
+        : byte === this.resumeMarker.charCodeAt(0) ? 1 : 0;
+      if (this.resumeMatched !== this.resumeMarker.length) continue;
+      this.resumeDuration = Math.max(0, paintedAt - this.resumeStartedAt);
+      this.clearResume();
+      this.renderReport();
+      this.message.textContent = "Resume completed after the first echoed marker painted.";
+      break;
     }
   }
 
@@ -337,13 +405,16 @@ export class PerformanceProbe {
   private renderReport(): void {
     if (this.latencies.length === 0) {
       this.lastReport = this.resumeDuration === undefined
-        ? "No painted key echoes yet."
+        ? (this.resumeStartedAt === undefined && this.resumeFailures > 0 ? "Time to resume: FAIL" : "No painted key echoes yet.")
         : `Time to resume: ${format(this.resumeDuration)} ms`;
+      this.appendResumeFailures();
       this.results.textContent = this.lastReport;
       return;
     }
     const sorted = [...this.latencies].sort((left, right) => left - right);
-    const resume = this.resumeDuration === undefined ? "pending" : `${format(this.resumeDuration)} ms`;
+    const resume = this.resumeDuration === undefined
+      ? (this.resumeStartedAt === undefined && this.resumeFailures > 0 ? "FAIL" : "pending")
+      : `${format(this.resumeDuration)} ms`;
     this.lastReport = [
       `Painted echoes: ${sorted.length} / ${this.runTarget}`,
       `p50: ${format(percentile(sorted, 0.5))} ms`,
@@ -352,7 +423,14 @@ export class PerformanceProbe {
       ...this.renderHopReport(),
       `Time to resume: ${resume}`,
     ].join("\n");
+    this.appendResumeFailures();
     this.results.textContent = this.lastReport;
+  }
+
+  /** Keeps failed samples visible and copyable even after another measurement succeeds. */
+  private appendResumeFailures(): void {
+    if (this.resumeFailures === 0) return;
+    this.lastReport += `\nResume samples: ${this.resumeFailures} FAIL\nLast failed resume: ${this.resumeFailure}`;
   }
 
   /** Copies the report to the clipboard, or tells the user to copy it by hand. */
@@ -366,11 +444,15 @@ export class PerformanceProbe {
     }
   }
 
-  /** Enables the run and drop buttons only when the terminal is connected, quiet and no run is active. */
+  /**
+   * Enables the run and drop buttons only when the terminal is connected, quiet, no run is active and no forced drop
+   * is still waiting for its resumed echo (a key or a second drop then would land inside that resume's sample).
+   */
   private syncButtons(): void {
     const connected = this.terminal?.isConnected === true;
-    this.runButton.disabled = !connected || !this.quiet || this.runActive;
-    this.dropButton.disabled = !connected || !this.quiet || this.runActive;
+    const busy = !connected || !this.quiet || this.runActive || this.resumeStartedAt !== undefined;
+    this.runButton.disabled = busy;
+    this.dropButton.disabled = busy;
   }
 
   /** Marks the terminal busy now and quiet again after 100 ms without output. */

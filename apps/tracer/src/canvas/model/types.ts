@@ -85,10 +85,13 @@ export interface WindowModel {
  */
 export interface ColumnModel { id: string; w: number; half?: string; group?: string; wins: WindowModel[] }
 
+/** A positioned host or tag card, including restore safety when the server proves it. */
 export interface NodeModel {
   id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;
   /** Live state of a host (a tag has none): drives the card's status icon. */
   state?: "online" | "behind" | "offline";
+  /** Whether this host can retire stale peers after a server authority restore. */
+  restoreSafe?: boolean;
   /** A host without an address shows its tags in the detail line, as chips. */
   tagList?: string[];
   /** The person dragged this node, so it stays where it is while the rest are laid out automatically (D180). */

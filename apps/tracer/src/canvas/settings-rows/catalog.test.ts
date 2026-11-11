@@ -110,7 +110,7 @@ test("every \"?\" link opens a page and a heading that exist in docs/user", () =
 });
 
 test("the table holds no invented data: no lists of facts or keys, and every panel it names is one the product renders", () => {
-  const PANELS = ["appearance", "windows", "hosts", "toolbar", "shortcuts", "account", "about", "devices"];
+  const PANELS = ["windows", "hosts", "toolbar", "shortcuts", "account", "about", "devices"];
   for (const { group } of spots(SETTINGS_MAP)) {
     expect(Object.keys(group).filter((k) => ["facts", "keys", "later"].includes(k))).toEqual([]);
     for (const id of typeof group.panel === "string" ? [group.panel] : group.panel ?? []) expect(PANELS).toContain(id);
@@ -119,7 +119,7 @@ test("the table holds no invented data: no lists of facts or keys, and every pan
 
 test("the owner's map: rows, windows and their order", () => {
   expect(SETTINGS_MAP.map((c) => `${c.title}: ${c.groups.map((g) => g.title).join(", ")}`)).toEqual([
-    "Appearance: Theme, Font, Size, Layout",
+    "Appearance: Themes, Layout",
     "Terminal: Typing, Hosts, Scrollback, Multiplexer",
     "You: Profile, Passkeys, Recovery, Apps, Devices",
     "Machines: New Machines, Updates",
@@ -157,4 +157,8 @@ test("the table and the definitions agree: every id in a window is defined, and 
   const placed = spots(SETTINGS_MAP).flatMap((s) => s.group.settings ?? []);
   for (const id of placed) expect(SETTING_DEFS[id], id).toBeDefined();
   expect(Object.keys(SETTING_DEFS).sort()).toEqual([...placed].sort());
+});
+
+test("the Themes window is the one the theme editor fills, and no other window is", () => {
+  expect(spots(SETTINGS_MAP).filter((s) => s.group.themes).map((s) => `${s.comp.id}.${s.group.id}`)).toEqual(["appearance.themes"]);
 });
