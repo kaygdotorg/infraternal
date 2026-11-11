@@ -1,4 +1,8 @@
 //! Single-threaded bounded PTY/socket pump; replay precedes live output at one cursor.
+//!
+//! A fresh input Ack may pass only whole, unstarted raw Output frames so a
+//! credit-starved relay can request its repaint. A partially written frame and
+//! every non-Ack control fence retain their original order.
 #![forbid(unsafe_code)]
 use crate::{
     frame::{
@@ -248,6 +252,35 @@ impl Peer {
         self.written = 0;
         Ok(())
     }
+    /// Queue the current input reply, moving a fresh Ack ahead of only an unstarted raw Output.
+    fn queue_input_reply(&mut self, written: u64, accepted: u64) -> io::Result<bool> {
+        let Some(reply) = self.input_reply else {
+            return Ok(false);
+        };
+        let frame = match reply {
+            InputReply::State => Frame::InputState(written, accepted),
+            InputReply::Ack => Frame::InputAck(written),
+        };
+        let queued = if self.pending.is_empty() {
+            self.queue(&frame)?;
+            true
+        } else if matches!(reply, InputReply::Ack)
+            && crate::frame::insert_input_ack_before_unstarted_output(
+                &mut self.pending,
+                self.written,
+                written,
+            )?
+        {
+            true
+        } else {
+            false
+        };
+        if queued {
+            self.input_reply = None;
+            self.ack_queued = written;
+        }
+        Ok(queued)
+    }
     fn snapshot(&mut self, terminal: &impl SessionTerminal, head: u64) -> io::Result<()> {
         match terminal.snapshot() {
             Ok(bytes) => {
@@ -390,6 +423,69 @@ impl Peer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod input_ack_order_tests {
+    //! Checks that input replies can pass only wholly unstarted raw output.
+    use super::*;
+
+    /// A minimal subscribed peer with a live Unix socket pair.
+    fn peer() -> (Peer, UnixStream) {
+        let (stream, client) = UnixStream::pair().unwrap();
+        let peer = Peer {
+            stream,
+            decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
+            attached: true,
+            caps: SEQUENCED_INPUT,
+            input_reply: Some(InputReply::Ack),
+            writer: Some(0),
+            shared_writer: false,
+            ack_queued: 0,
+            size: (80, 24, 0, 0),
+            cursor: Some(0),
+            pending: Vec::new(),
+            written: 0,
+            exited_sent: false,
+            stopping: false,
+            request: None,
+        };
+        (peer, client)
+    }
+
+    /// Keep a fresh Ack before a wholly unsent flood frame and retain both exact wire frames.
+    #[test]
+    fn ack_passes_an_unstarted_output_frame() {
+        let (mut peer, _client) = peer();
+        let output = Frame::Output(0, b"flood".to_vec());
+        peer.pending = output.encode().unwrap();
+
+        assert!(peer.queue_input_reply(5, 5).unwrap());
+        assert_eq!(
+            Decoder::default().feed(&peer.pending).unwrap(),
+            vec![Frame::InputAck(5), output]
+        );
+        assert_eq!(peer.ack_queued, 5);
+        assert!(peer.input_reply.is_none());
+    }
+
+    /// Keep a partially sent frame ahead of its Ack so the stream remains decodable.
+    #[test]
+    fn ack_waits_for_a_partially_written_output_frame() {
+        let (mut peer, _client) = peer();
+        let output = Frame::Output(0, b"flood".to_vec());
+        peer.pending = output.encode().unwrap();
+        peer.written = 1;
+        let before = peer.pending.clone();
+
+        assert!(!peer.queue_input_reply(5, 5).unwrap());
+        assert_eq!(peer.pending, before);
+        assert!(matches!(peer.input_reply, Some(InputReply::Ack)));
+        assert_eq!(peer.ack_queued, 0);
+    }
+}
+
 fn private_dir(path: &Path) -> io::Result<()> {
     match DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -850,15 +946,9 @@ fn run_configured(
             {
                 p.input_reply = Some(InputReply::Ack);
             }
-            if p.pending.is_empty()
-                && let Some(reply) = p.input_reply.take()
-            {
+            if p.input_reply.is_some() {
                 let state = cursors.get(p.writer)?;
-                p.ack_queued = state.written;
-                p.queue(&match reply {
-                    InputReply::State => Frame::InputState(state.written, state.accepted),
-                    InputReply::Ack => Frame::InputAck(state.written),
-                })?;
+                p.queue_input_reply(state.written, state.accepted)?;
             }
             if p.pending.is_empty()
                 && let Some(request) = p.request.take()
@@ -1200,9 +1290,6 @@ fn run_configured(
         for (index, p) in peers.iter_mut().enumerate() {
             let flags = ready.3[index];
             let mut disconnect = flags.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
-            if flags.contains(PollFlags::POLLOUT) && p.flush().is_err() {
-                disconnect = true;
-            }
             if p.deferred.is_some() && flags.contains(PollFlags::POLLHUP) {
                 disconnect = true;
             }
@@ -1231,6 +1318,15 @@ fn run_configured(
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(_) => disconnect = true,
+                }
+            }
+            if flags.contains(PollFlags::POLLOUT) && !disconnect {
+                if p.input_reply.is_some() {
+                    let state = cursors.get(p.writer)?;
+                    p.queue_input_reply(state.written, state.accepted)?;
+                }
+                if p.flush().is_err() {
+                    disconnect = true;
                 }
             }
             disconnects[index] = disconnect;

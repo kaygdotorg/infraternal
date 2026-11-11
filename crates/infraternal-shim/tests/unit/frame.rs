@@ -99,6 +99,43 @@ mod tests {
             assert!(Decoder::default().feed(bytes).is_err());
         }
     }
+
+    /// Keep a fresh Ack ahead of unstarted raw output without crossing a partial frame or state fence.
+    #[test]
+    fn input_ack_only_passes_unstarted_output() {
+        let output = Frame::Output(17, b"echo".to_vec());
+        let mut wire = output.encode().unwrap();
+        assert!(insert_input_ack_before_unstarted_output(&mut wire, 0, 18).unwrap());
+        assert_eq!(
+            Decoder::default().feed(&wire).unwrap(),
+            vec![Frame::InputAck(18), output.clone()]
+        );
+
+        let mut partial = output.encode().unwrap();
+        let original = partial.clone();
+        assert!(!insert_input_ack_before_unstarted_output(&mut partial, 1, 19).unwrap());
+        assert_eq!(partial, original, "a partially written frame stays byte-for-byte intact");
+
+        let mut state_fence = Frame::InputState(18, 19).encode().unwrap();
+        state_fence.extend(output.encode().unwrap());
+        let original = state_fence.clone();
+        assert!(!insert_input_ack_before_unstarted_output(&mut state_fence, 0, 20).unwrap());
+        assert_eq!(state_fence, original, "Ack insertion cannot cross a state fence");
+    }
+
+    /// Keep input acknowledgments monotonic when a later Ack passes the same unstarted output.
+    #[test]
+    fn input_ack_stays_after_prior_ack_before_output() {
+        let first = Frame::InputAck(18);
+        let second = Frame::InputAck(19);
+        let output = Frame::Output(17, b"echo".to_vec());
+        let mut wire = first.encode().unwrap();
+        wire.extend(output.encode().unwrap());
+
+        assert!(insert_input_ack_before_unstarted_output(&mut wire, 0, 19).unwrap());
+
+        assert_eq!(Decoder::default().feed(&wire).unwrap(), vec![first, second, output]);
+    }
 }
 
 #[cfg(test)]

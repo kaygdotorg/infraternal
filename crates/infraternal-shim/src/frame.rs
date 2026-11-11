@@ -421,6 +421,56 @@ impl Frame {
         Ok(frame)
     }
 }
+
+/// Put a fresh InputAck before wholly unstarted raw Output while keeping existing Acks and complete frame bytes ordered.
+///
+/// A partially written frame cannot be moved without corrupting the wire
+/// stream. Non-Ack control frames are ordering fences, so this only crosses
+/// zero or more complete InputAcks before the first unstarted Output.
+/// # Errors
+/// Returns the encoder error if the small Ack frame cannot be encoded.
+pub(crate) fn insert_input_ack_before_unstarted_output(
+    wire: &mut Vec<u8>,
+    written: usize,
+    sequence: u64,
+) -> io::Result<bool> {
+    if written != 0 {
+        return Ok(false);
+    }
+
+    let mut insertion = 0;
+    loop {
+        if insertion == wire.len() || wire.len() - insertion < 5 {
+            return Ok(false);
+        }
+        let body_len = u32::from_le_bytes(
+            wire[insertion..insertion + 4]
+                .try_into()
+                .map_err(|_| invalid())?,
+        ) as usize;
+        let Some(frame_end) = insertion.checked_add(4).and_then(|n| n.checked_add(body_len))
+        else {
+            return Ok(false);
+        };
+        if body_len == 0 || body_len > MAX_FRAME || frame_end > wire.len() {
+            return Ok(false);
+        }
+        match FrameRef::decode(&wire[insertion + 4..frame_end])? {
+            FrameRef::Owned(Frame::InputAck(_)) => insertion = frame_end,
+            FrameRef::Output(_, _) => break,
+            _ => return Ok(false),
+        }
+    }
+
+    let ack = Frame::InputAck(sequence).encode()?;
+    let old_len = wire.len();
+    wire.reserve(ack.len());
+    wire.resize(old_len + ack.len(), 0);
+    wire.copy_within(insertion..old_len, insertion + ack.len());
+    wire[insertion..insertion + ack.len()].copy_from_slice(&ack);
+    Ok(true)
+}
+
 /// Incremental stream decoder; callers must not feed more than one bounded frame at once.
 #[derive(Default)]
 pub struct Decoder {
