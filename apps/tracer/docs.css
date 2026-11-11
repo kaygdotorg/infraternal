@@ -1,7 +1,11 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
-/* The docs pages (docs-build.ts): ink and paper, following the system like the sign-in pages, with the
-   sign-in card's colours, the app's root size and type roles (D372: sizes in rem, the root 110 % of 16 px on desktop and 16 px on touch) and weights. One small deferred script (doc.js) marks the section being read.
-   Mobile-first: one column, a 44 px target for every link row on touch, and the safe areas respected. */
+/* The standalone pages (docs, landing, install): ink and paper, following the system like the sign-in pages, with the sign-in card's colours,
+   the app's root size and type roles (D372: sizes in rem, the root 110 % of 16 px on desktop and 16 px on touch) and weights. The frame
+   (top bar, footer) is site.css; the structure every docs page shares is doc.css. This file holds the tokens and the reading type.
+   Browser zoom is never blocked (D159): every length is rem, the viewport tag has no scale limit.
+
+   Reading (D388): the text is 1 rem, which is 17.6 px on a desktop and 16 px on a phone, set at a line height of 1.6, in a column of
+   about 68 characters. The longest line of a page is therefore about 720 px on a desktop and the screen's width on a phone. */
 @font-face {
   font-family: "Maple Mono NF";
   src: url("/docs/fonts/roman.latin.woff2") format("woff2");
@@ -9,60 +13,100 @@
   font-weight: 400 700;
   font-display: swap;
 }
+/* The app's other interface face, used here only when the page asks for it (`data-font="sans"`, the mockup's `?font=sans`). */
+@font-face {
+  font-family: "Geist Sans";
+  src: url("/docs/fonts/Geist-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
 :root {
   color-scheme: dark;
   --bg: #101113;
   --fg: #f4f4f5;
   --fg-2: #a1a1aa;
+  --fg-3: #8a8a93;
   --line: rgb(255 255 255 / 0.09);
   --wash: rgb(255 255 255 / 0.05);
   /* The product's tone colours, for callouts (doc.css); in the canvas window the theme supplies them. */
   --accent: #7a9cff; --ok: #4ade80; --warn: #e5a93d; --danger: #f87171;
   --hover: rgb(255 255 255 / 0.06);
-  /* The app's root size and type sizes (packages/ui/styles.css, D372), written again because these pages load no token file:
-     the root is 110 % of 16 px on desktop and 16 px on touch, every size is in rem, and the page reads the body role (the
-     one long-reading size) and the eyebrow role for secondary text. */
+  /* The floating material of the top bar: the app's overlay colours in the default ink and paper. */
+  --overlay: rgb(30 31 35 / 0.72); --overlay-solid: #1b1c20; --overlay-line: rgb(255 255 255 / 0.1); --shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 0.35);
+  --ui-overlay-blur: 1rem; --ui-overlay-saturation: 160%;
+  /* The app's root size and type sizes (packages/ui/styles.css, D372), written again because these pages load no token file. */
   --ui-base: 1.1;
   font-size: calc(16px * var(--ui-base));
   --ui-size-body: 0.875rem; --ui-size-label: 0.8125rem; --ui-size-eyebrow: 0.75rem;
-  --text-body: var(--ui-size-body); --text-secondary: var(--ui-size-eyebrow); --row: 1.75rem;
+  /* The reading size and the secondary size: the long text is read at 1 rem, a caption or a footnote at the eyebrow role. */
+  --read: 1rem;
+  --text-body: var(--read); --text-secondary: var(--ui-size-label); --row: 1.75rem;
+  --r-xs: 0.375rem; --r-sm: 0.5rem; --r-md: 0.75rem; --r-lg: 1.125rem; --r-pill: 999px;
+  --pill-h: 2.375rem; --gutter: 1rem;
   --fw-secondary: 450; --fw-body: 500; --fw-label: 550; --fw-title: 650;
   --ease: cubic-bezier(0.23, 1, 0.32, 1);
   /* The app names this one curve --ease-out (style.css); doc.css is shared with the in-app reader and reads that name, so the standalone pages define it too. */
   --ease-out: var(--ease);
   /* The same three transition durations as the app (packages/ui/styles.css, D372); doc.css reads them. */
   --t-press: 120ms; --t-pop: 180ms; --t-panel: 240ms;
+  --font-read: "Maple Mono NF", ui-monospace, monospace;
+  /* The top bar's height, so a sticky column and a heading reached by a link sit below it. */
+  --bar-h: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 0.75rem);
   background: var(--bg);
   color: var(--fg);
-  font-family: "Maple Mono NF", ui-monospace, monospace;
+  font-family: var(--font-read);
   font-synthesis: none;
   text-size-adjust: 100%;
   -webkit-text-size-adjust: 100%;
+  scroll-padding-top: var(--bar-h);
 }
+:root[data-font="sans"] { --font-read: "Geist Sans", system-ui, sans-serif; }
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
     --bg: #f6f6f4;
     --fg: #18181b;
     --fg-2: #52525b;
+    --fg-3: #71717a;
     --line: rgb(0 0 0 / 0.1);
     --wash: rgb(0 0 0 / 0.05);
     --accent: #3555c9; --ok: #15803d; --warn: #9a5b00; --danger: #b91c1c;
     --hover: rgb(0 0 0 / 0.05);
+    --overlay: rgb(255 255 255 / 0.74); --overlay-solid: #ffffff; --overlay-line: rgb(0 0 0 / 0.1); --shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 0.1);
   }
 }
-@media (pointer: coarse) { :root { --ui-base: 1; --ui-size-body: 0.9375rem; --row: 2.75rem; } }
+@media (pointer: coarse) { :root { --ui-base: 1; --pill-h: 2.75rem; --row: 2.75rem; } }
 
-body { margin: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.7; }
-/* The header and the page share one width and one left edge. It holds the text (70 characters) and the contents beside it. */
-header, main { box-sizing: border-box; max-width: calc(55rem + 40px); margin: 0 auto; padding-inline: 20px; }
-main { container-type: inline-size; }
-header { display: flex; align-items: center; min-height: 56px; border-bottom: 1px solid var(--line); }
-header a { display: inline-flex; min-height: var(--row); align-items: center; color: var(--fg-2); font-weight: var(--fw-label); text-decoration: none; }
-main { padding-top: 24px; padding-bottom: 64px; }
-
-p, ul, ol { margin: 0 0 16px; }
+body { margin: 0; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); font-size: var(--read); font-weight: var(--fw-body); line-height: 1.6; font-synthesis: none; }
+/* Code stays in the app's monospace face whichever face the prose is read in. */
+:root[data-font="sans"] code, :root[data-font="sans"] pre, :root[data-font="sans"] kbd { font-family: "Maple Mono NF", ui-monospace, monospace; }
+p, ul, ol { margin: 0 0 1.1em; }
 ul, ol { padding-left: 1.4em; }
-li { margin: 6px 0; }
+li { margin: 0.4em 0; }
 strong { font-weight: var(--fw-title); }
-a { color: var(--fg); text-decoration-color: var(--fg-2); text-underline-offset: 3px; }
+a { color: var(--fg); text-decoration-color: var(--fg-3); text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-color: currentColor; }
+
+/* ---- The reading type -------------------------------------------------------------------------------------------------------
+   One scale in `em` of the 1 rem text: title 2.05, section 1.5, sub-section 1.2. doc.css sets the structure and a smaller scale for
+   the canvas window; these rules come from the `.docs-col` and outrank it, so the in-app reader is unchanged. */
+.docs-col .doc h1 { margin: 0 0 0.5rem; font-size: 2.05em; font-weight: var(--fw-title); line-height: 1.15; letter-spacing: -0.03em; }
+.docs-col .doc .lede { margin: 0 0 2rem; color: var(--fg-2); font-size: 1.18em; line-height: 1.5; }
+.docs-col .doc h2 { margin: 3rem 0 0.875rem; padding-top: 1.75rem; border-top: 1px solid var(--line); font-size: 1.5em; line-height: 1.25; letter-spacing: -0.02em; }
+.docs-col .doc h3 { margin: 2.25rem 0 0.625rem; font-size: 1.2em; line-height: 1.3; }
+.docs-col .doc h4 { margin: 1.75rem 0 0.5rem; font-size: 1em; font-weight: var(--fw-title); }
+.docs-col .doc .doc-body > h2:first-child { padding-top: 0; border-top: 0; }
+.docs-col .doc :target { scroll-margin-top: calc(var(--bar-h) + 1rem); }
+/* The measure: about 68 characters of the face the page is read in. */
+.docs-col .doc-head, .docs-col .doc-body { max-width: 68ch; }
+:root[data-font="sans"] .docs-col .doc-head, :root[data-font="sans"] .docs-col .doc-body { max-width: 66ch; }
+.docs-col .doc code { font-size: 0.88em; }
+.docs-col .doc pre { padding: 0.875rem 1.125rem; font-size: 0.88em; line-height: 1.6; }
+.docs-col .doc .doc-code > .ui-copied { top: 0.875rem; left: 1.125rem; }
+.docs-col .doc .callout, .docs-col .doc .why, .docs-col .doc .table, .docs-col .doc .doc-code, .docs-col .doc .quote, .docs-col .doc blockquote { margin-bottom: 1.25rem; }
+.docs-col .doc .callout { padding: 0.875rem 1.125rem; }
+.docs-col .doc .notes { font-size: var(--text-secondary); }
+.docs-col .doc .toc { top: calc(var(--bar-h) + 0.5rem); max-height: calc(100dvh - var(--bar-h) - 1.5rem); font-size: var(--text-secondary); }
+.docs-col .doc .toc-fold summary { font-size: 1em; }
+@media (pointer: coarse) { :root { --text-secondary: 0.9375rem; } }
