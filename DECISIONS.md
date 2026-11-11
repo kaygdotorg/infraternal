@@ -4884,8 +4884,8 @@ access (#341 B19).
      - **Pages (amends D220):** "one proper landing page + /docs + /changelog
        + /releases", plus `/install` "for app/server download links".
      - **Pitch:** not a terminal. The owner, verbatim: "we are not a
-       \"self-hosted terminal\" - we are an \"Infrastructure platform you
-       fully own\"". The headline is "Infrastructure you fully own". The
+       'self-hosted terminal' - we are an 'Infrastructure platform you
+       fully own'" (the owner's inner double quotes shown as single quotes). The headline is "Infrastructure you fully own". The
        landing page claims only what is built (D45), and the scope ahead
        (app windows, logs, containers, Proxmox, Kubernetes) waits until it
        works.
