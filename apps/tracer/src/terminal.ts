@@ -2671,6 +2671,7 @@ export class TerminalClient {
     return position !== undefined && position.visible && !position.alternate && position.viewportY === 0;
   }
 
+  /** Fits the screen to the visible area while the keyboard is up, and back to full height when it is not (see keyboard-viewport.ts). */
   private syncVisualViewport(): void {
     const viewport = window.visualViewport;
     if (!viewport) return;

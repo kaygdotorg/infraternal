@@ -17,7 +17,9 @@ import { expect, test, type Page } from "playwright/test";
 const PHONE = { width: 402, height: 740 };
 test.use({ viewport: PHONE, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
 
+/** The add-host card. */
 const wizard = (page: Page) => page.locator(".ah-float");
+/** A button of the add-host card, by its exact name. */
 const inWizard = (page: Page, name: string) => wizard(page).getByRole("button", { name, exact: true });
 
 /** Resets the shared test double and opens the clusters canvas on a phone. */

@@ -102,7 +102,6 @@ export interface WizardDeps {
   onClosed(): void;
 }
 
-/** The add-host wizard: discovery, CA unlock when needed, then enrollment. */
 /**
  * Attributes for a secret that belongs to someone else's machine and is used once: an SSH password or a key passphrase.
  * It is a plain text field that draws dots (`.ah-masked`, `-webkit-text-security`), never `type="password"`: Safari
@@ -112,6 +111,7 @@ export interface WizardDeps {
  */
 const ONE_OFF_SECRET_ATTRS = `type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="go" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"`;
 
+/** The add-host wizard: discovery, CA unlock when needed, then enrollment. */
 export class Wizard {
   private readonly surface: FlowSurface;
   private readonly root: HTMLElement;
@@ -901,6 +901,7 @@ export class Wizard {
   /** The host's name as typed, with its port when one was given (`build-01:2222`), for titles that name the machine being asked about. */
   private nameWithPort(entry: Entry): string { return entry.port ? `${entry.label}:${entry.port}` : entry.label; }
 
+  /** The host-key page: shows the fingerprint to compare, and trusts it only on a click (a changed key is a warning). */
   private renderHostKey(page: HTMLElement): void {
     const job = this.fixing!;
     const print = job.view.failure?.fingerprints?.[0];
@@ -917,6 +918,7 @@ export class Wizard {
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${changed ? "back-progress" : "back"}">${changed ? "Back" : "Cancel"}</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>${changed ? "Replace trusted key" : "Trust and continue"}</span></button>`);
   }
 
+  /** The sign-in choice page: the server's key, a saved key, a key from the computer, or a one-off password. */
   private renderChoose(page: HTMLElement): void {
     const job = this.fixing!;
     const name = escapeHtml(job.entry.label);
