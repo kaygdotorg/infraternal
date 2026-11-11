@@ -148,3 +148,42 @@ fn install_nix_profile_tool(name: &str) -> std::path::PathBuf {
         .expect("make fake resolver tool executable");
     tool
 }
+
+/// A failed resolver removal must invalidate the old success cache before records return to it.
+#[test]
+#[ignore = "Run in the J519 private resolver filesystem namespace."]
+fn review_j529_failed_cleanup_does_not_cache_previous_success() {
+    let nmcli = install_nix_profile_tool("nmcli");
+    let daemon = install_nix_profile_tool("NetworkManager");
+    fs::write(&daemon, "#!/bin/sh\nprintf '[main]\\ndns=dnsmasq\\n'\n")
+        .expect("resolver fixture setup or inspection");
+    let original = records();
+    let changed_config: crate::dataplane::Config = serde_json::from_value(serde_json::json!({
+        "node": 1,
+        "version": 2,
+        "addresses": {"ipv4": "10.254.0.1", "ipv6": "fd01::1"},
+        "default_policy": "Deny",
+        "dns_suffix": "corp.example",
+        "peers": {}
+    }))
+    .expect("resolver fixture setup or inspection");
+    let changed =
+        Records::from_config(&changed_config).expect("resolver fixture setup or inspection");
+    let mut integration = DnsIntegration::default();
+    integration
+        .configure("infraternal0", &original, 0)
+        .expect("resolver fixture setup or inspection");
+    assert!(matches!(
+        integration.linux.as_ref().map(|install| install.mode),
+        Some(LinuxMode::NetworkManager)
+    ));
+    fs::write(&nmcli, "#!/bin/sh\nexit 1\n").expect("resolver fixture setup or inspection");
+    integration
+        .configure("infraternal0", &changed, 0)
+        .expect_err("the changed snapshot's cleanup reload fails");
+    let path = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY).join(NETWORKMANAGER_MESH_DNS_FILE);
+    let contents = fs::read_to_string(&path).expect("resolver fixture setup or inspection");
+    println!("J529_FILE_AFTER_FAILED_CLEANUP={contents:?}");
+    assert_eq!(contents, format!("{NETWORKMANAGER_MESH_DNS_MARKER}\n"));
+    integration.configure("infraternal0", &original, 0).expect_err("returning to the old snapshot must retry the failed cleanup, not return cached success for the now-empty file");
+}

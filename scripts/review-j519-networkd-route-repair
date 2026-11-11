@@ -3,8 +3,15 @@
 # Run through build-slot nice -n10 on a build VM with systemd-networkd and D-Bus installed.
 set -euo pipefail
 if [ "${1:-}" != --inside-namespace ]; then
-    exec unshare -Urnmpf --mount-proc bash "$0" --inside-namespace
+    exec unshare -Urnmpf --mount-proc bash "$0" --inside-namespace "${1:-review_j519_networkd_reload_repairs_peer_routes}"
 fi
+
+# Accept only the original proof or the review's bounded peer-inventory regression.
+test_name="${2:-review_j519_networkd_reload_repairs_peer_routes}"
+case "$test_name" in
+    review_j519_networkd_reload_repairs_peer_routes|review_j529_networkd_reload_recovers_all_peers) ;;
+    *) echo "unknown networkd regression: $test_name" >&2; exit 2 ;;
+esac
 
 # Refuse a real-root invocation before mounting over system paths.
 read -r mapped_uid outside_uid mapped_count < /proc/self/uid_map
@@ -26,4 +33,4 @@ trap 'kill "$(cat /run/dbus.pid)" 2>/dev/null || true; test ! -f /run/networkd.l
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
 cargo test --locked -p infraternal-plugin-mesh --test restart_route_ownership \
     --no-default-features --features agent,server,relay,test-support \
-    review_j519_networkd_reload_repairs_peer_routes -- --ignored --exact --nocapture
+    "$test_name" -- --ignored --exact --nocapture

@@ -272,7 +272,9 @@ fn review_j519_restart_repairs_missing_routes() {
         removed_peer_names: Vec::new(),
     })
     .unwrap();
-    // Model an upgrade after the old resolver reapply removed both peer routes.
+    // Stop the new repair worker before modeling the old resolver's lost routes, so the
+    // subsequent restore must recreate them rather than racing an already-running repair.
+    drop(node);
     for arguments in [
         vec!["route", "del", "10.254.0.2/32", "dev", "infraternal0"],
         vec!["-6", "route", "del", "fd01::2/128", "dev", "infraternal0"],
@@ -285,7 +287,6 @@ fn review_j519_restart_repairs_missing_routes() {
                 .success()
         );
     }
-    drop(node);
     let mut restored = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     for arguments in [
         vec!["-j", "route", "show", "10.254.0.2/32"],
@@ -724,4 +725,272 @@ fn wait_for_networkd_configuration() -> bool {
         // sleep: poll the networkd configuration state until it changes or the fixture times out.
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// A configured link reload must recover every accepted peer through a route-event burst.
+#[test]
+#[ignore = "Run with the J519 private networkd namespace wrapper."]
+fn review_j529_networkd_reload_recovers_all_peers() {
+    let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
+    let directory = target.join(format!("j529-networkd-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
+    node.up().unwrap();
+    seed_udev_link_data("infraternal0");
+    let networkd = NetworkdFixture::start();
+    assert!(
+        wait_for_networkd_configuration(),
+        "networkd must configure the mesh link before its peer routes are installed"
+    );
+    let peer_count = std::env::var("J529_PEERS")
+        .unwrap_or_else(|_| "256".to_owned())
+        .parse::<u32>()
+        .unwrap();
+    let mut peers = BTreeMap::new();
+    for id in 2..peer_count + 2 {
+        let (_, key) = Key::generate().unwrap();
+        let peer = Peer {
+            key,
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
+                ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
+            },
+            endpoint: None,
+        };
+        peers.insert(
+            NodeId(u64::from(id)),
+            infraternal_plugin_mesh::dataplane::PeerPolicy {
+                peer,
+                inbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
+                outbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
+                access_ssh: None,
+            },
+        );
+    }
+    let expected: BTreeSet<IpAddr> = peers
+        .values()
+        .flat_map(|policy| {
+            [
+                IpAddr::V4(policy.peer.addresses.ipv4),
+                IpAddr::V6(policy.peer.addresses.ipv6),
+            ]
+        })
+        .collect();
+    node.chunk(Chunk {
+        access_updates: Vec::new(),
+        local_key: None,
+        authority_epoch: None,
+        server: None,
+        node: NodeId(1),
+        #[cfg(feature = "mesh-dns")]
+        name: None,
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: "internal".to_owned(),
+        from_version: None,
+        version: 1,
+        index: 0,
+        last: true,
+        addresses: Addresses {
+            ipv4: "10.254.0.1".parse().unwrap(),
+            ipv6: "fd01::1".parse().unwrap(),
+        },
+        default_policy: DefaultPolicy::Deny,
+        exposure: None,
+        upserted: peers,
+        merged: BTreeMap::new(),
+        removed: Vec::new(),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: std::collections::BTreeMap::new(),
+        #[cfg(feature = "mesh-dns")]
+        removed_peer_names: Vec::new(),
+    })
+    .unwrap();
+
+    assert_eq!(Device::peer_routes().unwrap(), expected);
+    let events = RouteEventMonitor::start(&expected);
+    println!(
+        "J529_NETLINK_BEFORE\n{}",
+        fs::read_to_string("/proc/net/netlink").unwrap()
+    );
+    let configuration = fs::read_to_string("/etc/systemd/network/10-j519.network").unwrap();
+    for round in 0..3 {
+        let mtu = if round % 2 == 0 { 1400 } else { 1390 };
+        fs::write(
+            "/etc/systemd/network/10-j519.network",
+            format!("{configuration}\n[Link]\nMTUBytes={mtu}\n"),
+        )
+        .unwrap();
+        assert!(
+            Command::new("networkctl")
+                .arg("reload")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut deleted = BTreeSet::new();
+        let mut added = BTreeSet::new();
+        let mut delete_events = 0;
+        let mut add_events = 0;
+        loop {
+            if let Ok(event) = events.next(Duration::from_millis(100)) {
+                if event.deleted {
+                    delete_events += 1;
+                    deleted.insert(event.address);
+                    added.remove(&event.address);
+                } else if deleted.contains(&event.address) {
+                    add_events += 1;
+                    added.insert(event.address);
+                }
+            }
+            if added == expected || Instant::now() >= deadline {
+                let routes = Device::peer_routes().unwrap();
+                let configured = networkd_status("infraternal0").is_some_and(|status| {
+                    status.contains("(configured)") && status.contains(&format!("MTU: {mtu}"))
+                });
+                println!(
+                    "J529_RELOAD_ROUND={round} PEERS={peer_count} EXPECTED={} PRESENT={} DELETED={} ADDED={} DELETE_EVENTS={delete_events} ADD_EVENTS={add_events}",
+                    expected.len(),
+                    routes.len(),
+                    deleted.len(),
+                    added.len()
+                );
+                if routes != expected {
+                    println!(
+                        "J529_NETLINK_AFTER\n{}",
+                        fs::read_to_string("/proc/net/netlink").unwrap()
+                    );
+                }
+                assert_eq!(
+                    routes, expected,
+                    "all peer routes must recover after a networkd reload burst"
+                );
+                assert!(
+                    configured,
+                    "the changed networkd configuration must be applied"
+                );
+                break;
+            }
+        }
+    }
+    drop(events);
+    node.down().unwrap();
+    drop(networkd);
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+/// Route recovery stays bound to the owned link when another link takes its former name.
+#[test]
+#[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
+fn review_j529_repair_does_not_follow_a_reused_interface_name() {
+    let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
+    let directory = target.join(format!("j529-reused-name-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
+    node.up().unwrap();
+    let (_, key) = Key::generate().unwrap();
+    let peer = Peer {
+        key,
+        previous_key: None,
+        previous_active: false,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().unwrap(),
+            ipv6: "fd01::2".parse().unwrap(),
+        },
+        endpoint: None,
+    };
+    node.chunk(Chunk {
+        access_updates: Vec::new(),
+        local_key: None,
+        authority_epoch: None,
+        server: None,
+        node: NodeId(1),
+        #[cfg(feature = "mesh-dns")]
+        name: None,
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: "internal".to_owned(),
+        from_version: None,
+        version: 1,
+        index: 0,
+        last: true,
+        addresses: Addresses {
+            ipv4: "10.254.0.1".parse().unwrap(),
+            ipv6: "fd01::1".parse().unwrap(),
+        },
+        default_policy: DefaultPolicy::Deny,
+        exposure: None,
+        upserted: BTreeMap::from([(
+            NodeId(2),
+            infraternal_plugin_mesh::dataplane::PeerPolicy {
+                peer,
+                inbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
+                outbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
+                access_ssh: None,
+            },
+        )]),
+        merged: BTreeMap::new(),
+        removed: Vec::new(),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: std::collections::BTreeMap::new(),
+        #[cfg(feature = "mesh-dns")]
+        removed_peer_names: Vec::new(),
+    })
+    .unwrap();
+    let ipv4: IpAddr = "10.254.0.2".parse().unwrap();
+    let events = RouteEventMonitor::start(&BTreeSet::from([ipv4]));
+    for arguments in [
+        vec!["link", "set", "infraternal0", "name", "j529-owned"],
+        vec!["link", "add", "infraternal0", "type", "dummy"],
+        vec!["link", "set", "infraternal0", "up"],
+        vec![
+            "route",
+            "del",
+            "10.254.0.2/32",
+            "dev",
+            "j529-owned",
+            "proto",
+            "250",
+        ],
+    ] {
+        assert!(
+            Command::new("ip")
+                .args(arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut deleted = false;
+    while Instant::now() < deadline {
+        if let Ok(event) = events.next(Duration::from_millis(100)) {
+            deleted |= event.deleted;
+            if deleted && !event.deleted {
+                break;
+            }
+        }
+    }
+    assert!(
+        deleted,
+        "the fixture must observe the original interface's route deletion"
+    );
+    let output = Command::new("ip")
+        .args(["-j", "route", "show", "10.254.0.2/32"])
+        .output()
+        .unwrap();
+    println!(
+        "J529_ROUTE_AFTER_INTERFACE_REUSE={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !owned_route_present(ipv4),
+        "route repair must not write to the foreign interface reusing the mesh name"
+    );
+    drop(events);
+    drop(node);
+    fs::remove_dir_all(directory).unwrap();
 }

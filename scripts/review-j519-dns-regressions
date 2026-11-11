@@ -9,7 +9,7 @@ fi
 
 test_name="${2:?name one J519 DNS regression}"
 case "$test_name" in
-    review_j519_restart_cleanup_removes_owned_file|review_j519_missing_tools_are_reported|review_j519_nix_profile_tool_is_discovered) ;;
+    review_j519_restart_cleanup_removes_owned_file|review_j519_missing_tools_are_reported|review_j519_nix_profile_tool_is_discovered|review_j529_failed_cleanup_does_not_cache_previous_success) ;;
     *) echo "unknown J519 DNS regression: $test_name" >&2; exit 2 ;;
 esac
 
