@@ -32,8 +32,8 @@ export interface Metrics {
   /** The narrowest a column is ever drawn (px); 0 where there is no floor. Display only: see `drawnWidth`. */
   minW: number;
   /**
-   * The widest a column is ever drawn (px); 0 where there is no ceiling (a phone strip scrolls sideways by design). On a
-   * desktop it is the widest Window Sizes option, the viewport width times 0.99, which is also the limit of a hand resize.
+   * The widest a column is ever drawn (px). Phones cap individual columns at the viewport width; canvas panning
+   * reaches their neighbours. Desktops use the widest Window Sizes option, also the limit of a hand resize.
    * Display only, like `minW`: see `drawnWidth`.
    */
   maxW: number;
@@ -68,7 +68,7 @@ export const metricsFor = (width: number, height: number, coarse: boolean, sizes
   const peekW = peekWidth(width, narrow, colW, COLUMN_GAP, sizes);
   // The floor is never wider than a column of a default strip (`peekW`): a small phone's screen cannot show 40 cells with
   // a neighbour's slice beside them, and the floor must not change how a default layout looks there.
-  return { colW, peekW, minW: coarse ? Math.min(MIN_TOUCH_COLUMN, peekW) : 0, maxW: narrow ? 0 : maxColumnWidth(width), clh, narrow, nodeW: Math.round((narrow ? 200 : 208) * scale), nodeH: Math.round(104 * scale), scale };
+  return { colW, peekW, minW: coarse ? Math.min(MIN_TOUCH_COLUMN, peekW) : 0, maxW: narrow ? colW : maxColumnWidth(width), clh, narrow, nodeW: Math.round((narrow ? 200 : 208) * scale), nodeH: Math.round(104 * scale), scale };
 };
 
 /**
