@@ -4830,3 +4830,25 @@ access (#341 B19).
      - **On phones, the glass confirmation card is inset** from the screen
        edges like the other floating cards, not edge to edge. The owner chose
        "Inset it".
+
+386. **The app owns every infraternal_* firewall table, and hosts are never changed by hand (owner, 2026-11-11, #483, #489):**
+     - **Context:** prod's host input table `inet infraternal_host` and its
+       loader `infraternal-firewall.service` were written by a job on
+       2026-11-01 (#274). They were never updated for the mesh, so they drop
+       mesh traffic (soak finding F5).
+     - **The owner, verbatim:** "i think better yet the app itself should
+       recognize all infraternal tables/chains as its own and modify them as it
+       sees fit. you doing anything manully over ssh will be cheating."
+     - **Decision:** infraternal treats every nftables table and chain named
+       `infraternal_*` as its own. It creates, updates and removes them, the
+       host input policy included, from its own configuration. Enabling mesh
+       (D384) brings in the input it needs, such as traffic on `infraternal0`
+       and the fixed mesh UDP port 10254, with grants still enforced by the
+       mesh filter.
+     - **Fixes are proven in the product, not by hand:** a fix to a host's
+       network state ships as product behaviour and is proven on a
+       prod-shaped server (mesh-staging). It is never applied by hand over SSH.
+       The manual /usr/sbin/nft link applied to prod on 2026-11-10 (#483) is
+       replaced by the product's own nft discovery (D384) at the next deploy.
+     - **Ownership stays narrow:** tables not named `infraternal_*` are never
+       touched.
