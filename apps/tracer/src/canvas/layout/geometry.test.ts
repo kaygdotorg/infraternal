@@ -25,6 +25,20 @@ test("a dropped view pushes the one it lands on along the axis of least overlap,
   for (const p of at.values()) { expect(Math.abs(p.x % CELL)).toBe(0); expect(Math.abs(p.y % CELL)).toBe(0); }
 });
 
+test("a push chain never lands a view on the one that stays put (the Mesh grown over a stack of views at 600 px)", () => {
+  // A narrow desktop window stacks the views in one column. The Mesh (the fixed view) grows over Settings; Settings is pushed up
+  // onto Containers, which is pushed down onto the Mesh. Containers must go round the Mesh, since a view that stays put is never moved.
+  const boxes: Box[] = [
+    { id: "console", x: 0, y: 0, w: 1800, h: 960 },
+    { id: "containers", x: 0, y: 960, w: 1440, h: 960 },
+    { id: "mesh", x: 0, y: 1920, w: 2760, h: 2520 },
+    { id: "settings", x: 0, y: 2520, w: 3000, h: 960 },
+  ];
+  const at = resolve(boxes, "mesh");
+  expect(at.get("mesh")).toEqual({ x: 0, y: 1920 });
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) expect(overlaps(boxes[i]!, boxes[j]!, at)).toBe(false);
+});
+
 test("a chain of neighbours is pushed in turn", () => {
   const boxes: Box[] = [
     { id: "a", x: 0, y: 0, w: 2 * CELL, h: 2 * CELL },

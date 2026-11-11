@@ -106,8 +106,13 @@ export const snapToGrid = (v: number): number => Math.round(v / CELL) * CELL;
 /** True when the two boxes share any area. Boxes that only touch do not overlap. */
 const overlaps = (a: Box, b: Box): boolean => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
-/** Picks the least-travel separation, avoiding a protected box when display settlement holds one anchor. */
-function separation(pusher: Box, other: Box, protectedBox?: Box): { dx: number; dy: number } {
+/**
+ * Picks the least-travel separation of `other` from `pusher`, avoiding a protected box when display settlement holds one anchor.
+ * With `rest` (every other view) it prefers a move that lands `other` on none of them: the shortest move can land it on a view
+ * that is then pushed back onto the first (a stack that a growing view pushes up and down), and a view that stays put is never moved.
+ * When every move collides it falls back to the least travel.
+ */
+function separation(pusher: Box, other: Box, protectedBox?: Box, rest: readonly Box[] = []): { dx: number; dy: number } {
   const options = [
     { dx: pusher.x + pusher.w - other.x, dy: 0 },
     { dx: -(other.x + other.w - pusher.x), dy: 0 },
@@ -126,7 +131,8 @@ function separation(pusher: Box, other: Box, protectedBox?: Box): { dx: number; 
       return { dx: 0, dy: protectedBox.y - other.h - other.y };
     });
   }
-  return candidates.reduce((a, b) => (Math.abs(b.dx) + Math.abs(b.dy) < Math.abs(a.dx) + Math.abs(a.dy) ? b : a));
+  const clear = candidates.filter((move) => !rest.some((box) => overlaps(box, { ...other, x: other.x + move.dx, y: other.y + move.dy })));
+  return (clear.length ? clear : candidates).reduce((a, b) => (Math.abs(b.dx) + Math.abs(b.dy) < Math.abs(a.dx) + Math.abs(a.dy) ? b : a));
 }
 
 /**
@@ -135,8 +141,20 @@ function separation(pusher: Box, other: Box, protectedBox?: Box): { dx: number; 
  * one). `settleAll` also visits otherwise disconnected groups so one display settlement can
  * clear the whole canvas without choosing another view that could move the camera's anchor.
  * Each push is a whole number of cells because every box edge sits on the grid.
+ *
+ * A chain of pushes can end with two views on top of each other (a view that stays put is never moved, so the last box
+ * of the chain cannot be pushed off it). When that happens the pass is repeated with every push choosing a move that
+ * lands on no other view (see `separation`), which keeps the plain least-travel result for every layout that already settles.
  */
 export function resolve(boxes: Box[], fixedId: string, settleAll = false): Map<string, { x: number; y: number }> {
+  const plain = pushAside(boxes, fixedId, settleAll, false);
+  const list = (at: Map<string, { x: number; y: number }>): Box[] => boxes.map((b) => ({ ...b, ...at.get(b.id)! }));
+  const crowded = (at: Map<string, { x: number; y: number }>): boolean => { const l = list(at); return l.some((a, i) => l.slice(i + 1).some((b) => overlaps(a, b))); };
+  return crowded(plain) ? pushAside(boxes, fixedId, settleAll, true) : plain;
+}
+
+/** One pass of {@link resolve}; `lookAhead` makes every push avoid landing on another view. */
+function pushAside(boxes: Box[], fixedId: string, settleAll: boolean, lookAhead: boolean): Map<string, { x: number; y: number }> {
   const at = new Map(boxes.map((b) => [b.id, { ...b }]));
   const fixed = new Set([fixedId]);
   const queue = settleAll ? boxes.map((b) => b.id) : [fixedId];
@@ -154,7 +172,7 @@ export function resolve(boxes: Box[], fixedId: string, settleAll = false): Map<s
     for (const other of at.values()) {
       if (other.id === pusher.id || fixed.has(other.id) || !overlaps(pusher, other)) continue;
       // Least travel wins; on a tie prefer moving away to the right or down.
-      const best = separation(pusher, other, settleAll ? anchor : undefined);
+      const best = separation(pusher, other, settleAll ? anchor : undefined, lookAhead ? [...at.values()].filter((box) => box.id !== pusher.id && box.id !== other.id) : []);
       other.x += best.dx;
       other.y += best.dy;
       queue.push(other.id);
