@@ -726,3 +726,166 @@ async fn forget_retired_host_without_removal_record_matches_inventory() {
     assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
     assert!(!live(&f, host).await);
 }
+
+/// An expired admin window asks for a tap while the owner's browser session stays signed in (#498).
+#[tokio::test]
+async fn expired_removal_window_requests_passkey_instead_of_sign_in() {
+    use tower::ServiceExt;
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    sqlx::query("UPDATE sessions SET fresh=1")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let response = crate::remote_removal_http::router(f.auth.clone(), removal(&f))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/remote/hosts/remove/start")
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(json!({"host_id":host}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::PRECONDITION_REQUIRED
+    );
+    assert!(
+        f.auth
+            .session(&f.session, crate::runtime::unix_seconds().unwrap())
+            .await
+            .is_ok()
+    );
+    assert!(live(&f, host).await);
+}
+
+/// A real identity-only tap renews this session, resumes removal and cannot revive a per-action grant (#498).
+#[tokio::test]
+async fn removal_passkey_renews_same_session_and_cannot_replay() {
+    let mut f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let now = NOW + 901;
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
+    let before = f
+        .auth
+        .session(&f.session, now)
+        .await
+        .unwrap()
+        .session_incarnation;
+    let start = service.reauth_start(&f.session, host, now).await.unwrap();
+    assert!(
+        start["options"]["publicKey"].get("extensions").is_none(),
+        "renewal needs no PRF secret"
+    );
+    let ceremony = str_field(&start, "ceremony");
+    let proof = f.software.login(&start, ORIGIN, true);
+    assert!(
+        service
+            .reauth_finish(&f.session, Uuid::new_v4(), ceremony, proof.clone(), now)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .reauth_finish("another-session", host, ceremony, proof.clone(), now)
+            .await
+            .is_err()
+    );
+    service
+        .reauth_finish(&f.session, host, ceremony, proof.clone(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.auth
+            .fresh_session(&f.session, now)
+            .await
+            .unwrap()
+            .session_incarnation,
+        before
+    );
+    assert!(
+        f.auth.add_start(&f.session, now).await.is_err(),
+        "renewal must not resurrect the old per-action tap"
+    );
+    assert!(
+        service
+            .reauth_finish(&f.session, host, ceremony, proof, now)
+            .await
+            .is_err()
+    );
+    let review = service.start(&f.session, host, true, now).await.unwrap();
+    assert_eq!(
+        service
+            .finish_host(&f.session, host, str_field(&review, "review"), now)
+            .await
+            .unwrap()["state"],
+        "pending"
+    );
+}
+
+/// Unrelated ceremonies, stale requests and authority revoked during the prompt never renew a session (#498).
+#[tokio::test]
+async fn removal_passkey_rechecks_authority_and_rejects_unrelated_ceremonies() {
+    for rule in [
+        "unrelated",
+        "expired",
+        "owner-revoked",
+        "session-revoked",
+        "host-revoked",
+        "no-uv",
+    ] {
+        let mut f = fixture().await;
+        let host = owned_host(&f).await;
+        let service = removal(&f);
+        let now = NOW + 901;
+        let start = if rule == "unrelated" {
+            f.auth.login_start(&f.user, now).await.unwrap()
+        } else {
+            service.reauth_start(&f.session, host, now).await.unwrap()
+        };
+        let proof = f.software.login(&start, ORIGIN, rule != "no-uv");
+        match rule {
+            "owner-revoked" => {
+                sqlx::query("UPDATE users SET owner=0")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "session-revoked" => {
+                sqlx::query("DELETE FROM sessions")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "host-revoked" => {
+                sqlx::query("UPDATE remote_hosts SET revoked_at=1")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        assert!(
+            service
+                .reauth_finish(
+                    &f.session,
+                    host,
+                    str_field(&start, "ceremony"),
+                    proof,
+                    if rule == "expired" { now + 120 } else { now }
+                )
+                .await
+                .is_err(),
+            "{rule}"
+        );
+        assert!(
+            f.auth.fresh_session(&f.session, now).await.is_err(),
+            "{rule}"
+        );
+    }
+}

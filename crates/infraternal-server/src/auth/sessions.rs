@@ -31,7 +31,7 @@ pub struct RecoveryPending {
 }
 impl Session {
     /// The session is inside the browser's 15-minute admin window that its tap started (D333).
-    pub(super) fn require_admin_window(&self, now: i64) -> Result<()> {
+    pub(crate) fn require_admin_window(&self, now: i64) -> Result<()> {
         if self.fresh > now || now - self.fresh >= infraternal_plugin_api::ADMIN_WINDOW_SECONDS {
             return Err(Error::Denied);
         }

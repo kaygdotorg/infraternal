@@ -5,6 +5,8 @@
  * D369 Forget cancels an unreachable retirement here, in that same window, without touching the machine.
  */
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
+import { mountConfirmTip } from "../../../../packages/ui/src/tooltip";
+import { recoveryAuth as auth, type AuthStart } from "../auth";
 import { confirmHostForget, confirmHostRemoval } from "./host-removal-confirm";
 import type { CoreScreen } from "../core-screen";
 import type { RemovalOutcome } from "./context";
@@ -16,11 +18,58 @@ interface RemovalStart { review: string; action: { host_id: string; host: string
  * could not uninstall itself.
  */
 interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null }
+/** Retain the response status so only an expired admin window triggers a passkey request. */
+class RemovalError extends Error {
+  /** A safe user-facing reason and the protocol status, never the response body. */
+  constructor(message: string, readonly status: number) { super(message); }
+}
 /** Send a bounded host-management step with the browser session and same-origin checks. */
-async function post<T>(path: string, body: unknown, failure = "The host could not be removed. Sign in again, then try again."): Promise<T> {
+async function post<T>(path: string, body: unknown, failure = "The host could not be removed. Try again."): Promise<T> {
   const response = await fetch(`/remote/hosts/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(failure);
+  if (!response.ok) throw new RemovalError(response.status === 401 ? "Your session has ended. Sign in again, then try again."
+    : response.status === 403 ? "This request could not be authorised. Refresh the host list and try again."
+    : response.status === 429 ? "Too many host requests. Try again in a moment."
+    : response.status >= 500 ? "The server could not complete this request. Try again." : failure, response.status);
   return await response.json() as T;
+}
+
+/** Prepare first, then invoke WebAuthn directly from a fresh tap so mobile browsers keep user activation. */
+async function renewWindow(id: string, name: string): Promise<void> {
+  const start = await post<AuthStart>("reauth/start", { host_id: id });
+  const publicKey = auth.requestOptions(start.options.publicKey);
+  await new Promise<void>((resolve, reject) => {
+    mountConfirmTip(null, {
+      label: `Confirm removal of ${name}`, title: `Confirm removal of ${name}`,
+      effect: "Confirm with your passkey to continue. This opens 15 minutes of admin actions.",
+      named: true, confirmLabel: "Confirm with passkey", cancelLabel: "Keep host",
+      onCancel: () => reject(new Error("Passkey confirmation was cancelled. The host was not removed.")),
+      onConfirm: () => {
+        // No await before this call: the click itself starts the platform passkey prompt.
+        void navigator.credentials.get({ publicKey }).then(async assertion => {
+          if (!(assertion instanceof PublicKeyCredential)) throw new Error("Passkey confirmation was cancelled. The host was not removed.");
+          await post("reauth/finish", { host_id: id, ceremony: start.ceremony, proof: auth.credentialProof(assertion) }, "Passkey confirmation could not be verified. Try again.");
+          resolve();
+        }).catch((error: unknown) => reject(error instanceof DOMException
+          ? new Error(error.name === "NotAllowedError" ? "Passkey confirmation was cancelled or timed out. The host was not removed." : "This browser could not confirm your passkey. Try again.") : error));
+      },
+    });
+  });
+}
+
+/** Remove only the reviewed host, renewing authority once if the admin window closes at either step. */
+async function removeReviewed(id: string, name: string): Promise<Result> {
+  /** A new review always binds the selected host to the current session before removal. */
+  const run = async (): Promise<Result> => {
+    const start = await post<RemovalStart>("remove/start", { host_id: id, uninstall: true });
+    if (start.action.host_id !== id || start.action.uninstall !== true || typeof start.review !== "string") throw new Error("Host confirmation changed. Try again.");
+    return post<Result>("remove/finish", { host_id: id, review: start.review });
+  };
+  try { return await run(); }
+  catch (error) {
+    if (!(error instanceof RemovalError) || error.status !== 428) throw error;
+    await renewWindow(id, name);
+    return run();
+  }
 }
 /** Confirm a host removal and keep pending cleanup visible until server delivery. */
 export async function createHostRemoval(core: CoreScreen, removed: (id: string) => void) {
@@ -60,10 +109,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
       const go = async (): Promise<RemovalOutcome> => {
         busy = true;
         try {
-          const start = await post<RemovalStart>("remove/start", { host_id: id, uninstall: true });
-          // The dry run must name the host the person confirmed; its review removes exactly that one.
-          if (start.action.host_id !== id || start.action.uninstall !== true || typeof start.review !== "string") throw new Error("Host confirmation changed. Try again.");
-          const result = await post<Result>("remove/finish", { host_id: id, review: start.review });
+          const result = await removeReviewed(id, name);
           if (!["removed", "pending"].includes(result.state) || result.host_id !== id) throw new Error("Host removal could not be confirmed.");
           if (result.state === "removed") removed(id);
           const manual = result.manual;
