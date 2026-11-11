@@ -260,10 +260,12 @@ fn refresh_peer_routes_from(
     Ok(previous)
 }
 
-/// Remember learned endpoints and refresh direct routes without displacing relay MTU overrides.
+/// Remember learned endpoints and refresh every active direct route without displacing relay
+/// MTU overrides.
 ///
-/// A `None` live endpoint returns to the accepted coordinator endpoint. Endpoints for peers that
-/// are no longer installed are ignored, so a late packet cannot restore a retired host route.
+/// A `None` live endpoint returns to the accepted coordinator endpoint. Stable endpoints still
+/// need a new route budget because the underlay MTU can change independently. Endpoints for peers
+/// that are no longer installed are ignored, so a late packet cannot restore a retired host route.
 /// # Errors
 /// Returns route-netlink errors and restores learned endpoint state if a direct route update fails.
 fn update_live_peer_endpoints(
@@ -275,11 +277,12 @@ fn update_live_peer_endpoints(
 ) -> io::Result<()> {
     let mut state = lock_route_state(state);
     let previous_endpoints = state.live_endpoints.clone();
-    let mut changed = BTreeSet::new();
+    let mut refreshed = BTreeSet::new();
     for (key, endpoint) in endpoints {
         let Some(configured) = state.peers.get(key).map(|peer| peer.endpoint) else {
             continue;
         };
+        refreshed.insert(*key);
         let desired = (*endpoint).filter(|endpoint| Some(*endpoint) != configured);
         if state.live_endpoints.get(key).copied() == desired {
             continue;
@@ -292,12 +295,11 @@ fn update_live_peer_endpoints(
                 state.live_endpoints.remove(key);
             }
         }
-        changed.insert(*key);
     }
-    if changed.is_empty() {
+    if refreshed.is_empty() {
         return Ok(());
     }
-    let route_peers: Vec<_> = changed
+    let route_peers: Vec<_> = refreshed
         .iter()
         .filter(|key| !state.overrides.contains_key(key))
         .filter_map(|key| state.peers.get(key))
