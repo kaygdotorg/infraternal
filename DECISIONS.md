@@ -4876,3 +4876,47 @@ access (#341 B19).
      - **Phone popovers** (gear, window picker): inset from the screen edges
        and open below the pill, never covering it, as D385's confirmation
        card does.
+
+388. **Website and docs (owner, 2026-11-11, #339; amends D44, D220, D317, D325):**
+     - **Context:** J184's grill on #339. infraternal.com served nothing yet;
+       the only public docs were ssh.kayg.org/docs, built by our own renderer
+       (`docs-build.ts`), not the Starlight/SvelteKit pair D44 named.
+     - **Pages (amends D220):** "one proper landing page + /docs + /changelog
+       + /releases", plus `/install` "for app/server download links".
+     - **Pitch:** not a terminal. The owner, verbatim: "we are not a
+       \"self-hosted terminal\" - we are an \"Infrastructure platform you
+       fully own\"". The headline is "Infrastructure you fully own". The
+       landing page claims only what is built (D45), and the scope ahead
+       (app windows, logs, containers, Proxmox, Kubernetes) waits until it
+       works.
+     - **Generator (amends D44):** our own renderer builds the docs and the
+       site. The owner, verbatim: "if we keep our renderer then we need to
+       make it really readable!"
+     - **Look:** the app's tokens, font and capsule top bar, tuned for
+       reading (comfortable line length and size, clear headings, contents
+       on wide screens). Mockup first; screenshots at 1440, 393 and 375,
+       light and dark.
+     - **Audiences (amends D317):** "/docs/user /docs/admin /docs/dev".
+     - **Media (carries out D325):** git holds only a hash lock
+       (`media.lock`). The files live in an R2 bucket named by their SHA-256.
+       Nothing goes on Forgejo. The owner, verbatim: "I don't wanna store
+       images on fj becuase we self-host it and we will likely need a lot of
+       storage for images and videos".
+     - **Freshness:** figures are recaptured at release time only.
+     - **Detached? (closes D317's open item):** no. The docs text ships in
+       the app, and media is fetched on demand.
+     - **Versions:** the public /docs shows the newest; each server shows
+       its own; at the first release add /docs/latest and /docs/v<N>/ for
+       supported versions. "?" help links use the server's own address.
+     - **Search:** "cmd + k should match everything!" The ⌘K index covers
+       page text as well as titles and headings, in the app and on the
+       standalone pages. No third-party service (D46).
+     - **Deploy:** straight to infraternal.com, no preview address. CI runs
+       on github.com and deploys to Cloudflare, "so it doesn't depend on our
+       infra". The Cloudflare token is scoped to the Pages project and the
+       media bucket, and lives only in that CI's secrets.
+     - **GitHub mirror:** `dev` and `main` are pushed to
+       github.com/kaygdotorg/infraternal (public) from 2026-11-11;
+       git.kayg.org stays the home of issues, merges and the gates.
+     - **Licence:** the docs' text and media are AGPL-3.0-only, stated in the
+       footer.
