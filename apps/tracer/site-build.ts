@@ -28,7 +28,7 @@ import { AUDIENCES, escapeHtml, sitePage, type Audience } from "./site-chrome";
 const root = resolve(import.meta.dirname, "../..");
 
 /** What the standalone-site build is told: the folder to write, whether it is a review build, and where the captured figures are. */
-export interface SiteOptions { out: string; mockup?: boolean; figures?: string }
+export interface SiteOptions { out: string; mockup?: boolean | undefined; figures?: string }
 
 /**
  * The existing pages that stand in for the admin and developer audiences: `from` is the file in `docs/`, `name` the page's address under

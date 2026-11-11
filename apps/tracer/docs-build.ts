@@ -325,7 +325,7 @@ export async function figureOptionsFor(source: string = USER_DOCS_DIR): Promise<
  * How `buildDocs` places a tree. `audience` puts it under `/docs/<audience>/` and gives its pages the audience tabs and page list (D388);
  * without it the tree is flat, `/docs/<page>/`, as the instance's own docs are today. `mockup` adds the reading-face switch for review.
  */
-export interface BuildOptions { audience?: Audience; mockup?: boolean }
+export interface BuildOptions { audience?: Audience; mockup?: boolean | undefined }
 
 /**
  * Writes the docs tree into `out` (for the app build, `<dist>/docs`), reading the pages of `source`. `scan` lists the source folders

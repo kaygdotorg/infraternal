@@ -50,7 +50,7 @@ export interface Chrome {
   /** The left column of a docs page (from `sideNav`), written inside the page's grid. */
   side?: string;
   /** Marks the build as a mockup: adds the `?font=` switch the owner uses to compare the reading faces. */
-  mockup?: boolean;
+  mockup?: boolean | undefined;
 }
 
 /** The site's links, in the order of the top bar and the footer. The `href`s are the addresses D388 names. */
