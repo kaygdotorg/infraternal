@@ -400,6 +400,9 @@ fn nested_underlay_case(case: ReviewCase) {
     in_ns(NS_A, || {
         assert!(node_a.chunk(snapshot(a, b, configured_a)).unwrap());
     });
+    // Check the configured high-path budget before B starts on the alternate path: an
+    // authenticated keepalive may roam A before the next route read.
+    assert_eq!(route_mtu(NS_A, "10.254.0.2"), Some(1360));
     in_ns(NS_B, || {
         assert!(node_b.chunk(snapshot(b, a, active_b)).unwrap());
     });
@@ -411,7 +414,6 @@ fn nested_underlay_case(case: ReviewCase) {
     );
     let learned_route = run("ip", &["-n", NS_B, "route", "get", "198.51.100.1"]);
     assert!(learned_route.contains("dev j502lb"), "{learned_route}");
-    assert_eq!(route_mtu(NS_A, "10.254.0.2"), Some(1360));
 
     if matches!(case, ReviewCase::Handshake) {
         let deadline = Instant::now() + IO_TIMEOUT;
