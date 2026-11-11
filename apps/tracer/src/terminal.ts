@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { exitStatusText } from "./canvas/status";
 import { keysIn } from "./input-keys";
 import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
@@ -1989,7 +1990,7 @@ export class TerminalClient {
     if (!exit || exit.retired || this.exitReported || this.lastOutSeq < exit.finalSeq || this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.exitReported = true;
     this.cancelStreamRetry();
-    this.setStatus(exit.status === 0 ? "Shell exited." : `Shell exited with status ${exit.status}. Open a new shell to continue.`);
+    this.setStatus(exitStatusText(exit.status));
     this.config.hooks?.onExited?.(exit.status);
   }
 

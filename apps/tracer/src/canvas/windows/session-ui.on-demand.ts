@@ -10,7 +10,8 @@
  *   a row swipes open 1:1 with the finger to show the same actions.
  * - An exited session shows its final screen read-only, with one floating pill: Run again, Dismiss.
  * - A session the host no longer has (#158) shows the same pill, quieter: "Session ended", New shell (a new shell
- *   on the same host, in this window) and Close window. There is no exit code or final screen to show.
+ *   on the same host, in this window) and Close window. A recorded status names its exit code or signal; a missing
+ *   status says only that the session ended.
  * - A session another device typed in last is shown scaled to fit with a quiet "Sized for <device>" badge; typing
  *   or tapping the badge takes the size over (D183).
  *
@@ -25,6 +26,7 @@
  * The inventory is the source of truth: every change it reports repaints the windows, the tree and an open
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
+import { endedStripText } from "../status";
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
 import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
@@ -106,8 +108,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const dismiss = { label: gone ? "Close window" : "Dismiss", run: () => dismissSession(rec.model.host, s) };
     if (gone) {
       return {
-        signature: `${s.id}:gone:${s.exit?.code ?? ""}`, result: "ended", label: `${s.name} ended`,
-        text: `Session ended${s.exit ? ` · Exit ${s.exit.code}` : ""}`,
+        signature: `${s.id}:gone:${s.exit?.code ?? ""}`, result: "ended", label: `${s.name}: ${endedStripText(s.exit?.code)}`,
+        text: endedStripText(s.exit?.code),
         // The obvious next step: a new shell on the same host, in this same window.
         ...(rec.binding?.openNew ? { action: { label: "New shell", icon: ICON.plus, run: () => newShell(rec) } } : {}), dismiss,
       };

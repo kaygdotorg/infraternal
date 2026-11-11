@@ -14,9 +14,9 @@ export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal
 
 /** True for windows that take the person's keys and pointer: a terminal, and an app window or a screen (D208). The input lock can hold only these. */
 export const isInteractive = (rec: WinRec): boolean => isTerminal(rec) || rec.model.kind === "app" || rec.model.kind === "screen";
-/** Policy for the view's terminal-exit callback, extracted so clean exits can be tested without a browser canvas. */
+/** D357 closes every normal shell exit (0..255); negative statuses name signals and preserve the final screen. Host setup keeps its window until its own result arrives. */
 export function shouldCloseWindowAfterExit(status: number, setupPending: boolean): boolean {
-  return status === 0 && !setupPending;
+  return status >= 0 && !setupPending;
 }
 
 /**
