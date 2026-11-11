@@ -18,7 +18,7 @@ use std::{
 };
 
 /// A packet's position relative to this host and its mesh peers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Direction {
     /// A host packet that is about to enter `GotaTun` and be sent to a peer.
     HostToMesh,
@@ -36,6 +36,12 @@ const OTHER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const FLOWS_PER_PEER: usize = 128;
 /// `FLOWS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
 const FLOWS_PER_PEER_HASH: u64 = 128;
+/// Expire a fragment association before the IP reassembly window can become stale.
+const FRAGMENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound the number of fragmented datagrams each peer can have in flight.
+const FRAGMENTS_PER_PEER: usize = 64;
+/// `FRAGMENTS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
+const FRAGMENTS_PER_PEER_HASH: u64 = 64;
 /// IP protocol number for TCP packets.
 const TCP: u8 = 6;
 /// IP protocol number for UDP packets.
@@ -122,6 +128,7 @@ impl PacketFilter {
                     *slot = FlowSlot::Removed;
                 }
             }
+            flows.remove_orphaned_fragments();
         }
         *current = next;
     }
@@ -153,8 +160,30 @@ impl PacketFilter {
         };
         let peer = &policy.peers[peer_index];
         let peer_id = peer.node;
+        if let Some(fragment) = parsed.fragment.filter(|fragment| !fragment.first) {
+            return Self::allow_fragment(
+                packet,
+                fragment,
+                parsed.packet_end,
+                direction,
+                peer_address,
+                peer_id,
+                &peer.flows,
+                &policy,
+                now,
+            );
+        }
         if let Some(related) = parsed.related {
-            return Self::allow_related(related, peer_address, peer_id, &peer.flows, &policy, now);
+            return Self::allow_related(
+                related,
+                parsed,
+                direction,
+                peer_address,
+                peer_id,
+                &peer.flows,
+                &policy,
+                now,
+            );
         }
 
         let mut lookup_key = parsed.key;
@@ -185,7 +214,7 @@ impl PacketFilter {
                 shard.remove(index);
                 // An expired tuple is treated as new. TCP continuations still cannot initiate it.
                 if expired {
-                    return Self::start_flow(
+                    let admitted = Self::start_flow(
                         packet,
                         parsed,
                         direction,
@@ -196,28 +225,39 @@ impl PacketFilter {
                         &mut shard,
                         now,
                     );
+                    return admitted;
                 }
                 return false;
             }
             if ssh_reply_candidate && entry.ssh_redirect_port != Some(parsed.key.source_port) {
                 return false;
             }
-            let mut refreshed = entry;
-            refreshed.last_seen = now;
-            shard.slots[index] = FlowSlot::Occupied(refreshed);
-            if let Some(port) = entry.ssh_redirect_port {
-                let rewrite = if same_direction { port } else { 22 };
-                let rewrite_offset = if same_direction {
+            let rewrite = entry.ssh_redirect_port.map(|port| {
+                let offset = if same_direction {
                     parsed.transport_offset + 2
                 } else {
                     parsed.transport_offset
                 };
-                if rewrite_offset + 2 > parsed.packet_end {
-                    return false;
-                }
-                write_u16(packet, rewrite_offset, rewrite);
-                recompute_transport_checksum(packet, &parsed);
+                (offset, if same_direction { port } else { 22 })
+            });
+            if rewrite.is_some() && !can_rewrite_ssh_packet(&parsed) {
+                return false;
             }
+            let checksum_adjustment =
+                rewrite.and_then(|(offset, port)| rewrite_ssh_port(packet, &parsed, offset, port));
+            if !Self::remember_first_fragment(
+                &mut shard,
+                parsed,
+                direction,
+                entry.key,
+                checksum_adjustment,
+                now,
+            ) {
+                return false;
+            }
+            let mut refreshed = entry;
+            refreshed.last_seen = now;
+            shard.slots[index] = FlowSlot::Occupied(refreshed);
             return true;
         }
 
@@ -235,6 +275,112 @@ impl PacketFilter {
             &mut shard,
             now,
         )
+    }
+
+    /// Remember a fragmented first packet only after its ordinary grant check passes.
+    fn remember_first_fragment(
+        shard: &mut FlowShard,
+        parsed: ParsedPacket,
+        direction: Direction,
+        flow: FlowKey,
+        checksum_adjustment: Option<FragmentChecksumAdjustment>,
+        now: Instant,
+    ) -> bool {
+        let Some(fragment) = parsed
+            .fragment
+            .filter(|fragment| fragment.first && fragment.more)
+        else {
+            return true;
+        };
+        shard.insert_fragment(
+            FragmentEntry {
+                key: fragment.key,
+                flow,
+                direction,
+                checksum_adjustment,
+                last_seen: now,
+            },
+            fragment_start(fragment.key, direction),
+            now,
+        )
+    }
+
+    /// Admit a later fragment only while its first fragment's authorized flow remains live.
+    fn allow_fragment(
+        packet: &mut [u8],
+        fragment_packet: PacketFragment,
+        packet_end: usize,
+        direction: Direction,
+        peer_address: IpAddr,
+        peer_id: NodeId,
+        flow_table: &Mutex<FlowShard>,
+        policy: &CompiledPolicy,
+        now: Instant,
+    ) -> bool {
+        let mut shard = flow_table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(fragment_index) = shard.find_fragment(
+            fragment_packet.key,
+            direction,
+            fragment_start(fragment_packet.key, direction),
+        ) else {
+            return false;
+        };
+        let FragmentSlot::Occupied(mut fragment) = shard.fragments[fragment_index] else {
+            return false;
+        };
+        if fragment.expired(now) {
+            shard.remove_fragment(fragment_index);
+            return false;
+        }
+        let Some((flow_index, _)) = shard.find(fragment.flow, flow_start(fragment.flow)) else {
+            shard.remove_fragment(fragment_index);
+            return false;
+        };
+        let FlowSlot::Occupied(mut flow) = shard.slots[flow_index] else {
+            shard.remove_fragment(fragment_index);
+            return false;
+        };
+        if flow.peer_address != peer_address
+            || flow.peer_id != peer_id
+            || flow.expired(now)
+            || !policy.allows_flow(flow)
+        {
+            shard.remove(flow_index);
+            shard.remove_fragment(fragment_index);
+            return false;
+        }
+        if let Some(adjustment) = fragment.checksum_adjustment {
+            let payload_len = packet_end - fragment_packet.data_offset;
+            let fragment_end = fragment_packet.offset_bytes + payload_len;
+            let checksum_end = adjustment.offset + 2;
+            if adjustment.offset >= fragment_packet.offset_bytes && checksum_end <= fragment_end {
+                let checksum_offset = fragment_packet.data_offset
+                    + (adjustment.offset - fragment_packet.offset_bytes);
+                let Some(checksum) = read_u16(packet, checksum_offset) else {
+                    shard.remove_fragment(fragment_index);
+                    return false;
+                };
+                write_u16(
+                    packet,
+                    checksum_offset,
+                    adjust_checksum_for_word(
+                        checksum,
+                        adjustment.previous_port,
+                        adjustment.replacement_port,
+                    ),
+                );
+            } else if !fragment_packet.more && fragment_end < checksum_end {
+                shard.remove_fragment(fragment_index);
+                return false;
+            }
+        }
+        flow.last_seen = now;
+        fragment.last_seen = now;
+        shard.slots[flow_index] = FlowSlot::Occupied(flow);
+        shard.fragments[fragment_index] = FragmentSlot::Occupied(fragment);
+        true
     }
 
     /// Admit and record a new tuple after its current grant and TCP initiation flags pass.
@@ -260,6 +406,9 @@ impl PacketFilter {
         let Some(grant) = policy.new_grant(peer, parsed.key, direction) else {
             return false;
         };
+        if grant.ssh_redirect_port.is_some() && !can_rewrite_ssh_packet(&parsed) {
+            return false;
+        }
         let entry = FlowEntry {
             key: parsed.key,
             peer_address,
@@ -276,9 +425,24 @@ impl PacketFilter {
                 return false;
             }
         }
-        if let Some(port) = entry.ssh_redirect_port {
-            write_u16(packet, parsed.transport_offset + 2, port);
-            recompute_transport_checksum(packet, &parsed);
+        let checksum_adjustment = entry
+            .ssh_redirect_port
+            .and_then(|port| rewrite_ssh_port(packet, &parsed, parsed.transport_offset + 2, port));
+        if !Self::remember_first_fragment(
+            shard,
+            parsed,
+            direction,
+            entry.key,
+            checksum_adjustment,
+            now,
+        ) {
+            // A dropped first fragment must not leave a reverse tuple that admits its reply.
+            if let Some((index, _)) = shard.find(entry.key, slot_start)
+                && matches!(shard.slots[index], FlowSlot::Occupied(current) if current.key == entry.key)
+            {
+                shard.remove(index);
+            }
+            return false;
         }
         true
     }
@@ -286,6 +450,8 @@ impl PacketFilter {
     /// Admit only an ICMP error that quotes a still-authorized flow to this exact peer.
     fn allow_related(
         key: FlowKey,
+        parsed: ParsedPacket,
+        direction: Direction,
         peer_address: IpAddr,
         peer_id: NodeId,
         flow_table: &Mutex<FlowShard>,
@@ -308,6 +474,9 @@ impl PacketFilter {
             || !policy.allows_flow(entry)
         {
             shard.remove(index);
+            return false;
+        }
+        if !Self::remember_first_fragment(&mut shard, parsed, direction, entry.key, None, now) {
             return false;
         }
         entry.last_seen = now;
@@ -668,20 +837,75 @@ enum FlowSlot {
     Occupied(FlowEntry),
 }
 
-/// One fixed-size open-addressed conntrack shard protected independently from other flows.
+/// One key that identifies all IP fragments belonging to one datagram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FragmentKey {
+    version: u8,
+    source: IpAddr,
+    destination: IpAddr,
+    protocol: u8,
+    identification: u32,
+}
+
+/// One fragment association that inherits authority from its admitted first packet.
+#[derive(Clone, Copy)]
+struct FragmentEntry {
+    key: FragmentKey,
+    flow: FlowKey,
+    direction: Direction,
+    checksum_adjustment: Option<FragmentChecksumAdjustment>,
+    last_seen: Instant,
+}
+
+/// A deferred checksum adjustment for an SSH port whose checksum bytes are in a later fragment.
+#[derive(Clone, Copy)]
+struct FragmentChecksumAdjustment {
+    /// TCP checksum word offset from the start of the datagram's fragmentable payload.
+    offset: usize,
+    /// TCP port value present in the datagram before the filter rewrites it.
+    previous_port: u16,
+    /// TCP port value that the checksum must cover after the filter's rewrite.
+    replacement_port: u16,
+}
+
+impl FragmentEntry {
+    /// Report whether this datagram association has exceeded its bounded reassembly window.
+    fn expired(self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_seen) > FRAGMENT_IDLE_TIMEOUT
+    }
+}
+
+/// One fragment slot; tombstones preserve open-addressing probe chains after expiry or revocation.
+#[derive(Clone, Copy)]
+enum FragmentSlot {
+    /// No fragment association has occupied this slot in the current probe chain.
+    Empty,
+    /// An association was removed, so later keys in the probe chain must still be checked.
+    Removed,
+    /// A bounded fragment-to-flow association.
+    Occupied(FragmentEntry),
+}
+
+/// One fixed-size conntrack and fragment shard protected independently from other peers.
 struct FlowShard {
     slots: Vec<FlowSlot>,
+    fragments: Vec<FragmentSlot>,
 }
 
 impl FlowShard {
-    /// Allocate this peer's complete slot array before packet workers start.
+    /// Allocate this peer's complete flow and fragment slot arrays before packet workers start.
     fn new() -> io::Result<Self> {
         let mut slots = Vec::new();
         slots
             .try_reserve_exact(FLOWS_PER_PEER)
             .map_err(|_| io::Error::other("mesh conntrack slots could not be allocated"))?;
         slots.resize(FLOWS_PER_PEER, FlowSlot::Empty);
-        Ok(Self { slots })
+        let mut fragments = Vec::new();
+        fragments
+            .try_reserve_exact(FRAGMENTS_PER_PEER)
+            .map_err(|_| io::Error::other("mesh fragment slots could not be allocated"))?;
+        fragments.resize(FRAGMENTS_PER_PEER, FragmentSlot::Empty);
+        Ok(Self { slots, fragments })
     }
 
     /// Find either orientation of one flow and report whether the stored direction matched.
@@ -735,11 +959,87 @@ impl FlowShard {
         self.slots[index] = FlowSlot::Removed;
     }
 
+    /// Find one fragment association by its complete IP identity and packet direction.
+    fn find_fragment(&self, key: FragmentKey, direction: Direction, start: usize) -> Option<usize> {
+        for offset in 0..self.fragments.len() {
+            let index = (start + offset) % self.fragments.len();
+            match self.fragments[index] {
+                FragmentSlot::Empty => return None,
+                FragmentSlot::Occupied(entry)
+                    if entry.key == key && entry.direction == direction =>
+                {
+                    return Some(index);
+                }
+                FragmentSlot::Removed | FragmentSlot::Occupied(_) => {}
+            }
+        }
+        None
+    }
+
+    /// Insert a first-fragment association without growing the table or replacing an active ID.
+    fn insert_fragment(&mut self, entry: FragmentEntry, start: usize, now: Instant) -> bool {
+        let mut removed = None;
+        for offset in 0..self.fragments.len() {
+            let index = (start + offset) % self.fragments.len();
+            match self.fragments[index] {
+                FragmentSlot::Empty => {
+                    self.fragments[removed.unwrap_or(index)] = FragmentSlot::Occupied(entry);
+                    return true;
+                }
+                FragmentSlot::Removed => {
+                    removed.get_or_insert(index);
+                }
+                FragmentSlot::Occupied(existing)
+                    if existing.key == entry.key && existing.direction == entry.direction =>
+                {
+                    if !existing.expired(now) && existing.flow != entry.flow {
+                        return false;
+                    }
+                    self.fragments[index] = FragmentSlot::Occupied(entry);
+                    return true;
+                }
+                FragmentSlot::Occupied(existing) if existing.expired(now) => {
+                    self.fragments[index] = FragmentSlot::Removed;
+                    removed.get_or_insert(index);
+                }
+                FragmentSlot::Occupied(_) => {}
+            }
+        }
+        if let Some(index) = removed {
+            self.fragments[index] = FragmentSlot::Occupied(entry);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove one association without breaking later entries in its probe chain.
+    fn remove_fragment(&mut self, index: usize) {
+        self.fragments[index] = FragmentSlot::Removed;
+    }
+
+    /// Retire associations whose conntrack entry a policy update removed or replaced.
+    fn remove_orphaned_fragments(&mut self) {
+        for index in 0..self.fragments.len() {
+            let FragmentSlot::Occupied(entry) = self.fragments[index] else {
+                continue;
+            };
+            if self.find(entry.flow, flow_start(entry.flow)).is_none() {
+                self.remove_fragment(index);
+            }
+        }
+    }
+
     /// Reclaim idle entries only when a full shard refuses a new flow.
     fn reclaim_expired(&mut self, now: Instant) {
         for slot in &mut self.slots {
             if matches!(*slot, FlowSlot::Occupied(entry) if entry.expired(now)) {
                 *slot = FlowSlot::Removed;
+            }
+        }
+        for slot in &mut self.fragments {
+            if matches!(*slot, FragmentSlot::Occupied(entry) if entry.expired(now)) {
+                *slot = FragmentSlot::Removed;
             }
         }
     }
@@ -753,6 +1053,14 @@ fn flow_start(key: FlowKey) -> usize {
     usize::try_from(tuple_hash % FLOWS_PER_PEER_HASH).unwrap_or_default()
 }
 
+/// Index one fragment identity inside its peer's fixed-size table.
+fn fragment_start(key: FragmentKey, direction: Direction) -> usize {
+    let mut tuple_hasher = DefaultHasher::new();
+    key.hash(&mut tuple_hasher);
+    direction.hash(&mut tuple_hasher);
+    usize::try_from(tuple_hasher.finish() % FRAGMENTS_PER_PEER_HASH).unwrap_or_default()
+}
+
 /// Parsed packet fields used for policy, conntrack and checksum-safe SSH translation.
 #[derive(Clone, Copy)]
 struct ParsedPacket {
@@ -762,35 +1070,80 @@ struct ParsedPacket {
     packet_end: usize,
     related: Option<FlowKey>,
     version: u8,
+    fragment: Option<PacketFragment>,
 }
 
-/// Parse an IPv4 or IPv6 packet without copying its bytes or accepting fragments.
+/// One validated first or later fragment with its address-and-ID association key.
+#[derive(Clone, Copy)]
+struct PacketFragment {
+    key: FragmentKey,
+    first: bool,
+    more: bool,
+    /// Offset of this fragment's payload in the original datagram.
+    offset_bytes: usize,
+    /// Packet index where this fragment's payload starts.
+    data_offset: usize,
+}
+
+/// Parse an IPv4 or IPv6 packet without copying bytes and retain valid fragment identity.
 fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
     let version = packet.first()? >> 4;
-    let (source, destination, protocol, offset, packet_end) = match version {
+    let (source, destination, protocol, offset, packet_end, fragment) = match version {
         4 => {
             if packet.len() < 20 {
                 return None;
             }
             let header_len = usize::from(packet[0] & 0x0f) * 4;
             let total_len = usize::from(read_u16(packet, 2)?);
-            let fragment = read_u16(packet, 6)?;
+            let fragment_field = read_u16(packet, 6)?;
+            let fragment_offset = fragment_field & 0x1fff;
+            let more_fragments = fragment_field & 0x2000 != 0;
+            let fragmented = fragment_offset != 0 || more_fragments;
             if header_len < 20
                 || header_len > packet.len()
                 || total_len < header_len
                 || total_len > packet.len()
-                || fragment & 0x3fff != 0
+                || fragment_field & 0x8000 != 0
+                || (fragment_field & 0x4000 != 0 && fragmented)
             {
                 return None;
             }
             let source = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
             let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            let source = IpAddr::V4(source);
+            let destination = IpAddr::V4(destination);
+            let payload_len = total_len - header_len;
+            let fragment = if fragmented {
+                let offset_bytes = usize::from(fragment_offset) * 8;
+                if payload_len == 0
+                    || (more_fragments && payload_len % 8 != 0)
+                    || offset_bytes + payload_len > usize::from(u16::MAX)
+                {
+                    return None;
+                }
+                Some(PacketFragment {
+                    key: FragmentKey {
+                        version: 4,
+                        source,
+                        destination,
+                        protocol: packet[9],
+                        identification: u32::from(read_u16(packet, 4)?),
+                    },
+                    first: fragment_offset == 0,
+                    more: more_fragments,
+                    offset_bytes,
+                    data_offset: header_len,
+                })
+            } else {
+                None
+            };
             (
-                IpAddr::V4(source),
-                IpAddr::V4(destination),
+                source,
+                destination,
                 packet[9],
                 header_len,
                 total_len,
+                fragment,
             )
         }
         6 => {
@@ -804,17 +1157,60 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
             }
             let source = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?);
             let destination = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[24..40]).ok()?);
+            let source = IpAddr::V6(source);
+            let destination = IpAddr::V6(destination);
             let mut protocol = packet[6];
             let mut offset = 40;
             let mut headers = 0;
+            let mut fragment = None;
             while matches!(protocol, 0 | 43 | 44 | 51 | 60 | 135 | 139 | 140) {
+                if protocol == 44 {
+                    headers += 1;
+                    if headers > 8 || fragment.is_some() || offset + 8 > end {
+                        return None;
+                    }
+                    let next = packet[offset];
+                    let offset_and_flags = read_u16(packet, offset + 2)?;
+                    let fragment_offset = offset_and_flags >> 3;
+                    let more_fragments = offset_and_flags & 1 != 0;
+                    let payload_len = end - (offset + 8);
+                    let offset_bytes = usize::from(fragment_offset) * 8;
+                    if packet[offset + 1] != 0
+                        || offset_and_flags & 0x0006 != 0
+                        || payload_len == 0
+                        || (more_fragments && payload_len % 8 != 0)
+                        || offset_bytes + payload_len > usize::from(u16::MAX)
+                    {
+                        return None;
+                    }
+                    fragment = Some(PacketFragment {
+                        key: FragmentKey {
+                            version: 6,
+                            source,
+                            destination,
+                            protocol: next,
+                            identification: u32::from_be_bytes(
+                                packet[offset + 4..offset + 8].try_into().ok()?,
+                            ),
+                        },
+                        first: fragment_offset == 0,
+                        more: more_fragments,
+                        offset_bytes,
+                        data_offset: offset + 8,
+                    });
+                    protocol = next;
+                    offset += 8;
+                    if fragment_offset != 0 {
+                        break;
+                    }
+                    continue;
+                }
                 headers += 1;
                 if headers > 8 || offset + 2 > end {
                     return None;
                 }
                 let next = packet[offset];
                 let ext_len = match protocol {
-                    44 => return None,
                     51 => (usize::from(packet[offset + 1]) + 2).checked_mul(4)?,
                     _ => (usize::from(packet[offset + 1]) + 1).checked_mul(8)?,
                 };
@@ -824,30 +1220,50 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                 protocol = next;
                 offset += ext_len;
             }
-            (
-                IpAddr::V6(source),
-                IpAddr::V6(destination),
-                protocol,
-                offset,
-                end,
-            )
+            (source, destination, protocol, offset, end, fragment)
         }
         _ => return None,
     };
 
+    if let Some(fragment) = fragment.filter(|fragment| !fragment.first) {
+        return Some(ParsedPacket {
+            key: FlowKey {
+                source,
+                destination,
+                source_port: 0,
+                destination_port: 0,
+                protocol,
+            },
+            tcp_flags: None,
+            transport_offset: offset,
+            packet_end,
+            related: None,
+            version,
+            fragment: Some(fragment),
+        });
+    }
+
     let (source_port, destination_port, tcp_flags, related) = match protocol {
         TCP => {
-            if offset + 20 > packet_end {
+            let first_fragment = fragment.is_some_and(|fragment| fragment.first && fragment.more);
+            if offset + 4 > packet_end || (!first_fragment && offset + 20 > packet_end) {
                 return None;
             }
-            let header_len = usize::from(packet[offset + 12] >> 4) * 4;
-            if header_len < 20 || offset + header_len > packet_end {
+            let tcp_flags = if offset + 14 <= packet_end {
+                let header_len = usize::from(packet[offset + 12] >> 4) * 4;
+                if header_len < 20 || (!first_fragment && offset + header_len > packet_end) {
+                    return None;
+                }
+                Some(packet[offset + 13])
+            } else if first_fragment {
+                None
+            } else {
                 return None;
-            }
+            };
             (
                 read_u16(packet, offset)?,
                 read_u16(packet, offset + 2)?,
-                Some(packet[offset + 13]),
+                tcp_flags,
                 None,
             )
         }
@@ -856,7 +1272,8 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                 return None;
             }
             let udp_len = usize::from(read_u16(packet, offset + 4)?);
-            if udp_len < 8 || offset + udp_len > packet_end {
+            let first_fragment = fragment.is_some_and(|fragment| fragment.first && fragment.more);
+            if udp_len < 8 || (!first_fragment && offset + udp_len > packet_end) {
                 return None;
             }
             (
@@ -911,6 +1328,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
         packet_end,
         related,
         version,
+        fragment,
     })
 }
 
@@ -1018,6 +1436,65 @@ fn write_u16(packet: &mut [u8], offset: usize, value: u16) {
     packet[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
 }
 
+/// Check that a mesh SSH rewrite can update the TCP checksum in this packet.
+fn can_rewrite_ssh_packet(parsed: &ParsedPacket) -> bool {
+    parsed.key.protocol == TCP
+        && parsed
+            .transport_offset
+            .checked_add(4)
+            .is_some_and(|end| end <= parsed.packet_end)
+}
+
+/// Rewrite one mesh SSH port and preserve the checksum of a fragmented TCP datagram.
+///
+/// Callers first check [`can_rewrite_ssh_packet`]. For a first fragment, adjust the checksum
+/// immediately when its field is present. Otherwise return the word delta for the later fragment
+/// that carries the checksum; summing only the first fragment would invalidate the reassembled
+/// TCP segment.
+fn rewrite_ssh_port(
+    packet: &mut [u8],
+    parsed: &ParsedPacket,
+    offset: usize,
+    port: u16,
+) -> Option<FragmentChecksumAdjustment> {
+    let previous = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+    write_u16(packet, offset, port);
+    if let Some(fragment) = parsed
+        .fragment
+        .filter(|fragment| fragment.first && fragment.more)
+    {
+        let checksum_offset = parsed.transport_offset + 16;
+        if checksum_offset + 2 <= parsed.packet_end {
+            let checksum =
+                u16::from_be_bytes([packet[checksum_offset], packet[checksum_offset + 1]]);
+            write_u16(
+                packet,
+                checksum_offset,
+                adjust_checksum_for_word(checksum, previous, port),
+            );
+            None
+        } else {
+            Some(FragmentChecksumAdjustment {
+                offset: checksum_offset - fragment.data_offset,
+                previous_port: previous,
+                replacement_port: port,
+            })
+        }
+    } else {
+        recompute_transport_checksum(packet, parsed);
+        None
+    }
+}
+
+/// Adjust a checksum after replacing one 16-bit network-order word.
+fn adjust_checksum_for_word(checksum: u16, previous: u16, replacement: u16) -> u16 {
+    let mut sum = u32::from(!checksum) + u32::from(!previous) + u32::from(replacement);
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !u16::try_from(sum).unwrap_or_default()
+}
+
 /// Recompute TCP's pseudo-header checksum after rewriting a mesh SSH port.
 fn recompute_transport_checksum(packet: &mut [u8], parsed: &ParsedPacket) {
     if parsed.key.protocol != TCP || parsed.transport_offset + 18 > parsed.packet_end {
@@ -1067,7 +1544,9 @@ fn add_checksum_bytes(sum: &mut u32, bytes: &[u8]) {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{Direction, PacketFilter};
+    use super::{
+        Direction, FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, PacketFilter, UDP, UDP_IDLE_TIMEOUT,
+    };
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
         policy::{
@@ -1226,13 +1705,97 @@ mod tests {
         packet
     }
 
+    /// Build an IPv4 UDP datagram long enough to split into two valid IP fragments.
+    fn udp4_payload(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        source_port: u16,
+        destination_port: u16,
+    ) -> Vec<u8> {
+        let mut packet = udp4(source, destination, source_port, destination_port);
+        packet.extend_from_slice(&[0xa5; 16]);
+        let total_len = u16::try_from(packet.len()).expect("test packet fits IPv4 length");
+        packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+        packet[24..26].copy_from_slice(&24_u16.to_be_bytes());
+        packet
+    }
+
+    /// Copy one portion of an IPv4 datagram into a valid fragment for filter tests.
+    fn ipv4_fragment(
+        packet: &[u8],
+        identification: u16,
+        offset_bytes: usize,
+        payload_bytes: usize,
+        more_fragments: bool,
+    ) -> Vec<u8> {
+        let header_len = usize::from(packet[0] & 0x0f) * 4;
+        let payload_start = header_len + offset_bytes;
+        let payload_end = payload_start + payload_bytes;
+        let mut fragment = Vec::with_capacity(header_len + payload_bytes);
+        fragment.extend_from_slice(&packet[..header_len]);
+        fragment.extend_from_slice(&packet[payload_start..payload_end]);
+        let total_len = u16::try_from(fragment.len()).expect("test fragment fits IPv4 length");
+        fragment[2..4].copy_from_slice(&total_len.to_be_bytes());
+        fragment[4..6].copy_from_slice(&identification.to_be_bytes());
+        let offset = u16::try_from(offset_bytes / 8).expect("test offset fits IPv4 field");
+        let flags = offset | if more_fragments { 0x2000 } else { 0 };
+        fragment[6..8].copy_from_slice(&flags.to_be_bytes());
+        fragment
+    }
+
+    /// Build an IPv6 UDP datagram long enough to split into two valid fragments.
+    fn udp6_payload(
+        source: Ipv6Addr,
+        destination: Ipv6Addr,
+        source_port: u16,
+        destination_port: u16,
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 64];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&24_u16.to_be_bytes());
+        packet[6] = UDP;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..42].copy_from_slice(&source_port.to_be_bytes());
+        packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
+        packet[44..46].copy_from_slice(&24_u16.to_be_bytes());
+        packet
+    }
+
+    /// Copy one portion of an IPv6 datagram into a valid Fragment-header packet.
+    fn ipv6_fragment(
+        packet: &[u8],
+        identification: u32,
+        offset_bytes: usize,
+        payload_bytes: usize,
+        more_fragments: bool,
+    ) -> Vec<u8> {
+        let payload_len = u16::try_from(8 + payload_bytes).expect("test fragment payload fits");
+        let mut fragment = vec![0; 48 + payload_bytes];
+        fragment[..40].copy_from_slice(&packet[..40]);
+        fragment[4..6].copy_from_slice(&payload_len.to_be_bytes());
+        fragment[6] = 44;
+        fragment[40] = packet[6];
+        let offset = u16::try_from(offset_bytes / 8).expect("test offset fits IPv6 field");
+        let more = u16::from(more_fragments);
+        let offset_and_flags = (offset << 3) | more;
+        fragment[42..44].copy_from_slice(&offset_and_flags.to_be_bytes());
+        fragment[44..48].copy_from_slice(&identification.to_be_bytes());
+        let payload_start = 40 + offset_bytes;
+        let payload_end = payload_start + payload_bytes;
+        fragment[48..].copy_from_slice(&packet[payload_start..payload_end]);
+        fragment
+    }
+
     /// Calculate the checksum of an IPv4 TCP packet, including its pseudo-header.
     fn tcp_checksum4(packet: &[u8]) -> u16 {
         let mut pseudo = [0_u8; 12];
         pseudo[..4].copy_from_slice(&packet[12..16]);
         pseudo[4..8].copy_from_slice(&packet[16..20]);
         pseudo[9] = 6;
-        pseudo[10..12].copy_from_slice(&20_u16.to_be_bytes());
+        let transport_len = u16::try_from(packet.len() - 20).expect("test TCP segment fits");
+        pseudo[10..12].copy_from_slice(&transport_len.to_be_bytes());
         checksum(&[&pseudo, &packet[20..]])
     }
 
@@ -1667,6 +2230,102 @@ mod tests {
         mesh_ssh::clear_listener(IpAddr::V4(LOCAL4), 1001);
     }
 
+    /// A fragmented mesh SSH redirect adjusts the TCP checksum for the reassembled segment.
+    #[test]
+    fn ssh_redirect_translates_fragmented_tcp_with_a_valid_checksum() {
+        let local = Ipv4Addr::new(10, 254, 99, 20);
+        let peer = Ipv4Addr::new(10, 254, 99, 21);
+        let address = IpAddr::V4(local);
+        mesh_ssh::clear_listener(address, 1007);
+        mesh_ssh::publish_listener(address, 1007).expect("publish private listener");
+        let mut policy = config(TrafficPolicy::All, TrafficPolicy::None);
+        policy.server = Some(NodeId(3));
+        policy.addresses.ipv4 = local;
+        policy
+            .peers
+            .get_mut(&NodeId(2))
+            .expect("fixture peer")
+            .peer
+            .addresses
+            .ipv4 = peer;
+        let filter =
+            PacketFilter::new(&policy, MeshProxyIngress::default()).expect("compile policy");
+        let mut datagram = tcp4(peer, local, 40_000, 22, SYN);
+        datagram.extend_from_slice(&[0xa5; 16]);
+        let total_len = u16::try_from(datagram.len()).expect("test TCP packet fits IPv4 length");
+        datagram[2..4].copy_from_slice(&total_len.to_be_bytes());
+        datagram[36..38].fill(0);
+        let checksum = tcp_checksum4(&datagram);
+        datagram[36..38].copy_from_slice(&checksum.to_be_bytes());
+        let mut first = ipv4_fragment(&datagram, 0x123b, 0, 24, true);
+        let mut later = ipv4_fragment(&datagram, 0x123b, 24, 12, false);
+
+        assert!(filter.check_at(&mut first, Direction::MeshToHost, Instant::now()));
+        assert_eq!(u16::from_be_bytes([first[22], first[23]]), 1007);
+        assert!(filter.check_at(
+            &mut later,
+            Direction::MeshToHost,
+            Instant::now() + Duration::from_secs(1)
+        ));
+
+        let mut reassembled = vec![0; datagram.len()];
+        reassembled[..20].copy_from_slice(&first[..20]);
+        reassembled[2..4].copy_from_slice(&total_len.to_be_bytes());
+        reassembled[6..8].fill(0);
+        reassembled[20..44].copy_from_slice(&first[20..44]);
+        reassembled[44..].copy_from_slice(&later[20..]);
+        assert_eq!(tcp_checksum4(&reassembled), 0);
+        mesh_ssh::clear_listener(address, 1007);
+    }
+
+    /// A split TCP checksum is adjusted in the later fragment after the SSH port is rewritten.
+    #[test]
+    fn ssh_redirect_adjusts_a_checksum_carried_by_a_later_fragment() {
+        let local = Ipv4Addr::new(10, 254, 99, 22);
+        let peer = Ipv4Addr::new(10, 254, 99, 23);
+        let address = IpAddr::V4(local);
+        mesh_ssh::clear_listener(address, 1008);
+        mesh_ssh::publish_listener(address, 1008).expect("publish private listener");
+        let mut policy = config(TrafficPolicy::All, TrafficPolicy::None);
+        policy.server = Some(NodeId(3));
+        policy.addresses.ipv4 = local;
+        policy
+            .peers
+            .get_mut(&NodeId(2))
+            .expect("fixture peer")
+            .peer
+            .addresses
+            .ipv4 = peer;
+        let filter =
+            PacketFilter::new(&policy, MeshProxyIngress::default()).expect("compile policy");
+        let mut datagram = tcp4(peer, local, 40_000, 22, SYN);
+        datagram.extend_from_slice(&[0xa5; 16]);
+        let total_len = u16::try_from(datagram.len()).expect("test TCP packet fits IPv4 length");
+        datagram[2..4].copy_from_slice(&total_len.to_be_bytes());
+        datagram[36..38].fill(0);
+        let checksum = tcp_checksum4(&datagram);
+        datagram[36..38].copy_from_slice(&checksum.to_be_bytes());
+        let mut first = ipv4_fragment(&datagram, 0x123c, 0, 16, true);
+        let mut later = ipv4_fragment(&datagram, 0x123c, 16, 20, false);
+
+        assert!(filter.check_at(&mut first, Direction::MeshToHost, Instant::now()));
+        assert_eq!(u16::from_be_bytes([first[22], first[23]]), 1008);
+        assert!(filter.check_at(
+            &mut later,
+            Direction::MeshToHost,
+            Instant::now() + Duration::from_secs(1)
+        ));
+
+        let mut reassembled = vec![0; datagram.len()];
+        reassembled[..20].copy_from_slice(&first[..20]);
+        reassembled[2..4].copy_from_slice(&total_len.to_be_bytes());
+        reassembled[6..8].fill(0);
+        reassembled[20..36].copy_from_slice(&first[20..36]);
+        reassembled[36..].copy_from_slice(&later[20..]);
+        assert_eq!(tcp_checksum4(&reassembled), 0);
+        mesh_ssh::clear_listener(address, 1008);
+    }
+
     /// A grant for all ports cannot reach the SSH listener's private redirect port directly.
     #[test]
     fn ssh_private_redirect_port_is_not_a_grantable_mesh_port() {
@@ -1797,7 +2456,205 @@ mod tests {
         assert!(!filter.check_at(&mut unselected, Direction::MeshToHost, now));
     }
 
-    /// Malformed and fragmented headers fail closed because their initiating tuple is ambiguous.
+    /// A narrow UDP grant admits later IPv4 fragments only after its first fragment passes.
+    #[test]
+    fn ipv4_fragments_follow_only_an_admitted_first_fragment() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Udp, 53)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let datagram = udp4_payload(LOCAL4, PEER4, 40_000, 53);
+        let mut later = ipv4_fragment(&datagram, 0x1234, 16, 8, false);
+        let mut first = ipv4_fragment(&datagram, 0x1234, 0, 16, true);
+
+        assert!(!filter.check_at(&mut later, Direction::HostToMesh, now));
+        assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+        assert!(filter.check_at(
+            &mut later,
+            Direction::HostToMesh,
+            now + Duration::from_secs(1)
+        ));
+
+        let denied = udp4_payload(LOCAL4, PEER4, 40_001, 5353);
+        let mut denied_first = ipv4_fragment(&denied, 0x1235, 0, 16, true);
+        let mut denied_later = ipv4_fragment(&denied, 0x1235, 16, 8, false);
+        assert!(!filter.check_at(&mut denied_first, Direction::HostToMesh, now));
+        assert!(!filter.check_at(&mut denied_later, Direction::HostToMesh, now));
+    }
+
+    /// A TCP first fragment needs only enough bytes to identify its grant and SYN initiation.
+    #[test]
+    fn tcp_first_fragment_can_split_after_its_syn_flags() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let datagram = tcp4(LOCAL4, PEER4, 40_000, 443, SYN);
+        let mut first = ipv4_fragment(&datagram, 0x1239, 0, 16, true);
+        let mut later = ipv4_fragment(&datagram, 0x1239, 16, 4, false);
+
+        assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+        assert!(filter.check_at(
+            &mut later,
+            Direction::HostToMesh,
+            now + Duration::from_secs(1)
+        ));
+    }
+
+    /// A full fragment table refuses a new datagram without leaving a conntrack flow behind.
+    #[test]
+    fn fragment_capacity_refusal_does_not_open_a_flow() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Udp, 53)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        for index in 0..FRAGMENTS_PER_PEER {
+            let source_port = 40_000 + u16::try_from(index).expect("port index fits");
+            let datagram = udp4_payload(LOCAL4, PEER4, source_port, 53);
+            let mut first = ipv4_fragment(
+                &datagram,
+                0x2000 + u16::try_from(index).expect("fragment id fits"),
+                0,
+                16,
+                true,
+            );
+            assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+        }
+
+        let refused_port = 40_000 + u16::try_from(FRAGMENTS_PER_PEER).expect("port index fits");
+        let refused = udp4_payload(LOCAL4, PEER4, refused_port, 53);
+        let mut refused_first = ipv4_fragment(&refused, 0x3000, 0, 16, true);
+        assert!(!filter.check_at(&mut refused_first, Direction::HostToMesh, now));
+
+        let mut unsolicited_reply = udp4(PEER4, LOCAL4, 53, refused_port);
+        assert!(!filter.check_at(
+            &mut unsolicited_reply,
+            Direction::MeshToHost,
+            now + Duration::from_secs(1)
+        ));
+    }
+
+    /// A narrow UDP grant admits later IPv6 fragments only after its first fragment passes.
+    #[test]
+    fn ipv6_fragments_follow_only_an_admitted_first_fragment() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Udp, 53)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let datagram = udp6_payload(LOCAL6, PEER6, 40_000, 53);
+        let mut later = ipv6_fragment(&datagram, 0x1234_5678, 16, 8, false);
+        let mut first = ipv6_fragment(&datagram, 0x1234_5678, 0, 16, true);
+
+        assert!(!filter.check_at(&mut later, Direction::HostToMesh, now));
+        assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+        assert!(filter.check_at(
+            &mut later,
+            Direction::HostToMesh,
+            now + Duration::from_secs(1)
+        ));
+    }
+
+    /// Fragment state expires with the flow and cannot survive a policy that revokes its grant.
+    #[test]
+    fn fragment_state_expires_and_policy_publication_revokes_it() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Udp, 53)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let datagram = udp4_payload(LOCAL4, PEER4, 40_000, 53);
+        let mut first = ipv4_fragment(&datagram, 0x1236, 0, 16, true);
+        let mut later = ipv4_fragment(&datagram, 0x1236, 16, 8, false);
+        assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+        assert!(!filter.check_at(
+            &mut later,
+            Direction::HostToMesh,
+            now + FRAGMENT_IDLE_TIMEOUT + Duration::from_secs(1)
+        ));
+
+        let fresh = udp4_payload(LOCAL4, PEER4, 40_001, 53);
+        let mut fresh_first = ipv4_fragment(&fresh, 0x1237, 0, 16, true);
+        let mut fresh_later = ipv4_fragment(&fresh, 0x1237, 16, 8, false);
+        let refreshed = now + UDP_IDLE_TIMEOUT + Duration::from_secs(2);
+        assert!(filter.check_at(&mut fresh_first, Direction::HostToMesh, refreshed));
+        let revoked = PacketFilter::prepare_policy(
+            &config(TrafficPolicy::None, TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("prepare revoked policy");
+        filter.publish_policy(revoked);
+        assert!(!filter.check_at(
+            &mut fresh_later,
+            Direction::HostToMesh,
+            refreshed + Duration::from_secs(1)
+        ));
+    }
+
+    /// A fragmented ICMP error inherits access only from its quoted, still-authorized flow.
+    #[test]
+    fn fragmented_icmp_errors_follow_the_quoted_flow() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Udp, 53)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut request = udp4(LOCAL4, PEER4, 40_000, 53);
+        assert!(filter.check_at(&mut request, Direction::HostToMesh, now));
+
+        let mut error = vec![0; 64];
+        error[0] = 0x45;
+        error[2..4].copy_from_slice(&64_u16.to_be_bytes());
+        error[8] = 64;
+        error[9] = 1;
+        error[12..16].copy_from_slice(&PEER4.octets());
+        error[16..20].copy_from_slice(&LOCAL4.octets());
+        error[20] = 3;
+        error[21] = 3;
+        error[28..56].copy_from_slice(&request);
+        let mut first = ipv4_fragment(&error, 0x123a, 0, 40, true);
+        let mut later = ipv4_fragment(&error, 0x123a, 40, 4, false);
+
+        assert!(filter.check_at(&mut first, Direction::MeshToHost, now));
+        assert!(filter.check_at(
+            &mut later,
+            Direction::MeshToHost,
+            now + Duration::from_secs(1)
+        ));
+    }
+
+    /// A fragment from an unconfigured source cannot reuse another peer's admitted fragment ID.
+    #[test]
+    fn fragment_state_is_scoped_to_the_configured_peer_address() {
+        let filter = PacketFilter::new(
+            &config(grant(Protocol::Udp, 53), TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let datagram = udp4_payload(PEER4, LOCAL4, 40_000, 53);
+        let mut first = ipv4_fragment(&datagram, 0x1238, 0, 16, true);
+        assert!(filter.check_at(&mut first, Direction::MeshToHost, now));
+
+        let spoofed = udp4_payload(OTHER_PEER4, LOCAL4, 40_000, 53);
+        let mut spoofed_later = ipv4_fragment(&spoofed, 0x1238, 16, 8, false);
+        assert!(!filter.check_at(
+            &mut spoofed_later,
+            Direction::MeshToHost,
+            now + Duration::from_secs(1)
+        ));
+    }
+
+    /// Malformed packets and non-final fragments with invalid lengths fail closed.
     #[test]
     fn malformed_and_fragmented_packets_are_rejected() {
         let filter = PacketFilter::new(
