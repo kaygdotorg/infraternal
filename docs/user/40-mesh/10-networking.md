@@ -2,6 +2,8 @@
 <!-- Role: explain the mesh UDP listener, direct paths through stateful firewalls, and host input for traffic inside the tunnel. -->
 # Mesh networking
 
+This page explains which UDP port the mesh uses, how peers make direct connections, and which host rule admits traffic inside the tunnel.
+
 ## UDP listener
 
 Each mesh node listens on UDP **10254** by default. The port matches the default mesh subnet, `10.254.0.0/16`, and stays the same across ordinary restarts.
@@ -28,4 +30,8 @@ The host input chain needs this rule for new connections arriving through the me
 iifname "infraternal0" accept
 ```
 
-The mesh's own table and its D384 userspace filter continue to enforce each peer's grants. Accepting traffic from `infraternal0` in the host input chain does not grant a peer new mesh access. Tables named `infraternal_*` belong to Infraternal and are managed by the product; do not add this rule by hand to an app-owned table.
+The mesh's own nftables table and userspace filter continue to enforce each peer's grants. Accepting traffic from `infraternal0` in the host input chain does not grant a peer new mesh access. Tables named `infraternal_*` belong to Infraternal and are managed by the product; do not add this rule by hand to an app-owned table.
+
+---
+
+Behind this page: D386, #483 and #489 (mesh-owned host firewall behavior and the UDP listener).
