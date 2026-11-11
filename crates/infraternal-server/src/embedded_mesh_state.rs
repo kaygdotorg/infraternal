@@ -261,13 +261,16 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 mod tests {
     //! Proves legacy identity migration, durable precedence, permissions, and retry behavior.
 
-    use super::{MIGRATION_MARKER, migrate};
+    use super::{MIGRATION_MARKER, migrate, rollback_handoff};
     use std::{
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt},
         path::PathBuf,
         process::Command,
     };
+
+    use base64::Engine as _;
+    use sha2::Digest as _;
 
     /// Build a unique fixture root outside the repository so no private test key is committed.
     fn fixture_root() -> PathBuf {
@@ -638,6 +641,86 @@ mod tests {
             br#"{"enabled":true}"#
         );
         assert!(!durable.join("mesh-private-key").exists());
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    /// Keeps a known public-key fingerprint unchanged through rollback and the next upgrade.
+    #[test]
+    fn rollback_and_reupgrade_keep_the_same_public_key_fingerprint() {
+        const PRIVATE: [u8; 32] = [
+            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
+            0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
+            0x1d, 0xb9, 0x2c, 0x2a,
+        ];
+        const PUBLIC: [u8; 32] = [
+            0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e,
+            0xf7, 0x5a, 0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e,
+            0xaa, 0x9b, 0x4e, 0x6a,
+        ];
+
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime directory private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh directory private");
+        fs::write(durable.join("mesh-private-key"), PRIVATE).expect("write RFC key fixture");
+        fs::set_permissions(
+            durable.join("mesh-private-key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("make key fixture private");
+        let public_state = serde_json::json!({
+            "server_public_key": base64::engine::general_purpose::STANDARD.encode(PUBLIC),
+        });
+        let public_path = durable.join("mesh-public.json");
+        fs::write(&public_path, serde_json::to_vec(&public_state).expect("encode public state"))
+            .expect("write public-key fixture");
+        fs::set_permissions(&public_path, fs::Permissions::from_mode(0o600))
+            .expect("make public state private");
+
+        let fingerprint_at = |path: &std::path::Path| {
+            let state: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).expect("read public state"))
+                    .expect("decode public state");
+            let encoded = state["server_public_key"]
+                .as_str()
+                .expect("public key text");
+            let key = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("decode public key");
+            <[u8; 32]>::from(sha2::Sha256::digest(key))
+        };
+        let expected = sha2::Sha256::digest(PUBLIC);
+        let expected_fingerprint: [u8; 32] = expected.into();
+        assert_eq!(fingerprint_at(&public_path), expected_fingerprint);
+
+        rollback_handoff(&durable, &volatile).expect("hand identity back to the previous build");
+        assert_eq!(
+            fs::read(volatile.join("mesh-private-key")).expect("rollback private key"),
+            PRIVATE,
+            "rollback must keep the private identity bytes",
+        );
+        assert_eq!(
+            fingerprint_at(&volatile.join("mesh-public.json")),
+            expected_fingerprint,
+            "the public-key fingerprint must survive rollback",
+        );
+
+        migrate(&volatile, &durable).expect("migrate identity forward on re-upgrade");
+        assert_eq!(
+            fs::read(durable.join("mesh-private-key")).expect("re-upgraded private key"),
+            PRIVATE,
+            "re-upgrade must keep the private identity bytes",
+        );
+        assert_eq!(
+            fingerprint_at(&durable.join("mesh-public.json")),
+            expected_fingerprint,
+            "the public-key fingerprint must survive re-upgrade",
+        );
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
