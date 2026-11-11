@@ -7,6 +7,7 @@
   "scripts": {
     "build": "bun run build.ts",
     "docs": "bun run docs-build.ts docs-dist",
+    "site": "bun run site-build.ts site-dist",
     "docs:figures": "bun x playwright test -c playwright.figures.config.ts",
     "check": "bun x tsc --project tsconfig.json",
     "test": "bun x playwright test"
