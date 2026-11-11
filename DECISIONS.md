@@ -4852,3 +4852,27 @@ access (#341 B19).
        replaced by the product's own nft discovery (D384) at the next deploy.
      - **Ownership stays narrow:** tables not named `infraternal_*` are never
        touched.
+
+387. **App-window controls mockup approved (owner, 2026-11-11, #146; extends D342, D343, D350, D351):**
+     - **Context:** J209 drew the app-window controls in the mockup
+       "App-window controls and phone toolbar" (#146 comment 78545) and left
+       seven calls for the owner. The owner chose the recommended option on
+       each.
+     - **Popovers over a streamed picture:** over an app-window picture only,
+       popover glass gets a minimum opacity so text stays crisp. Elsewhere it
+       keeps the normal material.
+     - **The ⋯ menu:** Screenshot, View only, Settings, then a hairline, then
+       "Close window on the machine" last (it confirms).
+     - **Phone bar:** two rows. Row 1 is the machine pill + Full screen +
+       Close. Row 2 is the keys (terminal keys, or Send keys for an app
+       window). On a phone the pill shows the app's icon, not its name.
+     - **Gear wording:** "1:1" = the Mac's window follows this window; "Fit"
+       = the Mac's window keeps its size, scaled. "Reconnect" is a button in
+       the gear and a "Reconnect by itself" switch in Settings.
+     - **Numbered windows:** when titles repeat, the number shows in the
+       picker row and in the window's pill ("Today 1").
+     - **Send keys glyphs:** Mac symbols (⌘ ⌥ ⌃ ⇧) on every keyboard, because
+       the keys go to the Mac.
+     - **Phone popovers** (gear, window picker): inset from the screen edges
+       and open below the pill, never covering it, as D385's confirmation
+       card does.
