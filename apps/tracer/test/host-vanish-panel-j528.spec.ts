@@ -6,6 +6,7 @@
  * 1. A registered host that is offline because the CA is locked stays listed in the sidebar's Console, says
  *    "locked", and offers "Unlock to connect" inline; unlocking runs the passkey ceremony.
  * 2. A connected host with no session of its own is still a row of the Console tree, so its swipe-to-remove is reachable.
+ *    Two admitted hosts that carry one label (two logins on one machine) are both rows, told apart by their login.
  * 3. On a short phone the Remove question's Keep and Remove buttons are in view as soon as the question opens.
  * 4. The machine panel opens at the height it keeps: reading the host's facts afterwards never moves its height.
  *
@@ -40,7 +41,7 @@ async function newPage(browser: import("playwright/test").Browser, size: Size): 
  * Serves the sockets calls this spec needs: one added host (`online` or not), the server's facts after `factsDelayMs`, and the
  * CA's lock status. Returns the CA calls other than the status read (an unlock attempt shows up there).
  */
-async function serve(page: Page, options: { online: boolean; locked?: boolean; factsDelayMs?: number }): Promise<{ caCalls: string[] }> {
+async function serve(page: Page, options: { online: boolean; locked?: boolean; factsDelayMs?: number; extraHosts?: unknown[] }): Promise<{ caCalls: string[] }> {
   const caCalls: string[] = [];
   await page.route("**/remote/ca/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -60,7 +61,7 @@ async function serve(page: Page, options: { online: boolean; locked?: boolean; f
         return;
       }
       if (frame.type === "Call" && frame.actionId === "remote.host.list") {
-        reply(frame.callId, true, { hosts: [{ id: HOST_ID, name: HOST, user: "operator", os: "Debian GNU/Linux", address: "operator@worker.lan", online: options.online }], next: null });
+        reply(frame.callId, true, { hosts: [{ id: HOST_ID, name: HOST, user: "operator", os: "Debian GNU/Linux", address: "operator@worker.lan", online: options.online }, ...(options.extraHosts ?? [])], next: null });
         return;
       }
       // The test double closes the socket on a session open for a host it does not know.
@@ -97,7 +98,7 @@ for (const size of SIZES) {
       await openSidebar(page);
       await expect(hostRow(page), "the registered host is listed although it is offline").toBeVisible({ timeout: 30_000 });
       await expect(hostRow(page)).toContainText("locked");
-      const unlock = page.locator('#tree .bm-leaf[data-id="u:' + HOST + '"]');
+      const unlock = page.locator('#tree .bm-leaf[data-id="u:' + HOST_ID + '"]');
       await expect(unlock, "an inline way to unlock, under the host").toBeVisible();
       await expect(unlock).toContainText("Unlock to connect");
       await page.screenshot({ path: tracerEvidencePath("j528", `bug1-sidebar-${size.id}.png`) });
@@ -115,6 +116,19 @@ for (const size of SIZES) {
       await expect(hostRow(page), "every admitted host is in the tree").toBeVisible({ timeout: 30_000 });
       await expect(page.locator('#tree .bm-leaf[data-id^="u:"]'), "a connected host has nothing to unlock").toHaveCount(0);
       await page.screenshot({ path: tracerEvidencePath("j528", `bug2-tree-${size.id}.png`) });
+    } finally { await close(); }
+  });
+
+  test(`bug 2 ${size.id}: two admitted hosts with one label are both rows`, async ({ browser }) => {
+    const { page, close } = await newPage(browser, size);
+    try {
+      const twin = { id: "44444444-5555-4666-8777-888888888888", name: HOST, user: "second", os: "Debian GNU/Linux", address: "second@worker.lan", online: true };
+      await serve(page, { online: true, extraHosts: [twin] });
+      await openProduct(page);
+      await openSidebar(page);
+      await expect(page.locator("#tree li.bm-subhead[data-id]"), "the server's own host and both admitted hosts").toHaveCount(3, { timeout: 30_000 });
+      await expect(page.locator(`#tree li.bm-subhead[data-id="h:${twin.id}"]`)).toContainText(`second@${HOST}`);
+      await expect(page.locator(`#tree li.bm-subhead[data-id="h:${HOST_ID}"]`)).toContainText(`operator@${HOST}`);
     } finally { await close(); }
   });
 
