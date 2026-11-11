@@ -1359,6 +1359,54 @@ mod tests {
         );
     }
 
+    /// Poll one refresh notification without sleeping or measuring wall-clock time.
+    fn review_endpoint_refresh_ready(signal: &super::EndpointRefreshSignal) -> bool {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let mut notification = Box::pin(signal.notified());
+        notification
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_ready()
+    }
+
+    /// A packet burst uses one wakeup until its endpoint snapshot is complete.
+    #[test]
+    fn review_endpoint_refresh_coalesces_a_packet_burst() {
+        let signal = super::EndpointRefreshSignal::default();
+        for _ in 0..10_000 {
+            signal.packet_received();
+        }
+        assert_eq!(signal.generation(), 10_000);
+        assert!(review_endpoint_refresh_ready(&signal));
+        assert!(!review_endpoint_refresh_ready(&signal));
+        signal.finish_refresh(signal.generation());
+        assert!(!signal.pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!review_endpoint_refresh_ready(&signal));
+        signal.packet_received();
+        assert!(review_endpoint_refresh_ready(&signal));
+    }
+
+    /// Packets arriving during a snapshot request exactly one subsequent refresh.
+    #[test]
+    fn review_endpoint_refresh_retains_a_burst_during_the_snapshot() {
+        let signal = super::EndpointRefreshSignal::default();
+        signal.packet_received();
+        assert!(review_endpoint_refresh_ready(&signal));
+        let observed = signal.generation();
+        for _ in 0..10_000 {
+            signal.packet_received();
+        }
+        assert!(!review_endpoint_refresh_ready(&signal));
+        signal.finish_refresh(observed);
+        assert!(review_endpoint_refresh_ready(&signal));
+        assert!(!review_endpoint_refresh_ready(&signal));
+        signal.finish_refresh(signal.generation());
+        assert!(!signal.pending.load(std::sync::atomic::Ordering::Acquire));
+    }
+
     /// The worker rebuilds a device whose packet task ended on a fatal error, and `mesh status`
     /// sees it stopped in between (#260 J143 P2-1). A sequenced-packet pair plays the TUN; closing
     /// the kernel's side ends `GotaTun`'s TUN reader with EOF, its fatal TUN error.

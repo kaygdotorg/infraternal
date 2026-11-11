@@ -3503,6 +3503,96 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
 
+    /// Run one namespace-local route command for the foreign-interface review proof.
+    fn review_route_command(args: &[&str]) -> String {
+        let output = std::process::Command::new("ip")
+            .args(args)
+            .output()
+            .expect("ip command");
+        assert!(
+            output.status.success(),
+            "ip {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("ip output")
+    }
+
+    /// Retained peer inventory must not authorize writes after a foreign link replaces our TUN.
+    #[test]
+    #[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+    fn review_live_endpoint_refresh_refuses_foreign_interface() {
+        use crate::policy::model::{Addresses, PublicKey};
+        review_route_command(&["link", "set", "lo", "up"]);
+        review_route_command(&["link", "add", "infraternal0", "type", "dummy"]);
+        review_route_command(&["link", "set", "infraternal0", "up"]);
+        review_route_command(&["address", "add", "10.254.0.1/32", "dev", "infraternal0"]);
+        review_route_command(&[
+            "-6",
+            "address",
+            "add",
+            "fd01::1/128",
+            "dev",
+            "infraternal0",
+            "nodad",
+        ]);
+        review_route_command(&[
+            "route",
+            "add",
+            "10.254.0.2/32",
+            "dev",
+            "infraternal0",
+            "mtu",
+            "1400",
+        ]);
+        review_route_command(&[
+            "-6",
+            "route",
+            "add",
+            "fd01::2/128",
+            "dev",
+            "infraternal0",
+            "mtu",
+            "1400",
+        ]);
+        let key = PublicKey([7; 32]);
+        let peer = crate::dataplane::Peer {
+            key,
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("IPv4"),
+                ipv6: "fd01::2".parse().expect("IPv6"),
+            },
+            endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        };
+        // This inventory can survive a person's deletion/replacement of the live TUN. The
+        // replacement has no ownership alias, so its routes are outside this node's authority.
+        let state = Mutex::new(PeerRouteState::default());
+        lock_route_state(&state).set_peers(&[peer]);
+        let before = review_route_command(&["route", "show", "exact", "10.254.0.2/32"]);
+        let before_v6 = review_route_command(&["-6", "route", "show", "exact", "fd01::2/128"]);
+        let result = update_live_peer_endpoints(
+            &state,
+            &[(
+                key,
+                Some("127.0.0.2:51820".parse().expect("learned endpoint")),
+            )],
+        );
+        let after = review_route_command(&["route", "show", "exact", "10.254.0.2/32"]);
+        let after_v6 = review_route_command(&["-6", "route", "show", "exact", "fd01::2/128"]);
+        eprintln!(
+            "REVIEW foreign link result={result:?} IPv4 before={before:?} after={after:?} IPv6 before={before_v6:?} after={after_v6:?}"
+        );
+        assert_eq!(
+            after, before,
+            "endpoint callback must leave a foreign interface's IPv4 route alone"
+        );
+        assert_eq!(
+            after_v6, before_v6,
+            "endpoint callback must leave a foreign interface's IPv6 route alone"
+        );
+    }
+
     /// A direct endpoint update remains available when a relay budget currently owns the route.
     #[test]
     fn live_endpoint_refresh_preserves_relay_budget_for_direct_fallback() {
