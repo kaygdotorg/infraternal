@@ -102,9 +102,31 @@ none on those steps. The QA owner and host are disposable.
 and stops the QA units on mesh-staging (data is kept in `/var/lib/infraternal-qa`; delete it to start from a fresh
 first-run). Shut the simulator down with `xcrun simctl shutdown` when you are done.
 
+## Desktop Safari (Mac VM) and what 2026-11-11 taught
+
+`scripts/real-device-qa mac-setup` (once) and `mac` (per deploy) drive real Safari at 1440 x 900 and at a phone-narrow
+402 px window through safaridriver, as lume, under `/tmp/mac-bench.lock` with the driver stopped by PID. They give the page's
+own DOM: overflow, window rectangles, computed text sizes, per-frame motion, `scrollTop`. The Mac needs its own owner (the
+simulator's passkey cannot be shared), so `mac-setup` installs a second QA server (`stage/install-qa2-instance.sh`, TLS on
+:9000, because SELinux allows nginx only on http_port_t ports; :8443 and :9000 are such ports, :8444 is not). The Maintainer
+trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
+
+- Safari's WebDriver virtual authenticator hangs on `credentials.create`. The test-only in-page software authenticator is
+  injected as a `<script>` element (WebDriver scripts run in an isolated JS world) and installed on
+  `CredentialsContainer.prototype` (WebKit can garbage-collect the wrapper that carries a patch on `navigator.credentials`).
+  Its signature counter must never go backwards: the state file is saved at the end of every session.
+- After a page load the host CA is locked until "Unlock host connections" (one passkey tap); hosts stay offline and unlisted
+  until then. The simulator checklist has an `unlock` phase for that.
+- A removed host that is offline stays listed with its cleanup pending, so removal is proven by the re-add needing the full
+  host-key and password flow, not by the toast (it disappears).
+- The signed-in app takes its theme from the account's saved look: `?theme=mocha` darkens only the sign-in screens. A dark
+  run of the app has to pick a dark theme in Settings > Themes first (not automated yet).
+- Never `kill` by pattern on std: its `kayg` user is shared with other lanes (calternal). Kill by exact PID.
+
 ## Known gaps
 
-- **The dark run is not dark yet.** `run.sh` switches the simulator to dark appearance (verified: `simctl ui
+- **The dark run is not dark yet.** (See the theme note above: the signed-in app ignores `?theme=`.)
+- (older note) **The dark run is not dark yet.** `run.sh` switches the simulator to dark appearance (verified: `simctl ui
   appearance` reads `dark`, and Safari's own bar goes grey), but on 2026-11-11 the app itself stayed in its light
   theme in every dark screenshot. Whether the app ignores the system scheme on iOS or a stored theme wins is not
   isolated. Until it is, a dark check has to pick a dark theme in Settings > Themes first (not yet automated);
