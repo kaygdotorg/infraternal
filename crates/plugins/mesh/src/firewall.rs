@@ -13,8 +13,8 @@ use std::{
 };
 /// The fixed install-time nft entry used by both the optional guard and D346's kernel engine.
 pub(crate) const NFT: &str = "/usr/sbin/nft";
-/// Test builds may trust this fixed path only after the privileged runner verifies it on the host.
-#[cfg(test)]
+/// Test and test-support builds may trust this fixed path only after the privileged runner verifies it on the host.
+#[cfg(any(test, feature = "test-support"))]
 const TEST_ROOT_OWNED_NFT_ENV: &str = "INFRATERNA_TEST_ROOT_OWNED_NFT";
 /// Fixed iptables-nft restore and inspection paths for both address families.
 const IPTABLES_NFT: [&str; 4] = [
@@ -127,9 +127,9 @@ fn missing_guard_tool_detail(nft: bool, iptables_ipv4: bool, iptables_ipv6: bool
 
 /// Accept the root-owned install-time path and its executable target.
 fn root_owned_tool(path: &str) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let host_verified_nft_path = std::env::var(TEST_ROOT_OWNED_NFT_ENV).ok();
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let host_verified_nft_path: Option<String> = None;
 
     root_owned_tool_with_host_verified_path(path, host_verified_nft_path.as_deref())

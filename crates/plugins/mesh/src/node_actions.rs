@@ -1252,10 +1252,10 @@ mod tests {
             ])
         );
     }
-    /// Preserves the stopping state after failed cleanup and explicit-off intent after reconnect.
+    /// Preserves explicit-off intent after failed kernel-firewall cleanup and reconnect.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off() {
+    fn kernel_firewall_cleanup_failure_reports_stopping_and_reconnect_keeps_explicit_off() {
         use crate::{
             dataplane::DefaultPolicy,
             policy::model::{Addresses, NodeId},
@@ -1264,7 +1264,9 @@ mod tests {
             io::Write as _,
             process::{Command, Stdio},
         };
-        let mut plugin = MeshNodePlugin::default();
+        let mut plugin = MeshNodePlugin::from_node(
+            Node::default().with_engine(crate::gotatun_node::EngineKind::Kernel),
+        );
         plugin.call("mesh.up", b"{}").expect("start");
         let chunk = Chunk {
             access_updates: Vec::new(),
