@@ -59,6 +59,63 @@ def labels(lines):
     return [re.sub(r"^QA_LABEL \S+ x=-?\d+ y=-?\d+ w=\d+ h=\d+ ", "", l) for l in lines if l.startswith("QA_LABEL ")]
 
 
+def png_gray(path: Path):
+    """Decodes an 8-bit RGB/RGBA PNG to (width, height, rows of 0-255 grey bytes). Standard library only."""
+    import struct
+    import zlib
+    data = path.read_bytes()
+    pos, idat, width, height, ctype = 8, b"", 0, 0, 2
+    while pos < len(data):
+        n, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            width, height, depth, ctype = struct.unpack(">IIBB", body[:10])
+            if depth != 8 or ctype not in (2, 6):
+                raise ValueError("unsupported PNG format")
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + n
+    bpp = 4 if ctype == 6 else 3
+    raw = zlib.decompress(idat)
+    stride = width * bpp
+    prev = bytearray(stride)
+    rows = []
+    for y in range(height):
+        f = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        if f == 1:
+            for i in range(bpp, stride): line[i] = (line[i] + line[i - bpp]) & 255
+        elif f == 2:
+            for i in range(stride): line[i] = (line[i] + prev[i]) & 255
+        elif f == 3:
+            for i in range(stride): line[i] = (line[i] + (((line[i - bpp] if i >= bpp else 0) + prev[i]) >> 1)) & 255
+        elif f == 4:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line[0::bpp]))  # the red channel is enough to see text move
+        prev = line
+    return width, height, rows
+
+
+def region_changed(a: Path, b: Path, top: float, bottom: float) -> float:
+    """Fraction (0..1) of pixels in the vertical band [top, bottom] of the screen that differ clearly between two shots."""
+    wa, ha, ra = png_gray(a)
+    wb, hb, rb = png_gray(b)
+    if (wa, ha) != (wb, hb):
+        return 1.0
+    diff = total = 0
+    for y in range(int(ha * top), int(ha * bottom)):
+        for x in range(0, wa, 2):
+            total += 1
+            if abs(ra[y][x] - rb[y][x]) > 40:
+                diff += 1
+    return diff / max(total, 1)
+
+
 def check_theme(theme_dir: Path, facts: dict):
     rows = []
 
@@ -116,19 +173,23 @@ def check_theme(theme_dir: Path, facts: dict):
             add("4a machine pill facts", "FAIL", f"panel does not show the host's own {', '.join(missing)} (host: {facts})")
         else:
             add("4a machine pill facts", "PASS", f"kernel and architecture match the host ({facts.get('kernel')}, {facts.get('arch')}); tabs Machine/Connection; shots: " + ", ".join(shots(theme_dir, "pill", ["pill-machine", "pill-connection"])))
-        y0, y1, y2 = (frames(pl, n) for n in ("kernel-y0", "kernel-y1", "kernel-y2"))
-        if not (y0 and y1 and y2):
-            add("4b scroll holds 35 s", "REVIEW", "the Kernel row was not found at every sample")
+        # The accessibility frames inside the scaled canvas lag, so scrolling is judged on the screenshots instead:
+        # the panel body (45-72 % of the screen height) must change when swiped, then stay the same for 35 s.
+        def shot(name):
+            hit = [p for d in sorted(theme_dir.glob("*-pill")) for p in d.glob(f"[0-9]*-{name}.png")]
+            return hit[0] if hit else None
+        base, now, later = shot("pill-machine"), shot("pill-scrolled-now"), shot("pill-scrolled-35s")
+        if not (base and now and later):
+            add("4b scroll holds 35 s", "REVIEW", "a pill screenshot is missing")
         else:
-            a, b, c = y0[0]["y"], y1[0]["y"], y2[0]["y"]
-            if abs(a - b) < 40:
-                # Fewer than 40 pt means the swipe did not really scroll the panel (accessibility frames lag too), so
-                # the numbers prove nothing about holding position.
-                add("4b scroll holds 35 s", "REVIEW", f"the swipe did not scroll the panel by a measurable amount (Kernel y {a:.0f} -> {b:.0f} -> {c:.0f}); compare pill-scrolled-now and pill-scrolled-35s by eye")
-            elif abs(b - c) >= 20:
-                add("4b scroll holds 35 s", "FAIL", f"panel moved after the swipe settled: Kernel y {b:.0f} at the swipe, {c:.0f} 35 s later")
+            moved = region_changed(base, now, 0.45, 0.72)
+            drift = region_changed(now, later, 0.45, 0.72)
+            if moved < 0.03:
+                add("4b scroll holds 35 s", "REVIEW", f"the swipe did not move the panel ({moved:.1%} of the body changed), so holding cannot be judged; shots pill-machine, pill-scrolled-now")
+            elif drift > 0.03:
+                add("4b scroll holds 35 s", "FAIL", f"the panel jumped after the swipe settled: {drift:.1%} of the body differs between the swipe and 35 s later (rule <= 3 %)")
             else:
-                add("4b scroll holds 35 s", "PASS", f"Kernel y {a:.0f} -> {b:.0f} and still {c:.0f} after 35 s")
+                add("4b scroll holds 35 s", "PASS", f"swipe moved {moved:.0%} of the body; {drift:.1%} differs 35 s later (rule <= 3 %)")
 
     # 5 remove host
     add("5 Remove host (pill, palette, sidebar swipe) + re-add", "NOT RUN", "destructive: do it by hand on the QA host, then `add-host` again (runbook step 5)")

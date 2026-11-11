@@ -19,7 +19,10 @@ TOP_PILL='0.5~0.1075'          # the "Console · N" pill at the top: opens the v
 PILL='0.228~0.177'            # the machine pill, top-left of a window
 CONNECTION_TAB='0.385~0.311'  # the second tab inside the machine panel
 NEW_SHELL='0.616~0.501'       # "New shell" on an ended session, centred in a full-height (fresh-load) window
-fresh="open~$url/?r=$(date +%s)|wait~12"
+# The app's own theme wins over the system scheme once one is saved, so a "dark" run must ask for a dark theme in the
+# URL (?theme=mocha is the dark default, latte the light one) as well as switching the simulator's appearance.
+case "$theme" in dark) app_theme=mocha;; *) app_theme=latte;; esac
+fresh="open~$url/?r=$(date +%s)&theme=$app_theme|wait~12"
 
 # QA_PHASES="shell pill" runs only those phases (a phase that needed a fix can be rerun without the whole checklist).
 wanted() { [[ -z "${QA_PHASES:-}" || " $QA_PHASES " == *" $1 "* ]]; }
@@ -32,7 +35,7 @@ run signin "$fresh|tapif~Continue with passkey~5|tapsbif~Use Passkey~6|face|wait
 run shell "$fresh|xy~$NEW_SHELL|wait~8|shot~shell-opened|frames~region~regions-before|xy~0.5~0.3|wait~2|type~echo qa-ok|return|wait~2|shot~shell-typed|type~exit|return|wait~5|shot~after-exit|absent~shell ended~exit-closes-window|frames~shell, region~win-after-exit"
 
 # 4. The machine pill: both tabs, the facts, and whether a scrolled panel stays where it was for 35 s.
-run pill "$fresh|xy~$PILL|wait~3|shot~pill-machine|labels|frames~Kernel~kernel-y0|swipe~0.5~0.7~0.5~0.4~0.3|shot~pill-scrolled-now|frames~Kernel~kernel-y1|wait~35|frames~Kernel~kernel-y2|shot~pill-scrolled-35s|xy~$CONNECTION_TAB|wait~2|shot~pill-connection"
+run pill "$fresh|xy~$PILL|wait~3|shot~pill-machine|labels|frames~Kernel~kernel-y0|swipe~0.5~0.72~0.5~0.3~1.2|wait~1|shot~pill-scrolled-now|frames~Kernel~kernel-y1|wait~35|frames~Kernel~kernel-y2|shot~pill-scrolled-35s|xy~$CONNECTION_TAB|wait~2|shot~pill-connection"
 
 # 6, 8. The views menu: mesh, settings and the palette ("Search everything").
 run menus "$fresh|xy~$TOP_PILL|wait~3|shot~views-menu|tapx~Mesh|wait~3|shot~mesh|frames~card~mesh-cards|xy~$TOP_PILL|wait~2|tapx~Settings|wait~4|shot~settings|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|shot~palette"
