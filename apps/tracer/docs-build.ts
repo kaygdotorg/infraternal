@@ -323,16 +323,16 @@ export async function figureOptionsFor(source: string = USER_DOCS_DIR): Promise<
 
 /**
  * How `buildDocs` places a tree. `audience` puts it under `/docs/<audience>/` and gives its pages the audience tabs and page list (D388);
- * without it the tree is flat, `/docs/<page>/`, as the instance's own docs are today. `mockup` adds the reading-face switch for review.
+ * without it the tree is flat, `/docs/<page>/`, as the instance's own docs are today.
  */
-export interface BuildOptions { audience?: Audience; mockup?: boolean | undefined }
+export interface BuildOptions { audience?: Audience }
 
 /**
  * Writes the docs tree into `out` (for the app build, `<dist>/docs`), reading the pages of `source`. `scan` lists the source folders
  * whose docs addresses are checked against the pages (docs-anchors.ts); the real tree checks the app, a fixture tree none.
  */
 export async function buildDocs(out: string, source: string = USER_DOCS_DIR, scan: readonly string[] = source === USER_DOCS_DIR ? APP_SOURCES : [], options: BuildOptions = {}): Promise<DocsIndexPage[]> {
-  const { audience, mockup } = options;
+  const { audience } = options;
   // With an audience (D388) the pages live under `<out>/<audience>/`; the shared files stay in `out`, one copy for every audience.
   const tree = audience ? resolve(out, audience) : out;
   const mount = audience ? `/docs/${audience}` : "/docs";
@@ -399,7 +399,7 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
   const write = (doc: RenderedDoc, slug: string): Promise<void> => writeFile(resolve(tree, slug === INDEX_SLUG ? "" : slug, "index.html"), sitePage({
     title: doc === front ? area : `${doc.title} · ${area}`,
     here: doc === front ? area : `${area} / ${doc.title}`,
-    area: "docs", main: "docs", mockup,
+    area: "docs", main: "docs",
     body: own(doc.html),
     ...(audience ? { side: sideNav(audience, nav, slug) } : {}),
   }));

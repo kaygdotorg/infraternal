@@ -13,14 +13,6 @@
   font-weight: 400 700;
   font-display: swap;
 }
-/* The app's other interface face, used here only when the page asks for it (`data-font="sans"`, the mockup's `?font=sans`). */
-@font-face {
-  font-family: "Geist Sans";
-  src: url("/docs/fonts/Geist-Variable.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
-}
 :root {
   color-scheme: dark;
   --bg: #101113;
@@ -61,7 +53,6 @@
   -webkit-text-size-adjust: 100%;
   scroll-padding-top: var(--bar-h);
 }
-:root[data-font="sans"] { --font-read: "Geist Sans", system-ui, sans-serif; }
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
@@ -79,8 +70,6 @@
 @media (pointer: coarse) { :root { --ui-base: 1; --pill-h: 2.75rem; --row: 2.75rem; } }
 
 body { margin: 0; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); font-size: var(--read); font-weight: var(--fw-body); line-height: 1.6; font-synthesis: none; }
-/* Code stays in the app's monospace face whichever face the prose is read in. */
-:root[data-font="sans"] code, :root[data-font="sans"] pre, :root[data-font="sans"] kbd { font-family: "Maple Mono NF", ui-monospace, monospace; }
 p, ul, ol { margin: 0 0 1.1em; }
 ul, ol { padding-left: 1.4em; }
 li { margin: 0.4em 0; }
@@ -98,9 +87,8 @@ a:hover { text-decoration-color: currentColor; }
 .docs-col .doc h4 { margin: 1.75rem 0 0.5rem; font-size: 1em; font-weight: var(--fw-title); }
 .docs-col .doc .doc-body > h2:first-child { padding-top: 0; border-top: 0; }
 .docs-col .doc :target { scroll-margin-top: calc(var(--bar-h) + 1rem); }
-/* The measure: about 68 characters of the face the page is read in. */
+/* The measure: 68 characters of Maple Mono, about 720 px at the desktop size. */
 .docs-col .doc-head, .docs-col .doc-body { max-width: 68ch; }
-:root[data-font="sans"] .docs-col .doc-head, :root[data-font="sans"] .docs-col .doc-body { max-width: 66ch; }
 .docs-col .doc code { font-size: 0.88em; }
 .docs-col .doc pre { padding: 0.875rem 1.125rem; font-size: 0.88em; line-height: 1.6; }
 .docs-col .doc .doc-code > .ui-copied { top: 0.875rem; left: 1.125rem; }

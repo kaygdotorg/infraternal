@@ -18,7 +18,6 @@
  * the capture wrote (with its `manifest.json`); without it the slot shows "Figure pending", as every figure does until a capture exists.
  */
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { buildDocs, type DocsIndexPage } from "./docs-build";
 import { figures, type FigureManifest } from "./docs-figure";
@@ -27,8 +26,8 @@ import { AUDIENCES, escapeHtml, sitePage, type Audience } from "./site-chrome";
 /** The repository root, found from this file's place (`apps/tracer/`). */
 const root = resolve(import.meta.dirname, "../..");
 
-/** What the standalone-site build is told: the folder to write, whether it is a review build, and where the captured figures are. */
-export interface SiteOptions { out: string; mockup?: boolean | undefined; figures?: string }
+/** What the standalone-site build is told: the folder to write, and where the captured figures are. */
+export interface SiteOptions { out: string; figures?: string }
 
 /**
  * The existing pages that stand in for the admin and developer audiences: `from` is the file in `docs/`, `name` the page's address under
@@ -61,12 +60,6 @@ async function standInSource(audience: Exclude<Audience, "user">, scratch: strin
   return dir;
 }
 
-/** `bun` can read the committed font of the app; the second face is optional (it is only used by the `?font=sans` comparison). */
-async function copyFaces(out: string): Promise<void> {
-  const geist = resolve(import.meta.dirname, "node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2");
-  if (existsSync(geist)) await cp(geist, resolve(out, "docs/fonts/Geist-Variable.woff2"));
-}
-
 /** A copyable block of shell text, in the markup the docs' code blocks use, so `doc.js` copies it on a click. */
 const command = (text: string): string => `<div class="doc"><div class="doc-code"><pre tabindex="0"><code>${escapeHtml(text)}</code></pre></div></div>`;
 
@@ -78,7 +71,7 @@ function landing(figureHtml: string): string {
 <p class="lede">One server you run, on hardware you choose. Open a terminal on any of your machines from any of your devices, join the machines into a private mesh, and decide who gets in.</p>
 <div class="hero-actions"><a class="button primary" href="/install/">Install</a><a class="button" href="/docs/">Read the docs</a></div>
 ${command("curl -fsSL https://builds.infraternal.com/install.sh | sh")}
-<p class="hint">Linux, x86-64 and arm64. The install page shows how to check the download first.</p>
+<p class="hint">Linux, x86-64 and arm64. The installer checks the build\u2019s signature before it installs anything. To check by hand first, see <a href="/install/">Install</a>.</p>
 </section>
 <section class="shot" aria-label="Screenshot"><div class="doc">${figureHtml}</div></section>
 <section class="band" aria-labelledby="today">
@@ -86,7 +79,7 @@ ${command("curl -fsSL https://builds.infraternal.com/install.sh | sh")}
 <ul class="cards">
 <li class="card"><h3>Terminals on every device</h3><p>Every terminal keeps running on its machine. Close the tab, move from your laptop to your phone, and pick it up where you left it.</p><a href="/docs/user/terminal/multiplexer/">How sessions work</a></li>
 <li class="card"><h3>Machines and mesh</h3><p>Add a computer from the app and the server sets it up over SSH. Your machines then reach each other over a private WireGuard mesh whose keys renew by themselves.</p><a href="/docs/user/mesh/">About the mesh</a></li>
-<li class="card"><h3>Access and sharing</h3><p>Sign in with a passkey and keep recovery words for the day you lose it. Choose which devices are signed in as you, and attach several of them to one terminal.</p><a href="/docs/user/you/">Your account</a></li>
+<li class="card"><h3>Your account</h3><p>Sign in with a passkey and keep recovery words for the day you lose it. Choose which devices are signed in as you, and attach several of them to one terminal.</p><a href="/docs/user/you/">Your account</a></li>
 </ul>
 </section>
 <ul class="facts"><li>AGPL-3.0-only</li><li>Runs on your own hardware</li><li>No trackers, no cookies</li></ul>
@@ -146,16 +139,15 @@ async function put(out: string, path: string, html: string): Promise<void> {
 
 /** Builds the whole site into `options.out`. */
 export async function buildSite(options: SiteOptions): Promise<void> {
-  const { out, mockup } = options;
+  const { out } = options;
   await rm(out, { recursive: true, force: true });
   const docs = resolve(out, "docs");
   const scratch = resolve(out, "../.site-sources");
   const counts = {} as Record<Audience, number>;
   const indexes: Record<string, DocsIndexPage[]> = {};
-  indexes.user = await buildDocs(docs, undefined, undefined, { audience: "user", mockup });
-  for (const audience of ["admin", "dev"] as const) indexes[audience] = await buildDocs(docs, await standInSource(audience, scratch), [], { audience, mockup });
+  indexes.user = await buildDocs(docs, undefined, undefined, { audience: "user" });
+  for (const audience of ["admin", "dev"] as const) indexes[audience] = await buildDocs(docs, await standInSource(audience, scratch), [], { audience });
   for (const audience of Object.keys(AUDIENCES) as Audience[]) counts[audience] = indexes[audience]!.length - 1;
-  await copyFaces(out);
 
   // The landing page's screenshot goes through the same figure code as the docs'; pending until a capture exists.
   const manifestFile = options.figures ? Bun.file(resolve(options.figures, "manifest.json")) : undefined;
@@ -166,7 +158,7 @@ export async function buildSite(options: SiteOptions): Promise<void> {
     await Promise.all(shot.files.map((file) => cp(resolve(options.figures!, file), resolve(docs, "figures", file))));
   }
 
-  const chrome = (title: string, body: string, area: "home" | "docs" | "install" | "releases" | "changelog", main: "docs" | "site" = "site", here?: string): string => sitePage({ title, body, area, main, mockup, ...(here ? { here } : {}) });
+  const chrome = (title: string, body: string, area: "home" | "docs" | "install" | "releases" | "changelog", main: "docs" | "site" = "site", here?: string): string => sitePage({ title, body, area, main, ...(here ? { here } : {}) });
   await put(out, "", chrome("Infrastructure you fully own", landing(shot.html), "home", "site", "Infraternal"));
   await put(out, "install", chrome("Install", install(), "install"));
   await put(out, "releases", chrome("Releases", emptyPage("Releases", "Signed builds of every release.", "The first release is not out yet. Each one will be listed here with its checksums and signature."), "releases"));
@@ -180,6 +172,6 @@ export async function buildSite(options: SiteOptions): Promise<void> {
 
 if (import.meta.main) {
   const out = resolve(process.argv[2] ?? "site-dist");
-  await buildSite({ out, mockup: process.env.SITE_MOCKUP === "1", ...(process.env.SITE_FIGURES ? { figures: process.env.SITE_FIGURES } : {}) });
+  await buildSite({ out, ...(process.env.SITE_FIGURES ? { figures: process.env.SITE_FIGURES } : {}) });
   console.log(`site written to ${out}`);
 }

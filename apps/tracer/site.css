@@ -31,11 +31,14 @@
 .bar-sheet a { height: var(--row); padding: 0 0.875rem; border-radius: var(--r-md); }
 /* A phone: the links fold into the menu button, and the capsule gives up its width to the place name. */
 @media (max-width: 40rem) {
-  .bar-in { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .bar-capsule { min-width: 0; width: 100%; }
+  /* Two rows: the name and the menu above, the capsule full width below, so a page title fits. The bar scrolls away on a phone, where height is dear. */
+  .bar { position: static; }
+  .bar-in { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.5rem; }
+  .bar-capsule { grid-row: 2; grid-column: 1 / -1; min-width: 0; width: 100%; }
   .bar-links { display: none; }
   .bar-menu { display: block; }
   .bar-kbd kbd { display: none; }
+  .bar-area { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .bar-brand, .bar-links a, .bar-sheet a { transition: none; } .bar-brand:active { transform: none; } }
 
@@ -142,3 +145,10 @@ main.site { box-sizing: border-box; max-width: 100rem; margin: 0 auto; padding: 
 @media (prefers-reduced-motion: reduce) { .audiences a { transition: none; } .audiences a:active { transform: none; } }
 .empty { max-width: 38em; }
 .code404 { margin: 0 0 1rem; color: var(--fg-3); font-size: var(--ui-size-label); font-weight: var(--fw-label); letter-spacing: 0.02em; }
+
+/* An install command wraps instead of scrolling sideways, so all of it is visible at 375 px. */
+.hero pre, .plain pre, .hero pre code, .plain pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Hint on hover (desktop only): a faint "Click to copy" in the block's top-right corner. It gives way to the in-place "Copied". */
+.doc-code::after { content: "Click to copy"; position: absolute; top: 0.5rem; right: 0.75rem; color: var(--fg-3); font-size: var(--ui-size-eyebrow); line-height: 1; opacity: 0; pointer-events: none; transition: opacity var(--t-pop) var(--ease-out); }
+@media (hover: hover) and (pointer: fine) { .doc-code:hover::after { opacity: 0.8; } .doc-code[data-copied]::after { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .doc-code::after { transition: none; } }

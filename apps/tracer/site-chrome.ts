@@ -49,8 +49,6 @@ export interface Chrome {
   main: "docs" | "site";
   /** The left column of a docs page (from `sideNav`), written inside the page's grid. */
   side?: string;
-  /** Marks the build as a mockup: adds the `?font=` switch the owner uses to compare the reading faces. */
-  mockup?: boolean | undefined;
 }
 
 /** The site's links, in the order of the top bar and the footer. The `href`s are the addresses D388 names. */
@@ -66,6 +64,12 @@ const SEARCH_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" 
 /** The two-line "menu" icon of the phone's link button. */
 const MENU_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5h10M3 10.5h10"/></svg>';
 
+/** The capsule text: "Area / Page" keeps the area in its own span, so a phone can show the page title alone. */
+function placeName(here: string): string {
+  const cut = here.lastIndexOf(" / ");
+  return cut < 0 ? escapeHtml(here) : `<span class="bar-area">${escapeHtml(here.slice(0, cut))} / </span>${escapeHtml(here.slice(cut + 3))}`;
+}
+
 /**
  * The top bar. Three tracks like the app's: the name, the capsule, the links. On a phone the links fold into one button
  * (`<details>`, so it needs no script) and the capsule keeps the place name and the ⌘K hint. The hint is a label, not a button: nothing
@@ -75,7 +79,7 @@ function topBar(here: string, area: Area): string {
   const link = (entry: (typeof LINKS)[number]): string => `<a href="${entry.href}"${entry.area === area ? ' aria-current="page"' : ""}>${entry.label}</a>`;
   return `<header class="bar"><div class="bar-in">
 <a class="pill bar-brand" href="/">infraternal</a>
-<div class="pill bar-capsule"><span class="bar-here">${escapeHtml(here)}</span><span class="bar-kbd" aria-label="Search is opened with Command K">${SEARCH_ICON}<kbd>⌘K</kbd></span></div>
+<div class="pill bar-capsule"><span class="bar-here">${placeName(here)}</span><span class="bar-kbd" aria-label="Search is opened with Command K">${SEARCH_ICON}<kbd>⌘K</kbd></span></div>
 <nav class="bar-end" aria-label="Site"><div class="pill bar-links">${LINKS.map(link).join("")}</div><details class="bar-menu"><summary class="pill" aria-label="Menu">${MENU_ICON}</summary><div class="pill bar-sheet">${LINKS.map(link).join("")}</div></details></nav>
 </div></header>`;
 }
@@ -88,9 +92,6 @@ function footer(): string {
 </div></footer>`;
 }
 
-/** The inline script of a mockup: `?font=sans` (or `mono`) sets the reading face for this visit, so the owner can compare both on one page. */
-const FONT_SWITCH = `<script>{const f=new URLSearchParams(location.search).get("font");if(f==="sans"||f==="mono")document.documentElement.dataset.font=f}</script>`;
-
 /** Writes one complete document. Every standalone page goes through here. */
 export function sitePage(chrome: Chrome): string {
   const here = chrome.here ?? chrome.title;
@@ -100,7 +101,7 @@ export function sitePage(chrome: Chrome): string {
 <meta name="theme-color" content="#101113" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
 <title>${escapeHtml(chrome.title)} · Infraternal</title>
-${chrome.mockup ? FONT_SWITCH : ""}<link rel="stylesheet" href="/docs/docs.css">
+<link rel="stylesheet" href="/docs/docs.css">
 <link rel="stylesheet" href="/docs/doc.css">
 <link rel="stylesheet" href="/docs/site.css">
 <script src="/docs/doc.js" defer></script>
