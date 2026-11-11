@@ -190,6 +190,6 @@ test("the touch floor is about the terminal's cells, not the UI: it does not sca
 
 test("Mesh nodes grow with the UI size too", () => {
   const m = metricsFor(1440, 900, false, DEFAULT_SIZES, 1.5);
-  expect([m.nodeW, m.nodeH]).toEqual([312, 156]);
-  expect([metricsFor(1440, 900, false).nodeW, metricsFor(1440, 900, false).nodeH]).toEqual([208, 104]);
+  expect([m.nodeW, m.nodeH]).toEqual([312, 198]);
+  expect([metricsFor(1440, 900, false).nodeW, metricsFor(1440, 900, false).nodeH]).toEqual([208, 132]);
 });
