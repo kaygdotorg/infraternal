@@ -342,7 +342,19 @@ impl EmbeddedAgent {
     }
 
     /// Start the on-demand agent supervisor for the server's own executable.
+    #[cfg(any(not(target_os = "linux"), test))]
     pub fn spawn(executable: PathBuf) -> Self {
+        Self::spawn_inner(executable, None)
+    }
+
+    /// Start the embedded node with mesh files stored apart from volatile sessions.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spawn_with_mesh_state(executable: PathBuf, mesh_state: PathBuf) -> Self {
+        Self::spawn_inner(executable, Some(mesh_state))
+    }
+
+    /// Build the on-demand supervisor with its optional Mesh-only state path.
+    fn spawn_inner(executable: PathBuf, mesh_state: Option<PathBuf>) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
@@ -351,6 +363,7 @@ impl EmbeddedAgent {
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable,
+                mesh_state,
                 initial: None,
             },
             receiver,
@@ -725,6 +738,7 @@ impl EmbeddedAgent {
         })
     }
 
+    /// Build an embedded supervisor around an already-connected test socket.
     #[cfg(test)]
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -735,6 +749,7 @@ impl EmbeddedAgent {
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable: PathBuf::new(),
+                mesh_state: None,
                 initial: Some(stream),
             },
             receiver,
@@ -868,6 +883,7 @@ enum Peer {
     Remote(Arc<RemoteLink>),
 }
 
+/// Describes how the server supervisor reconnects to an embedded or remote child.
 enum Source {
     /// Already-greeted fixture links expose actor retry policy under a paused clock.
     #[cfg(test)]
@@ -877,6 +893,7 @@ enum Source {
     },
     Embedded {
         executable: PathBuf,
+        mesh_state: Option<PathBuf>,
         initial: Option<UnixStream>,
     },
     #[cfg(feature = "remote")]
@@ -888,6 +905,9 @@ enum Source {
 }
 
 impl Source {
+    /// Open the next child connection, consuming the inherited socket on first use.
+    /// # Errors
+    /// Returns unavailable when the child process or remote channel cannot connect.
     async fn connect(&mut self) -> Result<AgentConnection, AgentError> {
         match self {
             #[cfg(test)]
@@ -902,8 +922,9 @@ impl Source {
             }
             Self::Embedded {
                 executable,
+                mesh_state,
                 initial,
-            } => connect_agent(executable, initial.take()).await,
+            } => connect_agent(executable, initial.take(), mesh_state.as_deref()).await,
             #[cfg(feature = "remote")]
             Self::Remote {
                 incoming,
@@ -1597,14 +1618,19 @@ fn after_loss(backoff: Duration, connected_at: std::time::Instant) -> Duration {
     }
 }
 
+/// Start or attach to the embedded infraternal agent and finish its handshake.
+/// # Errors
+/// Returns unavailable when the child cannot start or the channel handshake fails.
 async fn connect_agent(
     executable: &Path,
     initial: Option<UnixStream>,
+    mesh_state: Option<&Path>,
 ) -> Result<AgentConnection, AgentError> {
     let (mut socket, pid) = if let Some(socket) = initial {
         (socket, None)
     } else {
-        spawn_socketpair_agent(executable).map_err(|_| AgentError::Unavailable)?
+        spawn_socketpair_agent_with_mesh_state(executable, mesh_state)
+            .map_err(|_| AgentError::Unavailable)?
     };
     let setup = async {
         let mut encode = Vec::with_capacity(128);
@@ -3430,9 +3456,26 @@ fn decode_session_id(value: &str) -> Option<[u8; 16]> {
         .then(|| parsed.into_bytes())
 }
 
-#[cfg(unix)]
+/// Spawn a child with its default paths for process-boundary regression tests.
+/// # Errors
+/// Returns unavailable when socket, spawn or stream setup fails.
+#[cfg(all(test, unix))]
 fn spawn_socketpair_agent(
     executable: &std::path::Path,
+) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
+    spawn_socketpair_agent_with_mesh_state(executable, None)
+}
+
+/// Spawn the embedded child with a private Mesh-only state override when present.
+///
+/// The ordinary `--state` remains unset, so session rendezvous and non-Mesh plugin files retain
+/// their existing runtime location.
+/// # Errors
+/// Returns unavailable when socket, argument, spawn or stream setup fails.
+#[cfg(unix)]
+fn spawn_socketpair_agent_with_mesh_state(
+    executable: &std::path::Path,
+    mesh_state: Option<&std::path::Path>,
 ) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
     use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
     use std::{
@@ -3444,12 +3487,19 @@ fn spawn_socketpair_agent(
     let (parent, child) = StdUnixStream::pair().map_err(|_| AgentError::Unavailable)?;
     let path =
         CString::new(executable.as_os_str().as_bytes()).map_err(|_| AgentError::Unavailable)?;
-    let argv = [
+    let mut arguments = vec![
         path.clone(),
         CString::new("agent").map_err(|_| AgentError::Unavailable)?,
         CString::new("--fd").map_err(|_| AgentError::Unavailable)?,
         CString::new("3").map_err(|_| AgentError::Unavailable)?,
     ];
+    if let Some(mesh_state) = mesh_state {
+        arguments.push(CString::new("--mesh-state").map_err(|_| AgentError::Unavailable)?);
+        arguments.push(
+            CString::new(mesh_state.as_os_str().as_bytes()).map_err(|_| AgentError::Unavailable)?,
+        );
+    }
+    let argv: Vec<_> = arguments.iter().map(CString::as_c_str).collect();
     let environment = std::env::vars_os()
         .map(|(key, value)| {
             let mut entry = key.as_os_str().as_bytes().to_vec();
@@ -3497,9 +3547,13 @@ fn spawn_socketpair_agent(
     Ok((stream, Some(pid)))
 }
 
+/// Spawn the embedded child with an optional private Mesh path on Unix platforms.
+/// # Errors
+/// Returns unavailable on platforms without inherited Unix socketpairs.
 #[cfg(not(unix))]
-fn spawn_socketpair_agent(
+fn spawn_socketpair_agent_with_mesh_state(
     _executable: &std::path::Path,
+    _mesh_state: Option<&std::path::Path>,
 ) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
     Err(AgentError::Unavailable)
 }

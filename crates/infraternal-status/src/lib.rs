@@ -14,8 +14,8 @@
 //!    two observations per unit, four concurrent `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
 //!    other manager's units are still readable.
-//! 3. Read mesh facts from the public snapshot the mesh writes next to the
-//!    runtime state, and the kernel's interface list under `/sys`.
+//! 3. Read mesh facts from the host agent's `--state` snapshot or the embedded
+//!    server snapshot under `<server --data>/mesh`, plus the kernel interface list.
 //!
 //! Headline/exit contract for configured roles (D299/D303). A retained server
 //! database establishes the server role even when its unit is masked/missing.
@@ -775,6 +775,11 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
         .iter()
         .filter_map(|(unit, _)| unit.state.clone())
         .collect();
+    dirs.extend(units.iter().filter_map(|(unit, _)| {
+        (unit.kind == Kind::Server)
+            .then(|| unit.data.as_ref().map(|data| data.join("mesh")))
+            .flatten()
+    }));
     dirs.extend(roots.run_dir.clone());
     let mut unreadable = false;
     let mut found = false;
