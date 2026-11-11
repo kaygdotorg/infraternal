@@ -122,10 +122,10 @@ for (const [name, viewport, scale] of SIZES) {
       await settle(page);
       await page.screenshot({ path: resolve(OUT, `added-host-${name}-${theme}.png`) });
       // D385 puts the host's address in Connection; machine facts remain scoped to the same host across tabs.
-      await page.getByRole("tab", { name: "Connection" }).click();
+      await page.locator(".canvas-popover").getByRole("tab", { name: "Connection" }).click();
       await expect(value(page, "Address")).toHaveText("operator@worker.lan");
-      await expect(page.getByRole("tab")).toHaveCount(2);
-      await page.getByRole("tab", { name: "Machine" }).click();
+      await expect(page.locator(".canvas-popover").getByRole("tab")).toHaveCount(2);
+      await page.locator(".canvas-popover").getByRole("tab", { name: "Machine" }).click();
       await expect(value(page, "CPU")).toHaveText("8 logical cores · Neoverse N1");
       expect(asked).toContain("host.facts.read");
       expect(asked).toContain(`remote.host.facts ${WORKER_ID}`);
