@@ -23,6 +23,7 @@ import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
 import { lookBridge, startThemes } from "./canvas/themes/controller";
 import { readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
+import { watchKeyboard } from "./keyboard-viewport";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { initialFont, rememberFont } from "./font-preference";
@@ -916,9 +917,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       void applyLook();
     }
   };
-  const viewportChange = (): void => {
-    const viewport = window.visualViewport;
-    keyboardOpen = Boolean(viewport && viewport.height < window.innerHeight - 120);
+  /** Re-reads whether the keyboard is up (see keyboard-viewport.ts: it also runs after focus changes and a settle delay). */
+  const viewportChange = (open: boolean): void => {
+    keyboardOpen = open;
     ROOT.dataset.kb = keyboardOpen ? "open" : "closed";
     if (keyboardOpen) {
       keybar.classList.remove("is-away");
@@ -987,8 +988,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   systemDark.addEventListener("change", systemThemeChange);
   const dockedLayoutChange = (): void => dockPanes(!sidebar.hidden, true);
   dockedLayout.addEventListener("change", dockedLayoutChange);
-  window.visualViewport?.addEventListener("resize", viewportChange);
-  window.visualViewport?.addEventListener("scroll", viewportChange);
+  const stopKeyboardWatch = watchKeyboard(viewportChange);
   viewportChange();
 
   const keyInput: Record<string, string> = {
@@ -1766,8 +1766,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.removeEventListener("resize", resize);
       systemDark.removeEventListener("change", systemThemeChange);
       dockedLayout.removeEventListener("change", dockedLayoutChange);
-      window.visualViewport?.removeEventListener("resize", viewportChange);
-      window.visualViewport?.removeEventListener("scroll", viewportChange);
+      stopKeyboardWatch();
       offInputToolbar();
       keybar.removeEventListener("pointercancel", keybarPointerCancel);
       keybar.removeEventListener("click", keybarClick);

@@ -10,6 +10,7 @@
  *   is left transformed at rest and text stays crisp.
  * - It loads on demand (D188): nothing of it is fetched until a pill is first pressed.
  */
+import { keyboardIsOpen, watchKeyboard } from "../../keyboard-viewport";
 import { createCapsuleTabs } from "../../../../../packages/ui/src/capsule-tabs";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { createKeyValueList } from "../../../../../packages/ui/src/kv-list";
@@ -132,7 +133,7 @@ export function openDetailsPopover(
     const top = Math.round(pill.bottom + INSET);
     const tray = stage.querySelector<HTMLElement>("#keybar");
     const trayTop = tray && getComputedStyle(tray).display !== "none" ? tray.getBoundingClientRect().top : screen.bottom;
-    const bottom = Math.min(win.bottom - inset, trayTop - INSET, (window.visualViewport?.height ?? innerHeight) - INSET);
+    const bottom = Math.min(win.bottom - inset, trayTop - INSET, (keyboardIsOpen() ? window.visualViewport?.height ?? innerHeight : innerHeight) - INSET);
     root.style.left = `${left - screen.left}px`;
     root.style.top = `${top - screen.top}px`;
     root.style.width = `${Math.round(width)}px`;
@@ -180,7 +181,9 @@ export function openDetailsPopover(
     if (event.key === "Escape" && !(event.target instanceof Element && event.target.closest("[data-owns-escape]"))) { event.stopPropagation(); close("keyboard"); anchor.focus({ preventScroll: true }); }
   }, { capture: true, signal: events.signal });
   window.addEventListener("resize", () => place(), { signal: events.signal });
-  window.visualViewport?.addEventListener("resize", () => place(), { signal: events.signal });
+  // The keyboard watcher also re-places after focus changes and a settle delay, so a panel never keeps a keyboard-sized height.
+  const stopKeyboardWatch = watchKeyboard(() => place());
+  events.signal.addEventListener("abort", stopKeyboardWatch, { once: true });
   if (source === "keyboard") root.querySelector<HTMLElement>(".ui-tab[aria-selected='true']")?.focus({ preventScroll: true });
 
   return { windowId: input.windowId, close, refresh: () => show(selected, false, false) };
