@@ -1,6 +1,6 @@
 /**
  * The Font group in the command palette (#90, D87): arrowing or hovering onto a row previews
- * the whole font (UI and terminal), Escape reverts, Enter commits and persists, and a font is
+ * the whole font (UI and terminal), Escape reverts, Enter commits (the account's look keeps it, D352), and a font is
  * fetched only when first previewed or picked.
  */
 import { expect, test, type Page } from "playwright/test";
@@ -49,7 +49,11 @@ test("arrow previews a font, Escape reverts, nothing is saved", async ({ browser
   await context.close();
 });
 
-test("hover previews, Enter commits and the choice survives a reload", async ({ browser }) => {
+// Where a committed font is kept is the account's look (D352, D366, #400), written by the product screen's theme store. This page is the bare
+// terminal screen of the test double, which has no look to write to, so what survives a reload is proved against a real server by
+// `real/appearance-sync.spec.ts` ("theme and font changes reach the same account live and after reload"). Here: Enter commits the
+// font on the page and writes nothing to the old device-wide key.
+test("hover previews and Enter commits the font", async ({ browser }) => {
   const context = await browser.newContext({ baseURL, viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   await open(page);
@@ -62,12 +66,7 @@ test("hover previews, Enter commits and the choice survives a reload", async ({ 
   const committed = await state(page);
   expect(committed.dataFont).toBe("ibm-plex-mono");
   expect(committed.terminalId).toBe("ibm-plex-mono");
-  expect(committed.saved).toBe("ibm-plex-mono");
-  await page.goto("/?mock=1&theme=ink&bg=none");
-  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
-  const reloaded = await state(page);
-  expect(reloaded.dataFont).toBe("ibm-plex-mono");
-  expect(reloaded.terminalId).toBe("ibm-plex-mono");
-  expect(reloaded.loaded).toContain("IBM Plex Mono");
+  expect(committed.saved, "the account's look keeps the font now, not the old device-wide key").toBeNull();
+  expect(committed.loaded).toContain("IBM Plex Mono");
   await context.close();
 });

@@ -519,8 +519,12 @@ test("canvas lock on a phone: tapping a neighbour that peeks in moves there; two
   const t = await touchPage(browser, 3);
   try {
     const { page } = t;
-    // The next column peeks in at the right edge.
-    await page.touchscreen.tap(368, 500);
+    // The next column peeks in at the right edge. Its window is hit a few pixels inside its own left edge (the first ones are the
+    // gap's rim), and where that edge is follows the window width (it grows with the UI size, #283), so the tap point is found
+    // from the window's box instead of being a fixed pixel.
+    const nextLeft = await page.locator('.cl-col[data-id="c2"] > .ui-window').first().evaluate((w) => w.getBoundingClientRect().left);
+    expect(nextLeft, "the next window peeks in from the right").toBeLessThan(393 - 10);
+    await page.touchscreen.tap(Math.round(nextLeft) + 9, 500);
     await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).index, { timeout: 4000 }).toBe(1);
     await page.waitForTimeout(800);
     const col = '.cl-col[data-id="c2"]';
