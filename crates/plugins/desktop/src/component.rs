@@ -429,13 +429,11 @@ else:
         let _lock = NATIVE_CHILD_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let spawned = catch_unwind(AssertUnwindSafe(|| {
+        let spawned: Result<(), _> = catch_unwind(AssertUnwindSafe(|| {
             let fixture = NativeChildFixture::start();
             resume_unwind(Box::new((fixture.group_id(), fixture.native_pid())));
         }));
-        let Err(payload) = spawned else {
-            panic!("fixture unexpectedly returned without unwinding");
-        };
+        let payload = spawned.expect_err("fixture unexpectedly returned without unwinding");
         let (group, native_pid) = *payload
             .downcast::<(nix::unistd::Pid, nix::unistd::Pid)>()
             .unwrap();
