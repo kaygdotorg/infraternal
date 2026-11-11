@@ -433,9 +433,8 @@ else:
             let fixture = NativeChildFixture::start();
             resume_unwind(Box::new((fixture.group_id(), fixture.native_pid())));
         }));
-        let payload = match spawned {
-            Err(payload) => payload,
-            Ok(()) => panic!("fixture unexpectedly returned without unwinding"),
+        let Err(payload) = spawned else {
+            panic!("fixture unexpectedly returned without unwinding");
         };
         let (group, native_pid) = *payload
             .downcast::<(nix::unistd::Pid, nix::unistd::Pid)>()
