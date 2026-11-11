@@ -144,6 +144,41 @@ fn a_large_repaint_reclaims_only_the_bulk_output_it_replaces() {
     assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
 }
 
+/// Fit the largest valid Snapshot using the real unused grant before borrowing any queued raw bytes.
+#[test]
+fn maximum_snapshot_can_spend_unused_bulk_credit() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+    const BACKLOG: usize = 16 * 1024;
+    const MAX_REPAINT: usize = infraternal_shim::frame::MAX_FRAME - 9;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT + REPAINT_RESERVE).unwrap();
+    output.forward(BACKLOG).unwrap();
+    let budget = output.repaint_budget();
+    assert!(budget >= MAX_REPAINT as u64);
+
+    output
+        .repaint_reserved(BACKLOG as u64 + 1, MAX_REPAINT)
+        .expect("every frame-valid Snapshot fits one unspent browser grant");
+
+    assert_eq!(output.reserved_credit(), 0);
+    let remaining = u64::from(BULK_CREDIT + REPAINT_RESERVE)
+        - BACKLOG as u64
+        - MAX_REPAINT as u64;
+    assert_eq!(output.repaint_budget(), remaining);
+    output
+        .repaint_reserved(BACKLOG as u64 + 2, usize::try_from(remaining).unwrap())
+        .expect("one more repaint may spend the exact remaining grant");
+    assert_eq!(output.repaint_budget(), 0);
+    assert!(output.bulk_starved());
+    assert_eq!(
+        output.repaint_reserved(BACKLOG as u64 + 3, 1),
+        Err(Error::OutOfRange),
+        "key spam cannot mint credit after the original grant is exhausted"
+    );
+}
+
 /// Keep the full legacy window for clients that do not offer repaint credit.
 #[test]
 fn a_legacy_initial_credit_keeps_its_full_bulk_window() {

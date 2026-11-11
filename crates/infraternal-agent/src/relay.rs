@@ -6,14 +6,14 @@
 //! and ring, and requests replay when credit returns. No idle timer runs.
 //!
 //! Raw output may spend only the ordinary 1 MiB bulk window. A relay attached
-//! for the tracer also protects 64 KiB for an input-triggered repaint. A larger
-//! replacement Snapshot may borrow credit from this stream's unreturned raw
-//! Output, since the client drops that queued output when it accepts the
-//! Snapshot. A raw byte can back at most one replacement before its credit
-//! returns, even when the first Snapshot fits in the reserve. Returned credit
-//! pays repaint debt before it funds more output. Snapshots stay under the
-//! shim's 1 MiB frame cap. The unchanged 250 ms path uses ordinary bulk credit,
-//! and every `Output` owns its own budgets.
+//! for the tracer also protects 64 KiB for an input-triggered repaint. A
+//! Snapshot spends that reserve first, then unused capped bulk credit, then
+//! credit from unreturned raw Output that the client discards when it accepts
+//! the Snapshot. Each granted byte can fund at most one sent frame: a raw byte
+//! backs at most one replacement, and borrowed bytes become debt until credit
+//! returns. Returned credit pays repaint debt before it funds more output.
+//! Snapshots stay under the shim's 1 MiB frame cap. The unchanged 250 ms path
+//! uses ordinary bulk credit, and every `Output` owns its own budgets.
 
 use infraternal_shim::frame::MAX_FRAME;
 use std::{
@@ -330,10 +330,11 @@ impl Output {
 
     /// Commit a key repaint from granted credit and raw bytes the Snapshot replaces.
     ///
-    /// The separate reserve pays first. A larger Snapshot can borrow only from
-    /// raw bytes sent since the previous repaint; the client drops that output
-    /// when it accepts the replacement. Returned credit pays the borrow before
-    /// it funds more output. A zero-byte repaint still costs one byte.
+    /// The separate reserve pays first, followed by unused capped bulk credit.
+    /// A larger Snapshot may then borrow only from raw bytes sent since the
+    /// previous repaint; the client drops that output when it accepts the
+    /// replacement. Returned credit pays the borrow before it funds more
+    /// output. A zero-byte repaint still costs one byte.
     /// # Errors
     /// Rejects regression, overflow, a Snapshot above the shim frame limit, or
     /// a repaint larger than its available credit plus replaceable raw output.
@@ -351,8 +352,9 @@ impl Output {
             self.required = cost;
             return Err(Error::OutOfRange);
         }
-        let spent = cost.min(u64::from(self.repaint_reserve));
-        let borrowed = cost - spent;
+        let reserve_spent = cost.min(u64::from(self.repaint_reserve));
+        let bulk_spent = (cost - reserve_spent).min(self.bulk_credit());
+        let borrowed = cost - reserve_spent - bulk_spent;
         let borrowed = u32::try_from(borrowed).map_err(|_| Error::Overflow)?;
         let repaint_debt = self
             .repaint_debt
@@ -360,8 +362,8 @@ impl Output {
             .ok_or(Error::Overflow)?;
         self.required = 1;
         self.cursor = seq;
-        self.credit -= spent;
-        self.repaint_reserve -= u32::try_from(spent).map_err(|_| Error::Overflow)?;
+        self.credit -= reserve_spent + bulk_spent;
+        self.repaint_reserve -= u32::try_from(reserve_spent).map_err(|_| Error::Overflow)?;
         // This repaint replaces the raw tail already sent. Those bytes may
         // still be in flight for credit accounting, but cannot back another
         // repaint until the client returns their credit.
@@ -403,6 +405,7 @@ impl Output {
     pub fn repaint_budget(&self) -> u64 {
         if self.reserve_mode == RESERVE_ACTIVE {
             u64::from(self.repaint_reserve)
+                .saturating_add(self.bulk_credit())
                 .saturating_add(u64::from(self.raw_replacement_credit))
                 .saturating_sub(u64::from(self.repaint_debt))
         } else {

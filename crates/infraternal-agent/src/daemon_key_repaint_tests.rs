@@ -232,6 +232,37 @@ async fn fill_bulk_window(fixture: &mut RelayFixture) {
     .unwrap();
 }
 
+/// Leave only a small raw backlog in flight while retaining the rest of the granted bulk window.
+async fn fill_partial_bulk_backlog(fixture: &mut RelayFixture, length: usize) {
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(INITIAL_CREDIT))
+        .unwrap();
+    sessions::send(&mut fixture.peer, &Shim::Output(0, vec![b'f'; length]))
+        .await
+        .unwrap();
+    let Some(Message::Shim(stream, Shim::Output(0, bytes))) =
+        tokio::time::timeout(EVENT_GUARD, fixture.messages.recv())
+            .await
+            .expect("partial bulk output was not forwarded")
+    else {
+        panic!("relay did not forward the partial backlog");
+    };
+    assert_eq!(stream, fixture.stream);
+    assert_eq!(bytes.len(), length);
+}
+
+/// Make a valid, highly styled Snapshot whose payload is at least `length` bytes.
+fn styled_snapshot_at_least(length: usize) -> Vec<u8> {
+    let mut styled = Vec::with_capacity(length);
+    while styled.len() < length {
+        styled.extend_from_slice(b"\x1b[38;2;255;0;0mX\x1b[38;2;0;0;255mY");
+    }
+    styled
+}
+
 /// Submit a key and wait until the shim confirms its PTY write.
 async fn type_key_and_wait_for_ack(fixture: &mut RelayFixture, seq: u64) -> bool {
     fixture
@@ -321,10 +352,7 @@ async fn key_repaint_funds_a_large_styled_snapshot_from_dropped_bulk_credit() {
     let mut fixture = start_relay(2).await;
     fill_bulk_window(&mut fixture).await;
     let requested = type_key_and_wait_for_repaint_request(&mut fixture, 0).await;
-    let mut styled = Vec::with_capacity(128 * 1024);
-    while styled.len() < 128 * 1024 {
-        styled.extend_from_slice(b"\x1b[38;2;255;0;0mX\x1b[38;2;0;0;255mY");
-    }
+    let styled = styled_snapshot_at_least(128 * 1024);
     assert!(styled.len() > REPAINT_CREDIT as usize);
     assert!(styled.len() < infraternal_shim::frame::MAX_FRAME - 9);
     if requested {
@@ -347,6 +375,35 @@ async fn key_repaint_funds_a_large_styled_snapshot_from_dropped_bulk_credit() {
         repaint.map(|(seq, bytes)| (seq, bytes.len())),
         Some((u64::from(BULK_CREDIT) + 1, styled.len())),
         "a faithful styled Snapshot above the small reserve must use only reclaimed or reserved credit"
+    );
+}
+
+/// Use the unused granted bulk window when a valid large Snapshot replaces a small raw backlog.
+#[tokio::test]
+async fn key_repaint_funds_a_large_snapshot_from_unused_bulk_credit() {
+    let mut fixture = start_relay(2).await;
+    let backlog = usize::try_from(relay::KEY_REPAINT_BACKLOG).unwrap();
+    fill_partial_bulk_backlog(&mut fixture, backlog).await;
+    let requested = type_key_and_wait_for_repaint_request(&mut fixture, backlog as u64).await;
+    let styled = styled_snapshot_at_least(128 * 1024);
+    let seq = u64::try_from(backlog + 1).unwrap();
+    if requested {
+        sessions::send(&mut fixture.peer, &Shim::Snapshot(seq, styled.clone()))
+            .await
+            .unwrap();
+    }
+    let repaint = if requested {
+        wait_for_repaint(&mut fixture).await
+    } else {
+        None
+    };
+    stop_relay(&mut fixture).await;
+
+    assert!(requested, "the raw backlog must request its key repaint");
+    assert_eq!(
+        repaint.map(|(seq, bytes)| (seq, bytes.len())),
+        Some((seq, styled.len())),
+        "a valid large Snapshot may use the unused client grant after dropping queued bulk"
     );
 }
 
