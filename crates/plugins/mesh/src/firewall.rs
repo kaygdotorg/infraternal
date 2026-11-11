@@ -7,10 +7,26 @@ use crate::{
 use std::{
     fmt::Write as _,
     io::{self, Write},
+    os::unix::fs::MetadataExt,
+    path::Path,
     process::{Command, Stdio},
 };
-const NFT: &str = "/usr/sbin/nft";
+/// The fixed install-time nft entry used by both the optional guard and D346's kernel engine.
+pub(crate) const NFT: &str = "/usr/sbin/nft";
+/// Fixed iptables-nft restore and inspection paths for both address families.
+const IPTABLES_NFT: [&str; 4] = [
+    "/usr/sbin/iptables-nft",
+    "/usr/sbin/iptables-nft-restore",
+    "/usr/sbin/ip6tables-nft",
+    "/usr/sbin/ip6tables-nft-restore",
+];
 const TABLE: &str = "infraternal_mesh";
+/// Kernel-only protections shown when a `GotaTun` guard cannot be installed.
+const MISSING_KERNEL_PROTECTIONS: [&str; 3] = [
+    "mesh-address anti-spoofing on non-mesh interfaces",
+    "forwarding drops",
+    "public TCP/80 and TCP/443 gate",
+];
 // Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
 // middleware then checks the source against that route's original backend-port grant.
 
@@ -32,11 +48,108 @@ fn removes_only_permissions(old: &Config, next: &Config) -> bool {
 }
 
 /// The two owner-selected Linux frontends; kernel policy is retained independently of processes.
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Backend {
     Nft,
     NfTables,
 }
+
+/// The live state of the optional kernel-only guard for a `GotaTun` node.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct KernelGuardStatus {
+    /// Whether the guard is installed, missing, or waiting for mesh addresses.
+    pub state: &'static str,
+    /// The protections that are not currently active.
+    pub missing: Vec<&'static str>,
+    /// The exact tool/path result or installation error.
+    pub detail: String,
+}
+
+impl Default for KernelGuardStatus {
+    fn default() -> Self {
+        Self {
+            state: "pending",
+            missing: MISSING_KERNEL_PROTECTIONS.to_vec(),
+            detail: "waiting for the mesh addresses needed by the kernel guard".to_owned(),
+        }
+    }
+}
+
+/// Selects whether the kernel owns full peer policy or only guards the host edges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum FirewallMode {
+    /// Keep the complete peer policy in the selected firewall frontend.
+    #[default]
+    FullPolicy,
+    /// Keep only kernel-visible protections and let `GotaTun` decide mesh access.
+    OptionalKernelGuard,
+    /// Keep full peer policy in nft for the kernel `WireGuard` opt-out.
+    RequiredNft,
+}
+
+/// Select an optional fixed-path frontend only when its complete command set is trusted.
+fn optional_backend(nft: bool, iptables_ipv4: bool, iptables_ipv6: bool) -> Option<Backend> {
+    if nft {
+        Some(Backend::Nft)
+    } else if iptables_ipv4 && iptables_ipv6 {
+        Some(Backend::NfTables)
+    } else {
+        None
+    }
+}
+
+/// Name each unavailable root-owned tool path so a missing optional guard is visible.
+fn missing_guard_tool_detail(nft: bool, iptables_ipv4: bool, iptables_ipv6: bool) -> String {
+    let mut missing = Vec::new();
+    if !nft {
+        missing.push(format!("nft at {NFT}"));
+    }
+    if !iptables_ipv4 {
+        missing.push(format!(
+            "iptables-nft at {} and iptables-nft-restore at {}",
+            IPTABLES_NFT[0], IPTABLES_NFT[1]
+        ));
+    }
+    if !iptables_ipv6 {
+        missing.push(format!(
+            "ip6tables-nft at {} and ip6tables-nft-restore at {}",
+            IPTABLES_NFT[2], IPTABLES_NFT[3]
+        ));
+    }
+    format!(
+        "{} were not found as root-owned executables",
+        missing.join("; ")
+    )
+}
+
+/// Accept only the root-owned install-time path and its root-owned executable target.
+fn root_owned_tool(path: &str) -> bool {
+    let path = Path::new(path);
+    let Ok(link) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let Ok(target) = std::fs::metadata(path) else {
+        return false;
+    };
+    link.uid() == 0
+        && target.uid() == 0
+        && target.is_file()
+        && target.mode() & 0o111 != 0
+        && target.mode() & 0o022 == 0
+}
+
+/// Keep command failures readable when the fixed install-time path races or refuses access.
+fn tool_error(path: &str, operation: &str, error: &io::Error) -> io::Error {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("firewall tool");
+    io::Error::new(
+        error.kind(),
+        format!("{name} at {path} could not {operation}: {error}"),
+    )
+}
+
 /// An owned inet table with input, output and forwarded packet enforcement.
 #[derive(Default)]
 pub struct Firewall {
@@ -52,6 +165,8 @@ pub struct Firewall {
     // closes the window in which a revoked peer could open a new connection [#281].
     proxy_config: Option<Config>,
     previous_fence: bool,
+    mode: FirewallMode,
+    guard_status: KernelGuardStatus,
 }
 impl Firewall {
     /// Select the declared compatibility backend explicitly for real-engine validation.
@@ -64,6 +179,27 @@ impl Firewall {
     pub fn for_backend(backend: Backend) -> Self {
         Self {
             backend: Some(backend),
+            ..Self::default()
+        }
+    }
+    /// Configure the firewall mode selected by the node's engine.
+    #[must_use]
+    pub(crate) fn for_node(
+        backend: Option<Backend>,
+        engine: crate::gotatun_node::EngineKind,
+    ) -> Self {
+        let mode = match engine {
+            crate::gotatun_node::EngineKind::GotaTun => FirewallMode::OptionalKernelGuard,
+            crate::gotatun_node::EngineKind::Kernel => FirewallMode::RequiredNft,
+        };
+        let backend = if mode == FirewallMode::RequiredNft {
+            Some(Backend::Nft)
+        } else {
+            backend
+        };
+        Self {
+            backend,
+            mode,
             ..Self::default()
         }
     }
@@ -95,6 +231,99 @@ impl Firewall {
     pub fn installed(&self) -> bool {
         self.installed
     }
+    /// Read the optional kernel guard state for status and user-facing diagnostics.
+    #[must_use]
+    pub fn kernel_guard_status(&self) -> Option<&KernelGuardStatus> {
+        self.guard_only().then_some(&self.guard_status)
+    }
+
+    /// Whether the selected node engine moves peer access decisions into `GotaTun`.
+    fn guard_only(&self) -> bool {
+        self.mode == FirewallMode::OptionalKernelGuard
+    }
+
+    /// Whether the selected node engine requires the fixed nft frontend.
+    fn nft_required(&self) -> bool {
+        self.mode == FirewallMode::RequiredNft
+    }
+
+    /// Require the fixed, root-owned nft path for the kernel-WireGuard opt-out.
+    ///
+    /// # Errors
+    /// Names `nft` and the exact path when the path is missing, untrusted or not executable.
+    pub(crate) fn require_nft(&mut self) -> io::Result<()> {
+        if !root_owned_tool(NFT) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("nft at {NFT} is missing or is not a root-owned executable"),
+            ));
+        }
+        self.backend = Some(Backend::Nft);
+        self.mode = FirewallMode::RequiredNft;
+        Ok(())
+    }
+    /// Resolve one fixed root-owned tool path without consulting `PATH`.
+    fn select_optional_backend(&mut self) -> bool {
+        let nft = root_owned_tool(NFT);
+        let ipv4 = root_owned_tool(IPTABLES_NFT[0]) && root_owned_tool(IPTABLES_NFT[1]);
+        let ipv6 = root_owned_tool(IPTABLES_NFT[2]) && root_owned_tool(IPTABLES_NFT[3]);
+        self.select_optional_backend_with_tools(nft, ipv4, ipv6)
+    }
+    /// Record the available fixed-path frontend, or the exact missing-tool state for `GotaTun`.
+    fn select_optional_backend_with_tools(
+        &mut self,
+        nft: bool,
+        iptables_ipv4: bool,
+        iptables_ipv6: bool,
+    ) -> bool {
+        let available_at = |backend| match backend {
+            Backend::Nft => nft,
+            Backend::NfTables => iptables_ipv4 && iptables_ipv6,
+        };
+        let selected = self
+            .backend
+            .filter(|backend| available_at(*backend))
+            .or_else(|| optional_backend(nft, iptables_ipv4, iptables_ipv6));
+        if let Some(selected) = selected {
+            self.backend = Some(selected);
+            true
+        } else {
+            self.guard_status = KernelGuardStatus {
+                state: "missing",
+                missing: MISSING_KERNEL_PROTECTIONS.to_vec(),
+                detail: missing_guard_tool_detail(nft, iptables_ipv4, iptables_ipv6),
+            };
+            false
+        }
+    }
+    /// Keep the exact missing protections and tool path in status after a best-effort failure.
+    fn report_guard_failure(&mut self, operation: &str, error: &io::Error) {
+        self.guard_status = KernelGuardStatus {
+            state: "failed",
+            missing: MISSING_KERNEL_PROTECTIONS.to_vec(),
+            detail: format!("{operation}: {error}"),
+        };
+    }
+    /// Report whether the last best-effort guard transaction is active.
+    fn refresh_guard_status(&mut self) {
+        self.guard_status = if self.installed {
+            let detail = match self.backend {
+                Some(Backend::Nft) => format!("nft at {NFT} installed the kernel-only guard"),
+                Some(Backend::NfTables) => format!(
+                    "iptables-nft at {} and ip6tables-nft at {} installed the kernel-only guard",
+                    IPTABLES_NFT[1], IPTABLES_NFT[3]
+                ),
+                None => "the kernel-only guard is not installed".to_owned(),
+            };
+            KernelGuardStatus {
+                state: "installed",
+                missing: Vec::new(),
+                detail,
+            }
+        } else {
+            KernelGuardStatus::default()
+        };
+    }
     fn is_fallback(&self) -> bool {
         matches!(self.backend, Some(Backend::NfTables))
     }
@@ -102,20 +331,60 @@ impl Firewall {
     /// # Errors
     /// Reports missing tools, privilege failures or unrelated rules with the same name.
     pub fn adopt(&mut self) -> io::Result<()> {
-        self.select();
+        let optional_guard = self.guard_only();
+        if self.nft_required() {
+            self.require_nft()?;
+        } else if optional_guard {
+            if !self.select_optional_backend() {
+                self.installed = false;
+                self.fallback_complete = false;
+                return Ok(());
+            }
+        } else {
+            self.select();
+        }
+        match self.adopt_selected_backend() {
+            Ok(()) => {
+                if self.guard_only() {
+                    self.refresh_guard_status();
+                }
+                Ok(())
+            }
+            Err(error) if optional_guard => {
+                self.installed = false;
+                self.fallback_complete = false;
+                self.report_guard_failure("inspect the kernel-only guard", &error);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+    /// Inspect the selected frontend without changing which protections it owns.
+    fn adopt_selected_backend(&mut self) -> io::Result<()> {
         if self.is_fallback() {
-            let families = crate::iptables::presence()?;
-            self.installed = families.into_iter().any(crate::iptables::Ownership::any);
-            self.fallback_complete = families
-                .into_iter()
-                .all(crate::iptables::Ownership::complete);
+            if self.guard_only() {
+                let guard = crate::iptables::guard_presence()?;
+                self.installed = guard.iter().any(|family| family.any());
+                self.fallback_complete = guard.iter().all(|family| family.complete());
+            } else {
+                let families = crate::iptables::presence()?;
+                self.installed = families.into_iter().any(crate::iptables::Ownership::any);
+                self.fallback_complete = families
+                    .into_iter()
+                    .all(crate::iptables::Ownership::complete);
+            }
         } else {
             let tables = Command::new(NFT)
                 .args(["-j", "list", "tables"])
                 .stderr(Stdio::null())
-                .output()?;
+                .output()
+                .map_err(|error| tool_error(NFT, "inspect tables", &error))?;
             if !tables.status.success() {
-                return Err(io::ErrorKind::PermissionDenied.into());
+                return Err(tool_error(
+                    NFT,
+                    "inspect tables",
+                    &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
+                ));
             }
             let tables: serde_json::Value =
                 serde_json::from_slice(&tables.stdout).map_err(io::Error::other)?;
@@ -129,9 +398,14 @@ impl Firewall {
                 let output = Command::new(NFT)
                     .args(["-j", "list", "table", "inet", TABLE])
                     .stderr(Stdio::null())
-                    .output()?;
+                    .output()
+                    .map_err(|error| tool_error(NFT, "inspect the mesh table", &error))?;
                 if !output.status.success() {
-                    return Err(io::ErrorKind::PermissionDenied.into());
+                    return Err(tool_error(
+                        NFT,
+                        "inspect the mesh table",
+                        &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
+                    ));
                 }
                 let state: serde_json::Value =
                     serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
@@ -178,6 +452,15 @@ impl Firewall {
         proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
         confirmed: bool,
     ) -> io::Result<()> {
+        if self.guard_only() {
+            self.install(config, &[], false, config, proxy_ingress)?;
+            self.proxy_ingress = proxy_ingress.clone();
+            self.accepted = Some(config.clone());
+            if confirmed {
+                self.proxy_config = Some(config.clone());
+            }
+            return Ok(());
+        }
         if self.proxy_ingress != *proxy_ingress || self.accepted.as_ref() != Some(config) {
             self.install(config, &[], false, config, proxy_ingress)?;
         }
@@ -200,7 +483,15 @@ impl Firewall {
         let proxy_ingress = self.proxy_ingress.clone();
         self.install(config, &[], false, config, &proxy_ingress)
     }
+    /// Retire revoked conntrack entries after the full policy snapshot has committed.
     pub(crate) fn complete(&mut self, config: &Config) -> io::Result<()> {
+        if self.guard_only() {
+            self.accepted = Some(config.clone());
+            if crate::proxy_access::selected_ports(&self.proxy_ingress).is_none() {
+                self.proxy_config = Some(config.clone());
+            }
+            return Ok(());
+        }
         let reference = self.proxy_config.as_ref().or(self.accepted.as_ref());
         crate::connection_state::retire(
             self.accepted.as_ref(),
@@ -225,6 +516,7 @@ impl Firewall {
         let proxy_ingress = self.proxy_ingress.clone();
         self.install(config, aliases, true, connections, &proxy_ingress)
     }
+    /// Install the selected full policy, or only its kernel guard for `GotaTun`.
     fn install(
         &mut self,
         config: &Config,
@@ -233,6 +525,12 @@ impl Firewall {
         connections: &Config,
         proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
     ) -> io::Result<()> {
+        if self.guard_only() {
+            return self.install_guard_only(config, aliases, proxy_ingress);
+        }
+        if self.nft_required() {
+            self.require_nft()?;
+        }
         self.select();
         // A table declaration can extend an existing table. First application
         // must therefore validate ownership even when no adapter called adopt.
@@ -322,11 +620,87 @@ impl Firewall {
         self.fallback_complete = self.is_fallback();
         Ok(())
     }
+    /// Apply only kernel-visible protections while `GotaTun` enforces all access grants itself.
+    fn install_guard_only(
+        &mut self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+        proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+    ) -> io::Result<()> {
+        if self.nft_required() {
+            self.require_nft()?;
+        } else if !self.select_optional_backend() {
+            return Ok(());
+        }
+        if !self.installed
+            && let Err(error) = self.adopt()
+        {
+            if self.nft_required() {
+                return Err(error);
+            }
+            self.report_guard_failure("inspect the existing guard", &error);
+            return Ok(());
+        }
+        let applied = if self.is_fallback() {
+            crate::iptables::apply_guard_only(config, aliases, proxy_ingress)
+        } else {
+            run(
+                NFT,
+                &["-f", "-"],
+                &render_guard_only(config, self.installed, aliases, proxy_ingress),
+            )
+        };
+        match applied {
+            Ok(()) => {
+                self.installed = true;
+                self.fallback_complete = self.is_fallback();
+                self.previous = Some(config.clone());
+                self.previous_aliases = aliases.to_vec();
+                self.previous_fence = false;
+                self.refresh_guard_status();
+                Ok(())
+            }
+            Err(error) if self.nft_required() => Err(error),
+            Err(error) => {
+                self.report_guard_failure("apply the kernel-only guard", &error);
+                Ok(())
+            }
+        }
+    }
     /// Remove only the owned table, leaving the host firewall intact.
     /// # Errors
     /// Returns a failed kernel deletion without claiming the component is off.
     pub fn remove(&mut self) -> io::Result<()> {
+        if self.guard_only() {
+            if self.installed {
+                if self.nft_required() {
+                    self.require_nft()?;
+                } else if !self.select_optional_backend() {
+                    return Ok(());
+                }
+                if self.is_fallback() {
+                    crate::iptables::remove_guard_only()?;
+                } else {
+                    self.adopt()?;
+                    if self.installed {
+                        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n"))?;
+                    }
+                }
+            }
+            self.installed = false;
+            self.fallback_complete = false;
+            self.previous = None;
+            self.accepted = None;
+            self.proxy_config = None;
+            self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
+            self.previous_aliases.clear();
+            self.refresh_guard_status();
+            return Ok(());
+        }
         if self.installed {
+            if self.nft_required() {
+                self.require_nft()?;
+            }
             if self.is_fallback() {
                 crate::iptables::remove()?;
             } else {
@@ -348,13 +722,15 @@ impl Firewall {
         Ok(())
     }
 }
+/// Run one fixed firewall command with a public rule script supplied on standard input.
 fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| tool_error(program, "run", &error))?;
     // Policy contains public typed addresses/ports only. No shell or secret in argv/stdout.
     let write = child
         .stdin
@@ -364,7 +740,11 @@ fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
     let status = child.wait()?;
     write?;
     if !status.success() {
-        return Err(io::ErrorKind::PermissionDenied.into());
+        return Err(tool_error(
+            program,
+            "apply the requested rules",
+            &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
+        ));
     }
     Ok(())
 }
@@ -582,6 +962,96 @@ fn render_with_aliases(
     script
 }
 
+/// Render only the protections the `GotaTun` packet filter cannot see.
+///
+/// Access grants stay in userspace. This table rejects mesh-address spoofing on other
+/// interfaces, stops forwarding through the host, and closes the public listener pair until
+/// a public route is active.
+fn render_guard_only(
+    config: &Config,
+    replace: bool,
+    aliases: &[crate::policy::model::Addresses],
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+) -> String {
+    let addresses = std::iter::once(&config.addresses)
+        .chain(aliases)
+        .chain(config.peers.values().map(|peer| &peer.peer.addresses))
+        .flat_map(|address| {
+            [
+                std::net::IpAddr::V4(address.ipv4),
+                std::net::IpAddr::V6(address.ipv6),
+            ]
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let ipv4 = addresses
+        .iter()
+        .filter_map(|address| match address {
+            std::net::IpAddr::V4(address) => Some(address.to_string()),
+            std::net::IpAddr::V6(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let ipv6 = addresses
+        .iter()
+        .filter_map(|address| match address {
+            std::net::IpAddr::V4(_) => None,
+            std::net::IpAddr::V6(address) => Some(address.to_string()),
+        })
+        .collect::<Vec<_>>();
+    let mut script = String::new();
+    if replace {
+        let _ = writeln!(script, "delete table inet {TABLE}");
+    }
+    let _ = writeln!(
+        script,
+        "table inet {TABLE} {{ comment \"infraternal.mesh.v1\";"
+    );
+    let ipv4_entries = ipv4.join(", ");
+    let ipv6_entries = ipv6.join(", ");
+    let _ = writeln!(
+        script,
+        " set mesh4 {{ type ipv4_addr; elements = {{ {ipv4_entries} }}; }}"
+    );
+    let _ = writeln!(
+        script,
+        " set mesh6 {{ type ipv6_addr; elements = {{ {ipv6_entries} }}; }}"
+    );
+    let _ = writeln!(
+        script,
+        " chain ingress {{ type filter hook prerouting priority -310; policy accept; iifname != \"{INTERFACE}\" ip saddr @mesh4 drop; iifname != \"{INTERFACE}\" ip6 saddr @mesh6 drop; }}"
+    );
+    let _ = writeln!(
+        script,
+        " chain forward {{ type filter hook forward priority -10; policy accept; iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
+    );
+    let public_gate = if proxy_ingress.public_route_active {
+        String::new()
+    } else {
+        proxy_ingress
+            .public_listener_pair
+            .filter(|pair| {
+                pair.http != pair.https
+                    && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                        .iter()
+                        .any(|range| range.contains(pair.http))
+                    && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                        .iter()
+                        .any(|range| range.contains(pair.https))
+            })
+            .map_or_else(String::new, |pair| {
+                format!(
+                    "iifname != \"lo\" tcp dport {{ {}, {} }} drop;",
+                    pair.http, pair.https
+                )
+            })
+    };
+    let _ = writeln!(
+        script,
+        " chain input {{ type filter hook input priority -10; policy accept; {public_gate} }}"
+    );
+    script.push_str("}\n");
+    script
+}
+
 // Both packet directions consult the initiating tuple. A reply's ephemeral
 // destination port is never interpreted as permission to initiate [164,242].
 fn render_connection_checks(script: &mut String, config: &Config) {
@@ -708,6 +1178,93 @@ mod tests {
                 .collect(),
             #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// The `GotaTun` optional guard contains only rules the packet filter cannot see.
+    #[test]
+    fn gotatun_guard_contains_only_mesh_spoof_forward_and_public_port_rules() {
+        let config = config();
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: Some(infraternal_mesh::proxy_ports::ListenerPortPair {
+                http: 80,
+                https: 443,
+            }),
+            public_route_active: false,
+            ..infraternal_mesh::proxy_ports::MeshProxyIngress::default()
+        };
+
+        let rules = render_guard_only(&config, true, &[], &ingress);
+
+        for rule in [
+            "ip saddr @mesh4 drop",
+            "ip6 saddr @mesh6 drop",
+            "iifname \"infraternal0\" drop",
+            "oifname \"infraternal0\" drop",
+            "tcp dport { 80, 443 } drop",
+        ] {
+            assert!(rules.contains(rule), "missing {rule}: {rules}");
+        }
+        for policy_rule in ["incoming4_", "outgoing4_", "ct state", "ct original"] {
+            assert!(
+                !rules.contains(policy_rule),
+                "unexpected {policy_rule}: {rules}"
+            );
+        }
+    }
+
+    /// A first guard install adds a table directly; only an owned replacement deletes it first.
+    #[test]
+    fn gotatun_guard_rendering_distinguishes_first_install_from_replacement() {
+        let config = config();
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
+
+        let first = render_guard_only(&config, false, &[], &ingress);
+        let replacement = render_guard_only(&config, true, &[], &ingress);
+
+        assert!(!first.starts_with("delete table"));
+        assert!(replacement.starts_with("delete table inet infraternal_mesh\n"));
+    }
+
+    /// Optional guard selection uses only complete fixed-path frontends and names every gap.
+    #[test]
+    fn optional_guard_selects_fixed_tools_and_names_every_missing_path() {
+        assert_eq!(optional_backend(true, false, false), Some(Backend::Nft));
+        assert_eq!(optional_backend(false, true, true), Some(Backend::NfTables));
+        assert_eq!(optional_backend(false, true, false), None);
+
+        let detail = missing_guard_tool_detail(false, false, false);
+        for path in [
+            "nft at /usr/sbin/nft",
+            "iptables-nft-restore at /usr/sbin/iptables-nft-restore",
+            "ip6tables-nft-restore at /usr/sbin/ip6tables-nft-restore",
+        ] {
+            assert!(detail.contains(path), "missing {path}: {detail}");
+        }
+    }
+
+    /// A missing optional guard is reported without refusing a userspace mesh node.
+    #[test]
+    fn gotatun_guard_without_trusted_tools_is_nonfatal_and_lists_missing_protections() {
+        let mut firewall = Firewall::for_node(None, crate::gotatun_node::EngineKind::GotaTun);
+
+        assert!(!firewall.select_optional_backend_with_tools(false, false, false));
+
+        let status = firewall
+            .kernel_guard_status()
+            .expect("GotaTun guard status");
+        assert_eq!(status.state, "missing");
+        assert_eq!(status.missing, MISSING_KERNEL_PROTECTIONS);
+        for path in [
+            "/usr/sbin/nft",
+            "/usr/sbin/iptables-nft-restore",
+            "/usr/sbin/ip6tables-nft-restore",
+        ] {
+            assert!(
+                status.detail.contains(path),
+                "missing {path}: {}",
+                status.detail
+            );
         }
     }
     #[test]

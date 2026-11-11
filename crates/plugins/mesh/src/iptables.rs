@@ -7,12 +7,15 @@ use crate::{
 use std::{
     fmt::Write as _,
     io::{self, Write},
+    path::Path,
     process::{Command, Stdio},
 };
 const TOOLS: [&str; 2] = [
     "/usr/sbin/iptables-nft-restore",
     "/usr/sbin/ip6tables-nft-restore",
 ];
+/// Fixed inspection commands used to prove ownership of each nft-backed family.
+const INSPECT_TOOLS: [&str; 2] = ["/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft"];
 const CHAINS: [&str; 3] = ["IFM_IN", "IFM_OUT", "IFM_FWD"];
 const GUARD: &str = "IFM_GUARD";
 const DELIVERY: &str = "IFM_DELIVERY";
@@ -25,14 +28,82 @@ pub struct Ownership {
     guard: bool,
     delivery: bool,
 }
+
+/// Keep the fixed command path visible when an inspection or restore fails.
+fn tool_error(tool: &str, operation: &str, error: &io::Error) -> io::Error {
+    let name = Path::new(tool)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("iptables-nft");
+    io::Error::new(
+        error.kind(),
+        format!("{name} at {tool} could not {operation}: {error}"),
+    )
+}
 impl Ownership {
+    /// Return whether any Mesh-owned chain exists in this family.
     #[must_use]
     pub fn any(self) -> bool {
         self.filter || self.guard || self.delivery
     }
+    /// Return whether all compatibility policy chains exist in this family.
     #[must_use]
     pub fn complete(self) -> bool {
         self.filter && self.guard && self.delivery
+    }
+}
+
+/// The owned chains needed when `GotaTun` keeps peer access decisions in userspace.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GuardOwnership {
+    /// Groups the three independent protections enforced outside `GotaTun`.
+    protections: KernelProtectionOwnership,
+    /// Legacy peer input/output chains still exist and should be removed on conversion.
+    policy: bool,
+}
+
+/// Whether each kernel-only mesh protection already has a marked chain.
+#[derive(Clone, Copy, Debug, Default)]
+struct KernelProtectionOwnership {
+    /// The raw ingress source anti-spoof chain exists.
+    guard: bool,
+    /// The public listener gate exists.
+    delivery: bool,
+    /// The forwarding drop chain exists.
+    forward: bool,
+}
+
+impl GuardOwnership {
+    /// Whether any guard or legacy policy chain is present in this family.
+    pub(crate) fn any(self) -> bool {
+        self.protections.guard
+            || self.protections.delivery
+            || self.protections.forward
+            || self.policy
+    }
+    /// Whether all three kernel-only protections are owned in this family.
+    pub(crate) fn complete(self) -> bool {
+        self.protections.guard && self.protections.delivery && self.protections.forward
+    }
+
+    /// Whether this family owns its anti-spoofing chain.
+    fn guard(self) -> bool {
+        self.protections.guard
+    }
+
+    /// Whether this family owns its public listener gate.
+    fn delivery(self) -> bool {
+        self.protections.delivery
+    }
+
+    /// Whether this family owns its forwarding drops.
+    fn forward(self) -> bool {
+        self.protections.forward
+    }
+
+    /// Whether this family still owns the previous full policy chains.
+    fn policy(self) -> bool {
+        self.policy
     }
 }
 /// Narrow installation plans are selected only after ownership and typed old/new comparison.
@@ -106,6 +177,25 @@ pub(crate) fn apply_with_aliases(
     execute_families(&scripts, false)?;
     Ok(())
 }
+
+/// Replace each family with anti-spoofing, forwarding drops, and the public listener gate only.
+///
+/// When converting an older full policy, this transaction removes its input and output grant
+/// chains from the same family commit so only `GotaTun` continues to decide peer access.
+/// # Errors
+/// Names the fixed restore path on discovery or transaction failures.
+pub(crate) fn apply_guard_only(
+    config: &Config,
+    aliases: &[crate::policy::model::Addresses],
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+) -> io::Result<()> {
+    let installed = guard_presence()?;
+    let scripts = std::array::from_fn(|index| {
+        render_guard_only(config, index == 1, installed[index], aliases, proxy_ingress)
+    });
+    execute_families(&scripts, true)?;
+    execute_families(&scripts, false)
+}
 fn execute_families(scripts: &[String; 2], preflight: bool) -> io::Result<()> {
     for (tool, script) in TOOLS.iter().zip(scripts) {
         execute(tool, script, preflight)?;
@@ -149,6 +239,105 @@ pub fn remove() -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Read ownership for the kernel-only guard, including a full older policy awaiting conversion.
+/// # Errors
+/// Refuses untrusted executables, unrelated chains, unavailable tools, or privilege failures.
+pub(crate) fn guard_presence() -> io::Result<[GuardOwnership; 2]> {
+    let mut present = [GuardOwnership::default(); 2];
+    for (index, tool) in INSPECT_TOOLS.iter().enumerate() {
+        let version = Command::new(tool)
+            .arg("--version")
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|error| tool_error(tool, "inspect the frontend version", &error))?;
+        if !version.status.success()
+            || !String::from_utf8_lossy(&version.stdout).contains("nf_tables")
+        {
+            return Err(tool_error(
+                tool,
+                "verify the nf_tables frontend",
+                &io::Error::new(io::ErrorKind::Unsupported, "the frontend is unavailable"),
+            ));
+        }
+        let inbound = owned(tool, "filter", CHAINS[0])?;
+        let outbound = owned(tool, "filter", CHAINS[1])?;
+        if inbound != outbound {
+            return Err(tool_error(
+                tool,
+                "verify the Mesh policy chains",
+                &io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "only one policy chain is marked",
+                ),
+            ));
+        }
+        let state = GuardOwnership {
+            protections: KernelProtectionOwnership {
+                guard: owned(tool, "raw", GUARD)?,
+                delivery: owned(tool, "filter", DELIVERY)?,
+                forward: owned(tool, "filter", CHAINS[2])?,
+            },
+            policy: inbound,
+        };
+        if state.any() && !state.complete() {
+            return Err(tool_error(
+                tool,
+                "verify the complete Mesh guard",
+                &io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "the owned guard is incomplete",
+                ),
+            ));
+        }
+        present[index] = state;
+    }
+    Ok(present)
+}
+
+/// Delete only the Mesh guard and any retired full-policy chains in both families.
+/// # Errors
+/// Leaves incomplete or foreign chains untouched and names the tool path on failure.
+pub(crate) fn remove_guard_only() -> io::Result<()> {
+    let installed = guard_presence()?;
+    for (index, tool) in TOOLS.iter().enumerate() {
+        let owner = installed[index];
+        if !owner.any() {
+            continue;
+        }
+        let mut script = String::new();
+        if owner.guard() {
+            let _ = writeln!(
+                script,
+                "*raw\n-D PREROUTING -j {GUARD}\n-F {GUARD}\n-X {GUARD}\nCOMMIT"
+            );
+        }
+        script.push_str("*filter\n");
+        if owner.delivery() {
+            let _ = writeln!(
+                script,
+                "-D INPUT -j {DELIVERY}\n-D FORWARD -j {DELIVERY}\n-F {DELIVERY}\n-X {DELIVERY}"
+            );
+        }
+        if owner.forward() {
+            let _ = writeln!(
+                script,
+                "-D FORWARD -i {INTERFACE} -j {}\n-D FORWARD -o {INTERFACE} -j {}\n-F {}\n-X {}",
+                CHAINS[2], CHAINS[2], CHAINS[2], CHAINS[2]
+            );
+        }
+        if owner.policy() {
+            let _ = writeln!(
+                script,
+                "-D INPUT -i {INTERFACE} -j {}\n-D OUTPUT -o {INTERFACE} -j {}\n-F {}\n-X {}\n-F {}\n-X {}",
+                CHAINS[0], CHAINS[1], CHAINS[0], CHAINS[0], CHAINS[1], CHAINS[1]
+            );
+        }
+        script.push_str("COMMIT\n");
+        run(tool, &script)?;
+    }
+    Ok(())
+}
 fn hooks() -> [(&'static str, &'static str, &'static str); 4] {
     [
         (CHAINS[0], "INPUT", "-i"),
@@ -162,18 +351,20 @@ fn hooks() -> [(&'static str, &'static str, &'static str); 4] {
 /// Refuses unrelated chains, unavailable tools and privilege failures.
 pub fn presence() -> io::Result<[Ownership; 2]> {
     let mut present = [Ownership::default(); 2];
-    for (index, tool) in ["/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft"]
-        .iter()
-        .enumerate()
-    {
+    for (index, tool) in INSPECT_TOOLS.iter().enumerate() {
         let version = Command::new(tool)
             .arg("--version")
             .stderr(Stdio::null())
-            .output()?;
+            .output()
+            .map_err(|error| tool_error(tool, "inspect the frontend version", &error))?;
         if !version.status.success()
             || !String::from_utf8_lossy(&version.stdout).contains("nf_tables")
         {
-            return Err(io::ErrorKind::Unsupported.into());
+            return Err(tool_error(
+                tool,
+                "verify the nf_tables frontend",
+                &io::Error::new(io::ErrorKind::Unsupported, "the frontend is unavailable"),
+            ));
         }
         let mut filter = [false; 3];
         for (slot, chain) in filter.iter_mut().zip(CHAINS) {
@@ -182,7 +373,14 @@ pub fn presence() -> io::Result<[Ownership; 2]> {
         if filter.iter().any(|exists| *exists) != filter.iter().all(|exists| *exists) {
             // All filter chains share an atomic table transaction. A subset
             // cannot be our interrupted install and must not be overwritten.
-            return Err(io::ErrorKind::AlreadyExists.into());
+            return Err(tool_error(
+                tool,
+                "verify the Mesh policy chains",
+                &io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "the owned chains are incomplete",
+                ),
+            ));
         }
         let delivery = owned(tool, "filter", DELIVERY)?;
         if delivery && !filter[0] {
@@ -197,11 +395,13 @@ pub fn presence() -> io::Result<[Ownership; 2]> {
     }
     Ok(present)
 }
+/// Prove ownership from one exact marker rule without adopting foreign chains.
 fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
     let output = Command::new(tool)
         .args(["-t", table, "-S", chain])
         .stderr(Stdio::null())
-        .output()?;
+        .output()
+        .map_err(|error| tool_error(tool, "inspect ownership", &error))?;
     // -S emits one canonical rule per line. Match the complete marker rule,
     // including its table-selected chain, interface/state selector and verdict.
     // Neither a containing comment nor a marker on another rule is authority.
@@ -225,14 +425,26 @@ fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
         {
             Ok(true)
         }
-        Some(0) => Err(io::ErrorKind::AlreadyExists.into()),
+        Some(0) => Err(tool_error(
+            tool,
+            "verify ownership",
+            &io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the chain has no infraternal marker",
+            ),
+        )),
         Some(1) => Ok(false),
-        _ => Err(io::ErrorKind::PermissionDenied.into()),
+        _ => Err(tool_error(
+            tool,
+            "inspect ownership",
+            &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
+        )),
     }
 }
 fn run(tool: &str, script: &str) -> io::Result<()> {
     execute(tool, script, false)
 }
+/// Run or preflight an iptables-nft restore transaction at its fixed executable path.
 fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
     let mut command = Command::new(tool);
     command.arg("--noflush");
@@ -243,18 +455,32 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| tool_error(tool, "run a restore transaction", &error))?;
     let written = child
         .stdin
         .take()
-        .ok_or(io::ErrorKind::BrokenPipe)?
-        .write_all(script.as_bytes());
-    let status = child.wait()?;
+        .ok_or_else(|| {
+            tool_error(
+                tool,
+                "receive a restore transaction",
+                &io::Error::from(io::ErrorKind::BrokenPipe),
+            )
+        })?
+        .write_all(script.as_bytes())
+        .map_err(|error| tool_error(tool, "receive a restore transaction", &error));
+    let status = child
+        .wait()
+        .map_err(|error| tool_error(tool, "finish a restore transaction", &error))?;
     written?;
     if status.success() {
         Ok(())
     } else {
-        Err(io::ErrorKind::PermissionDenied.into())
+        Err(tool_error(
+            tool,
+            "apply the restore transaction",
+            &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
+        ))
     }
 }
 // Keep the complete per-family atomic restore batch visible together.
@@ -505,6 +731,109 @@ fn render_with_aliases(
     script
 }
 
+/// Render just spoof protection, no forwarding through the host, and the public 80/443 gate.
+fn render_guard_only(
+    config: &Config,
+    ipv6: bool,
+    installed: GuardOwnership,
+    aliases: &[crate::policy::model::Addresses],
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+) -> String {
+    let mut script = String::from("*raw\n");
+    if installed.guard() {
+        let _ = writeln!(script, "-F {GUARD}");
+    } else {
+        let _ = writeln!(script, ":{GUARD} - [0:0]");
+    }
+    let addresses = std::iter::once(&config.addresses)
+        .chain(aliases)
+        .chain(config.peers.values().map(|peer| &peer.peer.addresses))
+        .map(|addresses| {
+            if ipv6 {
+                addresses.ipv6.to_string()
+            } else {
+                addresses.ipv4.to_string()
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let _ = writeln!(
+        script,
+        "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN"
+    );
+    for address in addresses {
+        let _ = writeln!(
+            script,
+            "-A {GUARD} ! -i {INTERFACE} -s {address} -m comment --comment infraternal.mesh.v1 -j DROP"
+        );
+    }
+    if !installed.guard() {
+        let _ = writeln!(script, "-I PREROUTING 1 -j {GUARD}");
+    }
+    script.push_str("COMMIT\n*filter\n");
+    if installed.delivery() {
+        let _ = writeln!(script, "-F {DELIVERY}");
+    } else {
+        let _ = writeln!(script, ":{DELIVERY} - [0:0]");
+    }
+    if installed.forward() {
+        let _ = writeln!(script, "-F {}", CHAINS[2]);
+    } else {
+        let _ = writeln!(script, ":{} - [0:0]", CHAINS[2]);
+    }
+    if installed.policy() {
+        let _ = writeln!(
+            script,
+            "-D INPUT -i {INTERFACE} -j {}\n-D OUTPUT -o {INTERFACE} -j {}\n-F {}\n-X {}\n-F {}\n-X {}",
+            CHAINS[0], CHAINS[1], CHAINS[0], CHAINS[0], CHAINS[1], CHAINS[1]
+        );
+    }
+    let public_gate = if proxy_ingress.public_route_active {
+        String::new()
+    } else {
+        proxy_ingress
+            .public_listener_pair
+            .filter(|pair| {
+                pair.http != pair.https
+                    && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                        .iter()
+                        .any(|range| range.contains(pair.http))
+                    && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                        .iter()
+                        .any(|range| range.contains(pair.https))
+            })
+            .map_or_else(String::new, |pair| {
+                format!(
+                    "-A {DELIVERY} ! -i lo -m addrtype --dst-type LOCAL -p tcp -m multiport --dports {},{} -m comment --comment infraternal.mesh.v1 -j DROP\n",
+                    pair.http, pair.https
+                )
+            })
+    };
+    let _ = writeln!(
+        script,
+        "{public_gate}-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
+    );
+    let _ = writeln!(
+        script,
+        "-A {} -m comment --comment infraternal.mesh.v1 -j DROP",
+        CHAINS[2]
+    );
+    if !installed.delivery() {
+        let _ = writeln!(
+            script,
+            "-I INPUT 1 -j {DELIVERY}\n-I FORWARD 1 -j {DELIVERY}"
+        );
+    }
+    if !installed.forward() {
+        let _ = writeln!(
+            script,
+            "-I FORWARD 1 -i {INTERFACE} -j {}\n-I FORWARD 1 -o {INTERFACE} -j {}",
+            CHAINS[2], CHAINS[2]
+        );
+    }
+    script.push_str("COMMIT\n");
+    script
+}
+
 type Groups = std::collections::BTreeMap<
     (usize, Option<crate::policy::rules::Port>),
     std::collections::BTreeSet<u128>,
@@ -674,6 +1003,40 @@ mod tests {
             peer_names: std::collections::BTreeMap::new(),
         }
     }
+
+    /// The compatibility guard keeps only kernel-visible mesh protections for `GotaTun`.
+    #[test]
+    fn gotatun_guard_does_not_render_kernel_peer_grants() {
+        let mut config = config(&[2]);
+        config.peers.get_mut(&NodeId(2)).expect("peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 22,
+                },
+            ]));
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: Some(infraternal_mesh::proxy_ports::ListenerPortPair {
+                http: 80,
+                https: 443,
+            }),
+            ..infraternal_mesh::proxy_ports::MeshProxyIngress::default()
+        };
+
+        let rules = render_guard_only(&config, false, GuardOwnership::default(), &[], &ingress);
+
+        for rule in [
+            "-s 10.254.0.2 -m comment --comment infraternal.mesh.v1 -j DROP",
+            "-A IFM_FWD -m comment --comment infraternal.mesh.v1 -j DROP",
+            "--dports 80,443",
+        ] {
+            assert!(rules.contains(rule), "missing {rule}: {rules}");
+        }
+        for grant in ["IFM_IN", "IFM_OUT", "--ctorigdstport 22"] {
+            assert!(!rules.contains(grant), "unexpected {grant}: {rules}");
+        }
+    }
+
     #[test]
     fn initiating_prefixes_cover_only_owned_intervals_even_at_family_boundaries() {
         assert_eq!(prefixes(2, 3, false), ["0.0.0.2/31"]);

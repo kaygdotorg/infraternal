@@ -337,6 +337,31 @@ fn namespace_restart_recovers_a_retained_owned_table() {
     transaction(&render(address, "infraternal0", 40_000)).unwrap();
     assert!(presence(address).unwrap());
     assert!(MeshPort::bind(address, "infraternal0").is_err());
+
+    // A GotaTun restart removes a legacy owned redirect before publishing the
+    // userspace listener; it never leaves the kernel rule beside the filter.
+    let mut filtered =
+        MeshPort::bind_after_restart_with_filter(address, "infraternal0", true).unwrap();
+    assert_eq!(filtered.mode(), PortMode::UserspaceRedirect);
+    assert!(!presence(address).unwrap());
+    filtered.stop().unwrap();
+
+    // Recovery refuses a same-named table with a foreign marker and leaves it intact.
+    transaction(&format!(
+        "create table inet {} {{ comment \"{}.foreign\"; }}\n",
+        table(address),
+        MARKER
+    ))
+    .unwrap();
+    let refusal = MeshPort::bind_after_restart_with_filter(address, "infraternal0", true)
+        .err()
+        .map(|error| error.kind());
+    assert_eq!(refusal, Some(io::ErrorKind::AlreadyExists));
+    assert!(presence(address).is_err());
+    transaction(&format!("delete table inet {}\n", table(address))).unwrap();
+
+    // Kernel WireGuard keeps its existing recovery path and reinstalls its redirect.
+    transaction(&render(address, "infraternal0", 40_000)).unwrap();
     let mut port = MeshPort::bind_after_restart(address, "infraternal0").unwrap();
     assert_eq!(port.mode(), PortMode::Redirect);
     assert_delivery(&port, SocketAddr::new(address, 22));

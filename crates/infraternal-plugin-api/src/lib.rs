@@ -1115,6 +1115,31 @@ pub enum PluginError {
     MessageTooLarge,
     /// The plugin rejected a validly routed action.
     Rejected,
+    /// Kernel `WireGuard` refused because its fixed root-owned nft tool is unavailable.
+    KernelFirewallUnavailable,
+}
+
+impl PluginError {
+    /// Return the short, safe reason a local operator can act on.
+    ///
+    /// Only the D346 firewall refusal carries a reason. Its install-time path is fixed; all other
+    /// plugin failures keep the existing generic message.
+    #[must_use]
+    pub const fn control_error_message(self) -> &'static str {
+        match self {
+            Self::KernelFirewallUnavailable => {
+                "Kernel WireGuard requires a root-owned nft executable at /usr/sbin/nft; the fixed path is missing or could not apply its firewall rules."
+            }
+            _ => "plugin action rejected",
+        }
+    }
+
+    /// Encode the short refusal as a bounded JSON body for the local control channel.
+    #[must_use]
+    pub fn control_error_json(self) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "error": self.control_error_message() }))
+            .unwrap_or_else(|_| br#"{"error":"plugin action rejected"}"#.to_vec())
+    }
 }
 
 #[cfg(test)]

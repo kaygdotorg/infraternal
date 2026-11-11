@@ -69,6 +69,10 @@ pub mod gotatun_node;
 mod gotatun_tun;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+/// Enforces per-peer grants at both GotaTun TUN boundaries on Linux and macOS.
+mod packet_filter;
+
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Derives per-peer mesh route MTUs and a shared IPv6-safe interface MTU.
 mod mesh_mtu;
 

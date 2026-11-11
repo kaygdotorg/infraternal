@@ -290,6 +290,7 @@ pub fn set_mesh_service(factory: MeshServiceFactory) {
 #[cfg(all(feature = "mesh", target_os = "linux"))]
 fn mesh_view(
     config: &infraternal_plugin_mesh::dataplane::Config,
+    userspace_filter: bool,
 ) -> infraternal_plugin_api::mesh_view::MeshView {
     use infraternal_plugin_api::mesh_view::{MeshPeer, MeshView};
     use std::net::IpAddr;
@@ -300,6 +301,7 @@ fn mesh_view(
             IpAddr::V6(config.addresses.ipv6),
         ],
         interface: infraternal_plugin_mesh::wireguard::INTERFACE.to_owned(),
+        userspace_filter,
         peers: config
             .peers
             .iter()
@@ -328,8 +330,12 @@ fn observe_mesh(
     let Some(service) = service else {
         return mesh_plugin;
     };
-    mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config| {
-        service(config.as_ref().map(mesh_view));
+    mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config, userspace_filter| {
+        service(
+            config
+                .as_ref()
+                .map(|config| mesh_view(config, userspace_filter)),
+        );
         Ok(())
     }))
 }
@@ -352,9 +358,13 @@ fn connect_proxy_and_mesh(
         .set_mesh_ingress_observer(mesh_plugin.proxy_ingress_observer())
         .map_err(|_| PluginError::Rejected)?;
     Ok(mesh_plugin
-        .with_configuration_observer(std::sync::Arc::new(move |config| {
+        .with_configuration_observer(std::sync::Arc::new(move |config, userspace_filter| {
             if let Some(service) = &service {
-                service(config.as_ref().map(mesh_view));
+                service(
+                    config
+                        .as_ref()
+                        .map(|config| mesh_view(config, userspace_filter)),
+                );
             }
             let context = config
                 .as_ref()

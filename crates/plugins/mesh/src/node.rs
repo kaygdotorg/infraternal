@@ -702,7 +702,7 @@ impl Default for Node {
             routes: BTreeSet::new(),
             peer_route_state: Arc::default(),
             route_repair: None,
-            firewall: Firewall::default(),
+            firewall: Firewall::for_node(None, EngineKind::GotaTun),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
             kernel_owner: KernelProof::default(),
@@ -762,6 +762,7 @@ impl Node {
     pub fn with_engine(mut self, engine: EngineKind) -> Self {
         self.engine_kind = engine;
         self.engine_source = EngineSource::Code;
+        self.firewall = Firewall::for_node(self.firewall.backend(), engine);
         self
     }
 
@@ -857,9 +858,7 @@ impl Node {
                 AuthorityResetState::Stable
             },
             store: Some(store),
-            firewall: state
-                .backend
-                .map_or_else(Firewall::default, Firewall::for_backend),
+            firewall: Firewall::for_node(state.backend, engine_kind),
             ..Self::default()
         };
         // Both links outlive their process (D332). A live one is this installation's only under
@@ -1092,6 +1091,18 @@ impl Node {
         proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
         confirmed: bool,
     ) -> io::Result<()> {
+        let policy = if self.engine_kind == EngineKind::GotaTun
+            && self.active()
+            && let Some(config) = self.config.as_ref()
+        {
+            self.gotatun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+            Some(crate::gotatun_node::Engine::prepare_policy(
+                config,
+                proxy_ingress.clone(),
+            )?)
+        } else {
+            None
+        };
         // An unchanged snapshot still reaches the firewall: Traefik has just confirmed it, and
         // any source that lost a route since the last confirmation must lose its open flows.
         if self.active()
@@ -1099,6 +1110,12 @@ impl Node {
         {
             self.firewall
                 .apply_proxy_ingress(config, &proxy_ingress, confirmed)?;
+        }
+        if let Some(policy) = policy {
+            self.gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .publish_policy(policy);
         }
         self.proxy_ingress = proxy_ingress;
         Ok(())
@@ -1182,6 +1199,13 @@ impl Node {
             reason: self.engine_source.reason(),
         }
     }
+
+    /// Report the optional kernel-only guard that the `GotaTun` node currently has installed.
+    #[must_use]
+    pub(crate) fn kernel_guard_status(&self) -> Option<&crate::firewall::KernelGuardStatus> {
+        self.firewall.kernel_guard_status()
+    }
+
     /// Health of the running `GotaTun` engine; `None` under kernel `WireGuard` or when stopped.
     #[must_use]
     pub fn engine_health(&self) -> Option<crate::gotatun_node::EngineHealth> {
@@ -1478,7 +1502,14 @@ impl Node {
             }
             EngineKind::GotaTun => {
                 let adopt = self.persisted_tun_to_adopt(public_key)?;
-                let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None, adopt)?;
+                let engine = Engine::start(
+                    key.gotatun_secret()?,
+                    public_key,
+                    0,
+                    None,
+                    &self.proxy_ingress,
+                    adopt,
+                )?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
                     || port == 0
@@ -2877,6 +2908,16 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        let packet_policy = if self.engine_kind == EngineKind::GotaTun {
+            self.gotatun
+                .as_ref()
+                .map(|_| {
+                    crate::gotatun_node::Engine::prepare_policy(&config, self.proxy_ingress.clone())
+                })
+                .transpose()?
+        } else {
+            None
+        };
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         if self.config.is_some() {
             self.ensure_dns_resolver(config.addresses.ipv4)?;
@@ -3111,6 +3152,7 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let _retire = crate::cutoff_measure::Stage::new(config.node, config.version, "retire");
             self.config = Some(config);
+            self.publish_gotatun_policy(packet_policy);
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.publish_dns(dns_records)?;
             self.connection_cleanup_pending = true;
@@ -3285,10 +3327,18 @@ impl Node {
             self.authority_reset = AuthorityResetState::Stable;
         }
         self.config = Some(config);
+        self.publish_gotatun_policy(packet_policy);
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         self.publish_dns(dns_records)?;
         self.connection_cleanup_pending = true;
         self.finish_connection_cleanup()
+    }
+
+    /// Publish a precompiled `GotaTun` policy only after the enclosing node transaction commits.
+    fn publish_gotatun_policy(&self, policy: Option<crate::packet_filter::PreparedPolicy>) {
+        if let (Some(engine), Some(policy)) = (self.gotatun.as_ref(), policy) {
+            engine.publish_policy(policy);
+        }
     }
 
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
@@ -3398,6 +3448,22 @@ impl Retirement {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// The default `GotaTun` node treats its kernel-only guard as optional and reports its state.
+    #[test]
+    fn default_gotatun_node_treats_kernel_guard_as_optional() {
+        assert!(
+            Node::default().firewall.kernel_guard_status().is_some(),
+            "GotaTun must expose the optional kernel guard state"
+        );
+    }
+
+    /// Choosing kernel `WireGuard` keeps D346's required nft frontend selected.
+    #[test]
+    fn kernel_wireguard_node_selects_required_nft_frontend() {
+        let node = Node::default().with_engine(EngineKind::Kernel);
+        assert_eq!(node.firewall.backend(), Some(crate::firewall::Backend::Nft));
+    }
+
     /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
     #[test]
     fn retirement_removes_the_private_key_file() {

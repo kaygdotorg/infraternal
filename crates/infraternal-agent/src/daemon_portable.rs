@@ -122,7 +122,7 @@ async fn dispatch(
             tokio::select! {
                 result = calls.completed(), if calls.pending() => {
                     let (id, result) = result?;
-                    match result { Ok(result) => reply(&tx, Message::Deferred(0, id, result))?, Err(_) => reply(&tx, Message::Result(0, id, false, br#"{"error":"plugin action rejected"}"#.to_vec()))? }
+                    match result { Ok(result) => reply(&tx, Message::Deferred(0, id, result))?, Err(error) => reply(&tx, Message::Result(0, id, false, error.control_error_json()))? }
                 }
                 result = renewals.join_next(), if !renewals.is_empty() => {
                     let (id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| io::Error::other("Renewal is unavailable."))?.map_err(io::Error::other)?;
@@ -144,7 +144,7 @@ async fn dispatch(
                         Frame::Call { call_id, action_id, input_json } => match calls.start(call_id,action_id,input_json,NodeContext::default()) {
                             Ok(Some(result)) => reply(&tx, Message::Deferred(0,call_id,result))?,
                             Ok(None) => {},
-                            Err(_) => reply(&tx,Message::Result(0,call_id,false,br#"{"error":"plugin action rejected"}"#.to_vec()))?,
+                            Err(error) => reply(&tx,Message::Result(0,call_id,false,error.control_error_json()))?,
                         },
                         _ => return Err(io::ErrorKind::InvalidData.into()),
                     }
