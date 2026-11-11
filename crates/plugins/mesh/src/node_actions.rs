@@ -765,6 +765,39 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// An unenrolled rootless mesh component can be inspected without probing a privileged firewall.
+    #[test]
+    fn rootless_owner_can_read_an_inactive_mesh_without_kernel_setup() {
+        assert!(
+            !nix::unistd::Uid::effective().is_root(),
+            "run as an ordinary account"
+        );
+        let directory = crate::node_state::tests::Directory::new();
+        let mut plugin = MeshNodePlugin::new(&directory.0);
+        let peers: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.peers", b"{}").expect("rootless peers"))
+                .expect("peer JSON");
+        assert_eq!(peers["peers"], json!([]));
+        assert_eq!(peers["version"], serde_json::Value::Null);
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("rootless status"))
+                .expect("status JSON");
+        assert_eq!(status["state"], "Off");
+        assert_eq!(std::fs::read_dir(&directory.0).expect("state").count(), 0);
+    }
+
+    /// Inactive rootless inspection must not conceal an unsafe retained ownership record.
+    #[test]
+    fn rootless_mesh_reads_refuse_an_unsafe_retained_owner() {
+        use std::os::unix::fs::symlink;
+        let directory = crate::node_state::tests::Directory::new();
+        let unrelated = directory.0.join("unrelated");
+        std::fs::write(&unrelated, b"keep").expect("unrelated file");
+        symlink(&unrelated, directory.0.join("mesh-interface.json")).expect("unsafe owner");
+        let mut plugin = MeshNodePlugin::new(&directory.0);
+        assert!(plugin.call("mesh.peers", b"{}").is_err());
+        assert_eq!(std::fs::read(&unrelated).expect("preserved file"), b"keep");
+    }
 
     /// #382 P2 (J418): after a server rollback (D295) to a release without authority epochs, a
     /// node that saw an epoch adopts the epoch-less full snapshot instead of waiting forever.
