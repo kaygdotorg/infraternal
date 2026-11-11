@@ -23,7 +23,7 @@ import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
 import { lookBridge, startThemes } from "./canvas/themes/controller";
 import { readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
-import { watchKeyboard } from "./keyboard-viewport";
+import { keyboardIsOpen, watchKeyboard } from "./keyboard-viewport";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { initialFont, rememberFont } from "./font-preference";
@@ -989,7 +989,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const dockedLayoutChange = (): void => dockPanes(!sidebar.hidden, true);
   dockedLayout.addEventListener("change", dockedLayoutChange);
   const stopKeyboardWatch = watchKeyboard(viewportChange);
-  viewportChange();
+  viewportChange(keyboardIsOpen());
 
   const keyInput: Record<string, string> = {
     esc: "\x1b", tab: "\t", up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C",
