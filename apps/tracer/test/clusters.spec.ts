@@ -806,23 +806,25 @@ test("toolbar: the row stack follows the finger one to one (a swipe down moves i
   } finally { await t.close(); }
 });
 
-test("droplet split: a goo layer exists only while it runs, the gap pulls past its rest size and wobbles back, and each frame costs under 4 ms", async ({ page }) => {
+test("a pointer split fades the new window in over 150 ms and draws no liquid layer; the other windows only snap or glide", async ({ page }) => {
   await open(page, 3);
-  await page.evaluate(() => ((window as unknown as { __splitProbe: unknown }).__splitProbe = { frames: 0, drawMs: 0, maxDrawMs: 0, trace: [] }));
-  expect(await page.locator(".cl-goo").count()).toBe(0);
+  await page.evaluate(() => {
+    const w = window as unknown as { __splitFade: number[]; __splitGoo: number };
+    w.__splitFade = []; w.__splitGoo = 0;
+    new MutationObserver(() => {
+      if (document.querySelector(".cl-goo")) w.__splitGoo++;
+      for (const a of document.getAnimations()) {
+        const keys = (a.effect as KeyframeEffect | null)?.getKeyframes() ?? [];
+        if (keys.length === 2 && "opacity" in keys[0]! && !w.__splitFade.includes(a.effect!.getTiming().duration as number)) w.__splitFade.push(a.effect!.getTiming().duration as number);
+      }
+    }).observe(document.body, { subtree: true, childList: true, attributes: true });
+  });
   await page.locator('.ui-window[data-window-id="w-studio-mac"] [data-action="split-down"]').evaluate((b) => (b as HTMLElement).click()); // off screen at the 1.1 default: three windows no longer fit side by side
-  await expect(page.locator(".cl-goo")).toHaveCount(1, { timeout: 2000 });
-  await expect(page.locator(".cl-goo")).toHaveCount(0, { timeout: 3000 });
-  const r = await page.evaluate(() => (window as unknown as { __splitProbe: { frames: number; drawMs: number; maxDrawMs: number; trace: Array<[number, number]> } }).__splitProbe);
-  console.log(`SPLIT_COST frames=${r.frames} avgDrawMs=${(r.drawMs / r.frames).toFixed(3)} maxDrawMs=${r.maxDrawMs.toFixed(2)} durationMs=${r.trace.at(-1)?.[0]}`);
-  expect(r.maxDrawMs).toBeLessThan(4);
-  const gaps = r.trace.map((t) => t[1]);
-  expect(Math.max(...gaps)).toBeGreaterThan(60); // pulled far past the resting gap
-  const peak = gaps.indexOf(Math.max(...gaps));
-  expect(Math.min(...gaps.slice(peak))).toBeLessThan(12); // squeezed below it on the way back
-  expect(r.trace[r.trace.length - 1]![0]).toBeLessThan(1000);
-  // Both windows are plain frames again, with their content, at rest.
-  await expect(page.locator('.ui-window[data-goo]')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __splitFade: number[] }).__splitFade), { timeout: 3000 }).toContain(150); // declared duration, not a measured one
+  expect(await page.evaluate(() => (window as unknown as { __splitGoo: number }).__splitGoo)).toBe(0);
+  // Every animation shorter than 2 s has ended (named in the failure, so a straggler is easy to find); loops that run while a state lasts (the caret blink, the connection pulse) last far longer than any transition and are not the split.
+  await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a.playState === "running" && Number(a.effect?.getComputedTiming().endTime) < 2000).map((a) => `${(a as CSSAnimation).animationName ?? (a as CSSTransition).transitionProperty ?? "web-animation"} on ${(a.effect as KeyframeEffect | null)?.target instanceof Element ? ((a.effect as KeyframeEffect).target as Element).className : "?"}`)), { timeout: 3000 }).toEqual([]);
+  expect(await page.locator(".cl-goo").count()).toBe(0);
 });
 
 test("closing re-tiles: the remaining window of a column takes the whole column (bottom closed, then top closed)", async ({ page }) => {

@@ -35,12 +35,14 @@ fn check(backend: Backend) {
         .save(&infraternal_plugin_mesh::node_state::State {
             enabled: true,
             config: None,
+            authority_reset_pending: false,
             backend: Some(backend),
         })
         .unwrap();
     let mut node = Node::restore(&root).unwrap();
     let identity = node.up().unwrap();
     let mut old = Config {
+        authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(1),

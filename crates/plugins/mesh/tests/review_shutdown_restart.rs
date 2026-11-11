@@ -76,6 +76,7 @@ fn configure(node: &mut Node) {
             access_updates: Vec::new(),
             local_key: None,
             server: None,
+            authority_epoch: None,
             node: NodeId(1),
             #[cfg(feature = "mesh-dns")]
             name: None,
@@ -102,6 +103,7 @@ fn configure(node: &mut Node) {
     assert_eq!(Device::counters().unwrap().len(), 1000);
 }
 
+/// Create a mesh state at the requested boundary and hold it for the parent restart proof.
 #[test]
 #[ignore = "Child-only fixture: started by the weighted restart proof inside its namespace; does nothing alone."]
 fn crash_child() {
@@ -122,6 +124,7 @@ fn crash_child() {
         .save(&State {
             enabled: true,
             config: None,
+            authority_reset_pending: false,
             backend: Some(backend),
         })
         .unwrap();
@@ -135,6 +138,7 @@ fn crash_child() {
         .save(&State {
             enabled: false,
             config: None,
+            authority_reset_pending: false,
             backend: Some(backend),
         })
         .unwrap();

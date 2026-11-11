@@ -479,7 +479,7 @@ mod proxy_mesh_context_tests {
         }
     }
 
-    /// Accepted exposure policy publishes only inbound-authorized TCP sources.
+    /// The accepted Mesh exposure policy publishes only inbound-authorized TCP sources.
     #[test]
     fn accepted_config_exports_only_inbound_tcp_sources_for_the_published_port() {
         let tcp_3000 = Port {
@@ -492,6 +492,7 @@ mod proxy_mesh_context_tests {
         };
         let config = Config {
             local_key: None,
+            authority_epoch: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
             #[cfg(feature = "mesh")]

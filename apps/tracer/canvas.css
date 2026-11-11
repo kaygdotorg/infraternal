@@ -69,8 +69,23 @@
   -webkit-mask-image: linear-gradient(transparent, #000 0.625rem, #000 calc(100% - 0.625rem), transparent);
   mask-image: linear-gradient(transparent, #000 0.625rem, #000 calc(100% - 0.625rem), transparent);
 }
-/* The destructive action under the facts: the settings row's own 8 px padding plus this 8 px puts its label on the keys' 16 px edge. */
-.canvas-popover-action { flex: none; padding: 0.375rem 0.5rem 0.5rem; border-top: 1px solid var(--line); }
+/* The block sits inside the scrolling list: its own 8 px of row padding, less the same 8 px of margin, puts the label on the keys' edge. */
+.canvas-popover-action { margin: 0.375rem -0.5rem 0; }
+.canvas-popover-action::before { content: ""; display: block; height: 1px; margin: 0 0.5rem 0.375rem; background: var(--line); } /* the hairline spans the keys' width, not the negative margin's */
+.canvas-popover-action[hidden], .canvas-popover-action[data-gone] { display: none; }
+/* Remove host at the end of the Connection tab (D385, details-removal.ts): inline, the row turns into the question. */
+.canvas-popover-ask { display: grid; gap: 0.25rem; padding: 0.5rem 0.5rem 0.25rem; }
+.canvas-popover-ask[hidden] { display: none; }
+.canvas-popover-ask-q { margin: 0; color: var(--fg); font: 500 var(--text-body)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
+.canvas-popover-ask-effect { margin: 0; color: var(--fg-2); font: 450 var(--text-secondary)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); overflow-wrap: anywhere; }
+.canvas-popover-ask:focus { outline: none; }
+.canvas-popover-ask-note { margin: 0; padding-top: 0.25rem; color: var(--fg-2); font: 450 var(--text-secondary)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); overflow-wrap: anywhere; }
+.canvas-popover-ask-note:empty { padding: 0; }
+.canvas-popover-ask-note[data-tone="danger"] { color: var(--danger); }
+.canvas-popover-ask-actions .ui-button:disabled { opacity: 0.6; cursor: default; }
+.canvas-popover-ask-actions { display: flex; justify-content: flex-end; gap: 0.375rem; padding-top: 0.5rem; }
+.canvas-popover-ask-actions .ui-button { --ui-button-height: var(--ui-control-h); }
+.canvas-popover-ask-actions .canvas-popover-ask-yes { --ui-button-background: var(--danger); --ui-button-color: #fff; }
 @media (pointer: coarse) {
   .canvas-popover { border-radius: var(--r-lg); }
   .canvas-popover-head { padding: 1rem 1rem 0.75rem; }

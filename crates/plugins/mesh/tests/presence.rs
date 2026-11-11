@@ -71,15 +71,46 @@ async fn nodes_the_server_sees_are_online_with_their_path_and_named_by_machine()
     let nodes = json_nodes(&after);
     assert_eq!(nodes[0]["node"]["host"], "monitor01");
     assert_eq!(nodes[0]["live"], true);
+    assert_eq!(nodes[0]["key_rotation_supported"], false);
+    assert_eq!(nodes[0]["restore_safe"], false);
     assert!(
         nodes[0].get("path").is_none(),
         "the server has no path to itself"
     );
     assert_eq!(nodes[1]["node"]["host"], "minipc01");
     assert_eq!(nodes[1]["live"], true);
+    assert_eq!(nodes[1]["key_rotation_supported"], false);
+    assert_eq!(nodes[1]["restore_safe"], false);
     assert_eq!(nodes[1]["path"], "direct");
     // Presence moves no stored revision: viewers are told by the transition, not a revision.
     assert_eq!(after.revision, before.revision);
+}
+
+/// A proved authority-epoch capability makes the API report a peer as restore-safe.
+#[tokio::test]
+async fn a_node_with_proved_authority_epoch_support_is_restore_safe() {
+    let (service, _, _) = service().await;
+    service
+        .dataplane()
+        .attach_named_with_probed_capabilities(
+            HOST,
+            PublicKey([2; 32]),
+            None,
+            false,
+            None,
+            Some(false),
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+    let nodes = json_nodes(
+        &service
+            .list("owner", MeshFilter::default(), NOW)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(nodes[1]["restore_safe"], true);
 }
 
 #[tokio::test]

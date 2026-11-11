@@ -115,13 +115,18 @@ for (const [name, viewport, scale] of SIZES) {
       await added.locator(".ui-window-pill").click();
       await expect(value(page, "System")).toHaveText("Debian GNU/Linux 13", slow);
       await expect(value(page, "CPU")).toHaveText("8 logical cores · Neoverse N1");
-      await expect(value(page, "Address")).toHaveText("operator@worker.lan");
       await expect(value(page, "Infraternal agent")).toHaveText("Remote · user");
       await expect(page.locator(".canvas-popover")).not.toContainText("AlmaLinux");
       await expect(page.locator(".canvas-popover")).not.toContainText("Intel N100");
       await checkAlignment(page);
       await settle(page);
       await page.screenshot({ path: resolve(OUT, `added-host-${name}-${theme}.png`) });
+      // D385 puts the host's address in Connection; machine facts remain scoped to the same host across tabs.
+      await page.getByRole("tab", { name: "Connection" }).click();
+      await expect(value(page, "Address")).toHaveText("operator@worker.lan");
+      await expect(page.getByRole("tab")).toHaveCount(2);
+      await page.getByRole("tab", { name: "Machine" }).click();
+      await expect(value(page, "CPU")).toHaveText("8 logical cores · Neoverse N1");
       expect(asked).toContain("host.facts.read");
       expect(asked).toContain(`remote.host.facts ${WORKER_ID}`);
       expect(serverHost).not.toBe("worker");

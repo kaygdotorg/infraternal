@@ -7,8 +7,9 @@
  * the content nodes that should fade in. The panel is laid out once at its final size and a
  * spring opens a `clip-path: inset(... round r)` from the pill's rectangle to the panel, so
  * width, height and corner radius move together and nothing reflows. The pill fades out over the
- * first third, the content fades in after the shape has settled, and closing reverses the same
- * spring from wherever it is (interruptible). At rest no clip, transform or opacity is left
+ * first third and the content is whole from the first frames (it fades in over the first third of the
+ * shape's growth, so the panel is never a blurred empty card: the clip shows it as the shape opens), and
+ * closing reverses the same spring from wherever it is (interruptible). At rest no clip, transform or opacity is left
  * on anything. Reduced motion: a crossfade. Opened or closed from the keyboard (Enter on the focused pill, Escape), the
  * morph has no motion at all (#427, input-source.ts): the panel is whole in the first frame and gone in the first frame.
  *
@@ -53,11 +54,13 @@ export interface PillMorph {
 }
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+/** How long the shape takes to grow from the pill to the panel, in seconds: a quick ease-out (owner, #484: "why does this animation take so long?"). */
+const MORPH_SECONDS = 0.18;
 const smooth = (from: number, to: number, value: number): number => { const t = clamp01((value - from) / (to - from)); return t * t * (3 - 2 * t); };
 
 /**
  * Builds the morph for one pill and panel (see the module note); nothing is drawn until `open()`. The shape grows on
- * the ease-out curve in 220 ms, so the panel is there almost at once.
+ * the ease-out curve in `MORPH_SECONDS` (180 ms, TASTE "Fast, ease-out, under 300 ms"), so the panel is there almost at once.
  */
 export function createPillMorph(options: PillMorphOptions): PillMorph {
   const { pill, stage, panel, content } = options;
@@ -82,11 +85,12 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
     const lerp = (a: number, b: number): number => (a + (b - a) * k) * rest;
     const radius = pillInset.radius + (openInset.radius - pillInset.radius) * k;
     panel.style.clipPath = `inset(0px ${lerp(pillInset.right, 0)}px ${lerp(pillInset.bottom, openInset.bottom)}px ${lerp(pillInset.left, 0)}px round ${radius}px)`;
-    const show = String(smooth(0.7, 1, k));
+    // The content shows from the first frames: a card with a blurred backdrop and no rows in it looked empty and slow.
+    const show = String(smooth(0, 0.3, k));
     for (const node of content) node.style.opacity = show;
     pill.style.opacity = String(1 - smooth(0, 0.35, k));
   };
-  const spring = new Spring(0, apply, { visualDuration: 0.22 });
+  const spring = new Spring(0, apply, { visualDuration: MORPH_SECONDS });
 
   const finishClose = (): void => {
     panel.remove();

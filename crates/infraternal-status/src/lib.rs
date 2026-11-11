@@ -714,6 +714,12 @@ fn peer_count(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+/// Whether an enabled public mesh state is waiting for its first accepted server snapshot.
+fn waiting_for_server_configuration(bytes: &[u8]) -> bool {
+    // State writes these fields first, in this order, so status stays a bounded prefix check instead of parsing all peers.
+    bytes.starts_with(br#"{"enabled":true,"config":null"#)
+}
+
 /// Mesh state: the kernel interface says whether it is up, the snapshot says how many peers.
 fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let link = roots.net_class.join(MESH_INTERFACE).exists();
@@ -725,23 +731,33 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let mut unreadable = false;
     let mut found = false;
     let mut peers = None;
+    let mut waiting = false;
     for dir in dirs {
         match fs::read(dir.join("mesh-public.json")) {
             Ok(bytes) => {
                 found = true;
                 peers = peer_count(&bytes);
+                waiting = waiting_for_server_configuration(&bytes);
                 break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => unreadable = true,
             Err(_) => {}
         }
     }
-    match (link, peers) {
-        (true, Some(count)) => row("mesh", "Running", format!("peers: {count}")),
-        (true, None) if unreadable => row("mesh", "Running", "peers need root to read"),
-        (true, None) => row("mesh", "Running", "peers unknown"),
-        (false, _) if found => row("mesh", "Stopped", "interface is down"),
-        (false, _) => row("mesh", "Not set up", ""),
+    if waiting {
+        row(
+            "mesh",
+            "Waiting",
+            "No server configuration accepted; check server and infraternal agent compatibility",
+        )
+    } else {
+        match (link, peers) {
+            (true, Some(count)) => row("mesh", "Running", format!("peers: {count}")),
+            (true, None) if unreadable => row("mesh", "Running", "peers need root to read"),
+            (true, None) => row("mesh", "Running", "peers unknown"),
+            (false, _) if found => row("mesh", "Stopped", "interface is down"),
+            (false, _) => row("mesh", "Not set up", ""),
+        }
     }
 }
 

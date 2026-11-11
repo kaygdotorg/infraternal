@@ -109,6 +109,9 @@ export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHo
       const removal = cx.adapters.hostRemoval;
       if (entry && entry.id !== "embedded" && removal?.label()) out.push({
         id: "remove", label: `${removal.label()}…`, icon: SESSION_ICON.end, danger: true,
+        // D385: a left swipe reveals "Remove". The question is the glass confirmation card (D380), not the in-row one, because
+        // removing a host says more than a row can; the row is still listed behind it, so it settles back (`swipeKeeps`).
+        swipe: "left", swipeLabel: "Remove", swipeKeeps: true,
         run: () => removal.remove(entry.id, host, row),
       });
       return out;

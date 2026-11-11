@@ -18,6 +18,7 @@ fn plural(count: u64, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+/// Turn public mesh status JSON into a short message and suggested next command.
 fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     let state = value["state"].as_str().ok_or(PluginError::Rejected)?;
     let count = value["peer_count"].as_u64().ok_or(PluginError::Rejected)?;
@@ -29,7 +30,7 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         ),
         "Waiting" => (
             Tone::Attention,
-            "Mesh is on, waiting for this machine to reach its server.".to_owned(),
+            "Waiting for server.".to_owned(),
             vec!["infraternal status"],
         ),
         "Stopping" => (
@@ -356,10 +357,20 @@ fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginEr
 }
 
 #[cfg(test)]
+/// Tests the user-facing CLI presentation of Mesh status and peer rows.
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
+
+    /// A refused node tells the person to wait for a usable server snapshot.
+    #[test]
+    fn refused_node_says_waiting_for_server() {
+        let shown = status(serde_json::json!({"state":"Waiting","peer_count":0}), 100)
+            .expect("waiting status");
+        assert_eq!(shown.message, "Waiting for server.");
+    }
+
     #[test]
     fn status_explains_the_observed_server_transport() {
         for (kind, reason, label, explanation) in [

@@ -85,6 +85,7 @@ fn snapshot(local: (u32, PublicKey), peer: (u32, PublicKey), endpoint: SocketAdd
     Chunk {
         local_key: Some(local.1),
         server: Some(NodeId(1)),
+        authority_epoch: None,
         node: NodeId(local.0.into()),
         #[cfg(feature = "mesh-dns")]
         name: None,
@@ -322,4 +323,116 @@ fn manual_route_and_open_tcp_flow_survive_an_agent_restart() {
         received, STREAM_BYTES,
         "the open flow broke on the receiver"
     );
+}
+
+/// A lower-revision restore either replaces its peers or stops before any stale peer stays reachable.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft, issue #382."]
+fn restored_snapshot_makes_a_removed_peer_unreachable() {
+    let (state_a, state_b) = (state("j287-rollback-a"), state("j287-rollback-b"));
+    run("mkdir", &["-p", "/run/netns"]);
+    run("mount", &["-t", "tmpfs", "netns", "/run/netns"]);
+    cleanup(&[]);
+    for ns in [NS_A, NS_B] {
+        run("ip", &["netns", "add", ns]);
+        run("ip", &["-n", ns, "link", "set", "lo", "up"]);
+    }
+    run(
+        "ip",
+        &[
+            "link", "add", "d332a", "netns", NS_A, "type", "veth", "peer", "d332b", "netns", NS_B,
+        ],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "address", "add", "192.0.2.1/24", "dev", "d332a"],
+    );
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "192.0.2.2/24", "dev", "d332b"],
+    );
+    run("ip", &["-n", NS_A, "link", "set", "d332a", "up"]);
+    run("ip", &["-n", NS_B, "link", "set", "d332b", "up"]);
+
+    let up = |ns: &str, path: &PathBuf| {
+        in_ns(ns, || {
+            let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+            let identity = node.up().unwrap();
+            (node, identity)
+        })
+    };
+    let (mut node_a, id_a) = up(NS_A, &state_a);
+    let (mut node_b, id_b) = up(NS_B, &state_b);
+    let a = (1, id_a.public_key);
+    let b = (2, id_b.public_key);
+    let endpoint_a = SocketAddr::from(([192, 0, 2, 1], id_a.port));
+    let endpoint_b = SocketAddr::from(([192, 0, 2, 2], id_b.port));
+
+    let mut accepted = snapshot(a, b, endpoint_b);
+    accepted.version = 11;
+    in_ns(NS_A, || assert!(node_a.chunk(accepted).unwrap()));
+    in_ns(NS_B, || {
+        assert!(node_b.chunk(snapshot(b, a, endpoint_a)).unwrap());
+    });
+
+    let address = SocketAddr::from(([10, 254, 0, 2], 5001));
+    let listener = in_ns(NS_B, || TcpListener::bind(address).unwrap());
+    let accept_listener = listener.try_clone().unwrap();
+    let accepting = thread::spawn(move || {
+        enter(NS_B);
+        accept_listener.accept().unwrap().0
+    });
+    let mut client = in_ns(NS_A, || {
+        TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap()
+    });
+    let mut accepted_stream = accepting.join().unwrap();
+    client.write_all(b"peer reachable").unwrap();
+    let mut received = [0; 14];
+    accepted_stream.read_exact(&mut received).unwrap();
+    assert_eq!(&received, b"peer reachable");
+
+    let mut restored = snapshot(a, b, endpoint_b);
+    restored.version = 2;
+    restored.default_policy = DefaultPolicy::Deny;
+    restored.upserted.clear();
+    let (restored_result, retained_version, installed_peers) = in_ns(NS_A, || {
+        let result = node_a.chunk(restored);
+        (
+            result,
+            node_a.config().map(|config| config.version),
+            node_a.counters().map(|counters| counters.len()),
+        )
+    });
+    let attempt = in_ns(NS_A, || {
+        TcpStream::connect_timeout(&address, Duration::from_secs(2))
+    });
+    let replacement_applied = match restored_result {
+        Ok(applied) => {
+            assert!(applied, "the restored full snapshot was not committed");
+            assert_eq!(retained_version, Some(2));
+            assert!(installed_peers.as_ref().is_ok_and(|count| *count == 0));
+            true
+        }
+        Err(error) => {
+            // If retirement itself fails, `chunk` stops the mesh before returning the refusal.
+            // That fallback is acceptable only when no stale configuration or peer remains.
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(retained_version, None);
+            assert!(installed_peers.is_err());
+            false
+        }
+    };
+    assert!(
+        attempt.is_err(),
+        "the peer removed by the restored snapshot still reached the listener"
+    );
+
+    drop(client);
+    drop(accepted_stream);
+    drop(listener);
+    if replacement_applied {
+        in_ns(NS_A, || node_a.down().unwrap());
+    }
+    in_ns(NS_B, || node_b.down().unwrap());
+    cleanup(&[&state_a, &state_b]);
 }

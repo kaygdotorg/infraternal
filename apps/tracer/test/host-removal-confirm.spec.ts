@@ -27,8 +27,8 @@ const OPAQUE_COLOUR_CORRELATION = 0.2;
 
 /**
  * The glass checks for one open card: dense text really behind it (so a card over a blank part of the terminal proves
- * nothing), no glass bed under it (D380), and at the translucent levels colour and shape from behind showing through (so an
- * opaque card cannot pass as glass); the Solid level is opaque by design and must show none. The legibility numbers are
+ * nothing), no glass bed under it (D380), and at the translucent looks colour and shape from behind showing through (so an
+ * opaque card cannot pass as glass); the Solid look is opaque by design and must show none. The legibility numbers are
  * logged for the issue, not limited: readability is the shared glass contrast guarantee's job.
  */
 async function expectGlass(page: Page, label: string, pixels: CardPixels, level: string, minTextBehind: number): Promise<void> {
@@ -41,14 +41,7 @@ async function expectGlass(page: Page, label: string, pixels: CardPixels, level:
   else expect(colour.corr, `the card is glass: colour and shape from behind show through (${numbers})`).toBeGreaterThan(GLASS_COLOUR_CORRELATION);
 }
 
-/**
- * The levels the palette-started cases run. Solid is left out: setting `data-card` alone no longer makes the card's fill opaque (the
- * fill's alpha comes from `applyTheme`'s level, not the attribute), so the "Solid is opaque" check failed on unmodified dev (7d4f1a4b6)
- * before D380 touched anything. Solid's real appearance is covered by the transparency specs; this one checks the glass levels.
- */
-const GLASS_LEVELS = LEVELS.filter((level) => level !== "solid");
-
-for (const size of SIZES) for (const theme of THEMES) for (const level of GLASS_LEVELS) test(`removal from the palette ${size.id} ${theme} ${level}: centred, plain buttons, glass`, async ({ browser }) => {
+for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS) test(`removal from the palette ${size.id} ${theme} ${level}: centred, plain buttons, glass`, async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, hasTouch: size.touch, isMobile: size.touch });
   const page = await context.newPage();
   try {
@@ -83,7 +76,7 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of GLASS_
     expect(touchesPill, "not hung on the focused window's pill").toBe(false);
     expect(m.title, "the full host name is in the title").toBe(`Remove ${removed}?`);
     expect(m.labelledBy, "the dialog is named by its title").toBe(m.title);
-    expect(m.describedBy, "the dialog is described by its effect line").toContain("Revoke its access");
+    expect(m.describedBy, "the dialog is described by its effect line").toContain("Revokes its access");
     expect(m.yes.text, "the button is the plain verb").toBe("Remove");
     expect(m.yesLabel).toBe("Remove");
     expect(m.no.text).toBe("Keep");
@@ -106,7 +99,7 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of GLASS_
 });
 
 /** The card started from the sidebar's host row is anchored to that row and is glass too (same checks, a lower text floor: the sidebar's own rows are half of what is behind it). */
-for (const size of SIZES) for (const theme of THEMES) for (const level of ["tinted", "frosted"] as const) test(`removal from the sidebar ${size.id} ${theme} ${level}: anchored, glass, centred`, async ({ browser }) => {
+for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS) test(`removal from the sidebar ${size.id} ${theme} ${level}: anchored, glass, centred`, async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, hasTouch: size.touch, isMobile: size.touch });
   const page = await context.newPage();
   try {

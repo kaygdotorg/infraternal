@@ -312,7 +312,6 @@
 .ui-window[data-goo] { transition: none; background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
 /* The two frames after the silhouette ends: the real windows are back, their borders do not fade in under the silhouette. */
 .ui-window[data-goo-end] { transition: none !important; }
-.cl-goo { z-index: 0; }
 
 /* Settings view: a section's content fills its window (the shared settings pane, scrolled by itself). */
 .cl-col .ui-window-body > .ui-settings-pane { position: absolute; inset: 0; }

@@ -94,6 +94,7 @@ fn configuration(granted_ports: &[u16]) -> Config {
 /// Builds one node's snapshot with the requested peer port grants.
 fn configuration_with(grants: &[(u8, &[u16])]) -> Config {
     Config {
+        authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(1),

@@ -5,7 +5,7 @@
  *   their static imports, the core screen, the terminal and its renderer with the WASM). Strict, and unchanged.
  * - **On demand**: code that loads only when the person takes an action (the add-host wizard, the share studio,
  *   a Settings window): modules named `*.on-demand.ts` and what only they reach. Its own budget.
- * - **Deferred**: code that loads after the first screen is up (the canvas: views, Mesh, the droplet, the toolbar's
+ * - **Deferred**: code that loads after the first screen is up (the canvas: views, Mesh, the toolbar's
  *   edit mode, the settings windows). Its own budget: the size at the time of the decision plus a stated margin.
  *
  * Which chunk is which comes from the build graph (`chunks.json`, written by build.ts from the bundler's own

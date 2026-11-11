@@ -10,8 +10,8 @@
  *   Split right in a stacked column makes a group: the window's column halves and the windows around it span both
  *   halves, so nothing else moves (layout/grid.ts holds the rules). A new window opens a full-size window beside it
  *   (`right`, after its whole group) or under it (`below`, which grows the column). Every action opens a new shell on
- *   the same host, no prompt. Splits play the droplet in their direction and the other windows glide (FLIP) on a mouse
- *   action. Keyboard actions are instant. Splits are windows in the one structure: no nesting.
+ *   the same host, no prompt. A mouse split fades the new window in (150 ms) while sizes snap and moved windows glide (FLIP,
+ *   150 ms). Keyboard actions are instant. Splits are windows in the one structure: no nesting.
  *
  * Every layout change measures, changes, then plays (layout/flip.ts); the terminal refits once at the new size.
  */
