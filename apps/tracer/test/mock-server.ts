@@ -267,6 +267,19 @@ server.listen(PORT, HOST, () => {
   process.stdout.write(`tracer TEST DOUBLE listening on http://${HOST}:${PORT}\n`);
 });
 
+/**
+ * Review knobs for the hosts surfaces (#500, J528), all off unless set, so no spec changes: `MOCK_REMOTE_HOSTS` is a JSON array of
+ * admitted hosts (`{id, name, online, user?, os?, address?}`) that `remote.host.list` answers with; `MOCK_FACTS_DELAY_MS` makes
+ * `host.facts.read` answer after that many milliseconds with a full machine report (instead of the bare `{"os":"Linux"}`); and
+ * `MOCK_CA_LOCKED=1` makes the host-connections CA read as locked. They let a real browser on a real device see a registered
+ * host that is offline behind the lock, and a machine panel whose facts arrive late, against the same built app.
+ */
+const MOCK_REMOTE_HOSTS: unknown[] | undefined = process.env.MOCK_REMOTE_HOSTS ? JSON.parse(process.env.MOCK_REMOTE_HOSTS) as unknown[] : undefined;
+const MOCK_FACTS_DELAY_MS = process.env.MOCK_FACTS_DELAY_MS === undefined ? undefined : Number(process.env.MOCK_FACTS_DELAY_MS);
+const MOCK_CA_LOCKED = process.env.MOCK_CA_LOCKED === "1";
+/** A full machine report, the shape the product's facts reader accepts. */
+const MOCK_FACTS = { os: "Debian GNU/Linux", version: "13", kernel: "6.12.57", architecture: "aarch64", model: "Raspberry Pi 5", cpuModel: "Cortex-A76", logicalCpus: 4, memory: { usedBytes: 2e9, totalBytes: 8e9 }, rootDisk: { usedBytes: 1e10, totalBytes: 6e10 }, uptimeSeconds: 86_400, loadAverage: [0.1, 0.2, 0.3], executionUid: 0, mode: "embedded", engines: ["Podman"] };
+
 /** Serves the double's HTTP side: the `/__mock/*` controls the specs drive, auth, and the built app. */
 async function routeHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
   response.setHeader(TEST_DOUBLE_HEADER, "true");
@@ -278,6 +291,10 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     return sendJson(response, 200, { ok: true });
   }
   if (url.pathname === "/__perf") return perfSink(request, response);
+  // The host-connections CA (see the review knobs above): only its status is answered, and only when the knobs ask for a lock.
+  if (MOCK_CA_LOCKED && url.pathname.startsWith("/remote/ca/")) {
+    return url.pathname === "/remote/ca/status" ? sendJson(response, 200, { initialized: true, locked: true, roots: [] }) : sendJson(response, 503, {});
+  }
   if (await appwinHttp(request, response, url.pathname, readJson, sendJson)) return;
   if (await handleBootstrapHttp(request, response, url.pathname, sameOrigin(request) || request.method === "GET" ? isAuthenticated(request) : false)) return;
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
@@ -955,13 +972,18 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       return;
     case "Call": {
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "remote.host.list") {
-        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: appwinHosts(), next: null })) });
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: MOCK_REMOTE_HOSTS ?? appwinHosts(), next: null })) });
         return;
       }
       if (connection.welcomed && frame.callId > 0 && appwinEnabled && frame.actionId.startsWith("desktop.")) {
         let input: Record<string, unknown> = {};
         try { input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as Record<string, unknown>; } catch { /* an empty input */ }
         if (appwinCall(connection.socket, frame.callId, frame.actionId, input)) return;
+      }
+      if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read" && MOCK_FACTS_DELAY_MS !== undefined) {
+        const socket = connection.socket;
+        setTimeout(() => sendFrame(socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify(MOCK_FACTS)) }), MOCK_FACTS_DELAY_MS);
+        return;
       }
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read") {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"os":"Linux"}') });
