@@ -9,6 +9,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gotatun_break_it.report import Probe, report_case
+from gotatun_break_it.trace import (
+    CounterSample,
+    GoodputSample,
+    SchedulerEvent,
+    goodput_from_counters,
+    parse_perf_sched,
+    summarize_soak,
+)
 
 
 class RecoveryReportTests(unittest.TestCase):
@@ -34,6 +42,7 @@ class RecoveryReportTests(unittest.TestCase):
             integrity_ok=True,
         )
 
+        self.assertEqual(report["fault_duration_ms"], 200.0)
         self.assertEqual(report["recovery_ms_from_fault_start"], 210.0)
         self.assertEqual(report["recovery_ms_after_fault_cleared"], 10.0)
         self.assertEqual(report["bytes_unverified"], 300)
@@ -58,6 +67,90 @@ class RecoveryReportTests(unittest.TestCase):
 
         self.assertEqual(report["manual_fix"], True)
         self.assertEqual(report["outcome"], "FAIL")
+
+
+class SoakTraceTests(unittest.TestCase):
+    """Keep a long loaded-latency report aligned with GotaTun's diagnostic streams."""
+
+    def test_reports_stall_with_correlated_goodput_counters_and_scheduler_waits(self):
+        """A probe stall retains the queue, throughput and runnable-delay evidence at its time."""
+        report = summarize_soak(
+            probes=[
+                Probe(1, 1_000_000_000, 8.0),
+                Probe(2, 1_100_000_000, 120.0),
+                Probe(3, 1_200_000_000, 240.0),
+                Probe(4, 1_300_000_000, 8.0),
+            ],
+            goodput=[GoodputSample(1_150_000_000, 900_000_000)],
+            counters=[
+                CounterSample(
+                    1_150_000_000,
+                    {"crypto_queue_depth": 12, "completion_lock_wait_ns": 45_000_000},
+                ),
+                CounterSample(
+                    1_200_000_000,
+                    {"crypto_queue_depth": 16, "completion_lock_wait_ns": 0},
+                ),
+            ],
+            scheduler_events=[
+                SchedulerEvent(
+                    1_200_000_000,
+                    task="gotatun-crypto-0",
+                    event="runnable_delay",
+                    delay_ns=250_000_000,
+                )
+            ],
+        )
+
+        self.assertEqual(report["p99_ms"], 240.0)
+        self.assertEqual(report["stall_bursts"][0]["first_probe_sequence"], 2)
+        self.assertEqual(report["stall_bursts"][0]["last_probe_sequence"], 3)
+        self.assertEqual(report["stall_bursts"][0]["probe_count"], 2)
+        self.assertEqual(report["stall_bursts"][0]["goodput_min_bps"], 900_000_000)
+        self.assertEqual(report["stall_bursts"][0]["counter_max"]["crypto_queue_depth"], 16)
+        self.assertEqual(
+            report["stall_bursts"][0]["counter_max"]["completion_lock_wait_ns"],
+            45_000_000,
+        )
+        self.assertEqual(report["stall_bursts"][0]["scheduler_wait_max_ns"], 250_000_000)
+        self.assertEqual(report["correlation_status"], "complete")
+
+    def test_derives_one_second_goodput_from_gotatun_peer_byte_counters(self):
+        """Use monotonic counter samples to measure each interval's delivered rate."""
+        samples = [
+            CounterSample(1_000_000_000, {"gotatun_tx_bytes": 100}),
+            CounterSample(2_000_000_000, {"gotatun_tx_bytes": 1_100}),
+            CounterSample(4_000_000_000, {"gotatun_tx_bytes": 3_100}),
+        ]
+
+        self.assertEqual(
+            goodput_from_counters(samples, "gotatun_tx_bytes"),
+            [
+                GoodputSample(2_000_000_000, 8_000),
+                GoodputSample(4_000_000_000, 8_000),
+            ],
+        )
+
+    def test_parses_perf_sched_wakeup_to_runqueue_delay(self):
+        """Correlate a task's wakeup with the switch that next schedules it."""
+        events = parse_perf_sched(
+            """
+worker 123/123 [002] 20.000000: sched:sched_wakeup: comm=worker pid=123 prio=120 target_cpu=002
+worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 prev_prio=120 prev_state=S ==> next_comm=worker next_pid=123 next_prio=120
+"""
+        )
+
+        self.assertEqual(
+            events,
+            [
+                SchedulerEvent(
+                    20_250_000_000,
+                    task="worker/123",
+                    event="runnable_delay",
+                    delay_ns=250_000_000,
+                )
+            ],
+        )
 
     def test_missing_recovery_is_a_failure_without_invented_latency(self):
         """Report a missing recovery explicitly instead of fabricating a duration."""
