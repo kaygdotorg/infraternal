@@ -1147,3 +1147,8 @@ mod tests {
 #[cfg(all(test, target_os = "linux", feature = "mesh-dns"))]
 #[path = "review_j354_integration.rs"]
 mod review_j354_integration;
+
+/// Regression probes for restart cleanup and resolver failures found by J519 (#483).
+#[cfg(all(test, target_os = "linux", feature = "mesh-dns"))]
+#[path = "review_j519_dns.rs"]
+mod review_j519_dns;
