@@ -4920,3 +4920,20 @@ access (#341 B19).
        git.kayg.org stays the home of issues, merges and the gates.
      - **Licence:** the docs' text and media are AGPL-3.0-only, stated in the
        footer.
+
+389. **Website and docs mockup choices (owner, 2026-11-11, #339; extends D388):**
+     - **Context:** J514's mockup of the landing page, /install and the
+       reading-tuned docs (mockups index item "Website and docs (#339)").
+     - **Font:** mono everywhere. Docs body and landing copy keep the app's
+       Maple Mono, like the app. A sans body face was offered and declined.
+     - **Install step:** a one-line installer on the landing page
+       (`curl … | sh`). The installer itself verifies the build's signature
+       (D184) before installing anything.
+     - **Landing card:** "Your account" (passkey sign-in, recovery words,
+       signed-in devices, one terminal on several devices). It becomes
+       "Access and sharing" when those ship (D45).
+     - **Code blocks:** click to copy with "Copied" in place, and a faint
+       "Click to copy" hint on hover (desktop). No copy button.
+     - **Orchestrator's calls (reversible):** the ⌘K hint stays a label until
+       search ships; the standalone pages keep their own small copy of the
+       pill CSS instead of loading the app's full style sheet.
