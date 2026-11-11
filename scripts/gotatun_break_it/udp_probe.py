@@ -59,6 +59,7 @@ def echo_server(bind: str, port: int) -> None:
     """Echo valid mesh probe datagrams until the process is stopped."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
         listener.bind((bind, port))
+        print(json.dumps({"ready": True, "bind": bind, "port": port}), flush=True)
         while True:
             payload, address = listener.recvfrom(256)
             if decode_probe(payload) is not None:

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
+import select
+import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -312,6 +316,64 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
             timeout(now_ns=1_500, next_sample_ns=1_250, sampling_active=True),
             0,
         )
+
+    def test_loaded_latency_window_runs_exactly_one_tcp_flow(self):
+        """Keep the J526 loaded-latency profile pinned to one transport flow."""
+        try:
+            soak_module = importlib.import_module("gotatun_break_it.loaded_latency_soak")
+        except ImportError:
+            soak_module = None
+        command_builder = getattr(soak_module, "net_tput_command", None)
+        self.assertIsNotNone(command_builder, "loaded-latency command builder is missing")
+
+        self.assertEqual(
+            command_builder(Path("/opt/j88c/bin/h2h"), "10.254.0.2", 900),
+            [
+                "/opt/j88c/bin/h2h",
+                "net-tput",
+                "--to",
+                "10.254.0.2:5201",
+                "--flows",
+                "1",
+                "--seconds",
+                "900",
+            ],
+        )
+        with self.assertRaises(ValueError):
+            command_builder(Path("/opt/j88c/bin/h2h"), "mesh-peer", 900)
+        with self.assertRaises(ValueError):
+            command_builder(Path("/opt/j88c/bin/h2h"), "10.254.0.2", 0)
+
+    def test_probe_echo_server_reports_readiness_after_binding(self):
+        """Let the soak start fixed-rate probes only after the tunnel echo socket binds."""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        server_path = Path(__file__).parent / "gotatun_break_it" / "udp_probe.py"
+        server = subprocess.Popen(
+            [sys.executable, str(server_path), "serve", "--bind", "127.0.0.1", "--port", str(port)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            readable, _, _ = select.select([server.stdout], [], [], 3)
+            self.assertTrue(readable, "probe echo server did not announce readiness")
+            ready = json.loads(server.stdout.readline())
+            self.assertEqual(ready, {"ready": True, "bind": "127.0.0.1", "port": port})
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                client.settimeout(3)
+                client.sendto(encode_probe(1, 42), ("127.0.0.1", port))
+                payload, _ = client.recvfrom(256)
+            self.assertEqual(decode_probe(payload), (1, 42))
+        finally:
+            server.terminate()
+            server.wait(timeout=3)
+            if server.stdout is not None:
+                server.stdout.close()
+            if server.stderr is not None:
+                server.stderr.close()
 
     def test_missing_recovery_is_a_failure_without_invented_latency(self):
         """Report a missing recovery explicitly instead of fabricating a duration."""

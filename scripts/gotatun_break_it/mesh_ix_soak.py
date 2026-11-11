@@ -132,9 +132,18 @@ def _write_counter_sample(
     counters.update({f"b_{name}": value for name, value in right_counters.items()})
     counters.update({f"a_{name}": value for name, value in qdisc_counters("infraternal0").items()})
     counters.update(
+        {f"a_underlay_{name}": value for name, value in qdisc_counters("underlay0").items()}
+    )
+    counters.update(
         {
             f"b_{name}": value
             for name, value in qdisc_counters("infraternal0", right_namespace_pid).items()
+        }
+    )
+    counters.update(
+        {
+            f"b_underlay_{name}": value
+            for name, value in qdisc_counters("underlay1", right_namespace_pid).items()
         }
     )
     ended_ns = time.monotonic_ns()
