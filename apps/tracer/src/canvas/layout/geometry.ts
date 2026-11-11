@@ -55,6 +55,13 @@ export interface Metrics {
 export const MIN_TOUCH_COLUMN = 355;
 
 /**
+ * A host or tag card's height at scale 1: the header pill, the detail line and the status line at its two-line limit
+ * (`.cl-node-sub` clamps to two lines), with the card's padding. It is the height of the widest honest content, so no
+ * line is clipped (J508): at 104 px a status that wrapped lost its second line at the card's edge.
+ */
+const NODE_H = 132;
+
+/**
  * Sizes follow the viewport so a snapped view fills it: on a phone a lone column is the safe-area width and a column in a
  * strip of several is that width minus a sliver for each neighbour to peek in (`peekW`); on a desktop three columns fill the width; a column is always as tall
  * as the viewport (D119: windows tile the pane).
@@ -68,7 +75,7 @@ export const metricsFor = (width: number, height: number, coarse: boolean, sizes
   const peekW = peekWidth(width, narrow, colW, COLUMN_GAP, sizes);
   // The floor is never wider than a column of a default strip (`peekW`): a small phone's screen cannot show 40 cells with
   // a neighbour's slice beside them, and the floor must not change how a default layout looks there.
-  return { colW, peekW, minW: coarse ? Math.min(MIN_TOUCH_COLUMN, peekW) : 0, maxW: narrow ? colW : maxColumnWidth(width), clh, narrow, nodeW: Math.round((narrow ? 200 : 208) * scale), nodeH: Math.round(104 * scale), scale };
+  return { colW, peekW, minW: coarse ? Math.min(MIN_TOUCH_COLUMN, peekW) : 0, maxW: narrow ? colW : maxColumnWidth(width), clh, narrow, nodeW: Math.round((narrow ? 200 : 208) * scale), nodeH: Math.round(NODE_H * scale), scale };
 };
 
 /**

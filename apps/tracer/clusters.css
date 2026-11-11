@@ -155,6 +155,8 @@
 
 .cl-node-meta { display: grid; gap: 1px; padding: 0.25rem 0.875rem 0.625rem; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-node-detail { color: var(--fg); }
+/* On a phone the card's first line (its address or member count) is a row of text, so it reads the body size (D383); the status line under it is a caption and stays label size. */
+@media (pointer: coarse) { .cl-node-detail { font-size: var(--ui-size-body); } }
 /* Two lines at most: "188 ms, through fra-relay" is longer than a card is wide, and a cut-off figure reads as a wrong one. */
 .cl-node-sub { color: var(--ui-text-secondary); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
 /* Arrows pass under the cards, so a line that crosses a card is hidden by it instead of cutting through its text. */

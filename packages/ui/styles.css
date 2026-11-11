@@ -484,7 +484,7 @@
   --t-panel: 240ms;
 }
 @media (pointer: coarse) {
-  :root { --ui-control-h: 2.75rem; --ui-icon: 1.125rem; --ui-size-body: 0.9375rem; --ui-size-title: 1.375rem; --text-body: var(--ui-size-body); --text-secondary: var(--ui-size-body); --text-caption: var(--ui-size-label); --text-input: 1rem; /* ui-literal: D372, iOS never zooms at 16 px */ }
+  :root { --ui-control-h: 2.75rem; --ui-icon: 1.125rem; --ui-size-body: 0.9375rem; --ui-size-button: 0.9375rem; --ui-size-eyebrow: 0.8125rem; --ui-size-title: 1.375rem; --text-body: var(--ui-size-body); --text-secondary: var(--ui-size-body); --text-caption: var(--ui-size-label); --text-input: 1rem; /* ui-literal: D372, iOS never zooms at 16 px */ }
 }
 
 /* Window card (window-card.ts): the pane card's surface plus a quiet header. */
@@ -919,7 +919,7 @@
 .ui-sidebar-names { display: grid; min-width: 0; gap: 0.25rem; }
 .ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
 .ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: var(--ui-size-eyebrow); }
-@media (pointer: coarse) { .ui-sidebar-secondary { font-size: var(--ui-size-eyebrow); } }
+@media (pointer: coarse) { .ui-sidebar-secondary { font-size: var(--ui-size-label); } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Window lock (lock-toggle.ts, window-card.ts): the padlock glyph itself, no chip. It is centred on
@@ -1219,7 +1219,7 @@
 /* A long leaf name gives way to its marks and notes instead of wrapping onto a second line. */
 .bm-leaf .bm-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A caption between groups inside one section: the host above its sessions. It has no branch of its own. */
-.bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 0.5rem; color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1.2 var(--font-mono); letter-spacing: 0; }
+.bm-subhead { display: flex; align-items: center; height: var(--row); padding: 0 0.5rem; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1.2 var(--font-mono); letter-spacing: 0; }
 
 /* Entity chips (entity-chip.ts): a recognised thing named in text. Text-height, on the baseline, one unit when the line
    wraps, never animated. The fill is set inline from the palette tokens, so a theme switch recolours it with no script. */

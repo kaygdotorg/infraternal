@@ -89,7 +89,12 @@ export function openDetailsPopover(
   let scrolled = false;
   scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
   let selected = first.sections[0]?.id ?? "";
-  const show = (id: string, animate: boolean): void => {
+  /**
+   * Draws tab `id`. `tabChange` is true only when the person picked a tab: the list then starts from the top. A refresh
+   * (the facts poll repaints about once a second) passes false and keeps the scroll position, so reading further down
+   * the panel is never undone by new data (J508).
+   */
+  const show = (id: string, animate: boolean, tabChange = true): void => {
     selected = id;
     const facts = input.read();
     updateHeader(facts);
@@ -103,7 +108,7 @@ export function openDetailsPopover(
       removal.sync();
     }
     // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
-    if (scrolled) { scroll.scrollTop = 0; scrolled = false; }
+    if (tabChange && scrolled) { scroll.scrollTop = 0; scrolled = false; }
     if (animate && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
       list.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE_OUT });
     }
@@ -178,7 +183,7 @@ export function openDetailsPopover(
   window.visualViewport?.addEventListener("resize", () => place(), { signal: events.signal });
   if (source === "keyboard") root.querySelector<HTMLElement>(".ui-tab[aria-selected='true']")?.focus({ preventScroll: true });
 
-  return { windowId: input.windowId, close, refresh: () => show(selected, false) };
+  return { windowId: input.windowId, close, refresh: () => show(selected, false, false) };
 }
 
 /** Controls the one open machine panel and keeps it aligned with its window identity. */
