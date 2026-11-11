@@ -1415,6 +1415,12 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
             interface: args.host_firewall_remote_interface.clone(),
             address,
             protocol: Protocol::Tcp,
+            sources: sources.clone(),
+        });
+        listeners.push(Listener {
+            interface: args.host_firewall_remote_interface.clone(),
+            address,
+            protocol: Protocol::Udp,
             sources,
         });
     }

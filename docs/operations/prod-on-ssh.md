@@ -46,16 +46,20 @@ difference between those loaded rules and its desired configuration.
 
 ## Product configuration for the next deploy
 
-Pass the host rules to `infraternal server init --system`. Include the server's
-actual data directory, public origin and any TLS or remote-listener settings
-used on the host. These host-policy arguments reproduce the current
-allowances:
+Pass the host rules to `infraternal server init --system --force`. `--force`
+lets the product replace the existing server unit with the current settings.
+Include the server's actual data directory, web root, public origin, remote CA
+directory and any TLS settings used on the host. These host-policy arguments
+reproduce the current allowances:
 
 ```sh
-infraternal server init --system \
+infraternal server init --system --force \
+  --data /var/lib/infraternal \
   --listen 10.69.0.89:7011 \
+  --web-root /opt/infraternal/73b1d61a6/web \
   --public-origin https://ssh.kayg.org \
   --remote-listen 10.69.69.89:7443 \
+  --remote-ca-dir /var/lib/infraternal/remote-ca \
   --behind-proxy \
   --trusted-proxy 10.69.0.99 \
   --host-firewall-listen-interface eth0 \
@@ -80,8 +84,9 @@ host table is replaced.
 
 After the product takes over, it replaces the dynamic `wt0` counter with the
 equivalent configured interface allowance, derives the listener rules from
-server flags and retains the configured extra rules. The table remains
-default-drop. Mesh adds the two lines at the end when enabled:
+server flags and retains the configured extra rules. Listener rules also match
+the configured destination addresses. The table remains default-drop. Mesh
+adds the two lines at the end when enabled:
 
 ```nft
 table inet infraternal_host {
@@ -97,9 +102,9 @@ table inet infraternal_host {
         iifname "wt0" ip saddr 10.69.69.0/24 tcp dport 22 accept
         iifname "wt0" ip saddr 10.69.69.99 tcp dport 7011 accept
         iifname "eth0" ip saddr 10.69.0.99 tcp dport 7012 accept
-        iifname "eth0" ip saddr 10.69.0.99 tcp dport 7011 accept
-        iifname "wt0" ip saddr 10.69.69.0/24 tcp dport 7443 accept
-        iifname "wt0" ip saddr 10.69.69.0/24 udp dport 7443 accept
+        iifname "eth0" ip saddr 10.69.0.99 ip daddr 10.69.0.89 tcp dport 7011 accept
+        iifname "wt0" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 tcp dport 7443 accept
+        iifname "wt0" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 udp dport 7443 accept
         iifname "infraternal0" accept
         udp dport 10254 accept
     }
@@ -122,7 +127,8 @@ and can be removed later as routine cleanup. Do not edit or apply nft rules
 over SSH to complete this migration; the product install performs the takeover
 and reports the rule differences.
 
-`infraternal up` installs the same early boot unit on agent-only hosts. It
+`infraternal up` installs the same early boot unit on hosts that run only an
+infraternal agent. It
 stores a root-owned agent policy, keeps the active SSH source (or accepts
 additional `--host-firewall-allow` entries), and takes over this hand loader
 with rollback support. Both server and agent installs leave unrelated nftables

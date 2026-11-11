@@ -27,20 +27,35 @@ fn prod_policy(mesh_enabled: bool) -> Policy {
             AllowRule::from_str("eth0,*,udp,51820").expect("mesh transport ingress"),
             AllowRule::from_str("wt0,10.69.69.0/24,tcp,22").expect("admin SSH path"),
             AllowRule::from_str("wt0,10.69.69.99,tcp,7011").expect("private ingress source"),
-            AllowRule::from_str("eth0,10.69.0.99,tcp,7011").expect("public ingress source"),
             AllowRule::from_str("eth0,10.69.0.99,tcp,7012").expect("proxy health listener"),
-            AllowRule::from_str("wt0,10.69.69.0/24,tcp,7443").expect("main TCP listener"),
-            AllowRule::from_str("wt0,10.69.69.0/24,udp,7443").expect("remote UDP listener"),
         ],
         accept_interfaces: vec!["wt0".to_owned()],
-        listeners: vec![Listener {
-            interface: Some("wt0".to_owned()),
-            address: "0.0.0.0:7443"
-                .parse::<SocketAddr>()
-                .expect("server address"),
-            protocol: Protocol::Tcp,
-            sources: vec!["10.69.69.0/24".parse().expect("trusted proxy source")],
-        }],
+        listeners: vec![
+            Listener {
+                interface: Some("eth0".to_owned()),
+                address: "10.69.0.89:7011"
+                    .parse::<SocketAddr>()
+                    .expect("server address"),
+                protocol: Protocol::Tcp,
+                sources: vec!["10.69.0.99".parse().expect("trusted proxy source")],
+            },
+            Listener {
+                interface: Some("wt0".to_owned()),
+                address: "10.69.69.89:7443"
+                    .parse::<SocketAddr>()
+                    .expect("remote listener address"),
+                protocol: Protocol::Tcp,
+                sources: vec!["10.69.69.0/24".parse().expect("remote source network")],
+            },
+            Listener {
+                interface: Some("wt0".to_owned()),
+                address: "10.69.69.89:7443"
+                    .parse::<SocketAddr>()
+                    .expect("remote listener address"),
+                protocol: Protocol::Udp,
+                sources: vec!["10.69.69.0/24".parse().expect("remote source network")],
+            },
+        ],
         mesh_enabled,
     }
 }
@@ -66,9 +81,10 @@ fn prod_shaped_policy_renders_listeners_admin_rules_and_default_drop() {
             "        iifname \"eth0\" udp dport 51820 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 22 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.99 tcp dport 7011 accept\n",
-            "        iifname \"eth0\" ip saddr 10.69.0.99 tcp dport 7011 accept\n",
             "        iifname \"eth0\" ip saddr 10.69.0.99 tcp dport 7012 accept\n",
-            "        iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 7443 accept\n",
+            "        iifname \"eth0\" ip saddr 10.69.0.99 ip daddr 10.69.0.89 tcp dport 7011 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 tcp dport 7443 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 udp dport 7443 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.0/24 udp dport 7443 accept\n",
             "    }\n",
             "}\n",

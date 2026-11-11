@@ -385,13 +385,13 @@ pub(crate) fn run(
     #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
     let host_firewall_service: Option<&str> = None;
     let success_message = if host_firewall_service.is_some() {
-        "This machine joined; its system service and host input firewall are active."
+        "This machine joined; infraternal owns its host input firewall through infraternal-firewall.service."
     } else {
         "This machine joined the server and its system service is active."
     };
     let success_body = if host_firewall_service.is_some() {
         format!(
-            "Machine joined as {hostname}.\nService: active\nHost input firewall: active\nCommand: {PATH_BINARY}"
+            "Machine joined as {hostname}.\nService: active\nHost input firewall: active (infraternal-firewall.service)\nCommand: {PATH_BINARY}"
         )
     } else {
         format!("Machine joined as {hostname}.\nService: active\nCommand: {PATH_BINARY}")
