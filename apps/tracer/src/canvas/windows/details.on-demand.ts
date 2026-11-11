@@ -181,11 +181,14 @@ export function openDetailsPopover(
   return { windowId: input.windowId, close, refresh: () => show(selected, false) };
 }
 
+/** Controls the one open machine panel and keeps it aligned with its window identity. */
 export interface DetailsModule {
   /** Opens the popover for a window, or closes it when it is that window's. */
   toggle(rec: WinRec, source: "pointer" | "keyboard"): void;
   /** Closes it (instantly when `instant`). */
   close(instant?: boolean): void;
+  /** Re-read an open window after its host identity changes, keeping the loading state current. */
+  refresh(windowId: string): void;
   isOpen(): boolean;
   dispose(): void;
 }
@@ -196,7 +199,7 @@ function hostStatus(cx: Ctx, hostId: string): RemovalStatus {
   return !entry ? "gone" : entry.online === false ? "offline" : "ready";
 }
 
-/** Makes the details module for a canvas: it opens, toggles and closes the popover for a window and adds the product's extra rows to it. */
+/** Own the one open details panel, repaint it when its window target changes, and add the product's extra rows and removal action. */
 export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
   let open: DetailsPopover | undefined;
   // The "Access level" row (#215) exists only on an instance that can raise the agent's privileges; its code loads with the first popover that needs it.
@@ -234,6 +237,7 @@ export function createDetails(cx: Ctx, source: DetailsSource): DetailsModule {
       stop = source.open?.(rec, popover.refresh) ?? stop;
     },
     close,
+    refresh: (windowId) => { if (open?.windowId === windowId) open.refresh(); },
     isOpen: () => open !== undefined,
     dispose() { open?.close("keyboard"); access?.dispose(); },
   };

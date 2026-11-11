@@ -142,3 +142,48 @@ test("a canonical receipt keeps temporary streams without re-journaling them", a
     registerGroups(groups);
   }
 });
+
+/** A shared host change must repaint an open panel before a timer or old reply can run. */
+test("a shared retarget immediately replaces the open panel's old facts with pending facts", async () => {
+  const { createLiveDetails } = await import("../sessions/details-live.on-demand");
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout: () => 1, clearTimeout() {} } });
+  Object.defineProperty(globalThis, "location", { configurable: true, value: { hostname: "server.example.invalid", protocol: "https:" } });
+  const source = createLiveDetails({
+    host: { name: "server" }, roundTrip: () => undefined,
+    connection: { isWelcomed: true, isOpen: true, call: async () => ({ os: "Debian", version: "13", kernel: "6.12", architecture: "x86_64", logicalCpus: 16, executionUid: 0, mode: "embedded", engines: [] }) } as unknown as import("../../connection").MuxConnection,
+  });
+  const metrics = metricsFor(1440, 900, false);
+  const model: WindowModel = { id: "stable", kind: "terminal", host: "server", sessionId: "same-session" };
+  const rec = { model, card: { setTitle() {} } } as unknown as WinRec;
+  const view: ViewModel = { id: "console", name: "Console", layout: "tiled", x: 0, y: 0, nodes: [], cols: [{ id: "c", w: metrics.colW, wins: [model] }] };
+  const record = { view, wins: new Map([[model.id, rec]]), label: { querySelector: () => null } } as unknown as ViewRec;
+  let shown: ReturnType<typeof source.facts>;
+  /** Models the open popover's real read-on-refresh boundary without polling or a DOM double. */
+  const paint = (): void => { shown = source.facts(rec); };
+  const cx = {
+    views: new Map([[view.id, record]]), state: { currentView: view.id, metrics, activeWin: rec },
+    details: { refresh(id: string) { if (id === rec.model.id) paint(); } },
+    view: { geometry() {}, paintEmpty() {}, settle() {} }, win: { setActive() {} },
+    visibility: { unwatch() {}, lodChanged() {} }, adapters: {},
+    store: { reset() {}, changed() {} }, tree: { render() {} }, pill: { paint() {} }, toolbar: { update() {} },
+  } as unknown as Ctx;
+  registerGroups({ applyCols() {} } as unknown as Groups);
+  const stop = source.open!(rec, paint);
+  try {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(shown!.sections[0]!.rows.find((row) => row.key === "Architecture")?.value).toBe("x86_64");
+    const next = { ...view, cols: [{ ...view.cols[0]!, wins: [{ ...model, host: "unreadable" }] }] };
+    await reconcile(cx, () => ({ document: toDocument([next], metrics, 1), protectedIds: new Set(), protectedViews: new Set() }), () => ({ sessionId: "same-session" }), () => true);
+    expect(rec.model.host).toBe("unreadable");
+    expect(shown!.sections[0]!.rows.find((row) => row.key === "System")?.value).toBe("Not known yet");
+    expect(shown!.sections[0]!.rows.find((row) => row.key === "Architecture")?.value).toBe("");
+  } finally {
+    stop();
+    const { groups } = await import("../layout/groups.on-demand");
+    registerGroups(groups);
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow); else Reflect.deleteProperty(globalThis, "window");
+    if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation); else Reflect.deleteProperty(globalThis, "location");
+  }
+});

@@ -15,6 +15,7 @@ function place(view: ViewRec, document: DocView): void {
   if (view.view.x !== x || view.view.y !== y) { view.view.x = x; view.view.y = y; view.sx.set(x, true); view.sy.set(y, true); }
 }
 export interface SharedPaint { document: CanvasDocument; protectedIds: ReadonlySet<string>; protectedViews: ReadonlySet<string> }
+/** Apply a shared layout and refresh an open machine panel immediately when its host changes. */
 export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (target: DocTarget, windowId: string) => Partial<WindowModel> | undefined, current: () => boolean): Promise<void> {
   const grouped = await loadGroups();
   if (!current()) return;
@@ -63,6 +64,7 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
           for (const k of ["sessionId", "session", "sessionPinned", "hostId", "user", "address", "os", "h", "span", "rows", "row"] as const) delete rec.model[k];
           Object.assign(rec.model, model);
         }
+        if (!sameHost) cx.details?.refresh(rec.model.id);
         if (retargeted && (!sameHost || !rec.binding?.retarget?.(rec.model))) { rec.binding?.dispose(); makeBody(cx, rec); rec.binding?.setActive(cx.state.activeWin === rec); }
         if (relabel) rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), ...(rec.model.session ? { session: rec.model.session } : {}) });
       }
