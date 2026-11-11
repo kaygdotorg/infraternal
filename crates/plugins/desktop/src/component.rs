@@ -248,6 +248,7 @@ impl Drop for DesktopComponent {
     }
 }
 
+/// Tests the desktop plugin's helper lifecycle and native-child cleanup.
 #[cfg(test)]
 mod tests {
     use super::*;
