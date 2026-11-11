@@ -1,7 +1,10 @@
 /**
- * Quick swipes are never swallowed (#122). In the Settings view with nine windows side by side, six trackpad swipes in
+ * Quick swipes are never swallowed (#122). In a view with nine windows side by side, six trackpad swipes in
  * two seconds land six windows further, with and without momentum events: a swipe is a run of wheel events that ramps
  * up and, with momentum, tails off for a few hundred milliseconds. The next swipe may start inside that tail.
+ *
+ * The run is built in the Console with "New window right" (nine full-size columns). The Settings view cannot be used for it any more:
+ * it is a grid of rows now, one row for each component, so its horizontal stops are the columns of one row, five at most (D212, #304).
  */
 import { expect, test, type Page } from "playwright/test";
 
@@ -36,8 +39,20 @@ for (const momentum of [false, true]) {
     await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     const api = (fn: string, ...args: unknown[]): Promise<unknown> => page.evaluate(([f, a]) => ((window as unknown as { __tracerClusters: Record<string, (...x: unknown[]) => unknown> }).__tracerClusters[f as string] as (...x: unknown[]) => unknown)(...(a as unknown[])), [fn, args] as const);
-    await api("flyView", "settings");
+    await api("flyView", "console");
+    // sleep: the fly-in to the Console must end before a window in it is clicked
     await page.waitForTimeout(1500);
+    await page.locator('.cl[data-view="console"] .ui-window .ui-window-body').first().click({ position: { x: 20, y: 40 } });
+    // Each "New window right" adds one column; wait for it to be there before the next one, so none is lost to the focus moving.
+    const columns = page.locator('.cl[data-view="console"] .cl-col');
+    for (let want = (await columns.count()) + 1; want <= 9; want++) {
+      await page.keyboard.press("Control+Shift+Enter");
+      await expect(columns).toHaveCount(want);
+    }
+    // The camera follows the newest window; fly away and back so the run is measured from its first column.
+    await api("flyView", "settings");
+    await api("flyView", "console");
+    await expect.poll(async () => ((await api("canvasLock")) as { index: number }).index, { timeout: 5000 }).toBe(0);
     const lock = (await api("canvasLock")) as { on: boolean; index: number; stops: number };
     expect(lock.on).toBe(true);
     expect(lock.stops).toBeGreaterThanOrEqual(8);
