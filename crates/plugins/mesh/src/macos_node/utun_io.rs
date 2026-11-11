@@ -24,8 +24,11 @@ use tokio::{
     sync::watch,
 };
 
+/// The address-family marker that macOS prepends to an IPv4 utun packet.
 const UTUN_AF_INET: u32 = 2;
+/// The address-family marker that macOS prepends to an IPv6 utun packet.
 const UTUN_AF_INET6: u32 = 30;
+/// The kernel control socket name used to request a fresh utun interface.
 const UTUN_CONTROL: &str = "com.apple.net.utun_control";
 
 /// Holds a freshly allocated utun control socket until the node registers it.
@@ -73,6 +76,7 @@ impl OpenUtun {
     }
 }
 
+/// Add the utun setup stage to a kernel error so startup failures have useful context.
 fn utun_setup_error(stage: &str, error: nix::errno::Errno) -> io::Error {
     let error = io::Error::from(error);
     io::Error::new(error.kind(), format!("utun {stage}: {error}"))
