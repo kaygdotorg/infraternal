@@ -270,9 +270,10 @@
   --ui-button-transition: color var(--t-press) ease, transform var(--t-press) var(--ease-out);
   margin-left: -0.5rem;
 }
+/* On a phone the short Back/Cancel and the main action share one row, so the footer costs one button's height, not two:
+   stacked, they took about 100 pt a phone's short card could not spare, and pushed the sign-in options out of sight. */
 @media (max-width: 480px) {
-  .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
-  .ah-foot:has(.ah-secondary) :is(.ah-primary, .ah-secondary) { width: 100%; margin: 0; }
+  .ah-foot:has(.ah-secondary) .ah-primary { flex: 1 1 auto; min-width: 0; }
 }
 
 /* ── Focus: rings only during Tab navigation ──────────────────────────────── */
@@ -339,6 +340,9 @@
 .ah-keyblock .ui-kv { margin: 0; }
 .ah-input { display: block; width: 100%; height: var(--ah-field-h); margin: 0.75rem 0 0; padding: 0 0.875rem; border: 1px solid var(--line); border-radius: var(--r-md); outline: none; background: var(--ah-field); color: var(--fg); font: var(--fw-body) var(--ui-size-body)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 .ah-input::placeholder { color: var(--fg-3); opacity: 1; }
+/* A one-off secret is a text field drawn as dots, so Safari never treats it as a password to generate or save (wizard.ts, ONE_OFF_SECRET_ATTRS). The placeholder stays readable. */
+.ah-masked { -webkit-text-security: disc; }
+.ah-masked:placeholder-shown { -webkit-text-security: none; }
 .ah-input:focus { border-color: rgb(from var(--fg) r g b / 0.28); background: var(--ah-field-focus); }
 /* Rows and highlights bleed 6-10 px past the text column. The step viewport clips, so it carries that room itself
    (padding out, margin back in: the text column does not move). Revealed blocks sit back on the text column. */

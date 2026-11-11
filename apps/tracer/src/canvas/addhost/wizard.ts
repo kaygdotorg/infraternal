@@ -103,6 +103,15 @@ export interface WizardDeps {
 }
 
 /** The add-host wizard: discovery, CA unlock when needed, then enrollment. */
+/**
+ * Attributes for a secret that belongs to someone else's machine and is used once: an SSH password or a key passphrase.
+ * It is a plain text field that draws dots (`.ah-masked`, `-webkit-text-security`), never `type="password"`: Safari
+ * offers "Use Strong Password?" and "Save Password?" for any password-typed field and ignores `autocomplete="off"` on
+ * it, while neither a generated nor a saved password is right for a credential we never store. The `data-*` flags
+ * ask third-party password managers to stay out as well.
+ */
+const ONE_OFF_SECRET_ATTRS = `type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="go" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"`;
+
 export class Wizard {
   private readonly surface: FlowSurface;
   private readonly root: HTMLElement;
@@ -889,13 +898,16 @@ export class Wizard {
     this.startFresh(job, job.view.failure.takeover.close_challenge);
   }
 
+  /** The host's name as typed, with its port when one was given (`build-01:2222`), for titles that name the machine being asked about. */
+  private nameWithPort(entry: Entry): string { return entry.port ? `${entry.label}:${entry.port}` : entry.label; }
+
   private renderHostKey(page: HTMLElement): void {
     const job = this.fixing!;
     const print = job.view.failure?.fingerprints?.[0];
     const key = hostKeyPresentation(job.view.failure?.host_key_type);
     const changed = job.view.failure?.host_key_changed === true;
     // A new key is an ordinary question (neutral icon). Only a changed pin is a warning (TASTE: the icon matches the news).
-    page.innerHTML = `${changed ? this.hero(ICON.warning, "danger") : this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(job.entry.label)}'s key</h1>
+    page.innerHTML = `${changed ? this.hero(ICON.warning, "danger") : this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(this.nameWithPort(job.entry))}'s key</h1>
       <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : "Compare this fingerprint with the one on the host before trusting it."}</p>
       <div class="ah-keyblock" data-kv></div>
       <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>${this.detailsBlock(job)}`;
@@ -912,16 +924,16 @@ export class Wizard {
     const option = (value: string, title: string, hint: string): string => `<label class="ah-option"><input type="radio" name="ah-method" value="${value}" ${value === first ? "checked" : ""} /><span class="ah-radio" aria-hidden="true"></span>
       <span class="ah-option-text"><span>${title}</span><span class="ah-option-hint">${hint}</span></span></label>`;
     const reveal = (value: string, inner: string): string => `<div class="ah-reveal" data-reveal="${value}" data-open="${value === first}"><div class="ah-reveal-in">${inner}</div></div>`;
-    page.innerHTML = `${this.hero(ICON.key)}<h1 class="ah-title">Sign in to ${name}</h1>
+    page.innerHTML = `${this.hero(ICON.key)}<h1 class="ah-title">Sign in to ${escapeHtml(this.nameWithPort(job.entry))}</h1>
       <p class="ah-lede">${escapeHtml(guideFor(job.entry.label, job.view.failure).happened)} Choose how to sign in.</p>
       <div class="ah-options" role="radiogroup" aria-label="How to sign in">
         ${this.serverKey ? option("server", "Use this server's key", "SSH public key in ~/.ssh/authorized_keys. Add it to the host, then try again.") + reveal("server", `<div class="ah-keyblock" data-kv="server"></div><p class="ah-text">Add this line to <span class="ah-code">~/.ssh/authorized_keys</span> on ${name}, then choose Try again.${this.serverKey.locked ? " The server's key is locked until an administrator unlocks it with a passkey." : ""}</p>`) : ""}
         ${this.savedKey ? option("saved", `Use ${escapeHtml(this.savedKey.label)}`, "Unlocked with your passkey, used for this one connection.") : ""}
         ${option("key", "Use a key from your computer", "SSH private key. Sent once for this connection, not stored.")}
         ${reveal("key", `<textarea class="ah-secret" data-secret="key" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Private key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" tabindex="-1"></textarea>
-          <input class="ah-input" data-secret="passphrase" type="password" autocomplete="off" aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
+          <input class="ah-input ah-masked" data-secret="passphrase" ${ONE_OFF_SECRET_ATTRS} aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
         ${option("password", "Sign in with a password", "SSH password authentication. Sent once for this connection, not stored.")}
-        ${reveal("password", `<input class="ah-input" data-secret="password" type="password" autocomplete="off" aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
+        ${reveal("password", `<input class="ah-input ah-masked" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
       </div>
       <button class="ah-link ah-alt" type="button" data-ah="install">Or install from the host instead</button>`;
     if (this.serverKey) {
