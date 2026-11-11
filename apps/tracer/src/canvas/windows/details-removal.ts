@@ -115,6 +115,20 @@ export function createRemovalFoot(action: DetailsAction): RemovalFoot {
     to.hidden = false;
     if (!instant && !reduced()) to.animate([{ opacity: 0 }, { opacity: 1 }], { duration: FADE, easing: EASE_OUT });
     if (focus) (asking ? keep : row).focus({ preventScroll: true });
+    if (asking) revealQuestion();
+  }
+  /**
+   * Scrolls the panel's list just far enough that the whole question, Keep and Remove included, is on screen (#500, J528). The
+   * block sits at the end of a list that scrolls inside the panel, and on a short phone panel the question is taller than the
+   * row it replaced, so its buttons landed below the fold. Only the panel's own scroller moves (never the page or the canvas),
+   * and it is a jump, not an animation: the question is already crossfading in at that spot.
+   */
+  function revealQuestion(): void {
+    const scroller = ask.closest<HTMLElement>(".canvas-popover-scroll");
+    if (!scroller) return;
+    // The list fades out over its last 10 px (canvas.css), so the buttons must clear that edge, not touch it.
+    const over = ask.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 10;
+    if (over > 0) scroller.scrollTop += Math.ceil(over);
   }
   /** Back to the row, from the question; the note and the buttons start clean the next time. */
   function reset(): void {
