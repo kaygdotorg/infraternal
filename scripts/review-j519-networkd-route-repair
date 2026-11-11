@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Runs the live-node networkd route repair proof with a private daemon and network (#483).
+# Run through build-slot nice -n10 on a build VM with systemd-networkd and D-Bus installed.
+set -euo pipefail
+if [ "${1:-}" != --inside-namespace ]; then
+    exec unshare -Urnmpf --mount-proc bash "$0" --inside-namespace
+fi
+
+# Refuse a real-root invocation before mounting over system paths.
+read -r mapped_uid outside_uid mapped_count < /proc/self/uid_map
+test "$mapped_uid" = 0 && test "$outside_uid" != 0 && test "$mapped_count" = 1
+umask 022
+unset XDG_RUNTIME_DIR
+mount --make-rprivate /
+mount -t sysfs sysfs /sys
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /etc
+mkdir -p /run/dbus /run/systemd/netif/links /run/systemd/netif/leases /run/systemd/netif/lldp /etc/systemd/network
+printf 'root:x:0:0:root:/root:/bin/sh\nsystemd-network:x:0:0:network:/run/systemd:/usr/sbin/nologin\n' > /etc/passwd
+printf 'root:x:0:\nsystemd-network:x:0:\n' > /etc/group
+printf '0123456789abcdef0123456789abcdef\n' > /etc/machine-id
+printf '[Match]\nName=infraternal0\n[Network]\nAddress=10.254.0.1/32\nAddress=fd01::1/128\nLinkLocalAddressing=no\n' > /etc/systemd/network/10-j519.network
+/usr/bin/dbus-daemon --session --address=unix:path=/run/dbus/system_bus_socket --fork --print-pid > /run/dbus.pid
+ip link set lo up
+trap 'kill "$(cat /run/dbus.pid)" 2>/dev/null || true; test ! -f /run/networkd.log || cat /run/networkd.log' EXIT
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
+cargo test --locked -p infraternal-plugin-mesh --test restart_route_ownership \
+    --no-default-features --features agent,server,relay,test-support \
+    review_j519_networkd_reload_repairs_peer_routes -- --ignored --exact --nocapture

@@ -4,13 +4,19 @@ use crate::{
     netlink::{self, NESTED, Socket, attribute},
     policy::model::{Addresses, PublicKey},
 };
-use nix::sys::socket::SockProtocol;
+use nix::{
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+    sys::socket::{
+        AddressFamily, MsgFlags, NetlinkAddr, SockFlag, SockProtocol, SockType, bind, recv, socket,
+    },
+};
 use openssl::pkey::PKey;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
 };
 use zeroize::Zeroizing;
 
@@ -200,7 +206,8 @@ fn chosen_index() -> u32 {
     (1 << 20) + mixed % (0x7fff_ffff - (1 << 20))
 }
 
-/// No timer or background thread: the socket exists only during one operation.
+/// Route operations use short-lived sockets; the node's optional route repair worker listens for
+/// deletion notifications while the mesh is up.
 pub struct Device;
 impl Device {
     /// Create our interface, marked with `owner`, the public key the caller will configure, and
@@ -674,28 +681,7 @@ impl Device {
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
             ] {
-                let mut payload = vec![
-                    family,
-                    prefix,
-                    0,
-                    0,
-                    254,
-                    RTPROT_INFRATERNAL,
-                    253,
-                    1,
-                    0,
-                    0,
-                    0,
-                    0,
-                ];
-                attribute(&mut payload, 1, &address)?;
-                attribute(&mut payload, 4, &index.to_ne_bytes())?;
-                if let Some(mtu) = mtu {
-                    let mut metrics = Vec::new();
-                    attribute(&mut metrics, RTAX_MTU, &u32::from(mtu).to_ne_bytes())?;
-                    // RTAX_LOCK is deliberately absent so later PMTU information can refine this.
-                    attribute(&mut payload, RTA_METRICS | NLA_F_NESTED, &metrics)?;
-                }
+                let mut payload = peer_route_payload(family, prefix, &address, index, mtu)?;
                 let result = socket.request(
                     if remove { 25 } else { 24 },
                     if remove { 4 } else { 4 | 0x100 | 0x400 },
@@ -718,6 +704,39 @@ impl Device {
             }
         }
         Ok(())
+    }
+
+    /// Re-add one missing route only when no route already occupies its destination.
+    ///
+    /// The caller has matched the deleted address against the currently installed peer set. The
+    /// exclusive create flag makes a concurrent or foreign route a no-op instead of replacing it.
+    /// # Errors
+    /// Returns route-netlink errors other than `AlreadyExists`, which means there is nothing safe
+    /// to change at that destination.
+    pub(crate) fn repair_peer_route(peer: &Peer, address: IpAddr, mtu: u16) -> io::Result<()> {
+        let (family, prefix, destination) = match address {
+            IpAddr::V4(address) if address == peer.addresses.ipv4 => {
+                (2, 32, address.octets().to_vec())
+            }
+            IpAddr::V6(address) if address == peer.addresses.ipv6 => {
+                (10, 128, address.octets().to_vec())
+            }
+            _ => return Err(io::ErrorKind::InvalidInput.into()),
+        };
+        let payload = peer_route_payload(family, prefix, &destination, index()?, Some(mtu))?;
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        match socket.request(24, 4 | 0x200 | 0x400, &payload) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Open a passive listener for route deletions on the current mesh interface.
+    /// # Errors
+    /// Returns socket, binding, or interface lookup errors before the worker starts.
+    pub(crate) fn route_monitor() -> io::Result<RouteMonitor> {
+        RouteMonitor::open()
     }
     /// Read the unique public-prefix owner for every retained peer route.
     /// # Errors
@@ -985,6 +1004,188 @@ impl Device {
     }
 }
 
+/// Listens for kernel route deletions while a node is up, so only a known mesh peer route is
+/// offered back to the kernel after an interface manager reconfigures the link.
+pub(crate) struct RouteMonitor {
+    /// The route multicast socket subscribed in the node's network namespace.
+    fd: OwnedFd,
+    /// The interface index proven when the listener starts.
+    interface_index: u32,
+    /// Reused storage for kernel notifications; route messages contain no private key material.
+    buffer: Vec<u8>,
+}
+
+impl RouteMonitor {
+    /// Subscribe to IPv4 and IPv6 route notifications for the current mesh interface.
+    /// # Errors
+    /// Returns socket, bind, or interface lookup errors before the node becomes active.
+    fn open() -> io::Result<Self> {
+        let interface_index = index()?;
+        let fd = socket(
+            AddressFamily::Netlink,
+            SockType::Raw,
+            SockFlag::SOCK_CLOEXEC,
+            SockProtocol::NetlinkRoute,
+        )?;
+        bind(
+            fd.as_raw_fd(),
+            &NetlinkAddr::new(0, RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE),
+        )?;
+        Ok(Self {
+            fd,
+            interface_index,
+            buffer: vec![0; netlink::DATAGRAM_BYTES],
+        })
+    }
+
+    /// Wait for an owned peer host-route deletion, or return `None` when `cancel` becomes readable.
+    ///
+    /// Only unicast `/32` and `/128` routes in the main table, with this interface and protocol
+    /// 250, are reported. Other route changes pass through untouched.
+    /// # Errors
+    /// Returns poll, receive, or malformed-netlink-message errors.
+    pub(crate) fn wait_for_deleted_peer_route(
+        &mut self,
+        cancel: BorrowedFd<'_>,
+    ) -> io::Result<Option<IpAddr>> {
+        loop {
+            let mut descriptors = [
+                PollFd::new(self.fd.as_fd(), PollFlags::POLLIN),
+                PollFd::new(cancel, PollFlags::POLLIN),
+            ];
+            if let Err(error) = poll(&mut descriptors, PollTimeout::NONE) {
+                if error == nix::errno::Errno::EINTR {
+                    continue;
+                }
+                return Err(error.into());
+            }
+            if descriptors[1].revents().is_some_and(|flags| {
+                flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
+            }) {
+                return Ok(None);
+            }
+            let route_events = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
+            if route_events
+                .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
+            {
+                return Err(io::Error::other("route notification socket disconnected"));
+            }
+            if route_events.contains(PollFlags::POLLIN) {
+                let length = recv(self.fd.as_raw_fd(), &mut self.buffer, MsgFlags::empty())?;
+                if length == 0 || length == self.buffer.len() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                for message in netlink::messages(&self.buffer[..length])? {
+                    if let Some(address) = deleted_mesh_peer_route(&message, self.interface_index)?
+                    {
+                        return Ok(Some(address));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Builds the exact host-route payload used for installing, removing, or repairing a peer route.
+///
+/// The IPv6 scope is sent as link scope, which the kernel normalizes to universe scope for host
+/// routes. The MTU remains unlocked so later path-MTU information can refine it.
+/// # Errors
+/// Rejects an address family and byte length that do not describe an IPv4 or IPv6 host route.
+fn peer_route_payload(
+    family: u8,
+    prefix: u8,
+    destination: &[u8],
+    interface_index: u32,
+    mtu: Option<u16>,
+) -> io::Result<Vec<u8>> {
+    if !matches!(
+        (family, prefix, destination.len()),
+        (2, 32, 4) | (10, 128, 16)
+    ) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut payload = vec![
+        family,
+        prefix,
+        0,
+        0,
+        254,
+        RTPROT_INFRATERNAL,
+        253,
+        1,
+        0,
+        0,
+        0,
+        0,
+    ];
+    attribute(&mut payload, 1, destination)?;
+    attribute(&mut payload, 4, &interface_index.to_ne_bytes())?;
+    if let Some(mtu) = mtu {
+        let mut metrics = Vec::new();
+        attribute(&mut metrics, RTAX_MTU, &u32::from(mtu).to_ne_bytes())?;
+        attribute(&mut payload, RTA_METRICS | NLA_F_NESTED, &metrics)?;
+    }
+    Ok(payload)
+}
+
+/// Returns the destination from a protocol-250 host-route deletion on the active mesh interface.
+/// # Errors
+/// Returns `InvalidData` for a truncated route header or malformed route attributes.
+fn deleted_mesh_peer_route(
+    message: &netlink::Message<'_>,
+    interface_index: u32,
+) -> io::Result<Option<IpAddr>> {
+    if message.kind != 25 {
+        return Ok(None);
+    }
+    let Some(header) = message.payload.get(..12) else {
+        return Err(io::ErrorKind::InvalidData.into());
+    };
+    let (address_len, prefix, scope) = match header[0] {
+        2 => (4, 32, 253),
+        10 => (16, 128, 0),
+        _ => return Ok(None),
+    };
+    if header[1] != prefix
+        || header[2] != 0
+        || header[3] != 0
+        || header[5] != RTPROT_INFRATERNAL
+        || header[6] != scope
+        || header[7] != 1
+        || header[8..12] != [0; 4]
+    {
+        return Ok(None);
+    }
+    let mut table = u32::from(header[4]);
+    let mut destination = None;
+    let mut route_interface = None;
+    for field in netlink::attributes(&message.payload[12..])? {
+        match field.kind {
+            1 => destination = Some(field.payload),
+            4 => route_interface = Some(netlink::u32_at(field.payload, 0)?),
+            15 => table = netlink::u32_at(field.payload, 0)?,
+            _ => {}
+        }
+    }
+    if table != 254 || route_interface != Some(interface_index) {
+        return Ok(None);
+    }
+    let Some(destination) = destination.filter(|bytes| bytes.len() == address_len) else {
+        return Ok(None);
+    };
+    let address = match header[0] {
+        2 => IpAddr::V4(Ipv4Addr::from(
+            <[u8; 4]>::try_from(destination).map_err(|_| io::ErrorKind::InvalidData)?,
+        )),
+        10 => IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(destination).map_err(|_| io::ErrorKind::InvalidData)?,
+        )),
+        _ => return Ok(None),
+    };
+    Ok(Some(address))
+}
+
 /// Recognize only the single MTU metric this mesh writes on a peer host route.
 ///
 /// Routes from before per-peer MTUs may have no metrics at all; callers accept
@@ -1016,6 +1217,10 @@ fn mesh_route_metrics_are_owned(field: netlink::Attribute<'_>) -> bool {
 const RTPROT_INFRATERNAL: u8 = 250;
 /// Identifies generic static routes written by earlier mesh versions during upgrade cleanup.
 const RTPROT_LEGACY_STATIC: u8 = 4;
+/// Subscribes to IPv4 unicast route changes in the main route table.
+const RTMGRP_IPV4_ROUTE: u32 = 0x40;
+/// Subscribes to IPv6 unicast route changes in the main route table.
+const RTMGRP_IPV6_ROUTE: u32 = 0x400;
 /// `RTA_METRICS`: nested per-route metrics accepted by rtnetlink.
 const RTA_METRICS: u16 = 8;
 /// `RTAX_MTU`: the per-peer inner packet limit stored on a mesh host route.
