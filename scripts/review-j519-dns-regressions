@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs the J519 DNS regressions with disposable /etc and root Nix profile paths (#483).
+set -euo pipefail
+
+if [ "${1:-}" != --inside-namespace ]; then
+    test -n "${1:-}" || { echo "usage: $0 TEST_NAME" >&2; exit 2; }
+    exec unshare -Urmpf --mount-proc bash "$0" --inside-namespace "$1"
+fi
+
+test_name="${2:?name one J519 DNS regression}"
+case "$test_name" in
+    review_j519_restart_cleanup_removes_owned_file|review_j519_missing_tools_are_reported|review_j519_nix_profile_tool_is_discovered) ;;
+    *) echo "unknown J519 DNS regression: $test_name" >&2; exit 2 ;;
+esac
+
+read -r mapped_uid outside_uid mapped_count < /proc/self/uid_map
+test "$mapped_uid" = 0 && test "$outside_uid" != 0 && test "$mapped_count" = 1
+mount --make-rprivate /
+mount -t tmpfs -o mode=755,size=32m tmpfs /etc
+/usr/bin/mkdir -p /tmp/j485b-private-nix-store
+/usr/bin/mount --bind /nix/store /tmp/j485b-private-nix-store
+/usr/bin/mount -t tmpfs -o mode=755,size=32m tmpfs /nix
+/usr/bin/mkdir -p /nix/store
+/usr/bin/mount --bind /tmp/j485b-private-nix-store /nix/store
+mkdir -p /nix/var/nix/profiles
+mkdir -p /etc/NetworkManager/dnsmasq.d
+
+cargo test --locked -p infraternal-plugin-mesh --lib --no-default-features \
+    --features agent,mesh-dns \
+    "dns_integration::review_j519_dns::$test_name" -- --ignored --exact --nocapture

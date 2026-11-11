@@ -1,5 +1,10 @@
 //! Exercises restart cleanup and unavailable resolver diagnostics in a disposable mount namespace (#483).
 
+#![expect(
+    clippy::expect_used,
+    reason = "isolated review fixtures report setup failures at the exact step that failed"
+)]
+
 use super::*;
 
 /// Builds a public-only DNS snapshot without starting a mesh node or touching host networking.
@@ -38,13 +43,85 @@ fn review_j519_restart_cleanup_removes_owned_file() {
 
 /// Missing resolver tools must produce an actionable error instead of caching apparent success.
 #[test]
-#[ignore = "Run in a disposable user/network/mount namespace with resolver binaries hidden."]
+#[ignore = "MESH_REVIEW_PROBE: run with scripts/review-j519-dns-regressions in a private Nix profile mount."]
 fn review_j519_missing_tools_are_reported() {
-    assert!(trusted_program(RESOLVECTL_PATHS).is_none());
-    assert!(trusted_program(NMCLI_PATHS).is_none());
+    assert!(trusted_program("resolvectl", RESOLVECTL_PATHS).is_err());
+    assert!(trusted_program("nmcli", NMCLI_PATHS).is_err());
+    assert!(trusted_program("NetworkManager", NETWORKMANAGER_PATHS).is_err());
     let mut integration = DnsIntegration::default();
     let error = integration
         .configure("infraternal0", &records(), 0)
         .expect_err("missing resolver tools must not silently disable host mesh DNS");
-    assert!(error.to_string().contains("nmcli") || error.to_string().contains("resolvectl"));
+    let message = error.to_string();
+    assert!(message.contains("resolvectl"));
+    assert!(message.contains("looked in"));
+    assert!(message.contains(RESOLVECTL_PATHS[0]));
+    assert!(message.contains(RESOLVECTL_PATHS[RESOLVECTL_PATHS.len() - 1]));
+    assert!(
+        integration.linux.is_none(),
+        "a failed setup is not a cached install"
+    );
+    integration
+        .configure("infraternal0", &records(), 0)
+        .expect_err("the next identical snapshot must retry and report missing tools");
+
+    install_nix_profile_tool("resolvectl");
+    integration
+        .configure("infraternal0", &records(), 0)
+        .expect("a later Nix-provided resolver must satisfy the same snapshot");
+    assert!(
+        matches!(
+            integration.linux.as_ref().map(|install| install.mode),
+            Some(LinuxMode::Resolved)
+        ),
+        "the retry should cache the successfully installed resolver only"
+    );
+}
+
+/// A protected root Nix profile supplies the resolver when distro paths are absent.
+#[test]
+#[ignore = "MESH_REVIEW_PROBE: run with scripts/review-j519-dns-regressions in a private /etc and Nix profile mount."]
+fn review_j519_nix_profile_tool_is_discovered() {
+    let tool = install_nix_profile_tool("resolvectl");
+    let expected = fs::canonicalize(&tool).expect("canonical Nix profile tool");
+    assert_eq!(
+        trusted_program(
+            "resolvectl",
+            &[
+                "/root/.local/state/nix/profiles/profile/bin/resolvectl",
+                "/nix/var/nix/profiles/default/bin/resolvectl",
+            ],
+        )
+        .expect("an inaccessible profile candidate must not hide the next trusted path"),
+        expected,
+        "an unavailable earlier candidate must not hide a safe Nix profile tool"
+    );
+    assert_eq!(
+        trusted_program("resolvectl", RESOLVECTL_PATHS)
+            .expect("the fixed root Nix profile resolver should be trusted"),
+        fs::canonicalize(&tool).expect("canonical Nix profile tool"),
+        "fixed resolver candidates must include the root Nix profile"
+    );
+
+    let mut integration = DnsIntegration::default();
+    integration
+        .configure("infraternal0", &records(), 0)
+        .expect("configure through the Nix profile resolver");
+    assert_eq!(
+        integration.linux.as_ref().map(|install| install.mode),
+        Some(LinuxMode::Resolved)
+    );
+}
+
+/// Writes a harmless resolver client into the private root profile used by the regression probes.
+fn install_nix_profile_tool(name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = Path::new("/nix/var/nix/profiles/default/bin");
+    fs::create_dir_all(directory).expect("private root Nix profile directory");
+    let tool = directory.join(name);
+    fs::write(&tool, "#!/bin/sh\nexit 0\n").expect("fake fixed resolver tool");
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755))
+        .expect("make fake resolver tool executable");
+    tool
 }

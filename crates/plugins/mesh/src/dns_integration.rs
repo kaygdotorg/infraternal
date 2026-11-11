@@ -28,15 +28,44 @@ const MACOS_MARKER: &str = "# Managed by infraternal agent.";
 /// The only directory used for per-suffix resolver files on macOS.
 #[cfg(target_os = "macos")]
 const MACOS_RESOLVER_DIRECTORY: &str = "/etc/resolver";
-/// Fixed systemd-resolved binaries; root never looks them up through `PATH`.
+/// Fixed systemd-resolved binaries; protected Nix profiles are checked before distro paths.
 #[cfg(target_os = "linux")]
-const RESOLVECTL_PATHS: &[&str] = &["/usr/bin/resolvectl", "/bin/resolvectl"];
+const RESOLVECTL_PATHS: &[&str] = &[
+    "/nix/var/nix/profiles/default/bin/resolvectl",
+    "/nix/var/nix/profiles/system/sw/bin/resolvectl",
+    "/nix/var/nix/profiles/per-user/root/profile/bin/resolvectl",
+    "/root/.local/state/nix/profiles/profile/bin/resolvectl",
+    "/root/.nix-profile/bin/resolvectl",
+    "/run/current-system/sw/bin/resolvectl",
+    "/usr/bin/resolvectl",
+    "/usr/sbin/resolvectl",
+    "/bin/resolvectl",
+];
 /// Fixed `NetworkManager` client binaries; root never looks them up through `PATH`.
 #[cfg(target_os = "linux")]
-const NMCLI_PATHS: &[&str] = &["/usr/bin/nmcli", "/bin/nmcli"];
+const NMCLI_PATHS: &[&str] = &[
+    "/nix/var/nix/profiles/default/bin/nmcli",
+    "/nix/var/nix/profiles/system/sw/bin/nmcli",
+    "/nix/var/nix/profiles/per-user/root/profile/bin/nmcli",
+    "/root/.local/state/nix/profiles/profile/bin/nmcli",
+    "/root/.nix-profile/bin/nmcli",
+    "/run/current-system/sw/bin/nmcli",
+    "/usr/bin/nmcli",
+    "/usr/sbin/nmcli",
+    "/bin/nmcli",
+];
 /// Fixed `NetworkManager` daemon binaries used only to inspect its active DNS mode.
 #[cfg(target_os = "linux")]
-const NETWORKMANAGER_PATHS: &[&str] = &["/usr/sbin/NetworkManager", "/usr/bin/NetworkManager"];
+const NETWORKMANAGER_PATHS: &[&str] = &[
+    "/nix/var/nix/profiles/default/bin/NetworkManager",
+    "/nix/var/nix/profiles/system/sw/bin/NetworkManager",
+    "/nix/var/nix/profiles/per-user/root/profile/bin/NetworkManager",
+    "/root/.local/state/nix/profiles/profile/bin/NetworkManager",
+    "/root/.nix-profile/bin/NetworkManager",
+    "/run/current-system/sw/bin/NetworkManager",
+    "/usr/sbin/NetworkManager",
+    "/usr/bin/NetworkManager",
+];
 /// The directory where `NetworkManager` reads dnsmasq plugin drop-ins.
 #[cfg(target_os = "linux")]
 const NETWORKMANAGER_DNSMASQ_DIRECTORY: &str = "/etc/NetworkManager/dnsmasq.d";
@@ -53,7 +82,8 @@ static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 /// Owns just the mesh suffix routes installed in the host resolver.
 ///
 /// Linux prefers a per-link systemd-resolved route, then `NetworkManager`'s
-/// dnsmasq split-DNS support. Unsupported hosts keep their resolver unchanged.
+/// dnsmasq split-DNS support. Unsupported hosts return a setup error and keep
+/// their existing resolver unchanged.
 /// macOS writes one managed `/etc/resolver` file per suffix only when root.
 #[derive(Default)]
 pub(crate) struct DnsIntegration {
@@ -98,8 +128,8 @@ impl NetworkManagerSupport {
 struct LinuxInstall {
     /// The mesh interface used by the per-link systemd-resolved route.
     interface: String,
-    /// The split-DNS mechanism configured, or none if this host supports neither one.
-    mode: Option<LinuxMode>,
+    /// The split-DNS mechanism installed successfully for this node.
+    mode: LinuxMode,
     /// The local mesh DNS server used by the route.
     address: Ipv4Addr,
     /// The default and optional custom suffixes installed for the node.
@@ -121,7 +151,7 @@ impl DnsIntegration {
     /// A userspace process without root authority keeps the DNS listener for
     /// mesh peers and leaves system resolver files untouched.
     /// # Errors
-    /// Returns errors from malformed resolver data or failed owned-file updates.
+    /// Returns resolver discovery or setup failures, malformed DNS data, or failed owned-file updates.
     pub(crate) fn configure(
         &mut self,
         interface: &str,
@@ -173,6 +203,7 @@ impl DnsIntegration {
 
     /// Updates the Linux host resolver for the accepted mesh suffixes.
     /// `NetworkManager` uses its DNS plugin and never reapplies the mesh interface.
+    /// Only a successful install is retained, so the next snapshot retries after a failed attempt.
     #[cfg(target_os = "linux")]
     fn configure_linux(&mut self, interface: &str, records: &Records) -> io::Result<()> {
         let address = records.local_address();
@@ -190,73 +221,134 @@ impl DnsIntegration {
             self.linux = None;
         }
 
-        let resolvectl = trusted_program(RESOLVECTL_PATHS)
-            .filter(|program| program_succeeds(program, &["status"]));
-        let nmcli = trusted_program(NMCLI_PATHS);
-        let nm_dnsmasq = networkmanager_dnsmasq_enabled();
+        let mut failures = Vec::new();
+        let resolvectl = trusted_program("resolvectl", RESOLVECTL_PATHS);
+        let resolved_available = match &resolvectl {
+            Ok(program) => match program_succeeds(program, &["status"]) {
+                Ok(true) => true,
+                Ok(false) => {
+                    failures.push(format!(
+                        "resolvectl at {} did not report an active resolver; looked in: {}",
+                        program.display(),
+                        RESOLVECTL_PATHS.join(", ")
+                    ));
+                    false
+                }
+                Err(error) => {
+                    failures.push(format!(
+                        "could not run resolvectl at {}: {error}; looked in: {}",
+                        program.display(),
+                        RESOLVECTL_PATHS.join(", ")
+                    ));
+                    false
+                }
+            },
+            Err(error) => {
+                failures.push(error.to_string());
+                false
+            }
+        };
+        let nmcli = trusted_program("nmcli", NMCLI_PATHS);
+        if let Err(error) = &nmcli {
+            failures.push(error.to_string());
+        }
+        let networkmanager = trusted_program("NetworkManager", NETWORKMANAGER_PATHS);
+        let nm_dnsmasq = match &networkmanager {
+            Ok(program) => match networkmanager_dnsmasq_enabled(program) {
+                Ok(true) => true,
+                Ok(false) => {
+                    failures.push(format!(
+                        "NetworkManager at {} does not use its dnsmasq plugin; looked in: {}",
+                        program.display(),
+                        NETWORKMANAGER_PATHS.join(", ")
+                    ));
+                    false
+                }
+                Err(error) => {
+                    failures.push(error.to_string());
+                    false
+                }
+            },
+            Err(error) => {
+                failures.push(error.to_string());
+                false
+            }
+        };
         let nm_support = NetworkManagerSupport {
             dnsmasq_enabled: nm_dnsmasq,
-            nmcli_available: nmcli.is_some(),
+            nmcli_available: nmcli.is_ok(),
         };
-        let mode = select_linux_mode(resolvectl.is_some(), nm_support);
+        let mode = select_linux_mode(resolved_available, nm_support);
 
         if mode.is_none() {
-            // Without a recorded install or a supported split-DNS mode, there is no
-            // resolver state this process can safely claim. In particular, DNS
-            // setup must never reapply the mesh device as a fallback.
-            self.linux = Some(LinuxInstall {
-                interface: interface.to_owned(),
-                mode: None,
-                address,
-                suffixes: suffixes.to_vec(),
-            });
-            return Ok(());
+            return Err(resolver_setup_error(&failures));
         }
 
         if mode == Some(LinuxMode::Resolved)
-            && let Some(resolvectl) = resolvectl.as_ref()
+            && let Ok(resolvectl) = &resolvectl
         {
             let commands = resolved_route_commands(interface, address, suffixes);
-            if run_commands(resolvectl, &commands).is_ok() {
-                self.linux = Some(LinuxInstall {
-                    interface: interface.to_owned(),
-                    mode: Some(LinuxMode::Resolved),
-                    address,
-                    suffixes: suffixes.to_vec(),
-                });
-                return Ok(());
+            match run_commands(resolvectl, &commands) {
+                Ok(()) => {
+                    self.linux = Some(LinuxInstall {
+                        interface: interface.to_owned(),
+                        mode: LinuxMode::Resolved,
+                        address,
+                        suffixes: suffixes.to_vec(),
+                    });
+                    return Ok(());
+                }
+                Err(error) => {
+                    failures.push(format!(
+                        "resolvectl at {} could not install mesh DNS: {error}; looked in: {}",
+                        resolvectl.display(),
+                        RESOLVECTL_PATHS.join(", ")
+                    ));
+                    if let Err(revert_error) = run_commands(
+                        resolvectl,
+                        &[vec!["revert".to_owned(), interface.to_owned()]],
+                    ) {
+                        failures.push(format!(
+                            "resolvectl at {} could not revert the partial mesh DNS update: {revert_error}",
+                            resolvectl.display()
+                        ));
+                    }
+                }
             }
-            let _ = run_commands(
-                resolvectl,
-                &[vec!["revert".to_owned(), interface.to_owned()]],
-            );
         }
 
         let fallback_mode = select_linux_mode(false, nm_support);
         if matches!(mode, Some(LinuxMode::NetworkManager | LinuxMode::Resolved))
             && fallback_mode == Some(LinuxMode::NetworkManager)
-            && let Some(nmcli) = nmcli
+            && let Ok(nmcli) = &nmcli
         {
-            if install_networkmanager_dns(&nmcli, address, suffixes).is_ok() {
-                self.linux = Some(LinuxInstall {
-                    interface: interface.to_owned(),
-                    mode: Some(LinuxMode::NetworkManager),
-                    address,
-                    suffixes: suffixes.to_vec(),
-                });
-                return Ok(());
+            match install_networkmanager_dns(nmcli, address, suffixes) {
+                Ok(()) => {
+                    self.linux = Some(LinuxInstall {
+                        interface: interface.to_owned(),
+                        mode: LinuxMode::NetworkManager,
+                        address,
+                        suffixes: suffixes.to_vec(),
+                    });
+                    return Ok(());
+                }
+                Err(error) => {
+                    failures.push(format!(
+                        "nmcli at {} could not install mesh DNS: {error}; looked in: {}",
+                        nmcli.display(),
+                        NMCLI_PATHS.join(", ")
+                    ));
+                    if let Err(cleanup_error) = clear_networkmanager_dns(nmcli) {
+                        failures.push(format!(
+                            "nmcli at {} could not clean up the failed mesh DNS update: {cleanup_error}",
+                            nmcli.display()
+                        ));
+                    }
+                }
             }
-            let _ = clear_networkmanager_dns(&nmcli);
         }
 
-        // A host without an available split-DNS mechanism keeps all existing DNS settings.
-        self.linux = Some(LinuxInstall {
-            interface: interface.to_owned(),
-            mode: None,
-            address,
-            suffixes: suffixes.to_vec(),
-        });
-        Ok(())
+        Err(resolver_setup_error(&failures))
     }
 
     /// Writes each suffix resolver file and removes stale files with our marker.
@@ -491,49 +583,68 @@ fn select_linux_mode(
     }
 }
 
+/// Explains why neither fixed, trusted Linux split-DNS mechanism could be installed.
+#[cfg(target_os = "linux")]
+fn resolver_setup_error(failures: &[String]) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "mesh DNS setup failed because no supported split-DNS resolver could be installed: {}",
+            failures.join("; ")
+        ),
+    )
+}
+
 /// Removes the resolver mechanism recorded for one Linux node.
 #[cfg(target_os = "linux")]
 fn remove_linux_install(install: &LinuxInstall) -> io::Result<()> {
     match install.mode {
-        Some(LinuxMode::Resolved) => {
-            let resolvectl = trusted_program(RESOLVECTL_PATHS).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "resolvectl is unavailable for cleanup",
-                )
-            })?;
+        LinuxMode::Resolved => {
+            let resolvectl = trusted_program("resolvectl", RESOLVECTL_PATHS)?;
             run_commands(
                 &resolvectl,
                 &[vec!["revert".to_owned(), install.interface.clone()]],
             )?;
         }
-        Some(LinuxMode::NetworkManager) => {
-            let nmcli = trusted_program(NMCLI_PATHS).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "nmcli is unavailable for cleanup")
-            })?;
+        LinuxMode::NetworkManager => {
+            let nmcli = trusted_program("nmcli", NMCLI_PATHS)?;
             clear_networkmanager_dns(&nmcli)?;
         }
-        None => {}
     }
     Ok(())
 }
 
 /// Detects whether `NetworkManager` already routes split DNS through dnsmasq.
+/// # Errors
+/// Reports failures to run the fixed daemon binary and includes its candidate paths.
 #[cfg(target_os = "linux")]
-fn networkmanager_dnsmasq_enabled() -> bool {
-    let Some(program) = trusted_program(NETWORKMANAGER_PATHS) else {
-        return false;
-    };
-    let Ok(output) = Command::new(program)
+fn networkmanager_dnsmasq_enabled(program: &Path) -> io::Result<bool> {
+    let output = Command::new(program)
         .arg("--print-config")
         .env_clear()
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-    else {
-        return false;
-    };
-    output.status.success() && config_uses_dnsmasq(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not inspect NetworkManager at {}; looked in: {}: {error}",
+                    program.display(),
+                    NETWORKMANAGER_PATHS.join(", ")
+                ),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "NetworkManager at {} failed --print-config; looked in: {}",
+            program.display(),
+            NETWORKMANAGER_PATHS.join(", ")
+        )));
+    }
+    Ok(config_uses_dnsmasq(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// Reads `NetworkManager`'s main DNS plugin setting without accepting other plugins.
@@ -558,9 +669,11 @@ fn config_uses_dnsmasq(configuration: &str) -> bool {
     dns_plugin == Some("dnsmasq")
 }
 
-/// Runs one fixed system resolver probe and reports its exit status.
+/// Runs one fixed resolver probe and reports spawn errors to its caller.
+/// # Errors
+/// Returns an operating-system error if the trusted program cannot be run.
 #[cfg(target_os = "linux")]
-fn program_succeeds(program: &Path, arguments: &[&str]) -> bool {
+fn program_succeeds(program: &Path, arguments: &[&str]) -> io::Result<bool> {
     Command::new(program)
         .args(arguments)
         .env_clear()
@@ -568,7 +681,7 @@ fn program_succeeds(program: &Path, arguments: &[&str]) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+        .map(|status| status.success())
 }
 
 /// Runs a fixed resolver command list with a clean environment and no shell.
@@ -589,14 +702,76 @@ fn run_commands(program: &Path, commands: &[Vec<String>]) -> io::Result<()> {
     Ok(())
 }
 
-/// Returns a fixed system binary only when its installed file is root-owned and not writable by others.
+/// Finds one fixed root-owned executable and refuses unsafe candidates instead of using `PATH`.
+///
+/// Both the candidate and canonical target directory chains must be protected. This accepts the
+/// sticky, root-owned Nix store while refusing a writable profile or symlink parent.
+/// # Errors
+/// Names the missing or unsafe tool and every fixed candidate path that was checked.
 #[cfg(target_os = "linux")]
-fn trusted_program(candidates: &[&str]) -> Option<PathBuf> {
-    candidates.iter().find_map(|candidate| {
+fn trusted_program(tool: &str, candidates: &[&str]) -> io::Result<PathBuf> {
+    let looked_in = if candidates.is_empty() {
+        "(no fixed candidate paths)".to_owned()
+    } else {
+        candidates.join(", ")
+    };
+    let mut rejected = Vec::new();
+    for candidate in candidates {
         let path = Path::new(candidate);
-        let metadata = fs::metadata(path).ok()?;
-        (metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0)
-            .then(|| path.to_path_buf())
+        let canonical = match fs::canonicalize(path) {
+            Ok(canonical) => canonical,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                rejected.push(format!("{candidate}: {error}"));
+                continue;
+            }
+        };
+        let directories_are_protected = path
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .chain(canonical.parent().into_iter().flat_map(Path::ancestors))
+            .all(|directory| protected_program_directory(directory, 0));
+        if regular_executable_of(&canonical, 0) && directories_are_protected {
+            return Ok(canonical);
+        }
+        rejected.push(format!(
+            "{candidate}: resolves to a replaceable or non-root-owned file"
+        ));
+    }
+    let rejection_summary = if rejected.is_empty() {
+        String::new()
+    } else {
+        format!("; rejected candidates: {}", rejected.join("; "))
+    };
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "{tool} was not found at any trusted candidate; looked in: {looked_in}{rejection_summary}"
+        ),
+    ))
+}
+
+/// Confirms the canonical tool is a root-owned executable that other users cannot replace.
+#[cfg(target_os = "linux")]
+fn regular_executable_of(path: &Path, owner_uid: u32) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| {
+        let mode = metadata.mode();
+        metadata.is_file() && metadata.uid() == owner_uid && mode & 0o022 == 0 && mode & 0o111 != 0
+    })
+}
+
+/// Confirms another local user cannot replace a path component such as `/nix/store`.
+/// The namespace root is accepted by path identity because it cannot be replaced as a child path.
+#[cfg(target_os = "linux")]
+fn protected_program_directory(path: &Path, owner_uid: u32) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| {
+        let mode = metadata.mode();
+        metadata.is_dir()
+            // The mount namespace root cannot be replaced by changing a pathname. A user
+            // namespace may show its host owner as an unmapped uid, so check its mode instead.
+            && (metadata.uid() == owner_uid || path == Path::new("/"))
+            && (mode & 0o022 == 0 || mode & 0o1000 != 0)
     })
 }
 
