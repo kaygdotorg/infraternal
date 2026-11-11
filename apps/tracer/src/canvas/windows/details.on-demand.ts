@@ -65,7 +65,9 @@ export function openDetailsPopover(
   const updateHeader = (facts: DetailsFacts): void => {
     root.setAttribute("aria-label", `Details for ${facts.title}`);
     title.textContent = facts.title;
-    subtitle.textContent = facts.subtitle;
+    // While the facts are on their way the subtitle (who and where) may not be known yet; an invisible character keeps its line, so
+    // the header does not grow by that line when the facts land (#500, J528).
+    subtitle.textContent = facts.subtitle || (facts.loading ? "​" : "");
     if (facts.os) {
       logo.innerHTML = hostIconMarkup(facts.os, "ui-host-mark");
       logo.hidden = false;
