@@ -150,8 +150,6 @@ impl DnsIntegration {
         if let Some(install) = self.linux.as_ref() {
             remove_linux_install(install)?;
             self.linux = None;
-        } else if current_process_is_root() {
-            clear_stale_linux_install(crate::wireguard::INTERFACE);
         }
         #[cfg(target_os = "macos")]
         if current_process_is_root() {
@@ -183,8 +181,6 @@ impl DnsIntegration {
         if let Some(current) = self.linux.as_ref() {
             remove_linux_install(current)?;
             self.linux = None;
-        } else {
-            clear_stale_linux_install(interface);
         }
 
         let resolvectl = trusted_program(RESOLVECTL_PATHS)
@@ -201,10 +197,24 @@ impl DnsIntegration {
         };
         let mode = select_linux_mode(resolvectl.is_some(), nm_support);
 
+        if mode.is_none() {
+            // Without a recorded install or a supported split-DNS mode, there is no
+            // resolver state this process can safely claim. In particular, an
+            // unconditional `nmcli device modify` reapplies the mesh device even
+            // when NetworkManager cannot route split DNS on this host.
+            self.linux = Some(LinuxInstall {
+                interface: interface.to_owned(),
+                mode: None,
+                address,
+                suffixes: suffixes.to_vec(),
+            });
+            return Ok(());
+        }
+
         if mode == Some(LinuxMode::Resolved)
             && let Some(resolvectl) = resolvectl.as_ref()
+            && let Some(commands) = linux_route_commands(mode, interface, address, suffixes)
         {
-            let commands = resolved_route_commands(interface, address, suffixes);
             if run_commands(resolvectl, &commands).is_ok() {
                 self.linux = Some(LinuxInstall {
                     interface: interface.to_owned(),
@@ -224,8 +234,9 @@ impl DnsIntegration {
         if matches!(mode, Some(LinuxMode::NetworkManager | LinuxMode::Resolved))
             && fallback_mode == Some(LinuxMode::NetworkManager)
             && let Some(nmcli) = nmcli
+            && let Some(commands) =
+                linux_route_commands(fallback_mode, interface, address, suffixes)
         {
-            let commands = networkmanager_route_commands(interface, address, suffixes);
             if run_commands(&nmcli, &commands).is_ok() {
                 self.linux = Some(LinuxInstall {
                     interface: interface.to_owned(),
@@ -365,6 +376,23 @@ fn select_linux_mode(
     }
 }
 
+/// Builds only the route update for the selected resolver, leaving unsupported hosts untouched.
+#[cfg(target_os = "linux")]
+fn linux_route_commands(
+    mode: Option<LinuxMode>,
+    interface: &str,
+    address: Ipv4Addr,
+    suffixes: &[String],
+) -> Option<Vec<Vec<String>>> {
+    match mode {
+        Some(LinuxMode::Resolved) => Some(resolved_route_commands(interface, address, suffixes)),
+        Some(LinuxMode::NetworkManager) => {
+            Some(networkmanager_route_commands(interface, address, suffixes))
+        }
+        None => None,
+    }
+}
+
 /// Removes the resolver mechanism recorded for one Linux node.
 #[cfg(target_os = "linux")]
 fn remove_linux_install(install: &LinuxInstall) -> io::Result<()> {
@@ -390,20 +418,6 @@ fn remove_linux_install(install: &LinuxInstall) -> io::Result<()> {
         None => {}
     }
     Ok(())
-}
-
-/// Best-effort removal of stale settings from the mesh link before resolver selection.
-#[cfg(target_os = "linux")]
-fn clear_stale_linux_install(interface: &str) {
-    if let Some(resolvectl) = trusted_program(RESOLVECTL_PATHS) {
-        let _ = run_commands(
-            &resolvectl,
-            &[vec!["revert".to_owned(), interface.to_owned()]],
-        );
-    }
-    if let Some(nmcli) = trusted_program(NMCLI_PATHS) {
-        let _ = run_commands(&nmcli, &networkmanager_clear_commands(interface));
-    }
 }
 
 /// Detects whether `NetworkManager` already routes split DNS through dnsmasq.
@@ -505,6 +519,7 @@ fn trusted_program(candidates: &[&str]) -> Option<PathBuf> {
 }
 
 /// Reports whether the current process can clean system resolver files.
+#[cfg(target_os = "macos")]
 fn current_process_is_root() -> bool {
     nix::unistd::Uid::effective().is_root()
 }
@@ -751,7 +766,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::{
-        LinuxMode, NetworkManagerSupport, networkmanager_clear_commands,
+        LinuxMode, NetworkManagerSupport, linux_route_commands, networkmanager_clear_commands,
         networkmanager_route_commands, resolved_route_commands, select_linux_mode,
     };
     #[cfg(target_os = "macos")]
@@ -896,20 +911,24 @@ mod tests {
         );
     }
 
-    /// Unsupported Linux hosts keep their existing resolver instead of guessing globally.
+    /// Unsupported Linux hosts keep their resolver and receive no per-link mutation.
     #[cfg(target_os = "linux")]
     #[test]
     fn unavailable_split_dns_does_not_select_a_host_wide_fallback() {
+        let mode = select_linux_mode(
+            false,
+            NetworkManagerSupport {
+                dnsmasq_enabled: false,
+                manages_link: false,
+                standard_listener: false,
+            },
+        );
+
+        assert_eq!(mode, None);
         assert_eq!(
-            select_linux_mode(
-                false,
-                NetworkManagerSupport {
-                    dnsmasq_enabled: false,
-                    manages_link: false,
-                    standard_listener: false,
-                },
-            ),
-            None
+            linux_route_commands(mode, "infraternal0", Ipv4Addr::new(10, 254, 0, 2), &[]),
+            None,
+            "an unsupported host must not receive a resolver mutation or NetworkManager reapply"
         );
     }
 
