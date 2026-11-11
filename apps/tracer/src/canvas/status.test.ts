@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** The terminal status relay never dresses a lost connection as good news (TASTE: the icon matches the news). */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { createStatusRelay } from "./status";
+import { createStatusRelay, exitStatusText } from "./status";
 
 /** Each relay owns an observer and may leave a pending clear timer; release both after its test. */
 const disposals: Array<() => void> = [];
@@ -111,4 +111,17 @@ test("a close reason stays visible through a quick reconnect and clears after a 
   state.say("");
   await new Promise((resolve) => setTimeout(resolve, 320));
   expect(state.dismissed).toBe(1);
+});
+
+test("normal shell exits never produce error toasts", () => {
+  const state = relay();
+  for (const message of ["Shell exited.", "Shell exited with status 3. Open a new shell to continue.", "Shell exited with status 129. Open a new shell to continue."]) state.say(message);
+  expect(state.shown).toEqual([]);
+});
+
+test("signed exit statuses distinguish shell codes from actual signals", () => {
+  expect(exitStatusText(0)).toBe("Shell exited.");
+  expect(exitStatusText(129)).toContain("status 129");
+  expect(exitStatusText(-1)).toContain("signal 1");
+  expect(exitStatusText(-9)).toContain("signal 9");
 });

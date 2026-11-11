@@ -7,6 +7,13 @@
  */
 import type { ToastController } from "../../../../packages/ui/src/toast";
 
+/** Formats the signed infraternal agent status without mistaking a signal for a shell exit code. */
+export function exitStatusText(status: number): string {
+  if (status === 0) return "Shell exited.";
+  if (status > 0) return `Shell exited with status ${status}. Open a new shell to continue.`;
+  return `Shell was stopped by signal ${-status}. Open a new shell to continue.`;
+}
+
 /** Creates a detached status element for one terminal and relays its text to the toast. Returns both. */
 export function createStatusRelay(toast: ToastController): { element: HTMLElement; dispose(): void } {
   const element = document.createElement("p");
@@ -21,7 +28,7 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
   let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
   const observer = new MutationObserver(() => {
     const message = element.textContent?.trim() ?? "";
-    if (message && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
+    if (message && !message.startsWith("Shell exited") && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
       clearTimeout(clearTimer);
       clearTimer = 0;
       relaying = true;
