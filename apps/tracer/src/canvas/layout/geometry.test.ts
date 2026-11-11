@@ -131,7 +131,7 @@ test("D309: a touch screen draws every column at least MIN_TOUCH_COLUMN wide, ne
   const wide = metricsFor(430, 932, true);
   expect(wide.minW).toBe(MIN_TOUCH_COLUMN);
   expect(drawnWidth(39, wide)).toBe(MIN_TOUCH_COLUMN);
-  expect(drawnWidth(500, wide)).toBe(500);
+  expect(drawnWidth(500, wide)).toBe(430);
   // A narrower screen cannot show a floor wider than a column of its default strip: the floor is that column, so the
   // default layout looks as it did and a column never overflows the screen.
   for (const width of [320, 375, 393]) { const m = metricsFor(width, 700, true); expect(m.minW).toBe(m.peekW); expect(m.minW).toBeLessThan(MIN_TOUCH_COLUMN); }
@@ -149,7 +149,7 @@ test("D309: the content is as wide as the drawn columns, so the camera reaches e
   expect(contentSize(view, metricsFor(1440, 900, false)).w).toBe(39 + 39 + 430 + 2 * COLUMN_GAP);
 });
 
-test("a desktop column is never drawn wider than the screen; a phone strip has no ceiling and the saved width is untouched", () => {
+test("a desktop or phone column is never drawn wider than its viewport and the saved width is untouched", () => {
   const desktop = metricsFor(1650, 1000, false);
   expect(desktop.maxW).toBe(1634);
   expect(drawnWidth(1442, desktop)).toBe(1442);
@@ -159,9 +159,13 @@ test("a desktop column is never drawn wider than the screen; a phone strip has n
   // The ceiling follows the screen: a narrower window lowers it, and never below the 480 px floor of "Full width".
   expect(drawnWidth(1442, metricsFor(1400, 900, false))).toBe(1386);
   expect(metricsFor(800, 600, false).maxW).toBe(792);
-  // A phone scrolls sideways through a strip by design, so it keeps every width.
-  expect(metricsFor(393, 852, true).maxW).toBe(0);
-  expect(drawnWidth(900, metricsFor(393, 852, true))).toBe(900);
+  // Panning reaches neighbouring columns; each individual column must still fit.
+  for (const width of [320, 375, 393, 430]) {
+    const phone = metricsFor(width, 852, true);
+    expect(phone.maxW).toBe(width);
+    expect(drawnWidth(900, phone)).toBe(width);
+    expect(drawnWidth(phone.peekW, phone)).toBe(phone.peekW);
+  }
 });
 
 // ---- windows grow with the UI size (#283) ---------------------------------------------------------------------------------
@@ -204,6 +208,6 @@ test("the touch floor is about the terminal's cells, not the UI: it does not sca
 
 test("Mesh nodes grow with the UI size too", () => {
   const m = metricsFor(1440, 900, false, DEFAULT_SIZES, 1.5);
-  expect([m.nodeW, m.nodeH]).toEqual([312, 156]);
-  expect([metricsFor(1440, 900, false).nodeW, metricsFor(1440, 900, false).nodeH]).toEqual([208, 104]);
+  expect([m.nodeW, m.nodeH]).toEqual([312, 198]);
+  expect([metricsFor(1440, 900, false).nodeW, metricsFor(1440, 900, false).nodeH]).toEqual([208, 132]);
 });

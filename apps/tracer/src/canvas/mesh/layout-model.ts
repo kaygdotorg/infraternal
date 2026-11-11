@@ -17,14 +17,21 @@ import { layoutMesh, type Cluster } from "./layout";
 import type { WireNode } from "./protocol";
 import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./source";
 
-/** Return the node subtitle, including its restore-safety warning when epoch support is unproved. */
+/**
+ * What a host card says under its name, in plain words. `restoreSafe === false` means the host runs an infraternal agent that
+ * cannot yet tell which peers a restored server database no longer allows (it predates the authority epoch, #382). The one
+ * thing a person can do about it is update that agent, so the card says "needs an update" and nothing more: the reason
+ * (what could go wrong after a restore) belongs in the operations guide, not in a line that has to fit a card. A host that is
+ * behind already says "not up to date", which is the same advice, and one that is offline cannot be updated until it is back,
+ * so the note is only added to a host that is online.
+ */
 const subOf = (n: WireNode): string => {
-  if (n.state === "offline") return n.restoreSafe === false ? "offline · unsafe after restore" : "offline";
-  if (n.state === "behind") return n.restoreSafe === false ? "not up to date · unsafe after restore" : "not up to date";
+  if (n.state === "offline") return "offline";
+  if (n.state === "behind") return "not up to date";
   const path = n.path === "relay" ? `via ${n.via ?? "another host"}` : n.path === "direct" ? "direct" : "";
   const rtt = n.rttMs === undefined ? "" : `${Math.round(n.rttMs)} ms`;
-  const online = [path, rtt].filter(Boolean).join(" · ") || "online";
-  return n.restoreSafe === false ? `${online} · unsafe after restore` : online;
+  const note = n.restoreSafe === false ? "needs an update" : "";
+  return [path, rtt, note].filter(Boolean).join(" · ") || "online";
 };
 
 /** Build a cached, positioned Mesh layout while preserving card identity and stored pin coordinates. */

@@ -247,11 +247,11 @@ test.describe("live updates", () => {
     await expect(page.locator('.ui-window[data-window-id="n-edge-arm"]')).toHaveCount(0);
   });
 
-  test("a node that cannot fence restored mesh peers is marked restore unsafe", async ({ page }, testInfo) => {
+  test("a node that cannot fence restored mesh peers says it needs an update", async ({ page }, testInfo) => {
     await open(page);
     await intoMesh(page);
     await server(page, (s) => s.patchNode("build-01", { restoreSafe: false }));
-    await expect.poll(() => sub(page, "build-01")).toBe("direct · 42 ms · unsafe after restore");
+    await expect.poll(() => sub(page, "build-01")).toBe("direct · 42 ms · needs an update");
     await capture(page, "mesh-restore-unsafe", testInfo);
   });
 

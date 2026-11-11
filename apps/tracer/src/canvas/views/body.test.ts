@@ -10,7 +10,11 @@ test("a clean terminal exit keeps the window while host setup can still fail", (
   expect(shouldCloseWindowAfterExit(0, true)).toBe(false);
 });
 
-test("clean exits still close ordinary windows, and failed exits stay visible", () => {
-  expect(shouldCloseWindowAfterExit(0, false)).toBe(true);
-  expect(shouldCloseWindowAfterExit(1, true)).toBe(false);
+test("every normal exit closes an ordinary window (D357)", () => {
+  for (const status of [0, 1, 3, 127, 129, 130, 255]) expect(shouldCloseWindowAfterExit(status, false)).toBe(true);
+  expect(shouldCloseWindowAfterExit(3, true)).toBe(false);
+});
+
+test("a signal preserves the ended window (D357)", () => {
+  for (const status of [-1, -9, -11, -15]) expect(shouldCloseWindowAfterExit(status, false)).toBe(false);
 });
