@@ -8,6 +8,7 @@
 import type { BranchSection } from "../../../../../packages/ui/src/branched";
 import type { Ctx } from "../context";
 import { byFrecency, type SessionRecord } from "../sessions/inventory";
+import { hostNote } from "../host-note";
 
 declare const __CLUSTERS_PREVIEW__: boolean;
 /**
@@ -25,14 +26,30 @@ const leaf = (host: string, s: SessionRecord, renamable: boolean): BranchSection
   return { id: `s:${host}/${s.id}`, label: s.name, state: s.state, ...(mark ? { mark } : {}), ...(markTip ? { markTip } : {}), ...(meta ? { meta } : {}), ...(renamable ? { renamable: true, renameLabel: "Session name" } : {}) };
 };
 
+/** The id prefix of the row that unlocks host connections; the tree's selection handler runs the unlock for it. */
+export const UNLOCK_ROW_PREFIX = "u:";
+
+/**
+ * Every admitted host, whether or not it has a session: a host that is offline or locked (or just has no shell open) must stay
+ * listed, or it cannot be removed and its absence is unexplained (#500, J528). Hosts that have sessions come first, in the
+ * inventory's order; the others follow in the host list's order. A host whose lock is what stops it carries the note
+ * "locked" and an inline "Unlock to connect" row under it; any other offline host carries "offline".
+ */
 export const consoleLeaves = (cx: Ctx): BranchSection["leaves"] => {
   const inv = cx.adapters.inventory!;
-  const allowed = new Set(cx.adapters.sessions.hosts().map((h) => h.name));
+  const admitted = cx.adapters.sessions.hosts().filter((h) => !h.state);
+  const byName = new Map(admitted.map((h) => [h.name, h]));
   const renamable = inv.can?.rename !== false;
   const meshHosts = cx.adapters.mesh?.data().nodes;
-  return inv.hosts().filter((h) => allowed.has(h)).flatMap((host) => [
-    // A host is renamed through the Mesh (its node name), so only a host the Mesh knows can be.
-    { id: `h:${host}`, label: host, heading: true, ...(meshHosts?.has(host) && cx.mesh ? { renamable: true, renameLabel: "Host name" } : {}) },
-    ...[...inv.list(host)].sort(byFrecency).map((s) => leaf(host, s, renamable)),
-  ]);
+  const names = [...new Set([...inv.hosts().filter((h) => byName.has(h)), ...admitted.map((h) => h.name)])];
+  return names.flatMap((host) => {
+    const entry = byName.get(host)!;
+    const note = hostNote(cx, entry);
+    return [
+      // A host is renamed through the Mesh (its node name), so only a host the Mesh knows can be.
+      { id: `h:${host}`, label: host, heading: true, ...(note ? { meta: note } : {}), ...(meshHosts?.has(host) && cx.mesh ? { renamable: true, renameLabel: "Host name" } : {}) },
+      ...(note === "locked" ? [{ id: `${UNLOCK_ROW_PREFIX}${host}`, label: "Unlock to connect", glyph: "◇", meta: "passkey" }] : []),
+      ...[...inv.list(host)].sort(byFrecency).map((s) => leaf(host, s, renamable)),
+    ];
+  });
 };

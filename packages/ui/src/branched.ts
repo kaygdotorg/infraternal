@@ -136,6 +136,8 @@ function makeSection(section: BranchSection): HTMLElement {
         const name = el("span", "bm-label");
         name.textContent = leaf.label;
         caption.append(name);
+        // A quiet note after the host's name (why it cannot connect), in the same place a leaf's note sits.
+        if (leaf.meta) { const note = el("span", "bm-meta"); note.textContent = leaf.meta; caption.append(note); caption.setAttribute("aria-label", `${leaf.label}, ${leaf.meta}`); }
         caption.dataset.id = leaf.id;
         caption.setAttribute("role", "treeitem");
         caption.tabIndex = 0;

@@ -69,7 +69,7 @@ export function createTree(cx: Ctx): TreeModule {
     if (!leavesOf) { loadLeaves(); return all; }
     // Console lists the sessions of its hosts, not only the ones that have a window (D178).
     const leaves = leavesOf(cx);
-    return all.map((sec) => (sec.id === "view:console" ? { ...sec, meta: `${leaves.filter((l) => !l.heading).length}`, leaves } : sec));
+    return all.map((sec) => (sec.id === "view:console" ? { ...sec, meta: `${leaves.filter((l) => !l.heading && !l.id.startsWith("u:")).length}`, leaves } : sec));
   };
   const current = (): string => {
     const w = state.activeWin;
@@ -110,6 +110,8 @@ export function createTree(cx: Ctx): TreeModule {
       loadRows();
       treeMenu = core.setHostTree(sections(), current(), (picked) => {
         // A component leaf of Settings (#304) opens the first window of its row; a group leaf is the window's own id.
+        // The inline "Unlock host connections" row under a locked host runs the passkey unlock; it opens no window.
+        if (picked.startsWith("u:")) { void cx.adapters.authority?.unlock(); chosen(picked); return; }
         const id = picked.startsWith("st:") ? outline?.rows().find((row) => `st:${row.id}` === picked)?.groups[0]?.windowId ?? picked : picked;
         if (id.startsWith("s:")) {
           const [host, sid] = id.slice(2).split("/");
@@ -137,6 +139,11 @@ export function createTree(cx: Ctx): TreeModule {
   };
   const shown = sidebar ? new MutationObserver(() => { if (stale && !sidebar.hidden) render(); }) : undefined;
   if (sidebar) shown!.observe(sidebar, { attributes: true, attributeFilter: ["hidden"] });
+  // The host list and the lock decide which hosts the Console lists and what each says (#500): a host that joins, goes offline or
+  // is unlocked changes its row, and the tree draws it without waiting for a layout change.
+  const offHostsChange = cx.adapters.sessions.onChange(render);
+  const offLockChange = cx.adapters.authority?.onChange(render);
+  signal.addEventListener("abort", () => { offHostsChange(); offLockChange?.(); }, { once: true });
   const tree = stage.querySelector<HTMLElement>("#tree");
   tree?.addEventListener("click", (e) => {
     const head = (e.target as Element).closest(".bm-head");
