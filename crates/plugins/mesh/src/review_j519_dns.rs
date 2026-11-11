@@ -22,23 +22,46 @@ fn records() -> Records {
 
 /// A process restart must not strand its marked forwarding file after losing the in-memory record.
 #[test]
-#[ignore = "Run in a disposable user/network/mount namespace with a private /etc."]
+#[ignore = "MESH_REVIEW_PROBE: run with scripts/review-j519-dns-regressions in private /etc and Nix profile mounts."]
 fn review_j519_restart_cleanup_removes_owned_file() {
     let directory = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY);
     fs::create_dir_all(directory).expect("private resolver directory");
     let path = directory.join(NETWORKMANAGER_MESH_DNS_FILE);
+    let unrelated = directory.join("unrelated.conf");
     fs::write(
         &path,
         format!("{NETWORKMANAGER_MESH_DNS_MARKER}\nserver=/internal/10.254.0.9#1053\n"),
     )
     .expect("simulate the previous process's owned forwarding file");
+    fs::write(&unrelated, "server=/host/192.0.2.1\n").expect("unrelated host drop-in");
+    install_nix_profile_tool("nmcli");
+    install_nix_profile_tool("resolvectl");
     let mut integration = DnsIntegration::default();
+    integration
+        .configure("infraternal0", &records(), 0)
+        .expect("a fresh process should select its current resolver");
+    assert!(
+        !path.exists(),
+        "a fresh process left the previous resolver mode's marked drop-in behind"
+    );
     integration.remove().expect("first cleanup");
     integration.remove().expect("idempotent cleanup");
     assert!(
         !path.exists(),
         "restart cleanup stranded a marked forwarding file"
     );
+    assert!(
+        unrelated.exists(),
+        "cleanup must leave other drop-ins alone"
+    );
+
+    fs::write(&path, "server=/host/192.0.2.2\n").expect("unmarked file at the owned name");
+    assert!(
+        integration.remove().is_err(),
+        "cleanup must refuse an unmarked file at its owned name"
+    );
+    assert!(path.exists(), "cleanup must preserve an unmarked file");
+    fs::remove_file(path).expect("remove the test's unmarked file");
 }
 
 /// Missing resolver tools must produce an actionable error instead of caching apparent success.

@@ -188,9 +188,12 @@ impl DnsIntegration {
     /// Reports failed removal of a per-link route or managed resolver file.
     pub(crate) fn remove(&mut self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
-        if let Some(install) = self.linux.as_ref() {
-            remove_linux_install(install)?;
-            self.linux = None;
+        {
+            if let Some(install) = self.linux.as_ref() {
+                remove_linux_install(install)?;
+                self.linux = None;
+            }
+            clear_stale_networkmanager_dns()?;
         }
         #[cfg(target_os = "macos")]
         if current_process_is_root() {
@@ -214,6 +217,12 @@ impl DnsIntegration {
             && current.suffixes == suffixes
         {
             return Ok(());
+        }
+
+        // A previous process may have left a marked dnsmasq drop-in without an in-memory install.
+        // Reconcile it before selecting this process's resolver, including when the mode changed.
+        if self.linux.is_none() {
+            clear_stale_networkmanager_dns()?;
         }
 
         if let Some(current) = self.linux.as_ref() {
@@ -549,11 +558,35 @@ fn networkmanager_dns_file_is_managed(path: &Path, owner_uid: u32) -> io::Result
 }
 
 /// Removes the owned `NetworkManager` file and reloads only its DNS plugin.
+/// # Errors
+/// Refuses an unsafe or unmarked file and reports a failed DNS-only reload.
 #[cfg(target_os = "linux")]
 fn clear_networkmanager_dns(nmcli: &Path) -> io::Result<()> {
     let path = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY).join(NETWORKMANAGER_MESH_DNS_FILE);
-    let _ = remove_networkmanager_dns_file(&path, 0)?;
-    run_commands(nmcli, &networkmanager_clear_commands())
+    if networkmanager_dns_file_is_managed(&path, 0)? {
+        // Leave an empty, marked file until NetworkManager confirms the DNS-only reload. If the
+        // command fails or the process stops, the next cleanup can safely retry the reload.
+        let empty = format!("{NETWORKMANAGER_MESH_DNS_MARKER}\n");
+        write_networkmanager_dns_file(&path, empty.as_bytes(), 0)?;
+        run_commands(nmcli, &networkmanager_clear_commands())?;
+        let _ = remove_networkmanager_dns_file(&path, 0)?;
+        Ok(())
+    } else {
+        run_commands(nmcli, &networkmanager_clear_commands())
+    }
+}
+
+/// Remove a previous process's marked drop-in even when this process has no in-memory install.
+/// # Errors
+/// Refuses an unsafe or unmarked file, an unavailable trusted `nmcli`, or a failed DNS-only reload.
+#[cfg(target_os = "linux")]
+fn clear_stale_networkmanager_dns() -> io::Result<()> {
+    let path = Path::new(NETWORKMANAGER_DNSMASQ_DIRECTORY).join(NETWORKMANAGER_MESH_DNS_FILE);
+    if !networkmanager_dns_file_is_managed(&path, 0)? {
+        return Ok(());
+    }
+    let nmcli = trusted_program("nmcli", NMCLI_PATHS)?;
+    clear_networkmanager_dns(&nmcli)
 }
 
 /// Renders one macOS resolver file for a suffix and the node's high DNS port.
