@@ -939,6 +939,7 @@ for (const [status, message] of [
           event.step = "failed";
           event.message = "Take over didn't finish";
           event.failure.message = message;
+          event.failure.kind = status >= 80 ? "install" : "unrecognized_install";
           event.failure.exit_status = status;
           delete event.failure.takeover;
           delete event.leftovers;

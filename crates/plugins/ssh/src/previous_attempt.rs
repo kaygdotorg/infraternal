@@ -624,11 +624,15 @@ impl FinishedInstall {
                         error.message = TAKEOVER_BUSY;
                     }
                     Some(80) => {
-                        error.kind = FailureKind::UnrecognizedInstall;
+                        // Cached clients drop exit_status; the generic kind keeps their headline truthful.
+                        error.kind = FailureKind::Install;
+                        error.failed_step = Some(crate::model::InstallStep::Install);
                         error.message = TAKEOVER_MANAGER_FAILED;
                     }
                     Some(81) => {
-                        error.kind = FailureKind::UnrecognizedInstall;
+                        // Cached clients drop exit_status; the generic kind keeps their headline truthful.
+                        error.kind = FailureKind::Install;
+                        error.failed_step = Some(crate::model::InstallStep::Install);
                         error.message = TAKEOVER_MANAGER_FAILED_AFTER_CLOSE;
                     }
                     Some(79) => {
@@ -1746,8 +1750,22 @@ mod tests {
                 .err()
                 .unwrap();
             assert_eq!(error.exit_status, Some(status));
-            assert_eq!(error.kind, FailureKind::UnrecognizedInstall);
+            assert_eq!(
+                error.kind,
+                if matches!(status, 80 | 81) {
+                    FailureKind::Install
+                } else {
+                    FailureKind::UnrecognizedInstall
+                }
+            );
             assert_eq!(error.message, message);
+            if matches!(status, 80 | 81) {
+                let wire = serde_json::to_value(&error).unwrap();
+                assert_eq!(wire["kind"], "install");
+                assert_eq!(wire["failed_step"], "install");
+                assert_eq!(wire["exit_status"], status);
+                assert_eq!(wire["message"], message);
+            }
         }
         assert!(TAKEOVER_MANAGER_FAILED.contains("No terminal was closed"));
         assert!(TAKEOVER_MANAGER_FAILED_AFTER_CLOSE.contains("those terminals stay closed"));

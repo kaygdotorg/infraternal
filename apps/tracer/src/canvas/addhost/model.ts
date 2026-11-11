@@ -53,6 +53,8 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "unproven_files": return "Setup files it can't vouch for";
     case "no_account": return "Couldn't find that account on this host";
     case "install":
+      // Manager failures use the old generic kind so cached clients remain truthful (#433).
+      if (failure.exit_status === 80 || failure.exit_status === 81) return "Take over didn't finish";
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
         return `Download infraternal (${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"}): ${failure.message}`;
       }
@@ -310,12 +312,20 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       next: "",
       fix: "none", tone: "danger",
     };
-    case "install": return {
-      title: `Setting up ${name} didn't finish`,
-      happened: failure.failed_step ? installSentence(failure) : "Setup stopped before this host was ready.",
-      next: failure.missing_binary ? "Add the file on the server, then try again." : failure.failed_step ? STEP_ADVICE[failure.failed_step] : GENERIC_ADVICE,
-      fix: "retry", tone: "danger",
-    };
+    case "install":
+      // Current clients retain the specific Take over copy; older clients show a generic setup failure.
+      if (failure.exit_status === 80 || failure.exit_status === 81) return {
+        title: `Take over on ${name} didn't finish`,
+        happened: failure.message,
+        next: "",
+        fix: "retry", tone: "info",
+      };
+      return {
+        title: `Setting up ${name} didn't finish`,
+        happened: failure.failed_step ? installSentence(failure) : "Setup stopped before this host was ready.",
+        next: failure.missing_binary ? "Add the file on the server, then try again." : failure.failed_step ? STEP_ADVICE[failure.failed_step] : GENERIC_ADVICE,
+        fix: "retry", tone: "danger",
+      };
     default: return {
       title: `Something went wrong with ${name}`,
       happened: "Something went wrong while setting up this host.",
