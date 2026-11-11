@@ -70,14 +70,14 @@ class Session:
         e = self.element(css)
         return bool(e) and "http_error" not in self.c("POST", "/element/%s/click" % e, {})
 
-    def click_text(self, text, tag="button", timeout=15):
+    def click_text(self, text, tag="button", timeout=15, exact=False):
         """Native click on the first VISIBLE element of `tag` whose text contains `text` (marked with a data attribute first)."""
         end = time.time() + timeout
         while time.time() < end:
-            hit = self.js("""const t = arguments[0], tag = arguments[1];
+            hit = self.js("""const t = arguments[0], tag = arguments[1], exact = arguments[2];
               for (const e of document.querySelectorAll(tag)) { const r = e.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden' && (e.textContent + ' ' + (e.getAttribute('aria-label') || '')).toLowerCase().includes(t.toLowerCase())) { e.setAttribute('data-qa-hit', '1'); return true; } }
-              return false;""", [text, tag])
+                if (r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden' && (exact ? e.textContent.trim().toLowerCase() === t.toLowerCase() : (e.textContent + ' ' + (e.getAttribute('aria-label') || '')).toLowerCase().includes(t.toLowerCase()))) { e.setAttribute('data-qa-hit', '1'); return true; } }
+              return false;""", [text, tag, exact])
             if hit:
                 ok = self.click('[data-qa-hit="1"]')
                 self.js("document.querySelectorAll('[data-qa-hit]').forEach(e => e.removeAttribute('data-qa-hit'))")
@@ -99,6 +99,14 @@ class Session:
             seq = [{"type": "keyDown", "value": k} for k in chord] + [{"type": "keyUp", "value": k} for k in reversed(chord)]
             actions += seq
         return self.c("POST", "/actions", {"actions": [{"type": "key", "id": "kb", "actions": actions}]})
+
+    def drag(self, x1, y1, x2, y2, steps=12, pause=25):
+        """A mouse drag from (x1, y1) to (x2, y2) in viewport coordinates: the pointer swipe a desktop browser can do."""
+        acts = [{"type": "pointerMove", "duration": 0, "x": int(x1), "y": int(y1)}, {"type": "pointerDown", "button": 0}]
+        for i in range(1, steps + 1):
+            acts.append({"type": "pointerMove", "duration": pause, "x": int(x1 + (x2 - x1) * i / steps), "y": int(y1 + (y2 - y1) * i / steps)})
+        acts.append({"type": "pointerUp", "button": 0})
+        return self.c("POST", "/actions", {"actions": [{"type": "pointer", "id": "mouse", "parameters": {"pointerType": "mouse"}, "actions": acts}]})
 
     def close(self):
         call("DELETE", "/session/%s" % self.id)
