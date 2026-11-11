@@ -42,6 +42,8 @@ const FRAGMENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAGMENTS_PER_PEER: usize = 64;
 /// `FRAGMENTS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
 const FRAGMENTS_PER_PEER_HASH: u64 = 64;
+/// Bound the number of disjoint fragment ranges tracked for one datagram without allocating.
+const FRAGMENT_RANGES_PER_DATAGRAM: usize = 128;
 /// IP protocol number for TCP packets.
 const TCP: u8 = 6;
 /// IP protocol number for UDP packets.
@@ -292,6 +294,9 @@ impl PacketFilter {
         else {
             return true;
         };
+        let Some(first_range) = FragmentRange::from_fragment(fragment, parsed.packet_end) else {
+            return false;
+        };
         shard.insert_fragment(
             FragmentEntry {
                 key: fragment.key,
@@ -302,6 +307,7 @@ impl PacketFilter {
             },
             fragment_start(fragment.key, direction),
             now,
+            first_range,
         )
     }
 
@@ -379,7 +385,13 @@ impl PacketFilter {
         flow.last_seen = now;
         fragment.last_seen = now;
         shard.slots[flow_index] = FlowSlot::Occupied(flow);
-        shard.fragments[fragment_index] = FragmentSlot::Occupied(fragment);
+        let completed =
+            shard.fragment_coverage[fragment_index].observe(fragment_packet, packet_end);
+        if completed {
+            shard.remove_fragment(fragment_index);
+        } else {
+            shard.fragments[fragment_index] = FragmentSlot::Occupied(fragment);
+        }
         true
     }
 
@@ -857,6 +869,129 @@ struct FragmentEntry {
     last_seen: Instant,
 }
 
+/// One half-open byte range covered by fragments of the same datagram.
+#[derive(Clone, Copy)]
+struct FragmentRange {
+    start: u16,
+    end: u16,
+}
+
+impl FragmentRange {
+    /// Build a checked range from one packet's fragment offset and payload length.
+    fn from_fragment(fragment: PacketFragment, packet_end: usize) -> Option<Self> {
+        let payload_len = packet_end.checked_sub(fragment.data_offset)?;
+        let end = fragment.offset_bytes.checked_add(payload_len)?;
+        Some(Self {
+            start: u16::try_from(fragment.offset_bytes).ok()?,
+            end: u16::try_from(end).ok()?,
+        })
+    }
+}
+
+/// Fixed, sorted coverage intervals used to retire a datagram after all its bytes arrive.
+///
+/// Each peer has a bounded table of these values, so packet checks never allocate. A full range
+/// set remains live until timeout rather than claiming that a partially tracked datagram finished.
+#[derive(Clone, Copy)]
+struct FragmentCoverage {
+    ranges: [FragmentRange; FRAGMENT_RANGES_PER_DATAGRAM],
+    range_count: u8,
+    final_end: Option<u16>,
+    overflowed: bool,
+}
+
+impl FragmentCoverage {
+    /// Reserve one empty coverage record while the peer's shard is compiled.
+    fn empty() -> Self {
+        Self {
+            ranges: [FragmentRange { start: 0, end: 0 }; FRAGMENT_RANGES_PER_DATAGRAM],
+            range_count: 0,
+            final_end: None,
+            overflowed: false,
+        }
+    }
+
+    /// Start a fresh association with the already-authorized first fragment's byte range.
+    fn reset(&mut self, first_range: FragmentRange) {
+        self.range_count = 0;
+        self.final_end = None;
+        self.overflowed = false;
+        self.insert_range(first_range);
+    }
+
+    /// Record one later fragment and report whether it completed the datagram.
+    fn observe(&mut self, fragment: PacketFragment, packet_end: usize) -> bool {
+        if self.overflowed {
+            return false;
+        }
+        let Some(range) = FragmentRange::from_fragment(fragment, packet_end) else {
+            self.overflowed = true;
+            return false;
+        };
+        let range_count = usize::from(self.range_count);
+        if fragment.more {
+            if self
+                .final_end
+                .is_some_and(|final_end| range.end >= final_end)
+            {
+                self.overflowed = true;
+                return false;
+            }
+        } else {
+            if self
+                .final_end
+                .is_some_and(|final_end| final_end != range.end)
+                || self.ranges[..range_count]
+                    .iter()
+                    .any(|previous| previous.end > range.end)
+            {
+                self.overflowed = true;
+                return false;
+            }
+            self.final_end = Some(range.end);
+        }
+        self.insert_range(range);
+        !self.overflowed
+            && self.final_end.is_some_and(|final_end| {
+                self.range_count > 0 && self.ranges[0].start == 0 && self.ranges[0].end == final_end
+            })
+    }
+
+    /// Merge one range into sorted, non-touching coverage intervals without growing storage.
+    fn insert_range(&mut self, mut incoming: FragmentRange) {
+        let range_count = usize::from(self.range_count);
+        let mut start = 0;
+        while start < range_count && self.ranges[start].end < incoming.start {
+            start += 1;
+        }
+        let mut end = start;
+        while end < range_count && self.ranges[end].start <= incoming.end {
+            incoming.start = incoming.start.min(self.ranges[end].start);
+            incoming.end = incoming.end.max(self.ranges[end].end);
+            end += 1;
+        }
+
+        if end == start {
+            if range_count == FRAGMENT_RANGES_PER_DATAGRAM {
+                self.overflowed = true;
+                return;
+            }
+            if start < range_count {
+                self.ranges.copy_within(start..range_count, start + 1);
+            }
+            self.ranges[start] = incoming;
+            self.range_count += 1;
+            return;
+        }
+
+        self.ranges[start] = incoming;
+        if end < range_count {
+            self.ranges.copy_within(end..range_count, start + 1);
+        }
+        self.range_count -= u8::try_from(end - start - 1).unwrap_or_default();
+    }
+}
+
 /// A deferred checksum adjustment for an SSH port whose checksum bytes are in a later fragment.
 #[derive(Clone, Copy)]
 struct FragmentChecksumAdjustment {
@@ -890,6 +1025,7 @@ enum FragmentSlot {
 struct FlowShard {
     slots: Vec<FlowSlot>,
     fragments: Vec<FragmentSlot>,
+    fragment_coverage: Vec<FragmentCoverage>,
 }
 
 impl FlowShard {
@@ -905,7 +1041,16 @@ impl FlowShard {
             .try_reserve_exact(FRAGMENTS_PER_PEER)
             .map_err(|_| io::Error::other("mesh fragment slots could not be allocated"))?;
         fragments.resize(FRAGMENTS_PER_PEER, FragmentSlot::Empty);
-        Ok(Self { slots, fragments })
+        let mut fragment_coverage = Vec::new();
+        fragment_coverage
+            .try_reserve_exact(FRAGMENTS_PER_PEER)
+            .map_err(|_| io::Error::other("mesh fragment coverage slots could not be allocated"))?;
+        fragment_coverage.resize(FRAGMENTS_PER_PEER, FragmentCoverage::empty());
+        Ok(Self {
+            slots,
+            fragments,
+            fragment_coverage,
+        })
     }
 
     /// Find either orientation of one flow and report whether the stored direction matched.
@@ -977,13 +1122,21 @@ impl FlowShard {
     }
 
     /// Insert a first-fragment association without growing the table or replacing an active ID.
-    fn insert_fragment(&mut self, entry: FragmentEntry, start: usize, now: Instant) -> bool {
+    fn insert_fragment(
+        &mut self,
+        entry: FragmentEntry,
+        start: usize,
+        now: Instant,
+        first_range: FragmentRange,
+    ) -> bool {
         let mut removed = None;
         for offset in 0..self.fragments.len() {
             let index = (start + offset) % self.fragments.len();
             match self.fragments[index] {
                 FragmentSlot::Empty => {
-                    self.fragments[removed.unwrap_or(index)] = FragmentSlot::Occupied(entry);
+                    let index = removed.unwrap_or(index);
+                    self.fragments[index] = FragmentSlot::Occupied(entry);
+                    self.fragment_coverage[index].reset(first_range);
                     return true;
                 }
                 FragmentSlot::Removed => {
@@ -996,6 +1149,7 @@ impl FlowShard {
                         return false;
                     }
                     self.fragments[index] = FragmentSlot::Occupied(entry);
+                    self.fragment_coverage[index].reset(first_range);
                     return true;
                 }
                 FragmentSlot::Occupied(existing) if existing.expired(now) => {
@@ -1007,6 +1161,7 @@ impl FlowShard {
         }
         if let Some(index) = removed {
             self.fragments[index] = FragmentSlot::Occupied(entry);
+            self.fragment_coverage[index].reset(first_range);
             true
         } else {
             false
@@ -2482,6 +2637,54 @@ mod tests {
         let mut denied_later = ipv4_fragment(&denied, 0x1235, 16, 8, false);
         assert!(!filter.check_at(&mut denied_first, Direction::HostToMesh, now));
         assert!(!filter.check_at(&mut denied_later, Direction::HostToMesh, now));
+    }
+
+    /// Completed fragmented datagrams release slots while an out-of-order tail still passes.
+    #[test]
+    fn completed_ipv4_datagrams_release_fragment_slots() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::All, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+
+        for index in 0..=FRAGMENTS_PER_PEER {
+            let number = u16::try_from(index).expect("fragment test index fits");
+            let source_port = 40_000 + number;
+            let datagram = udp4_payload(LOCAL4, PEER4, source_port, 53);
+            let mut first = ipv4_fragment(&datagram, 0x4000 + number, 0, 8, true);
+            let mut last = ipv4_fragment(&datagram, 0x4000 + number, 16, 8, false);
+            let mut middle = ipv4_fragment(&datagram, 0x4000 + number, 8, 8, true);
+
+            assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+            assert!(filter.check_at(&mut last, Direction::HostToMesh, now));
+            assert!(filter.check_at(&mut middle, Direction::HostToMesh, now));
+        }
+    }
+
+    /// Completed IPv6 datagrams release slots while an out-of-order tail still passes.
+    #[test]
+    fn completed_ipv6_datagrams_release_fragment_slots() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::All, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+
+        for index in 0..=FRAGMENTS_PER_PEER {
+            let number = u32::try_from(index).expect("fragment test index fits");
+            let source_port = 40_000 + u16::try_from(number).expect("port index fits");
+            let datagram = udp6_payload(LOCAL6, PEER6, source_port, 53);
+            let mut first = ipv6_fragment(&datagram, 0x4000 + number, 0, 8, true);
+            let mut last = ipv6_fragment(&datagram, 0x4000 + number, 16, 8, false);
+            let mut middle = ipv6_fragment(&datagram, 0x4000 + number, 8, 8, true);
+
+            assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+            assert!(filter.check_at(&mut last, Direction::HostToMesh, now));
+            assert!(filter.check_at(&mut middle, Direction::HostToMesh, now));
+        }
     }
 
     /// A TCP first fragment needs only enough bytes to identify its grant and SYN initiation.
