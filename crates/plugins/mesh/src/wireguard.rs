@@ -668,8 +668,15 @@ impl Device {
         overrides: &BTreeMap<PublicKey, u16>,
         remove: bool,
     ) -> io::Result<()> {
+        if peers.is_empty() {
+            return Ok(());
+        }
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
-        let index = index()?;
+        // Resolve the marked link and keep its ifindex for the whole batch. A name-only lookup
+        // could route through an unrelated interface substituted under `infraternal0`.
+        let index = Self::active_link()?
+            .ok_or(io::ErrorKind::NotConnected)?
+            .ifindex;
         for peer in peers {
             let mtu = (!remove).then(|| {
                 overrides
