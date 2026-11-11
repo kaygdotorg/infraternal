@@ -3,7 +3,7 @@
 # instance and J479's server (never touches either). Fresh data dir, so a fresh first-run owner can be created from
 # Mac Safari. Same release and the same certificate/CA as the first instance (the Mac trusts that CA for
 # mesh-staging.vpn.kayg.org; the port does not matter), own user, ports and nginx.
-#   server 127.0.0.1:7031, hosts 10.69.69.53:7643, TLS :8444, data /var/lib/infraternal-qa2
+#   server 127.0.0.1:7031, hosts 10.69.69.53:7643, TLS :9000 (an SELinux http_port_t port: nginx may not bind 8444), data /var/lib/infraternal-qa2
 # Usage (root on mesh-staging): install-qa2-instance.sh            # needs /opt/qa/current and /opt/qa/tls
 # SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
@@ -24,14 +24,14 @@ http {
   access_log off;
   map \$http_upgrade \$connection_upgrade { default upgrade; '' close; }
   server {
-    listen 8444 ssl;
+    listen 9000 ssl;
     server_name $name;
     ssl_certificate /opt/qa/tls/cert.pem;
     ssl_certificate_key /opt/qa/tls/key.pem;
     location / {
       proxy_pass http://127.0.0.1:7031;
       proxy_http_version 1.1;
-      proxy_set_header Host \$host:8444;
+      proxy_set_header Host \$host:9000;
       proxy_set_header X-Forwarded-Proto https;
       proxy_set_header X-Forwarded-For \$remote_addr;
       proxy_set_header Upgrade \$http_upgrade;
@@ -54,7 +54,7 @@ RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/infraternal-qa2
 Environment=HOME=/var/lib/infraternal-qa2
 WorkingDirectory=/var/lib/infraternal-qa2
-ExecStart=/opt/qa/current/infraternal server --data /var/lib/infraternal-qa2 --listen 127.0.0.1:7031 --public-origin https://$name:8444 --web-root /opt/qa/current/web --remote-listen 10.69.69.53:7643 --remote-ca-dir /var/lib/infraternal-qa2/remote-ca --behind-proxy --trusted-proxy 127.0.0.1
+ExecStart=/opt/qa/current/infraternal server --data /var/lib/infraternal-qa2 --listen 127.0.0.1:7031 --public-origin https://$name:9000 --web-root /opt/qa/current/web --remote-listen 10.69.69.53:7643 --remote-ca-dir /var/lib/infraternal-qa2/remote-ca --behind-proxy --trusted-proxy 127.0.0.1
 Restart=on-failure
 RestartSec=2
 [Install]
@@ -71,6 +71,9 @@ Restart=on-failure
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now infraternal-qa2-server infraternal-qa2-proxy
+systemctl enable infraternal-qa2-server infraternal-qa2-proxy
+systemctl restart infraternal-qa2-server
+systemctl reset-failed infraternal-qa2-proxy 2>/dev/null || true
+systemctl restart infraternal-qa2-proxy
 for i in $(seq 1 60); do curl -fs -m 2 http://127.0.0.1:7031/healthz >/dev/null && break; sleep 1; done
-curl -fsk -m 5 -o /dev/null -w 'proxy2_health=%{http_code}\n' https://127.0.0.1:8444/healthz
+curl -fsk -m 5 -o /dev/null -w 'proxy2_health=%{http_code}\n' https://127.0.0.1:9000/healthz
