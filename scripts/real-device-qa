@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Real-device QA: drives the actual web app in a real iPhone Simulator (Safari, iOS 27) on the Mac Studio "std",
+# against a device-QA copy of the server that runs on mesh-staging, and writes a pass/fail table with screenshots.
+# Run it from the control host after every deploy. Read docs/operations/real-device-qa.md first.
+#
+#   scripts/real-device-qa prepare                  # once per Mac Studio: runner + simulator
+#   scripts/real-device-qa stage [BUNDLE_DIR]       # install/refresh the QA server beside J479's on mesh-staging
+#   scripts/real-device-qa host-account             # throwaway rootless account + sshd on dev-02 (the host to add)
+#   scripts/real-device-qa owner-setup              # first-run owner with a real Face ID passkey (fresh server only)
+#   scripts/real-device-qa add-host                 # Add host through the phone UI (fresh server only)
+#   scripts/real-device-qa check [--themes light,dark] [--out DIR]
+#   scripts/real-device-qa teardown                 # remove everything created on dev-02, stop the QA units
+#
+# Why a copy of the server: a browser cannot be signed in to an existing account on a second device (the account key
+# is wrapped by a passkey that must be in the same browser), so a real-device run needs an account the simulator
+# itself created. mesh-staging is throwaway and prod-shaped (root units, reverse proxy, real TLS), and the QA copy
+# runs beside J479's server without touching it (own user, ports, data dir, CA).
+#
+# Secrets: the one-time setup token and the throwaway host password travel only as 0600 files on the Mac Studio and
+# are typed from there by the runner. Nothing secret is put on a command line, in a log, or in a screenshot we keep.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER_SRC="$HERE/real-device-qa-runner"
+STD="${QA_STD:-kayg@std.vpn.kayg.org}"
+STAGING="${QA_STAGING:-claude@mesh-staging.vpn.kayg.org}"
+DEV02="${QA_DEV02:-cua@infraternal-dev-02-std}"
+QA_URL="${QA_URL:-https://mesh-staging.vpn.kayg.org:8443}"
+HOST_ADDR="${QA_HOST_ADDR:-10.69.69.117}"   # dev-02's NetBird address
+HOST_PORT="${QA_HOST_PORT:-2222}"           # NetBird answers port 22 itself, so the QA host uses its own sshd port
+SIM="~/Developer/infraternal-sim"           # everything created on the Mac Studio lives here (owner rule)
+BASE_BUNDLE="${QA_BUNDLE:-/opt/j479/current}"
+
+die() { echo "real-device-qa: $*" >&2; exit 1; }
+std() { timeout "${QA_TIMEOUT:-900}" netbird ssh --no-browser "$STD" "$@"; }
+runner() { std "cd $SIM/qa-runner && export PATH=\$PATH:/nix/var/nix/profiles/default/bin && $*"; }
+
+cmd_prepare() {
+  # Pushes the runner sources (tar over ssh: the Studio has no rsync) and builds the XCUITest bundle.
+  tar -C "$RUNNER_SRC" -cf - --exclude dd --exclude out --exclude tmp --exclude '*.xcodeproj' --exclude 'tools-*' . \
+    | std "mkdir -p $SIM/qa-runner $SIM/qa && chmod 700 $SIM/qa && tar -C $SIM/qa-runner -xf -"
+  std "cd $SIM/qa-runner && chmod +x run.sh checklist.sh && export PATH=\$PATH:/nix/var/nix/profiles/default/bin && \
+       (xcrun simctl list devices | grep -q ' infraternal-01 (' || xcrun simctl create infraternal-01 com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro com.apple.CoreSimulator.SimRuntime.iOS-27-0) && \
+       ./run.sh build"
+  # The simulator must trust the QA server's CA, or Safari refuses the page.
+  local ca; ca="$(mktemp -d)"
+  ssh "$STAGING" 'sudo cat /opt/qa/tls/ca.pem' > "$ca/qa-ca.pem" 2>/dev/null || die "stage the QA server first (scripts/real-device-qa stage)"
+  std "cat > $SIM/qa/qa-ca.pem" < "$ca/qa-ca.pem"
+  std "xcrun simctl boot \$(xcrun simctl list devices | awk -F'[()]' '/ infraternal-01 \\(/ {print \$2; exit}') 2>/dev/null; \
+       xcrun simctl keychain \$(xcrun simctl list devices | awk -F'[()]' '/ infraternal-01 \\(/ {print \$2; exit}') add-root-cert $SIM/qa/qa-ca.pem && echo ca-trusted-in-simulator"
+  rm -rf "$ca"
+}
+
+cmd_stage() {
+  local bundle="${1:-$BASE_BUNDLE}"
+  scp -q "$RUNNER_SRC/stage/install-qa-instance.sh" "$STAGING:/tmp/install-qa-instance.sh"
+  ssh "$STAGING" "sudo bash /tmp/install-qa-instance.sh '$bundle'"
+}
+
+cmd_host_account() {
+  # A throwaway login on dev-02 for the Add host step, with its own sshd on $HOST_PORT run as a transient systemd
+  # unit (a hand-started sshd has no pam_systemd session, and rootless hosts then report "user systemd manager
+  # unavailable"). The QA server's CA is trusted on dev-02 because the host agent checks the server's HTTPS certificate.
+  local pw; pw="$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)"
+  [ "${#pw}" -eq 24 ] || die "could not make a password"
+  ssh "$DEV02" 'id qa-device >/dev/null 2>&1 || sudo -n useradd -m -s /bin/bash -c "device QA throwaway" qa-device; sudo -n loginctl enable-linger qa-device'
+  printf 'qa-device:%s\n' "$pw" | ssh "$DEV02" 'sudo -n chpasswd'
+  ssh "$DEV02" "sudo -n systemctl is-active qa-sshd >/dev/null 2>&1 || sudo -n systemd-run --unit=qa-sshd --description='device-QA sshd (temporary)' /usr/sbin/sshd -D -e -p $HOST_PORT -o AllowUsers=qa-device -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no"
+  printf '%s\n' "$pw" | std "umask 077; cat > $SIM/qa/host-password.txt"
+  ssh "$STAGING" 'sudo cat /opt/qa/tls/ca.pem' | ssh "$DEV02" 'cat > /tmp/qa-ca.crt && sudo -n install -m644 /tmp/qa-ca.crt /usr/local/share/ca-certificates/qa-ca.crt && sudo -n update-ca-certificates >/dev/null && rm -f /tmp/qa-ca.crt'
+  echo "host account ready: qa-device@$HOST_ADDR:$HOST_PORT (password in $SIM/qa/host-password.txt on the Studio)"
+}
+
+new_setup_token() {
+  ssh "$STAGING" 'sudo /opt/qa/current/infraternal server setup-token --data /var/lib/infraternal-qa' 2>/dev/null \
+    | std "umask 077; cat > $SIM/qa/setup-token.txt"
+}
+
+# The keyboard's accessory checkmark closes it; the page's own accessibility frames are stale while it is up.
+KBD='xy~0.898~0.586'
+
+cmd_owner_setup() {
+  # First-run owner: token, identity, passkey (simulated Face ID), recovery step. The recovery words are shown on
+  # screen only for the "stored" tick; no shot is taken there and nothing keeps them.
+  new_setup_token
+  local f="/Users/kayg/Developer/infraternal-sim/qa" fresh="open~$QA_URL/?r=$(date +%s)|wait~8"
+  runner "./run.sh run owner-1 \"$fresh|field~setup token|typefile~$f/setup-token.txt|$KBD|wait~2|tap~Continue|wait~4|field~username|type~qa-owner|$KBD|wait~1|field~display name|type~QA Owner|$KBD|wait~2|tap~Continue|wait~3|tap~Create passkey|wait~3\""
+  # The first sheet may be the 'needs enrolled biometrics' one on a fresh boot; run.sh enrols Face ID every run, so
+  # cancel it and try again.
+  runner "./run.sh run owner-2 \"tapsbif~Cancel~3|wait~2|tapif~Create passkey~5|wait~3|tapsb~Add Passkey|wait~2|face|wait~6\""
+  runner "./run.sh run owner-3 \"swipe~0.5~0.75~0.5~0.3~0.4|wait~2|tap~I stored them somewhere safe|wait~1|tap~Open infraternal|wait~8|shot~owner-signed-in\""
+  std "rm -f $SIM/qa/setup-token.txt"
+}
+
+cmd_add_host() {
+  # CA creation (one passkey tap), host key, password sign-in, install, shell. The password field makes Safari offer
+  # "Use Strong Password?"; a system sheet stalls later taps, so typing and closing the sheet are separate runs.
+  local f="/Users/kayg/Developer/infraternal-sim/qa"
+  runner "./run.sh run host-1 \"open~$QA_URL/?r=$(date +%s)|wait~9|tap~Add host|wait~3|field~Hosts to add|type~qa-device@$HOST_ADDR:$HOST_PORT|$KBD|wait~2|tap~Continue|wait~8|tapsbif~Use Passkey~6|face|wait~8|tapif~Trust and continue~10|wait~4\""
+  runner "./run.sh run host-2 \"swipe~0.5~0.62~0.5~0.5~0.4|wait~1|swipe~0.5~0.62~0.5~0.5~0.4|wait~1|swipe~0.5~0.62~0.5~0.5~0.4|wait~2|tap~Sign in with a password|wait~2|field~Password for $HOST_ADDR|typefile~$f/host-password.txt\""
+  runner "./run.sh run host-3 \"xy~0.922~0.663|wait~2|shot~sheet-closed\""
+  runner "./run.sh run host-4 \"tap~Sign in|wait~25|shot~host-added\""
+}
+
+cmd_check() {
+  local themes="light,dark" out="" ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  while [ $# -gt 0 ]; do case "$1" in
+    --themes) themes="$2"; shift 2;;
+    --out) out="$2"; shift 2;;
+    *) die "unknown option $1";; esac; done
+  out="${out:-$HOME/.cache/codex-scratch/real-device-qa/$ts}"
+  mkdir -p "$out"
+  local expected="$out/host-facts.json"
+  ssh "$DEV02" 'printf "{\"kernel\":\"%s\",\"arch\":\"%s\",\"os\":\"%s\"}\n" "$(uname -r)" "$(uname -m)" "$(. /etc/os-release; echo "$VERSION_ID")"' > "$expected"
+  for theme in ${themes//,/ }; do
+    local remote="$SIM/qa-out/$ts-$theme"
+    # std holds the simulator lock for the whole checklist (run.sh session), so nothing else can steer Safari.
+    runner "./run.sh session ./checklist.sh $theme $QA_URL $remote" > "$out/$theme-log.txt" 2>&1 || echo "theme $theme: checklist reported errors, see $out/$theme-log.txt" >&2
+    std "tar -C $remote -cf - ." | { mkdir -p "$out/$theme" && tar -C "$out/$theme" -xf -; }
+  done
+  python3 -I "$HERE/real-device-qa-report.py" "$out" "$expected" "$themes" | tee "$out/results.md"
+  echo "evidence: $out (screenshots, videos, qa-lines.txt per phase). Never commit it: attach it to the issue."
+}
+
+cmd_teardown() {
+  ssh "$DEV02" 'sudo -n systemctl stop qa-sshd 2>/dev/null; sudo -n userdel -r qa-device 2>/dev/null; sudo -n rm -f /usr/local/share/ca-certificates/qa-ca.crt; sudo -n update-ca-certificates --fresh >/dev/null 2>&1; echo dev-02 cleaned' || true
+  ssh "$STAGING" 'sudo systemctl stop infraternal-qa-server infraternal-qa-proxy; echo QA units stopped (data kept in /var/lib/infraternal-qa)' || true
+}
+
+case "${1:-}" in
+  prepare) cmd_prepare;;
+  stage) shift; cmd_stage "$@";;
+  host-account) cmd_host_account;;
+  owner-setup) cmd_owner_setup;;
+  add-host) cmd_add_host;;
+  check) shift; cmd_check "$@";;
+  teardown) cmd_teardown;;
+  *) sed -n 2,22p "$0"; exit 2;;
+esac
