@@ -358,6 +358,7 @@ mod tests {
 
     #[cfg(all(feature = "remote", target_os = "linux"))]
     #[test]
+    /// Keep the enrollment server origin positional in the `up` command.
     fn up_accepts_a_server_as_its_positional_argument() {
         let registry = registry().expect("action registry");
         let matches = build(&registry)
@@ -371,6 +372,34 @@ mod tests {
                 .get_one::<String>("server")
                 .map(String::as_str),
             Some("https://mesh.example.org")
+        );
+    }
+
+    /// Let a system install preserve extra SSH and administration paths from its command line.
+    #[cfg(all(feature = "remote", feature = "plugin-mesh", target_os = "linux"))]
+    #[test]
+    fn up_accepts_repeated_host_firewall_allow_rules() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "up",
+                "https://mesh.example.org",
+                "--host-firewall-allow",
+                "wt0,10.69.69.0/24,tcp,22",
+                "--host-firewall-allow",
+                "eth0,10.69.0.99,tcp,7011",
+            ])
+            .expect("typed host firewall rules");
+        let selected = selected(&matches);
+        assert_eq!(
+            selected
+                .matches
+                .get_many::<String>("host_firewall_allow")
+                .expect("repeated host rules")
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["wt0,10.69.69.0/24,tcp,22", "eth0,10.69.0.99,tcp,7011"]
         );
     }
 

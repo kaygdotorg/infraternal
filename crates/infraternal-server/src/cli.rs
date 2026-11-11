@@ -48,6 +48,7 @@ pub fn plugin() -> PluginDefinition {
     plugin
 }
 
+/// Register the command that runs the server in the current terminal.
 #[cfg(feature = "cli-plugin")]
 fn server_run_action() -> ActionDefinition {
     let server_data = JsonSchema::object(
@@ -70,6 +71,7 @@ fn server_run_action() -> ActionDefinition {
         [
             "Choose where it listens and a private folder for its data.",
             "Give it HTTPS files, or say that a trusted reverse proxy handles HTTPS.",
+            "For a system service, the product owns its host input rules and installs a boot-time firewall unit, replacing any hand-installed infraternal-firewall.service. Add trusted admin paths with --host-firewall-allow.",
             "Start it. It runs until you stop it.",
         ],
         JsonSchema::object(server_input_fields(), std::iter::empty()),
@@ -85,6 +87,7 @@ fn server_run_action() -> ActionDefinition {
     .with_example("server --listen 127.0.0.1:7443", "Run a local server.")
 }
 
+/// Register first-time system and user server installation.
 #[cfg(feature = "cli-plugin")]
 fn server_init_action() -> ActionDefinition {
     let mut inputs = server_input_fields();
@@ -122,6 +125,8 @@ fn server_init_action() -> ActionDefinition {
         "Use this the first time you set up a server on this machine.",
         [
             "Choose where it listens, its data folder and its public address.",
+            "A system install also takes over infraternal-firewall.service and writes the configured default-drop host policy.",
+            "Use --host-firewall-allow and --host-firewall-accept-interface to keep administrator paths, then inspect the complete plan with --dry-run.",
             "Run with --dry-run to see exactly what would be installed.",
             "Run it again and confirm, or pass --yes when no one is at the terminal.",
         ],
@@ -322,6 +327,7 @@ fn server_init_result_schema() -> JsonSchema {
     )
 }
 
+/// Describe the server and host-firewall settings accepted by run and init.
 #[cfg(feature = "cli-plugin")]
 fn server_input_fields() -> Vec<(String, JsonSchema)> {
     vec![
@@ -370,6 +376,35 @@ fn server_input_fields() -> Vec<(String, JsonSchema)> {
             JsonSchema::array(
                 JsonSchema::string("Proxy peer address or CIDR."),
                 "Addresses or networks of the reverse proxies to trust.",
+            ),
+        ),
+        (
+            "host_firewall_listen_interface".to_owned(),
+            JsonSchema::string("Interface that receives the main server listener."),
+        ),
+        (
+            "host_firewall_remote_interface".to_owned(),
+            JsonSchema::string("Interface that receives the remote agent listener."),
+        ),
+        (
+            "host_firewall_remote_source".to_owned(),
+            JsonSchema::array(
+                JsonSchema::string("Remote listener peer address or CIDR."),
+                "Peer addresses or networks allowed to reach the remote listener.",
+            ),
+        ),
+        (
+            "host_firewall_accept_interface".to_owned(),
+            JsonSchema::array(
+                JsonSchema::string("Host interface name."),
+                "Interfaces whose existing broad input allowance should be kept.",
+            ),
+        ),
+        (
+            "host_firewall_allow".to_owned(),
+            JsonSchema::array(
+                JsonSchema::string("INTERFACE,SOURCE,tcp|udp,PORT; use * for any."),
+                "Additional typed host input rules, including administrator SSH paths.",
             ),
         ),
     ]

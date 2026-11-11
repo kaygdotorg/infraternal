@@ -1,15 +1,19 @@
-//! Installs a fresh system service without modifying an existing installation (#338).
+//! Installs a fresh machine service and safely takes over its known host firewall loader (#338, D386).
 //!
 //! Preflight only reads, including when it models recovery of an unfinished install.
 //! Synced inode records precede publication; errors, signals and the next privileged
 //! attempt recover only those entries, leaving pre-existing paths alone.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+use super::{HOST_FIREWALL_SERVICE, host_firewall_systemd_unit};
 use super::{
     PATH_BINARY, SERVICE_BINARY, SERVICE_NAME, check_directory, hash_stream, run_systemctl,
     systemd_unit,
 };
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+use infraternal_plugin_mesh::host_firewall::{self, Policy};
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
@@ -176,6 +180,20 @@ struct Created {
     enrollment: bool,
 }
 
+/// A pre-existing host firewall unit kept on the same filesystem until install commit.
+#[derive(Clone)]
+struct Replaced {
+    /// The known hand-installed service pathname that is temporarily replaced.
+    path: PathBuf,
+    /// A hard link to the exact old inode, retained so rollback restores its mode and bytes.
+    backup: PathBuf,
+    /// Filesystem identity prevents replacing a concurrent administrator edit.
+    identity: (u64, u64),
+}
+
+/// Bound the hand unit read before checking whether it is the supported legacy loader.
+const MAX_HAND_FIREWALL_UNIT_BYTES: u64 = 64 * 1024;
+
 /// Owns only new install paths until the service is confirmed active.
 pub(super) struct Install {
     /// The namespace root, injectable for root tests without touching the host install.
@@ -184,6 +202,8 @@ pub(super) struct Install {
     owner: u32,
     /// Reverse creation order removes children before their new parent directories.
     created: Vec<Created>,
+    /// Existing known host firewall units are restored unless the service install commits.
+    replaced: Vec<Replaced>,
     /// The exclusive durable journal stays locked until commit or completed rollback.
     journal: journal::Journal,
     /// A trusted service manager used for activation and rollback.
@@ -194,6 +214,12 @@ pub(super) struct Install {
     committed: bool,
     /// A scoped signal listener requests rollback even during synchronous activation.
     interrupted: Option<Arc<AtomicBool>>,
+    /// The agent's host policy is held until its protected file is published with the unit.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    host_firewall_policy: Option<Policy>,
+    /// Policy and unit publication is idempotent within one activation transaction.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    host_firewall_installed: bool,
 }
 
 impl Install {
@@ -213,11 +239,16 @@ impl Install {
             root: root.to_owned(),
             owner,
             created: recovery.created,
+            replaced: recovery.replaced,
             journal,
             systemctl: systemctl.to_owned(),
             registered: recovery.registered,
             committed: false,
             interrupted: None,
+            #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+            host_firewall_policy: None,
+            #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+            host_firewall_installed: false,
         };
         install.rollback()?;
         check_preflight(root, owner, systemctl, &journal::Snapshot::default())?;
@@ -233,6 +264,142 @@ impl Install {
     pub(super) fn interrupt_on(mut self, interrupted: Arc<AtomicBool>) -> Self {
         self.interrupted = Some(interrupted);
         self
+    }
+
+    /// Validate and retain the agent's input rules until their root-owned file is published.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    pub(super) fn with_host_firewall_policy(mut self, policy: Policy) -> io::Result<Self> {
+        host_firewall::validate(&policy)
+            .map_err(|_| refused("The agent host firewall policy is invalid."))?;
+        self.host_firewall_policy = Some(policy);
+        Ok(self)
+    }
+
+    /// Save the agent policy and install the early boot unit, taking over only the known hand unit.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    pub(super) fn install_host_firewall(&mut self) -> io::Result<()> {
+        if self.host_firewall_installed {
+            return Ok(());
+        }
+        let policy = self.host_firewall_policy.as_ref().ok_or_else(|| {
+            refused("The agent host firewall policy was not supplied to the installer.")
+        })?;
+        host_firewall::validate(policy)
+            .map_err(|_| refused("The agent host firewall policy is invalid."))?;
+        let policy_path = self
+            .root
+            .join("var/lib/infraternal/host-firewall-agent.json");
+        let policy_json = serde_json::to_vec_pretty(policy)
+            .map_err(|_| io::Error::other("could not encode agent host firewall policy"))?;
+        self.new_file(&policy_path, &policy_json, 0o600)?;
+
+        let unit_directory = self.directory("etc/systemd/system", 0o755, false)?;
+        let unit_path = unit_directory.join(HOST_FIREWALL_SERVICE);
+        let unit = host_firewall_systemd_unit();
+        self.take_over_firewall_unit(&unit_path, unit.as_bytes())?;
+
+        let wants = self.directory("etc/systemd/system/network-pre.target.wants", 0o755, false)?;
+        let enabled = wants.join(HOST_FIREWALL_SERVICE);
+        match existing(&enabled)? {
+            None => self.link(
+                Path::new("/etc/systemd/system/infraternal-firewall.service"),
+                &enabled,
+            )?,
+            Some(metadata)
+                if metadata.file_type().is_symlink()
+                    && matches!(
+                        fs::read_link(&enabled)?.as_path(),
+                        path if path == Path::new("/etc/systemd/system/infraternal-firewall.service")
+                            || path == Path::new("../infraternal-firewall.service")
+                    ) => {}
+            Some(_) => {
+                return Err(refused(
+                    "An unrelated network-pre firewall enablement path exists. Inspect it before retrying infraternal up.",
+                ));
+            }
+        }
+        self.host_firewall_installed = true;
+        Ok(())
+    }
+
+    /// Publish a new private policy file without replacing a path from outside this install.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    fn new_file(&mut self, destination: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+        let (staging, mut output) = self.staging(destination)?;
+        output.write_all(bytes)?;
+        output.set_permissions(fs::Permissions::from_mode(mode))?;
+        output.sync_all()?;
+        self.publish(&staging, destination)
+    }
+
+    /// Replace only a known manual host loader, retaining its exact inode for rollback.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    fn take_over_firewall_unit(&mut self, destination: &Path, unit: &[u8]) -> io::Result<()> {
+        let Some(existing_metadata) = existing(destination)? else {
+            return self.new_file(destination, unit, 0o644);
+        };
+        if !existing_metadata.is_file()
+            || existing_metadata.uid() != self.owner
+            || existing_metadata.mode() & 0o022 != 0
+        {
+            return Err(refused(
+                "The host firewall unit is not a protected regular file. Inspect it before retrying infraternal up.",
+            ));
+        }
+        let old_bytes = read_firewall_unit(destination, &existing_metadata, self.owner)?;
+        if old_bytes == unit {
+            return Ok(());
+        }
+        if !known_hand_firewall_unit(&old_bytes) {
+            return Err(refused(
+                "The host firewall unit does not match the supported nftables file loader. Inspect it before allowing infraternal up to take it over.",
+            ));
+        }
+
+        let (staging, mut output) = self.staging(destination)?;
+        output.write_all(unit)?;
+        output.set_permissions(fs::Permissions::from_mode(0o644))?;
+        output.sync_all()?;
+
+        let backup = self.temporary(destination)?;
+        self.journal.step()?;
+        fs::hard_link(destination, &backup)?;
+        let backup_metadata = fs::symlink_metadata(&backup)?;
+        if (backup_metadata.dev(), backup_metadata.ino())
+            != (existing_metadata.dev(), existing_metadata.ino())
+        {
+            return Err(refused(
+                "The host firewall unit changed during takeover. Inspect it before retrying infraternal up.",
+            ));
+        }
+        self.record(backup.clone(), &backup_metadata, false)?;
+        self.journal
+            .replacement(destination, &backup, &existing_metadata)?;
+        let replacement = Replaced {
+            path: destination.to_owned(),
+            backup,
+            identity: (existing_metadata.dev(), existing_metadata.ino()),
+        };
+        self.replaced.push(replacement);
+
+        let replacement_metadata = fs::symlink_metadata(&staging)?;
+        let current_metadata = fs::symlink_metadata(destination)?;
+        if (current_metadata.dev(), current_metadata.ino())
+            != (existing_metadata.dev(), existing_metadata.ino())
+        {
+            return Err(refused(
+                "The host firewall unit changed during takeover. Inspect it before retrying infraternal up.",
+            ));
+        }
+        self.journal.step()?;
+        self.record(destination.to_owned(), &replacement_metadata, false)?;
+        fs::rename(&staging, destination)?;
+        fs::File::open(
+            destination
+                .parent()
+                .ok_or_else(|| io::Error::other("missing host firewall unit parent"))?,
+        )?
+        .sync_all()
     }
 
     /// Observe cancellation between synchronous writes and manager operations, before commit.
@@ -483,6 +650,10 @@ impl Install {
     /// Publish the binary, alias and unit, committing only after the service's active check.
     pub(super) fn activate(mut self, source: &Path) -> io::Result<()> {
         self.check_interruption()?;
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        if self.host_firewall_policy.is_some() {
+            self.install_host_firewall()?;
+        }
         self.binary(source)?;
         self.check_interruption()?;
         let path = self
@@ -523,6 +694,13 @@ impl Install {
         self.registered = true;
         run_systemctl(&self.systemctl, &["daemon-reload"], None)?;
         self.check_interruption()?;
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        if self.host_firewall_installed {
+            run_systemctl(&self.systemctl, &["enable", HOST_FIREWALL_SERVICE], None)?;
+            self.check_interruption()?;
+            run_systemctl(&self.systemctl, &["restart", HOST_FIREWALL_SERVICE], None)?;
+            self.check_interruption()?;
+        }
         run_systemctl(&self.systemctl, &["enable", "--now", SERVICE_NAME], None)?;
         self.check_interruption()?;
         run_systemctl(
@@ -533,7 +711,99 @@ impl Install {
         self.check_interruption()?;
         self.journal.commit()?;
         self.committed = true;
+        self.remove_replaced_backups();
         Ok(())
+    }
+}
+
+/// Recognize only the production hand loader that reads the documented nft file.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+fn known_hand_firewall_unit(bytes: &[u8]) -> bool {
+    let Ok(unit) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut starts = Vec::new();
+    let mut pres = Vec::new();
+    for line in unit.lines() {
+        if let Some(command) = line.strip_prefix("ExecStart=") {
+            starts.push(command);
+        } else if let Some(command) = line.strip_prefix("ExecStartPre=") {
+            pres.push(command);
+        } else if [
+            "ExecStartPost=",
+            "ExecStop=",
+            "ExecStopPost=",
+            "ExecCondition=",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        {
+            return false;
+        }
+    }
+    if starts.len() != 1 || pres.len() > 1 {
+        return false;
+    }
+    let command_matches = |command: &str, expected_args: &str| {
+        let command = command.strip_prefix('-').unwrap_or(command);
+        let Some((executable, arguments)) = command.split_once(' ') else {
+            return false;
+        };
+        Path::new(executable).is_absolute()
+            && Path::new(executable)
+                .file_name()
+                .is_some_and(|name| name == "nft")
+            && arguments == expected_args
+    };
+    command_matches(starts[0], "-f /etc/nftables/infraternal-host.nft")
+        && pres
+            .first()
+            .is_none_or(|command| command_matches(command, "delete table inet infraternal_host"))
+}
+
+/// Read the hand unit without following a replacement symlink or allocating an unbounded file.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+fn read_firewall_unit(path: &Path, expected: &fs::Metadata, owner: u32) -> io::Result<Vec<u8>> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o022 != 0
+        || (metadata.dev(), metadata.ino()) != (expected.dev(), expected.ino())
+    {
+        return Err(refused(
+            "The host firewall unit changed during takeover. Inspect it before retrying infraternal up.",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_HAND_FIREWALL_UNIT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_HAND_FIREWALL_UNIT_BYTES {
+        return Err(refused(
+            "The host firewall unit is too large for automatic takeover. Inspect it before retrying infraternal up.",
+        ));
+    }
+    Ok(bytes)
+}
+
+impl Install {
+    /// Remove prior unit hard links only after systemd has accepted the replacement service.
+    fn remove_replaced_backups(&mut self) {
+        for replaced in self.replaced.drain(..) {
+            if existing(&replaced.backup)
+                .ok()
+                .flatten()
+                .is_some_and(|metadata| (metadata.dev(), metadata.ino()) == replaced.identity)
+                && let Err(error) = fs::remove_file(&replaced.backup)
+            {
+                eprintln!(
+                    "infraternal: could not remove the retained host firewall unit backup: {error}"
+                );
+            }
+        }
     }
 }
 
@@ -554,11 +824,31 @@ impl Install {
                     .flatten()
                     .is_some_and(|metadata| entry.identity == (metadata.dev(), metadata.ino()))
         });
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        let own_firewall_unit = self.created.iter().any(|entry| {
+            entry.path
+                == self
+                    .root
+                    .join("etc/systemd/system/infraternal-firewall.service")
+                && existing(&entry.path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|metadata| entry.identity == (metadata.dev(), metadata.ino()))
+        });
         // Stop affects runtime state only. Disable would also delete administrator-owned
         // unit aliases; the inode journal already owns our sole enablement link.
         if self.registered && own_unit {
             run_systemctl(&self.systemctl, &["stop", SERVICE_NAME], None)?;
         }
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        if self.registered
+            && own_firewall_unit
+            && let Err(error) =
+                run_systemctl(&self.systemctl, &["stop", HOST_FIREWALL_SERVICE], None)
+        {
+            eprintln!("Could not stop the host firewall during rollback: {error}");
+        }
+        self.restore_replaced_units()?;
         for created in self.created.iter().rev() {
             let metadata = match fs::symlink_metadata(&created.path) {
                 Ok(metadata) => metadata,
@@ -585,12 +875,74 @@ impl Install {
         if self.registered {
             let _ = run_systemctl(&self.systemctl, &["daemon-reload"], None);
         }
+        if self.registered
+            && !self.replaced.is_empty()
+            && let Err(error) =
+                run_systemctl(&self.systemctl, &["restart", HOST_FIREWALL_SERVICE], None)
+        {
+            eprintln!("Could not restore the prior host firewall service: {error}");
+        }
         if let Some(error) = failure {
             return Err(error);
         }
         self.journal.clear()?;
         self.created.clear();
+        self.replaced.clear();
         self.registered = false;
+        Ok(())
+    }
+
+    /// Restore hard-linked hand units only when the destination is still ours or already original.
+    fn restore_replaced_units(&mut self) -> io::Result<()> {
+        for replaced in self.replaced.iter().rev() {
+            let current = existing(&replaced.path)?;
+            if current
+                .as_ref()
+                .is_some_and(|metadata| (metadata.dev(), metadata.ino()) == replaced.identity)
+            {
+                if existing(&replaced.backup)?.is_some() {
+                    let backup = fs::symlink_metadata(&replaced.backup)?;
+                    if (backup.dev(), backup.ino()) != replaced.identity {
+                        return Err(refused(
+                            "The saved host firewall unit changed during rollback. Keep the install journal and inspect it as root.",
+                        ));
+                    }
+                    fs::remove_file(&replaced.backup)?;
+                }
+                continue;
+            }
+            if let Some(metadata) = current {
+                let product_inode = self.created.iter().any(|entry| {
+                    entry.path == replaced.path
+                        && entry.identity == (metadata.dev(), metadata.ino())
+                });
+                if !product_inode {
+                    return Err(refused(
+                        "The host firewall unit changed during rollback. Keep the install journal and inspect it as root.",
+                    ));
+                }
+                fs::remove_file(&replaced.path)?;
+            }
+            let backup = fs::symlink_metadata(&replaced.backup).map_err(|_| {
+                refused(
+                    "The saved host firewall unit is missing during rollback. Keep the install journal and inspect it as root.",
+                )
+            })?;
+            if (backup.dev(), backup.ino()) != replaced.identity {
+                return Err(refused(
+                    "The saved host firewall unit changed during rollback. Keep the install journal and inspect it as root.",
+                ));
+            }
+            fs::hard_link(&replaced.backup, &replaced.path)?;
+            fs::remove_file(&replaced.backup)?;
+            fs::File::open(
+                replaced
+                    .path
+                    .parent()
+                    .ok_or_else(|| io::Error::other("missing host firewall unit parent"))?,
+            )?
+            .sync_all()?;
+        }
         Ok(())
     }
 }
@@ -697,6 +1049,47 @@ mod tests {
             super::inspect::command(b"harmless\0--json\0server\0"),
             Some(b"server".as_slice())
         );
+    }
+
+    /// Keep a hand-loaded infraternal firewall unit recoverable if the agent install rolls back.
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn agent_firewall_takeover_persists_policy_and_restores_hand_unit_on_rollback() {
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let owner = nix::unistd::geteuid().as_raw();
+        let unit_path = fixture
+            .0
+            .join("etc/systemd/system/infraternal-firewall.service");
+        fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+        let hand_unit = b"[Service]\nExecStart=/nix/store/test-nftables/bin/nft -f /etc/nftables/infraternal-host.nft\n";
+        fs::write(&unit_path, hand_unit).unwrap();
+
+        let policy = Policy {
+            admin_rules: vec!["wt0,10.69.69.0/24,tcp,22".parse().expect("valid SSH rule")],
+            ..Policy::default()
+        };
+        let mut install = Install::begin(&fixture.0, owner, Path::new("/bin/false"))
+            .unwrap()
+            .with_host_firewall_policy(policy.clone())
+            .unwrap();
+        install.install_host_firewall().unwrap();
+
+        let policy_path = fixture
+            .0
+            .join("var/lib/infraternal/host-firewall-agent.json");
+        let saved = fs::read(&policy_path).unwrap();
+        let saved_policy: Policy =
+            serde_json::from_slice(&saved).expect("saved agent policy deserializes");
+        assert_eq!(saved_policy, policy);
+        assert_eq!(fs::metadata(&policy_path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::read(&unit_path).unwrap(),
+            super::super::host_firewall_systemd_unit().as_bytes()
+        );
+
+        drop(install);
+        assert_eq!(fs::read(&unit_path).unwrap(), hand_unit);
+        assert!(!policy_path.exists());
     }
 }
 

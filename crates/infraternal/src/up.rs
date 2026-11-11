@@ -29,6 +29,11 @@ use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
+#[cfg(all(
+    any(feature = "plugin-mesh", feature = "plugin-server"),
+    target_os = "linux"
+))]
+use infraternal_plugin_mesh::host_firewall::{self, AllowRule, Policy};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -36,7 +41,14 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_INVITATION_BYTES: usize = 8 * 1024;
 const MAX_KEY_BYTES: usize = 4 * 1024;
 const MAX_HANDOFF_BYTES: usize = 16 * 1024;
+/// Keep the private handoff bounded while supporting a small administrator list.
+const MAX_HOST_FIREWALL_RULES: usize = 32;
+/// Reject oversized rule strings before they reach the root installer.
+const MAX_HOST_FIREWALL_RULE_BYTES: usize = 256;
 const SERVICE_NAME: &str = "infraternal-agent.service";
+/// The shared boot unit that restores product-owned input rules before networking.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+const HOST_FIREWALL_SERVICE: &str = "infraternal-firewall.service";
 const SERVICE_BINARY: &str = "/var/lib/infraternal/bin/infraternal";
 const SERVICE_DATA: &str = "/var/lib/infraternal/agent";
 const PATH_BINARY: &str = "/usr/local/bin/infraternal";
@@ -76,15 +88,22 @@ enum Failure {
     NoSystemd,
     /// Local installation conflicts are distinct from a remote approval refusal.
     InstallConflict,
+    /// A system firewall needs a valid administrator TCP/22 rule.
+    HostFirewall,
 }
 
 impl Failure {
     /// Classify a failure for the shared command result envelope.
     const fn state(self) -> CommandState {
         match self {
-            Self::InvalidServer | Self::Permission | Self::Expired | Self::Unsupported => {
-                CommandState::Refused
-            }
+            Self::InvalidServer
+            | Self::Permission
+            | Self::Expired
+            | Self::Unsupported
+            | Self::HostFirewall
+            | Self::SudoDenied
+            | Self::UntrustedTool
+            | Self::InstallConflict => CommandState::Refused,
             Self::Unreachable => CommandState::Unknown,
             Self::Partial
             | Self::Throttled
@@ -93,7 +112,6 @@ impl Failure {
             | Self::LocalState
             | Self::SudoUnavailable
             | Self::NoSystemd => CommandState::Failed,
-            Self::SudoDenied | Self::UntrustedTool | Self::InstallConflict => CommandState::Refused,
         }
     }
 
@@ -105,7 +123,8 @@ impl Failure {
             | Self::Expired
             | Self::SudoDenied
             | Self::UntrustedTool
-            | Self::InstallConflict => Exit::NotAllowed,
+            | Self::InstallConflict
+            | Self::HostFirewall => Exit::NotAllowed,
             Self::Unsupported | Self::SudoUnavailable | Self::NoSystemd => Exit::NotFound,
             Self::Unreachable => Exit::Unreachable,
             Self::Partial => Exit::Partial,
@@ -144,6 +163,9 @@ impl Failure {
             Self::InstallConflict => {
                 "The local installation was refused. Resolve the conflict reported above before retrying infraternal up."
             }
+            Self::HostFirewall => {
+                "The host firewall needs a valid TCP/22 administrator path. Add --host-firewall-allow or run infraternal up over SSH."
+            }
             Self::NoSystemd => {
                 "infraternal up installs a systemd system service, and systemctl is not installed in a system directory."
             }
@@ -154,6 +176,7 @@ impl Failure {
         self.exit().code()
     }
 
+    /// Restore the matching failure kind from the root helper's bounded exit code.
     const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Failed),
@@ -162,6 +185,7 @@ impl Failure {
             4 => Some(Self::Expired),
             5 => Some(Self::Unreachable),
             6 => Some(Self::Partial),
+            7 => Some(Self::HostFirewall),
             _ => None,
         }
     }
@@ -202,10 +226,13 @@ struct Approval {
     lifetime: Duration,
 }
 
+/// Carry the approved invitation, private key and host rules to the root installer over stdin.
 struct Handoff {
     invitation: Zeroizing<Vec<u8>>,
     key_pkcs8: Zeroizing<Vec<u8>>,
     key_digest: [u8; 32],
+    /// Administrator allow rules persisted for the next boot.
+    admin_rules: Vec<String>,
 }
 
 struct ApprovedInvitation(JoinInvitation);
@@ -249,12 +276,36 @@ fn take_join_key(data: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
 }
 
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
-pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
+pub(crate) fn run(
+    server_input: &str,
+    host_firewall_allow: &[String],
+    json_output: bool,
+) -> ExitCode {
     let server = match server_url(server_input) {
         Ok(server) => server,
         Err(failure) => return fail(json_output, failure),
     };
     let origin = server.origin().ascii_serialization();
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    let admin_rules = {
+        let ssh_connection = match env::var("SSH_CONNECTION") {
+            Ok(value) => Some(value),
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(_)) => {
+                eprintln!("infraternal up: the active SSH path could not be read safely");
+                return fail(json_output, Failure::HostFirewall);
+            }
+        };
+        match agent_host_firewall_rules(host_firewall_allow, ssh_connection.as_deref()) {
+            Ok(rules) => rules,
+            Err(error) => {
+                eprintln!("infraternal up host firewall: {error}");
+                return fail(json_output, Failure::HostFirewall);
+            }
+        }
+    };
+    #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
+    let admin_rules = Vec::new();
     // The code and link are a live approval capability for ten minutes. Show
     // them only to a person at a terminal, never into a pipe, file or CI log,
     // and do not wait out the lifetime when nobody can see them (#263).
@@ -321,7 +372,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
             Ok(invitation) => invitation,
             Err(failure) => return fail(json_output, failure),
         };
-    let payload = match encode_handoff(&invitation.0, &key_pkcs8, &key_digest) {
+    let payload = match encode_handoff(&invitation.0, &key_pkcs8, &key_digest, &admin_rules) {
         Ok(payload) => payload,
         Err(failure) => return fail(json_output, failure),
     };
@@ -329,11 +380,27 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
     if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
         return fail(json_output, failure);
     }
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    let host_firewall_service = Some(HOST_FIREWALL_SERVICE);
+    #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
+    let host_firewall_service: Option<&str> = None;
+    let success_message = if host_firewall_service.is_some() {
+        "This machine joined; its system service and host input firewall are active."
+    } else {
+        "This machine joined the server and its system service is active."
+    };
+    let success_body = if host_firewall_service.is_some() {
+        format!(
+            "Machine joined as {hostname}.\nService: active\nHost input firewall: active\nCommand: {PATH_BINARY}"
+        )
+    } else {
+        format!("Machine joined as {hostname}.\nService: active\nCommand: {PATH_BINARY}")
+    };
     emit(
         CommandResult::new(
             "up",
             CommandState::Ready,
-            "This machine joined the server and its system service is active.",
+            success_message,
             json!({
                 "server": origin,
                 "hostname": hostname,
@@ -343,14 +410,76 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
                 "service": SERVICE_NAME,
                 "status": "active",
                 "path": PATH_BINARY,
+                "host_firewall_service": host_firewall_service,
+                "host_firewall_status": if host_firewall_service.is_some() { "active" } else { "unavailable" },
             }),
         )
-        .with_body(format!(
-            "Machine joined as {hostname}.\nService: active\nCommand: {PATH_BINARY}"
-        )),
+        .with_body(success_body),
         json_output,
         Exit::Ok,
     )
+}
+
+/// Parse the small administrator-rule list used by a fresh system installation.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+fn parse_agent_host_firewall_rules(values: &[String]) -> Result<Vec<AllowRule>, String> {
+    if values.len() > MAX_HOST_FIREWALL_RULES
+        || values
+            .iter()
+            .any(|value| value.len() > MAX_HOST_FIREWALL_RULE_BYTES)
+    {
+        return Err("host firewall administrator rule list is too large".to_owned());
+    }
+    values
+        .iter()
+        .map(|value| {
+            value
+                .parse::<AllowRule>()
+                .map_err(|_| "host firewall administrator rule is invalid".to_owned())
+        })
+        .collect()
+}
+
+/// Build a validated default-drop host policy for the new system service.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+fn agent_host_firewall_policy(values: &[String]) -> Result<Policy, String> {
+    let admin_rules = parse_agent_host_firewall_rules(values)?;
+    let policy = Policy {
+        admin_rules,
+        ..Policy::default()
+    };
+    host_firewall::validate(&policy).map_err(|error| error.to_string())?;
+    Ok(policy)
+}
+
+/// Keep the active SSH path and validate additional administrator rules before approval.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+fn agent_host_firewall_rules(
+    values: &[String],
+    ssh_connection: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut admin_rules = parse_agent_host_firewall_rules(values)?;
+    if let Some(connection) = ssh_connection {
+        let policy = Policy {
+            admin_rules: admin_rules.clone(),
+            ..Policy::default()
+        };
+        if host_firewall::validate_ssh_connection(&policy, Some(connection)).is_err() {
+            admin_rules.push(
+                host_firewall::admin_rule_for_ssh_connection(connection)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    if admin_rules.len() > MAX_HOST_FIREWALL_RULES {
+        return Err("host firewall administrator rule list is too large".to_owned());
+    }
+    let policy = Policy {
+        admin_rules,
+        ..Policy::default()
+    };
+    host_firewall::validate(&policy).map_err(|error| error.to_string())?;
+    Ok(policy.admin_rules.iter().map(ToString::to_string).collect())
 }
 
 /// Run only the privileged half requested by `sudo`; all credentials arrive on stdin.
@@ -372,6 +501,14 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     let server = server_url(server_input)?;
     let origin = server.origin().ascii_serialization();
     let handoff = read_handoff(&mut io::stdin().lock())?;
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    let agent_policy = match agent_host_firewall_policy(&handoff.admin_rules) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("infraternal up host firewall: {error}");
+            return Err(Failure::HostFirewall);
+        }
+    };
     // Resolved again as root: the caller's check proves nothing to this process.
     // After the handoff is read (the caller's write must not fail on a closed
     // pipe) and before enrollment, so a refusal leaves no half-joined machine.
@@ -394,6 +531,13 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
                 Failure::LocalState
             })?
             .interrupt_on(interrupted);
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        let install = install
+            .with_host_firewall_policy(agent_policy)
+            .map_err(|error| {
+                eprintln!("{error}");
+                Failure::HostFirewall
+            })?;
         println!("UP_STAGE=enrollment");
         crate::remote::join_with_key(
             &join_url,
@@ -718,39 +862,46 @@ fn encode_handoff(
     invitation: &JoinInvitation,
     key_pkcs8: &[u8],
     key_digest: &[u8; 32],
+    admin_rules: &[String],
 ) -> Result<Zeroizing<Vec<u8>>, Failure> {
     let invitation = Zeroizing::new(serde_json::to_vec(invitation).map_err(|_| Failure::Failed)?);
+    let admin_rules = Zeroizing::new(serde_json::to_vec(admin_rules).map_err(|_| Failure::Failed)?);
     if invitation.is_empty()
         || invitation.len() > MAX_INVITATION_BYTES
         || key_pkcs8.is_empty()
         || key_pkcs8.len() > MAX_KEY_BYTES
+        || admin_rules.len() > MAX_HOST_FIREWALL_RULES * (MAX_HOST_FIREWALL_RULE_BYTES + 3)
     {
         return Err(Failure::Failed);
     }
     let invitation_len = u32::try_from(invitation.len()).map_err(|_| Failure::Failed)?;
     let key_len = u32::try_from(key_pkcs8.len()).map_err(|_| Failure::Failed)?;
+    let admin_rules_len = u32::try_from(admin_rules.len()).map_err(|_| Failure::Failed)?;
     let mut payload = Zeroizing::new(Vec::with_capacity(
-        12 + invitation.len() + key_pkcs8.len() + key_digest.len(),
+        16 + invitation.len() + key_pkcs8.len() + key_digest.len() + admin_rules.len(),
     ));
-    payload.extend_from_slice(b"UPJ1");
+    payload.extend_from_slice(b"UPJ2");
     payload.extend_from_slice(&invitation_len.to_be_bytes());
     payload.extend_from_slice(&invitation);
     payload.extend_from_slice(&key_len.to_be_bytes());
     payload.extend_from_slice(key_pkcs8);
     payload.extend_from_slice(key_digest);
+    payload.extend_from_slice(&admin_rules_len.to_be_bytes());
+    payload.extend_from_slice(&admin_rules);
     if payload.len() > MAX_HANDOFF_BYTES {
         return Err(Failure::Failed);
     }
     Ok(payload)
 }
 
+/// Read a bounded root-helper payload and reject truncated or trailing fields.
 fn read_handoff(reader: &mut impl Read) -> Result<Handoff, Failure> {
     let mut bytes = Zeroizing::new(Vec::new());
     reader
         .take((MAX_HANDOFF_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| Failure::Permission)?;
-    if bytes.len() > MAX_HANDOFF_BYTES || bytes.get(..4) != Some(&b"UPJ1"[..]) {
+    if bytes.len() > MAX_HANDOFF_BYTES || bytes.get(..4) != Some(&b"UPJ2"[..]) {
         return Err(Failure::Permission);
     }
     let mut offset = 4;
@@ -765,16 +916,34 @@ fn read_handoff(reader: &mut impl Read) -> Result<Handoff, Failure> {
     }
     let key_pkcs8 = take_bytes(&bytes, &mut offset, key_len)?;
     let digest_end = offset.checked_add(32).ok_or(Failure::Permission)?;
-    if digest_end != bytes.len() {
-        return Err(Failure::Permission);
-    }
-    let key_digest = bytes[offset..digest_end]
+    let key_digest = bytes
+        .get(offset..digest_end)
+        .ok_or(Failure::Permission)?
         .try_into()
         .map_err(|_| Failure::Permission)?;
+    offset = digest_end;
+    let admin_rules_len = take_u32(&bytes, &mut offset)?;
+    if admin_rules_len > MAX_HOST_FIREWALL_RULES * (MAX_HOST_FIREWALL_RULE_BYTES + 3) {
+        return Err(Failure::Permission);
+    }
+    let admin_rules_bytes = take_bytes(&bytes, &mut offset, admin_rules_len)?;
+    if offset != bytes.len() {
+        return Err(Failure::Permission);
+    }
+    let admin_rules: Vec<String> =
+        serde_json::from_slice(&admin_rules_bytes).map_err(|_| Failure::Permission)?;
+    if admin_rules.len() > MAX_HOST_FIREWALL_RULES
+        || admin_rules
+            .iter()
+            .any(|rule| rule.len() > MAX_HOST_FIREWALL_RULE_BYTES)
+    {
+        return Err(Failure::Permission);
+    }
     Ok(Handoff {
         invitation,
         key_pkcs8,
         key_digest,
+        admin_rules,
     })
 }
 
@@ -992,6 +1161,14 @@ fn hash_stream(input: &mut impl Read, mut output: Option<&mut fs::File>) -> io::
 fn systemd_unit() -> String {
     format!(
         "[Unit]\nDescription=Infraternal machine service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStartPre=-+/bin/sh -c \"[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t {SERVICE_BINARY}\"\nExecStart={SERVICE_BINARY} agent run --data {SERVICE_DATA}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+/// Render the agent's root firewall unit so its saved input rules load before network setup.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+fn host_firewall_systemd_unit() -> String {
+    format!(
+        "[Unit]\nDescription=infraternal host input firewall\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target\nWants=network-pre.target\n\n[Service]\nType=oneshot\nExecStart={SERVICE_BINARY} __host-firewall-apply\nRemainAfterExit=yes\n\n[Install]\nWantedBy=network-pre.target\n"
     )
 }
 
@@ -1816,6 +1993,7 @@ mod tests {
     }
 
     #[test]
+    /// Keep enrollment secrets and the host policy together on the private helper input stream.
     fn sudo_handoff_keeps_invitation_and_exact_key_together_on_private_input() {
         let invitation = JoinInvitation {
             host_id: uuid::Uuid::from_u128(1),
@@ -1831,7 +2009,8 @@ mod tests {
         };
         let key = b"pkcs8 private test bytes";
         let digest = [7; 32];
-        let encoded = encode_handoff(&invitation, key, &digest).unwrap();
+        let admin_rules = vec!["wt0,10.69.69.0/24,tcp,22".to_owned()];
+        let encoded = encode_handoff(&invitation, key, &digest, &admin_rules).unwrap();
         let mut cursor = std::io::Cursor::new(&encoded[..]);
         let decoded = read_handoff(&mut cursor).unwrap();
 
@@ -1842,6 +2021,44 @@ mod tests {
         );
         assert_eq!(&*decoded.key_pkcs8, key);
         assert_eq!(decoded.key_digest, digest);
+        assert_eq!(decoded.admin_rules, admin_rules);
+    }
+
+    /// Save the active SSH source together with configured administrator paths for boot.
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn agent_host_policy_keeps_the_live_ssh_source_and_extra_admin_rule() {
+        let rules = super::agent_host_firewall_rules(
+            &["eth0,10.69.0.99,tcp,7011".to_owned()],
+            Some("10.69.69.5 43122 10.69.69.89 22"),
+        )
+        .expect("an active SSH path supplies the required administrator rule");
+
+        assert!(rules.contains(&"eth0,10.69.0.99,tcp,7011".to_owned()));
+        assert!(
+            rules
+                .iter()
+                .any(|rule| { rule.contains("10.69.69.5") && rule.ends_with(",tcp,22") })
+        );
+    }
+
+    /// Require an explicit SSH path when `up` runs outside an SSH session.
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn agent_host_policy_without_ssh_or_tcp_22_rule_is_refused() {
+        assert!(super::agent_host_firewall_rules(&[], None).is_err());
+    }
+
+    /// Apply the agent's saved host input policy before system networking starts.
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn agent_firewall_unit_runs_before_network_pre() {
+        let unit = super::host_firewall_systemd_unit();
+
+        assert!(unit.contains("DefaultDependencies=no"));
+        assert!(unit.contains("Before=network-pre.target"));
+        assert!(unit.contains("WantedBy=network-pre.target"));
+        assert!(unit.contains("__host-firewall-apply"));
     }
 
     /// #401: the root unit `up` installs relabels its binary before every

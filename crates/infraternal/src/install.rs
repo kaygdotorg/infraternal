@@ -10,6 +10,28 @@ use std::{
     process::Command,
 };
 
+#[cfg(target_os = "linux")]
+use infraternal_plugin_mesh::host_firewall::{self, Policy};
+
+#[cfg(target_os = "linux")]
+/// The boot unit whose rules are loaded before network setup.
+const FIREWALL_SERVICE: &str = "infraternal-firewall.service";
+
+#[cfg(target_os = "linux")]
+/// Systemd destination replaced when the product takes over the hand unit.
+const FIREWALL_UNIT_PATH: &str = "/etc/systemd/system/infraternal-firewall.service";
+
+#[cfg(target_os = "linux")]
+/// Files and policy that one system server install publishes together.
+struct FirewallInstall {
+    /// The generated boot-time unit that supersedes the hand-installed service.
+    unit: String,
+    /// The complete structured server policy saved for boot-time application.
+    policy: Policy,
+    /// JSON kept in the dry-run plan for review before installation.
+    policy_json: String,
+}
+
 /// Install failures expose the failed operation without including service arguments or key contents.
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
@@ -25,6 +47,9 @@ pub enum InstallError {
     /// systemd rejected the requested reload or enable operation.
     #[error("systemctl failed")]
     Systemctl,
+    /// A server host-firewall setting is malformed or unsafe to apply.
+    #[error("host firewall configuration is invalid: {0}")]
+    HostFirewall(String),
 }
 
 /// Install the unit and enable it, or print the exact operations in dry-run mode.
@@ -41,8 +66,26 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     let service = format!("{}.service", options.name);
     let reload = format!("systemctl {} daemon-reload", scope_args.join(" "));
     let enable = format!("systemctl {} enable --now {service}", scope_args.join(" "));
+    #[cfg(target_os = "linux")]
+    if options.system && options.name == "infraternal-firewall" {
+        return Err(InstallError::Invalid);
+    }
 
     if options.dry_run {
+        #[cfg(target_os = "linux")]
+        if options.system {
+            let firewall = make_firewall_install(args)?;
+            return Ok(format!(
+                "Would replace the hand-installed {FIREWALL_SERVICE} and take over inet infraternal_host.\nWould write {}:\n{}\nWould write {}:\n{}\nWould write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable {FIREWALL_SERVICE}\n  systemctl restart {FIREWALL_SERVICE}\n  {}\n",
+                host_firewall::SERVER_POLICY_PATH,
+                firewall.policy_json,
+                FIREWALL_UNIT_PATH,
+                firewall.unit,
+                path.display(),
+                unit,
+                enable,
+            ));
+        }
         return Ok(format!(
             "Data folder: {}\n{}Would write {}:\n{}\nWould run:\n  {}\n  {}\n",
             absolute(&args.data)?.display(),
@@ -57,15 +100,26 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
         ));
     }
 
-    match fs::read(&path) {
-        Ok(existing) if existing == unit.as_bytes() => {}
-        Ok(_) if !options.force => return Err(InstallError::ExistingUnit),
-        Ok(_) => write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?;
-        }
-        Err(error) => return Err(InstallError::Io(error)),
+    ensure_server_unit_writable(&path, unit.as_bytes(), options.force)?;
+
+    #[cfg(target_os = "linux")]
+    let firewall = if options.system {
+        Some(make_firewall_install(args)?)
+    } else {
+        None
+    };
+
+    #[cfg(target_os = "linux")]
+    if let Some(firewall) = &firewall {
+        host_firewall::write_policy_file(
+            Path::new(host_firewall::SERVER_POLICY_PATH),
+            &firewall.policy,
+        )
+        .map_err(|error| InstallError::Io(std::io::Error::other(error)))?;
+        write_atomic(Path::new(FIREWALL_UNIT_PATH), firewall.unit.as_bytes())
+            .map_err(InstallError::Io)?;
     }
+    write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?;
     // Create the data folder private before the service first starts, only
     // once the unit is accepted; an existing folder keeps its mode [#516].
     super::install_paths::create_private_dir(&absolute(&args.data)?).map_err(InstallError::Io)?;
@@ -77,6 +131,23 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     if !command.status().map_err(InstallError::Io)?.success() {
         return Err(InstallError::Systemctl);
     }
+    #[cfg(target_os = "linux")]
+    if firewall.is_some() {
+        let mut command = Command::new("systemctl");
+        infraternal_shim::prepare_child(&mut command);
+        command.stdin(std::process::Stdio::null());
+        command.args(["enable", FIREWALL_SERVICE]);
+        if !command.status().map_err(InstallError::Io)?.success() {
+            return Err(InstallError::Systemctl);
+        }
+        let mut command = Command::new("systemctl");
+        infraternal_shim::prepare_child(&mut command);
+        command.stdin(std::process::Stdio::null());
+        command.args(["restart", FIREWALL_SERVICE]);
+        if !command.status().map_err(InstallError::Io)?.success() {
+            return Err(InstallError::Systemctl);
+        }
+    }
     let mut command = Command::new("systemctl");
     infraternal_shim::prepare_child(&mut command);
     command.stdin(std::process::Stdio::null());
@@ -86,7 +157,62 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     if !command.status().map_err(InstallError::Io)?.success() {
         return Err(InstallError::Systemctl);
     }
+    #[cfg(target_os = "linux")]
+    if firewall.is_some() {
+        return Ok(firewall_install_confirmation(&path));
+    }
     Ok(format!("Installed and enabled {}\n", path.display()))
+}
+
+/// Tell operators that the product unit now owns the named host firewall service and table.
+#[cfg(target_os = "linux")]
+fn firewall_install_confirmation(server_unit: &Path) -> String {
+    format!(
+        "Installed and enabled {} and {FIREWALL_SERVICE}; it replaces the hand-installed {FIREWALL_SERVICE} and owns inet infraternal_host.\n",
+        server_unit.display()
+    )
+}
+
+/// Refuse a conflicting server unit before publishing the host policy.
+fn ensure_server_unit_writable(path: &Path, unit: &[u8], force: bool) -> Result<(), InstallError> {
+    match fs::read(path) {
+        Ok(existing) if existing == unit => Ok(()),
+        Ok(_) if force => Ok(()),
+        Ok(_) => Err(InstallError::ExistingUnit),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(InstallError::Io(error)),
+    }
+}
+
+/// Build and validate the system firewall unit and saved policy for a server install.
+#[cfg(target_os = "linux")]
+fn make_firewall_install(args: &ServerArgs) -> Result<FirewallInstall, InstallError> {
+    let policy = super::host_firewall_policy(args).map_err(InstallError::HostFirewall)?;
+    let ssh_connection = match env::var("SSH_CONNECTION") {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => return Err(InstallError::Invalid),
+    };
+    host_firewall::validate_ssh_connection(&policy, ssh_connection.as_deref())
+        .map_err(|error| InstallError::HostFirewall(error.to_string()))?;
+    let policy_json = serde_json::to_string_pretty(&policy)
+        .map_err(|error| InstallError::HostFirewall(error.to_string()))?;
+    let unit = render_firewall_unit()?;
+    Ok(FirewallInstall {
+        unit,
+        policy,
+        policy_json,
+    })
+}
+
+/// Render the boot unit that applies the saved infraternal host policy before networking.
+#[cfg(target_os = "linux")]
+fn render_firewall_unit() -> Result<String, InstallError> {
+    let binary = env::current_exe().map_err(InstallError::Io)?;
+    let executable = quote_systemd(binary.as_os_str())?;
+    Ok(format!(
+        "[Unit]\nDescription=infraternal host input firewall\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target\nWants=network-pre.target\n\n[Service]\nType=oneshot\nExecStart={executable} __host-firewall-apply\nRemainAfterExit=yes\n\n[Install]\nWantedBy=network-pre.target\n"
+    ))
 }
 
 fn validate_name(name: &str) -> Result<(), InstallError> {
@@ -115,6 +241,7 @@ fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
     }
 }
 
+/// Render the server process unit and preserve all typed runtime options.
 fn render_unit(
     args: &ServerArgs,
     name: &str,
@@ -159,6 +286,26 @@ fn render_unit(
             command.push(OsString::from("--trusted-proxy"));
             command.push(OsString::from(proxy.to_string()));
         }
+    }
+    if let Some(interface) = &args.host_firewall_listen_interface {
+        command.push(OsString::from("--host-firewall-listen-interface"));
+        command.push(OsString::from(interface));
+    }
+    if let Some(interface) = &args.host_firewall_remote_interface {
+        command.push(OsString::from("--host-firewall-remote-interface"));
+        command.push(OsString::from(interface));
+    }
+    for source in &args.host_firewall_remote_sources {
+        command.push(OsString::from("--host-firewall-remote-source"));
+        command.push(OsString::from(source));
+    }
+    for interface in &args.host_firewall_accept_interfaces {
+        command.push(OsString::from("--host-firewall-accept-interface"));
+        command.push(OsString::from(interface));
+    }
+    for rule in &args.host_firewall_allow {
+        command.push(OsString::from("--host-firewall-allow"));
+        command.push(OsString::from(rule));
     }
     let command = command
         .into_iter()
@@ -251,6 +398,7 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
 
+    /// A user-scoped service keeps its process and command-line configuration.
     #[test]
     fn dry_run_prints_a_process_surviving_user_unit() {
         let args = ServerArgs {
@@ -263,6 +411,11 @@ mod tests {
             tls_key: Some(PathBuf::from("server.key")),
             behind_proxy: false,
             trusted_proxies: Vec::new(),
+            host_firewall_listen_interface: None,
+            host_firewall_remote_interface: None,
+            host_firewall_remote_sources: Vec::new(),
+            host_firewall_accept_interfaces: Vec::new(),
+            host_firewall_allow: Vec::new(),
         };
         let options = InstallArgs {
             system: false,
@@ -281,6 +434,7 @@ mod tests {
         assert!(!output.contains("INFRATERNAL_SERVER_SERVICE_SCOPE"));
     }
 
+    /// A system server plan includes firewall takeover and boot ordering.
     #[test]
     fn system_units_mark_the_scope_used_by_first_run_status() {
         let args = ServerArgs {
@@ -293,6 +447,11 @@ mod tests {
             tls_key: None,
             behind_proxy: false,
             trusted_proxies: Vec::new(),
+            host_firewall_listen_interface: None,
+            host_firewall_remote_interface: None,
+            host_firewall_remote_sources: Vec::new(),
+            host_firewall_accept_interfaces: Vec::new(),
+            host_firewall_allow: vec!["*,*,tcp,22".to_owned()],
         };
         let options = InstallArgs {
             system: true,
@@ -304,6 +463,12 @@ mod tests {
 
         let output = install(&args, &options).expect("dry-run output");
         assert!(output.contains("Environment=INFRATERNAL_SERVER_SERVICE_SCOPE=system"));
+        assert!(output.contains("/etc/systemd/system/infraternal-firewall.service"));
+        assert!(output.contains("Before=network-pre.target"));
+        assert!(output.contains("__host-firewall-apply"));
+        assert!(output.contains("host-firewall-server.json"));
+        assert!(output.contains("Would replace the hand-installed infraternal-firewall.service"));
+        assert!(output.contains("systemctl restart infraternal-firewall.service"));
     }
 
     /// The dry run shows the folders the unit will use, as absolute paths.

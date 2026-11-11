@@ -7,9 +7,9 @@ use crate::{
 use std::{
     fmt::Write as _,
     io::{self, Write},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-const NFT: &str = "/usr/sbin/nft";
 const TABLE: &str = "infraternal_mesh";
 // Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
 // middleware then checks the source against that route's original backend-port grant.
@@ -72,9 +72,10 @@ impl Firewall {
     pub fn backend(&self) -> Option<Backend> {
         self.backend
     }
+    /// Select nftables when a safe nft executable exists, otherwise use the fallback.
     fn select(&mut self) {
         self.backend.get_or_insert_with(|| {
-            if std::path::Path::new(NFT).exists() {
+            if nft_path().is_ok() {
                 Backend::Nft
             } else {
                 Backend::NfTables
@@ -110,13 +111,8 @@ impl Firewall {
                 .into_iter()
                 .all(crate::iptables::Ownership::complete);
         } else {
-            let tables = Command::new(NFT)
-                .args(["-j", "list", "tables"])
-                .stderr(Stdio::null())
-                .output()?;
-            if !tables.status.success() {
-                return Err(io::ErrorKind::PermissionDenied.into());
-            }
+            let nft = nft_path()?;
+            let tables = nft_output(&nft, &["-j", "list", "tables"])?;
             let tables: serde_json::Value =
                 serde_json::from_slice(&tables.stdout).map_err(io::Error::other)?;
             let exists = tables["nftables"].as_array().is_some_and(|tables| {
@@ -126,27 +122,9 @@ impl Firewall {
             });
             self.installed = false;
             if exists {
-                let output = Command::new(NFT)
-                    .args(["-j", "list", "table", "inet", TABLE])
-                    .stderr(Stdio::null())
-                    .output()?;
-                if !output.status.success() {
-                    return Err(io::ErrorKind::PermissionDenied.into());
-                }
-                let state: serde_json::Value =
-                    serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
-                // Only the table's own complete comment establishes ownership.
-                // A rule/set comment or an operator's longer comment cannot do so.
-                if !state["nftables"].as_array().is_some_and(|items| {
-                    items.iter().any(|item| {
-                        let table = &item["table"];
-                        table["family"] == "inet"
-                            && table["name"] == TABLE
-                            && table["comment"] == "infraternal.mesh.v1"
-                    })
-                }) {
-                    return Err(io::ErrorKind::AlreadyExists.into());
-                }
+                // D386 defines the infraternal_* namespace as product-owned.
+                // The stable table name is sufficient for takeover; an old
+                // marker is not a prerequisite for updating a hand-built table.
                 self.installed = true;
             }
         }
@@ -158,7 +136,9 @@ impl Firewall {
     /// remain restrictive on a cleanup error; the caller retries completion.
     pub fn apply(&mut self, config: &Config) -> io::Result<()> {
         self.install_pending(config)?;
-        self.complete(config)
+        self.complete(config)?;
+        sync_host_mesh_policy(true)?;
+        Ok(())
     }
     /// Replace the active proxy route grants after Traefik confirms its dynamic snapshot.
     ///
@@ -225,6 +205,7 @@ impl Firewall {
         let proxy_ingress = self.proxy_ingress.clone();
         self.install(config, aliases, true, connections, &proxy_ingress)
     }
+    /// Apply one complete mesh policy to the selected kernel firewall backend.
     fn install(
         &mut self,
         config: &Config,
@@ -286,8 +267,9 @@ impl Firewall {
                 return Err(error);
             }
         } else {
+            let nft = nft_path()?;
             run(
-                NFT,
+                &nft,
                 &["-f", "-"],
                 &render_with_aliases(
                     config,
@@ -327,6 +309,9 @@ impl Firewall {
     /// Returns a failed kernel deletion without claiming the component is off.
     pub fn remove(&mut self) -> io::Result<()> {
         if self.installed {
+            // Close host ingress before retiring the mesh grant filter. If the
+            // host transaction fails, leave the mesh filter installed and retry.
+            sync_host_mesh_policy(false)?;
             if self.is_fallback() {
                 crate::iptables::remove()?;
             } else {
@@ -334,7 +319,8 @@ impl Firewall {
                 // idempotent cleanup; privilege or foreign-table failures stay visible.
                 self.adopt()?;
                 if self.installed {
-                    run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n"))?;
+                    let nft = nft_path()?;
+                    run(&nft, &["-f", "-"], &format!("delete table inet {TABLE}\n"))?;
                 }
             }
             self.installed = false;
@@ -348,12 +334,44 @@ impl Firewall {
         Ok(())
     }
 }
-fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
+
+/// Keep the host input table aligned with mesh lifecycle while mesh grants stay in userspace.
+fn sync_host_mesh_policy(enabled: bool) -> io::Result<()> {
+    match crate::host_firewall::set_mesh_enabled(enabled) {
+        Ok(Some(report)) => {
+            tracing::info!(report = %report, "host firewall mesh policy updated");
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "host firewall mesh policy update failed: {error}"
+        ))),
+    }
+}
+/// Resolve nft from the product's fixed system and Nix paths without consulting PATH.
+fn nft_path() -> io::Result<PathBuf> {
+    crate::host_firewall::discover_nft(None).map_err(io::Error::other)
+}
+
+/// Run a read-only nft query and retain stderr when the tool refuses it.
+fn nft_output(program: &Path, args: &[&str]) -> io::Result<std::process::Output> {
+    let output = Command::new(program).args(args).output()?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+}
+
+/// Apply one nft batch without a shell and report useful diagnostics on failure.
+fn run(program: &Path, args: &[&str], script: &str) -> io::Result<()> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
     // Policy contains public typed addresses/ports only. No shell or secret in argv/stdout.
     let write = child
@@ -361,10 +379,12 @@ fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
         .take()
         .ok_or(io::ErrorKind::BrokenPipe)?
         .write_all(script.as_bytes());
-    let status = child.wait()?;
+    let output = child.wait_with_output()?;
     write?;
-    if !status.success() {
-        return Err(io::ErrorKind::PermissionDenied.into());
+    if !output.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
     }
     Ok(())
 }
@@ -882,16 +902,19 @@ mod tests {
         assert!(!open.contains(gate));
     }
 
+    /// Measure replacement cost while checking that a rejected nft batch is atomic.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nft_ownership_atomicity_and_scaled_apply() {
-        run(NFT, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("unrelated fixture");
-        let mut unrelated = Firewall::default();
-        assert_eq!(
-            unrelated.adopt().expect_err("unowned table").kind(),
-            io::ErrorKind::AlreadyExists
-        );
-        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("fixture cleanup");
+        let nft = super::nft_path().expect("fixed root-owned nft path");
+        run(&nft, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("unrelated fixture");
+        let mut named_table = Firewall::default();
+        named_table
+            .adopt()
+            .expect("prefixed table is product-owned");
+        assert!(named_table.installed());
+        named_table.remove().expect("takeover fixture cleanup");
+        run(&nft, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("fixture cleanup");
         let mut filter = Firewall::default();
         filter.adopt().expect("empty namespace");
         let mut config = config();
@@ -899,7 +922,7 @@ mod tests {
         filter.apply(&config).expect("scaled install");
         let initial = started.elapsed().as_micros();
         let broken = format!("delete table inet {TABLE}\ninvalid syntax\n");
-        assert!(run(NFT, &["-f", "-"], &broken).is_err());
+        assert!(run(&nft, &["-f", "-"], &broken).is_err());
         let mut recovered = Firewall::default();
         recovered
             .adopt()
@@ -920,25 +943,29 @@ mod tests {
         absent.adopt().expect("clean namespace");
         assert!(!absent.installed);
     }
+    /// Cleanup succeeds when the product-owned mesh table is already absent.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn already_removed_owned_table_does_not_block_component_cleanup() {
+        let nft = super::nft_path().expect("fixed root-owned nft path");
         let mut filter = Firewall::default();
         filter.adopt().expect("empty namespace");
         filter.apply(&config()).expect("install");
-        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("external removal");
+        run(&nft, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("external removal");
         filter.remove().expect("already absent owned table");
         assert!(!filter.installed);
     }
+    /// First adoption replaces an unmarked product-owned mesh table safely.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn initial_apply_without_adoption_refuses_a_foreign_table() {
-        run(NFT, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("foreign fixture");
+    fn initial_apply_takes_over_an_unmarked_infraternal_table() {
+        let nft = super::nft_path().expect("fixed root-owned nft path");
+        run(&nft, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("legacy fixture");
         let mut filter = Firewall::default();
-        assert_eq!(
-            filter.apply(&config()).expect_err("foreign table").kind(),
-            io::ErrorKind::AlreadyExists
-        );
-        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("fixture cleanup");
+        filter
+            .apply(&config())
+            .expect("product takes over its named table");
+        assert!(filter.installed());
+        filter.remove().expect("product table cleanup");
     }
 }
