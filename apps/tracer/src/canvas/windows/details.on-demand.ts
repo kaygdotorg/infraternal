@@ -67,7 +67,7 @@ export function openDetailsPopover(
     title.textContent = facts.title;
     // While the facts are on their way the subtitle (who and where) may not be known yet; an invisible character keeps its line, so
     // the header does not grow by that line when the facts land (#500, J528).
-    subtitle.textContent = facts.subtitle || (facts.loading ? "​" : "");
+    subtitle.textContent = facts.subtitle || (facts.loading ? "\u200b" : "");
     if (facts.os) {
       logo.innerHTML = hostIconMarkup(facts.os, "ui-host-mark");
       logo.hidden = false;
