@@ -51,6 +51,8 @@ export function createLiveDetails(options: {
       const gone = target.kind === "host" && !facts && offline.has(cacheKey);
       return detailsFacts({
         extended: readExtendedInfo(),
+        // A readable host whose facts have not come back yet (and is not known to be offline) holds its rows' places.
+        ...(target.kind !== "none" && !facts && !gone ? { loading: true } : {}),
         host: {
           name: rec.model.host,
           // The server's login only describes the server's own windows; an added host names its own.

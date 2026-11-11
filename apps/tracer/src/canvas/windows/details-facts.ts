@@ -22,9 +22,16 @@ export interface DetailsInput {
   connection: { state: "connected" | "connecting" | "offline"; delayMs?: number; encrypted?: boolean };
   /** Extended machine info (Settings): adds the technical facts (init, virtualization, shell, locale, how it is reached). */
   extended?: boolean;
+  /**
+   * The facts are being read and have not arrived yet. Every fact row the machine will fill is then drawn at once with "Reading…",
+   * so the panel opens at the height it will keep when the facts land (#500, J528) instead of growing under the person's eyes.
+   */
+  loading?: boolean;
   session?: { name?: string; lastCommand?: string; size?: string; sizedBy?: string; lastUsed?: string; started?: string };
 }
 
+/** The value of a fact row whose machine reading is still on its way. */
+const READING = "Reading…";
 const STATE_TEXT = { connected: "Connected", connecting: "Connecting…", offline: "Offline. This machine can't be reached right now." } as const;
 
 function compactBytes(bytes: number): string {
@@ -87,7 +94,7 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
     row("Access", false, "Shell", facts?.shell ?? ""),
     row("Access", false, "Locale", facts?.locale ?? ""),
   ];
-  const hostRows = allHostRows.filter((r) => r.core || input.extended).map(({ key, value, group }) => ({ key, value, group }));
+  const hostRows = allHostRows.filter((r) => r.core || input.extended).map(({ key, value, group }) => ({ key, value: value === "" && input.loading ? READING : value, group }));
   const section = (id: string, label: string, icon: string, rows: DetailsFacts["sections"][number]["rows"]) => ({ id, label, icon, rows });
   // D385: two tabs. Everything about how this machine is reached lives in the Connection tab: the link's state and delay,
   // where the server reaches it and how (moved from the Host tab's Access group), and the terminal session's own facts
@@ -95,6 +102,7 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
   const link = (key: string, value: string, hint?: string) => ({ key, value, group: "Link", ...(hint ? { hint } : {}) });
   const own = (key: string, value: string) => ({ key, value, group: "Session" });
   return {
+    ...(input.loading ? { loading: true } : {}),
     ...(os ? { os } : {}),
     title: osName || host.name,
     subtitle: osName ? `${host.user ? `${host.user}@` : ""}${host.name}` : host.user ? `${host.user}@${host.name}` : "",

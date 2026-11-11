@@ -23,6 +23,8 @@ export interface DetailsFacts {
   /** The small line: who and where ("kayg@build-01 · x86_64"). */
   subtitle: string;
   sections: DetailsSection[];
+  /** The machine's facts are still being read: the rows that will fill hold their place so the panel keeps one height (details-facts.ts). */
+  loading?: boolean;
 }
 
 /** A bounded snapshot returned by the host.facts.read plugin action. */
