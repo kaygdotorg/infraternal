@@ -27,10 +27,15 @@ interface Sample { firstFrameMs: number; fetched: string[]; longTasks: number; }
 /** What the page-side recorder collects between the click and the first visible frame. */
 interface Recording { t0: number; frames: Array<{ ts: number; has: boolean; opacity: number }>; resources: Array<{ name: string; start: number; end: number }>; longTasks: number[]; }
 
+/** Desktop and phone viewport sizes measured independently. */
 const SIZES = [{ name: "1440x900", width: 1440, height: 900 }, { name: "393x852", width: 393, height: 852 }] as const;
+/** Number of first-frame observations per viewport and cache state. */
 const SAMPLES = Number(process.env.TRACER_ADDHOST_SAMPLES ?? "5");
+/** Whether this run records observations without enforcing its budget. */
 const reportOnly = process.env.TRACER_ADDHOST_REPORT_ONLY === "1";
+/** Loopback backend port used to separate direct and relayed observations. */
 const backendPort = Number(process.env.TRACER_BACKEND_PORT ?? String(Number(process.env.TRACER_TEST_PORT ?? "4621") + 1));
+/** Direct and relayed addresses for the same test server. */
 const ORIGINS = { direct: `http://localhost:${backendPort}`, proxied: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}` } as const;
 
 /** Installs the recorder before the page's own scripts run, so no frame between click and card is missed. */
@@ -90,7 +95,9 @@ async function measure(browser: Browser, origin: string, size: (typeof SIZES)[nu
   } finally { await context.close(); }
 }
 
+/** Returns the middle sorted observation for the summary report. */
 const median = (values: number[]): number => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+/** Report lines collected across all measured scenarios. */
 const rows: string[] = [];
 
 for (const size of SIZES) {
