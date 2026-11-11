@@ -13,6 +13,9 @@ use std::{
 };
 /// The fixed install-time nft entry used by both the optional guard and D346's kernel engine.
 pub(crate) const NFT: &str = "/usr/sbin/nft";
+/// Test builds may trust this fixed path only after the privileged runner verifies it on the host.
+#[cfg(test)]
+const TEST_ROOT_OWNED_NFT_ENV: &str = "INFRATERNA_TEST_ROOT_OWNED_NFT";
 /// Fixed iptables-nft restore and inspection paths for both address families.
 const IPTABLES_NFT: [&str; 4] = [
     "/usr/sbin/iptables-nft",
@@ -122,8 +125,29 @@ fn missing_guard_tool_detail(nft: bool, iptables_ipv4: bool, iptables_ipv6: bool
     )
 }
 
-/// Accept only the root-owned install-time path and its root-owned executable target.
+/// Accept the root-owned install-time path and its executable target.
 fn root_owned_tool(path: &str) -> bool {
+    #[cfg(test)]
+    let host_verified_nft_path = std::env::var(TEST_ROOT_OWNED_NFT_ENV).ok();
+    #[cfg(not(test))]
+    let host_verified_nft_path: Option<String> = None;
+
+    root_owned_tool_with_host_verified_path(path, host_verified_nft_path.as_deref())
+}
+
+/// Keep the host's root-owner check while accounting for uid remapping in the test sandbox.
+///
+/// The privileged runner checks the fixed nft path before entering its user namespace, where a
+/// host-root file appears owned by the overflow uid. Only that exact checked path may bypass the
+/// in-sandbox owner lookup, and only in `cfg(test)` builds. Shipping builds always pass `None`.
+fn root_owned_tool_with_host_verified_path(
+    path: &str,
+    host_verified_nft_path: Option<&str>,
+) -> bool {
+    if path == NFT && host_verified_nft_path == Some(NFT) {
+        return true;
+    }
+
     let path = Path::new(path);
     let Ok(link) = std::fs::symlink_metadata(path) else {
         return false;
@@ -1241,6 +1265,20 @@ mod tests {
         ] {
             assert!(detail.contains(path), "missing {path}: {detail}");
         }
+    }
+
+    /// A host-verified nft path stays trusted after a nested user namespace remaps its owner ID.
+    #[test]
+    fn host_verified_nft_exception_is_limited_to_the_fixed_path() {
+        assert!(root_owned_tool_with_host_verified_path(NFT, Some(NFT)));
+        assert!(!root_owned_tool_with_host_verified_path(
+            "/tmp/not-nft",
+            Some(NFT)
+        ));
+        assert!(!root_owned_tool_with_host_verified_path(
+            "/tmp/not-nft",
+            None
+        ));
     }
 
     /// A missing optional guard is reported without refusing a userspace mesh node.
