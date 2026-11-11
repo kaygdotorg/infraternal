@@ -576,6 +576,8 @@ impl Node {
     }
 
     /// Restore public intent and the selected, marked mesh data plane.
+    /// An ordinary account with no retained mesh ownership gets an inactive node;
+    /// inspection alone never creates privileged networking for that account.
     /// # Errors
     /// Refuses unsafe state, unrelated interface ownership or failed policy recovery.
     pub fn restore(path: &std::path::Path) -> io::Result<Self> {
@@ -605,6 +607,28 @@ impl Node {
     ) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
         let engine_kind = requested_engine.unwrap_or_default();
+        // A rootless installation without mesh ownership has nothing to restore.
+        // Reading peers/status must not probe the host firewall or implicitly start
+        // a TUN. Retained state still takes the full recovery path below; an explicit
+        // up still attempts the ordinary privileged setup and reports its failure.
+        if !nix::unistd::Uid::effective().is_root()
+            && state.config.is_none()
+            && state.backend.is_none()
+            && !state.authority_reset_pending
+            && store.recorded_interface()?.is_none()
+            && store.recorded_engine()?.is_none()
+            && store.route_inventory()?.is_empty()
+            && store.read_private_key()?.is_none()
+            && store.rotation_secret()?.is_none()
+        {
+            return Ok(Self {
+                engine_kind,
+                engine_source,
+                enabled: false,
+                store: Some(store),
+                ..Self::default()
+            });
+        }
         let snapshot_key = state.config.as_ref().and_then(|c| c.local_key);
         let mut active_link = Device::active_link()?;
         if active_link
