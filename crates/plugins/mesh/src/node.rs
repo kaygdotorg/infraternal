@@ -38,57 +38,70 @@ impl PeerRouteState {
     }
 }
 
-/// Restores a deleted route only while its exact peer remains in the node's accepted route state.
-///
-/// The worker sleeps on route notifications and a cancellation stream, so an idle mesh node does
-/// not poll. Route repairs use exclusive creation and cannot replace a route already at that
-/// destination.
+/// Idle delay before another full inventory check becomes due, independent of notifications.
+/// A missed loss is retried after at most one such delay, plus work already in flight, scheduling
+/// and mutex waits, and a successful kernel reconciliation pass. This is not a real-time promise
+/// when the kernel rejects writes or the process cannot run; failures retry on the next check.
+const ROUTE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Repairs accepted routes using notifications plus a low-frequency complete inventory check.
+/// The proven link identity is fixed for the worker's lifetime. Exclusive additions preserve
+/// foreign destinations, and the absolute deadline cannot be postponed by unrelated events.
 struct RouteRepairWorker {
-    /// Shutting down this stream wakes the listener before link teardown without a timer.
+    /// Shutting down this stream wakes both event listening and fallback waits before teardown.
     cancel: UnixStream,
     /// The listener that reads route notifications in the node's network namespace.
     worker: Option<JoinHandle<()>>,
 }
 
 impl RouteRepairWorker {
-    /// Start a listener for protocol-250 host-route deletions on the active mesh interface.
+    /// Start recovery bound to the current owner-marked link, never just its shared name.
     /// # Errors
-    /// Returns listener, cancellation-stream, or thread creation errors.
+    /// Returns ownership, listener, cancellation-stream, or thread creation errors.
     fn start(state: Arc<Mutex<PeerRouteState>>) -> io::Result<Self> {
-        let mut monitor = Device::route_monitor()?;
+        let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
+        let monitor = Some(Device::route_monitor(&link)?);
+        Self::start_for_link(state, link, monitor)
+    }
+
+    /// Spawn the worker with a proven identity and an optional listener; absence uses the fallback.
+    fn start_for_link(
+        state: Arc<Mutex<PeerRouteState>>,
+        link: crate::wireguard::ActiveLink,
+        mut monitor: Option<crate::wireguard::RouteMonitor>,
+    ) -> io::Result<Self> {
         let (cancel_read, cancel) = UnixStream::pair()?;
         let worker = thread::Builder::new()
             .name("mesh-route-repair".to_owned())
             .spawn(move || {
+                let mut deadline = std::time::Instant::now() + ROUTE_RECHECK_INTERVAL;
                 loop {
-                    let address = match monitor.wait_for_deleted_peer_route(cancel_read.as_fd()) {
-                        Ok(Some(address)) => address,
-                        Ok(None) => break,
+                    let wake = if let Some(listener) = monitor.as_mut() {
+                        listener.wait_for_deleted_peer_route(cancel_read.as_fd(), deadline)
+                    } else {
+                        wait_for_route_recheck(cancel_read.as_fd(), deadline)
+                    };
+                    let address = match wake {
+                        Ok(crate::wireguard::RouteWake::Deleted(address)) => Some(address),
+                        Ok(crate::wireguard::RouteWake::Cancelled) => break,
+                        Ok(crate::wireguard::RouteWake::Reconcile) => None,
                         Err(error) => {
-                            tracing::error!(error = %error, "mesh route repair listener stopped");
-                            break;
+                            tracing::warn!(error = %error, "mesh route notifications unavailable; periodic recovery remains active");
+                            // A broken listener cannot spin or permanently disable reconciliation.
+                            monitor = None;
+                            continue;
                         }
                     };
-                    // Hold the inventory lock through the exclusive add so a config commit or
-                    // retirement cannot make this peer snapshot stale before the kernel write.
+                    // Keep membership and relay budgets stable through the kernel writes.
                     let route_state = lock_route_state(&state);
-                    let Some(peer) = route_state.peers.values().find(|peer| match address {
-                        IpAddr::V4(address) => peer.addresses.ipv4 == address,
-                        IpAddr::V6(address) => peer.addresses.ipv6 == address,
-                    }) else {
-                        continue;
-                    };
-                    let mtu = route_state
-                        .overrides
-                        .get(&peer.key)
-                        .copied()
-                        .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint));
-                    if let Err(error) = Device::repair_peer_route(peer, address, mtu) {
-                        tracing::warn!(
-                            %address,
-                            error = %error,
-                            "mesh peer route repair failed"
-                        );
+                    if let Err(error) = repair_accepted_routes(&link, &route_state, address) {
+                        tracing::warn!(error = %error, "mesh route repair skipped or failed; retrying on the next inventory check");
+                    }
+                    if address.is_none() {
+                        deadline = std::time::Instant::now() + ROUTE_RECHECK_INTERVAL;
+                        if monitor.is_none() {
+                            monitor = Device::route_monitor(&link).ok();
+                        }
                     }
                 }
             })?;
@@ -120,6 +133,76 @@ impl Drop for RouteRepairWorker {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Wait cheaply on cancellation when notifications fail, retaining the reconciliation deadline.
+fn wait_for_route_recheck(
+    cancel: std::os::fd::BorrowedFd<'_>,
+    deadline: std::time::Instant,
+) -> io::Result<crate::wireguard::RouteWake> {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(crate::wireguard::RouteWake::Reconcile);
+        }
+        let mut descriptors = [PollFd::new(cancel, PollFlags::POLLIN)];
+        match poll(
+            &mut descriptors,
+            PollTimeout::try_from(remaining).map_err(io::Error::other)?,
+        ) {
+            Ok(0) => return Ok(crate::wireguard::RouteWake::Reconcile),
+            Ok(_) => return Ok(crate::wireguard::RouteWake::Cancelled),
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Reconcile one deletion or the complete accepted inventory without replacing foreign routes.
+/// The caller holds the route-state lock; a full check dumps once and adds only missing routes.
+fn repair_accepted_routes(
+    link: &crate::wireguard::ActiveLink,
+    state: &PeerRouteState,
+    deleted: Option<IpAddr>,
+) -> io::Result<()> {
+    Device::verify_repair_link(link)?;
+    let missing = if let Some(address) = deleted {
+        BTreeSet::from([address])
+    } else {
+        let expected = state
+            .peers
+            .values()
+            .flat_map(|peer| {
+                [
+                    IpAddr::V4(peer.addresses.ipv4),
+                    IpAddr::V6(peer.addresses.ipv6),
+                ]
+            })
+            .collect();
+        Device::missing_peer_routes(link, &expected)?
+    };
+    let mut first_error = None;
+    for peer in state.peers.values() {
+        let mtu = state
+            .overrides
+            .get(&peer.key)
+            .copied()
+            .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint));
+        for address in [
+            IpAddr::V4(peer.addresses.ipv4),
+            IpAddr::V6(peer.addresses.ipv6),
+        ] {
+            if !missing.contains(&address) {
+                continue;
+            }
+            if let Err(error) = Device::repair_peer_route(link, peer, address, mtu) {
+                tracing::warn!(%address, error = %error, "mesh peer route repair failed");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Recover route state after a callback panics while holding its mutex.
@@ -1849,6 +1932,9 @@ impl Node {
         if self.engine_kind == EngineKind::GotaTun {
             rotation_tests::crash_checkpoint("rotation_private_key_saved");
         }
+        // A rotation deliberately changes ownership; replace the worker with a fresh proof.
+        self.route_repair.take();
+        self.ensure_route_repair()?;
         let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         Ok(identity.clone())
     }
@@ -3629,3 +3715,8 @@ mod rotation_tests;
 #[cfg(test)]
 #[path = "node_restart_continuity_bench.rs"]
 mod restart_continuity_bench;
+
+/// Namespace regressions for periodic route recovery and its idle measurement (#483).
+#[cfg(test)]
+#[path = "node_route_repair_tests.rs"]
+mod route_repair_tests;

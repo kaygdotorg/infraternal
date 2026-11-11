@@ -713,7 +713,13 @@ impl Device {
     /// # Errors
     /// Returns route-netlink errors other than `AlreadyExists`, which means there is nothing safe
     /// to change at that destination.
-    pub(crate) fn repair_peer_route(peer: &Peer, address: IpAddr, mtu: u16) -> io::Result<()> {
+    pub(crate) fn repair_peer_route(
+        link: &ActiveLink,
+        peer: &Peer,
+        address: IpAddr,
+        mtu: u16,
+    ) -> io::Result<()> {
+        Self::verify_repair_link(link)?;
         let (family, prefix, destination) = match address {
             IpAddr::V4(address) if address == peer.addresses.ipv4 => {
                 (2, 32, address.octets().to_vec())
@@ -723,7 +729,7 @@ impl Device {
             }
             _ => return Err(io::ErrorKind::InvalidInput.into()),
         };
-        let payload = peer_route_payload(family, prefix, &destination, index()?, Some(mtu))?;
+        let payload = peer_route_payload(family, prefix, &destination, link.ifindex, Some(mtu))?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         match socket.request(24, 4 | 0x200 | 0x400, &payload) {
             Ok(_) => Ok(()),
@@ -735,9 +741,57 @@ impl Device {
     /// Open a passive listener for route deletions on the current mesh interface.
     /// # Errors
     /// Returns socket, binding, or interface lookup errors before the worker starts.
-    pub(crate) fn route_monitor() -> io::Result<RouteMonitor> {
-        RouteMonitor::open()
+    pub(crate) fn route_monitor(link: &ActiveLink) -> io::Result<RouteMonitor> {
+        Self::verify_repair_link(link)?;
+        RouteMonitor::open(link.ifindex)
     }
+    /// Refuse repair if the shared name, original index, engine, or public ownership changed.
+    /// Writes still use the original index, so a name replacement cannot redirect them.
+    /// # Errors
+    /// Reports missing, foreign, or changed links before any route write.
+    pub(crate) fn verify_repair_link(link: &ActiveLink) -> io::Result<()> {
+        let owner = link.owner.ok_or(io::ErrorKind::PermissionDenied)?;
+        let active = Self::active_link().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "mesh route repair skipped: cannot verify original interface {}: {error}",
+                    link.ifindex
+                ),
+            )
+        })?;
+        if active.is_none_or(|active| {
+            active.ifindex != link.ifindex
+                || active.engine != link.engine
+                || active.owner != Some(owner)
+        }) {
+            return Err(io::Error::other(
+                "mesh route repair skipped: interface identity changed",
+            ));
+        }
+        verify_engine_owner(link.ifindex, link.engine, owner)
+    }
+
+    /// Find accepted destinations missing from the actual kernel route table on this proven link.
+    /// The returned set is bounded by `expected` (two addresses per accepted peer); streaming the
+    /// host dump avoids retaining unrelated routes. Allowed IPs are not evidence of a route.
+    /// # Errors
+    /// Refuses changed ownership, malformed route replies, and failed kernel dumps.
+    pub(crate) fn missing_peer_routes(
+        link: &ActiveLink,
+        expected: &BTreeSet<IpAddr>,
+    ) -> io::Result<BTreeSet<IpAddr>> {
+        Self::verify_repair_link(link)?;
+        let mut missing = expected.clone();
+        Socket::open(SockProtocol::NetlinkRoute)?.visit(26, 0x300, &[0; 12], |reply| {
+            if let Some(address) = mesh_peer_route_destination(reply, link.ifindex)? {
+                missing.remove(&address);
+            }
+            Ok(())
+        })?;
+        Ok(missing)
+    }
+
     /// Read the unique public-prefix owner for every retained peer route.
     /// # Errors
     /// Refuses malformed or multiply-owned `AllowedIPs`. All dump buffers,
@@ -1004,6 +1058,16 @@ impl Device {
     }
 }
 
+/// Why the route listener yielded control to the repair worker.
+pub(crate) enum RouteWake {
+    /// One accepted route may need immediate repair.
+    Deleted(IpAddr),
+    /// The independent deadline requires a complete inventory check.
+    Reconcile,
+    /// Link teardown requested the worker to stop.
+    Cancelled,
+}
+
 /// Listens for kernel route deletions while a node is up, so only a known mesh peer route is
 /// offered back to the kernel after an interface manager reconfigures the link.
 pub(crate) struct RouteMonitor {
@@ -1019,8 +1083,7 @@ impl RouteMonitor {
     /// Subscribe to IPv4 and IPv6 route notifications for the current mesh interface.
     /// # Errors
     /// Returns socket, bind, or interface lookup errors before the node becomes active.
-    fn open() -> io::Result<Self> {
-        let interface_index = index()?;
+    fn open(interface_index: u32) -> io::Result<Self> {
         let fd = socket(
             AddressFamily::Netlink,
             SockType::Raw,
@@ -1038,7 +1101,7 @@ impl RouteMonitor {
         })
     }
 
-    /// Wait for an owned peer host-route deletion, or return `None` when `cancel` becomes readable.
+    /// Wait until a deletion, cancellation, or the full-inventory reconciliation deadline.
     ///
     /// Only unicast `/32` and `/128` routes in the main table, with this interface and protocol
     /// 250, are reported. Other route changes pass through untouched.
@@ -1047,22 +1110,28 @@ impl RouteMonitor {
     pub(crate) fn wait_for_deleted_peer_route(
         &mut self,
         cancel: BorrowedFd<'_>,
-    ) -> io::Result<Option<IpAddr>> {
+        deadline: std::time::Instant,
+    ) -> io::Result<RouteWake> {
         loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(RouteWake::Reconcile);
+            }
+            let timeout = PollTimeout::try_from(remaining).map_err(io::Error::other)?;
             let mut descriptors = [
                 PollFd::new(self.fd.as_fd(), PollFlags::POLLIN),
                 PollFd::new(cancel, PollFlags::POLLIN),
             ];
-            if let Err(error) = poll(&mut descriptors, PollTimeout::NONE) {
-                if error == nix::errno::Errno::EINTR {
-                    continue;
-                }
-                return Err(error.into());
+            match poll(&mut descriptors, timeout) {
+                Ok(0) => return Ok(RouteWake::Reconcile),
+                Ok(_) => {}
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Err(error.into()),
             }
             if descriptors[1].revents().is_some_and(|flags| {
                 flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
             }) {
-                return Ok(None);
+                return Ok(RouteWake::Cancelled);
             }
             let route_events = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
             if route_events
@@ -1078,7 +1147,7 @@ impl RouteMonitor {
                 for message in netlink::messages(&self.buffer[..length])? {
                     if let Some(address) = deleted_mesh_peer_route(&message, self.interface_index)?
                     {
-                        return Ok(Some(address));
+                        return Ok(RouteWake::Deleted(address));
                     }
                 }
             }
@@ -1139,7 +1208,13 @@ fn deleted_mesh_peer_route(
     if message.kind != 25 {
         return Ok(None);
     }
-    let Some(header) = message.payload.get(..12) else {
+    mesh_peer_route_destination(message.payload, interface_index)
+}
+
+/// Decode the owned host-route shape shared by deletion events and actual kernel route dumps.
+/// Both paths require protocol 250, main table, exact host prefix, scope and original ifindex.
+fn mesh_peer_route_destination(payload: &[u8], interface_index: u32) -> io::Result<Option<IpAddr>> {
+    let Some(header) = payload.get(..12) else {
         return Err(io::ErrorKind::InvalidData.into());
     };
     let (address_len, prefix, scope) = match header[0] {
@@ -1160,7 +1235,7 @@ fn deleted_mesh_peer_route(
     let mut table = u32::from(header[4]);
     let mut destination = None;
     let mut route_interface = None;
-    for field in netlink::attributes(&message.payload[12..])? {
+    for field in netlink::attributes(&payload[12..])? {
         match field.kind {
             1 => destination = Some(field.payload),
             4 => route_interface = Some(netlink::u32_at(field.payload, 0)?),

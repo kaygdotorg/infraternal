@@ -24,6 +24,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Independent route-table observer, shared with the fallback regression.
+#[path = "support/route_inventory.rs"]
+mod route_inventory;
+
 /// Retiring orphan routes on restart leaves routes this node does not own.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
@@ -809,7 +813,7 @@ fn review_j529_networkd_reload_recovers_all_peers() {
     })
     .unwrap();
 
-    assert_eq!(Device::peer_routes().unwrap(), expected);
+    assert_eq!(route_inventory::installed_routes(), expected);
     let events = RouteEventMonitor::start(&expected);
     println!(
         "J529_NETLINK_BEFORE\n{}",
@@ -830,7 +834,7 @@ fn review_j529_networkd_reload_recovers_all_peers() {
                 .unwrap()
                 .success()
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(90);
         let mut deleted = BTreeSet::new();
         let mut added = BTreeSet::new();
         let mut delete_events = 0;
@@ -846,11 +850,15 @@ fn review_j529_networkd_reload_recovers_all_peers() {
                     added.insert(event.address);
                 }
             }
-            if added == expected || Instant::now() >= deadline {
-                let routes = Device::peer_routes().unwrap();
-                let configured = networkd_status("infraternal0").is_some_and(|status| {
-                    status.contains("(configured)") && status.contains(&format!("MTU: {mtu}"))
-                });
+            let routes = route_inventory::installed_routes();
+            let configured = networkd_status("infraternal0").is_some_and(|status| {
+                status.contains("(configured)") && status.contains(&format!("MTU: {mtu}"))
+            });
+            // Text notifications can be incomplete under a burst; real routes and the applied
+            // daemon configuration prove convergence. The deadline is only a hang guard.
+            if (!deleted.is_empty() && configured && routes == expected)
+                || Instant::now() >= deadline
+            {
                 println!(
                     "J529_RELOAD_ROUND={round} PEERS={peer_count} EXPECTED={} PRESENT={} DELETED={} ADDED={} DELETE_EVENTS={delete_events} ADD_EVENTS={add_events}",
                     expected.len(),
@@ -876,6 +884,18 @@ fn review_j529_networkd_reload_recovers_all_peers() {
             }
         }
     }
+    // Drain the observer's buffered burst, then cover a complete periodic inventory interval.
+    // This asserts stable state, not a recovery-speed budget; inventory proves convergence.
+    while events.next(Duration::from_secs(1)).is_ok() {}
+    assert!(
+        matches!(
+            events.next(Duration::from_secs(31)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "settled routes must not churn and the observer must stay alive for a full fallback interval"
+    );
+    assert_eq!(route_inventory::installed_routes(), expected);
+    println!("J485C_QUIET_ROUTE_EVENTS=0 QUIET_WINDOW_SECONDS=31 PEERS={peer_count}");
     drop(events);
     node.down().unwrap();
     drop(networkd);
