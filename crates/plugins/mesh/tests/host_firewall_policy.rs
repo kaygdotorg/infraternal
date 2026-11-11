@@ -1,4 +1,5 @@
 //! Checks that typed settings produce the exact narrow host input policy.
+#![cfg(target_os = "linux")]
 #![expect(
     clippy::expect_used,
     reason = "fixture failures need the exact stage that failed"
@@ -19,6 +20,11 @@ use infraternal_plugin_mesh::host_firewall::{
     AllowRule, Listener, Policy, Protocol, apply_with_ssh_connection, diff_report, discover_nft,
     render, validate, validate_ssh_connection_on,
 };
+
+#[path = "support/nft_fixture.rs"]
+mod nft_fixture;
+
+use nft_fixture::NftFixture;
 
 /// Build a prod-shaped policy without depending on a host or installed nft tool.
 fn prod_policy(mesh_enabled: bool) -> Policy {
@@ -285,7 +291,8 @@ fn missing_nft_error_reports_the_path_it_checked() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
-    let nft = discover_nft(None).expect("fixed-path nft executable");
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let setup = run_nft(
         &nft,
         &["-f", "-"],
@@ -379,7 +386,8 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
 #[test]
 #[ignore = "Run in disposable network namespaces with CAP_NET_ADMIN."]
 fn host_table_takeover_keeps_ssh_and_bidirectional_mesh_but_drops_other_ingress() {
-    let nft = discover_nft(None).expect("fixed root-owned nft executable");
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let suffix = std::process::id().to_string();
     let host_a = format!("j511-{suffix}-a");
     let host_b = format!("j511-{suffix}-b");

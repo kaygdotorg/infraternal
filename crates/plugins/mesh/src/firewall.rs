@@ -4,6 +4,8 @@ use crate::{
     policy::rules::{Protocol, TrafficPolicy},
     wireguard::INTERFACE,
 };
+#[cfg(test)]
+use std::cell::RefCell;
 use std::{
     fmt::Write as _,
     io::{self, Write},
@@ -11,6 +13,38 @@ use std::{
     process::{Command, Stdio},
 };
 const TABLE: &str = "infraternal_mesh";
+#[cfg(test)]
+#[path = "../tests/support/nft_fixture.rs"]
+mod nft_fixture;
+
+/// Keep a namespace-local nft copy scoped to one real-engine test thread.
+#[cfg(test)]
+std::thread_local! {
+    /// The validated nft copy used only by the current namespace test thread.
+    static TEST_NFT_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Restore the previous test executable when an ignored namespace test ends.
+#[cfg(test)]
+struct TestNftPathOverride(Option<PathBuf>);
+
+#[cfg(test)]
+impl TestNftPathOverride {
+    /// Use a safe copy whose owner maps to root inside the disposable namespace.
+    fn install(path: &Path) -> Self {
+        Self(TEST_NFT_PATH.with(|current| current.replace(Some(path.to_owned()))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestNftPathOverride {
+    /// Restore any earlier override so another test thread cannot inherit it.
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        TEST_NFT_PATH.with(|current| *current.borrow_mut() = previous);
+    }
+}
+
 // Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
 // middleware then checks the source against that route's original backend-port grant.
 
@@ -350,6 +384,10 @@ fn sync_host_mesh_policy(enabled: bool) -> io::Result<()> {
 }
 /// Resolve nft from the product's fixed system and Nix paths without consulting PATH.
 fn nft_path() -> io::Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_NFT_PATH.with(|current| current.borrow().clone()) {
+        return crate::host_firewall::discover_nft(Some(&path)).map_err(io::Error::other);
+    }
     crate::host_firewall::discover_nft(None).map_err(io::Error::other)
 }
 
@@ -906,6 +944,9 @@ mod tests {
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nft_ownership_atomicity_and_scaled_apply() {
+        let nft_fixture =
+            super::nft_fixture::NftFixture::new(crate::host_firewall::nft_candidates());
+        let _nft_override = super::TestNftPathOverride::install(nft_fixture.path());
         let nft = super::nft_path().expect("fixed root-owned nft path");
         run(&nft, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("unrelated fixture");
         let mut named_table = Firewall::default();
@@ -947,6 +988,9 @@ mod tests {
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn already_removed_owned_table_does_not_block_component_cleanup() {
+        let nft_fixture =
+            super::nft_fixture::NftFixture::new(crate::host_firewall::nft_candidates());
+        let _nft_override = super::TestNftPathOverride::install(nft_fixture.path());
         let nft = super::nft_path().expect("fixed root-owned nft path");
         let mut filter = Firewall::default();
         filter.adopt().expect("empty namespace");
@@ -959,6 +1003,9 @@ mod tests {
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn initial_apply_takes_over_an_unmarked_infraternal_table() {
+        let nft_fixture =
+            super::nft_fixture::NftFixture::new(crate::host_firewall::nft_candidates());
+        let _nft_override = super::TestNftPathOverride::install(nft_fixture.path());
         let nft = super::nft_path().expect("fixed root-owned nft path");
         run(&nft, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("legacy fixture");
         let mut filter = Firewall::default();
