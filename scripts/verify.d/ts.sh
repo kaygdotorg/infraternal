@@ -1,5 +1,11 @@
 # Bun checks for the protocol and production tracer, including its compressed transfer budget.
 
+# Run every tracer source test in one process so cross-file mock and global leaks fail the gate (#503).
+ts_verify_units() {
+    local repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+    (cd -- "$repo_dir/apps/tracer" && bun install --frozen-lockfile && bun test src)
+}
+
 ts_verify_fast() {
     local protocol_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../packages/protocol" && pwd)"
     local repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
