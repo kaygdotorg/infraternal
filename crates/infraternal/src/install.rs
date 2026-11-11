@@ -11,7 +11,7 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use infraternal_plugin_mesh::host_firewall::{self, Policy};
+use infraternal_plugin_mesh::host_firewall::{self, Policy, PolicyRole};
 
 #[cfg(target_os = "linux")]
 /// The boot unit whose rules are loaded before network setup.
@@ -56,6 +56,15 @@ pub enum InstallError {
 pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, InstallError> {
     validate_name(&options.name)?;
     let user = !options.system || options.user;
+    if args.host_firewall_off && user {
+        return Err(InstallError::HostFirewall(
+            "--host-firewall-off is available only for a system install".to_owned(),
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    if args.host_firewall_off {
+        return Err(InstallError::Invalid);
+    }
     let path = unit_path(user, &options.name)?;
     let origin = args
         .public_origin
@@ -74,6 +83,14 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     if options.dry_run {
         #[cfg(target_os = "linux")]
         if options.system {
+            if args.host_firewall_off {
+                return Ok(format!(
+                    "Would clear the server host policy, remove only marked infraternal host table and loader state when no agent policy remains, and write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable --now {}.service\n",
+                    path.display(),
+                    unit,
+                    options.name,
+                ));
+            }
             let firewall = make_firewall_install(args)?;
             return Ok(format!(
                 "Would replace the hand-installed {FIREWALL_SERVICE} and take over inet infraternal_host.\nWould write {}:\n{}\nWould write {}:\n{}\nWould write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable {FIREWALL_SERVICE}\n  systemctl restart {FIREWALL_SERVICE}\n  {}\n",
@@ -104,7 +121,19 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
 
     #[cfg(target_os = "linux")]
     let firewall = if options.system {
-        Some(make_firewall_install(args)?)
+        (!args.host_firewall_off)
+            .then(|| make_firewall_install(args))
+            .transpose()?
+    } else {
+        None
+    };
+
+    #[cfg(target_os = "linux")]
+    let firewall_removal_report = if options.system && args.host_firewall_off {
+        Some(
+            host_firewall::clear_role_from_config(PolicyRole::Server)
+                .map_err(|error| InstallError::HostFirewall(error.to_string()))?,
+        )
     } else {
         None
     };
@@ -161,6 +190,13 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     if firewall.is_some() {
         return Ok(firewall_install_confirmation(&path));
     }
+    #[cfg(target_os = "linux")]
+    if let Some(report) = firewall_removal_report {
+        return Ok(format!(
+            "{report}Installed and enabled {}\n",
+            path.display()
+        ));
+    }
     Ok(format!("Installed and enabled {}\n", path.display()))
 }
 
@@ -211,7 +247,8 @@ fn render_firewall_unit() -> Result<String, InstallError> {
     let binary = env::current_exe().map_err(InstallError::Io)?;
     let executable = quote_systemd(binary.as_os_str())?;
     Ok(format!(
-        "[Unit]\nDescription=infraternal host input firewall\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target\nWants=network-pre.target\n\n[Service]\nType=oneshot\nExecStart={executable} __host-firewall-apply\nRemainAfterExit=yes\n\n[Install]\nWantedBy=network-pre.target\n"
+        "{}\n[Unit]\nDescription=infraternal host input firewall\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target\nWants=network-pre.target\n\n[Service]\nType=oneshot\nExecStart={executable} __host-firewall-apply\nRemainAfterExit=yes\n\n[Install]\nWantedBy=network-pre.target\n",
+        host_firewall::HOST_FIREWALL_UNIT_MARKER
     ))
 }
 
@@ -416,6 +453,7 @@ mod tests {
             host_firewall_remote_sources: Vec::new(),
             host_firewall_accept_interfaces: Vec::new(),
             host_firewall_allow: Vec::new(),
+            host_firewall_off: false,
         };
         let options = InstallArgs {
             system: false,
@@ -452,6 +490,7 @@ mod tests {
             host_firewall_remote_sources: Vec::new(),
             host_firewall_accept_interfaces: Vec::new(),
             host_firewall_allow: vec!["*,*,tcp,22".to_owned()],
+            host_firewall_off: false,
         };
         let options = InstallArgs {
             system: true,
@@ -484,6 +523,12 @@ mod tests {
             tls_key: None,
             behind_proxy: false,
             trusted_proxies: Vec::new(),
+            host_firewall_listen_interface: None,
+            host_firewall_remote_interface: None,
+            host_firewall_remote_sources: Vec::new(),
+            host_firewall_accept_interfaces: Vec::new(),
+            host_firewall_allow: Vec::new(),
+            host_firewall_off: false,
         };
         let options = InstallArgs {
             system: false,
@@ -495,5 +540,41 @@ mod tests {
         let output = install(&args, &options).unwrap();
         assert!(output.contains("Data folder: /srv/state\n"));
         assert!(output.contains("Web folder: /srv/web\n"));
+    }
+
+    /// Preview an explicit server-policy clear without writing host state.
+    #[test]
+    fn system_host_firewall_off_dry_run_names_only_product_owned_removal() {
+        let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
+            listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
+            data: PathBuf::from("./state"),
+            public_origin: Some("https://localhost:47361".to_owned()),
+            web_root: None,
+            tls_cert: None,
+            tls_key: None,
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+            host_firewall_listen_interface: None,
+            host_firewall_remote_interface: None,
+            host_firewall_remote_sources: Vec::new(),
+            host_firewall_accept_interfaces: Vec::new(),
+            host_firewall_allow: Vec::new(),
+            host_firewall_off: true,
+        };
+        let options = InstallArgs {
+            system: true,
+            user: false,
+            dry_run: true,
+            force: false,
+            name: "infraternal-server".to_owned(),
+        };
+
+        let output = install(&args, &options).expect("dry-run output");
+
+        assert!(output.contains("Would clear the server host policy"));
+        assert!(output.contains("marked infraternal host table and loader state"));
+        assert!(output.contains("systemctl enable --now infraternal-server.service"));
+        assert!(!output.contains("Would replace the hand-installed"));
     }
 }

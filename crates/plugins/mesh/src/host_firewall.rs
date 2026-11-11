@@ -33,6 +33,86 @@ pub const HOST_TABLE: &str = "infraternal_host";
 pub const SERVER_POLICY_PATH: &str = "/var/lib/infraternal/host-firewall-server.json";
 /// Agent-owned administrator and mesh settings read by the boot service.
 pub const AGENT_POLICY_PATH: &str = "/var/lib/infraternal/host-firewall-agent.json";
+/// Product-managed systemd unit that applies the combined host policy before networking.
+pub const HOST_FIREWALL_UNIT_PATH: &str = "/etc/systemd/system/infraternal-firewall.service";
+/// Product-managed network-pre enablement link for the host firewall unit.
+pub const HOST_FIREWALL_ENABLED_PATH: &str =
+    "/etc/systemd/system/network-pre.target.wants/infraternal-firewall.service";
+/// Exact comment used to identify the unit file that infraternal may remove.
+pub const HOST_FIREWALL_UNIT_MARKER: &str = "# Managed by infraternal: host-firewall/v1";
+/// Exact JSON marker used to identify role policy files that infraternal may remove.
+pub const HOST_FIREWALL_POLICY_MARKER: &str = "infraternal-host-firewall-policy-v1";
+
+/// Names one role whose host input policy can be cleared through the product.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolicyRole {
+    /// The server listener and trusted-proxy policy.
+    Server,
+    /// The local infraternal agent's administrator and mesh policy.
+    Agent,
+}
+
+/// Names the owned role files and loader paths used by host-policy lifecycle operations.
+///
+/// Production uses [`HostFirewallPaths::system`]. [`HostFirewallPaths::under`] gives
+/// privileged namespace tests the same layout below a private root without touching
+/// the machine running the test.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostFirewallPaths {
+    server_policy: PathBuf,
+    agent_policy: PathBuf,
+    unit: PathBuf,
+    enabled: PathBuf,
+}
+
+impl HostFirewallPaths {
+    /// Return the fixed system paths managed by the infraternal host policy.
+    #[must_use]
+    pub fn system() -> Self {
+        Self {
+            server_policy: PathBuf::from(SERVER_POLICY_PATH),
+            agent_policy: PathBuf::from(AGENT_POLICY_PATH),
+            unit: PathBuf::from(HOST_FIREWALL_UNIT_PATH),
+            enabled: PathBuf::from(HOST_FIREWALL_ENABLED_PATH),
+        }
+    }
+
+    /// Map those fixed paths below an isolated root, as namespace tests do.
+    #[must_use]
+    pub fn under(root: &Path) -> Self {
+        Self {
+            server_policy: root.join("var/lib/infraternal/host-firewall-server.json"),
+            agent_policy: root.join("var/lib/infraternal/host-firewall-agent.json"),
+            unit: root.join("etc/systemd/system/infraternal-firewall.service"),
+            enabled: root
+                .join("etc/systemd/system/network-pre.target.wants/infraternal-firewall.service"),
+        }
+    }
+
+    /// Return the product's saved server policy path in this layout.
+    #[must_use]
+    pub fn server_policy_path(&self) -> &Path {
+        &self.server_policy
+    }
+
+    /// Return the product's saved agent policy path in this layout.
+    #[must_use]
+    pub fn agent_policy_path(&self) -> &Path {
+        &self.agent_policy
+    }
+
+    /// Return the loader unit path in this layout.
+    #[must_use]
+    pub fn unit_path(&self) -> &Path {
+        &self.unit
+    }
+
+    /// Return the network-pre enablement link path in this layout.
+    #[must_use]
+    pub fn enabled_path(&self) -> &Path {
+        &self.enabled
+    }
+}
 
 /// Bound disk reads and writes for each root-owned policy file.
 const MAX_POLICY_BYTES: u64 = 64 * 1024;
@@ -50,6 +130,15 @@ pub struct Policy {
     pub listeners: Vec<Listener>,
     /// Whether the local mesh node needs TUN and UDP ingress.
     pub mesh_enabled: bool,
+}
+
+/// Wrap a role policy with the marker required before the product may remove it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredPolicy {
+    /// Identifies role configuration files written by infraternal.
+    marker: String,
+    /// The validated settings used to render the host input table.
+    policy: Policy,
 }
 
 /// Combine server and agent settings into the one host input policy.
@@ -297,15 +386,50 @@ pub enum PolicyError {
     /// Replacing the current table would remove a configured TCP/22 path.
     #[error("host firewall policy would remove an existing TCP/22 allow rule")]
     ExistingAdminPathWouldBeLost,
-    /// No product-owned host policy file is installed.
-    #[error("host firewall policy is not configured")]
-    NoPolicy,
     /// A host policy file is not a root-owned, non-writable regular file.
     #[error("host firewall policy file at {0} is not a safe root-owned file")]
     UnsafePolicy(PathBuf),
+    /// A saved role policy exists but does not carry infraternal's ownership marker.
+    #[error("host firewall policy at {0} is not marked as infraternal-owned")]
+    UnownedPolicy(PathBuf),
     /// A host policy file is too large or contains invalid serialized settings.
     #[error("host firewall policy file at {0} is invalid")]
     BadPolicy(PathBuf),
+    /// A validated role policy could not be serialized for durable storage.
+    #[error("host firewall policy could not be encoded: {0}")]
+    EncodePolicy(#[source] serde_json::Error),
+    /// A loader item is not a protected regular file and cannot be safely inspected.
+    #[error("host firewall item at {0} is not a safe root-owned regular file")]
+    UnsafeManagedItem(PathBuf),
+    /// A named product-owned file could not be removed.
+    #[error("could not remove host firewall item {item}: {source}")]
+    RemovalFailed {
+        /// The exact item whose removal failed.
+        item: PathBuf,
+        /// The filesystem error from the attempted removal.
+        #[source]
+        source: io::Error,
+    },
+    /// The named host table could not be inspected or removed with nft.
+    #[error("could not remove nft table {item} using {nft}: {source}")]
+    TableRemovalFailed {
+        /// The exact nft table that the product was asked to remove.
+        item: String,
+        /// The selected nft path, or the fixed candidates checked during discovery.
+        nft: String,
+        /// The inspection or transaction failure that stopped removal.
+        #[source]
+        source: Box<PolicyError>,
+    },
+    /// A marker or tool could not be checked while cleaning one named file.
+    #[error("could not finish removing host firewall item {item}: {source}")]
+    ManagedItemRemovalFailed {
+        /// The exact marked policy or loader path involved in cleanup.
+        item: PathBuf,
+        /// The inspection or service-manager failure that stopped cleanup.
+        #[source]
+        source: Box<PolicyError>,
+    },
     /// No safe nft executable was available at the listed fixed paths.
     #[error("nft executable was not found; checked: {checked}")]
     NftMissing {
@@ -331,6 +455,38 @@ pub enum PolicyError {
     BadInventory {
         /// The exact root-owned executable selected for this operation.
         path: PathBuf,
+    },
+    /// No safe fixed-path systemctl executable was available for loader cleanup.
+    #[error("systemctl executable was not found; checked: {checked}")]
+    SystemctlMissing {
+        /// Every absolute candidate inspected.
+        checked: String,
+    },
+    /// The selected systemctl path is not a safe root-owned executable.
+    #[error("systemctl at {0} is not a safe root-owned executable")]
+    UnsafeSystemctl(PathBuf),
+    /// The selected systemctl could not be started after the loader was removed.
+    #[error(
+        "could not reload units after removing host firewall item {item} with {path}: {source}"
+    )]
+    SystemctlExecutionFailed {
+        /// The exact root-owned systemctl executable selected for this operation.
+        path: PathBuf,
+        /// The loader item removed before systemctl failed to start.
+        item: PathBuf,
+        /// The process creation error.
+        #[source]
+        source: io::Error,
+    },
+    /// systemd could not reload after the product-owned loader was removed.
+    #[error("systemctl at {path} failed to reload units after removing {item}: {message}")]
+    SystemctlRejected {
+        /// The exact root-owned systemctl executable selected for this operation.
+        path: PathBuf,
+        /// The loader or enablement item removed before reload failed.
+        item: PathBuf,
+        /// systemctl's stderr or a bounded fallback description.
+        message: String,
     },
 }
 
@@ -646,12 +802,92 @@ pub fn apply_with_ssh_connection(
 /// # Errors
 /// Returns an error for an unsafe or malformed role file, missing nft, or a rejected transaction.
 pub fn apply_from_config() -> Result<String, PolicyError> {
-    let server = read_policy_file(Path::new(SERVER_POLICY_PATH))?;
-    let agent = read_policy_file(Path::new(AGENT_POLICY_PATH))?;
+    apply_from_config_at(&HostFirewallPaths::system(), None, None)
+}
+
+/// Apply stored role policies, or remove stale product-owned state when both are cleared.
+///
+/// The optional executable paths are used by isolated namespace tests. Normal
+/// boot and installer paths pass `None` and use the fixed root-owned candidates.
+///
+/// # Errors
+/// Returns an error for unsafe role files, missing tools, or failed nft/systemd operations.
+pub fn apply_from_config_at(
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+    systemctl_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    let server = read_policy_file(paths.server_policy_path())?;
+    let agent = read_policy_file(paths.agent_policy_path())?;
     if server.is_none() && agent.is_none() {
-        return Err(PolicyError::NoPolicy);
+        let mut report = remove_host_table(nft_path)?;
+        report.push_str(&remove_owned_loader(paths, systemctl_path)?);
+        return Ok(report);
     }
-    apply(&combine(server, agent), None)
+    apply(&combine(server, agent), nft_path)
+}
+
+/// Clear one role's policy and reconcile the remaining host input configuration.
+///
+/// Removing the last default-drop table only opens input. When another role
+/// still owns policy, its candidate is validated against the active SSH path
+/// before the nft transaction runs.
+///
+/// # Errors
+/// Returns an error for unmarked files, unsafe policies, missing tools, or failed removals.
+pub fn clear_role_from_config(role: PolicyRole) -> Result<String, PolicyError> {
+    clear_role_from_config_at(role, &HostFirewallPaths::system(), None, None)
+}
+
+/// Clear a role below the supplied layout and use the requested fixed executables.
+///
+/// This is the same lifecycle used by [`clear_role_from_config`], with explicit
+/// paths so privileged namespace tests can prove removal without touching `/etc`
+/// or `/var/lib` on the build host.
+///
+/// # Errors
+/// Returns an error for unmarked files, unsafe policies, missing tools, or failed removals.
+pub fn clear_role_from_config_at(
+    role: PolicyRole,
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+    systemctl_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    let server = read_policy_file(paths.server_policy_path())?;
+    let agent = read_policy_file(paths.agent_policy_path())?;
+    let (cleared, remaining_server, remaining_agent) = match role {
+        PolicyRole::Server => (server, None, agent),
+        PolicyRole::Agent => (agent, server, None),
+    };
+    if cleared.is_none() {
+        return apply_from_config_at(paths, nft_path, systemctl_path);
+    }
+
+    let no_remaining_policy = remaining_server.is_none() && remaining_agent.is_none();
+    let mut report = if no_remaining_policy {
+        remove_host_table(nft_path)?
+    } else {
+        apply(&combine(remaining_server, remaining_agent), nft_path)?
+    };
+    let policy_path = match role {
+        PolicyRole::Server => paths.server_policy_path(),
+        PolicyRole::Agent => paths.agent_policy_path(),
+    };
+    remove_policy_file(policy_path)?;
+    let role_name = match role {
+        PolicyRole::Server => "server",
+        PolicyRole::Agent => "agent",
+    };
+    let _ = writeln!(
+        report,
+        "host firewall removal: removed {role_name} policy file {}",
+        policy_path.display()
+    );
+
+    if no_remaining_policy {
+        report.push_str(&remove_owned_loader(paths, systemctl_path)?);
+    }
+    Ok(report)
 }
 
 /// Read one validated role policy from its root-owned configuration file.
@@ -681,10 +917,29 @@ pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
     if bytes.len() as u64 > MAX_POLICY_BYTES {
         return Err(PolicyError::BadPolicy(path.to_owned()));
     }
-    let policy: Policy =
+    let stored: StoredPolicy =
         serde_json::from_slice(&bytes).map_err(|_| PolicyError::BadPolicy(path.to_owned()))?;
-    validate_fields(&policy).map_err(|_| PolicyError::BadPolicy(path.to_owned()))?;
-    Ok(Some(policy))
+    if stored.marker != HOST_FIREWALL_POLICY_MARKER {
+        return Err(PolicyError::UnownedPolicy(path.to_owned()));
+    }
+    validate_fields(&stored.policy).map_err(|_| PolicyError::BadPolicy(path.to_owned()))?;
+    Ok(Some(stored.policy))
+}
+
+/// Encode a validated role policy with the ownership marker used by startup and cleanup.
+///
+/// Installer journals call this before publishing bytes so cleanup can recognize
+/// only files the product created.
+///
+/// # Errors
+/// Returns an error when policy fields are invalid or JSON encoding fails.
+pub fn serialize_policy_file(policy: &Policy) -> Result<Vec<u8>, PolicyError> {
+    validate_fields(policy)?;
+    serde_json::to_vec_pretty(&StoredPolicy {
+        marker: HOST_FIREWALL_POLICY_MARKER.to_owned(),
+        policy: policy.clone(),
+    })
+    .map_err(PolicyError::EncodePolicy)
 }
 
 /// Replace one role policy atomically with root-only permissions.
@@ -720,8 +975,9 @@ pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<(), PolicyError
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(PolicyError::Io(error)),
     }
-    let bytes =
-        serde_json::to_vec_pretty(policy).map_err(|_| PolicyError::BadPolicy(path.to_owned()))?;
+    // Fixed role paths do not make a file ours. Updates may replace only a valid marked policy.
+    let _existing_policy = read_policy_file(path)?;
+    let bytes = serialize_policy_file(policy)?;
     if bytes.len() as u64 > MAX_POLICY_BYTES {
         return Err(PolicyError::BadPolicy(path.to_owned()));
     }
@@ -753,6 +1009,294 @@ pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<(), PolicyError
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Remove one validated product-owned role file after its replacement is active.
+fn remove_policy_file(path: &Path) -> Result<(), PolicyError> {
+    if read_policy_file(path)
+        .map_err(|source| managed_item_removal_failure(path, source))?
+        .is_none()
+    {
+        return Ok(());
+    }
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent_after_removal(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(PolicyError::RemovalFailed {
+            item: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+/// Remove only the named product host table in one nft transaction and report its rules.
+fn remove_host_table(nft_path: Option<&Path>) -> Result<String, PolicyError> {
+    let nft =
+        discover_nft(nft_path).map_err(|source| host_table_removal_failure(nft_path, source))?;
+    let inventory = run_nft(&nft, &["-j", "list", "tables"], None)
+        .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
+    let tables: serde_json::Value = serde_json::from_slice(&inventory.stdout)
+        .map_err(|_| PolicyError::BadInventory { path: nft.clone() })
+        .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
+    let entries = tables["nftables"]
+        .as_array()
+        .ok_or_else(|| PolicyError::BadInventory { path: nft.clone() })
+        .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
+    let exists = entries.iter().any(|item| {
+        item.get("table")
+            .is_some_and(|table| table["family"] == "inet" && table["name"] == HOST_TABLE)
+    });
+    if !exists {
+        return Ok("host firewall migration: no rule differences\nhost firewall removal: inet infraternal_host was already absent\n".to_owned());
+    }
+
+    let output = run_nft(&nft, &["-n", "list", "table", "inet", HOST_TABLE], None)
+        .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
+    let current = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut report = diff_report(&current, "");
+    run_nft(
+        &nft,
+        &["-f", "-"],
+        Some(format!("delete table inet {HOST_TABLE}\n").as_bytes()),
+    )
+    .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
+    let _ = writeln!(report, "host firewall removal: removed inet {HOST_TABLE}");
+    Ok(report)
+}
+
+/// Name the product-owned host table when any removal step fails.
+fn host_table_removal_failure(nft_path: Option<&Path>, source: PolicyError) -> PolicyError {
+    let nft = nft_path.map_or_else(
+        || "the fixed system and Nix paths".to_owned(),
+        |path| format!("nft at {}", path.display()),
+    );
+    PolicyError::TableRemovalFailed {
+        item: format!("inet {HOST_TABLE}"),
+        nft,
+        source: Box::new(source),
+    }
+}
+
+/// Name the managed path when an inspection step prevents its safe removal.
+fn managed_item_removal_failure(path: &Path, source: PolicyError) -> PolicyError {
+    PolicyError::ManagedItemRemovalFailed {
+        item: path.to_owned(),
+        source: Box::new(source),
+    }
+}
+
+/// Remove the marked loader files and reload systemd after the table has been removed.
+fn remove_owned_loader(
+    paths: &HostFirewallPaths,
+    systemctl_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    let unit_owned = has_unit_marker(paths.unit_path())
+        .map_err(|source| managed_item_removal_failure(paths.unit_path(), source))?;
+    let unit_present = path_exists(paths.unit_path())
+        .map_err(|source| managed_item_removal_failure(paths.unit_path(), source))?;
+    let link_present = path_exists(paths.enabled_path())
+        .map_err(|source| managed_item_removal_failure(paths.enabled_path(), source))?;
+    let link_owned = if unit_owned {
+        is_product_enablement_link(paths)
+            .map_err(|source| managed_item_removal_failure(paths.enabled_path(), source))?
+    } else {
+        false
+    };
+    if !unit_owned && !unit_present && !link_present {
+        return Ok("host firewall removal: loader was already absent\n".to_owned());
+    }
+
+    let systemctl = if unit_owned {
+        Some(
+            discover_systemctl(systemctl_path)
+                .map_err(|source| managed_item_removal_failure(paths.unit_path(), source))?,
+        )
+    } else {
+        None
+    };
+    let mut report = String::new();
+    if link_owned {
+        remove_named_item(paths.enabled_path())?;
+        let _ = writeln!(
+            report,
+            "host firewall removal: removed enablement link {}",
+            paths.enabled_path().display()
+        );
+    } else if link_present {
+        let _ = writeln!(
+            report,
+            "host firewall removal: kept unmarked enablement link {}",
+            paths.enabled_path().display()
+        );
+    }
+
+    if unit_owned {
+        remove_named_item(paths.unit_path())?;
+        let _ = writeln!(
+            report,
+            "host firewall removal: removed loader unit {}",
+            paths.unit_path().display()
+        );
+        if let Some(systemctl) = systemctl {
+            reload_systemd(&systemctl, paths.unit_path())?;
+        }
+    } else if unit_present {
+        let _ = writeln!(
+            report,
+            "host firewall removal: kept unmarked loader unit {}",
+            paths.unit_path().display()
+        );
+    }
+    Ok(report)
+}
+
+/// Check whether the root-owned loader file carries its exact product marker.
+fn has_unit_marker(path: &Path) -> Result<bool, PolicyError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PolicyError::Io(error)),
+    };
+    if !metadata.is_file() || !safe_policy_owner(&metadata) {
+        return Err(PolicyError::UnsafeManagedItem(path.to_owned()));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW);
+    let file = options.open(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            PolicyError::Io(error)
+        } else {
+            PolicyError::UnsafeManagedItem(path.to_owned())
+        }
+    })?;
+    let opened = file.metadata().map_err(PolicyError::Io)?;
+    if !opened.is_file() || !safe_policy_owner(&opened) {
+        return Err(PolicyError::UnsafeManagedItem(path.to_owned()));
+    }
+    #[cfg(unix)]
+    if metadata.dev() != opened.dev() || metadata.ino() != opened.ino() {
+        return Err(PolicyError::UnsafeManagedItem(path.to_owned()));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_POLICY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(PolicyError::Io)?;
+    if bytes.len() as u64 > MAX_POLICY_BYTES {
+        return Err(PolicyError::UnsafeManagedItem(path.to_owned()));
+    }
+    Ok(String::from_utf8_lossy(&bytes)
+        .lines()
+        .any(|line| line == HOST_FIREWALL_UNIT_MARKER))
+}
+
+/// Check whether the enablement symlink resolves to this layout's loader unit.
+fn is_product_enablement_link(paths: &HostFirewallPaths) -> Result<bool, PolicyError> {
+    let metadata = match fs::symlink_metadata(paths.enabled_path()) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(PolicyError::Io(error)),
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    if metadata.uid() != 0 {
+        return Ok(false);
+    }
+    let target = fs::read_link(paths.enabled_path()).map_err(PolicyError::Io)?;
+    Ok(target == Path::new("../infraternal-firewall.service"))
+}
+
+/// Check for any object at a managed path without following a possible symlink.
+fn path_exists(path: &Path) -> Result<bool, PolicyError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(PolicyError::Io(error)),
+    }
+}
+
+/// Remove one already-validated product path and name it if the unlink fails.
+fn remove_named_item(path: &Path) -> Result<(), PolicyError> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent_after_removal(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(PolicyError::RemovalFailed {
+            item: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+/// Persist a successful unlink before reporting the policy clear as complete.
+fn sync_parent_after_removal(path: &Path) -> Result<(), PolicyError> {
+    let parent = path.parent().ok_or_else(|| PolicyError::RemovalFailed {
+        item: path.to_owned(),
+        source: io::Error::new(io::ErrorKind::InvalidInput, "managed path has no parent"),
+    })?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| PolicyError::RemovalFailed {
+            item: path.to_owned(),
+            source,
+        })
+}
+
+/// Find systemctl from fixed system and Nix profile paths, never through `PATH`.
+fn discover_systemctl(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
+    const CANDIDATES: &[&str] = &[
+        "/usr/bin/systemctl",
+        "/bin/systemctl",
+        "/run/current-system/sw/bin/systemctl",
+        "/nix/var/nix/profiles/default/bin/systemctl",
+        "/nix/var/nix/profiles/system/sw/bin/systemctl",
+        "/root/.nix-profile/bin/systemctl",
+    ];
+    let candidates = configured.map_or_else(
+        || CANDIDATES.iter().map(PathBuf::from).collect::<Vec<_>>(),
+        |path| vec![path.to_owned()],
+    );
+    for candidate in &candidates {
+        match safe_nft_path(candidate) {
+            Ok(Some(path)) => return Ok(path),
+            Ok(None) => {}
+            Err(PolicyError::UnsafeNft(path)) => return Err(PolicyError::UnsafeSystemctl(path)),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(PolicyError::SystemctlMissing {
+        checked: candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
+}
+
+/// Ask the fixed system manager to forget the loader after its files are removed.
+fn reload_systemd(systemctl: &Path, removed_unit: &Path) -> Result<(), PolicyError> {
+    let output = Command::new(systemctl)
+        .env_clear()
+        .env("LANG", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .arg("daemon-reload")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|source| PolicyError::SystemctlExecutionFailed {
+            path: systemctl.to_owned(),
+            item: removed_unit.to_owned(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(PolicyError::SystemctlRejected {
+            path: systemctl.to_owned(),
+            item: removed_unit.to_owned(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Change the agent's mesh bit and apply the merged host policy if configured.
@@ -852,7 +1396,7 @@ fn remove_counter_clause(line: &str) -> String {
     )
 }
 
-/// Check every directory component and existing policy file against root writes.
+/// Check every directory component against root writes up to a fixed safe anchor.
 fn validate_policy_directories(parent: &Path, policy: &Path) -> Result<(), PolicyError> {
     for directory in parent.ancestors() {
         let metadata = fs::symlink_metadata(directory).map_err(PolicyError::Io)?;
@@ -862,6 +1406,11 @@ fn validate_policy_directories(parent: &Path, policy: &Path) -> Result<(), Polic
         let safe = metadata.is_dir();
         if !safe {
             return Err(PolicyError::UnsafePolicy(policy.to_owned()));
+        }
+        // `/run` is a fixed root-owned anchor for private runtime fixtures.
+        // Its parent can have an unmapped owner in the privileged test namespace.
+        if directory == Path::new("/run") {
+            break;
         }
     }
     Ok(())
@@ -1069,6 +1618,12 @@ fn safe_nft_path(candidate: &Path) -> Result<Option<PathBuf>, PolicyError> {
             if !directory_metadata.is_dir() || !safe_nft_directory(directory, &directory_metadata) {
                 return Err(PolicyError::UnsafeNft(resolved));
             }
+            // `/run` is a fixed root-owned trust anchor for private runtime
+            // tools and namespace fixtures. Its parent `/` may have an
+            // unmapped owner inside the privileged test user namespace.
+            if directory == Path::new("/run") || directory == Path::new("/nix/store") {
+                break;
+            }
         }
         let candidate_metadata = fs::symlink_metadata(candidate).map_err(PolicyError::Io)?;
         if candidate_metadata.uid() != 0 {
@@ -1090,14 +1645,17 @@ fn safe_nft_directory(path: &Path, metadata: &fs::Metadata) -> bool {
         && (mode & 0o022 == 0 || (path == Path::new("/nix/store") && mode & 0o1000 != 0))
 }
 
-/// Run nft at its resolved absolute path and retain useful stderr on failure.
+/// Run nft at its resolved absolute path while capturing inventory and error output.
 fn run_nft(
     path: &Path,
     arguments: &[&str],
     input: Option<&[u8]>,
 ) -> Result<std::process::Output, PolicyError> {
     let mut command = Command::new(path);
-    command.args(arguments).stderr(Stdio::piped());
+    command
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if input.is_some() {
         command.stdin(Stdio::piped());
     } else {
@@ -1125,7 +1683,9 @@ fn run_nft(
 /// Host policy state transitions avoid a disk write and nft transaction when unchanged.
 #[cfg(test)]
 mod tests {
-    use super::{Policy, update_mesh_enabled};
+    use std::path::{Path, PathBuf};
+
+    use super::{HOST_TABLE, Policy, PolicyError, host_table_removal_failure, update_mesh_enabled};
 
     /// Applying the current mesh state again leaves its policy unchanged and reports no work.
     #[test]
@@ -1137,5 +1697,21 @@ mod tests {
 
         assert!(!update_mesh_enabled(&mut agent, true));
         assert_eq!(agent.as_ref().map(|policy| policy.mesh_enabled), Some(true));
+    }
+
+    /// A rejected nft delete names the table the user asked infraternal to remove.
+    #[test]
+    fn table_removal_failure_names_the_product_table() {
+        let nft = Path::new("/nix/store/test-nft/bin/nft");
+        let error = host_table_removal_failure(
+            Some(nft),
+            PolicyError::NftRejected {
+                path: PathBuf::from(nft),
+                message: "permission denied".to_owned(),
+            },
+        );
+
+        assert!(error.to_string().contains(&format!("inet {HOST_TABLE}")));
+        assert!(error.to_string().contains("permission denied"));
     }
 }

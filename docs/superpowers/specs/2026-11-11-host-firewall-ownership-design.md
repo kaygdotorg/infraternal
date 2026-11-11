@@ -10,6 +10,8 @@ The server and infraternal agent must own their host input policy so mesh traffi
 - Add `infraternal0` and UDP 10254 input when mesh is enabled.
 - Keep the host input chain default-drop and enforce mesh grants in the existing mesh filter.
 - Apply a candidate ruleset in one nft transaction, reject incomplete admin access before invoking nft, report migration differences, and restore policy before `network-pre`.
+- Mark role policy files and the loader unit as product-owned so clearing the last role atomically removes `inet infraternal_host`, its enablement and its marked config; repeated removal is a no-op.
+- Removing the default-drop host table opens input. Unmarked files and units remain untouched, and removal errors name the failed item.
 - Resolve nft from fixed root-owned system or Nix paths, never by searching `PATH`.
 - Never inspect or alter tables outside the `infraternal_*` namespace.
 - Replace the hand-installed loader at its known service name on the next product install; this job does not change production.
@@ -22,7 +24,7 @@ The server and infraternal agent must own their host input policy so mesh traffi
 
 ## Design
 
-The shared host-firewall library lives beside the existing mesh firewall in the mesh plugin, which is available to both server and mesh-agent roles. It accepts typed listener, proxy, mesh, and admin rules and produces deterministic nft text. It rejects a policy without at least one explicit TCP/22 admin rule before tool discovery or mutation. The system service invokes the product binary with a root-owned policy file and a resolved absolute nft path. Server install writes its listener/proxy inputs and extra rules into that file. Mesh activation updates the same policy's mesh bit before applying it. Takeover reads the current named table, prints a difference report, then replaces the table in one nft batch. The product unit has `DefaultDependencies=no` and `Before=network-pre.target`.
+The shared host-firewall library lives beside the existing mesh firewall in the mesh plugin, which is available to both server and mesh-agent roles. It accepts typed listener, proxy, mesh, and admin rules and produces deterministic nft text. It rejects a policy without at least one explicit TCP/22 admin rule before tool discovery or mutation. The system service invokes the product binary with a root-owned, marked policy file and a resolved absolute nft path. Server install writes its listener/proxy inputs and extra rules into that file. Mesh activation updates the same policy's mesh bit before applying it. Takeover reads the current named table, prints a difference report, then replaces the table in one nft batch. An empty configuration deletes only the product table in one nft transaction and removes only marked policy and loader files. `server init --host-firewall-off` clears the server role while retaining any agent role. The product unit has `DefaultDependencies=no` and `Before=network-pre.target`.
 
 The product writes `infraternal-firewall.service` at system installation, intentionally replacing the hand-made unit of that name. Existing firewall sources needed for SSH, WireGuard, proxies, and remote listeners are represented as typed policy entries. Table names outside the prefix are never listed for mutation.
 

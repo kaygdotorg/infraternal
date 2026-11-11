@@ -78,3 +78,20 @@
 - [ ] Implement only the required adoption/path behavior, then prove admin access, both mesh directions, and default-drop.
 - [ ] Document how product installation replaces the hand unit; do not change prod.
 - [ ] Run `scripts/verify fast` on compute01, record measured outputs, and post finish receipts on #483 and #489 after any staging window is granted.
+
+### Task 4: Clear policy through the product
+
+**Files:**
+- Modify: `crates/plugins/mesh/src/host_firewall.rs` and its namespace tests.
+- Modify: `crates/infraternal/src/install.rs`, `crates/infraternal/src/up_install.rs`, and the server init CLI schema.
+- Modify: `docs/operations/prod-on-ssh.md`.
+
+**Interfaces:**
+- A role policy file and generated loader unit carry exact ownership markers.
+- `server init --host-firewall-off` clears the server role; when no role remains, the product removes its named table, marked policy files and marked loader.
+- Boot-time apply with no role policy performs the same idempotent cleanup. Unmarked files and units remain untouched.
+
+- [x] Write namespace tests for clear→removed, removed→clear, and unrelated state preservation; observe the expected missing lifecycle API on the red run.
+- [ ] Implement atomic default-drop table removal, marker-gated loader cleanup, explicit server policy-off configuration, and readable removal reports.
+- [ ] Run all three namespace tests plus the product CLI and role-file tests.
+- [ ] Run the full final gate on compute01 and publish the restore path on #489 before a staging window is granted.

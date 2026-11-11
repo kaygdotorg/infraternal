@@ -123,6 +123,28 @@ boot unit writes that report to the system journal. One nft batch deletes and
 recreates only `inet infraternal_host`; tables outside the `infraternal_*`
 namespace are not included in the transaction.
 
+## Clearing the server host policy
+
+For a system install, `infraternal server init --host-firewall-off` clears the
+server role's marked host-policy file through the product. Pass the same
+server listener, data, web root, origin, TLS, remote-listener and proxy flags
+as the current service because `server init` also rewrites that service unit.
+The dry run shows the plan before it is applied.
+
+If an agent role still has a marked policy, infraternal applies that policy and
+keeps the shared table and loader. If no role remains, it atomically deletes
+`inet infraternal_host`, reports the removed rule lines, unlinks only the
+product-marked network-pre loader and policy files, then reloads systemd. This
+opens input instead of retaining a default-drop table. A cleared configuration
+that reaches the boot apply path performs the same cleanup, so the loader does
+not recreate an empty policy on the next boot. The product marker in role JSON
+and its systemd unit gates file removal; unmarked files, foreign units and nft
+tables outside `infraternal_*` stay untouched.
+
+The staging restore to an absent-table baseline uses this product path with
+the staging server's current service flags. It does not edit nftables,
+systemd, or policy files by hand.
+
 ## Retiring the hand-installed unit
 
 The next product system install replaces

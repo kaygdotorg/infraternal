@@ -289,8 +289,11 @@ impl Install {
         let policy_path = self
             .root
             .join("var/lib/infraternal/host-firewall-agent.json");
-        let policy_json = serde_json::to_vec_pretty(policy)
-            .map_err(|_| io::Error::other("could not encode agent host firewall policy"))?;
+        let policy_json = host_firewall::serialize_policy_file(policy).map_err(|error| {
+            io::Error::other(format!(
+                "could not encode agent host firewall policy: {error}"
+            ))
+        })?;
         self.new_file(&policy_path, &policy_json, 0o600)?;
 
         let unit_directory = self.directory("etc/systemd/system", 0o755, false)?;
@@ -1078,8 +1081,14 @@ mod tests {
             .0
             .join("var/lib/infraternal/host-firewall-agent.json");
         let saved = fs::read(&policy_path).unwrap();
-        let saved_policy: Policy =
+        let saved_value: serde_json::Value =
             serde_json::from_slice(&saved).expect("saved agent policy deserializes");
+        assert_eq!(
+            saved_value["marker"],
+            host_firewall::HOST_FIREWALL_POLICY_MARKER
+        );
+        let saved_policy: Policy = serde_json::from_value(saved_value["policy"].clone())
+            .expect("saved agent policy payload deserializes");
         assert_eq!(saved_policy, policy);
         assert_eq!(fs::metadata(&policy_path).unwrap().mode() & 0o777, 0o600);
         assert_eq!(

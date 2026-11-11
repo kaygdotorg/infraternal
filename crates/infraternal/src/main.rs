@@ -98,6 +98,8 @@ struct ServerArgs {
     host_firewall_accept_interfaces: Vec<String>,
     /// Extra typed host input rules, including explicit administrator paths.
     host_firewall_allow: Vec<String>,
+    /// Clear the server policy from the shared host table during a system install.
+    host_firewall_off: bool,
 }
 
 /// Options controlling a user or system service installation.
@@ -1351,6 +1353,12 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
             .flatten()
             .cloned()
             .collect(),
+        host_firewall_off: matches
+            .try_get_one::<bool>("host_firewall_off")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false),
     })
 }
 

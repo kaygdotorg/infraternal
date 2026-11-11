@@ -115,6 +115,12 @@ fn server_init_action() -> ActionDefinition {
             JsonSchema::boolean("Replace a different service that has the same name."),
         ),
         (
+            "host_firewall_off".to_owned(),
+            JsonSchema::boolean(
+                "For a system install, clear the server host policy and remove the shared table and loader when no agent policy remains.",
+            ),
+        ),
+        (
             "name".to_owned(),
             JsonSchema::string("Service name, without .service."),
         ),
@@ -127,6 +133,7 @@ fn server_init_action() -> ActionDefinition {
             "Choose where it listens, its data folder and its public address.",
             "A system install also takes over infraternal-firewall.service and writes the configured default-drop host policy.",
             "Use --host-firewall-allow and --host-firewall-accept-interface to keep administrator paths, then inspect the complete plan with --dry-run.",
+            "On an existing system install, --host-firewall-off clears only the server policy; an agent role keeps the shared table active.",
             "Run with --dry-run to see exactly what would be installed.",
             "Run it again and confirm, or pass --yes when no one is at the terminal.",
         ],
@@ -145,6 +152,8 @@ fn server_init_action() -> ActionDefinition {
         dry_run_first: true,
         notes: vec![
             "Without --dry-run, setup enables and starts the selected service after confirmation."
+                .to_owned(),
+            "--host-firewall-off removes the server's default-drop table when no agent policy remains, which opens input."
                 .to_owned(),
         ],
     })

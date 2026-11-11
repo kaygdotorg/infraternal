@@ -6,19 +6,22 @@
 )]
 
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
+    os::unix::fs::{PermissionsExt, symlink},
     path::Path,
     process::{Command, Stdio},
     str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::Duration,
 };
 
 use infraternal_plugin_mesh::host_firewall::{
-    AllowRule, Listener, Policy, Protocol, apply_with_ssh_connection, diff_report, discover_nft,
-    render, validate, validate_ssh_connection_on,
+    AllowRule, HostFirewallPaths, Listener, Policy, PolicyRole, Protocol, apply_from_config_at,
+    apply_with_ssh_connection, clear_role_from_config_at, diff_report, discover_nft, render,
+    validate, validate_ssh_connection_on, write_policy_file,
 };
 
 /// Supplies the private nft command and namespace setup used by these policy tests.
@@ -26,6 +29,9 @@ use infraternal_plugin_mesh::host_firewall::{
 mod nft_fixture;
 
 use nft_fixture::NftFixture;
+
+/// Give each temporary policy layout a unique private directory.
+static NEXT_CONFIG_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 /// Build a prod-shaped policy without depending on a host or installed nft tool.
 fn prod_policy(mesh_enabled: bool) -> Policy {
@@ -292,6 +298,293 @@ fn missing_nft_error_reports_the_path_it_checked() {
             .to_string()
             .contains(missing.to_str().expect("UTF-8 path"))
     );
+}
+
+/// Never replace a root-owned role file that does not carry the product marker.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn writing_host_policy_refuses_an_unmarked_role_file() {
+    let config = ConfigFixture::new();
+    let path = config.paths.server_policy_path();
+    let foreign = br#"{"marker":"operator-owned","policy":{"admin_rules":[],"accept_interfaces":[],"listeners":[],"mesh_enabled":false}}"#;
+    fs::create_dir_all(path.parent().expect("policy parent"))
+        .expect("create private policy directory");
+    fs::write(path, foreign).expect("write the unmarked policy");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .expect("protect the unmarked policy");
+    let policy = Policy {
+        admin_rules: vec![
+            AllowRule::from_str("wt0,10.69.69.0/24,tcp,22").expect("typed administrator rule"),
+        ],
+        ..Policy::default()
+    };
+
+    let error = write_policy_file(path, &policy).expect_err("foreign policy must stay untouched");
+
+    assert!(error.to_string().contains(&path.display().to_string()));
+    assert!(
+        error
+            .to_string()
+            .contains("not marked as infraternal-owned"),
+        "the writer must reject an unowned policy for its ownership marker, got: {error}"
+    );
+    assert_eq!(fs::read(path).expect("read the unmarked policy"), foreign);
+}
+
+/// Clear the server role through the product path and remove only its marked state.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn clearing_host_policy_removes_its_table_config_and_loader() {
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    let setup = run_nft(
+        &nft,
+        &["-f", "-"],
+        Some(concat!(
+            "add table inet infraternal_host\n",
+            "add chain inet infraternal_host input { type filter hook input priority filter - 10; policy drop; }\n",
+            "add rule inet infraternal_host input iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 22 accept\n",
+            "add table inet unrelated_control\n",
+            "add chain inet unrelated_control keep\n",
+            "add rule inet unrelated_control keep counter\n",
+        )),
+    );
+    assert!(setup.status.success(), "host-policy fixture was rejected");
+    let unrelated_before = list_table(&nft, "unrelated_control");
+    write_policy_file(
+        config.paths.server_policy_path(),
+        &Policy {
+            admin_rules: vec![
+                AllowRule::from_str("wt0,10.69.69.0/24,tcp,22").expect("typed administrator rule"),
+            ],
+            ..Policy::default()
+        },
+    )
+    .expect("save marked server policy");
+    config.write_owned_loader();
+
+    let report = clear_role_from_config_at(
+        PolicyRole::Server,
+        &config.paths,
+        Some(&nft),
+        Some(&config.systemctl),
+    )
+    .expect("remove the configured server policy");
+
+    assert!(
+        !run_nft(
+            &nft,
+            &["-n", "list", "table", "inet", "infraternal_host"],
+            None
+        )
+        .status
+        .success(),
+        "the product host table must be removed"
+    );
+    assert_eq!(unrelated_before, list_table(&nft, "unrelated_control"));
+    assert!(!config.paths.server_policy_path().exists());
+    assert!(!config.paths.unit_path().exists());
+    assert!(!config.paths.enabled_path().exists());
+    assert!(
+        report.contains("- current: iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 22 accept")
+    );
+    assert!(report.contains("removed inet infraternal_host"));
+    assert!(report.contains("removed server policy file"));
+    assert!(report.contains("removed loader unit"));
+}
+
+/// Repeating a clear after removal succeeds without changing unrelated nft state.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn clearing_an_already_removed_host_policy_is_a_noop() {
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    let setup = run_nft(
+        &nft,
+        &["-f", "-"],
+        Some(concat!(
+            "add table inet infraternal_host\n",
+            "add chain inet infraternal_host input { type filter hook input priority filter - 10; policy drop; }\n",
+            "add rule inet infraternal_host input iifname \"lo\" accept\n",
+        )),
+    );
+    assert!(setup.status.success(), "host-policy fixture was rejected");
+
+    clear_role_from_config_at(
+        PolicyRole::Server,
+        &config.paths,
+        Some(&nft),
+        Some(&config.systemctl),
+    )
+    .expect("the first clear removes the table");
+    let repeated = clear_role_from_config_at(
+        PolicyRole::Server,
+        &config.paths,
+        Some(&nft),
+        Some(&config.systemctl),
+    )
+    .expect("a second clear is idempotent");
+
+    assert!(repeated.contains("no rule differences"));
+    assert!(
+        !run_nft(
+            &nft,
+            &["-n", "list", "table", "inet", "infraternal_host"],
+            None
+        )
+        .status
+        .success(),
+        "the removed product table must stay absent"
+    );
+}
+
+/// Boot-time cleanup deletes infraternal-owned state but keeps foreign tables and units.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn empty_config_removes_only_the_product_table_and_marked_loader() {
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    let setup = run_nft(
+        &nft,
+        &["-f", "-"],
+        Some(concat!(
+            "add table inet infraternal_host\n",
+            "add chain inet infraternal_host input { type filter hook input priority filter - 10; policy drop; }\n",
+            "add rule inet infraternal_host input iifname \"lo\" accept\n",
+            "add table inet unrelated_control\n",
+            "add chain inet unrelated_control keep\n",
+            "add rule inet unrelated_control keep counter\n",
+        )),
+    );
+    assert!(setup.status.success(), "host-policy fixture was rejected");
+    let unrelated_before = list_table(&nft, "unrelated_control");
+    fs::create_dir_all(config.paths.unit_path().parent().expect("unit parent"))
+        .expect("create fake systemd directory");
+    fs::write(
+        config.paths.unit_path(),
+        "[Unit]\nDescription=operator-owned unit\n",
+    )
+    .expect("write an unmarked unit");
+    fs::set_permissions(config.paths.unit_path(), fs::Permissions::from_mode(0o644))
+        .expect("protect the foreign unit");
+    fs::create_dir_all(
+        config
+            .paths
+            .enabled_path()
+            .parent()
+            .expect("enablement parent"),
+    )
+    .expect("create fake enablement directory");
+    symlink(
+        "../infraternal-firewall.service",
+        config.paths.enabled_path(),
+    )
+    .expect("write foreign enablement link");
+
+    let report = apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("empty configuration clears stale owned state");
+
+    assert!(
+        !run_nft(
+            &nft,
+            &["-n", "list", "table", "inet", "infraternal_host"],
+            None
+        )
+        .status
+        .success(),
+        "the product table must be removed"
+    );
+    assert_eq!(unrelated_before, list_table(&nft, "unrelated_control"));
+    assert!(
+        config.paths.unit_path().exists(),
+        "an unmarked unit is foreign"
+    );
+    assert!(
+        config.paths.enabled_path().exists(),
+        "an enablement link to an unmarked unit is foreign"
+    );
+    assert!(report.contains("kept unmarked loader unit"));
+    assert!(report.contains("kept unmarked enablement link"));
+}
+
+/// Holds marked host-policy files below a disposable namespace-local directory.
+struct ConfigFixture {
+    /// The fixture root removed when this test ends.
+    root: std::path::PathBuf,
+    /// Product paths rooted in the fixture instead of the host filesystem.
+    paths: HostFirewallPaths,
+    /// A harmless systemctl stand-in used only to verify cleanup ordering.
+    systemctl: std::path::PathBuf,
+}
+
+impl ConfigFixture {
+    /// Create a private layout and a fixed executable that accepts daemon-reload.
+    fn new() -> Self {
+        let sequence = NEXT_CONFIG_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::path::Path::new("/run").join(format!(
+            "j511-host-firewall-config-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create private policy fixture");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("protect private policy fixture");
+        let paths = HostFirewallPaths::under(&root);
+        let policy_parent = paths
+            .server_policy_path()
+            .parent()
+            .expect("server policy parent");
+        fs::create_dir_all(policy_parent).expect("create private policy directories");
+        let mut directory = policy_parent.to_owned();
+        while directory != root {
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o755))
+                .expect("protect policy directory from group writes");
+            directory = directory
+                .parent()
+                .expect("policy directories stay below the fixture root")
+                .to_owned();
+        }
+        let systemctl = root.join("systemctl");
+        fs::write(&systemctl, "#!/bin/sh\nexit 0\n").expect("write fake systemctl");
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755))
+            .expect("make fake systemctl executable");
+        Self {
+            root,
+            paths,
+            systemctl,
+        }
+    }
+
+    /// Install a loader unit and enablement link carrying the product marker.
+    fn write_owned_loader(&self) {
+        fs::create_dir_all(self.paths.unit_path().parent().expect("unit parent"))
+            .expect("create fake systemd directory");
+        fs::write(
+            self.paths.unit_path(),
+            "# Managed by infraternal: host-firewall/v1\n[Unit]\nDescription=infraternal host input firewall\n",
+        )
+        .expect("write marked loader unit");
+        fs::set_permissions(self.paths.unit_path(), fs::Permissions::from_mode(0o644))
+            .expect("protect marked loader unit");
+        fs::create_dir_all(
+            self.paths
+                .enabled_path()
+                .parent()
+                .expect("enablement parent"),
+        )
+        .expect("create fake enablement directory");
+        symlink("../infraternal-firewall.service", self.paths.enabled_path())
+            .expect("write product enablement link");
+    }
+}
+
+impl Drop for ConfigFixture {
+    /// Remove only this test's temporary policy and systemd paths.
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
 }
 
 /// Take over a hand-made host table without changing unrelated nft state.

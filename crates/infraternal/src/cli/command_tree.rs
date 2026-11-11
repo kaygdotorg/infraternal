@@ -813,6 +813,7 @@ mod tests {
         );
     }
 
+    /// Parse the server init confirmation, host-policy and listener options.
     #[test]
     #[cfg(feature = "plugin-server")]
     fn server_init_parses_confirmation_plan_and_server_configuration() {
@@ -824,6 +825,7 @@ mod tests {
                 "init",
                 "--listen",
                 "127.0.0.1:7443",
+                "--host-firewall-off",
                 "--dry-run",
                 "--json",
             ])
@@ -831,6 +833,7 @@ mod tests {
         let command = selected(&matches);
         assert_eq!(command.path, ["server", "init"]);
         assert!(command.matches.get_flag("dry_run"));
+        assert!(command.matches.get_flag("host_firewall_off"));
         assert_eq!(
             command
                 .matches

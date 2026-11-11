@@ -29,11 +29,13 @@ use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+use infraternal_plugin_mesh::host_firewall;
 #[cfg(all(
     any(feature = "plugin-mesh", feature = "plugin-server"),
     target_os = "linux"
 ))]
-use infraternal_plugin_mesh::host_firewall::{self, AllowRule, Policy};
+use infraternal_plugin_mesh::host_firewall::{AllowRule, Policy};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -1168,7 +1170,8 @@ fn systemd_unit() -> String {
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 fn host_firewall_systemd_unit() -> String {
     format!(
-        "[Unit]\nDescription=infraternal host input firewall\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target\nWants=network-pre.target\n\n[Service]\nType=oneshot\nExecStart={SERVICE_BINARY} __host-firewall-apply\nRemainAfterExit=yes\n\n[Install]\nWantedBy=network-pre.target\n"
+        "{}\n[Unit]\nDescription=infraternal host input firewall\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target\nWants=network-pre.target\n\n[Service]\nType=oneshot\nExecStart={SERVICE_BINARY} __host-firewall-apply\nRemainAfterExit=yes\n\n[Install]\nWantedBy=network-pre.target\n",
+        host_firewall::HOST_FIREWALL_UNIT_MARKER
     )
 }
 
