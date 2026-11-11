@@ -726,3 +726,251 @@ async fn forget_retired_host_without_removal_record_matches_inventory() {
     assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
     assert!(!live(&f, host).await);
 }
+
+/// Return the browser removal-start status using this fixture's same-origin owner cookie.
+async fn removal_start_status(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
+    use tower::ServiceExt;
+    crate::remote_removal_http::router(f.auth.clone(), removal(f))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/remote/hosts/remove/start")
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(json!({"host_id":host}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// An expired admin window asks for a tap while the owner's browser session stays signed in (#498).
+#[tokio::test]
+async fn expired_removal_window_requests_passkey_instead_of_sign_in() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    sqlx::query("UPDATE sessions SET fresh=1")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        removal_start_status(&f, host).await,
+        axum::http::StatusCode::PRECONDITION_REQUIRED
+    );
+    assert!(
+        f.auth
+            .session(&f.session, crate::runtime::unix_seconds().unwrap())
+            .await
+            .is_ok()
+    );
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        removal_start_status(&f, host).await,
+        axum::http::StatusCode::FORBIDDEN,
+        "a non-owner must not receive the window-expired response"
+    );
+    sqlx::query("UPDATE users SET owner=1 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        removal_start_status(&f, host).await,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "an ended session must not receive the window-expired response"
+    );
+    assert!(live(&f, host).await);
+}
+
+/// A real identity-only tap renews this session, resumes removal and cannot revive a per-action grant (#498).
+#[tokio::test]
+async fn removal_passkey_renews_same_session_and_cannot_replay() {
+    let mut f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let now = NOW + 901;
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
+    let before = f
+        .auth
+        .session(&f.session, now)
+        .await
+        .unwrap()
+        .session_incarnation;
+    let start = service.reauth_start(&f.session, host, now).await.unwrap();
+    assert!(
+        start["options"]["publicKey"].get("extensions").is_none(),
+        "renewal needs no PRF secret"
+    );
+    let ceremony = str_field(&start, "ceremony");
+    let proof = f.software.login(&start, ORIGIN, true);
+    let cross_session = crate::auth::random_capability();
+    let mut tx = f.auth.pool.begin().await.unwrap();
+    insert_session(
+        &mut tx,
+        &cross_session,
+        &f.user,
+        "second browser",
+        now,
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(f.auth.session(&cross_session, now).await.is_ok());
+    assert!(
+        service
+            .reauth_finish(&f.session, Uuid::new_v4(), ceremony, proof.clone(), now)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .reauth_finish(&cross_session, host, ceremony, proof.clone(), now)
+            .await
+            .is_err()
+    );
+    service
+        .reauth_finish(&f.session, host, ceremony, proof.clone(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.auth
+            .fresh_session(&f.session, now)
+            .await
+            .unwrap()
+            .session_incarnation,
+        before
+    );
+    assert!(
+        f.auth.add_start(&f.session, now).await.is_err(),
+        "renewal must not resurrect the old per-action tap"
+    );
+    assert!(
+        service
+            .reauth_finish(&f.session, host, ceremony, proof, now)
+            .await
+            .is_err()
+    );
+    let review = service.start(&f.session, host, true, now).await.unwrap();
+    assert_eq!(
+        service
+            .finish_host(&f.session, host, str_field(&review, "review"), now)
+            .await
+            .unwrap()["state"],
+        "pending"
+    );
+}
+
+/// Unrelated ceremonies, stale requests and authority revoked during the prompt never renew a session (#498).
+#[tokio::test]
+async fn removal_passkey_rechecks_authority_and_rejects_unrelated_ceremonies() {
+    for rule in [
+        "unrelated",
+        "expired",
+        "owner-revoked",
+        "session-revoked",
+        "host-revoked",
+        "no-uv",
+        "wrong-origin",
+        "wrong-rp-id",
+    ] {
+        let mut f = fixture().await;
+        let host = owned_host(&f).await;
+        let service = removal(&f);
+        let now = NOW + 901;
+        let start = if rule == "unrelated" {
+            f.auth.login_start(&f.user, now).await.unwrap()
+        } else {
+            service.reauth_start(&f.session, host, now).await.unwrap()
+        };
+        let proof = match rule {
+            "no-uv" => f.software.login(&start, ORIGIN, false),
+            "wrong-origin" => f.software.login(&start, "https://evil.example.test", true),
+            "wrong-rp-id" => {
+                f.software.rp_id = "evil.example.test";
+                f.software.login(&start, ORIGIN, true)
+            }
+            _ => f.software.login(&start, ORIGIN, true),
+        };
+        match rule {
+            "owner-revoked" => {
+                sqlx::query("UPDATE users SET owner=0")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "session-revoked" => {
+                sqlx::query("DELETE FROM sessions")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "host-revoked" => {
+                sqlx::query("UPDATE remote_hosts SET revoked_at=1")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        assert!(
+            service
+                .reauth_finish(
+                    &f.session,
+                    host,
+                    str_field(&start, "ceremony"),
+                    proof,
+                    if rule == "expired" { now + 120 } else { now }
+                )
+                .await
+                .is_err(),
+            "{rule}"
+        );
+        assert!(
+            f.auth.fresh_session(&f.session, now).await.is_err(),
+            "{rule}"
+        );
+    }
+}
+
+/// Concurrent reviews for one host can commit only one removal record (#498).
+#[tokio::test]
+async fn concurrent_second_removal_is_refused_before_a_second_commit() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let first = service.start(&f.session, host, true, NOW).await.unwrap();
+    let second = service.start(&f.session, host, true, NOW).await.unwrap();
+    let first_review = str_field(&first, "review").to_owned();
+    let second_review = str_field(&second, "review").to_owned();
+    let (first, second) = tokio::join!(
+        service.finish_host(&f.session, host, &first_review, NOW),
+        service.finish_host(&f.session, host, &second_review, NOW),
+    );
+    assert_ne!(
+        first.is_ok(),
+        second.is_ok(),
+        "exactly one concurrent removal can commit"
+    );
+    let removals: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_host_removals WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        removals, 1,
+        "the second request cannot publish another removal"
+    );
+}

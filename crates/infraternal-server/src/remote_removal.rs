@@ -39,6 +39,7 @@ enum RemovalAuthority {
     /// completed in the same transaction as the removal.
     ApiKey { key_hash: String, audit_id: i64 },
 }
+/// Shared host-removal authority, bounded reviews and session-bound renewal challenges.
 #[derive(Clone)]
 pub(crate) struct Removal {
     auth: Auth,
@@ -47,12 +48,15 @@ pub(crate) struct Removal {
     hosts: RemoteHosts,
     trust: PathBuf,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
+    /// Renewal ceremonies belong to one session and host, separate from removal reviews (#498).
+    taps: Arc<Mutex<HashMap<String, Pending>>>,
     admission: Arc<Semaphore>,
 }
 impl Removal {
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+    /// Share the server identity, enrollment and host-delivery state across removal requests.
     pub(crate) fn new(
         auth: Auth,
         pool: SqlitePool,
@@ -67,8 +71,90 @@ impl Removal {
             hosts,
             trust,
             pending: Arc::default(),
+            taps: Arc::default(),
             admission: Arc::new(Semaphore::new(8)),
         }
+    }
+    /// Ask this host's owner for a passkey to renew the browser admin window (#498).
+    pub(crate) async fn reauth_start(
+        &self,
+        token: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let user = self.auth.bootstrap_owner(token, now).await?;
+        if !self.auth.bootstrap_host(&user, host).await {
+            return Err(crate::auth::Error::Denied);
+        }
+        let mut taps = self.taps.lock().await;
+        taps.retain(|_, entry| entry.expires > now);
+        if taps.len() >= 1024 {
+            return Err(crate::auth::Error::Denied);
+        }
+        let mut start = self.auth.login_start(&user, now).await?;
+        // Identity verification needs no account-key secret or PRF extension in mobile browsers.
+        start["options"]["publicKey"]
+            .as_object_mut()
+            .ok_or(crate::auth::Error::Invalid)?
+            .remove("extensions");
+        let id = start["ceremony"]
+            .as_str()
+            .ok_or(crate::auth::Error::Invalid)?
+            .to_owned();
+        taps.insert(
+            id,
+            Pending {
+                hash: crate::auth::hash(token),
+                user,
+                host,
+                uninstall: true,
+                expires: now
+                    .checked_add(REVIEW_SECONDS)
+                    .ok_or(crate::auth::Error::Denied)?,
+            },
+        );
+        Ok(start)
+    }
+
+    /// Spend only the selected host's ceremony and renew the same live owner session.
+    /// This grants ordinary admin authority, never a per-action tap or a new login.
+    pub(crate) async fn reauth_finish(
+        &self,
+        token: &str,
+        host: Uuid,
+        ceremony: &str,
+        proof: Value,
+        now: i64,
+    ) -> Result<(), crate::auth::Error> {
+        let hash = crate::auth::hash(token);
+        let entry = {
+            let mut taps = self.taps.lock().await;
+            let entry = taps.get(ceremony).ok_or(crate::auth::Error::Denied)?;
+            if entry.hash != hash || entry.host != host {
+                return Err(crate::auth::Error::Denied);
+            }
+            taps.remove(ceremony).ok_or(crate::auth::Error::Denied)?
+        };
+        let verified = self.auth.verify_passkey(ceremony, proof, now).await?;
+        let live_now = verified.verified_at().max(now);
+        if entry.expires <= live_now
+            || verified.expires() <= live_now
+            || verified.user() != entry.user
+        {
+            return Err(crate::auth::Error::Denied);
+        }
+        // Recheck registration, host and owner authority in the write. Clear any older
+        // per-action grant: renewing `fresh` must never make that grant usable again.
+        let changed = sqlx::query("UPDATE sessions SET fresh=MAX(?,unixepoch()),tap_action=NULL,tap_spent=1 WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>MAX(?,unixepoch()) AND ?>MAX(?,unixepoch()) AND EXISTS(SELECT 1 FROM users WHERE id=sessions.user_id AND owner=1) AND EXISTS(SELECT 1 FROM passkeys WHERE user_id=sessions.user_id AND id=?) AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=sessions.user_id AND revoked_at IS NULL)")
+            .bind(live_now).bind(hash).bind(&entry.user).bind(live_now)
+            .bind(entry.expires.min(verified.expires()))
+            .bind(live_now)
+            .bind(verified.credential()).bind(host.as_bytes().as_slice())
+            .execute(&self.pool).await?.rows_affected();
+        if changed != 1 {
+            return Err(crate::auth::Error::Denied);
+        }
+        Ok(())
     }
     pub(crate) async fn start(
         &self,
