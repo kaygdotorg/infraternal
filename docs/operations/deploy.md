@@ -196,7 +196,7 @@ new authority epoch retires peers left on enrolled nodes, but it cannot infer
 removals that are absent from the restored database. Before allowing infraternal
 agents to reconnect, compare the restored Mesh inventory with removals made
 since the backup and remove those nodes again. Keep agent connectivity blocked
-until that reconciliation is complete. For nodes marked `unsafe after restore`,
+until that reconciliation is complete. For nodes whose card says `needs an update` (their infraternal agent predates epoch support),
 do not assume the old local peer set was replaced; upgrade them to epoch support
 or keep their mesh traffic blocked until their local Mesh state is reset and
 they are re-enrolled.
