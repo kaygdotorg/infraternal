@@ -216,6 +216,7 @@ for (const { w, h } of SIZES) for (const theme of THEMES) {
 
 // ---- the window pills ----------------------------------------------------------------------------------------------------
 
+/** Measures the first Console window's header: pill and actions heights, the close button's hit area, icon sizes, whether the host name is cut, and the pill's children. */
 async function pillMetrics(page: Page) {
   return page.evaluate(() => {
     const head = document.querySelector<HTMLElement>("[data-view='console'] .ui-window .ui-window-head")!;

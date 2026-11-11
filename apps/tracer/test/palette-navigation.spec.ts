@@ -83,6 +83,10 @@ async function expectSelectedVisible(page: Page, expectedIndex?: number): Promis
   return state;
 }
 
+/**
+ * Times 100 arrow presses and 100 filter inputs on the open palette, logs both as METRIC lines and checks the filter's budget.
+ * It leaves the palette unfiltered, so the checks after it start from the whole list.
+ */
 async function measureHandlers(page: Page): Promise<void> {
   const millisecondsPerArrow = await page.evaluate(() => {
     const input = document.querySelector<HTMLInputElement>("#palette-input");
