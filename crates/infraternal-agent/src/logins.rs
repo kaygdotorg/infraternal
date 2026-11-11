@@ -1795,12 +1795,15 @@ mod tests {
         services: PathBuf,
         /// Stops the stand-in kernel thread.
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// Owns the writer so fixture cleanup cannot race its last cgroup update.
+        kernel: Option<std::thread::JoinHandle<()>>,
     }
 
     impl ScriptedHost {
         /// Builds the host under `root`. With `dies`, a stand-in kernel empties
         /// the scope once `cgroup.kill` is written; without it the scope stays
-        /// populated, like a process in uninterruptible sleep.
+        /// populated, like a process in uninterruptible sleep. Dropping the
+        /// host joins that writer before its files can be removed.
         fn new(root: &Path, unit: &str, uid: u32, loaded: bool, dies: bool) -> Self {
             use std::os::unix::fs::PermissionsExt as _;
             let host = root.join("host");
@@ -1865,7 +1868,7 @@ mod tests {
             );
             std::fs::create_dir_all(host.join("linger")).unwrap();
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            if dies {
+            let kernel = dies.then(|| {
                 let (groups, stop) = (vec![scope.clone(), services.clone()], stop.clone());
                 std::thread::spawn(move || {
                     while !stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1877,11 +1880,11 @@ mod tests {
                                     .unwrap();
                             }
                         }
-                        // sleep: the stand-in kernel polls for the kill write; the loop ends on it.
+                        // sleep: poll for kill writes until the host signals shutdown.
                         std::thread::sleep(Duration::from_millis(5));
                     }
-                });
-            }
+                })
+            });
             HOST_UNITS.with(|units| {
                 *units.borrow_mut() = Some(HostStandIn {
                     systemctl,
@@ -1898,6 +1901,7 @@ mod tests {
                 scope,
                 services,
                 stop,
+                kernel,
             }
         }
 
@@ -1908,8 +1912,15 @@ mod tests {
     }
 
     impl Drop for ScriptedHost {
+        /// Finish the writer's in-flight update before callers remove its files.
         fn drop(&mut self) {
             self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(kernel) = self.kernel.take()
+                && kernel.join().is_err()
+                && !std::thread::panicking()
+            {
+                panic!("stand-in kernel thread failed");
+            }
             HOST_UNITS.with(|units| *units.borrow_mut() = None);
         }
     }
@@ -2045,7 +2056,14 @@ mod tests {
                 .any(|line| line == format!("systemctl stop user@{uid}.service")),
             "{calls:?}"
         );
+        // Cleanup may start as soon as the host is dropped. Its writer must
+        // have released its last ownership by then, not merely been signalled.
+        let writer = std::sync::Arc::downgrade(&host.stop);
         drop(host);
+        assert!(
+            writer.upgrade().is_none(),
+            "fixture writer outlived its host"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
