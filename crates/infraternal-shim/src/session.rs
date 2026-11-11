@@ -264,16 +264,13 @@ impl Peer {
         let queued = if self.pending.is_empty() {
             self.queue(&frame)?;
             true
-        } else if matches!(reply, InputReply::Ack)
-            && crate::frame::insert_input_ack_before_unstarted_output(
-                &mut self.pending,
-                self.written,
-                written,
-            )?
-        {
-            true
         } else {
-            false
+            matches!(reply, InputReply::Ack)
+                && crate::frame::insert_input_ack_before_unstarted_output(
+                    &mut self.pending,
+                    self.written,
+                    written,
+                )?
         };
         if queued {
             self.input_reply = None;

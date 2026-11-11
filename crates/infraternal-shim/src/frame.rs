@@ -422,11 +422,11 @@ impl Frame {
     }
 }
 
-/// Put a fresh InputAck before wholly unstarted raw Output while keeping existing Acks and complete frame bytes ordered.
+/// Put a fresh `InputAck` before wholly unstarted raw `Output` while keeping earlier acknowledgments ordered.
 ///
 /// A partially written frame cannot be moved without corrupting the wire
 /// stream. Non-Ack control frames are ordering fences, so this only crosses
-/// zero or more complete InputAcks before the first unstarted Output.
+/// zero or more complete `InputAck` frames before the first unstarted `Output`.
 /// # Errors
 /// Returns the encoder error if the small Ack frame cannot be encoded.
 pub(crate) fn insert_input_ack_before_unstarted_output(
