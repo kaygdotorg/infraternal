@@ -18,7 +18,7 @@ const TABLE: &str = "infraternal_mesh";
 #[path = "../tests/support/nft_fixture.rs"]
 mod nft_fixture;
 
-/// Keep a namespace-local nft copy scoped to one real-engine test thread.
+// Keep a namespace-local nft copy scoped to one real-engine test thread.
 #[cfg(test)]
 std::thread_local! {
     /// The validated nft copy used only by the current namespace test thread.

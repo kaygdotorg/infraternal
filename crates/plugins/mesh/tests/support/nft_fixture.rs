@@ -24,6 +24,10 @@ impl NftFixture {
     /// The gate maps host root to UID 65534 inside its sandbox, so the host-owned source
     /// cannot pass the product's root-owner check there. The copy is owned by the sandbox
     /// root, remains below private tmpfs, and is still checked by the production resolver.
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture setup failures must identify the unavailable sandbox resource"
+    )]
     #[must_use]
     pub fn new(fixed_candidates: &[&str]) -> Self {
         let source = source_candidate(fixed_candidates).expect("fixed-path nft executable");
