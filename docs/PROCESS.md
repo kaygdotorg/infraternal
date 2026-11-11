@@ -60,7 +60,10 @@ Definition of Done (it is in every job prompt):
    `scripts/verify fast` (static builds included) is the final gate: it runs
    at milestones and always on the branch head before you report done, hand
    off to review, push for integration or merge; its output is quoted
-   verbatim on the issue. A green `iterate` run is never quoted as the final
+   verbatim on the issue. Both modes run the `tracer unit suite` row with
+   `cd apps/tracer && bun test src` in one process, so module mocks and browser
+   globals leaking between source test files cannot hide behind separate runs
+   or a hand-picked file list (#503). A green `iterate` run is never quoted as the final
    gate. The commit body gives the why, the rejected alternatives, and the
    decision or issue references. (Owner, 2026-10-11: the full gate on every
    commit cost about half of each job's time on the shared build host.)
