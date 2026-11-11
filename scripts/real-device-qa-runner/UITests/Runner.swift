@@ -162,6 +162,12 @@ final class DeviceQA: XCTestCase {
                 springboard.coordinate(withNormalizedOffset: CGVector(dx: Double(a[1])!, dy: Double(a[2])!)).tap()
                 sleep(1)
             case "type":
+                // A terminal only takes keys once it has focus, and typing without a keyboard aborts the whole run, so
+                // tap the terminal area first when no keyboard is up.
+                if !safari.keyboards.firstMatch.exists {
+                    springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+                    _ = safari.keyboards.firstMatch.waitForExistence(timeout: 5)
+                }
                 safari.typeText(a[1])
             case "typefile":
                 // Types the last word of a 0600 file, so a secret never travels through argv or the log.

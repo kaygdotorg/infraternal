@@ -10,7 +10,7 @@
 #   scripts/real-device-qa host-account             # throwaway rootless account + sshd on dev-02 (the host to add)
 #   scripts/real-device-qa owner-setup              # first-run owner with a real Face ID passkey (fresh server only)
 #   scripts/real-device-qa add-host                 # Add host through the phone UI (fresh server only)
-#   scripts/real-device-qa check [--themes light,dark] [--out DIR]
+#   scripts/real-device-qa check [--themes light,dark] [--phases "shell pill"] [--out DIR]
 #   scripts/real-device-qa teardown                 # remove everything created on dev-02, stop the QA units
 #
 # Why a copy of the server: a browser cannot be signed in to an existing account on a second device (the account key
@@ -105,10 +105,11 @@ cmd_add_host() {
 }
 
 cmd_check() {
-  local themes="light,dark" out="" ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  local themes="light,dark" out="" phases="" ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
   while [ $# -gt 0 ]; do case "$1" in
     --themes) themes="$2"; shift 2;;
     --out) out="$2"; shift 2;;
+    --phases) phases="$2"; shift 2;;   # e.g. "shell pill": rerun only those phases (signin shell pill menus text motion)
     *) die "unknown option $1";; esac; done
   out="${out:-$HOME/.cache/codex-scratch/real-device-qa/$ts}"
   mkdir -p "$out"
@@ -117,7 +118,7 @@ cmd_check() {
   for theme in ${themes//,/ }; do
     local remote="$SIM/qa-out/$ts-$theme"
     # std holds the simulator lock for the whole checklist (run.sh session), so nothing else can steer Safari.
-    runner "./run.sh session ./checklist.sh $theme $QA_URL $remote" > "$out/$theme-log.txt" 2>&1 || echo "theme $theme: checklist reported errors, see $out/$theme-log.txt" >&2
+    runner "QA_PHASES='$phases' ./run.sh session ./checklist.sh $theme $QA_URL $remote" > "$out/$theme-log.txt" 2>&1 || echo "theme $theme: checklist reported errors, see $out/$theme-log.txt" >&2
     std "tar -C $remote -cf - ." | { mkdir -p "$out/$theme" && tar -C "$out/$theme" -xf -; }
   done
   python3 -I "$HERE/real-device-qa-report.py" "$out" "$expected" "$themes" | tee "$out/results.md"

@@ -45,7 +45,8 @@ scripts/real-device-qa stage /path/to/new/bundle    # only when the build under 
 scripts/real-device-qa check                        # light and dark, about 25 minutes
 ```
 
-`check` holds the simulator lock for the whole run, so another job cannot move Safari mid-check. The table is
+`check` holds the simulator lock for the whole run, so another job cannot move Safari mid-check. It is slow
+(about 35 minutes per theme); `--phases "shell pill"` reruns single phases (signin shell pill menus text motion). The table is
 printed and saved as `results.md` in `~/.cache/codex-scratch/real-device-qa/<UTC>/`. Attach the table, the
 screenshots and the videos to the issue; never commit them (ADR 0003).
 
@@ -105,5 +106,10 @@ first-run). Shut the simulator down with `xcrun simctl shutdown` when you are do
 
 - Production cannot be signed in to from a simulator without the owner's own passkey, so prod gets no real-device run
   yet.
-- Mac Safari is not covered: macOS VM Safari has no platform passkey without Touch ID (not proven either way).
+- Mac Safari is not covered. On 2026-11-11 `claude@infraternal-macos-01-std` could not `sudo -n` (a password is
+  required), so neither `launchctl asuser 501 ... -u lume` (a GUI session to click in) nor `safaridriver --enable`
+  was possible, and the Mac VM has no Touch ID for a platform passkey anyway. The same approach (its own owner on
+  its own QA instance) would work if the Mac VM can make a passkey; that is unproven.
+- Every tap takes up to a minute while Safari has a heavy page open (XCUITest waits for the app to idle), so a full
+  light+dark check takes about 70 minutes. Rerun a single phase with `check --phases "shell"`.
 - The QA server runs without a mesh node, so mesh cards (step 6) are N/A until a mesh node joins it.

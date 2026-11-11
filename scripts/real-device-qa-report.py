@@ -35,14 +35,15 @@ def shots(theme_dir: Path, phase: str, names):
     """Relative paths of the named screenshots of a phase that exist."""
     found = []
     for d in sorted(theme_dir.glob(f"*-{phase}")):
-        for png in sorted(d.glob("*.png")):
+        for png in sorted(d.glob("[0-9]*.png")):
             if any(png.name.endswith(f"-{n}.png") for n in names):
                 found.append(str(png.relative_to(theme_dir.parent)))
     return found
 
 
 def results(lines):
-    return {m.group(2).strip(): m.group(1) for l in lines if (m := re.match(r"QA_RESULT (PASS|FAIL) (.*)", l))}
+    # A result line is "QA_RESULT <PASS|FAIL> <name> <detail>"; the checks this report looks up have one-word names.
+    return {m.group(2): m.group(1) for l in lines if (m := re.match(r"QA_RESULT (PASS|FAIL) (\S+)", l))}
 
 
 def frames(lines, name):
@@ -116,9 +117,11 @@ def check_theme(theme_dir: Path, facts: dict):
             add("4b scroll holds 35 s", "REVIEW", "the Kernel row was not found at every sample")
         else:
             a, b, c = y0[0]["y"], y1[0]["y"], y2[0]["y"]
-            if a == b:
-                add("4b scroll holds 35 s", "REVIEW", f"the swipe did not move the panel (Kernel y {a:.0f} -> {b:.0f}); compare pill-scrolled-now / pill-scrolled-35s by eye")
-            elif b != c:
+            if abs(a - b) < 40:
+                # Fewer than 40 pt means the swipe did not really scroll the panel (accessibility frames lag too), so
+                # the numbers prove nothing about holding position.
+                add("4b scroll holds 35 s", "REVIEW", f"the swipe did not scroll the panel by a measurable amount (Kernel y {a:.0f} -> {b:.0f} -> {c:.0f}); compare pill-scrolled-now and pill-scrolled-35s by eye")
+            elif abs(b - c) >= 20:
                 add("4b scroll holds 35 s", "FAIL", f"panel moved after the swipe settled: Kernel y {b:.0f} at the swipe, {c:.0f} 35 s later")
             else:
                 add("4b scroll holds 35 s", "PASS", f"Kernel y {a:.0f} -> {b:.0f} and still {c:.0f} after 35 s")
@@ -143,14 +146,15 @@ def check_theme(theme_dir: Path, facts: dict):
     if not any(hs.values()):
         add("7 text sizes at phone width", "REVIEW", "no text rows were measured; compare text-sample by eye")
     else:
-        summary = ", ".join(f"{n.split('-')[1]} h={v[0]['h']:.0f}pt" for n, v in hs.items() if v)
+        # The smallest matching row is the text itself; bigger matches are the containers around it.
+        summary = ", ".join(f"{n.split('-')[1]} h={min(f['h'] for f in v):.0f}pt" for n, v in hs.items() if v)
         add("7 text sizes at phone width", "REVIEW", f"measured row heights ({summary}); there is no stored baseline yet, so compare with the same run on the previous build and look at text-sample")
 
     # 8 palette, settings, themes
     add("8 palette, settings, themes", "REVIEW" if mn else "FAIL", "shots: " + ", ".join(shots(theme_dir, "menus", ["views-menu", "settings", "palette"])))
 
     # 9 motion
-    videos = [str(p.relative_to(theme_dir.parent)) for p in theme_dir.glob("*-motion.mov")]
+    videos = [str(p.relative_to(theme_dir.parent)) for p in theme_dir.glob("*-motion.mov") if not p.name.startswith("._")]
     add("9 motion (pill menu, split)", "REVIEW" if videos else "FAIL", "screen recording: " + (", ".join(videos) if videos else "none was recorded") + " (ease-out, <= 300 ms is judged on the recording)")
     return rows
 
