@@ -38,18 +38,29 @@ export const UNLOCK_ROW_PREFIX = "u:";
 export const consoleLeaves = (cx: Ctx): BranchSection["leaves"] => {
   const inv = cx.adapters.inventory!;
   const admitted = cx.adapters.sessions.hosts().filter((h) => !h.state);
+  const count = new Map<string, number>();
+  for (const h of admitted) count.set(h.name, (count.get(h.name) ?? 0) + 1);
   const byName = new Map(admitted.map((h) => [h.name, h]));
   const renamable = inv.can?.rename !== false;
   const meshHosts = cx.adapters.mesh?.data().nodes;
   const names = [...new Set([...inv.hosts().filter((h) => byName.has(h)), ...admitted.map((h) => h.name)])];
-  return names.flatMap((host) => {
-    const entry = byName.get(host)!;
+  const rowsFor = (host: string, entry: (typeof admitted)[number], shared: boolean) => {
     const note = hostNote(cx, entry);
+    // Two admitted hosts can carry one label (two logins on one machine are both named for its address): the later ones are
+    // told apart by their login and addressed by their id, so no host is hidden behind another (#500, J528).
+    const label = shared && entry.user ? `${entry.user}@${host}` : host;
     return [
       // A host is renamed through the Mesh (its node name), so only a host the Mesh knows can be.
-      { id: `h:${host}`, label: host, heading: true, ...(note ? { meta: note } : {}), ...(meshHosts?.has(host) && cx.mesh ? { renamable: true, renameLabel: "Host name" } : {}) },
-      ...(note === "locked" ? [{ id: `${UNLOCK_ROW_PREFIX}${host}`, label: "Unlock to connect", glyph: "◇" }] : []),
-      ...[...inv.list(host)].sort(byFrecency).map((s) => leaf(host, s, renamable)),
+      { id: shared ? `h:${entry.id}` : `h:${host}`, label, heading: true, ...(note ? { meta: note } : {}), ...(!shared && meshHosts?.has(host) && cx.mesh ? { renamable: true, renameLabel: "Host name" } : {}) },
+      ...(note === "locked" ? [{ id: `${UNLOCK_ROW_PREFIX}${entry.id}`, label: "Unlock to connect", glyph: "◇" }] : []),
+    ];
+  };
+  return names.flatMap((host) => {
+    const same = admitted.filter((h) => h.name === host);
+    const shared = (count.get(host) ?? 1) > 1;
+    // Sessions are keyed by host label, so they list under the first host that carries it.
+    return [
+      ...same.flatMap((entry, i) => [...rowsFor(host, entry, shared), ...(i === 0 ? [...inv.list(host)].sort(byFrecency).map((sess) => leaf(host, sess, renamable)) : [])]),
     ];
   });
 };
