@@ -470,6 +470,10 @@ fn write_public_state_in_place(path: &Path, state: &SavedState) -> io::Result<()
     Ok(())
 }
 
+/// Check that an optional state file belongs to this user and has private permissions.
+///
+/// Missing files are allowed before the first write. Symlinks, non-files, a different owner,
+/// or permissions other than `0600` are rejected so state cannot be redirected or exposed.
 fn validate_state_file(path: &Path, uid: u32) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata)

@@ -99,6 +99,10 @@ pub(super) fn set_interface_mtu(interface: &str, mtu: u16) -> io::Result<()> {
     run_ifconfig([interface, "mtu", &mtu.to_string()])
 }
 
+/// Apply one argument list to the existing utun with the system `ifconfig` tool.
+///
+/// The caller supplies the interface and setting as separate arguments, so none of the values
+/// are interpreted by a shell. A rejected command is returned as an I/O error.
 fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
     let output = Command::new("/sbin/ifconfig").args(arguments).output()?;
     if output.status.success() {
