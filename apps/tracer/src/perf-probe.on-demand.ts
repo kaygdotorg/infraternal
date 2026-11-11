@@ -5,8 +5,12 @@ import type { TerminalClient, TerminalHooks, TerminalTraceHop } from "./terminal
 const KEY_SET = "abcdefghijklmnopqrstuvwxyz0123456789";
 /** The most keys one run may send. */
 const MAX_PROBE_KEYS = 5_000;
-/** The shortest time a run waits for its echoes before giving up; longer runs wait 50 ms per key. */
+/** The minimum deadline for a key run, including quiet links with a few slow echoes. */
 const ECHO_TIMEOUT_MS = 15_000;
+/** Give each sample room for the 300 ms round trip plus relay and paint work. */
+const KEY_SAMPLE_TIMEOUT_MS = 700;
+/** Keep deliberately large probe counts from holding the page forever. */
+const MAX_ECHO_TIMEOUT_MS = 180_000;
 /**
  * A deadlock guard, not a latency budget: two minutes is over 70 times the 1700 ms worst-case bound at 300 ms RTT
  * plus jitter. It also leaves slow successes (including a minute-long reconnect) measured at their full duration.
@@ -190,7 +194,8 @@ export class PerformanceProbe {
     this.results.textContent = `Painted 0 / ${count}`;
     this.syncButtons();
 
-    this.timeout = window.setTimeout(() => this.finishRun(true), Math.max(ECHO_TIMEOUT_MS, count * 50));
+    const runTimeout = Math.min(MAX_ECHO_TIMEOUT_MS, Math.max(ECHO_TIMEOUT_MS, count * KEY_SAMPLE_TIMEOUT_MS));
+    this.timeout = window.setTimeout(() => this.finishRun(true), runTimeout);
     this.sendNextKey();
   }
 

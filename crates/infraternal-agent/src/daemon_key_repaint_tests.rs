@@ -315,6 +315,41 @@ async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
     );
 }
 
+/// Send a highly styled repaint larger than 64 KiB through credit reclaimed by dropping the flood queue.
+#[tokio::test]
+async fn key_repaint_funds_a_large_styled_snapshot_from_dropped_bulk_credit() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window(&mut fixture).await;
+    let requested = type_key_and_wait_for_repaint_request(&mut fixture, 0).await;
+    let mut styled = Vec::with_capacity(128 * 1024);
+    while styled.len() < 128 * 1024 {
+        styled.extend_from_slice(b"\x1b[38;2;255;0;0mX\x1b[38;2;0;0;255mY");
+    }
+    assert!(styled.len() > REPAINT_CREDIT as usize);
+    assert!(styled.len() < infraternal_shim::frame::MAX_FRAME - 9);
+    if requested {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Snapshot(u64::from(BULK_CREDIT) + 1, styled.clone()),
+        )
+        .await
+        .unwrap();
+    }
+    let repaint = if requested {
+        wait_for_repaint(&mut fixture).await
+    } else {
+        None
+    };
+    stop_relay(&mut fixture).await;
+
+    assert!(requested, "the flooded stream must request its key repaint");
+    assert_eq!(
+        repaint.map(|(seq, bytes)| (seq, bytes.len())),
+        Some((u64::from(BULK_CREDIT) + 1, styled.len())),
+        "a faithful styled Snapshot above the small reserve must use only reclaimed or reserved credit"
+    );
+}
+
 /// Give the PTY program one frame to render its response before the repaint captures the screen.
 #[tokio::test(start_paused = true)]
 async fn key_repaint_waits_a_frame_for_pty_echo_after_input_ack() {

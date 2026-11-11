@@ -23,6 +23,8 @@ const realWindow = globalThis.window;
 /** See `realWindow`. */
 const realDocument = globalThis.document;
 /** See `realWindow`. */
+const realKeyboardEvent = globalThis.KeyboardEvent;
+/** See `realWindow`. */
 const realNow = globalThis.performance.now.bind(globalThis.performance);
 /** The fake clock, in milliseconds; `performance.now()` returns it during a test. */
 let now = 0;
@@ -48,27 +50,37 @@ function advance(ms: number): void {
 beforeEach(() => {
   now = 0;
   timers = [];
+  const keydownListeners: Array<(event: { key: string; preventDefault(): void }) => void> = [];
   Object.assign(globalThis, {
     window: {
       setTimeout: (run: () => void, ms: number) => { const id = nextTimer++; timers.push({ at: now + ms, run, id }); return id; },
       clearTimeout: (id: number) => { timers = timers.filter((timer) => timer.id !== id); },
     },
-    document: { addEventListener: () => undefined, removeEventListener: () => undefined },
+    document: {
+      addEventListener: (type: string, listener: (event: { key: string; preventDefault(): void }) => void) => { if (type === "keydown") keydownListeners.push(listener); },
+      removeEventListener: () => undefined,
+      dispatchEvent: (event: { key: string; preventDefault(): void }) => { for (const listener of keydownListeners) listener(event); return true; },
+    },
+    KeyboardEvent: class {
+      readonly key: string;
+      constructor(_type: string, init: { key: string }) { this.key = init.key; }
+      preventDefault(): void {}
+    },
   });
   globalThis.performance.now = () => now;
 });
 
 afterEach(() => {
-  Object.assign(globalThis, { window: realWindow, document: realDocument });
+  Object.assign(globalThis, { window: realWindow, document: realDocument, KeyboardEvent: realKeyboardEvent });
   globalThis.performance.now = realNow;
 });
 
 /** A probe on a fake panel bound to a fake connected terminal that records the keys it is given and its drops. */
-function setup() {
+function setup(initialCount = 20) {
   const controls = new Map<string, FakeControl>();
   const panel = { querySelector: (selector: string) => controls.get(selector) ?? controls.set(selector, new FakeControl()).get(selector) };
-  const probe = new PerformanceProbe(panel as unknown as HTMLElement, 20);
-  const terminal = { isConnected: true, drops: 0, typed: [] as string[], forceDrop() { this.drops += 1; }, injectInput(key: string) { this.typed.push(key); } };
+  const probe = new PerformanceProbe(panel as unknown as HTMLElement, initialCount);
+  const terminal = { isConnected: true, inputSequence: 0n, drops: 0, typed: [] as string[], forceDrop() { this.drops += 1; }, injectInput(key: string) { this.typed.push(key); } };
   probe.bind(terminal as unknown as TerminalClient);
   const hooks = probe.hooks();
   const drop = controls.get("#probe-drop")!;
@@ -205,4 +217,15 @@ describe("PerformanceProbe forced drops", () => {
     expect(timers).toHaveLength(0);
   });
 
+});
+
+describe("PerformanceProbe key samples", () => {
+  test("keeps a 200-key latency run open long enough for the 300 ms profile", () => {
+    const { probe, run, results, quiet } = setup(200);
+    quiet();
+    run.click();
+    advance(15_000);
+    expect(results.textContent).toBe("Painted 0 / 200");
+    probe.dispose();
+  });
 });

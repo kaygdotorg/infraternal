@@ -74,11 +74,6 @@ fn reserved_credit_preserves_the_bulk_window_and_cannot_be_overspent() {
     output.forward(BULK_CREDIT as usize).unwrap();
     assert!(output.bulk_starved());
     assert_eq!(output.suffix(u64::from(BULK_CREDIT), 1), Ok(0..0));
-    assert_eq!(
-        output.repaint_reserved(u64::from(BULK_CREDIT) + 1, REPAINT_RESERVE as usize + 1),
-        Err(Error::OutOfRange),
-        "a repaint larger than the remaining granted reserve must wait"
-    );
     assert_eq!(output.cursor(), u64::from(BULK_CREDIT));
     output
         .repaint_reserved(u64::from(BULK_CREDIT) + 1, REPAINT_RESERVE as usize)
@@ -95,6 +90,60 @@ fn reserved_credit_preserves_the_bulk_window_and_cannot_be_overspent() {
         .unwrap();
 }
 
+/// Keep an early key repaint from taking credit that raw output could still spend.
+#[test]
+fn key_repaint_does_not_reduce_unspent_bulk_credit() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+    const BACKLOG: usize = 16 * 1024;
+    const SNAPSHOT: usize = 32 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT + REPAINT_RESERVE).unwrap();
+    output.forward(BACKLOG).unwrap();
+    let bulk_before = output
+        .suffix(output.cursor(), BULK_CREDIT as usize)
+        .unwrap()
+        .len();
+
+    output
+        .repaint_reserved(output.cursor() + 1, SNAPSHOT)
+        .unwrap();
+
+    let bulk_after = output
+        .suffix(output.cursor(), BULK_CREDIT as usize)
+        .unwrap()
+        .len();
+    assert_eq!(
+        bulk_after, bulk_before,
+        "a key repaint must spend its reserve first"
+    );
+}
+
+/// Borrow repaint bytes only from outstanding raw output and never from an earlier repaint.
+#[test]
+fn a_large_repaint_reclaims_only_the_bulk_output_it_replaces() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+    const MAX_REPAINT: usize = infraternal_shim::frame::MAX_FRAME - 9;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT + REPAINT_RESERVE).unwrap();
+    output.forward(BULK_CREDIT as usize).unwrap();
+
+    output
+        .repaint_reserved(u64::from(BULK_CREDIT) + 1, MAX_REPAINT)
+        .expect("the largest valid Snapshot can borrow the raw bytes it replaces");
+    output.grant(BULK_CREDIT).unwrap(); // The client drops the old raw queue for the repaint.
+
+    assert_eq!(
+        output.repaint_reserved(u64::from(BULK_CREDIT) + 2, MAX_REPAINT,),
+        Err(Error::OutOfRange),
+        "a previous Snapshot cannot be borrowed as raw output credit"
+    );
+    assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
+}
+
 /// Keep the full legacy window for clients that do not offer repaint credit.
 #[test]
 fn a_legacy_initial_credit_keeps_its_full_bulk_window() {
@@ -103,6 +152,7 @@ fn a_legacy_initial_credit_keeps_its_full_bulk_window() {
     let mut output = Output::attach_with_repaint_reserve(0);
     output.grant(BULK_CREDIT).unwrap();
     assert_eq!(output.reserved_credit(), 0);
+    assert_eq!(output.repaint_budget(), 0);
     assert_eq!(
         output.suffix(0, BULK_CREDIT as usize),
         Ok(0..BULK_CREDIT as usize)

@@ -10,17 +10,18 @@
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //!
-//! D381 keeps four relay invariants: a repaint spends client credit before it
-//! is sent, and raw output cannot spend the 64 KiB reserve; a key-triggered
-//! capture follows that key's `InputAck` and leaves one frame for its PTY echo,
-//! even when sent bulk bytes remain unreturned; dropping stalled output affects
-//! only its own stream; and key input cannot refill the finite repaint reserve.
-//! After the latest coalesced key is acknowledged, its capture waits one 8 ms
-//! terminal frame so the PTY program can render the echo. Keys may coalesce
-//! behind one in-flight capture, and the 250 ms starvation deadline remains
-//! independent of this short repaint grace.
-//! A key preempts only when bulk credit is exhausted or at least 16 KiB of
-//! output credit is in flight, so a small quiet write does not trigger a repaint.
+//! D381 keeps four relay invariants: a repaint spends the separate 64 KiB reserve
+//! or borrows only from this stream's raw output that the client drops for the
+//! replacement; each raw byte backs at most one repaint until its credit returns,
+//! and borrowed bytes become debt. Raw output cannot spend the remaining reserve.
+//! A key-triggered capture
+//! follows that key's shim `InputAck` and leaves one frame for its PTY echo.
+//! Dropping stalled output affects only its own stream. Coalesced key input
+//! cannot mint credit or create unbounded captures. After the latest coalesced
+//! key is acknowledged, its capture waits one 8 ms terminal frame so the PTY
+//! program can render the echo. The 250 ms starvation deadline stays independent
+//! of this repaint grace. A key preempts only when raw output has spent credit,
+//! so a small quiet write alone does not trigger a repaint.
 //! A closed shim or failed terminal task closes only its mux stream. A session
 //! whose shim is gone answers its stream with the final Close 4404 (#158).
 use crate::{
@@ -51,13 +52,14 @@ const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(
 ///
 /// The cumulative target coalesces key bursts. This common gate keeps credit
 /// returns and completed captures from bypassing the frame grace, and it spends
-/// no credit itself; the later `Snapshot` must still pass `repaint_reserved`.
+/// no credit itself; the later `Snapshot` must still fit the current repaint
+/// budget, including raw bytes that this capture replaces.
 async fn request_key_repaint_if_ready(
     session: &mut Option<Link>,
     target: Option<u64>,
     requested: &mut Option<u64>,
     acknowledged: u64,
-    reserved_credit: u64,
+    repaint_budget: u64,
     ready: &mut bool,
     finished_peer: bool,
 ) -> io::Result<()> {
@@ -68,7 +70,7 @@ async fn request_key_repaint_if_ready(
         || session.is_none()
         || requested.is_some()
         || target > acknowledged
-        || reserved_credit == 0
+        || repaint_budget == 0
         || !*ready
     {
         return Ok(());
@@ -1868,7 +1870,7 @@ async fn terminal_run(
                                     key_repaint_target,
                                     &mut key_repaint_requested,
                                     acknowledged,
-                                    output.reserved_credit(),
+                                    output.repaint_budget(),
                                     &mut key_repaint_ready,
                                     finished_peer,
                                 )
@@ -1954,7 +1956,7 @@ async fn terminal_run(
                             key_repaint_target,
                             &mut key_repaint_requested,
                             acknowledged,
-                            output.reserved_credit(),
+                            output.repaint_budget(),
                             &mut key_repaint_ready,
                             finished_peer,
                         )
@@ -2021,11 +2023,12 @@ async fn terminal_run(
                                 if !bytes.is_empty() {
                                     // A small prior write is not a blocked flood;
                                     // this also catches a key just before bulk credit runs out.
-                                    let output_waiting = output.bulk_starved()
-                                        || output.unreturned_output_credit()
-                                            >= relay::KEY_REPAINT_BACKLOG;
+                                    let unreturned = output.unreturned_output_credit();
+                                    let output_waiting = unreturned > 0
+                                        && (output.bulk_starved()
+                                            || unreturned >= relay::KEY_REPAINT_BACKLOG);
                                     if key_repaint_target.is_some()
-                                        || (output_waiting && output.reserved_credit() > 0)
+                                        || (output_waiting && output.repaint_budget() > 0)
                                     {
                                         let length = u64::try_from(bytes.len())
                                             .map_err(|_| sessions::invalid("input length overflow"))?;
@@ -2097,7 +2100,7 @@ async fn terminal_run(
                     key_repaint_target,
                     &mut key_repaint_requested,
                     acknowledged,
-                    output.reserved_credit(),
+                    output.repaint_budget(),
                     &mut key_repaint_ready,
                     finished_peer,
                 )
@@ -2144,7 +2147,7 @@ async fn terminal_run(
                             key_repaint_target,
                             &mut key_repaint_requested,
                             acknowledged,
-                            output.reserved_credit(),
+                            output.repaint_budget(),
                             &mut key_repaint_ready,
                             finished_peer,
                         )

@@ -6,14 +6,16 @@
 //! and ring, and requests replay when credit returns. No idle timer runs.
 //!
 //! Raw output may spend only the ordinary 1 MiB bulk window. A relay attached
-//! for the tracer also protects 64 KiB for an input-triggered repaint; only a
-//! repaint can spend that floor, and returned client credit is the only way to
-//! restore it. Repaints consume credit before they are sent. The 250 ms path
-//! keeps using ordinary bulk credit, and every `Output` owns its own budgets.
-//! A key treats the stream as backlogged when bulk credit is exhausted or at
-//! least 16 KiB of output credit is still in flight; a small quiet write alone
-//! does not turn the next key into a repaint.
+//! for the tracer also protects 64 KiB for an input-triggered repaint. A larger
+//! replacement Snapshot may borrow credit from this stream's unreturned raw
+//! Output, since the client drops that queued output when it accepts the
+//! Snapshot. A raw byte can back at most one replacement before its credit
+//! returns, even when the first Snapshot fits in the reserve. Returned credit
+//! pays repaint debt before it funds more output. Snapshots stay under the
+//! shim's 1 MiB frame cap. The unchanged 250 ms path uses ordinary bulk credit,
+//! and every `Output` owns its own budgets.
 
+use infraternal_shim::frame::MAX_FRAME;
 use std::{
     ops::Range,
     time::{Duration, Instant},
@@ -24,7 +26,7 @@ pub const STARVATION: Duration = Duration::from_millis(250);
 
 /// Credit held back from raw output for one input-triggered repaint budget.
 pub const REPAINT_RESERVE: u32 = 64 * 1024;
-/// Minimum spent output credit that counts as a backlog before the bulk window empties.
+/// Minimum raw output in flight that marks a stream as backlogged before its bulk window empties.
 pub const KEY_REPAINT_BACKLOG: u64 = 16 * 1024;
 /// Maximum bulk credit raw output may spend in a reserved relay.
 const BULK_WINDOW: u64 = 1024 * 1024;
@@ -116,6 +118,14 @@ impl Input {
 pub struct Output {
     cursor: u64,
     credit: u64,
+    /// Raw bytes sent to the client whose credit has not returned.
+    raw_in_flight: u32,
+    /// Unreturned raw bytes sent since the latest repaint, usable for one replacement.
+    raw_replacement_credit: u32,
+    /// Unspent portion of the initial repaint reserve, restored by returned credit.
+    repaint_reserve: u32,
+    /// Repaint bytes borrowed from raw output, paid before later credit is usable.
+    repaint_debt: u32,
     stalled: Option<Instant>,
     snapshot: bool,
     required: u64,
@@ -131,6 +141,10 @@ impl Output {
         Self {
             cursor,
             credit: 0,
+            raw_in_flight: 0,
+            raw_replacement_credit: 0,
+            repaint_reserve: 0,
+            repaint_debt: 0,
             stalled: None,
             snapshot: false,
             required: 1,
@@ -147,6 +161,10 @@ impl Output {
         Self {
             cursor,
             credit: 0,
+            raw_in_flight: 0,
+            raw_replacement_credit: 0,
+            repaint_reserve: 0,
+            repaint_debt: 0,
             stalled: None,
             snapshot: false,
             required: 1,
@@ -154,20 +172,37 @@ impl Output {
         }
     }
 
-    /// Grant bounded cumulative credit. Overflow is a protocol error.
+    /// Grant bounded cumulative credit, paying any replacement repaint debt first.
     /// # Errors
     /// Rejects a credit counter overflow without mutating state.
     pub fn grant(&mut self, bytes: u32) -> Result<(), Error> {
-        self.credit = self
+        let repaid = bytes.min(self.repaint_debt);
+        let available = bytes - repaid;
+        let credit = self
             .credit
-            .checked_add(u64::from(bytes))
+            .checked_add(u64::from(available))
             .ok_or(Error::Overflow)?;
+        self.credit = credit;
+        self.repaint_debt -= repaid;
+        // Credit returns do not identify their frame. Treat them as older raw
+        // output first, which is conservative if a repaint returned first.
+        let raw_repaid = bytes.min(self.raw_in_flight);
+        let already_replaced = self.raw_in_flight - self.raw_replacement_credit;
+        self.raw_replacement_credit -= raw_repaid.saturating_sub(already_replaced);
+        self.raw_in_flight -= raw_repaid;
         if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT && bytes > 0 {
             self.reserve_mode = if u64::from(bytes) >= BULK_WINDOW + u64::from(REPAINT_RESERVE) {
+                self.repaint_reserve = REPAINT_RESERVE;
                 RESERVE_ACTIVE
             } else {
+                self.repaint_reserve = 0;
                 0
             };
+        } else if self.reserve_mode == RESERVE_ACTIVE {
+            self.repaint_reserve = self
+                .repaint_reserve
+                .saturating_add(available)
+                .min(REPAINT_RESERVE);
         }
         if self.bulk_credit() >= self.required {
             self.stalled = None;
@@ -200,8 +235,19 @@ impl Output {
         if bytes > self.bulk_credit() || self.snapshot {
             return Err(Error::OutOfRange);
         }
+        let raw_bytes = u32::try_from(bytes).map_err(|_| Error::Overflow)?;
+        let raw_in_flight = self
+            .raw_in_flight
+            .checked_add(raw_bytes)
+            .ok_or(Error::Overflow)?;
+        let raw_replacement_credit = self
+            .raw_replacement_credit
+            .checked_add(raw_bytes)
+            .ok_or(Error::Overflow)?;
         self.cursor = next;
         self.credit -= bytes;
+        self.raw_in_flight = raw_in_flight;
+        self.raw_replacement_credit = raw_replacement_credit;
         self.stalled = None;
         Ok(())
     }
@@ -219,8 +265,7 @@ impl Output {
 
     /// Arm the unchanged starvation deadline for a reserved repaint that is too large.
     pub fn pending_reserved_repaint(&mut self, now: Instant) -> Option<Instant> {
-        let available = self.credit.min(u64::from(REPAINT_RESERVE));
-        if available < self.required && !self.snapshot {
+        if self.repaint_budget() < self.required && !self.snapshot {
             let start = *self.stalled.get_or_insert(now);
             Some(start + STARVATION)
         } else {
@@ -283,29 +328,45 @@ impl Output {
         Ok(())
     }
 
-    /// Commit an input-triggered repaint using at most the protected 64 KiB floor.
+    /// Commit a key repaint from granted credit and raw bytes the Snapshot replaces.
     ///
-    /// This method is called only after the shim acknowledges the key. A zero-byte
-    /// repaint still needs one credit byte, so key spam cannot create uncharged frames.
+    /// The separate reserve pays first. A larger Snapshot can borrow only from
+    /// raw bytes sent since the previous repaint; the client drops that output
+    /// when it accepts the replacement. Returned credit pays the borrow before
+    /// it funds more output. A zero-byte repaint still costs one byte.
     /// # Errors
-    /// Rejects regression, overflow, zero-cost frames, oversized snapshots, or
-    /// insufficient client credit without changing the cursor or spending credit.
+    /// Rejects regression, overflow, a Snapshot above the shim frame limit, or
+    /// a repaint larger than its available credit plus replaceable raw output.
     pub fn repaint_reserved(&mut self, seq: u64, len: usize) -> Result<(), Error> {
         let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
         if seq < self.cursor {
             return Err(Error::OutOfRange);
         }
         let cost = bytes.max(1);
+        let frame_limit = u64::try_from(MAX_FRAME.saturating_sub(9)).unwrap_or(u64::MAX);
         if self.reserve_mode != RESERVE_ACTIVE
-            || bytes > u64::from(REPAINT_RESERVE)
-            || cost > self.credit.min(u64::from(REPAINT_RESERVE))
+            || bytes > frame_limit
+            || cost > self.repaint_budget()
         {
             self.required = cost;
             return Err(Error::OutOfRange);
         }
+        let spent = cost.min(u64::from(self.repaint_reserve));
+        let borrowed = cost - spent;
+        let borrowed = u32::try_from(borrowed).map_err(|_| Error::Overflow)?;
+        let repaint_debt = self
+            .repaint_debt
+            .checked_add(borrowed)
+            .ok_or(Error::Overflow)?;
         self.required = 1;
         self.cursor = seq;
-        self.credit -= cost;
+        self.credit -= spent;
+        self.repaint_reserve -= u32::try_from(spent).map_err(|_| Error::Overflow)?;
+        // This repaint replaces the raw tail already sent. Those bytes may
+        // still be in flight for credit accounting, but cannot back another
+        // repaint until the client returns their credit.
+        self.raw_replacement_credit = 0;
+        self.repaint_debt = repaint_debt;
         self.snapshot = false;
         self.stalled = None;
         Ok(())
@@ -315,7 +376,7 @@ impl Output {
     #[must_use]
     pub fn reserved_credit(&self) -> u64 {
         if self.reserve_mode == RESERVE_ACTIVE {
-            self.credit.min(u64::from(REPAINT_RESERVE))
+            u64::from(self.repaint_reserve)
         } else {
             0
         }
@@ -329,20 +390,31 @@ impl Output {
 
     /// Bulk allowance unavailable because the client has not returned output credit.
     ///
-    /// Credit is shared by raw output and repaint frames, so this counts any
-    /// output bytes still in flight instead of guessing which frame a later
-    /// Credit returns. The relay compares it with [`KEY_REPAINT_BACKLOG`] to
-    /// avoid repainting after tiny quiet writes.
+    /// This excludes Snapshot frames because a key repaint may borrow only from
+    /// raw output that it replaces. The daemon compares it with
+    /// [`KEY_REPAINT_BACKLOG`] so a quiet stream does not repaint after tiny writes.
     #[must_use]
     pub fn unreturned_output_credit(&self) -> u64 {
-        BULK_WINDOW.saturating_sub(self.bulk_credit())
+        u64::from(self.raw_in_flight)
+    }
+
+    /// Credit available to the next repaint, including raw output not replaced yet.
+    #[must_use]
+    pub fn repaint_budget(&self) -> u64 {
+        if self.reserve_mode == RESERVE_ACTIVE {
+            u64::from(self.repaint_reserve)
+                .saturating_add(u64::from(self.raw_replacement_credit))
+                .saturating_sub(u64::from(self.repaint_debt))
+        } else {
+            0
+        }
     }
 
     /// Ordinary credit left after preserving the key-triggered repaint floor.
     fn bulk_credit(&self) -> u64 {
         if self.reserve_mode == RESERVE_ACTIVE {
             self.credit
-                .saturating_sub(u64::from(REPAINT_RESERVE))
+                .saturating_sub(u64::from(self.repaint_reserve))
                 .min(BULK_WINDOW)
         } else {
             self.credit

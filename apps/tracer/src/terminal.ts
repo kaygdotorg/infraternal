@@ -1689,10 +1689,16 @@ export class TerminalClient {
     this.drainOutput();
   }
 
+  /** Accepts a repaint only against free or replaced output credit, then drops the queued screen it supersedes. */
   private acceptSnapshot(sequence: bigint, bytes: Uint8Array): void {
     performance.mark(`sw:snapshot:${this.streamId}`);
     performance.mark(`sw:snapshot:${this.streamId}`);
-    if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable) {
+    // A replacement may borrow the credit in queued raw bytes: accepting it
+    // drops that tail (and any pending Snapshot), while an active write returns
+    // its credit when its paint callback finishes. Keep the transaction within
+    // the bytes being replaced plus the credit already free on this stream.
+    const replaceable = this.outputQueue.length + (this.pendingSnapshot?.bytes.byteLength ?? 0);
+    if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable + replaceable) {
       this.protocolFailure("server sent a stale snapshot or exceeded output credit");
       return;
     }
