@@ -1,0 +1,109 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+# Real-device QA runbook
+
+Owner, 2026-11-11: "all this makes me think that our testing process sucks. you need to use test.ssh.kayg.org more
+in your mac vm through safari and on std via an iPhone simulator ... to confirm actual/real behaviour".
+
+`scripts/real-device-qa` drives the real web app in real iOS Safari (iPhone Simulator, iOS 27) on the Mac Studio
+"std", against a device-QA server on mesh-staging, and writes a pass/fail table with screenshots. Run it after every
+deploy. It catches what Chromium and Playwright WebKit cannot: the iOS keyboard and viewport, Safari's password
+prompts, the passkey sheet, and layout at the real 402 x 874 pt screen.
+
+## Why a separate server (and not test.ssh.kayg.org)
+
+A browser cannot be signed in to an existing account from a second device. The account key is wrapped by a passkey
+and unwrapped in the browser that holds that passkey; the server never has it (`addSecondPasskey` needs the existing
+passkey in the same browser, recovery deletes every passkey and session, invites are an enterprise feature). So the
+simulator needs an account it created itself. mesh-staging is a throwaway, prod-shaped AlmaLinux VM, so the QA
+server runs there as a second instance beside J479's: its own user (`infraternal-qa`), data dir
+(`/var/lib/infraternal-qa`), ports (127.0.0.1:7021, hosts 10.69.69.53:7543, TLS 8443), nginx and CA. J479's server,
+nginx, data and `/run/infraternal` are never touched. Do not run a second *root* server there: both would use root's
+fixed `/run/infraternal` and the second one's agent fails with "address in use".
+
+## One-time setup (a fresh QA server or Studio)
+
+1. `scripts/real-device-qa prepare`: copies the XCUITest runner to `~/Developer/infraternal-sim/qa-runner` on std,
+   creates the simulator `infraternal-01` (iPhone 18 Pro, iOS 27.0) if missing, builds the runner, trusts the QA CA
+   in the simulator.
+2. `scripts/real-device-qa stage [BUNDLE_DIR]`: installs or refreshes the QA server on mesh-staging. BUNDLE_DIR is a
+   release bundle on mesh-staging (`infraternal`, `web/`, `SOURCE`); the default is J479's current one. To test a
+   branch, build its bundle the way J479 did and pass it.
+3. `scripts/real-device-qa host-account`: a throwaway `qa-device` login on dev-02 with its own `qa-sshd` unit on
+   :2222 (NetBird answers :22 itself) and the QA CA trusted on dev-02, because the host agent verifies the server's
+   HTTPS certificate. The password is random and only ever lives in a 0600 file on the Studio.
+4. `scripts/real-device-qa owner-setup` (fresh server only): the first-run flow in the simulator, with a real
+   platform passkey and PRF made with a simulated Face ID.
+5. `scripts/real-device-qa add-host` (fresh server only): Add host through the phone UI, down to a live shell.
+
+Steps 4 and 5 are recorded UI flows. They were driven by hand once on 2026-11-11 and then encoded; if a step stops
+matching (a label changed), the run names it and you re-drive that one step with `run.sh run <name> '<actions>'`.
+
+## Every deploy
+
+```
+scripts/real-device-qa stage /path/to/new/bundle    # only when the build under test changed
+scripts/real-device-qa check                        # light and dark, about 25 minutes
+```
+
+`check` holds the simulator lock for the whole run, so another job cannot move Safari mid-check. The table is
+printed and saved as `results.md` in `~/.cache/codex-scratch/real-device-qa/<UTC>/`. Attach the table, the
+screenshots and the videos to the issue; never commit them (ADR 0003).
+
+Verdicts: PASS and FAIL are measured. REVIEW means numbers cannot decide it: open the named screenshots or the video.
+N/A means the QA server cannot show it (no mesh node, so no mesh cards). NOT RUN is the destructive step.
+
+| Step | What is measured |
+|---|---|
+| 1 sign in | the app shows its Console after load, going through the passkey sheet if there is no session |
+| 2 shell + exit | after `exit` the "shell ended" window must be gone |
+| 3 window fits | every window region's width <= 402 pt, from accessibility frames |
+| 4a machine pill | the panel shows the host's own kernel and architecture (read from the host over ssh) |
+| 4b scroll holds | the panel's Kernel row y after the swipe equals y 35 s later |
+| 5 Remove host | not run; by hand (below) |
+| 6 mesh cards | frames if the QA server has a mesh node; otherwise N/A |
+| 7 text sizes | row heights, for comparing builds; judged on `text-sample` |
+| 8 palette, settings, themes | screenshots in both themes |
+| 9 motion | a recording of the views menu and the machine panel |
+
+### Step 5 by hand
+
+Remove the QA host from the pill, then the palette, then the sidebar swipe (screenshot each), confirm none says
+"sign in again", then run `scripts/real-device-qa add-host` to put it back. A removed host is rebuilt in under a
+minute; the account and its passkey are untouched.
+
+## Gotchas that cost hours (all in the runner already)
+
+- The page's accessibility tree is **stale while the keyboard is up**: a tap on a frame lands on the keyboard. Close
+  the keyboard with its accessory checkmark first. Frames inside the scaled page canvas are not screen coordinates.
+- Any **system sheet** (Strong Password, Save Password, passkey) stalls the next XCUITest tap forever. Type in one
+  run and close the sheet in the next.
+- Matching a label against the live tree takes minutes (the canvas keeps every window in it). The runner parses one
+  hierarchy dump instead.
+- Face ID enrolment is lost on a simulator restart, and then passkeys fail with "Simulator requires enrolled
+  biometrics". `run.sh` enrols on every run (`notifyutil -s/-p com.apple.BiometricKit.enrollmentChanged`) and
+  approves prompts with `notifyutil -p com.apple.BiometricKit_Sim.pearl.match` (`face`).
+- XCUITest keeps failure snapshots that can show a typed secret. `run.sh` deletes everything that is not a
+  deliberate `qa-*` screenshot, and the result bundle.
+- Other jobs may use the same simulator and lock. They can only act between runs, which is why `check` runs as one
+  `run.sh session`.
+- Passkeys here are scoped to `kayg.org` (rp id), so the simulator's passkey is also offered on test and prod
+  hostnames. Do not approve prompts there.
+
+## Secrets
+
+The setup token and the host password are files (0600) on the Studio, typed by the runner (`typefile`), never argv.
+Never take a screenshot while a token is on screen, and never attach recovery-key screenshots. The runner takes
+none on those steps. The QA owner and host are disposable.
+
+## Cleanup
+
+`scripts/real-device-qa teardown` stops `qa-sshd`, deletes `qa-device`, removes the QA CA from dev-02's trust store
+and stops the QA units on mesh-staging (data is kept in `/var/lib/infraternal-qa`; delete it to start from a fresh
+first-run). Shut the simulator down with `xcrun simctl shutdown` when you are done.
+
+## Known gaps
+
+- Production cannot be signed in to from a simulator without the owner's own passkey, so prod gets no real-device run
+  yet.
+- Mac Safari is not covered: macOS VM Safari has no platform passkey without Touch ID (not proven either way).
+- The QA server runs without a mesh node, so mesh cards (step 6) are N/A until a mesh node joins it.
