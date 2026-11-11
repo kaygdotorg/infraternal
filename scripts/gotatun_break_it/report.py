@@ -19,6 +19,7 @@ class Probe:
     sequence: int
     sent_ns: int
     rtt_ms: float | None
+    sender_stalled: bool = False
 
 
 def report_case(

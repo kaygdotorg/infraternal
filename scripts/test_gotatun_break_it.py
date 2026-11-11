@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from gotatun_break_it import trace as trace_module
+from gotatun_break_it import mesh_ix_soak as mesh_ix_soak_module
 from gotatun_break_it.report import Probe, report_case
 from gotatun_break_it.trace import (
     CounterSample,
     GoodputSample,
     SchedulerEvent,
     goodput_from_counters,
+    load_counter_samples,
+    load_probe_samples,
     parse_perf_sched,
     summarize_soak,
 )
+from gotatun_break_it.udp_probe import decode_probe, encode_probe
+from gotatun_break_it.mesh_ix_soak import flatten_node_counters, process_counters
 
 
 class RecoveryReportTests(unittest.TestCase):
@@ -150,6 +159,158 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
                     delay_ns=250_000_000,
                 )
             ],
+        )
+
+    def test_aligns_pipeline_queue_events_to_the_host_monotonic_clock(self):
+        """Convert J525's per-process pipeline times to the host probe clock."""
+        parser = getattr(trace_module, "parse_pipeline_queue_events", None)
+        self.assertTrue(callable(parser), "pipeline queue time alignment is missing")
+        events = parser(
+            [
+                "pipeline mono_ns=1000000 stage=crypto_queue_push queued_jobs=4",
+                "pipeline mono_ns=1700000 stage=crypto_queue_pop queued_jobs=3",
+                "pipeline mono_ns=2000000 stage=tun_write bytes=1500",
+            ],
+            monotonic_offset_ns=12_345_000_000,
+            side="a",
+        )
+
+        self.assertEqual(
+            events,
+            [
+                CounterSample(12_346_000_000, {"a_crypto_queue_jobs": 4}),
+                CounterSample(12_346_700_000, {"a_crypto_queue_jobs": 3}),
+            ],
+        )
+
+    def test_scheduler_capture_must_cover_a_stall_before_correlation_is_complete(self):
+        """A scheduler file from another clock window cannot certify this stall."""
+        report = summarize_soak(
+            probes=[
+                Probe(1, 1_000_000_000, 8.0),
+                Probe(2, 1_100_000_000, 120.0),
+                Probe(3, 1_200_000_000, 8.0),
+            ],
+            goodput=[GoodputSample(1_150_000_000, 900_000_000)],
+            counters=[CounterSample(1_150_000_000, {"crypto_queue_depth": 8})],
+            scheduler_events=[
+                SchedulerEvent(
+                    2_000_000_000,
+                    task="gotatun-crypto-0/42",
+                    event="runnable_delay",
+                    delay_ns=250_000_000,
+                )
+            ],
+        )
+
+        self.assertEqual(report["correlation_status"], "incomplete")
+        self.assertEqual(report["stall_bursts"][0]["correlation_status"], "incomplete")
+
+    def test_empty_long_wait_list_is_complete_when_the_trace_covers_the_soak(self):
+        """A valid scheduler trace with no long waits still proves that interval."""
+        try:
+            report = summarize_soak(
+                probes=[
+                    Probe(1, 1_000_000_000, 8.0),
+                    Probe(2, 1_100_000_000, 120.0),
+                    Probe(3, 1_200_000_000, 8.0),
+                ],
+                goodput=[GoodputSample(1_150_000_000, 900_000_000)],
+                counters=[CounterSample(1_150_000_000, {"crypto_queue_depth": 8})],
+                scheduler_events=[],
+                scheduler_trace_window_ns=(900_000_000, 1_300_000_000),
+            )
+        except TypeError as error:
+            self.fail(f"scheduler trace coverage is not part of the report: {error}")
+
+        self.assertEqual(report["correlation_status"], "complete")
+        self.assertEqual(report["stall_bursts"][0]["correlation_status"], "complete")
+
+    def test_probe_payload_round_trips_sequence_and_monotonic_send_time(self):
+        """Keep each fixed-rate probe tied to its original monotonic send time."""
+        self.assertEqual(decode_probe(encode_probe(42, 9_876_543_210)), (42, 9_876_543_210))
+
+    def test_probe_payload_rejects_wrong_size(self):
+        """Ignore malformed echo packets instead of treating them as a probe reply."""
+        self.assertIsNone(decode_probe(b"short"))
+
+    def test_loads_raw_probe_and_counter_rows_without_losing_stall_markers(self):
+        """Keep a missed sender deadline distinguishable from network packet loss."""
+        with tempfile.TemporaryDirectory() as directory:
+            probe_path = Path(directory) / "probes.jsonl"
+            counter_path = Path(directory) / "counters.jsonl"
+            probe_path.write_text(
+                json.dumps(
+                    {
+                        "sequence": 1,
+                        "sent_ns": 10,
+                        "rtt_ms": None,
+                        "sender_stalled": True,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            counter_path.write_text(
+                json.dumps({"timestamp_ns": 10, "counters": {"gotatun_tx_bytes": 20}})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            probes = load_probe_samples(probe_path)
+            counters = load_counter_samples(counter_path)
+
+        self.assertIs(probes[0].sender_stalled, True)
+        self.assertEqual(counters[0].counters["gotatun_tx_bytes"], 20)
+
+    def test_flattens_product_peer_and_engine_counters_for_the_trace(self):
+        """Retain GotaTun health and peer byte counters without public key material."""
+        counters = flatten_node_counters(
+            {
+                "engine": {
+                    "stopped": False,
+                    "restarts": 2,
+                    "refused_frames": 3,
+                    "tx_queue_len": 1024,
+                }
+            },
+            {
+                "peers": [
+                    {"peer": {"key": "ephemeral-public-key"}, "counters": {"sent_bytes": 40, "received_bytes": 30}},
+                    {"peer": {"key": "other-key"}, "counters": {"sent_bytes": 50, "received_bytes": 60}},
+                ]
+            },
+        )
+
+        self.assertEqual(counters["gotatun_restarts"], 2)
+        self.assertEqual(counters["gotatun_tx_bytes"], 90)
+        self.assertEqual(counters["gotatun_rx_bytes"], 90)
+        self.assertNotIn("ephemeral-public-key", json.dumps(counters))
+
+    def test_reads_resource_counters_for_an_agent_process(self):
+        """Capture cumulative CPU, resident memory, threads, descriptors and context switches."""
+        counters = process_counters(os.getpid())
+
+        self.assertGreater(counters["rss_bytes"], 0)
+        self.assertGreater(counters["fd_count"], 0)
+        self.assertGreater(counters["thread_count"], 0)
+
+    def test_counter_sampler_sleeps_while_waiting_for_start_marker(self):
+        """Keep the counter process idle until the soak start marker arrives."""
+        timeout = getattr(mesh_ix_soak_module, "counter_poll_timeout_ns", None)
+        self.assertIsNotNone(timeout, "counter sampler wait calculation is missing")
+
+        self.assertEqual(
+            timeout(now_ns=1_000, next_sample_ns=0, sampling_active=False),
+            1_000_000_000,
+        )
+        self.assertEqual(
+            timeout(now_ns=1_000, next_sample_ns=1_250, sampling_active=True),
+            250,
+        )
+        self.assertEqual(
+            timeout(now_ns=1_500, next_sample_ns=1_250, sampling_active=True),
+            0,
         )
 
     def test_missing_recovery_is_a_failure_without_invented_latency(self):
