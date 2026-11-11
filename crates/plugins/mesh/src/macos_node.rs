@@ -1,12 +1,8 @@
 //! Restores the Mac userspace Mesh node and its utun routes across daemon lifetimes.
 
 use crate::dataplane::Config;
-use crate::macos_utun_reader::{self as reader, Decode, UtunReader};
-use bytes::Buf;
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
-    packet::{Ip, Packet, PacketBufPool},
-    tun::{IpRecv, IpSend, MtuWatcher},
     udp::{
         UdpTransportFactory, UdpTransportFactoryParams,
         socket::{UdpSocket as GotaUdpSocket, UdpSocketFactory},
@@ -14,43 +10,36 @@ use gotatun::{
     x25519::{PublicKey as X25519PublicKey, StaticSecret},
 };
 use ipnetwork::IpNetwork;
-use nix::{
-    fcntl::{FcntlArg, FdFlag, OFlag, fcntl},
-    sys::socket::{
-        AddressFamily, SockFlag, SockProtocol, SockType, SysControlAddr, connect, getsockopt,
-        socket, sockopt::UtunIfname,
-    },
-    unistd::write,
-};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     net::IpAddr,
-    os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, mpsc as sync},
     thread::JoinHandle,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::io::{Interest, unix::AsyncFd};
 use tokio::{
     runtime::Builder as RuntimeBuilder,
-    sync::{
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
-        watch,
-    },
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
 use zeroize::Zeroizing;
 
-const UTUN_AF_INET: u32 = 2;
-const UTUN_AF_INET6: u32 = 30;
-const UTUN_CONTROL: &str = "com.apple.net.utun_control";
+/// Owns the macOS utun descriptor and its GotaTun packet adapters.
+mod utun_io;
+use utun_io::{
+    MacUtun, MacUtunRx, MacUtunTx, OpenUtun, parse_utun_payload, utun_family, valid_utun_name,
+};
+/// Owns peer route installation and endpoint-derived MTU policy for the macOS utun.
+mod route_mtu;
+use route_mtu::{
+    PathBudgets, configure_interface, installed_peers, remove_routes, route, route_addresses,
+    route_mtus_to_refresh, set_interface_mtu, validate_underlay_routes,
+};
+
 const PUBLIC_STATE: &str = "mesh-public.json";
 const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -161,305 +150,6 @@ pub struct Counters {
 }
 
 type CounterMap = BTreeMap<crate::policy::model::PublicKey, Counters>;
-
-struct OpenUtun {
-    fd: OwnedFd,
-    name: String,
-}
-
-impl OpenUtun {
-    /// Ask the kernel for one fresh utun and read back the assigned interface unit.
-    /// # Errors
-    /// Returns socket-control or interface lookup failures.
-    fn open() -> io::Result<Self> {
-        let fd = socket(
-            AddressFamily::System,
-            SockType::Datagram,
-            SockFlag::empty(),
-            SockProtocol::KextControl,
-        )
-        .map_err(|error| utun_setup_error("PF_SYSTEM socket", error))?;
-        fcntl(&fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
-            .map_err(|error| utun_setup_error("nonblocking setup", error))?;
-        fcntl(&fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
-            .map_err(|error| utun_setup_error("close-on-exec setup", error))?;
-        let control = SysControlAddr::from_name(fd.as_raw_fd(), UTUN_CONTROL, 0)
-            .map_err(|error| utun_setup_error("control lookup", error))?;
-        connect(fd.as_raw_fd(), &control)
-            .map_err(|error| utun_setup_error("control connect", error))?;
-        let name = getsockopt(&fd, UtunIfname)
-            .map_err(|error| utun_setup_error("interface name lookup", error))?
-            .into_string()
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "utun interface name is not valid UTF-8.",
-                )
-            })?;
-        if !valid_utun_name(&name) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "utun interface name is invalid.",
-            ));
-        }
-        Ok(Self { fd, name })
-    }
-}
-
-fn utun_setup_error(stage: &str, error: nix::errno::Errno) -> io::Error {
-    let error = io::Error::from(error);
-    io::Error::new(error.kind(), format!("utun {stage}: {error}"))
-}
-
-/// Owns one dynamically assigned utun control socket and its exact interface name.
-#[derive(Clone)]
-struct MacUtun {
-    fd: Arc<AsyncFd<OwnedFd>>,
-    name: Arc<str>,
-    mtu: watch::Sender<u16>,
-}
-
-impl MacUtun {
-    /// Register one previously opened utun descriptor with this daemon's tokio runtime.
-    /// # Errors
-    /// Returns readiness registration failures.
-    fn from_open(open: OpenUtun) -> io::Result<Self> {
-        // Tokio's safe constructor is deprecated but remains the only safe API;
-        // the replacement requires unsafe code, which this crate forbids.
-        // Write readiness only: reads happen on the dedicated reader thread
-        // (`macos_utun_reader`), so read events would only wake the runtime for nothing.
-        #[allow(deprecated)]
-        let fd = AsyncFd::with_interest(open.fd, Interest::WRITABLE)?;
-        let (mtu, _) = watch::channel(crate::mesh_mtu::IPV6_MINIMUM_MTU);
-        Ok(Self {
-            fd: Arc::new(fd),
-            name: Arc::from(open.name),
-            mtu,
-        })
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Build the send adapter with a watcher for this utun's current shared interface MTU.
-    fn sender(&self) -> MacUtunTx {
-        MacUtunTx {
-            fd: self.fd.clone(),
-            mtu: self.mtu.subscribe().into(),
-            frame: Vec::with_capacity(usize::from(crate::mesh_mtu::IPV6_MINIMUM_MTU) + 4),
-        }
-    }
-
-    /// Build the receive adapter with a watcher for this utun's current shared interface MTU.
-    ///
-    /// Its reader thread starts on the first receive and stops when the adapter is dropped.
-    fn receiver(&self) -> MacUtunRx {
-        MacUtunRx {
-            fd: self.fd.clone(),
-            mtu: self.mtu.subscribe().into(),
-            reader: None,
-            start_failed: false,
-        }
-    }
-
-    /// Publish an MTU change to the utun send and receive packet workers.
-    fn set_mtu(&self, mtu: u16) {
-        self.mtu.send_replace(mtu);
-    }
-}
-
-/// Sends packets from GotaTun to one owned utun using its live interface MTU.
-struct MacUtunTx {
-    fd: Arc<AsyncFd<OwnedFd>>,
-    mtu: MtuWatcher,
-    frame: Vec<u8>,
-}
-
-impl IpSend for MacUtunTx {
-    async fn send(&mut self, packet: Packet<Ip>) -> io::Result<()> {
-        let packet = packet.into_bytes();
-        let family = utun_family(packet.as_ref())?;
-        if packet.len() > usize::from(self.mtu.get()) {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        self.frame.clear();
-        self.frame.extend_from_slice(&family.to_be_bytes());
-        self.frame.extend_from_slice(packet.as_ref());
-        loop {
-            let mut ready = self.fd.writable().await?;
-            match ready.try_io(|fd| write(fd.get_ref(), &self.frame).map_err(io::Error::from)) {
-                Err(_) => continue,
-                Ok(Err(error)) => return Err(error),
-                Ok(Ok(written)) if written == self.frame.len() => return Ok(()),
-                Ok(Ok(_)) => return Err(io::ErrorKind::WriteZero.into()),
-            }
-        }
-    }
-}
-
-/// Receives packets from one owned utun and rejects frames above its live interface MTU.
-///
-/// A dedicated thread reads the utun and hands packets over in bounded batches (#260, J461):
-/// see [`crate::macos_utun_reader`] for why, and for its backpressure and shutdown rules.
-struct MacUtunRx {
-    fd: Arc<AsyncFd<OwnedFd>>,
-    mtu: MtuWatcher,
-    /// The reader thread, started on the first receive with `GotaTun`'s packet pool.
-    reader: Option<UtunReader>,
-    /// Starting the thread failed and that was reported once; later receives wait forever,
-    /// because `GotaTun` retries non-fatal errors in a loop and repeating one would spin it.
-    start_failed: bool,
-}
-
-impl MacUtunRx {
-    /// Start the reader thread, decoding each frame against this utun's live MTU.
-    /// # Errors
-    /// Returns stop-pipe or thread creation failures.
-    fn start_reader(&self, pool: &PacketBufPool) -> io::Result<UtunReader> {
-        let mut mtu = self.mtu.clone();
-        let decode: Decode = Box::new(move |mut packet: Packet<[u8]>| {
-            parse_utun_payload(packet.as_ref(), mtu.get())?;
-            packet.buf_mut().advance(4);
-            packet
-                .try_into_ip()
-                .map_err(|_| io::ErrorKind::InvalidData.into())
-        });
-        UtunReader::spawn(
-            self.fd.clone(),
-            pool.clone(),
-            decode,
-            reader::QUEUE_BATCHES,
-            reader::READ_BATCH,
-        )
-    }
-}
-
-/// What [`MacUtunRx::recv`] yields: one reader batch, in device order.
-type UtunBatch = std::vec::IntoIter<Packet<Ip>>;
-
-impl IpRecv for MacUtunRx {
-    async fn recv<'a>(
-        &'a mut self,
-        pool: &mut PacketBufPool,
-    ) -> io::Result<impl Iterator<Item = Packet<Ip>> + Send + 'a> {
-        if self.start_failed {
-            return std::future::pending::<io::Result<UtunBatch>>().await;
-        }
-        if self.reader.is_none() {
-            match self.start_reader(pool) {
-                Ok(started) => self.reader = Some(started),
-                Err(error) => {
-                    self.start_failed = true;
-                    return Err(error);
-                }
-            }
-        }
-        let Some(reader) = self.reader.as_mut() else {
-            return std::future::pending::<io::Result<UtunBatch>>().await;
-        };
-        reader.next_batch().await.map(Vec::into_iter)
-    }
-
-    fn mtu(&self) -> MtuWatcher {
-        self.mtu.clone()
-    }
-}
-
-/// Add, change or remove one peer host route through our allocated utun.
-///
-/// Add and change operations carry an unlocked route MTU so the system can refine it with later
-/// PMTU information. Deletes carry no MTU.
-/// # Errors
-/// Reports invalid operation arguments, routing command failures, or an unexpected missing route.
-fn route(interface: &str, address: IpAddr, operation: &str, mtu: Option<u16>) -> io::Result<()> {
-    if operation != "delete" && mtu.is_none() {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    let family = if address.is_ipv4() { "-inet" } else { "-inet6" };
-    let mut command = Command::new("/sbin/route");
-    command
-        .args(["-n", operation, family, "-host"])
-        .arg(address.to_string())
-        .args(["-interface", interface]);
-    let mtu_argument = mtu.map(|mtu| mtu.to_string());
-    if let Some(mtu) = mtu_argument.as_deref() {
-        command.args(["-mtu", mtu]);
-    }
-    let output = command.output()?;
-    if output.status.success() {
-        Ok(())
-    } else if operation == "delete"
-        && String::from_utf8_lossy(&output.stderr)
-            .to_ascii_lowercase()
-            .contains("not in table")
-    {
-        Ok(())
-    } else {
-        Err(io::ErrorKind::AddrInUse.into())
-    }
-}
-
-fn valid_utun_name(name: &str) -> bool {
-    name.strip_prefix("utun")
-        .is_some_and(|unit| !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
-/// Delete only peer host routes installed through the validated utun interface.
-/// # Errors
-/// Rejects a malformed utun name or reports a route deletion failure.
-fn remove_routes(interface: &str, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
-    if !valid_utun_name(interface) {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    for address in routes {
-        route(interface, *address, "delete", None)?;
-    }
-    Ok(())
-}
-
-/// Configure this owned utun at an IPv6-safe MTU and install its local addresses.
-///
-/// Callers pass a staging MTU no smaller than either the old or new peer budget until route
-/// metrics have been updated. No other tunnel or resolver is changed.
-fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io::Result<()> {
-    run_ifconfig([interface, "mtu", &mtu.to_string(), "up"])?;
-    if let Some(config) = config {
-        run_ifconfig([
-            interface,
-            "inet",
-            &config.addresses.ipv4.to_string(),
-            &config.addresses.ipv4.to_string(),
-            "netmask",
-            "255.255.255.255",
-        ])?;
-        run_ifconfig([
-            interface,
-            "inet6",
-            &config.addresses.ipv6.to_string(),
-            "prefixlen",
-            "128",
-            "alias",
-        ])?;
-    }
-    Ok(())
-}
-
-/// Change the packet size on the already-owned utun interface.
-/// # Errors
-/// Reports a rejected `ifconfig` request.
-fn set_interface_mtu(interface: &str, mtu: u16) -> io::Result<()> {
-    run_ifconfig([interface, "mtu", &mtu.to_string()])
-}
-
-fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
-    let output = Command::new("/sbin/ifconfig").args(arguments).output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(io::ErrorKind::Other.into())
-    }
-}
 
 /// Public durable intent shared with the Linux node journal; the WireGuard secret is never serialized.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -595,107 +285,6 @@ impl Default for SavedState {
 /// The Mac node has no packet filter yet (#265 slice 3), so it cannot narrow
 /// what a peer may reach. Until it can, it fails closed: see [`installed_peers`].
 pub const ENFORCEMENT: &str = "unavailable";
-
-/// The peers this node may connect to while it cannot enforce access rules.
-///
-/// The coordinator also distributes a peer when only the opposite direction is
-/// granted (`inbound` is `None`) or when the grant is narrowed to ports. A
-/// `WireGuard` peer would reach every port on this Mac in both cases, so only a
-/// peer that may open connections to every port here (`inbound` is `All`) is
-/// installed. The coordinator is always installed: every node may reach it
-/// (D164). Its own inbound policy is not checked, so the server host can reach
-/// every port on this Mac, which a Linux node would deny without an arrow.
-/// The owner accepted that gap until the slice-3 filter (#265, J162 F1), and
-/// `mesh status` says so. The cost is that an arrow from this Mac to a node
-/// without the reverse arrow does not work until enforcement arrives.
-fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
-    config.peers.iter().filter_map(|(node, policy)| {
-        (config.server == Some(*node)
-            || matches!(policy.inbound, crate::policy::rules::TrafficPolicy::All))
-        .then_some(policy)
-    })
-}
-
-/// Return only the installed peers' host addresses that belong on the utun interface.
-fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
-    installed_peers(config)
-        .flat_map(|policy| {
-            [
-                IpAddr::V4(policy.peer.addresses.ipv4),
-                IpAddr::V6(policy.peer.addresses.ipv6),
-            ]
-        })
-        .collect()
-}
-
-/// The endpoint-derived MTUs for one snapshot: each installed peer host route's budget and
-/// the shared interface MTU.
-///
-/// Reading them costs a `route` and an `ifconfig` process per underlay path (about 6.5 ms
-/// each on the Mac VM). [`PathBudgets::probe`] therefore runs on the caller's thread before a
-/// snapshot is handed to the worker, never on the worker's runtime, which also drives every
-/// packet through the utun: probing there stalled traffic for the whole update (#381 J411).
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PathBudgets {
-    /// Route MTU for each installed peer host route.
-    route_mtus: BTreeMap<IpAddr, u16>,
-    /// Shared utun MTU: the largest peer budget, never below IPv6's minimum.
-    interface_mtu: u16,
-}
-
-impl PathBudgets {
-    /// Probe each distinct underlay path of `config` once. `None` means no peers yet.
-    fn probe(config: Option<&Config>) -> Self {
-        let mut probe = crate::mesh_mtu::EndpointProbe::default();
-        let mut route_mtus = BTreeMap::new();
-        let mut peer_mtus = Vec::new();
-        if let Some(config) = config {
-            for policy in installed_peers(config) {
-                let mtu = probe.mesh_mtu(policy.peer.endpoint);
-                route_mtus.insert(IpAddr::V4(policy.peer.addresses.ipv4), mtu);
-                route_mtus.insert(IpAddr::V6(policy.peer.addresses.ipv6), mtu);
-            }
-            peer_mtus.extend(
-                config
-                    .peers
-                    .values()
-                    .map(|policy| probe.mesh_mtu(policy.peer.endpoint)),
-            );
-        }
-        Self {
-            route_mtus,
-            interface_mtu: crate::mesh_mtu::interface_mtu(&peer_mtus),
-        }
-    }
-}
-
-/// Return retained host routes whose freshly derived MTU differs from the installed metric.
-fn route_mtus_to_refresh(
-    old_routes: &BTreeSet<IpAddr>,
-    new_routes: &BTreeSet<IpAddr>,
-    old_mtus: &BTreeMap<IpAddr, u16>,
-    new_mtus: &BTreeMap<IpAddr, u16>,
-) -> BTreeSet<IpAddr> {
-    old_routes
-        .intersection(new_routes)
-        .copied()
-        .filter(|address| old_mtus.get(address).copied() != new_mtus.get(address).copied())
-        .collect()
-}
-
-/// Refuse an endpoint that a host route would send back into this tunnel.
-fn validate_underlay_routes(config: &Config, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
-    if config.peers.values().any(|policy| {
-        policy
-            .peer
-            .endpoint
-            .is_some_and(|endpoint| routes.contains(&endpoint.ip()))
-    }) {
-        Err(io::ErrorKind::InvalidInput.into())
-    } else {
-        Ok(())
-    }
-}
 
 /// Read one bounded public snapshot without following links or accepting exposed files.
 /// # Errors
@@ -892,36 +481,6 @@ fn validate_state_file(path: &Path, uid: u32) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
-}
-
-/// Select the address-family header macOS requires for a complete IP packet.
-/// # Errors
-/// Rejects empty packets and unsupported IP versions.
-fn utun_family(packet: &[u8]) -> io::Result<u32> {
-    match packet.first().map(|byte| byte >> 4) {
-        Some(4) => Ok(UTUN_AF_INET),
-        Some(6) => Ok(UTUN_AF_INET6),
-        _ => Err(io::ErrorKind::InvalidData.into()),
-    }
-}
-
-/// Validate and strip the network-order address-family header from one utun frame.
-///
-/// `mtu` is the live shared interface limit reported to the GotaTun packet workers.
-/// # Errors
-/// Rejects truncated, unsupported, oversized or family-mismatched frames.
-fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
-    let prefix: [u8; 4] = frame
-        .get(..4)
-        .ok_or(io::ErrorKind::InvalidData)?
-        .try_into()
-        .map_err(|_| io::ErrorKind::InvalidData)?;
-    let payload = frame.get(4..).ok_or(io::ErrorKind::InvalidData)?;
-    let family = u32::from_be_bytes(prefix);
-    if payload.is_empty() || payload.len() > usize::from(mtu) || utun_family(payload)? != family {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    Ok(payload)
 }
 
 /// Convert every configured identity into GotaTun peers, keeping both rotation keys installed.
