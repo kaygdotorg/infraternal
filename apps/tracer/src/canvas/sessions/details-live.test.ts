@@ -100,8 +100,8 @@ const SERVER_FACTS = { os: "AlmaLinux", version: "10.2", kernel: "6.12", archite
 const WORKER_FACTS = { os: "Debian GNU/Linux", version: "13", kernel: "6.12.5", architecture: "aarch64", cpuModel: "Neoverse N1", logicalCpus: 8, executionUid: 1000, mode: "remote", engines: [] };
 /** The admitted id of the added host in these specs. */
 const WORKER_ID = "11111111-1111-4111-8111-111111111111";
-/** The value of the Host tab row named `key`, or undefined when the row is not drawn. */
-const row = (facts: ReturnType<ReturnType<typeof createLiveDetails>["facts"]>, key: string): string | undefined => facts!.sections[0]!.rows.find((r) => r.key === key)?.value;
+/** The value of the row named `key` in the selected details section, or undefined when it is absent. */
+const row = (facts: ReturnType<ReturnType<typeof createLiveDetails>["facts"]>, key: string, section = "host"): string | undefined => facts!.sections.find((tab) => tab.id === section)?.rows.find((r) => r.key === key)?.value;
 
 // #410: a window's details describe the window's own host. The server's machine answers only for the server's own windows.
 test("two hosts' details differ: each window reads and shows its own host's system, CPU, address and kind", async () => {
@@ -124,11 +124,11 @@ test("two hosts' details differ: each window reads and shows its own host's syst
     expect(asked).toContainEqual(["remote.host.facts", { host_id: WORKER_ID }]);
     expect(row(server, "System")).toBe("AlmaLinux 10.2");
     expect(row(server, "CPU")).toBe("4 logical cores · Intel N100");
-    expect(row(server, "Address")).toBe("server.example.invalid");
+    expect(row(server, "Address", "connection")).toBe("server.example.invalid");
     expect(row(server, "Infraternal agent")).toBe("Embedded · root");
     expect(row(worker, "System")).toBe("Debian GNU/Linux 13");
     expect(row(worker, "CPU")).toBe("8 logical cores · Neoverse N1");
-    expect(row(worker, "Address")).toBe("operator@worker.lan");
+    expect(row(worker, "Address", "connection")).toBe("operator@worker.lan");
     expect(row(worker, "Infraternal agent")).toBe("Remote · user");
     expect(worker.os).toBe("debian");
     for (const stop of stops) stop();
@@ -161,7 +161,7 @@ test("an offline or not-yet-read host says so in plain words and never shows the
     expect(facts.sections[1]!.rows.find((r) => r.key === "Status")?.value).toContain("Offline");
     expect(JSON.stringify(facts)).not.toContain("AlmaLinux");
     expect(JSON.stringify(facts)).not.toContain("Intel N100");
-    expect(row(facts, "Address")).toBe("operator@worker.lan");
+    expect(row(facts, "Address", "connection")).toBe("operator@worker.lan");
     stop2();
   });
 });
