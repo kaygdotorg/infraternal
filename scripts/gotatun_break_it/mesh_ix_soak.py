@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import select
 import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +165,95 @@ def counter_poll_timeout_ns(*, now_ns: int, next_sample_ns: int, sampling_active
     return max(0, next_sample_ns - now_ns)
 
 
+@dataclass(frozen=True, slots=True)
+class PipelineQueueSample:
+    """One process-relative GotaTun crypto-queue depth mapped to host monotonic time."""
+
+    timestamp_ns: int
+    side: str
+    queue_jobs: int
+
+
+class PipelineQueueClock:
+    """Map one GotaTun process's relative queue timestamps to the host monotonic clock."""
+
+    _PATTERN = re.compile(
+        r"pipeline mono_ns=(?P<elapsed>\d+) "
+        r"stage=crypto_queue_(?:push|pop) queued_jobs=(?P<queued>\d+)"
+    )
+
+    def __init__(self, side: str):
+        """Create a clock for the app node labelled `a` or `b`."""
+        if side not in {"a", "b"}:
+            raise ValueError("pipeline side must be 'a' or 'b'")
+        self.side = side
+        self.offset_ns: int | None = None
+
+    def observe(self, line: str, *, observed_ns: int) -> PipelineQueueSample | None:
+        """Convert a queue log line using its first observed host-monotonic timestamp."""
+        if observed_ns < 0:
+            raise ValueError("observed monotonic timestamp must be non-negative")
+        match = self._PATTERN.search(line)
+        if match is None:
+            return None
+        elapsed_ns = int(match.group("elapsed"))
+        if self.offset_ns is None:
+            self.offset_ns = observed_ns - elapsed_ns
+        timestamp_ns = self.offset_ns + elapsed_ns
+        if timestamp_ns < 0:
+            raise ValueError("mapped pipeline timestamp must be non-negative")
+        return PipelineQueueSample(
+            timestamp_ns=timestamp_ns,
+            side=self.side,
+            queue_jobs=int(match.group("queued")),
+        )
+
+
+class PipelineQueueAggregator:
+    """Keep queue peaks in short host-monotonic buckets instead of one row per packet."""
+
+    def __init__(self, *, bucket_ns: int = 100_000_000):
+        """Collect per-node queue maxima and last values in buckets of `bucket_ns`."""
+        if bucket_ns < 1:
+            raise ValueError("pipeline queue bucket must be positive")
+        self.bucket_ns = bucket_ns
+        self._buckets: dict[int, dict[str, int]] = {}
+
+    def record(self, sample: PipelineQueueSample) -> None:
+        """Add one queue-depth event to its host-monotonic bucket."""
+        if sample.side not in {"a", "b"} or sample.timestamp_ns < 0 or sample.queue_jobs < 0:
+            raise ValueError("pipeline queue sample has invalid side, timestamp, or depth")
+        started_ns = sample.timestamp_ns // self.bucket_ns * self.bucket_ns
+        counters = self._buckets.setdefault(started_ns, {})
+        prefix = f"{sample.side}_crypto_queue_jobs"
+        counters[prefix] = sample.queue_jobs
+        counters[f"{prefix}_max"] = max(
+            counters.get(f"{prefix}_max", sample.queue_jobs), sample.queue_jobs
+        )
+        event_name = f"{sample.side}_crypto_queue_events"
+        counters[event_name] = counters.get(event_name, 0) + 1
+
+    def drain_before(self, before_ns: int) -> list[dict[str, Any]]:
+        """Return complete buckets whose end is at or before `before_ns`."""
+        ready = [
+            started_ns
+            for started_ns in sorted(self._buckets)
+            if started_ns + self.bucket_ns <= before_ns
+        ]
+        return [self._take_bucket(started_ns) for started_ns in ready]
+
+    def finish(self) -> list[dict[str, Any]]:
+        """Return the remaining partial bucket rows when log capture ends."""
+        return [self._take_bucket(started_ns) for started_ns in sorted(self._buckets)]
+
+    def _take_bucket(self, started_ns: int) -> dict[str, Any]:
+        """Remove one bucket and return the JSON row consumed by the trace reporter."""
+        return {
+            "timestamp_ns": started_ns,
+            "counters": self._buckets.pop(started_ns),
+        }
+
+
 def main() -> None:
     """Start two production app nodes, publish readiness and sample until `quit`."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -172,6 +263,8 @@ def main() -> None:
     parser.add_argument("--scratch", required=True, type=Path)
     parser.add_argument("--pid-b", required=True, type=int)
     parser.add_argument("--counter-output", required=True, type=Path)
+    parser.add_argument("--pipeline-counters", required=True, type=Path)
+    parser.add_argument("--pipeline-diagnostics", action="store_true")
     parser.add_argument("--counter-start-marker", required=True, type=Path)
     parser.add_argument("--counter-stop-marker", required=True, type=Path)
     parser.add_argument("--counter-interval-ms", type=int, default=1_000)
@@ -181,15 +274,35 @@ def main() -> None:
     sys.path.insert(0, str(arguments.kit_lib))
     from mesh_agent_fixture import BinaryNode, CoordinatorFixture
 
+    arguments.counter_output.parent.mkdir(parents=True, exist_ok=True)
+    arguments.pipeline_counters.parent.mkdir(parents=True, exist_ok=True)
+    pipeline_output = arguments.pipeline_counters.open("w", encoding="utf-8")
+    pipeline_readers: dict[str, Any] = {}
+    pipeline_clocks: dict[str, PipelineQueueClock] = {}
+    pipeline_bucket_ns = 100_000_000
+    pipeline_aggregator = PipelineQueueAggregator(bucket_ns=pipeline_bucket_ns)
+    coordinator: Any | None = None
+    left: Any | None = None
+    right: Any | None = None
     start_ns = time.monotonic_ns()
-    coordinator = CoordinatorFixture(
-        str(arguments.coordinator), int(os.environ.get("H2H_IX_EXTRA_MEMBERS", "0"))
-    )
-    left = BinaryNode(str(arguments.binary), str(arguments.scratch))
-    right = BinaryNode(str(arguments.binary), str(arguments.scratch), arguments.pid_b)
     interval_ns = arguments.counter_interval_ms * 1_000_000
     next_sample_ns = 0
     try:
+        coordinator = CoordinatorFixture(
+            str(arguments.coordinator), int(os.environ.get("H2H_IX_EXTRA_MEMBERS", "0"))
+        )
+        left = BinaryNode(str(arguments.binary), str(arguments.scratch))
+        right = BinaryNode(str(arguments.binary), str(arguments.scratch), arguments.pid_b)
+        if arguments.pipeline_diagnostics:
+            for side, node in (("a", left), ("b", right)):
+                log = getattr(node, "log", None)
+                log_path = getattr(log, "name", None)
+                if not isinstance(log_path, str):
+                    raise RuntimeError("the mesh fixture does not expose its agent log path")
+                pipeline_readers[side] = Path(log_path).open(
+                    "r", encoding="utf-8", errors="replace"
+                )
+                pipeline_clocks[side] = PipelineQueueClock(side)
         identities = [json.loads(node.stdout.readline()) for node in (left, right)]
         compiled = coordinator.configuration("allow", identities)
         applied = []
@@ -208,10 +321,24 @@ def main() -> None:
             ),
             flush=True,
         )
-        arguments.counter_output.parent.mkdir(parents=True, exist_ok=True)
         with arguments.counter_output.open("w", encoding="utf-8") as output:
             while True:
                 now_ns = time.monotonic_ns()
+                if arguments.pipeline_diagnostics:
+                    for side, reader in pipeline_readers.items():
+                        for line in reader:
+                            sample = pipeline_clocks[side].observe(
+                                line, observed_ns=time.monotonic_ns()
+                            )
+                            if sample is not None:
+                                pipeline_aggregator.record(sample)
+                    pipeline_rows = pipeline_aggregator.drain_before(
+                        time.monotonic_ns() - pipeline_bucket_ns
+                    )
+                    for row in pipeline_rows:
+                        pipeline_output.write(json.dumps(row, separators=(",", ":")) + "\n")
+                    if pipeline_rows:
+                        pipeline_output.flush()
                 sampling_active = (
                     arguments.counter_start_marker.exists()
                     and not arguments.counter_stop_marker.exists()
@@ -227,15 +354,34 @@ def main() -> None:
                     next_sample_ns=next_sample_ns,
                     sampling_active=sampling_active,
                 )
-                ready, _, _ = select.select([sys.stdin], [], [], min(timeout_ns, 1_000_000_000) / 1e9)
+                if arguments.pipeline_diagnostics:
+                    timeout_ns = min(timeout_ns, 10_000_000)
+                ready, _, _ = select.select(
+                    [sys.stdin], [], [], min(timeout_ns, 1_000_000_000) / 1e9
+                )
                 if ready:
                     line = sys.stdin.readline()
                     if not line or line.strip() == "quit":
                         break
     finally:
         for node in (left, right):
-            node.close()
-        coordinator.close()
+            if node is not None:
+                node.close()
+        if arguments.pipeline_diagnostics:
+            for side, reader in pipeline_readers.items():
+                for line in reader:
+                    sample = pipeline_clocks[side].observe(
+                        line, observed_ns=time.monotonic_ns()
+                    )
+                    if sample is not None:
+                        pipeline_aggregator.record(sample)
+            for row in pipeline_aggregator.finish():
+                pipeline_output.write(json.dumps(row, separators=(",", ":")) + "\n")
+            for reader in pipeline_readers.values():
+                reader.close()
+        pipeline_output.close()
+        if coordinator is not None:
+            coordinator.close()
 
 
 if __name__ == "__main__":

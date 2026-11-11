@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import os
 import select
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -84,6 +86,51 @@ class RecoveryReportTests(unittest.TestCase):
 
 class SoakTraceTests(unittest.TestCase):
     """Keep a long loaded-latency report aligned with GotaTun's diagnostic streams."""
+
+    def test_maps_gotatun_queue_clock_to_the_probe_host_monotonic_clock(self):
+        """Use the first observed queue event to align later process-relative samples."""
+        clock = mesh_ix_soak_module.PipelineQueueClock("a")
+
+        first = clock.observe(
+            "pipeline mono_ns=0 stage=crypto_queue_push queued_jobs=4",
+            observed_ns=20_000_000_000,
+        )
+        second = clock.observe(
+            "pipeline mono_ns=5000000 stage=crypto_queue_pop queued_jobs=3",
+            observed_ns=20_010_000_000,
+        )
+
+        self.assertEqual(first.timestamp_ns, 20_000_000_000)
+        self.assertEqual(first.side, "a")
+        self.assertEqual(first.queue_jobs, 4)
+        self.assertEqual(second.timestamp_ns, 20_005_000_000)
+        self.assertEqual(second.queue_jobs, 3)
+
+    def test_buckets_queue_events_without_losing_the_peak_depth(self):
+        """Keep queue peaks in bounded 100 ms samples instead of one JSON row per packet."""
+        sample_type = mesh_ix_soak_module.PipelineQueueSample
+        aggregator = mesh_ix_soak_module.PipelineQueueAggregator(bucket_ns=100_000_000)
+        aggregator.record(sample_type(1_020_000_000, "a", 4))
+        aggregator.record(sample_type(1_080_000_000, "a", 16))
+        aggregator.record(sample_type(1_120_000_000, "a", 3))
+
+        first = aggregator.drain_before(1_100_000_000)
+        remaining = aggregator.finish()
+
+        self.assertEqual(
+            first,
+            [
+                {
+                    "timestamp_ns": 1_000_000_000,
+                    "counters": {
+                        "a_crypto_queue_jobs": 16,
+                        "a_crypto_queue_jobs_max": 16,
+                        "a_crypto_queue_events": 2,
+                    },
+                }
+            ],
+        )
+        self.assertEqual(remaining[0]["counters"]["a_crypto_queue_jobs_max"], 3)
 
     def test_reports_stall_with_correlated_goodput_counters_and_scheduler_waits(self):
         """A probe stall retains the queue, throughput and runnable-delay evidence at its time."""
@@ -266,6 +313,54 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
 
         self.assertIs(probes[0].sender_stalled, True)
         self.assertEqual(counters[0].counters["gotatun_tx_bytes"], 20)
+
+    def test_file_report_joins_pipeline_queue_depth_to_the_probe_stall(self):
+        """Include the companion GotaTun queue trace in the stall's time-correlated counters."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_path = root / "probes.jsonl"
+            counter_path = root / "counters.jsonl"
+            pipeline_path = root / "pipeline-counters.jsonl"
+            perf_data_path = root / "perf.data"
+            probe_path.write_text(
+                "".join(
+                    json.dumps(row) + "\n"
+                    for row in (
+                        {"sequence": 1, "sent_ns": 1_000_000_000, "rtt_ms": 10.0},
+                        {"sequence": 2, "sent_ns": 1_100_000_000, "rtt_ms": 150.0},
+                        {"sequence": 3, "sent_ns": 1_200_000_000, "rtt_ms": 300.0},
+                        {"sequence": 4, "sent_ns": 1_300_000_000, "rtt_ms": 10.0},
+                    )
+                ),
+                encoding="utf-8",
+            )
+            counter_path.write_text(
+                json.dumps({"timestamp_ns": 1_150_000_000, "counters": {"b_gotatun_rx_bytes": 1000}})
+                + "\n",
+                encoding="utf-8",
+            )
+            pipeline_path.write_text(
+                json.dumps({"timestamp_ns": 1_150_000_000, "counters": {"a_crypto_queue_jobs": 16}})
+                + "\n",
+                encoding="utf-8",
+            )
+            perf_data_path.touch()
+
+            fake_perf = unittest.mock.MagicMock()
+            fake_perf.__enter__.return_value = fake_perf
+            fake_perf.stdout = io.StringIO("")
+            fake_perf.wait.return_value = 0
+            with patch.object(trace_module.subprocess, "Popen", return_value=fake_perf):
+                report = trace_module.summarize_soak_files(
+                    probe_path, counter_path, perf_data_path
+                )
+
+        self.assertEqual(
+            report["stall_bursts"][0]["counter_max"]["a_crypto_queue_jobs"],
+            16,
+        )
+        self.assertEqual(report["pipeline_queue_sample_count"], 1)
+        self.assertEqual(report["pipeline_queue_trace_status"], "captured")
 
     def test_flattens_product_peer_and_engine_counters_for_the_trace(self):
         """Retain GotaTun health and peer byte counters without public key material."""

@@ -184,11 +184,13 @@ def main() -> None:
 
     arguments.output.mkdir(parents=True, exist_ok=True)
     counter_path = arguments.output / "counters.jsonl"
+    pipeline_counter_path = arguments.output / "pipeline-counters.jsonl"
     probe_path = arguments.output / "probes.jsonl"
     outputs = (
         arguments.output / "counter-start",
         arguments.output / "counter-stop",
         counter_path,
+        pipeline_counter_path,
         probe_path,
         arguments.output / "run.json",
         arguments.output / "agent-sampler.stderr",
@@ -212,6 +214,7 @@ def main() -> None:
         "tcp_flows": 1,
         "underlay_mtu": arguments.underlay_mtu,
         "pipeline_diagnostics_enabled": arguments.pipeline_diagnostics,
+        "pipeline_counter_path": str(pipeline_counter_path),
         "manual_fixes": [],
     }
     right_namespace: subprocess.Popen[bytes] | None = None
@@ -233,8 +236,7 @@ def main() -> None:
         environment.pop("GOTATUN_DIAG_PIPELINE", None)
         if arguments.pipeline_diagnostics:
             environment["GOTATUN_DIAG_PIPELINE"] = "1"
-        sampler = subprocess.Popen(
-            [
+        sampler_command = [
                 sys.executable,
                 "-I",
                 str(Path(__file__).with_name("mesh_ix_soak.py")),
@@ -250,13 +252,19 @@ def main() -> None:
                 str(right_namespace.pid),
                 "--counter-output",
                 str(counter_path),
+                "--pipeline-counters",
+                str(pipeline_counter_path),
                 "--counter-start-marker",
                 str(counter_start),
                 "--counter-stop-marker",
                 str(counter_stop),
                 "--counter-interval-ms",
                 str(arguments.counter_interval_ms),
-            ],
+            ]
+        if arguments.pipeline_diagnostics:
+            sampler_command.append("--pipeline-diagnostics")
+        sampler = subprocess.Popen(
+            sampler_command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=sampler_stderr,

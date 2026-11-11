@@ -3,8 +3,8 @@
 # Capture one bounded J526 flow under perf sched, then join the raw streams.
 set -euo pipefail
 
-if (($# != 5)); then
-    echo 'usage: run_loaded_latency_window.sh OUT DURATION_SECONDS J88C_KIT COORDINATOR INFRATERNAL_BIN' >&2
+if (($# < 5 || $# > 6)); then
+    echo 'usage: run_loaded_latency_window.sh OUT DURATION_SECONDS J88C_KIT COORDINATOR INFRATERNAL_BIN [--pipeline-diagnostics]' >&2
     exit 2
 fi
 
@@ -13,6 +13,14 @@ duration=$2
 kit=$3
 coordinator=$4
 binary=$5
+pipeline_args=()
+if (($# == 6)); then
+    [[ $6 == '--pipeline-diagnostics' ]] || {
+        echo 'the optional sixth argument must be --pipeline-diagnostics' >&2
+        exit 2
+    }
+    pipeline_args+=(--pipeline-diagnostics)
+fi
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 python=${PYTHON:-python3}
 
@@ -39,7 +47,8 @@ perf sched record -a --clockid mono -o "$out/perf.data" -- \
         --coordinator "$coordinator" \
         --kit-dir "$kit" \
         --output "$out" \
-        --duration-seconds "$duration"
+        --duration-seconds "$duration" \
+        "${pipeline_args[@]}"
 record_status=$?
 set -e
 trace_end_ns=$("$python" -c 'import time; print(time.monotonic_ns())')

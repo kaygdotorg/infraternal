@@ -506,6 +506,11 @@ def summarize_soak_files(
     """Join raw monotonic probes and counters to a captured `perf sched` data file."""
     probes = load_probe_samples(probe_path)
     counters = load_counter_samples(counter_path)
+    pipeline_counter_path = counter_path.with_name("pipeline-counters.jsonl")
+    pipeline_counters = (
+        load_counter_samples(pipeline_counter_path) if pipeline_counter_path.is_file() else []
+    )
+    counters.extend(pipeline_counters)
     events: list[SchedulerEvent] = []
     with subprocess.Popen(
         ["perf", "script", "-i", str(perf_data_path)],
@@ -517,7 +522,7 @@ def summarize_soak_files(
         events = parse_perf_sched(process.stdout, minimum_delay_ns=100_000)
         if process.wait() != 0:
             raise RuntimeError("perf script could not read the scheduler trace")
-    return summarize_soak(
+    report = summarize_soak(
         probes=probes,
         goodput=goodput_from_counters(counters, goodput_counter),
         counters=counters,
@@ -525,6 +530,9 @@ def summarize_soak_files(
         slow_threshold_ms=slow_threshold_ms,
         scheduler_trace_window_ns=scheduler_trace_window_ns,
     )
+    report["pipeline_queue_sample_count"] = len(pipeline_counters)
+    report["pipeline_queue_trace_status"] = "captured" if pipeline_counters else "missing"
+    return report
 
 
 def main() -> None:
