@@ -106,6 +106,108 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual(saved.execute("SELECT value FROM state").fetchall(), [("retained",)])
             self.assertEqual(live.execute("PRAGMA integrity_check").fetchone(), ("ok",))
 
+    def test_pre_upgrade_snapshot_never_copies_embedded_mesh_private_key(self):
+        """Keep the server's Mesh identity outside pre-upgrade snapshots."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+        private_key = mesh / "mesh-private-key"
+        private_key.write_bytes(b"synthetic-private-key")
+        private_key.chmod(0o600)
+        os.link(private_key, data / "backup-selected-config")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = [
+            path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ]
+        self.assertFalse(
+            any(b"synthetic-private-key" in saved for saved in saved_files),
+            "pre-upgrade snapshots must not contain Mesh private-key bytes",
+        )
+
+    def test_d295_rollback_restores_latest_mesh_state_before_old_binary_starts(self):
+        """Make the old binary's legacy Mesh path ready before a warm rollback."""
+        root = self.root / "deployment"
+        release = root / "releases" / "candidate"
+        release.mkdir(parents=True)
+        (release / "infraternal").write_bytes(b"candidate")
+        (release / "web").mkdir()
+        (release / "web/index.html").write_text("new web")
+
+        old_release = self.root / "old-release"
+        old_release.mkdir()
+        old_binary = old_release / "infraternal"
+        old_binary.write_bytes(b"c4")
+        for name, value in (("MANIFEST", b"manifest"),
+                            ("MANIFEST.sig", b"signature"),
+                            ("VERSION", b"edge-20261012T000000Z\n")):
+            (old_release / name).write_bytes(value)
+
+        data = self.root / "data"
+        data.mkdir()
+        with closing(sqlite3.connect(data / "infraternal.sqlite")):
+            pass
+        (data / "restart").mkdir()
+        web = self.root / "web"
+        web.mkdir()
+        (web / "index.html").write_text("old web")
+        legacy = self.root / "run/infraternal"
+        legacy.mkdir(parents=True, mode=0o700)
+        legacy_key = legacy / "mesh-private-key"
+        legacy_public = legacy / "mesh-public.json"
+        legacy_key.write_bytes(b"old-key")
+        legacy_key.chmod(0o600)
+
+        observed_by_old_binary = []
+
+        def restart_for_test(_data, binary):
+            if binary == release / "infraternal":
+                mesh = data / "mesh"
+                mesh.mkdir(mode=0o700)
+                legacy_key.rename(mesh / "mesh-private-key")
+                (mesh / "mesh-private-key").write_bytes(b"latest-candidate-key")
+                (mesh / "mesh-public.json").write_bytes(b'{"enabled":true}')
+            else:
+                observed_by_old_binary.append(
+                    (
+                        legacy_key.read_bytes() if legacy_key.exists() else None,
+                        legacy_public.read_bytes() if legacy_public.exists() else None,
+                    )
+                )
+
+        config = {
+            "root": root,
+            "sha": "candidate",
+            "data": data,
+            "binary": old_binary,
+            "web": web,
+            "pid": 1234,
+            "web_only": False,
+        }
+        with (patch.object(remote.os, "geteuid", return_value=0),
+              patch.object(remote, "checksums"),
+              patch.object(remote, "verify_signed"),
+              patch.object(remote, "healthy", side_effect=[True, False, True]),
+              patch.object(remote, "same_image", return_value=True),
+              patch.object(remote, "endpoint", return_value=(1, 1)),
+              patch.object(remote, "restart", side_effect=restart_for_test),
+              patch.object(remote, "wait_for_success")):
+            with self.assertRaisesRegex(ValueError, "deployment refused"):
+                remote.apply(config)
+
+        self.assertEqual(
+            observed_by_old_binary,
+            [(b"latest-candidate-key", b'{"enabled":true}')],
+            "the previous binary must see latest Mesh identity and public state at the legacy path",
+        )
+
     def test_ca_status_refuses_redirect_without_forwarding_session(self):
         seen = []
         class Handler(BaseHTTPRequestHandler):

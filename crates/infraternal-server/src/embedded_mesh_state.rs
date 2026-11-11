@@ -266,6 +266,7 @@ mod tests {
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt},
         path::PathBuf,
+        process::Command,
     };
 
     /// Build a unique fixture root outside the repository so no private test key is committed.
@@ -357,6 +358,44 @@ mod tests {
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
+    /// Preserves a valid runtime key when the competing durable key is malformed.
+    #[test]
+    fn corrupt_durable_key_does_not_delete_a_valid_legacy_identity() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh private");
+        fs::write(volatile.join("mesh-private-key"), [0x42; 32])
+            .expect("write valid-length legacy key");
+        fs::set_permissions(
+            volatile.join("mesh-private-key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("make legacy key private");
+        fs::write(durable.join("mesh-private-key"), b"truncated")
+            .expect("write malformed durable key");
+        fs::set_permissions(
+            durable.join("mesh-private-key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("make durable key private");
+
+        let result = migrate(&volatile, &durable);
+        let legacy_key_remains = volatile.join("mesh-private-key").exists();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(result.is_err(), "a malformed durable key must fail closed");
+        assert!(
+            legacy_key_remains,
+            "do not discard the valid legacy identity for malformed durable bytes"
+        );
+    }
+
     /// Finishes a marked move after the key reached durable storage but source cleanup did not.
     #[test]
     fn resumes_a_partial_move_without_replacing_the_durable_key() {
@@ -421,5 +460,515 @@ mod tests {
         assert!(!durable.join("mesh-private-key").exists());
         assert!(fs::symlink_metadata(volatile.join("mesh-private-key")).is_ok());
         fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    /// Refuses a durable key symlink without following it or deleting the legacy identity.
+    #[test]
+    fn refuses_a_durable_key_symlink_without_replacing_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime directory private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh directory private");
+        fs::write(volatile.join("mesh-private-key"), b"synthetic-legacy-key")
+            .expect("write synthetic legacy key");
+        let outside = root.join("outside-key");
+        fs::write(&outside, b"synthetic-outside-key").expect("write outside fixture key");
+        symlink(&outside, durable.join("mesh-private-key")).expect("create durable key symlink");
+
+        let result = migrate(&volatile, &durable);
+
+        assert!(result.is_err(), "a durable symlink must be rejected");
+        assert!(volatile.join("mesh-private-key").exists());
+        assert_eq!(
+            fs::read(&outside).expect("outside fixture key"),
+            b"synthetic-outside-key"
+        );
+        assert!(
+            fs::symlink_metadata(durable.join("mesh-private-key"))
+                .expect("durable symlink remains")
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    /// Refuses a legacy runtime directory symlink instead of migrating through it.
+    #[test]
+    fn refuses_a_symlinked_legacy_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let actual = root.join("actual-runtime");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(volatile.parent().expect("runtime parent"))
+            .expect("create runtime parent");
+        fs::create_dir(&actual).expect("create actual runtime directory");
+        fs::set_permissions(&actual, fs::Permissions::from_mode(0o700))
+            .expect("make actual runtime private");
+        fs::write(actual.join("mesh-private-key"), b"synthetic-private-key")
+            .expect("write synthetic runtime key");
+        symlink(&actual, &volatile).expect("link legacy runtime directory");
+
+        let result = migrate(&volatile, &durable);
+
+        assert!(
+            result.is_err(),
+            "a symlinked legacy directory must be rejected"
+        );
+        assert_eq!(
+            fs::read(actual.join("mesh-private-key")).expect("actual legacy key remains"),
+            b"synthetic-private-key"
+        );
+        assert!(!durable.join("mesh-private-key").exists());
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    /// Refuses a durable mesh directory symlink without moving the legacy identity through it.
+    #[test]
+    fn refuses_a_symlinked_durable_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        let actual = root.join("actual-durable");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+            .expect("write synthetic runtime key");
+        fs::create_dir_all(durable.parent().expect("durable parent"))
+            .expect("create durable parent");
+        fs::create_dir(&actual).expect("create actual durable directory");
+        fs::set_permissions(&actual, fs::Permissions::from_mode(0o700))
+            .expect("make actual durable directory private");
+        symlink(&actual, &durable).expect("link durable mesh directory");
+
+        let result = migrate(&volatile, &durable);
+
+        assert!(
+            result.is_err(),
+            "a symlinked durable directory must be rejected"
+        );
+        assert_eq!(
+            fs::read(volatile.join("mesh-private-key")).expect("legacy key remains"),
+            b"synthetic-private-key"
+        );
+        assert!(!actual.join("mesh-private-key").exists());
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    /// Leaves an interrupted migration marked when both the volatile source and durable key are gone.
+    #[test]
+    fn a_pending_migration_without_a_source_fails_closed() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh directory private");
+        fs::write(
+            durable.join(MIGRATION_MARKER),
+            b"J501 mesh state migration\n",
+        )
+        .expect("write pending migration marker");
+        fs::set_permissions(
+            durable.join(MIGRATION_MARKER),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("make migration marker private");
+
+        let result = migrate(&volatile, &durable);
+        let marker_remains = durable.join(MIGRATION_MARKER).exists();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(
+            result.is_err(),
+            "a missing source must not create a new identity"
+        );
+        assert!(
+            marker_remains,
+            "retain evidence that the migration was interrupted"
+        );
+    }
+
+    /// Moves the latest durable identity back to the runtime path for a D295 rollback.
+    #[test]
+    fn rollback_restore_moves_the_identity_back_to_the_legacy_path() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime directory private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh directory private");
+        fs::write(durable.join("mesh-private-key"), b"synthetic-current-key")
+            .expect("write synthetic durable key");
+        fs::set_permissions(
+            durable.join("mesh-private-key"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("make synthetic key private");
+        fs::write(durable.join("mesh-public.json"), br#"{"enabled":true}"#)
+            .expect("write synthetic durable state");
+        fs::set_permissions(
+            durable.join("mesh-public.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("make synthetic state private");
+
+        migrate(&durable, &volatile).expect("restore durable state for the old binary");
+
+        assert_eq!(
+            fs::read(volatile.join("mesh-private-key")).expect("rollback key"),
+            b"synthetic-current-key"
+        );
+        assert_eq!(
+            fs::read(volatile.join("mesh-public.json")).expect("rollback public state"),
+            br#"{"enabled":true}"#
+        );
+        assert!(!durable.join("mesh-private-key").exists());
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    /// Removes the private staging link left if a process stops just after publishing its target.
+    #[test]
+    fn retry_cleans_a_temporary_key_after_the_durable_link_was_published() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh private");
+        fs::write(durable.join("mesh-private-key"), b"synthetic-private-key")
+            .expect("write already-published durable key");
+        let temporary = durable.join(".mesh-private-key.migrate-new");
+        fs::write(&temporary, b"synthetic-private-key")
+            .expect("write interrupted migration temporary");
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+            .expect("make interrupted temporary private");
+        fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+            .expect("write remaining legacy source");
+        fs::write(
+            durable.join(MIGRATION_MARKER),
+            b"J501 mesh state migration\n",
+        )
+        .expect("write pending migration marker");
+        fs::set_permissions(
+            durable.join(MIGRATION_MARKER),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("make migration marker private");
+
+        migrate(&volatile, &durable).expect("resume the interrupted move");
+
+        let temporary_remains = temporary.exists();
+        let durable_key = fs::read(durable.join("mesh-private-key")).expect("durable key");
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(!temporary_remains, "retry must remove the extra key copy");
+        assert_eq!(durable_key, b"synthetic-private-key");
+    }
+
+    /// Serializes two server starts so neither can unlink the other's in-progress staging file.
+    #[test]
+    fn concurrent_migrations_do_not_replace_each_others_temporary_key() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh private");
+        let key = vec![b'K'; 64 * 1024 * 1024];
+        fs::write(volatile.join("mesh-private-key"), &key).expect("write synthetic key fixture");
+
+        let first_source = volatile.clone();
+        let first_durable = durable.clone();
+        let first = std::thread::spawn(move || migrate(&first_source, &first_durable));
+        let temporary = durable.join(".mesh-private-key.migrate-new");
+        for _ in 0..1_000_000 {
+            if temporary.exists() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let temporary_was_published = temporary.exists();
+        let second = migrate(&volatile, &durable);
+        let first = first.join().expect("first migration thread");
+        let durable_key = fs::read(durable.join("mesh-private-key")).ok();
+        let temporary_remains = temporary.exists();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(
+            temporary_was_published,
+            "first migration reached its staging file"
+        );
+        assert!(first.is_ok(), "first migration must complete");
+        assert!(
+            second.is_ok(),
+            "second migration must wait for or join the first"
+        );
+        assert!(
+            durable_key
+                .as_deref()
+                .is_some_and(|saved| saved == key.as_slice()),
+            "the published key must be complete and unchanged"
+        );
+        assert!(
+            !temporary_remains,
+            "completed migrations leave no staging key"
+        );
+    }
+
+    /// Keeps an agent's atomic key update when it races a copy from its runtime directory.
+    #[test]
+    fn a_concurrent_agent_key_update_is_not_unlinked_or_overwritten() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh private");
+        let source = volatile.join("mesh-private-key");
+        let original = vec![b'O'; 64 * 1024 * 1024];
+        fs::write(&source, &original).expect("write synthetic original key");
+        drop(original);
+
+        let migration_source = volatile.clone();
+        let migration_target = durable.clone();
+        let migration = std::thread::spawn(move || migrate(&migration_source, &migration_target));
+        let temporary = durable.join(".mesh-private-key.migrate-new");
+        for _ in 0..1_000_000 {
+            if temporary.exists() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let temporary_was_published = temporary.exists();
+        let writer_temporary = volatile.join("mesh-private-key.4242.new");
+        fs::write(&writer_temporary, b"rotated-key").expect("write synthetic rotated key");
+        fs::set_permissions(&writer_temporary, fs::Permissions::from_mode(0o600))
+            .expect("make rotated key private");
+        fs::rename(&writer_temporary, &source).expect("atomically publish rotated key");
+
+        let result = migration.join().expect("migration thread");
+        let durable_is_latest =
+            fs::read(durable.join("mesh-private-key")).ok().as_deref() == Some(&b"rotated-key"[..]);
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(temporary_was_published, "migration reached its copy phase");
+        assert!(result.is_ok(), "the migration must finish");
+        assert!(
+            durable_is_latest,
+            "the durable path must receive the agent's latest key, not an older inode"
+        );
+    }
+
+    /// Refuses a durable key hard-linked into another path that may be part of a backup.
+    #[test]
+    fn refuses_a_hardlinked_durable_private_key() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        let data = durable.parent().expect("service data directory");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(data).expect("create service data directory");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh directory private");
+        fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+            .expect("write synthetic legacy key");
+        let backup_selected_path = data.join("backup-selected-config");
+        fs::write(&backup_selected_path, b"synthetic-private-key")
+            .expect("write synthetic backup-selected file");
+        fs::hard_link(&backup_selected_path, durable.join("mesh-private-key"))
+            .expect("link durable key into backup-selected path");
+
+        let result = migrate(&volatile, &durable);
+        let legacy_key_remains = volatile.join("mesh-private-key").exists();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(
+            result.is_err(),
+            "a multiply-linked key cannot be treated as private"
+        );
+        assert!(
+            legacy_key_remains,
+            "refusal must preserve the legacy identity"
+        );
+    }
+
+    /// Refuses a legacy key whose inode is also reachable through a backup-selected path.
+    #[test]
+    fn refuses_a_hardlinked_legacy_private_key() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        let data = durable.parent().expect("service data directory");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(data).expect("create service data directory");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh directory private");
+        let backup_selected_path = data.join("backup-selected-config");
+        fs::write(&backup_selected_path, b"synthetic-private-key")
+            .expect("write synthetic backup-selected file");
+        fs::hard_link(&backup_selected_path, volatile.join("mesh-private-key"))
+            .expect("link legacy key into backup-selected path");
+
+        let result = migrate(&volatile, &durable);
+        let backup_copy_remains = backup_selected_path.exists();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(
+            result.is_err(),
+            "a multiply-linked key cannot be migrated as private"
+        );
+        assert!(
+            backup_copy_remains,
+            "refusal must not pretend the exposed key was moved"
+        );
+    }
+
+    /// Keeps the durable key at the exact mode that the mesh store requires under a strict umask.
+    #[test]
+    fn durable_private_key_mode_is_exact_under_umask() {
+        const CHILD_ENV: &str = "INFRATERAL_TEST_MESH_UMASK_ROOT";
+        let root = if let Some(root) = std::env::var_os(CHILD_ENV) {
+            PathBuf::from(root)
+        } else {
+            let root = fixture_root();
+            let volatile = root.join("run/infraternal");
+            let durable = root.join("var/lib/infraternal/mesh");
+            fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+            fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+                .expect("make legacy runtime directory private");
+            fs::create_dir_all(&durable).expect("create durable mesh directory");
+            fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+                .expect("make durable mesh directory private");
+            fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+                .expect("write synthetic legacy key");
+            fs::set_permissions(
+                volatile.join("mesh-private-key"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("make synthetic key private");
+
+            // `module_path!()` includes the crate name, while libtest's exact
+            // names start at the first Rust module.
+            let crate_prefix = format!("{}::", env!("CARGO_CRATE_NAME"));
+            let test_module = module_path!()
+                .strip_prefix(&crate_prefix)
+                .unwrap_or(module_path!());
+            let test_name = format!("{test_module}::durable_private_key_mode_is_exact_under_umask");
+            let output = Command::new("sh")
+                .args(["-c", "umask 0200; exec \"$@\"", "sh"])
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", test_name.as_str(), "--nocapture"])
+                .env(CHILD_ENV, &root)
+                .output()
+                .expect("run umask probe in an isolated process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            fs::remove_dir_all(&root).expect("remove fixture root");
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "strict-umask probe did not pass: {stdout}{stderr}"
+            );
+            return;
+        };
+
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        migrate(&volatile, &durable).expect("migrate under a strict umask");
+        let key =
+            fs::symlink_metadata(durable.join("mesh-private-key")).expect("durable key metadata");
+        assert_eq!(
+            key.mode() & 0o777,
+            0o600,
+            "the mesh store requires the exact 0600 key mode"
+        );
+    }
+
+    /// Creates a new durable directory with exact 0700 permissions under a strict umask.
+    #[test]
+    fn new_durable_directory_mode_is_exact_under_umask() {
+        use std::os::unix::fs::MetadataExt;
+
+        const CHILD_ENV: &str = "INFRATERAL_TEST_MESH_DIR_UMASK_ROOT";
+        let root = if let Some(root) = std::env::var_os(CHILD_ENV) {
+            PathBuf::from(root)
+        } else {
+            let root = fixture_root();
+            let volatile = root.join("run/infraternal");
+            let durable = root.join("var/lib/infraternal/mesh");
+            fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+            fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+                .expect("make legacy runtime directory private");
+            fs::create_dir_all(durable.parent().expect("durable parent"))
+                .expect("create service data directory");
+            fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+                .expect("write synthetic legacy key");
+            fs::set_permissions(
+                volatile.join("mesh-private-key"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("make synthetic key private");
+
+            let crate_prefix = format!("{}::", env!("CARGO_CRATE_NAME"));
+            let test_module = module_path!()
+                .strip_prefix(&crate_prefix)
+                .unwrap_or(module_path!());
+            let test_name =
+                format!("{test_module}::new_durable_directory_mode_is_exact_under_umask");
+            let output = Command::new("sh")
+                .args(["-c", "umask 0200; exec \"$@\"", "sh"])
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", test_name.as_str(), "--nocapture"])
+                .env(CHILD_ENV, &root)
+                .output()
+                .expect("run directory-mode probe in an isolated process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            fs::remove_dir_all(&root).expect("remove fixture root");
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "strict-umask directory probe did not pass: {stdout}{stderr}"
+            );
+            return;
+        };
+
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        migrate(&volatile, &durable).expect("migrate under a strict umask");
+        let directory = fs::symlink_metadata(durable).expect("durable directory metadata");
+        assert_eq!(
+            directory.mode() & 0o777,
+            0o700,
+            "Mesh state requires the exact 0700 directory mode"
+        );
     }
 }
