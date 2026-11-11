@@ -48,7 +48,7 @@ export const consoleLeaves = (cx: Ctx): BranchSection["leaves"] => {
     return [
       // A host is renamed through the Mesh (its node name), so only a host the Mesh knows can be.
       { id: `h:${host}`, label: host, heading: true, ...(note ? { meta: note } : {}), ...(meshHosts?.has(host) && cx.mesh ? { renamable: true, renameLabel: "Host name" } : {}) },
-      ...(note === "locked" ? [{ id: `${UNLOCK_ROW_PREFIX}${host}`, label: "Unlock to connect", glyph: "◇", meta: "passkey" }] : []),
+      ...(note === "locked" ? [{ id: `${UNLOCK_ROW_PREFIX}${host}`, label: "Unlock to connect", glyph: "◇" }] : []),
       ...[...inv.list(host)].sort(byFrecency).map((s) => leaf(host, s, renamable)),
     ];
   });
