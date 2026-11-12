@@ -3,9 +3,9 @@
 //! Two kinds of file leave here. A hashed `chunk-<hash>.js` never changes under its name, so it is cached for a
 //! year. Everything else (the page, `main.js`, the style sheets, the workers) keeps its name across releases, so it
 //! is `no-cache`: the browser asks again on every load and must be told reliably whether its copy is still the
-//! current release's. That answer is the ETag, and the one the file service computes (file time and size) cannot give
+//! current release's. That answer is the `ETag`, and the one the file service computes (file time and size) cannot give
 //! it: reproducible bundles carry one fixed file time, so two releases whose `main.js` compress to the same number
-//! of bytes have the same ETag, and a browser then reuses the *old* `main.js`, which imports chunk names that no
+//! of bytes have the same `ETag`, and a browser then reuses the *old* `main.js`, which imports chunk names that no
 //! longer exist (#500, J538). [`headers`] therefore replaces the validator for mutable files with one that also
 //! carries a fingerprint of the whole bundle, and answers `If-None-Match` itself.
 
@@ -49,8 +49,8 @@ pub(crate) fn router(root: PathBuf) -> Router {
 /// Sets cache, framing and validator headers on every response from the file service.
 ///
 /// For a mutable file the service's own `Last-Modified` and `If-Modified-Since` handling is switched off (the file
-/// time is the same for every release, so it would always say "unchanged"), and its ETag is wrapped as
-/// `"<bundle fingerprint>-<its ETag>"`. A request that already holds exactly that ETag gets a `304` without a body.
+/// time is the same for every release, so it would always say "unchanged"), and its `ETag` is wrapped as
+/// `"<bundle fingerprint>-<its ETag>"`. A request that already holds exactly that `ETag` gets a `304` without a body.
 async fn headers(
     State(fingerprint): State<Arc<str>>,
     mut request: Request,
@@ -100,7 +100,7 @@ async fn headers(
 /// Replaces the file service's validators on a `no-cache` response and turns it into a `304` when the request's
 /// `If-None-Match` already names the current release's copy.
 ///
-/// Only a full `200` carries an ETag at all; a range or error response has none, so a browser cannot store a partial
+/// Only a full `200` carries an `ETag` at all; a range or error response has none, so a browser cannot store a partial
 /// body under a validator.
 fn revalidation(response: &mut Response, fingerprint: &str, if_none_match: Option<&HeaderValue>) {
     response.headers_mut().remove(header::LAST_MODIFIED);

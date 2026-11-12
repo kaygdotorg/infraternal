@@ -182,7 +182,7 @@ async fn no_other_site_may_frame_the_app() {
 }
 
 /// A bundle holding only `main.js` (and its brotli copy), with every file given the one fixed file time that
-/// reproducible builds use, so the file service's own (time, size) ETag cannot tell two releases apart.
+/// reproducible builds use, so the file service's own (time, size) `ETag` cannot tell two releases apart.
 fn release(main: &[u8], main_br: &[u8]) -> (PathBuf, Router) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target")
