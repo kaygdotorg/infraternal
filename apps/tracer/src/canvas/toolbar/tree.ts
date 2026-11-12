@@ -23,6 +23,7 @@ export interface TreeModule {
   dispose(): void;
 }
 
+/** Builds the sidebar tree for one canvas and keeps it current as views, windows, hosts and the CA lock change; returns its `render` and `dispose`. */
 export function createTree(cx: Ctx): TreeModule {
   const { core, stage, signal, views, state } = cx;
   const inv = cx.adapters.inventory;

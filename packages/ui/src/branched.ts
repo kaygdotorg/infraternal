@@ -80,6 +80,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string): H
   return node;
 }
 
+/** Builds one section of the tree (its header, branch drawing and rows, with a host caption's quiet note where the leaf has one). */
 function makeSection(section: BranchSection): HTMLElement {
   const root = el("section", "bm-sec");
   root.dataset.id = section.id;

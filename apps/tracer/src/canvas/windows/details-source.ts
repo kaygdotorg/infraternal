@@ -15,6 +15,7 @@ export interface DetailsSection {
   rows: KeyValueRow[];
 }
 
+/** Everything the machine panel shows for one window: its header (mark, title, subtitle), its tabs of rows and whether the facts are still loading. */
 export interface DetailsFacts {
   /** The mark in the header (the operating system). */
   os?: HostPlatform;

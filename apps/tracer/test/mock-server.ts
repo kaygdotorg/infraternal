@@ -275,7 +275,9 @@ server.listen(PORT, HOST, () => {
  * host that is offline behind the lock, and a machine panel whose facts arrive late, against the same built app.
  */
 const MOCK_REMOTE_HOSTS: unknown[] | undefined = process.env.MOCK_REMOTE_HOSTS ? JSON.parse(process.env.MOCK_REMOTE_HOSTS) as unknown[] : undefined;
+/** Milliseconds before `host.facts.read` answers with {@link MOCK_FACTS}; unset keeps the bare instant answer. */
 const MOCK_FACTS_DELAY_MS = process.env.MOCK_FACTS_DELAY_MS === undefined ? undefined : Number(process.env.MOCK_FACTS_DELAY_MS);
+/** Whether the host-connections CA reads as locked (`MOCK_CA_LOCKED=1`). */
 const MOCK_CA_LOCKED = process.env.MOCK_CA_LOCKED === "1";
 /** A full machine report, the shape the product's facts reader accepts. */
 const MOCK_FACTS = { os: "Debian GNU/Linux", version: "13", kernel: "6.12.57", architecture: "aarch64", model: "Raspberry Pi 5", cpuModel: "Cortex-A76", logicalCpus: 4, memory: { usedBytes: 2e9, totalBytes: 8e9 }, rootDisk: { usedBytes: 1e10, totalBytes: 6e10 }, uptimeSeconds: 86_400, loadAverage: [0.1, 0.2, 0.3], executionUid: 0, mode: "embedded", engines: ["Podman"] };
@@ -938,6 +940,7 @@ function handleWire(connection: Connection, streamId: number, frame: WireFrame, 
   }
 }
 
+/** Handles one non-terminal frame of a welcomed socket: layout frames, host list, host facts and refusals of everything else. */
 function handleControlFrame(connection: Connection, frame: WireFrame): void {
   if (connection.welcomed && appwinLayoutFrame(connection.socket, frame)) return;
   switch (frame.type) {
