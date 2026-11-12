@@ -421,6 +421,9 @@ def _summarize_burst(
         "counter_sample_count": len(matched_counters),
         "counter_min": counter_min,
         "counter_max": counter_max,
+        "pipeline_queue_sample_count": sum(
+            _is_crypto_queue_sample(sample) for sample in matched_counters
+        ),
         "scheduler_event_count": len(matched_scheduler),
         "scheduler_wait_total_ns": sum(event.delay_ns for event in matched_scheduler),
         "scheduler_wait_max_ns": max((event.delay_ns for event in matched_scheduler), default=0),
@@ -437,10 +440,19 @@ def _summarize_burst(
             "complete"
             if matched_goodput
             and matched_counters
+            and any(_is_crypto_queue_sample(sample) for sample in matched_counters)
             and (matched_scheduler or scheduler_covers_burst)
             else "incomplete"
         ),
     }
+
+
+def _is_crypto_queue_sample(sample: CounterSample) -> bool:
+    """Recognize one counter row that actually sampled a GotaTun crypto queue."""
+    return any(
+        "crypto_queue_jobs" in name or "crypto_queue_depth" in name
+        for name in sample.counters
+    )
 
 
 def _is_slow(probe: Probe, threshold_ms: float) -> bool:
@@ -608,10 +620,13 @@ def summarize_soak_files(
         if lock_event_count
         else "missing"
     )
-    if not queue_samples:
+    if not queue_samples or any(
+        burst["correlation_status"] != "complete" for burst in report["stall_bursts"]
+    ):
         report["correlation_status"] = "incomplete"
         for burst in report["stall_bursts"]:
-            burst["correlation_status"] = "incomplete"
+            if burst["pipeline_queue_sample_count"] == 0:
+                burst["correlation_status"] = "incomplete"
     return report
 
 

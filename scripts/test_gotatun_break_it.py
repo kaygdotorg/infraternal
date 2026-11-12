@@ -448,6 +448,68 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
             "host monotonic log-tail observations (nominal 10 ms polling; backlog can widen)",
         )
 
+    def test_queue_sample_outside_the_stall_cannot_complete_its_correlation(self):
+        """Require crypto-queue evidence inside each stall, not elsewhere in the soak."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_path = root / "probes.jsonl"
+            counter_path = root / "counters.jsonl"
+            pipeline_path = root / "pipeline-counters.jsonl"
+            perf_data_path = root / "perf.data"
+            probe_path.write_text(
+                "".join(
+                    json.dumps(row) + "\n"
+                    for row in (
+                        {"sequence": 1, "sent_ns": 900_000_000, "rtt_ms": 10.0},
+                        {"sequence": 2, "sent_ns": 1_100_000_000, "rtt_ms": 150.0},
+                        {"sequence": 3, "sent_ns": 1_200_000_000, "rtt_ms": 10.0},
+                    )
+                ),
+                encoding="utf-8",
+            )
+            counter_path.write_text(
+                "".join(
+                    json.dumps({"timestamp_ns": timestamp, "counters": {"b_gotatun_rx_bytes": total}})
+                    + "\n"
+                    for timestamp, total in ((1_100_000_000, 100), (1_200_000_000, 200))
+                ),
+                encoding="utf-8",
+            )
+            pipeline_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp_ns": 1_000_000_000,
+                        "counters": {"a_crypto_queue_jobs": 4},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / "agent-pids.json").write_text(
+                '{"pids":[100,200],"tids":[100,101,200,201],'
+                '"tids_after":[100,101,200,201]}\n',
+                encoding="utf-8",
+            )
+            perf_data_path.touch()
+
+            fake_perf = unittest.mock.MagicMock()
+            fake_perf.__enter__.return_value = fake_perf
+            fake_perf.stdout = io.StringIO("")
+            fake_perf.wait.return_value = 0
+            with patch.object(trace_module.subprocess, "Popen", return_value=fake_perf):
+                report = trace_module.summarize_soak_files(
+                    probe_path,
+                    counter_path,
+                    perf_data_path,
+                    scheduler_trace_window_ns=(800_000_000, 1_300_000_000),
+                )
+
+        burst = report["stall_bursts"][0]
+        self.assertEqual(report["pipeline_queue_sample_count"], 1)
+        self.assertEqual(burst.get("pipeline_queue_sample_count"), 0)
+        self.assertEqual(burst["correlation_status"], "incomplete")
+        self.assertEqual(report["correlation_status"], "incomplete")
+
     def test_flattens_product_peer_and_engine_counters_for_the_trace(self):
         """Retain GotaTun health and peer byte counters without public key material."""
         counters = flatten_node_counters(
