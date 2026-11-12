@@ -8,6 +8,7 @@
 import type { BranchSection } from "../../../../../packages/ui/src/branched";
 import type { Ctx } from "../context";
 import { byFrecency, type SessionRecord } from "../sessions/inventory";
+import { hostNote } from "../host-note";
 
 declare const __CLUSTERS_PREVIEW__: boolean;
 /**
@@ -25,14 +26,41 @@ const leaf = (host: string, s: SessionRecord, renamable: boolean): BranchSection
   return { id: `s:${host}/${s.id}`, label: s.name, state: s.state, ...(mark ? { mark } : {}), ...(markTip ? { markTip } : {}), ...(meta ? { meta } : {}), ...(renamable ? { renamable: true, renameLabel: "Session name" } : {}) };
 };
 
+/** The id prefix of the row that unlocks host connections; the tree's selection handler runs the unlock for it. */
+export const UNLOCK_ROW_PREFIX = "u:";
+
+/**
+ * Every admitted host, whether or not it has a session: a host that is offline or locked (or just has no shell open) must stay
+ * listed, or it cannot be removed and its absence is unexplained (#500, J528). Hosts that have sessions come first, in the
+ * inventory's order; the others follow in the host list's order. A host whose lock is what stops it carries the note
+ * "locked" and an inline "Unlock to connect" row under it; any other offline host carries "offline".
+ */
 export const consoleLeaves = (cx: Ctx): BranchSection["leaves"] => {
   const inv = cx.adapters.inventory!;
-  const allowed = new Set(cx.adapters.sessions.hosts().map((h) => h.name));
+  const admitted = cx.adapters.sessions.hosts().filter((h) => !h.state);
+  const count = new Map<string, number>();
+  for (const h of admitted) count.set(h.name, (count.get(h.name) ?? 0) + 1);
+  const byName = new Map(admitted.map((h) => [h.name, h]));
   const renamable = inv.can?.rename !== false;
   const meshHosts = cx.adapters.mesh?.data().nodes;
-  return inv.hosts().filter((h) => allowed.has(h)).flatMap((host) => [
-    // A host is renamed through the Mesh (its node name), so only a host the Mesh knows can be.
-    { id: `h:${host}`, label: host, heading: true, ...(meshHosts?.has(host) && cx.mesh ? { renamable: true, renameLabel: "Host name" } : {}) },
-    ...[...inv.list(host)].sort(byFrecency).map((s) => leaf(host, s, renamable)),
-  ]);
+  const names = [...new Set([...inv.hosts().filter((h) => byName.has(h)), ...admitted.map((h) => h.name)])];
+  const rowsFor = (host: string, entry: (typeof admitted)[number], shared: boolean) => {
+    const note = hostNote(cx, entry);
+    // Two admitted hosts can carry one label (two logins on one machine are both named for its address): the later ones are
+    // told apart by their login and addressed by their id, so no host is hidden behind another (#500, J528).
+    const label = shared && entry.user ? `${entry.user}@${host}` : host;
+    return [
+      // A host is renamed through the Mesh (its node name), so only a host the Mesh knows can be.
+      { id: shared ? `h:${entry.id}` : `h:${host}`, label, heading: true, ...(note ? { meta: note } : {}), ...(!shared && meshHosts?.has(host) && cx.mesh ? { renamable: true, renameLabel: "Host name" } : {}) },
+      ...(note === "locked" ? [{ id: `${UNLOCK_ROW_PREFIX}${entry.id}`, label: "Unlock to connect", glyph: "◇" }] : []),
+    ];
+  };
+  return names.flatMap((host) => {
+    const same = admitted.filter((h) => h.name === host);
+    const shared = (count.get(host) ?? 1) > 1;
+    // Sessions are keyed by host label, so they list under the first host that carries it.
+    return [
+      ...same.flatMap((entry, i) => [...rowsFor(host, entry, shared), ...(i === 0 ? [...inv.list(host)].sort(byFrecency).map((sess) => leaf(host, sess, renamable)) : [])]),
+    ];
+  });
 };

@@ -35,6 +35,8 @@ export function createLiveDetails(options: {
   const snapshots = new Map<string, HostFactsSnapshot>();
   // Snapshot, offline and throttle keys pair each window with the host identity that answered.
   const offline = new Set<string>();
+  // Hosts whose facts the server refused for good: their rows stop waiting ("Reading…") and are simply left out.
+  const refusedKeys = new Set<string>();
   const retarget = new Map<string, () => void>();
   const lastReadAt = new Map<string, number>();
   return {
@@ -51,6 +53,8 @@ export function createLiveDetails(options: {
       const gone = target.kind === "host" && !facts && offline.has(cacheKey);
       return detailsFacts({
         extended: readExtendedInfo(),
+        // A readable host whose facts have not come back yet (and is not known to be offline) holds its rows' places.
+        ...(target.kind !== "none" && !facts && !gone && !refusedKeys.has(cacheKey) ? { loading: true } : {}),
         host: {
           name: rec.model.host,
           // The server's login only describes the server's own windows; an added host names its own.
@@ -86,6 +90,7 @@ export function createLiveDetails(options: {
         if (next !== key) {
           snapshots.delete(`${id}:${key}`);
           offline.delete(`${id}:${key}`);
+          refusedKeys.delete(`${id}:${key}`);
           key = next;
           generation++;
           inFlight = false;
@@ -132,7 +137,9 @@ export function createLiveDetails(options: {
           } else if (error instanceof ActionRefused && error.reason !== "host busy") {
             // A permanent refusal stops this host's poll; retargeting can still start another host.
             refused = true;
+            refusedKeys.add(readKey);
             window.clearTimeout(timer);
+            refresh();
           }
           // Transport failures and admission backpressure retry on the next bounded poll.
         } finally {
@@ -151,6 +158,7 @@ export function createLiveDetails(options: {
         retarget.delete(id);
         snapshots.delete(`${id}:${key}`);
         offline.delete(`${id}:${key}`);
+        refusedKeys.delete(`${id}:${key}`);
       };
     },
   };

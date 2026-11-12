@@ -65,7 +65,9 @@ export function openDetailsPopover(
   const updateHeader = (facts: DetailsFacts): void => {
     root.setAttribute("aria-label", `Details for ${facts.title}`);
     title.textContent = facts.title;
-    subtitle.textContent = facts.subtitle;
+    // While the facts are on their way the subtitle (who and where) may not be known yet; an invisible character keeps its line, so
+    // the header does not grow by that line when the facts land (#500, J528).
+    subtitle.textContent = facts.subtitle || (facts.loading ? "\u200b" : "");
     if (facts.os) {
       logo.innerHTML = hostIconMarkup(facts.os, "ui-host-mark");
       logo.hidden = false;
@@ -88,6 +90,12 @@ export function openDetailsPopover(
     removal.onOutcome = (outcome) => { if (outcome.state === "removed") close("pointer"); };
   }
   let scrolled = false;
+  /**
+   * The panel opens at the height it keeps (#500, J528). While the machine's facts are on their way their rows hold their places
+   * (details-facts.ts `loading`); once they land a row the machine does not report is dropped, which would shrink the panel. The
+   * height seen before each repaint of that stretch is therefore held as the list's minimum until the person changes tab.
+   */
+  let holding = false;
   scroll.addEventListener("scroll", () => { scrolled = true; }, { passive: true });
   let selected = first.sections[0]?.id ?? "";
   /**
@@ -98,10 +106,16 @@ export function openDetailsPopover(
   const show = (id: string, animate: boolean, tabChange = true): void => {
     selected = id;
     const facts = input.read();
+    if (tabChange) { scroll.style.minHeight = ""; holding = false; }
+    // Measured before the rows change: the height the person is looking at.
+    const held = !tabChange && holding && root.isConnected ? Math.max(parseFloat(scroll.style.minHeight) || 0, scroll.clientHeight) : 0;
+    if (facts.loading) holding = true;
+    else if (holding && !tabChange) holding = false;
     updateHeader(facts);
     list.root.setAttribute("aria-label", `${facts.title} details`);
     const section = facts.sections.find((x) => x.id === id) ?? first.sections[0];
     list.set((section?.rows ?? []).filter((row) => row.value.trim() !== ""));
+    if (held) scroll.style.minHeight = `${held}px`;
     if (removal) {
       // Leaving the tab takes an open question back to the row (a refresh on the tab itself must not); the host's state is read each time.
       if (section?.id !== "connection") removal.reset();

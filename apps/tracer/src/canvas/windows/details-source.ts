@@ -15,6 +15,7 @@ export interface DetailsSection {
   rows: KeyValueRow[];
 }
 
+/** Everything the machine panel shows for one window: its header (mark, title, subtitle), its tabs of rows and whether the facts are still loading. */
 export interface DetailsFacts {
   /** The mark in the header (the operating system). */
   os?: HostPlatform;
@@ -23,6 +24,8 @@ export interface DetailsFacts {
   /** The small line: who and where ("kayg@build-01 · x86_64"). */
   subtitle: string;
   sections: DetailsSection[];
+  /** The machine's facts are still being read: the rows that will fill hold their place so the panel keeps one height (details-facts.ts). */
+  loading?: boolean;
 }
 
 /** A bounded snapshot returned by the host.facts.read plugin action. */

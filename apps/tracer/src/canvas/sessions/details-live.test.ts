@@ -147,7 +147,9 @@ test("an offline or not-yet-read host says so in plain words and never shows the
     const stop = source.open!(added, () => {});
     let facts = source.facts(added)!;
     expect(row(facts, "System")).toBe("Not known yet");
-    expect(row(facts, "CPU")).toBe("");
+    // Waiting rows hold their place with "Reading…" so the panel keeps one height when the facts land (#500, J528).
+    expect(row(facts, "CPU")).toBe("Reading…");
+    expect(facts.loading).toBe(true);
     expect(JSON.stringify(facts)).not.toContain("AlmaLinux");
     stop();
     // Refused as offline.
