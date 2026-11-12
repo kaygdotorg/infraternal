@@ -425,13 +425,13 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
     }
     let directory = Directory::new();
     let installed = directory.0.join("installed");
-    // Link a compact image without a write window after publication.
+    // Publish a compact image without a write window after publication, even
+    // when the build target and the passwd-home fixture are on different disks.
     // The child unlinks only this name, leaving the cargo test image intact.
-    std::fs::hard_link(
-        stripped_test_image(&std::env::current_exe().unwrap()),
+    crate::test_executable::link_or_copy(
+        &stripped_test_image(&std::env::current_exe().unwrap()),
         &installed,
-    )
-    .unwrap();
+    );
     let child = std::process::Command::new(&installed)
         .args(["--exact", NAME, "--nocapture"])
         .env("INFRATERNAL_DELETED_BINARY_TEST", "1")
