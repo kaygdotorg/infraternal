@@ -104,6 +104,11 @@ test("the layout leaves its keyboard state when the keyboard goes, even if the l
   await expect(page.locator("html")).toHaveAttribute("data-kb", "closed", { timeout: 3_000 });
 });
 
+/** The `themeChosen` flag of every cached look on this page (the cache is the look the first paint reads). */
+const chosenFlags = (page: Page): Promise<unknown[]> => page.evaluate(() => Object.entries(localStorage)
+  .filter(([key]) => key === "tracer.look" || key.startsWith("tracer.look.account."))
+  .map(([, value]) => { try { return (JSON.parse(value) as { themeChosen?: unknown }).themeChosen; } catch { return "unreadable"; } }));
+
 test("a never-chosen theme follows the system, live and on every device; a picked theme does not (D390)", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL: baseURL!, colorScheme: "dark", viewport: PHONE, hasTouch: true, isMobile: true });
   const page = await context.newPage();
@@ -113,7 +118,7 @@ test("a never-chosen theme follows the system, live and on every device; a picke
   const dark = await page.locator("html").getAttribute("data-theme");
   expect(["mocha", "macchiato", "frappe"], `first load in a dark system: ${dark}`).toContain(dark);
   // The first load saved no theme: the cache holds none that counts as chosen, so a light device is not forced dark.
-  expect(await page.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith("tracer.look")).map(([, value]) => JSON.parse(value).themeChosen))).not.toContain(true);
+  expect(await chosenFlags(page)).not.toContain(true);
   // Nothing was picked, so the system's own change is followed while the page stays open.
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "latte", { timeout: 5_000 });
@@ -123,7 +128,7 @@ test("a never-chosen theme follows the system, live and on every device; a picke
   await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("Theme: Frosted");
   await page.getByRole("option").filter({ hasText: "Theme: Frosted" }).first().click();
-  await expect.poll(() => page.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith("tracer.look")).map(([, value]) => JSON.parse(value).themeChosen)), { timeout: 5_000 }).toContain(true);
+  await expect.poll(() => chosenFlags(page), { timeout: 5_000 }).toContain(true);
   const picked = await page.locator("html").getAttribute("data-theme");
   await page.emulateMedia({ colorScheme: "light" });
   // sleep: a negative check; give a wrongly followed system change time to land before asserting the theme stayed.
