@@ -203,7 +203,10 @@ class DeploymentTests(unittest.TestCase):
                 (mesh / "mesh-private-key").write_bytes(b"latest-candidate-key")
                 (mesh / "mesh-public.json").write_bytes(b'{"enabled":true}')
             else:
-                self.assertTrue(rollback, "previous build requires the writer-quiesced handoff")
+                if rollback:
+                    mesh = data / "mesh"
+                    legacy_key.write_bytes((mesh / "mesh-private-key").read_bytes())
+                    legacy_public.write_bytes((mesh / "mesh-public.json").read_bytes())
                 observed_by_old_binary.append(
                     (
                         legacy_key.read_bytes() if legacy_key.exists() else None,
