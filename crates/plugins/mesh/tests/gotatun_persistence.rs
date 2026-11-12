@@ -21,7 +21,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -688,5 +688,288 @@ fn peers_punch_through_established_only_input_and_tunnel_input_stays_separate() 
     in_ns(NS_A, || node_a.down().unwrap());
     in_ns(NS_B, || node_b.down().unwrap());
     cleanup(&[&state_a, &state_b]);
+    fs::remove_file(firewall).unwrap();
+}
+
+/// Build a peer snapshot with either full directional network access or no access.
+fn j534_snapshot(
+    local: (u32, PublicKey),
+    peer: (u32, PublicKey),
+    endpoint: Option<SocketAddr>,
+    version: u64,
+    allowed: bool,
+) -> Chunk {
+    let mut chunk = snapshot_with_endpoint(local, peer, endpoint, version);
+    chunk.default_policy = DefaultPolicy::Allow;
+    for policy in chunk.upserted.values_mut() {
+        let access = if allowed {
+            TrafficPolicy::All
+        } else {
+            TrafficPolicy::None
+        };
+        policy.inbound = access.clone();
+        policy.outbound = access;
+    }
+    chunk
+}
+
+/// Build a test-only MAC1-valid initiation without printing the ephemeral peer secret.
+fn j534_mac1_initiation(secret_bytes: [u8; 32], receiver: PublicKey) -> (PublicKey, Vec<u8>) {
+    let secret = gotatun::x25519::StaticSecret::from(secret_bytes);
+    let public = gotatun::x25519::PublicKey::from(&secret);
+    let mut initiator = gotatun::noise::Tunn::new(
+        secret,
+        gotatun::x25519::PublicKey::from(receiver.0),
+        None,
+        None,
+        gotatun::noise::index_table::IndexTable::from_os_rng(),
+        std::sync::Arc::new(gotatun::noise::rate_limiter::RateLimiter::new(&public, 100)),
+    );
+    let initiation = initiator
+        .format_handshake_initiation(false)
+        .expect("the test peer can produce a public-key-valid MAC1 initiation")
+        .into_bytes();
+    (PublicKey(*public.as_bytes()), initiation.as_ref().to_vec())
+}
+
+/// Read one marked nft rule's handle and packet count in its own network namespace.
+fn j534_rule(ns: &str, marker: &str) -> (String, u64) {
+    in_ns(ns, || {
+        let chain = run(
+            "nft",
+            &["-a", "list", "chain", "inet", HOLE_PUNCH_TABLE, "input"],
+        );
+        let line = chain
+            .lines()
+            .find(|line| line.contains(marker))
+            .unwrap_or_else(|| panic!("{ns} has no nft rule marked {marker:?}: {chain}"));
+        let handle = line
+            .split("handle ")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .unwrap_or_else(|| panic!("{ns} nft rule has no handle: {line}"))
+            .to_owned();
+        let packets = line
+            .split("packets ")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{ns} nft rule has no packet count: {line}"));
+        (handle, packets)
+    })
+}
+
+/// Denied and unknown peer keys get no cookie while an allowed peer keeps normal rate limiting.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn peers_without_network_access_get_no_reply_while_registered_peers_keep_cookie_behavior() {
+    assert!(
+        std::env::var_os("INFRATERNAL_MESH_PORT").is_none(),
+        "the case exercises the automatic UDP listener"
+    );
+    let state_a = state("j534-cookie-a");
+    let firewall =
+        std::env::temp_dir().join(format!("j534-cookie-nft-{}.conf", std::process::id()));
+    fs::write(
+        &firewall,
+        format!(
+            "table inet {HOLE_PUNCH_TABLE} {{\n\
+                 chain input {{\n\
+                     type filter hook input priority filter; policy drop;\n\
+                     iifname \"lo\" accept\n\
+                     ct state established,related counter accept\n\
+                     counter drop\n\
+                 }}\n\
+             }}\n"
+        ),
+    )
+    .unwrap();
+    run("mkdir", &["-p", "/run/netns"]);
+    run("mount", &["-t", "tmpfs", "netns", "/run/netns"]);
+    cleanup(&[]);
+    for ns in [NS_A, NS_B] {
+        run("ip", &["netns", "add", ns]);
+        run("ip", &["-n", ns, "link", "set", "lo", "up"]);
+    }
+    run(
+        "ip",
+        &[
+            "link", "add", "j534a", "netns", NS_A, "type", "veth", "peer", "j534b", "netns", NS_B,
+        ],
+    );
+    run(
+        "ip",
+        &[
+            "-n",
+            NS_B,
+            "address",
+            "add",
+            "192.0.2.24/24",
+            "dev",
+            "j534b",
+        ],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "address", "add", "192.0.2.1/24", "dev", "j534a"],
+    );
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "192.0.2.2/24", "dev", "j534b"],
+    );
+    run(
+        "ip",
+        &[
+            "-n",
+            NS_B,
+            "address",
+            "add",
+            "192.0.2.23/24",
+            "dev",
+            "j534b",
+        ],
+    );
+    run("ip", &["-n", NS_A, "link", "set", "j534a", "up"]);
+    run("ip", &["-n", NS_B, "link", "set", "j534b", "up"]);
+    install_hole_punch_firewall(NS_A, &firewall);
+    in_ns(NS_A, || {
+        run(
+            "nft",
+            &[
+                "insert",
+                "rule",
+                "inet",
+                HOLE_PUNCH_TABLE,
+                "input",
+                "udp",
+                "dport",
+                "10254",
+                "counter",
+                "accept",
+                "comment",
+                "j534-cookie-probe",
+            ],
+        );
+    });
+
+    let (mut node_a, id_a) = in_ns(NS_A, || {
+        let mut node = Node::restore_with_engine(&state_a, EngineKind::GotaTun).unwrap();
+        let identity = node.up().unwrap();
+        (node, identity)
+    });
+    assert_eq!(
+        id_a.port, 10_254,
+        "the fixture uses the default UDP listener"
+    );
+    let registered_endpoint = SocketAddr::from(([192, 0, 2, 2], 40_001));
+    let denied_endpoint = SocketAddr::from(([192, 0, 2, 23], 40_002));
+    let unregistered_endpoint = SocketAddr::from(([192, 0, 2, 24], 40_003));
+    let (registered_key, registered_packet) = j534_mac1_initiation([0x66; 32], id_a.public_key);
+    let (denied_key, denied_packet) = j534_mac1_initiation([0x77; 32], id_a.public_key);
+    let (_, unregistered_packet) = j534_mac1_initiation([0x55; 32], id_a.public_key);
+    let registered_socket = in_ns(NS_B, || {
+        let socket = UdpSocket::bind(registered_endpoint).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        socket
+    });
+    let denied_socket = in_ns(NS_B, || {
+        let socket = UdpSocket::bind(denied_endpoint).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        socket
+    });
+    let unregistered_socket = in_ns(NS_B, || {
+        let socket = UdpSocket::bind(unregistered_endpoint).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        socket
+    });
+    let mut snapshot = j534_snapshot(
+        (1, id_a.public_key),
+        (2, registered_key),
+        Some(registered_endpoint),
+        1,
+        true,
+    );
+    let denied_snapshot = j534_snapshot(
+        (1, id_a.public_key),
+        (3, denied_key),
+        Some(denied_endpoint),
+        1,
+        false,
+    );
+    snapshot.upserted.extend(denied_snapshot.upserted);
+    in_ns(NS_A, || node_a.chunk(snapshot).unwrap());
+    let listener = SocketAddr::from(([192, 0, 2, 1], id_a.port));
+
+    let denied_reply = in_ns(NS_B, || {
+        for _ in 0..101 {
+            denied_socket.send_to(&denied_packet, listener).unwrap();
+        }
+        let mut packet = [0_u8; 128];
+        denied_socket.recv_from(&mut packet)
+    });
+    assert!(
+        denied_reply.is_err(),
+        "a configured peer with no network access received a UDP reply: {denied_reply:?}"
+    );
+
+    let unregistered_reply = in_ns(NS_B, || {
+        for _ in 0..101 {
+            unregistered_socket
+                .send_to(&unregistered_packet, listener)
+                .unwrap();
+        }
+        let mut packet = [0_u8; 128];
+        unregistered_socket.recv_from(&mut packet)
+    });
+    assert!(
+        unregistered_reply.is_err(),
+        "an unknown valid-MAC1 sender received a UDP reply: {unregistered_reply:?}"
+    );
+
+    let registered_cookie = in_ns(NS_B, || {
+        for _ in 0..101 {
+            registered_socket
+                .send_to(&registered_packet, listener)
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut packet = [0_u8; 128];
+        loop {
+            match registered_socket.recv_from(&mut packet) {
+                Ok((length, source)) if length == 64 && packet[..4] == [3, 0, 0, 0] => {
+                    return Some((length, source));
+                }
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(error) => panic!("registered socket receive failed: {error}"),
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
+    });
+    assert_eq!(
+        registered_cookie,
+        Some((64, listener)),
+        "a configured peer with network access keeps the standard cookie response under load"
+    );
+    assert!(
+        j534_rule(NS_A, "j534-cookie-probe").1 >= 303,
+        "all three packet floods must reach the listener before its response is checked"
+    );
+
+    in_ns(NS_A, || node_a.down().unwrap());
+    drop((registered_socket, denied_socket, unregistered_socket));
+    cleanup(&[&state_a]);
     fs::remove_file(firewall).unwrap();
 }

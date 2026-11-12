@@ -2,10 +2,11 @@
 
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
-    packet::{Ip, Packet, PacketBufPool},
+    noise::{handshake::parse_handshake_anon, rate_limiter::RateLimiter},
+    packet::{Ip, Packet, PacketBufPool, WgKind, WgPacketType},
     tun::{IpRecv, IpSend, MtuWatcher},
     udp::{
-        UdpTransportFactory, UdpTransportFactoryParams,
+        UdpRecv, UdpTransportFactory, UdpTransportFactoryParams,
         socket::{UdpSocket as GotaUdpSocket, UdpSocketFactory},
     },
     x25519::{PublicKey as X25519PublicKey, StaticSecret},
@@ -27,14 +28,20 @@ use std::{
 };
 use tokio::{
     runtime::Builder as RuntimeBuilder,
-    sync::Notify,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::{
+        Notify, RwLock,
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+    },
     task::JoinSet,
     time::Instant,
 };
 
 use crate::listen_port::Request as ListenPortRequest;
-use crate::{dataplane::Config, gotatun_tun::LinuxTun, policy::model::PublicKey};
+use crate::{
+    dataplane::Config,
+    gotatun_tun::LinuxTun,
+    policy::{model::PublicKey, rules::TrafficPolicy},
+};
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, LinuxPacketIo, LinuxPacketIo)>;
 type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
@@ -171,16 +178,147 @@ impl EngineKind {
     }
 }
 
+/// Holds the already-bound UDP sockets and live peer-admission state for `GotaTun`.
+///
+/// Clones share the listener and admission guard so a device restart keeps its actual port and
+/// uses the latest accepted peer snapshot.
 #[derive(Clone)]
 struct BoundUdpFactory {
     send: GotaUdpSocket,
     receive: GotaUdpSocket,
     port: u16,
+    admission: Arc<RwLock<PeerAdmission>>,
+}
+
+/// Holds the live mesh identities allowed to reach `GotaTun`'s handshake cookie limiter.
+///
+/// `GotaTun` can answer a valid initiation with a cookie before it looks up a peer. This guard first
+/// validates MAC1, then decrypts the sender identity so an unregistered key cannot cause a reply.
+/// Admitted peers still reach `GotaTun`'s normal limiter. The peer list changes only after a device
+/// snapshot succeeds, while both key checks follow live local-key rotation.
+struct PeerAdmission {
+    private_key: StaticSecret,
+    public_key: X25519PublicKey,
+    /// Checks MAC1 before peer-identity decryption; admitted peers still use `GotaTun`'s limiter.
+    mac1: RateLimiter,
+    peers: BTreeSet<PublicKey>,
+}
+
+impl PeerAdmission {
+    /// Create an empty admission set for the node's current `WireGuard` identity.
+    fn new(private_key: StaticSecret) -> Self {
+        let public_key = X25519PublicKey::from(&private_key);
+        let mac1 = RateLimiter::new(&public_key, u64::MAX);
+        Self {
+            private_key,
+            public_key,
+            mac1,
+            peers: BTreeSet::new(),
+        }
+    }
+
+    /// Replace the identities accepted by the most recently applied device snapshot.
+    fn set_peers(&mut self, peers: impl IntoIterator<Item = PublicKey>) {
+        self.peers = peers.into_iter().collect();
+    }
+
+    /// Replace the local identity after `GotaTun` accepts a key rotation.
+    fn set_private_key(&mut self, private_key: StaticSecret) {
+        self.public_key = X25519PublicKey::from(&private_key);
+        self.mac1 = RateLimiter::new(&self.public_key, u64::MAX);
+        self.private_key = private_key;
+    }
+
+    /// Mark only handshake initiations for cryptographic peer admission.
+    fn needs_admission(packet: &Packet) -> bool {
+        packet.as_ref().first() == Some(&WgPacketType::HandshakeInit.0)
+    }
+
+    /// Admit non-initiation traffic unchanged and only pass initiations from configured peers.
+    fn admits(&self, packet: &Packet) -> bool {
+        if !Self::needs_admission(packet) {
+            return true;
+        }
+        // Keep malformed traffic out of the static-key decryption path and out of the real
+        // limiter. MAC1 does not depend on the source address, so keep the validator's per-IP
+        // counter on one fixed key instead of letting spoofed sources grow a second map.
+        self.mac1.try_reset_count();
+        let validation_source = SocketAddr::from(([0, 0, 0, 0], 0));
+        let validation_packet: Packet = Packet::copy_from(packet.as_ref());
+        let Ok(WgKind::HandshakeInit(initiation)) = self
+            .mac1
+            .verify_packet(validation_source, validation_packet)
+        else {
+            return false;
+        };
+        let Ok(sender) = parse_handshake_anon(&self.private_key, &self.public_key, &initiation)
+        else {
+            return false;
+        };
+        self.peers.contains(&PublicKey(sender.peer_static_public))
+    }
+}
+
+/// Keeps the socket's batched receive path while filtering unregistered handshakes before `GotaTun`.
+struct PeerAdmissionUdpReceiver {
+    socket: GotaUdpSocket,
+    admission: Arc<RwLock<PeerAdmission>>,
+}
+
+impl UdpRecv for PeerAdmissionUdpReceiver {
+    type RecvManyBuf = <GotaUdpSocket as UdpRecv>::RecvManyBuf;
+
+    /// Receive one packet and suppress any valid-MAC1 initiation from an unknown peer key.
+    async fn recv_from(
+        &mut self,
+        pool: &mut PacketBufPool,
+    ) -> io::Result<(Packet, std::net::SocketAddr)> {
+        loop {
+            let packet = self.socket.recv_from(pool).await?;
+            if !PeerAdmission::needs_admission(&packet.0)
+                || self.admission.read().await.admits(&packet.0)
+            {
+                return Ok(packet);
+            }
+        }
+    }
+
+    /// Preserve `GotaTun`'s socket batch receive and remove only rejected handshake initiations.
+    async fn recv_many_from(
+        &mut self,
+        recv_buf: &mut Self::RecvManyBuf,
+        pool: &mut PacketBufPool,
+        packets: &mut Vec<(Packet, std::net::SocketAddr)>,
+    ) -> io::Result<()> {
+        let first_new_packet = packets.len();
+        self.socket.recv_many_from(recv_buf, pool, packets).await?;
+        let mut read = first_new_packet;
+        let mut write = first_new_packet;
+        while read < packets.len() {
+            let packet = &packets[read].0;
+            let admitted = !PeerAdmission::needs_admission(packet)
+                || self.admission.read().await.admits(packet);
+            if admitted {
+                if write != read {
+                    packets.swap(write, read);
+                }
+                write += 1;
+            }
+            read += 1;
+        }
+        packets.truncate(write);
+        Ok(())
+    }
+
+    /// Keep the underlying socket's UDP GRO support available to `GotaTun`.
+    fn enable_udp_gro(&self) -> io::Result<()> {
+        self.socket.enable_udp_gro()
+    }
 }
 
 impl UdpTransportFactory for BoundUdpFactory {
     type Send = GotaUdpSocket;
-    type Recv = GotaUdpSocket;
+    type Recv = PeerAdmissionUdpReceiver;
 
     // The trait returns a future; these sockets are already bound, so complete it immediately.
     fn bind(
@@ -190,7 +328,13 @@ impl UdpTransportFactory for BoundUdpFactory {
         if params.addr.is_some() || params.port != self.port {
             return std::future::ready(Err(io::ErrorKind::InvalidInput.into()));
         }
-        std::future::ready(Ok((self.send.clone(), self.receive.clone())))
+        std::future::ready(Ok((
+            self.send.clone(),
+            PeerAdmissionUdpReceiver {
+                socket: self.receive.clone(),
+                admission: Arc::clone(&self.admission),
+            },
+        )))
     }
 }
 
@@ -600,11 +744,12 @@ async fn initialize(
         .or_else(|_| crate::wireguard::Device::tx_queue_len())
         .unwrap_or(0);
     let tun = LinuxPacketIo::new(tun);
-    let (factory, port) = bind_udp(requested_port).await?;
+    let (factory, port) = bind_udp(requested_port, private_key.clone()).await?;
     let peers = config
         .map(peers_for_config)
         .transpose()?
         .unwrap_or_default();
+    let admitted_peers = config.map(admitted_peer_keys).unwrap_or_default();
     // GotaTun starts its packet workers only when the builder has peers.
     // Node::up precedes the coordinator's first snapshot, so the bound
     // transport and key wait for that first nonempty peer set; they also stay
@@ -618,6 +763,7 @@ async fn initialize(
                 private_key.clone(),
                 port,
                 peers,
+                admitted_peers,
                 tun.clone(),
             )
             .await?,
@@ -882,15 +1028,21 @@ impl RuntimeState {
     /// # Errors
     /// Reports an absent runtime or a failed userspace device reconfiguration.
     async fn set_private_key(&mut self, private_key: StaticSecret) -> io::Result<()> {
-        if self.pending.is_none() {
-            return Err(io::ErrorKind::NotConnected.into());
-        }
+        let admission = Arc::clone(
+            &self
+                .pending
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .factory
+                .admission,
+        );
         if let Some(device) = self.device.as_ref() {
             device
                 .set_private_key(private_key.clone())
                 .await
                 .map_err(|_| io::Error::other("GotaTun private key could not be updated."))?;
         }
+        admission.write().await.set_private_key(private_key.clone());
         self.pending
             .as_mut()
             .ok_or(io::ErrorKind::NotConnected)?
@@ -1001,6 +1153,7 @@ impl RuntimeState {
             pending.private_key.clone(),
             self.info.port,
             peers,
+            admitted_peer_keys(config),
             tun,
         )
         .await?;
@@ -1055,26 +1208,36 @@ impl RuntimeState {
             self.config = Some(config);
             return Ok(self.info.clone());
         }
-        let desired: BTreeSet<_> = config.peers.values().flat_map(policy_keys).collect();
+        let desired = peer_keys_with_network_access(&config);
+        let admitted_peers = admitted_peer_keys(&config);
+        let admission = Arc::clone(
+            &self
+                .pending
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .factory
+                .admission,
+        );
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let changed_policies = config
             .peers
             .iter()
             .filter(|(id, policy)| {
-                self.config
-                    .as_ref()
-                    .and_then(|old| old.peers.get(id))
-                    .is_none_or(|old| old.peer != policy.peer)
+                peer_has_network_access(policy)
+                    && self
+                        .config
+                        .as_ref()
+                        .and_then(|old| old.peers.get(id))
+                        .is_none_or(|old| !peer_has_network_access(old) || old.peer != policy.peer)
             })
             .map(|(_, policy)| peer_for_policy(policy))
             .collect::<io::Result<Vec<_>>>()?;
         let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
-        let previous_keys: BTreeSet<_> = self
+        let previous_keys = self
             .config
-            .iter()
-            .flat_map(|old| old.peers.values())
-            .flat_map(policy_keys)
-            .collect();
+            .as_ref()
+            .map(peer_keys_with_network_access)
+            .unwrap_or_default();
         let retired: Vec<_> = previous_keys
             .difference(&desired)
             .copied()
@@ -1098,6 +1261,8 @@ impl RuntimeState {
                 return Err(error);
             }
         }
+        // The receive guard follows only snapshots the live device accepted.
+        admission.write().await.set_peers(admitted_peers);
         self.config = Some(config);
         Ok(self.info.clone())
     }
@@ -1162,13 +1327,26 @@ impl RuntimeState {
     }
 }
 
+/// Build a `GotaTun` device from a retained listener, identity, peers and TUN.
+///
+/// Install the admission set before the device starts receiving, so its first initiation sees the
+/// same peers as the device configuration.
+/// # Errors
+/// Reports a failure to start `GotaTun` with these sockets, peers or TUN.
 async fn build_device(
     factory: BoundUdpFactory,
     private_key: StaticSecret,
     port: u16,
     peers: Vec<WireGuardPeer>,
+    admitted_peers: BTreeSet<PublicKey>,
     tun: LinuxPacketIo,
 ) -> io::Result<GotaDevice> {
+    let admission = Arc::clone(&factory.admission);
+    {
+        let mut admission = admission.write().await;
+        admission.set_private_key(private_key.clone());
+        admission.set_peers(admitted_peers);
+    }
     DeviceBuilder::new()
         .with_udp(factory)
         .with_private_key(private_key)
@@ -1194,10 +1372,14 @@ const UDP_BUFFER_BYTES: usize = 7 * 1024 * 1024;
 /// Every bound socket sends IPv4 with Don't Fragment clear (#483).
 /// # Errors
 /// Returns socket errors, rejects the reserved port, or reports bounded ephemeral allocation failure.
-async fn bind_udp(request: ListenPortRequest) -> io::Result<(BoundUdpFactory, u16)> {
+async fn bind_udp(
+    request: ListenPortRequest,
+    private_key: StaticSecret,
+) -> io::Result<(BoundUdpFactory, u16)> {
     if request.port == 51_820 {
         return Err(io::ErrorKind::InvalidInput.into());
     }
+    let admission = Arc::new(RwLock::new(PeerAdmission::new(private_key)));
     let mut factory = UdpSocketFactory {
         recv_buffer_size: Some(UDP_BUFFER_BYTES),
         send_buffer_size: Some(UDP_BUFFER_BYTES),
@@ -1222,6 +1404,7 @@ async fn bind_udp(request: ListenPortRequest) -> io::Result<(BoundUdpFactory, u1
                         send,
                         receive,
                         port,
+                        admission: Arc::clone(&admission),
                     },
                     port,
                 ));
@@ -1247,6 +1430,7 @@ async fn bind_udp(request: ListenPortRequest) -> io::Result<(BoundUdpFactory, u1
                     send,
                     receive,
                     port,
+                    admission: Arc::clone(&admission),
                 },
                 port,
             ));
@@ -1306,13 +1490,15 @@ impl IpRecv for LinuxPacketIo {
     }
 }
 
-/// Build the device's complete peer list, retaining both keys during a rotation overlap.
+/// Build the device's peer list from peers with network access, retaining both keys during a
+/// rotation overlap.
 /// # Errors
 /// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let peers = config
         .peers
         .values()
+        .filter(|peer| peer_has_network_access(peer))
         .map(peer_for_policy)
         .collect::<io::Result<Vec<_>>>()?;
     Ok(peers.into_iter().flatten().collect())
@@ -1382,6 +1568,38 @@ fn policy_keys(policy: &crate::dataplane::PeerPolicy) -> impl Iterator<Item = Pu
     std::iter::once(policy.peer.key).chain(policy.peer.previous_key)
 }
 
+/// Return configured `WireGuard` identities whose peers have network access in either direction.
+///
+/// `GotaTun` must not install a peer with no access: a configured endpoint and keepalive would let
+/// the node initiate a handshake to that peer even though inbound handshake admission rejects it.
+pub(crate) fn peer_keys_with_network_access(config: &Config) -> BTreeSet<PublicKey> {
+    config
+        .peers
+        .values()
+        .filter(|peer| peer_has_network_access(peer))
+        .flat_map(policy_keys)
+        .collect()
+}
+
+/// Tell whether either direction permits at least one network packet tuple.
+fn peer_has_network_access(peer: &crate::dataplane::PeerPolicy) -> bool {
+    has_network_access(&peer.inbound) || has_network_access(&peer.outbound)
+}
+
+/// Return identities whose effective network access permits traffic in at least one direction.
+fn admitted_peer_keys(config: &Config) -> BTreeSet<PublicKey> {
+    peer_keys_with_network_access(config)
+}
+
+/// Tell whether a directional network rule allows at least one packet tuple.
+fn has_network_access(policy: &TrafficPolicy) -> bool {
+    match policy {
+        TrafficPolicy::All => true,
+        TrafficPolicy::Ports(ports) => !ports.is_empty(),
+        TrafficPolicy::None => false,
+    }
+}
+
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {
     let raw: [u8; 32] = bytes.try_into().map_err(|_| io::ErrorKind::InvalidData)?;
     let raw = zeroize::Zeroizing::new(raw);
@@ -1394,7 +1612,7 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{EngineKind, peers_for_config};
+    use super::{EngineKind, admitted_peer_keys, peer_keys_with_network_access, peers_for_config};
     use crate::listen_port::Request;
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -1436,11 +1654,15 @@ mod tests {
     /// even where `rmem_default` equals `rmem_max`. With `CAP_NET_ADMIN` the request is forced.
     #[tokio::test]
     async fn engine_udp_socket_requests_the_large_buffers() {
+        use gotatun::x25519::StaticSecret;
         use nix::sys::socket::{getsockopt, setsockopt, sockopt};
-        let (factory, _) = super::bind_udp(Request {
-            port: 0,
-            allow_fallback: true,
-        })
+        let (factory, _) = super::bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            StaticSecret::from([1; 32]),
+        )
         .await
         .expect("bound engine socket");
         let reference = std::net::UdpSocket::bind("127.0.0.1:0").expect("reference socket");
@@ -1463,6 +1685,7 @@ mod tests {
     /// An automatic listener falls back when its preferred UDP port is held; an explicit choice fails.
     #[tokio::test]
     async fn occupied_listener_falls_back_only_for_automatic_selection() {
+        use gotatun::x25519::StaticSecret;
         let occupied = std::net::UdpSocket::bind("0.0.0.0:0").expect("reserve test port");
         let preferred = occupied.local_addr().expect("reserved port").port();
         assert_ne!(
@@ -1470,10 +1693,13 @@ mod tests {
             "the fallback test does not use the reserved port"
         );
 
-        let (factory, actual) = super::bind_udp(Request {
-            port: preferred,
-            allow_fallback: true,
-        })
+        let (factory, actual) = super::bind_udp(
+            Request {
+                port: preferred,
+                allow_fallback: true,
+            },
+            StaticSecret::from([2; 32]),
+        )
         .await
         .expect("automatic listener falls back");
         assert_ne!(actual, preferred, "the occupied preference was not reused");
@@ -1487,10 +1713,13 @@ mod tests {
         );
         drop(factory);
 
-        let Err(error) = super::bind_udp(Request {
-            port: preferred,
-            allow_fallback: false,
-        })
+        let Err(error) = super::bind_udp(
+            Request {
+                port: preferred,
+                allow_fallback: false,
+            },
+            StaticSecret::from([2; 32]),
+        )
         .await
         else {
             panic!("an explicit occupied port unexpectedly succeeded")
@@ -1563,6 +1792,7 @@ mod tests {
         use gotatun::x25519::StaticSecret;
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
         use std::sync::{Arc, mpsc as sync};
+        let private_key = StaticSecret::from([7; 32]);
         let (kernel, device) = socketpair(
             AddressFamily::Unix,
             SockType::SeqPacket,
@@ -1575,13 +1805,15 @@ mod tests {
             crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
                 .expect("TUN stand-in registers"),
         );
-        let (factory, port) = bind_udp(Request {
-            port: 0,
-            allow_fallback: true,
-        })
+        let (factory, port) = bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            private_key.clone(),
+        )
         .await
         .expect("engine socket");
-        let private_key = StaticSecret::from([7; 32]);
         let config = one_peer_config(None);
         let peers = peers_for_config(&config).expect("peers");
         let device = build_device(
@@ -1589,6 +1821,7 @@ mod tests {
             private_key.clone(),
             port,
             peers,
+            admitted_peer_keys(&config),
             tun.clone(),
         )
         .await
@@ -1703,6 +1936,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["10.254.0.1/32", "fd01::1/128"]
         );
+    }
+
+    /// A peer with no network access cannot trigger an unsolicited userspace handshake.
+    #[test]
+    fn peer_without_network_access_is_not_installed() {
+        let mut config = one_peer_config(None);
+        let policy = config.peers.get_mut(&NodeId(1)).expect("configured peer");
+        policy.inbound = TrafficPolicy::None;
+        policy.outbound = TrafficPolicy::None;
+
+        assert!(peers_for_config(&config).expect("convert peers").is_empty());
+        assert!(peer_keys_with_network_access(&config).is_empty());
     }
 
     /// Keep both rotation keys installed while routing only through the currently active one.

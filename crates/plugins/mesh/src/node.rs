@@ -2729,17 +2729,23 @@ impl Node {
     }
 
     /// Check that the live data plane contains exactly the keys in a same-content snapshot.
+    ///
+    /// `GotaTun` omits peers with no network access so their configured endpoints cannot receive
+    /// unsolicited handshakes. The kernel engine retains its complete peer inventory.
     fn runtime_peer_inventory_matches(&self, config: &Config) -> bool {
         let Ok(counters) = self.peer_counters() else {
             return false;
         };
         let installed: std::collections::BTreeSet<_> = counters.keys().copied().collect();
-        let desired: std::collections::BTreeSet<_> = config
-            .peers
-            .values()
-            .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
-            .flatten()
-            .collect();
+        let desired = match self.engine_kind {
+            EngineKind::GotaTun => crate::gotatun_node::peer_keys_with_network_access(config),
+            EngineKind::Kernel => config
+                .peers
+                .values()
+                .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
+                .flatten()
+                .collect(),
+        };
         installed == desired
     }
 
