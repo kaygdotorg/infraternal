@@ -228,20 +228,53 @@ async fn a_different_release_with_equally_sized_files_is_never_not_modified() {
     let (root_b, release_b) = release(b"entry script B", b"brotli copy B");
     let a = get(&release_a, "/main.js", &[]).await;
     let b = get(&release_b, "/main.js", &[]).await;
-    let (tag_a, tag_b) = (a.headers()[header::ETAG].clone(), b.headers()[header::ETAG].clone());
-    assert_ne!(tag_a, tag_b, "same size and time must not give the same ETag");
-    let revalidated = get(&release_b, "/main.js", &[(header::IF_NONE_MATCH, tag_a.to_str().unwrap())]).await;
-    assert_eq!(revalidated.status(), 200, "release B must send its own main.js");
+    let (tag_a, tag_b) = (
+        a.headers()[header::ETAG].clone(),
+        b.headers()[header::ETAG].clone(),
+    );
+    assert_ne!(
+        tag_a, tag_b,
+        "same size and time must not give the same ETag"
+    );
+    let revalidated = get(
+        &release_b,
+        "/main.js",
+        &[(header::IF_NONE_MATCH, tag_a.to_str().unwrap())],
+    )
+    .await;
     assert_eq!(
-        revalidated.into_body().collect().await.unwrap().to_bytes().as_ref(),
+        revalidated.status(),
+        200,
+        "release B must send its own main.js"
+    );
+    assert_eq!(
+        revalidated
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
         b"brotli copy B"
     );
     // Release A's own page keeps working with the cheap answer.
-    let same = get(&release_a, "/main.js", &[(header::IF_NONE_MATCH, tag_a.to_str().unwrap())]).await;
+    let same = get(
+        &release_a,
+        "/main.js",
+        &[(header::IF_NONE_MATCH, tag_a.to_str().unwrap())],
+    )
+    .await;
     assert_eq!(same.status(), 304);
     assert_eq!(same.headers()[header::ETAG], tag_a);
     assert_eq!(same.headers()[header::CACHE_CONTROL], "no-cache");
-    assert!(same.into_body().collect().await.unwrap().to_bytes().is_empty());
+    assert!(
+        same.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
     // The file time is the same in every release, so If-Modified-Since never decides anything.
     let by_date = get(
         &release_b,
@@ -264,7 +297,10 @@ async fn the_etag_follows_the_whole_bundle() {
     std::fs::write(root_c.join("index.html"), b"<html>other</html>").unwrap();
     let changed = router(root_c.clone());
     let second = get(&changed, "/main.js", &[]).await.headers()[header::ETAG].clone();
-    assert_ne!(first, second, "a changed bundle must change every mutable ETag");
+    assert_ne!(
+        first, second,
+        "a changed bundle must change every mutable ETag"
+    );
     std::fs::remove_dir_all(root_a).unwrap();
     std::fs::remove_dir_all(root_c).unwrap();
 }

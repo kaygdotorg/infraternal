@@ -108,7 +108,11 @@ fn revalidation(response: &mut Response, fingerprint: &str, if_none_match: Optio
         .headers_mut()
         .remove(header::ETAG)
         .filter(|_| response.status() == StatusCode::OK)
-        .and_then(|tag| tag.to_str().ok().map(|tag| tag.trim_matches('"').to_owned()));
+        .and_then(|tag| {
+            tag.to_str()
+                .ok()
+                .map(|tag| tag.trim_matches('"').to_owned())
+        });
     let Some(inner) = inner else { return };
     let tag = format!("\"{fingerprint}-{inner}\"");
     if if_none_match.is_some_and(|wanted| names_etag(wanted, &tag)) {
@@ -157,7 +161,10 @@ fn bundle_fingerprint(root: &Path) -> String {
         Ok(digest.finalize())
     });
     match hashed {
-        Ok(digest) => digest[..8].iter().map(|byte| format!("{byte:02x}")).collect(),
+        Ok(digest) => digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
         Err(_) => {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
