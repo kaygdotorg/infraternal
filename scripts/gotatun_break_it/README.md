@@ -48,18 +48,20 @@ or an independently scheduled background worker.
 ## Continuous loaded-latency soak
 
 Run the one-to-two-hour leak and latency soak on compute01 under one build-slot
-hold. It keeps the same product pair alive for the whole run and captures a
-TID-filtered scheduler trace alongside the probes and GotaTun queue counters.
-The product binaries must already be built in the job target on `/mnt/build`.
-Use a fresh evidence directory each time:
+hold. It keeps the same product pair alive and samples per-thread scheduler
+wait, RSS, descriptors, threads, CPU ticks, GotaTun queue depth, and probes on
+one monotonic timeline. compute01 does not grant unprivileged kernel tracepoint
+access; the separate 10-minute backup01 window captures TID-filtered `perf
+sched` events. The product binaries must already be built in the job target on
+`/mnt/build`. Use a fresh evidence directory each time:
 
 ```sh
 CARGO_TARGET_DIR=/mnt/build/targets/J526 \
 ~/infraternal-ops/build-slot nice -n10 nix shell \
-  nixpkgs#perf nixpkgs#iproute2 nixpkgs#util-linux nixpkgs#python3 \
+  nixpkgs#iproute2 nixpkgs#util-linux nixpkgs#python3 \
   --command bash -c '
     cd /home/claude/worktrees/J526
-    PERF="$(command -v perf)" python3 scripts/gotatun_break_it/long_soak.py \
+    python3 scripts/gotatun_break_it/long_soak.py \
       /home/claude/.cache/codex-scratch/J526/evidence/loaded-latency-long-YYYYMMDD \
       3600 \
       /home/claude/.cache/codex-scratch/J526/j88c-kit \

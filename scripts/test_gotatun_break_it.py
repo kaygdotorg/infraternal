@@ -93,13 +93,15 @@ class LongSoakPlanTests(unittest.TestCase):
     """Keep one GotaTun process pair alive for the full long latency soak."""
 
     def test_long_soak_builds_a_compute_window_without_backup_perf_runner(self):
-        """Run the continuous leak soak inside compute01's build-slot hold."""
+        """Run the continuous leak soak under unshare inside compute01's build slot."""
         long_soak = importlib.import_module("gotatun_break_it.long_soak")
         command_builder = getattr(long_soak, "build_compute_window_command", None)
         self.assertIsNotNone(command_builder, "the compute long-soak runner should be available")
         assert command_builder is not None
         command = command_builder(
-            window_runner=Path("/suite/run_loaded_latency_window.sh"),
+            unshare=Path("/usr/bin/unshare"),
+            python=Path("/usr/bin/python3"),
+            soak_runner=Path("/suite/loaded_latency_soak.py"),
             window_output=Path("/evidence/continuous-soak"),
             duration_seconds=3_600,
             kit=Path("/kit"),
@@ -111,12 +113,21 @@ class LongSoakPlanTests(unittest.TestCase):
         self.assertEqual(
             command,
             [
-                "/suite/run_loaded_latency_window.sh",
-                "/evidence/continuous-soak",
-                "3600",
-                "/kit",
-                "/coordinator",
+                "/usr/bin/unshare",
+                "-Urn",
+                "/usr/bin/python3",
+                "-I",
+                "/suite/loaded_latency_soak.py",
+                "--binary",
                 "/infraternal",
+                "--coordinator",
+                "/coordinator",
+                "--kit-dir",
+                "/kit",
+                "--output",
+                "/evidence/continuous-soak",
+                "--duration-seconds",
+                "3600",
                 "--underlay-rate-mbit",
                 "800",
                 "--queue-depth-sampling",
@@ -729,6 +740,31 @@ worker 123/123 [002] 20.605000: sched:sched_switch: prev_comm=other prev_pid=456
         self.assertGreater(counters["rss_bytes"], 0)
         self.assertGreater(counters["fd_count"], 0)
         self.assertGreater(counters["thread_count"], 0)
+        self.assertIn("scheduler_wait_ns", counters)
+
+    def test_sums_thread_scheduler_counters_without_perf_privileges(self):
+        """Preserve monotonic per-thread runqueue wait in the long-soak samples."""
+        read_scheduler = getattr(mesh_ix_soak_module, "_scheduler_counters", None)
+        self.assertIsNotNone(read_scheduler, "procfs scheduler counter reader is missing")
+        assert read_scheduler is not None
+        with tempfile.TemporaryDirectory() as temporary:
+            task_root = Path(temporary)
+            for tid, contents in (("101", "100 20 3\n"), ("102", "50 10 2\n")):
+                task = task_root / tid
+                task.mkdir()
+                (task / "schedstat").write_text(contents, encoding="ascii")
+
+            counters = read_scheduler(task_root)
+
+        self.assertEqual(
+            counters,
+            {
+                "scheduler_runtime_ns": 150,
+                "scheduler_wait_ns": 30,
+                "scheduler_timeslices": 5,
+                "scheduler_thread_samples": 2,
+            },
+        )
 
     def test_counter_sampler_sleeps_while_waiting_for_start_marker(self):
         """Keep the counter process idle until the soak start marker arrives."""

@@ -343,6 +343,8 @@ def main() -> None:
         "underlay_rate_mbit": arguments.underlay_rate_mbit,
         "pipeline_diagnostics_enabled": arguments.pipeline_diagnostics,
         "queue_depth_sampling_enabled": arguments.queue_depth_sampling,
+        "scheduler_sample_source": "procfs-thread-schedstat",
+        "scheduler_sample_clock": "host-monotonic-counter-sample",
         "pipeline_log_tail_poll_interval_ms": (
             10 if arguments.pipeline_diagnostics or arguments.queue_depth_sampling else None
         ),

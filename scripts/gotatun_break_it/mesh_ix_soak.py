@@ -42,7 +42,7 @@ def flatten_node_counters(status: dict[str, Any], peer_page: dict[str, Any]) -> 
 
 
 def process_counters(pid: int) -> dict[str, int]:
-    """Read RSS, descriptors, threads, CPU ticks and context switches from procfs."""
+    """Read resource, context-switch and per-thread scheduler counters from procfs."""
     process = Path("/proc") / str(pid)
     status = _status_fields((process / "status").read_text(encoding="ascii"))
     stat = (process / "stat").read_text(encoding="ascii")
@@ -54,6 +54,34 @@ def process_counters(pid: int) -> dict[str, int]:
         "cpu_ticks": int(rest[11]) + int(rest[12]),
         "voluntary_context_switches": status.get("voluntary_ctxt_switches", 0),
         "involuntary_context_switches": status.get("nonvoluntary_ctxt_switches", 0),
+        **_scheduler_counters(process / "task"),
+    }
+
+
+def _scheduler_counters(task_root: Path) -> dict[str, int]:
+    """Sum Linux run time, runqueue wait and slice counts across one process's threads."""
+    runtime_ns = 0
+    wait_ns = 0
+    timeslices = 0
+    sampled_threads = 0
+    try:
+        for task in task_root.iterdir():
+            try:
+                values = (task / "schedstat").read_text(encoding="ascii").split()
+                runtime, wait, slices = (int(value) for value in values[:3])
+            except (OSError, ValueError):
+                continue
+            runtime_ns += runtime
+            wait_ns += wait
+            timeslices += slices
+            sampled_threads += 1
+    except OSError:
+        pass
+    return {
+        "scheduler_runtime_ns": runtime_ns,
+        "scheduler_wait_ns": wait_ns,
+        "scheduler_timeslices": timeslices,
+        "scheduler_thread_samples": sampled_threads,
     }
 
 
