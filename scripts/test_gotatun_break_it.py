@@ -34,9 +34,8 @@ from gotatun_break_it.udp_probe import decode_probe, encode_probe
 from gotatun_break_it.mesh_ix_soak import flatten_node_counters, process_counters
 
 try:
-    from gotatun_break_it.long_soak import build_perf_window_command, plan_soak_windows
+    from gotatun_break_it.long_soak import plan_soak_windows
 except ModuleNotFoundError:
-    build_perf_window_command = None
     plan_soak_windows = None
 
 
@@ -93,6 +92,37 @@ class RecoveryReportTests(unittest.TestCase):
 class LongSoakPlanTests(unittest.TestCase):
     """Keep one GotaTun process pair alive for the full long latency soak."""
 
+    def test_long_soak_builds_a_compute_window_without_backup_perf_runner(self):
+        """Run the continuous leak soak inside compute01's build-slot hold."""
+        long_soak = importlib.import_module("gotatun_break_it.long_soak")
+        command_builder = getattr(long_soak, "build_compute_window_command", None)
+        self.assertIsNotNone(command_builder, "the compute long-soak runner should be available")
+        assert command_builder is not None
+        command = command_builder(
+            window_runner=Path("/suite/run_loaded_latency_window.sh"),
+            window_output=Path("/evidence/continuous-soak"),
+            duration_seconds=3_600,
+            kit=Path("/kit"),
+            coordinator=Path("/coordinator"),
+            binary=Path("/infraternal"),
+            underlay_rate_mbit=800,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "/suite/run_loaded_latency_window.sh",
+                "/evidence/continuous-soak",
+                "3600",
+                "/kit",
+                "/coordinator",
+                "/infraternal",
+                "--underlay-rate-mbit",
+                "800",
+                "--queue-depth-sampling",
+            ],
+        )
+
     def test_uses_one_continuous_window_for_one_or_two_hours(self):
         """Do not restart the product agents between windows of a leak soak."""
         self.assertIsNotNone(plan_soak_windows, "the long-soak planner should be available")
@@ -108,46 +138,6 @@ class LongSoakPlanTests(unittest.TestCase):
             with self.subTest(total_seconds=total_seconds):
                 with self.assertRaises(ValueError):
                     plan_soak_windows(total_seconds)
-
-    def test_builds_one_root_perf_hold_for_the_entire_soak(self):
-        """Keep perf privileges and the agent pair alive for the measured hour."""
-        self.assertIsNotNone(build_perf_window_command, "the long-soak runner should be available")
-        assert build_perf_window_command is not None
-        command = build_perf_window_command(
-            perf_runner=Path("/usr/local/bin/perf-run"),
-            perf=Path("/nix/store/perf/bin/perf"),
-            window_runner=Path("/suite/run_loaded_latency_window.sh"),
-            window_output=Path("/evidence/continuous-soak"),
-            perf_output=Path("/evidence/perf-run"),
-            duration_seconds=3_600,
-            kit=Path("/kit"),
-            coordinator=Path("/coordinator"),
-            binary=Path("/infraternal"),
-            underlay_rate_mbit=800,
-        )
-
-        self.assertEqual(
-            command,
-            [
-                "/usr/local/bin/perf-run",
-                "--root",
-                "--out",
-                "/evidence/perf-run",
-                "--",
-                "env",
-                "PERF=/nix/store/perf/bin/perf",
-                "/suite/run_loaded_latency_window.sh",
-                "/evidence/continuous-soak",
-                "3600",
-                "/kit",
-                "/coordinator",
-                "/infraternal",
-                "--underlay-rate-mbit",
-                "800",
-                "--queue-depth-sampling",
-            ],
-        )
-
 
 class ModerateLoadShapeTests(unittest.TestCase):
     """Keep the long one-flow soak below the perf VM's full-rate ceiling."""

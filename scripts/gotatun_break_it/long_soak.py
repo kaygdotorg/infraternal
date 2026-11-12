@@ -1,4 +1,4 @@
-"""Run a one- or two-hour loaded-latency soak as bounded perf-lock windows."""
+"""Run one continuous loaded-latency soak on compute01 with scheduler tracing."""
 
 # SPDX-License-Identifier: AGPL-3.0-only
 
@@ -8,7 +8,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 from typing import Any
@@ -20,38 +19,28 @@ MAX_SOAK_SECONDS = 7_200
 
 
 def plan_soak_windows(total_seconds: int) -> list[int]:
-    """Use one continuous perf hold so resource drift belongs to the same agent pair."""
+    """Keep the same product pair alive so resource drift belongs to one process lifetime."""
     if type(total_seconds) is not int or not MIN_SOAK_SECONDS <= total_seconds <= MAX_SOAK_SECONDS:
         raise ValueError("the loaded-latency soak must run for 3600–7200 seconds")
     return [total_seconds]
 
 
-def build_perf_window_command(
+def build_compute_window_command(
     *,
-    perf_runner: Path,
-    perf: Path,
     window_runner: Path,
     window_output: Path,
-    perf_output: Path,
     duration_seconds: int,
     kit: Path,
     coordinator: Path,
     binary: Path,
     underlay_rate_mbit: int = 800,
 ) -> list[str]:
-    """Build the single root perf hold that contains the complete continuous soak."""
+    """Build the single trace-enabled window command for compute01's build slot."""
     if not MIN_SOAK_SECONDS <= duration_seconds <= MAX_SOAK_SECONDS:
         raise ValueError("the continuous perf hold must run for 3600–7200 seconds")
     if type(underlay_rate_mbit) is not int or not 100 <= underlay_rate_mbit <= 10_000:
         raise ValueError("the underlay rate must be between 100 and 10000 Mbit/s")
     command = [
-        str(perf_runner),
-        "--root",
-        "--out",
-        str(perf_output),
-        "--",
-        "env",
-        f"PERF={perf}",
         str(window_runner),
         str(window_output),
         str(duration_seconds),
@@ -100,9 +89,6 @@ def main() -> None:
         parser.error("the underlay rate must be between 100 and 10000 Mbit/s")
     if arguments.perf is None or not arguments.perf.is_file() or not os.access(arguments.perf, os.X_OK):
         parser.error("set PERF to the executable perf binary or pass --perf")
-    perf_runner = shutil.which("perf-run")
-    if perf_runner is None:
-        parser.error("perf-run is required for the continuous isolated measurement hold")
     window_runner = Path(__file__).with_name("run_loaded_latency_window.sh")
     if not window_runner.is_file() or not os.access(window_runner, os.X_OK):
         parser.error(f"loaded-latency window runner is missing: {window_runner}")
@@ -129,20 +115,17 @@ def main() -> None:
 
     for duration_seconds in durations:
         window_output = arguments.output / "continuous-soak"
-        perf_output = arguments.output / "perf-run"
-        command = build_perf_window_command(
-            perf_runner=Path(perf_runner),
-            perf=arguments.perf,
+        command = build_compute_window_command(
             window_runner=window_runner,
             window_output=window_output,
-            perf_output=perf_output,
             duration_seconds=duration_seconds,
             kit=arguments.kit,
             coordinator=arguments.coordinator,
             binary=arguments.binary,
             underlay_rate_mbit=arguments.underlay_rate_mbit,
         )
-        result = subprocess.run(command, check=False)
+        environment = dict(os.environ, PERF=str(arguments.perf))
+        result = subprocess.run(command, check=False, env=environment)
         report = _window_report(window_output / "report.json")
         index["windows"].append(
             {
