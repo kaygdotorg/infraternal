@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import inspect
+import select
+import socket
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +30,13 @@ except ModuleNotFoundError as error:
     build_fault_matrix = None
     build_netem_command = None
     build_next_config_chunks = None
+
+try:
+    from gotatun_break_it.tcp_progress import transfer_integrity_ok
+except ModuleNotFoundError as error:
+    if error.name != "gotatun_break_it.tcp_progress":
+        raise
+    transfer_integrity_ok = None
 
 
 class LinuxFaultPlanTests(unittest.TestCase):
@@ -139,6 +151,93 @@ class FaultReportStallTests(unittest.TestCase):
         self.assertEqual(report["bytes_stalled"], 3072)
         self.assertEqual(report["bytes_unverified"], 0)
         self.assertEqual(report["outcome"], "PASS")
+
+    def test_tcp_transfer_integrity_requires_matching_lengths_and_hashes(self):
+        """Pass only when the receiver verified the sender's full byte stream."""
+        self.assertIsNotNone(transfer_integrity_ok, "the TCP progress helper should be available")
+        assert transfer_integrity_ok is not None
+        sender = {"bytes": 4096, "sha256": "abc123"}
+        self.assertTrue(transfer_integrity_ok(sender, {"bytes": 4096, "sha256": "abc123"}))
+        self.assertFalse(transfer_integrity_ok(sender, {"bytes": 2048, "sha256": "abc123"}))
+        self.assertFalse(transfer_integrity_ok(sender, {"bytes": 4096, "sha256": "different"}))
+
+    def test_tcp_sender_and_receiver_publish_a_matching_real_stream(self):
+        """Exercise the real bounded sender and receiver over a local TCP socket."""
+        self.assertIsNotNone(transfer_integrity_ok, "the TCP progress helper should be available")
+        assert transfer_integrity_ok is not None
+        helper = Path(__file__).parent / "gotatun_break_it" / "tcp_progress.py"
+        self.assertTrue(helper.is_file(), "the TCP progress command should exist")
+        with tempfile.TemporaryDirectory(prefix="j526-tcp-") as directory:
+            root = Path(directory)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            progress = root / "receiver-progress.json"
+            result_path = root / "receiver-result.json"
+            receiver = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(helper),
+                    "serve",
+                    "--bind",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--progress",
+                    str(progress),
+                    "--result",
+                    str(result_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert receiver.stdout is not None
+                readable, _, _ = select.select([receiver.stdout], [], [], 10)
+                self.assertTrue(readable, "the TCP receiver should publish readiness")
+                self.assertEqual(json.loads(receiver.stdout.readline()), {"ready": True, "port": port})
+                sender = subprocess.run(
+                    [
+                        sys.executable,
+                        str(helper),
+                        "send",
+                        "--target",
+                        "127.0.0.1",
+                        "--port",
+                        str(port),
+                        "--seconds",
+                        "1",
+                        "--rate-mbit",
+                        "10",
+                        "--progress",
+                        str(root / "sender-progress.json"),
+                        "--result",
+                        str(root / "sender-result.json"),
+                    ],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(sender.returncode, 0, sender.stderr)
+                self.assertEqual(receiver.wait(timeout=15), 0)
+                sent = json.loads(sender.stdout.strip().splitlines()[-1])
+                received = json.loads(result_path.read_text(encoding="utf-8"))
+                self.assertTrue(transfer_integrity_ok(sent, received), (sent, received))
+                self.assertEqual(json.loads(progress.read_text(encoding="utf-8")), received)
+            finally:
+                if receiver.poll() is None:
+                    receiver.kill()
+                    receiver.wait(timeout=5)
+                if receiver.stdout is not None:
+                    receiver.stdout.close()
+                if receiver.stderr is not None:
+                    receiver.stderr.close()
+                assert receiver.stdout is not None
+                assert receiver.stderr is not None
+                self.assertTrue(receiver.stdout.closed)
+                self.assertTrue(receiver.stderr.closed)
 
 
 if __name__ == "__main__":
