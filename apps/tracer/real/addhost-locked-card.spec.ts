@@ -85,7 +85,10 @@ test("a locked server offers Unlock on the Add host card and the host carries on
     await page.keyboard.type(`${process.env.USER ?? "claude"}@127.0.0.1:${host.port} `, { delay: 5 });
     await wizard.getByRole("button", { name: "Continue", exact: true }).click();
     // First contact: the host's key is new, so the card asks to trust it.
-    await wizard.getByRole("button", { name: "Trust and continue" }).click({ timeout: 60_000 });
+    await wizard.getByRole("button", { name: "Trust and continue" }).click({ timeout: 60_000 }).catch(async (error: unknown) => {
+      // Name the page the card is on, so a changed flow is diagnosed from the log and not from a guess.
+      throw new Error(`the card never asked to trust the host key; it shows: ${(await wizard.innerText()).replace(/\s+/g, " ").slice(0, 400)} (${String(error).slice(0, 80)})`);
+    });
     // The server's own key is locked and not installed, so the host asks how to sign in: use the throwaway key.
     await wizard.getByText("Use a key from your computer").click({ timeout: 60_000 });
     await wizard.locator("[data-secret='key']").fill(host.privateKey);
