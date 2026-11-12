@@ -20,8 +20,8 @@ use std::{
 
 use infraternal_plugin_mesh::host_firewall::{
     AllowRule, HostFirewallPaths, Listener, Policy, PolicyRole, Protocol, apply_from_config_at,
-    apply_with_ssh_connection, clear_role_from_config_at, diff_report, discover_nft, render,
-    validate, validate_ssh_connection_on, write_policy_file,
+    apply_with_ssh_connection, clear_role_from_config_at, discover_nft, render, validate,
+    validate_ssh_connection_on, write_policy_file,
 };
 
 /// Supplies the private nft command and namespace setup used by these policy tests.
@@ -239,41 +239,6 @@ fn malformed_admin_rule_is_rejected_without_becoming_nft_source() {
     ] {
         assert!(AllowRule::from_str(value).is_err(), "accepted {value:?}");
     }
-}
-
-/// Show additions and removals while the product takes over an old host table.
-#[test]
-fn takeover_diff_names_only_changed_rule_lines() {
-    let before = "iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 22 accept\n";
-    let after = format!("{before}udp dport 10254 accept\n");
-
-    let report = diff_report(before, &after);
-
-    assert!(!report.contains("- current: udp dport 10254 accept"));
-    assert!(report.contains("+ desired: udp dport 10254 accept"));
-}
-
-/// Show rule order changes because an nft input chain is ordered policy.
-#[test]
-fn takeover_diff_reports_reordered_rule_lines() {
-    let before =
-        "iifname \"lo\" accept\nct state established,related accept\nip protocol icmp accept\n";
-    let after =
-        "ct state established,related accept\nip protocol icmp accept\niifname \"lo\" accept\n";
-
-    let report = diff_report(before, after);
-
-    assert!(report.contains("- current: iifname \"lo\" accept"));
-    assert!(report.contains("+ desired: iifname \"lo\" accept"));
-}
-
-/// Treat nft's numeric invalid-state mask as the named state rendered by the product.
-#[test]
-fn takeover_diff_normalizes_the_invalid_state_mask() {
-    assert_eq!(
-        diff_report("ct state 0x1 drop\n", "ct state invalid drop\n"),
-        "host firewall migration: no rule differences\n"
-    );
 }
 
 /// Keep distro and Nix executable candidates fixed instead of searching PATH.
@@ -600,6 +565,9 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
             "add table inet unrelated_control\n",
             "add chain inet unrelated_control keep\n",
             "add rule inet unrelated_control keep counter\n",
+            "add table inet infraternal_mesh\n",
+            "add chain inet infraternal_mesh keep\n",
+            "add rule inet infraternal_mesh keep counter\n",
             "add table inet infraternal_host\n",
             "add chain inet infraternal_host input { type filter hook input priority filter - 10; policy drop; }\n",
             "add rule inet infraternal_host input iifname \"wt0\" accept\n",
@@ -623,10 +591,12 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
         String::from_utf8_lossy(&setup.stderr)
     );
     let unrelated_before = list_table(&nft, "unrelated_control");
+    let mesh_before = list_table(&nft, "infraternal_mesh");
     let report = apply_with_ssh_connection(&prod_policy(true), Some(&nft), None)
         .expect("product policy takes over the legacy host table");
     let installed = list_table(&nft, "infraternal_host");
     let unrelated_after = list_table(&nft, "unrelated_control");
+    let mesh_after = list_table(&nft, "infraternal_mesh");
 
     assert_eq!(
         report,
@@ -643,6 +613,10 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
     assert!(installed.contains("10.69.69.0/24 tcp dport 22 accept"));
     assert!(installed.contains("udp dport 10254 accept"));
     assert_eq!(unrelated_before, unrelated_after);
+    assert_eq!(
+        mesh_before, mesh_after,
+        "host policy updates must preserve the mesh table"
+    );
 
     let installed_with_handles = list_table_with_handles(&nft, "infraternal_host");
     let repeated = apply_with_ssh_connection(&prod_policy(true), Some(&nft), None)

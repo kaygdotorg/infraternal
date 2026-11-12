@@ -1150,6 +1150,8 @@ mod tests {
             io::Write as _,
             process::{Command, Stdio},
         };
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = crate::host_firewall::discover_nft(None).expect("fixed-path nft fixture");
         let mut plugin = MeshNodePlugin::default();
         plugin.call("mesh.up", b"{}").expect("start");
         let chunk = Chunk {
@@ -1186,7 +1188,7 @@ mod tests {
                 &serde_json::to_vec(&chunk).expect("chunk"),
             )
             .expect("configure");
-        let mut child = Command::new("/usr/sbin/nft")
+        let mut child = Command::new(&nft)
             .args(["-f", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1206,7 +1208,7 @@ mod tests {
                 .expect("JSON");
         assert_eq!(status["state"], "Stopping");
         assert!(
-            Command::new("/usr/sbin/nft")
+            Command::new(&nft)
                 .args(["delete", "table", "inet", "infraternal_mesh"])
                 .status()
                 .expect("fixture cleanup")

@@ -1,6 +1,15 @@
 //! Renders and applies the host input policy owned by infraternal, D386.
 
+#[path = "host_firewall_semantics.rs"]
+mod host_firewall_semantics;
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "../tests/support/nft_fixture.rs"]
+mod nft_fixture;
+
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, feature = "test-support"))]
+use std::cell::RefCell;
 use std::{
     collections::HashSet,
     fmt::{self, Write as _},
@@ -118,6 +127,59 @@ impl HostFirewallPaths {
 const MAX_POLICY_BYTES: u64 = 64 * 1024;
 /// Disambiguate concurrently written temporary policy names in this process.
 static POLICY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+// Namespace tests use a private nft copy whose owner maps to root in the sandbox.
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    /// The checked nft fixture active on this test thread, if one was requested.
+    static TEST_NFT_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// A test-only fixed-path nft override shared by host and mesh policy tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct NftTestPathOverride {
+    /// The previous thread-local path, restored when the guard leaves scope.
+    previous: Option<PathBuf>,
+    /// The fixture executable kept alive by [`Self::with_fixed_nft_fixture`].
+    fixture: Option<nft_fixture::NftFixture>,
+}
+
+/// Test-only lifecycle methods for the shared nft fixture.
+#[cfg(any(test, feature = "test-support"))]
+impl NftTestPathOverride {
+    /// Create a private executable from one fixed system or Nix candidate.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_fixed_nft_fixture() -> Self {
+        let fixture = nft_fixture::NftFixture::new(NFT_CANDIDATES);
+        let mut guard = Self::install(fixture.path());
+        guard.fixture = Some(fixture);
+        guard
+    }
+
+    /// Use an existing private fixture for this test thread.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn install(path: &Path) -> Self {
+        let previous = TEST_NFT_PATH.with(|current| current.replace(Some(path.to_owned())));
+        Self {
+            previous,
+            fixture: None,
+        }
+    }
+}
+
+/// Restore the previous fixture path without affecting another test thread.
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for NftTestPathOverride {
+    /// Restore an earlier override after this test ends.
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        TEST_NFT_PATH.with(|current| *current.borrow_mut() = previous);
+        let _ = self.fixture.take();
+    }
+}
 
 /// One layer of the host input policy supplied by server or host configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -659,57 +721,6 @@ pub fn render(policy: &Policy) -> Result<String, PolicyError> {
     Ok(unique)
 }
 
-/// Report changed lines between the current table and the desired rendering.
-#[must_use]
-pub fn diff_report(current: &str, desired: &str) -> String {
-    let current_lines = meaningful_lines(current);
-    let desired_lines = meaningful_lines(desired);
-    if current_lines == desired_lines {
-        return "host firewall migration: no rule differences\n".to_owned();
-    }
-    let mut report = String::from("host firewall migration: current and desired rules differ\n");
-    report_ordered_diff(&current_lines, &desired_lines, &mut report);
-    report
-}
-
-/// Show ordered removals and additions so migration receipts explain chain reordering.
-fn report_ordered_diff(current: &[String], desired: &[String], report: &mut String) {
-    let mut common = vec![vec![0; desired.len() + 1]; current.len() + 1];
-    for current_index in (0..current.len()).rev() {
-        for desired_index in (0..desired.len()).rev() {
-            common[current_index][desired_index] =
-                if current[current_index] == desired[desired_index] {
-                    common[current_index + 1][desired_index + 1] + 1
-                } else {
-                    common[current_index + 1][desired_index]
-                        .max(common[current_index][desired_index + 1])
-                };
-        }
-    }
-
-    let mut current_index = 0;
-    let mut desired_index = 0;
-    while current_index < current.len() || desired_index < desired.len() {
-        if current_index < current.len()
-            && desired_index < desired.len()
-            && current[current_index] == desired[desired_index]
-        {
-            current_index += 1;
-            desired_index += 1;
-        } else if desired_index < desired.len()
-            && (current_index == current.len()
-                || common[current_index][desired_index + 1]
-                    >= common[current_index + 1][desired_index])
-        {
-            let _ = writeln!(report, "+ desired: {}", desired[desired_index]);
-            desired_index += 1;
-        } else {
-            let _ = writeln!(report, "- current: {}", current[current_index]);
-            current_index += 1;
-        }
-    }
-}
-
 /// Return the fixed system paths checked before the Nix store.
 #[must_use]
 pub fn nft_candidates() -> &'static [&'static str] {
@@ -758,13 +769,16 @@ pub fn apply_with_ssh_connection(
             .any(|item| item["table"]["family"] == "inet" && item["table"]["name"] == HOST_TABLE)
     });
     let current = if exists {
-        let output = run_nft(&nft, &["-n", "list", "table", "inet", HOST_TABLE], None)?;
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        let output = run_nft(&nft, &["-j", "list", "table", "inet", HOST_TABLE], None)?;
+        let current: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| PolicyError::BadInventory { path: nft.clone() })?;
+        Some(host_firewall_semantics::from_nft_json(&current, &nft)?)
     } else {
-        String::new()
+        None
     };
-    ensure_existing_admin_rules_are_preserved(&current, &desired)?;
-    let report = diff_report(&current, &desired);
+    let desired_semantics = host_firewall_semantics::from_policy(policy);
+    ensure_existing_admin_rules_are_preserved(current.as_ref(), &desired_semantics)?;
+    let report = host_firewall_semantics::report(current.as_ref(), Some(&desired_semantics));
     if report == "host firewall migration: no rule differences\n" {
         return Ok(report);
     }
@@ -1050,10 +1064,14 @@ fn remove_host_table(nft_path: Option<&Path>) -> Result<String, PolicyError> {
         return Ok("host firewall migration: no rule differences\nhost firewall removal: inet infraternal_host was already absent\n".to_owned());
     }
 
-    let output = run_nft(&nft, &["-n", "list", "table", "inet", HOST_TABLE], None)
+    let output = run_nft(&nft, &["-j", "list", "table", "inet", HOST_TABLE], None)
         .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
-    let current = String::from_utf8_lossy(&output.stdout).into_owned();
-    let mut report = diff_report(&current, "");
+    let current: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| PolicyError::BadInventory { path: nft.clone() })
+        .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
+    let current = host_firewall_semantics::from_nft_json(&current, &nft)
+        .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
+    let mut report = host_firewall_semantics::report(Some(&current), None);
     run_nft(
         &nft,
         &["-f", "-"],
@@ -1347,19 +1365,10 @@ fn update_mesh_enabled(agent: &mut Option<Policy>, enabled: bool) -> bool {
 
 /// Reject an adoption that would remove an existing explicit SSH allow rule.
 fn ensure_existing_admin_rules_are_preserved(
-    current: &str,
-    desired: &str,
+    current: Option<&host_firewall_semantics::HostTable>,
+    desired: &host_firewall_semantics::HostTable,
 ) -> Result<(), PolicyError> {
-    let desired = meaningful_lines(desired);
-    let current_admin = meaningful_lines(current)
-        .into_iter()
-        .filter(|line| line.contains("tcp dport 22") && line.contains("accept"));
-    if current_admin.into_iter().any(|line| {
-        let normalized = remove_counter_clause(&line);
-        !desired
-            .iter()
-            .any(|desired_line| remove_counter_clause(desired_line) == normalized)
-    }) {
+    if !host_firewall_semantics::preserves_admin_rules(current, desired) {
         return Err(PolicyError::ExistingAdminPathWouldBeLost);
     }
     Ok(())
@@ -1383,17 +1392,6 @@ pub fn admin_rule_for_ssh_connection(value: &str) -> Result<AllowRule, PolicyErr
         protocol: Protocol::Tcp,
         port,
     })
-}
-
-/// Ignore generated counter text when comparing existing nft rules with policy output.
-fn remove_counter_clause(line: &str) -> String {
-    let Some((before, after)) = line.split_once(" counter packets") else {
-        return line.to_owned();
-    };
-    after.find(" accept").map_or_else(
-        || line.to_owned(),
-        |accept| format!("{before}{}", &after[accept..]),
-    )
 }
 
 /// Check every directory component against root writes up to a fixed safe anchor.
@@ -1487,24 +1485,6 @@ fn render_rule(
     let _ = writeln!(output, "{protocol} dport {port} accept");
 }
 
-/// Keep rule-bearing lines and normalize nft presentation details for comparison.
-fn meaningful_lines(value: &str) -> Vec<String> {
-    value
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && *line != "{"
-                && *line != "}"
-                && !line.starts_with("table ")
-                && !line.starts_with("chain ")
-        })
-        .map(remove_counter_clause)
-        // nft versions may print the invalid conntrack bit as either 0x1 or its name.
-        .map(|line| line.replace("ct state 0x1 ", "ct state invalid "))
-        .collect()
-}
-
 /// Parse `*` or a network interface while excluding nft metacharacters.
 fn parse_optional_interface(value: &str) -> Result<Option<String>, PolicyError> {
     if value == "*" {
@@ -1551,6 +1531,14 @@ fn parse_protocol(value: &str) -> Result<Protocol, PolicyError> {
 /// # Errors
 /// Returns an error when a candidate is unsafe or no fixed executable path exists.
 pub fn discover_nft(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let test_path = configured
+        .is_none()
+        .then(|| TEST_NFT_PATH.with(|current| current.borrow().clone()))
+        .flatten();
+    #[cfg(not(any(test, feature = "test-support")))]
+    let test_path: Option<PathBuf> = None;
+    let configured = configured.or(test_path.as_deref());
     let (candidates, checked) = if let Some(configured) = configured {
         (vec![configured.to_owned()], vec![configured.to_owned()])
     } else {
