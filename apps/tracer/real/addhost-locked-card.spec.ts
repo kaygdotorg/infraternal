@@ -61,16 +61,13 @@ test("a locked server offers Unlock on the Add host card and the host carries on
     await page.getByRole("button", { name: "Open infraternal" }).click();
     await page.locator(".cl-viewport").waitFor();
 
-    // Unlock once through the palette so the Add host card's own check passes (the state a long-open card is in).
-    const unlockViaPalette = async (): Promise<void> => {
-      await page.keyboard.press("Control+Shift+K");
-      await expect(page.locator("#palette")).toBeVisible();
-      await page.keyboard.type("Unlock host");
-      await expect(page.locator("#palette-results .result-label")).toContainText(["Unlock host connections"], { timeout: 20_000 });
-      await page.keyboard.press("Enter");
+    // Unlock once from the sign-in toast, the way a person does after a restart, so the Add host card's own check passes
+    // (the state a long-open card is in).
+    const unlockViaToast = async (): Promise<void> => {
+      await page.locator(".ui-toast").getByRole("button", { name: "Unlock", exact: true }).click({ timeout: 60_000 });
       await expect(page.locator(".ui-toast").filter({ hasText: "Host connections unlocked" })).toBeVisible({ timeout: 30_000 });
     };
-    await unlockViaPalette();
+    await unlockViaToast();
     const status = async (): Promise<boolean> => (await page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).locked;
     expect(await status()).toBe(false);
 
