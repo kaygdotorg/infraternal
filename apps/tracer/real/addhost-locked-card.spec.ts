@@ -68,7 +68,7 @@ test("a locked server offers Unlock on the Add host card and the host carries on
       await page.keyboard.type("Unlock host");
       await expect(page.locator("#palette-results .result-label")).toContainText(["Unlock host connections"], { timeout: 20_000 });
       await page.keyboard.press("Enter");
-      await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked", { timeout: 30_000 });
+      await expect(page.locator(".ui-toast").filter({ hasText: "Host connections unlocked" })).toBeVisible({ timeout: 30_000 });
     };
     await unlockViaPalette();
     const status = async (): Promise<boolean> => (await page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).locked;
