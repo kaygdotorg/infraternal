@@ -204,6 +204,12 @@ pub enum FailureKind {
     /// help, so the person picks another account or root (#394).
     #[serde(rename = "no_account")]
     NoAccount,
+    /// The server's certificate authority is locked (after a restart, or before
+    /// first-run setup finished), so no host can be added yet. Nothing was
+    /// changed on the host. The page answers with the passkey unlock it already
+    /// has, then retries; it must not guess this from the message wording.
+    #[serde(rename = "authority_locked")]
+    AuthorityLocked,
 }
 
 /// Public, bounded findings from a host-local ownership check; paths belong in Details.
@@ -791,6 +797,7 @@ impl Failure {
             FailureKind::UnrecognizedInstall => "unrecognized-install",
             FailureKind::UnprovenFiles => "unproven-files",
             FailureKind::NoAccount => "no-account",
+            FailureKind::AuthorityLocked => "authority-locked",
             FailureKind::Unsupported => "unsupported",
             FailureKind::StalePreviousAttempt => "leftovers",
             FailureKind::SetupRunning => "setup-running",
@@ -935,7 +942,16 @@ impl Failure {
     pub fn install(message: &'static str) -> Self {
         Self::new(FailureKind::Install, message)
     }
+    /// The certificate authority is locked or not set up: nothing can be added
+    /// until an administrator confirms with a passkey (see [`FailureKind::AuthorityLocked`]).
+    #[must_use]
+    pub fn authority_locked() -> Self {
+        Self::new(FailureKind::AuthorityLocked, AUTHORITY_LOCKED)
+    }
 }
+/// The sentence for [`FailureKind::AuthorityLocked`].
+pub const AUTHORITY_LOCKED: &str =
+    "Set up or unlock host connections with an administrator passkey before adding a host.";
 /// Exit 71 outside the read-only check: a staging step met files at the setup
 /// location that it cannot prove are this setup's own, and changed nothing.
 pub const UNPROVEN_FILES: &str = "Setup found infraternal files on this machine that it can't prove belong to this setup, so it changed nothing.";

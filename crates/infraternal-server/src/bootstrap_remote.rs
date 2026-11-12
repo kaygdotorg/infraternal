@@ -283,9 +283,7 @@ impl RemoteBackend {
             return Err(unavailable());
         };
         if !self.issuer.ready() {
-            return Err(Failure::install(
-                "Set up or unlock host connections with an administrator passkey before adding a host.",
-            ));
+            return Err(Failure::authority_locked());
         }
         if let Some(host_id) = self
             .existing_host(&authority.owner, address, lookup, retire)
@@ -571,9 +569,7 @@ impl RemoteBackend {
             }
         };
         if !self.issuer.ready() {
-            return Err(Failure::install(
-                "Set up or unlock host connections with an administrator passkey before adding a host.",
-            ));
+            return Err(Failure::authority_locked());
         }
         let (mode, uid) = match target.mode {
             InstallMode::Rootless => (Mode::Rootless, check.uid),
@@ -998,9 +994,7 @@ impl Backend for RemoteBackend {
                 ));
             }
             if !self.issuer.ready() {
-                return Err(Failure::install(
-                    "Set up or unlock host connections with an administrator passkey before adding a host.",
-                ));
+                return Err(Failure::authority_locked());
             }
             let uid = match target.mode {
                 InstallMode::Rootless => check.uid,
@@ -1265,9 +1259,7 @@ fn decide_stuck_install(facts: &StuckFacts) -> Result<StuckInstall, Failure> {
         return Ok(StuckInstall::Finish);
     }
     if !facts.ca_ready {
-        return Err(Failure::install(
-            "Set up or unlock host connections with an administrator passkey before adding a host.",
-        ));
+        return Err(Failure::authority_locked());
     }
     Ok(StuckInstall::Replace)
 }

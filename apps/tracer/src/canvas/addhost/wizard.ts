@@ -578,6 +578,22 @@ export class Wizard {
     } finally { this.setBusy(false); }
   }
 
+  /**
+   * The card's own Unlock: the same ceremony and failure wording as the host-connections toast (`runUnlock`), then the
+   * failed host tries again on its open run. A refusal stays on this page with the reason, so the person can try again.
+   */
+  private async unlockAndRetry(job: Job): Promise<void> {
+    if (this.busy || !this.deps.service.unlockAuthority) return;
+    this.setBusy(true);
+    try {
+      const result = await runUnlock(this.deps.service);
+      if (!this.alive || this.closing) return;
+      if (!result.ok) { this.showError(result.message); return; }
+      this.authorityReady = true;
+      this.retryJob(job);
+    } finally { this.setBusy(false); }
+  }
+
   private beginBatch(root: boolean): void {
     this.closeAllRuns();
     const ids = this.targetIds(this.selected);
@@ -779,7 +795,7 @@ export class Wizard {
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.
-    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : "Install from the host";
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : fix === "unlock" ? "Unlock" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -860,8 +876,9 @@ export class Wizard {
     }
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
+    const unlock = guide.fix === "unlock" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="unlock-retry">${svg(ICON.shieldCheck)}<span>Unlock</span></button>` : "";
     const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${guide.fix === "none" || guide.fix === "take-over" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${unlock}${guide.fix === "none" || guide.fix === "take-over" || guide.fix === "unlock" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
     if (closing.length) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       if (label) label.textContent = closing.length === 1 ? "Close it and start fresh" : "Close them and start fresh";
@@ -1182,6 +1199,7 @@ export class Wizard {
     else if (action === "cancel-install") this.dismiss();
     else if (action === "reload") void this.loadDiscovery();
     else if (action === "retry") { if (this.fixing) this.retryJob(this.fixing); }
+    else if (action === "unlock-retry") { if (this.fixing) void this.unlockAndRetry(this.fixing); }
     else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing, this.fixing.view.failure?.closes?.close_challenge); }
     else if (action === "review-take-over") { if (this.fixing) this.go("takeover"); }
     else if (action === "take-over") { if (this.fixing) this.takeOver(this.fixing); }
