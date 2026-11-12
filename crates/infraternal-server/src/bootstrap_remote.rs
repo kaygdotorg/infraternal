@@ -2970,6 +2970,11 @@ mod tests {
             "{}",
             failed.message
         );
+        // The page offers its own Unlock only for this kind (#510); it must not depend on the sentence.
+        assert_eq!(
+            failed.failure.as_ref().map(|failure| failure.kind),
+            Some(infraternal_plugin_ssh::model::FailureKind::AuthorityLocked)
+        );
         assert!(events.iter().all(|event| event.leftovers.is_none()));
         assert_eq!(mutating(&scripts), Vec::<&str>::new());
     }
