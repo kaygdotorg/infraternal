@@ -15,7 +15,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, TextIO
+from typing import Any, Mapping, TextIO
 
 
 def net_tput_command(h2h: Path, destination: str, seconds: int) -> list[str]:
@@ -59,6 +59,27 @@ def underlay_tbf_command(tc: Path, interface: str, rate_mbit: int) -> list[str]:
         "latency",
         "10ms",
     ]
+
+
+def soak_environment(
+    source: Mapping[str, str],
+    *,
+    pipeline_diagnostics: bool,
+    queue_depth_sampling: bool,
+) -> dict[str, str]:
+    """Select bounded queue sampling without inheriting verbose GotaTun diagnostics."""
+    if pipeline_diagnostics and queue_depth_sampling:
+        raise ValueError("full pipeline logging and sampled queue depth are mutually exclusive")
+    environment = dict(source)
+    environment["INFRATERNAL_MESH_ENGINE"] = "gotatun"
+    for name in tuple(environment):
+        if name.startswith("GOTATUN_DIAG_"):
+            environment.pop(name)
+    if pipeline_diagnostics:
+        environment["GOTATUN_DIAG_PIPELINE"] = "1"
+    if queue_depth_sampling:
+        environment["GOTATUN_DIAG_CRYPTO_QUEUE_DEPTH"] = "1"
+    return environment
 
 
 def _tool(name: str) -> str:
@@ -259,11 +280,14 @@ def main() -> None:
     parser.add_argument("--underlay-mtu", type=int, default=1500)
     parser.add_argument("--underlay-rate-mbit", type=int)
     parser.add_argument("--pipeline-diagnostics", action="store_true")
+    parser.add_argument("--queue-depth-sampling", action="store_true")
     parser.add_argument("--agent-pids", type=Path)
     parser.add_argument("--capture-start-marker", type=Path)
     arguments = parser.parse_args()
     if (arguments.agent_pids is None) != (arguments.capture_start_marker is None):
         parser.error("agent PID output and capture-start marker must be supplied together")
+    if arguments.pipeline_diagnostics and arguments.queue_depth_sampling:
+        parser.error("full pipeline logging and sampled queue depth are mutually exclusive")
     if not 60 <= arguments.duration_seconds <= 840:
         parser.error("one perf-lock window must run between 60 and 840 seconds")
     if arguments.probe_interval_ms < 1 or arguments.counter_interval_ms < 100:
@@ -318,7 +342,10 @@ def main() -> None:
         "underlay_mtu": arguments.underlay_mtu,
         "underlay_rate_mbit": arguments.underlay_rate_mbit,
         "pipeline_diagnostics_enabled": arguments.pipeline_diagnostics,
-        "pipeline_log_tail_poll_interval_ms": 10 if arguments.pipeline_diagnostics else None,
+        "queue_depth_sampling_enabled": arguments.queue_depth_sampling,
+        "pipeline_log_tail_poll_interval_ms": (
+            10 if arguments.pipeline_diagnostics or arguments.queue_depth_sampling else None
+        ),
         "pipeline_counter_path": str(pipeline_counter_path),
         "thread_snapshot_policy": "after one 1-second TCP warm-up and after measured transfer",
         "manual_fixes": [],
@@ -348,11 +375,11 @@ def main() -> None:
                     *underlay_tbf_command(tc, "underlay1", arguments.underlay_rate_mbit),
                 )
             )
-        environment = os.environ.copy()
-        environment["INFRATERNAL_MESH_ENGINE"] = "gotatun"
-        environment.pop("GOTATUN_DIAG_PIPELINE", None)
-        if arguments.pipeline_diagnostics:
-            environment["GOTATUN_DIAG_PIPELINE"] = "1"
+        environment = soak_environment(
+            os.environ,
+            pipeline_diagnostics=arguments.pipeline_diagnostics,
+            queue_depth_sampling=arguments.queue_depth_sampling,
+        )
         sampler_command = [
                 sys.executable,
                 "-I",
@@ -378,7 +405,7 @@ def main() -> None:
                 "--counter-interval-ms",
                 str(arguments.counter_interval_ms),
             ]
-        if arguments.pipeline_diagnostics:
+        if arguments.pipeline_diagnostics or arguments.queue_depth_sampling:
             sampler_command.append("--pipeline-diagnostics")
         sampler = subprocess.Popen(
             sampler_command,

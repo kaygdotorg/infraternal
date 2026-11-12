@@ -73,6 +73,7 @@ def build_perf_window_command(
         str(binary),
         "--underlay-rate-mbit",
         str(underlay_rate_mbit),
+        "--queue-depth-sampling",
     ]
     return command
 
@@ -133,6 +134,7 @@ def main() -> None:
         "total_seconds_requested": arguments.total_seconds,
         "maximum_window_seconds": arguments.window_seconds,
         "underlay_rate_mbit": arguments.underlay_rate_mbit,
+        "queue_depth_sampling_enabled": True,
         "status": "running",
         "manual_fixes": [],
         "windows": [],

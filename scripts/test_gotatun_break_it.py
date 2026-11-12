@@ -149,6 +149,7 @@ class LongSoakPlanTests(unittest.TestCase):
                 "/infraternal",
                 "--underlay-rate-mbit",
                 "800",
+                "--queue-depth-sampling",
             ],
         )
 
@@ -191,6 +192,44 @@ class ModerateLoadShapeTests(unittest.TestCase):
             with self.subTest(rate_mbit=rate_mbit):
                 with self.assertRaises(ValueError):
                     command_builder(Path("/usr/sbin/tc"), "underlay0", rate_mbit)
+
+
+class QueueDiagnosticModeTests(unittest.TestCase):
+    """Enable only J525's sampled queue gauge during the loaded soak."""
+
+    def test_queue_depth_mode_disables_per_packet_pipeline_logging(self):
+        """Select the 100 ms queue gauge without inheriting verbose packet diagnostics."""
+        loaded_soak = importlib.import_module("gotatun_break_it.loaded_latency_soak")
+        environment_builder = getattr(loaded_soak, "soak_environment", None)
+        self.assertIsNotNone(environment_builder, "the loaded soak should build its diagnostic environment")
+        assert environment_builder is not None
+        environment = environment_builder(
+            {
+                "GOTATUN_DIAG_PIPELINE": "inherited",
+                "GOTATUN_DIAG_CRYPTO_QUEUE_DEPTH": "inherited",
+                "GOTATUN_DIAG_SEND_QUEUE": "inherited",
+                "GOTATUN_DIAG_REKEY_AFTER_MS": "inherited",
+            },
+            pipeline_diagnostics=False,
+            queue_depth_sampling=True,
+        )
+
+        self.assertEqual(environment["GOTATUN_DIAG_CRYPTO_QUEUE_DEPTH"], "1")
+        self.assertNotIn("GOTATUN_DIAG_PIPELINE", environment)
+        self.assertNotIn("GOTATUN_DIAG_SEND_QUEUE", environment)
+        self.assertNotIn("GOTATUN_DIAG_REKEY_AFTER_MS", environment)
+        self.assertEqual(environment["INFRATERNAL_MESH_ENGINE"], "gotatun")
+
+    def test_queue_depth_and_full_pipeline_diagnostics_are_mutually_exclusive(self):
+        """Reject the per-packet switch when it would defeat bounded queue sampling."""
+        loaded_soak = importlib.import_module("gotatun_break_it.loaded_latency_soak")
+        environment_builder = getattr(loaded_soak, "soak_environment", None)
+        self.assertIsNotNone(environment_builder, "the loaded soak should build its diagnostic environment")
+        assert environment_builder is not None
+        with self.assertRaises(ValueError):
+            environment_builder(
+                {}, pipeline_diagnostics=True, queue_depth_sampling=True
+            )
 
 
 class SoakTraceTests(unittest.TestCase):

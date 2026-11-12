@@ -4,7 +4,7 @@
 set -euo pipefail
 
 if (($# < 5)); then
-    echo 'usage: run_loaded_latency_window.sh OUT DURATION_SECONDS J88C_KIT COORDINATOR INFRATERNAL_BIN [--pipeline-diagnostics] [--underlay-rate-mbit N]' >&2
+    echo 'usage: run_loaded_latency_window.sh OUT DURATION_SECONDS J88C_KIT COORDINATOR INFRATERNAL_BIN [--queue-depth-sampling] [--pipeline-diagnostics] [--underlay-rate-mbit N]' >&2
     exit 2
 fi
 
@@ -16,6 +16,7 @@ binary=$5
 shift 5
 window_args=()
 pipeline_seen=0
+queue_seen=0
 rate_seen=0
 while (($#)); do
     case $1 in
@@ -23,6 +24,12 @@ while (($#)); do
             ((pipeline_seen == 0)) || { echo 'pipeline diagnostics may be selected only once' >&2; exit 2; }
             pipeline_seen=1
             window_args+=(--pipeline-diagnostics)
+            shift
+            ;;
+        --queue-depth-sampling)
+            ((queue_seen == 0)) || { echo 'queue-depth sampling may be selected only once' >&2; exit 2; }
+            queue_seen=1
+            window_args+=(--queue-depth-sampling)
             shift
             ;;
         --underlay-rate-mbit)
