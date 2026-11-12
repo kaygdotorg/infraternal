@@ -77,6 +77,7 @@ interface MockSession {
   echoDelayMs: number;
 }
 
+/** One welcomed or welcoming browser socket of the double, with its session, flow-control credit and subscriptions. */
 interface Connection {
   /** Test-only identity used to attribute input bytes to one attached browser. */
   clientId: number;

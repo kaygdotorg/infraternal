@@ -27,6 +27,7 @@ const SIZES = [
   { id: "1440", viewport: { width: 1440, height: 900 }, touch: false },
   { id: "402", viewport: { width: 402, height: 720 }, touch: true },
 ] as const;
+/** One review size from {@link SIZES}. */
 type Size = (typeof SIZES)[number];
 
 /** A context at `size`, as a phone (touch, mobile) or a desktop. */
