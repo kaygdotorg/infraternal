@@ -591,9 +591,18 @@ export class Wizard {
       if (!this.alive || this.closing) return;
       if (!result.ok) { this.showError(result.message); return; }
       this.authorityReady = true;
-      this.retryJob(job);
+      // A password or key is sent once and is gone after the attempt that used it (D274), so trying the host again
+      // would only fail to sign in. Ask for it again, saying why, instead of a retry that cannot work.
+      const method = job.view.authentication?.method;
+      if (method === "password" || method === "user-key") {
+        this.chooseLede = `Host connections are unlocked. Your ${method === "password" ? "password" : "key"} was used once and isn't kept, so sign in to ${job.entry.label} again.`;
+        this.go("choose");
+      } else this.retryJob(job);
     } finally { this.setBusy(false); }
   }
+
+  /** Replaces the sign-in page's first sentence once (set after an unlock that used up a one-off password or key). */
+  private chooseLede: string | undefined;
 
   private beginBatch(root: boolean): void {
     this.closeAllRuns();
@@ -952,7 +961,7 @@ export class Wizard {
       <span class="ah-option-text"><span>${title}</span><span class="ah-option-hint">${hint}</span></span></label>`;
     const reveal = (value: string, inner: string): string => `<div class="ah-reveal" data-reveal="${value}" data-open="${value === first}"><div class="ah-reveal-in">${inner}</div></div>`;
     page.innerHTML = `${this.hero(ICON.key)}<h1 class="ah-title">Sign in to ${escapeHtml(this.nameWithPort(job.entry))}</h1>
-      <p class="ah-lede">${escapeHtml(guideFor(job.entry.label, job.view.failure).happened)} Choose how to sign in.</p>
+      <p class="ah-lede">${this.chooseLede ? escapeHtml(this.chooseLede) : `${escapeHtml(guideFor(job.entry.label, job.view.failure).happened)} Choose how to sign in.`}</p>
       <form class="ah-method-form" data-ah-method-form novalidate><button type="submit" hidden tabindex="-1" aria-hidden="true"></button>
       <div class="ah-options" role="radiogroup" aria-label="How to sign in">
         ${this.serverKey ? option("server", "Use this server's key", "SSH public key in ~/.ssh/authorized_keys. Add it to the host, then try again.") + reveal("server", `<div class="ah-keyblock" data-kv="server"></div><p class="ah-text">Add this line to <span class="ah-code">~/.ssh/authorized_keys</span> on ${name}, then choose Try again.${this.serverKey.locked ? " The server's key is locked until an administrator unlocks it with a passkey." : ""}</p>`) : ""}
@@ -971,6 +980,7 @@ export class Wizard {
       page.querySelector<HTMLElement>("[data-kv='server']")!.append(list.root);
     }
     this.chosen = first;
+    this.chooseLede = undefined;
     this.setFoot(this.chooseFoot(first));
   }
 

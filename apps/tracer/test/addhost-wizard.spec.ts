@@ -737,6 +737,27 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock.lab");
   });
 
+  test(`after Unlock a host whose password was used once asks for it again, and says why at ${viewport.width} (#510)`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@relock-pw.lab");
+    await expect(page.getByRole("heading", { name: /Sign in to relock-pw.lab/ })).toBeVisible({ timeout: 15_000 });
+    await page.getByText("Sign in with a password").click();
+    await page.locator("[data-secret='password']").fill("not-a-real-password");
+    await inWizard(page, "Sign in").click();
+    await expect(onScreen(page, "failure").getByRole("heading", { name: "Host connections are locked" })).toBeVisible({ timeout: 15_000 });
+    await wizard(page).locator(".ah-foot").getByRole("button", { name: "Unlock", exact: true }).click();
+    // The password was sent once and is gone: a retry would fail to sign in, so the card asks for it again.
+    const choose = onScreen(page, "choose");
+    await expect(choose.locator(".ah-lede")).toContainText("Your password was used once and isn't kept", { timeout: 15_000 });
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `sign-in-again-${viewport.width}.png`) });
+    await page.getByText("Sign in with a password").click();
+    await page.locator("[data-secret='password']").fill("not-a-real-password");
+    await inWizard(page, "Sign in").click();
+    await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock-pw.lab");
+  });
+
   test(`a failed host's progress row says it in one line beside its name at ${viewport.width}`, async ({ page }) => {
     await open(page);
     await page.setViewportSize(viewport);

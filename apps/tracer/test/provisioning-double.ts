@@ -171,6 +171,8 @@ function failureOf(target: Target): Failure | undefined {
   if (/^(newkey|changedkey)/.test(name) && !trusted.has(name)) {
     return { phase: 0, beforeLogin: true, kind: "host-key", message: "The SSH host key is not trusted.", evidence: "Checking SSH and host support.", fingerprints: [fingerprintOf(name)], ...(name.startsWith("changedkey") ? { keyChanged: true } : {}) };
   }
+  // `relock-pw*` also wants a typed credential first, so the lock is met after a one-off password was used up.
+  if (/^relock-pw/.test(name) && !target.credential) return { phase: 0, beforeLogin: true, kind: "auth", message: "No sign-in method was accepted.", evidence: "Network access, the server key and a saved key were not accepted.", choose: true };
   if (/^relock/.test(name) && caLocked) return { phase: 0, beforeLogin: false, kind: "authority_locked", message: "Set up or unlock host connections with an administrator passkey before adding a host.", evidence: "" };
   if (target.fixed) return undefined;
   if (host?.reachability === "unreachable") return { phase: 0, beforeLogin: true, kind: "unreachable", message: "No SSH answer on port 22", evidence: host.evidence };

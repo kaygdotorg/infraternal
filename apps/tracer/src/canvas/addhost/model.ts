@@ -318,7 +318,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     case "authority_locked": return {
       title: "Host connections are locked",
       happened: "This server needs an administrator passkey to connect new hosts again.",
-      next: `Unlock them, and ${name} will continue.`,
+      next: `Unlock them to carry on with ${name}.`,
       fix: "unlock", tone: "info",
     };
     case "install":
