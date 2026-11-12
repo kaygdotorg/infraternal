@@ -44,6 +44,7 @@ pub fn plugin() -> PluginDefinition {
     }
     #[cfg(feature = "remote")]
     {
+        plugin = plugin.with_group("server mesh", "Check the running server's Mesh identity.");
         plugin
             .actions
             .push(infraternal_plugin_remote::cli::restart_action());
