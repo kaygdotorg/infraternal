@@ -79,6 +79,19 @@ except ModuleNotFoundError as error:
 class LinuxFaultPlanTests(unittest.TestCase):
     """Keep each requested network failure in the runnable case matrix."""
 
+    def test_linux_matrix_script_help_works_without_package_context(self):
+        """Keep the documented direct script invocation's package imports valid."""
+        script = Path(__file__).resolve().parent / "gotatun_break_it" / "linux_matrix.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Linux GotaTun failure matrix", result.stdout)
+
     def test_matrix_covers_the_requested_linux_reliability_cases(self):
         """Use stable case IDs for rebinding, faults, restart, churn, and scale."""
         self.assertIsNotNone(build_fault_matrix, "the Linux fault matrix should be available")

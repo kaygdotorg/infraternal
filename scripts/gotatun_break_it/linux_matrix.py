@@ -18,6 +18,12 @@ import time
 import uuid
 from typing import Any, Callable
 
+# A direct script launch sets no package and points Python at this folder;
+# add the scripts parent so the package-relative imports below can resolve.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    __package__ = "gotatun_break_it"
+
 from .app_fixture import CoordinatorFixture, MeshNode
 from .dns_probe import query_a
 from .linux_faults import (
