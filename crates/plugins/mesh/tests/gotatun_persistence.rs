@@ -1671,3 +1671,82 @@ fn simultaneous_ipv6_punch_rebinding_and_tunnel_grants() {
     fs::remove_file(reflection_rules).unwrap();
     fs::remove_file(output_rules).unwrap();
 }
+
+/// Verify that an explicit override is the live port and fails rather than changing when occupied.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with CAP_NET_ADMIN."]
+fn explicit_override_binds_exact_port_and_fails_when_occupied() {
+    const CHILD: &str = "J534_EXPLICIT_OVERRIDE_CHILD";
+    match std::env::var(CHILD).as_deref() {
+        Ok("occupied") => {
+            let path = state("j534-explicit-child");
+            // Root restore starts enabled nodes, so the bind may fail before `up` is called.
+            let error = Node::restore_with_engine(&path, EngineKind::GotaTun)
+                .and_then(|mut node| node.up())
+                .expect_err("an occupied explicit port must fail");
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+            let _ = fs::remove_dir_all(path);
+            return;
+        }
+        Ok("available") => {
+            let path = state("j534-explicit-child");
+            let mut node = Node::restore_with_engine(&path, EngineKind::GotaTun).unwrap();
+            assert_eq!(
+                node.listen_port(),
+                Some(32_001),
+                "root restore publishes its actual explicit listener"
+            );
+            let identity = node.up().unwrap();
+            assert_eq!(identity.port, 32_001);
+            assert_eq!(
+                node.listen_port(),
+                Some(32_001),
+                "host policy reads the actual explicit listener port"
+            );
+            node.down().unwrap();
+            let _ = fs::remove_dir_all(path);
+            return;
+        }
+        _ => {}
+    }
+
+    assert!(
+        std::env::var_os("INFRATERAL_MESH_PORT").is_none(),
+        "the parent case must not inherit an explicit override"
+    );
+    assert!(
+        std::env::var_os(CHILD).is_none(),
+        "only the two child cases set the marker"
+    );
+    let executable = std::env::current_exe().unwrap();
+    let run_child = |case: &str| {
+        Command::new(&executable)
+            .args([
+                "--exact",
+                "--ignored",
+                "explicit_override_binds_exact_port_and_fails_when_occupied",
+                "--nocapture",
+            ])
+            .env(CHILD, case)
+            .env("INFRATERNAL_MESH_PORT", "32001")
+            .output()
+            .unwrap()
+    };
+    let occupied = UdpSocket::bind("0.0.0.0:32001").unwrap();
+    let collision = run_child("occupied");
+    assert!(
+        collision.status.success(),
+        "explicit collision child failed: {}{}",
+        String::from_utf8_lossy(&collision.stdout),
+        String::from_utf8_lossy(&collision.stderr)
+    );
+    drop(occupied);
+
+    let available = run_child("available");
+    assert!(
+        available.status.success(),
+        "available override child failed: {}{}",
+        String::from_utf8_lossy(&available.stdout),
+        String::from_utf8_lossy(&available.stderr)
+    );
+}

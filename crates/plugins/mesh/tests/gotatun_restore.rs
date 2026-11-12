@@ -254,7 +254,22 @@ fn occupied_default_listener_falls_back_and_reuses_its_actual_port() -> std::io:
     let occupied = std::net::UdpSocket::bind("0.0.0.0:10254")?;
     let result = (|| {
         let mut first = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
+        // Root restore starts the enabled node and binds before returning.
+        let restored_port = first.listen_port().unwrap();
+        assert_ne!(
+            restored_port, 10_254,
+            "the occupied default selects a fallback"
+        );
         let identity = first.up()?;
+        assert_eq!(
+            identity.port, restored_port,
+            "up reports the bound listener"
+        );
+        assert_eq!(
+            first.listen_port(),
+            Some(identity.port),
+            "host policy reads the actual bound fallback port"
+        );
         assert_ne!(
             identity.port, 10_254,
             "the occupied default selected a fallback"
@@ -274,10 +289,16 @@ fn occupied_default_listener_falls_back_and_reuses_its_actual_port() -> std::io:
         let mut restarted = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let restored = restarted.up()?;
         assert_eq!(
+            restarted.listen_port(),
+            Some(restored.port),
+            "host policy reads the persisted actual port after restart"
+        );
+        assert_eq!(
             restored.port, identity.port,
             "restart reuses the saved fallback"
         );
         restarted.down()?;
+        assert_eq!(restarted.listen_port(), None);
         Ok::<_, std::io::Error>(())
     })();
 
