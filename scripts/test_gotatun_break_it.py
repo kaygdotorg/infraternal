@@ -33,6 +33,12 @@ from gotatun_break_it.trace import (
 from gotatun_break_it.udp_probe import decode_probe, encode_probe
 from gotatun_break_it.mesh_ix_soak import flatten_node_counters, process_counters
 
+try:
+    from gotatun_break_it.long_soak import build_perf_window_command, plan_soak_windows
+except ModuleNotFoundError:
+    build_perf_window_command = None
+    plan_soak_windows = None
+
 
 class RecoveryReportTests(unittest.TestCase):
     """Keep the break-it report honest about recovery, loss and manual fixes."""
@@ -82,6 +88,109 @@ class RecoveryReportTests(unittest.TestCase):
 
         self.assertEqual(report["manual_fix"], True)
         self.assertEqual(report["outcome"], "FAIL")
+
+
+class LongSoakPlanTests(unittest.TestCase):
+    """Keep a one- or two-hour latency soak inside separate perf-lock windows."""
+
+    def test_splits_one_and_two_hours_into_even_windows(self):
+        """Avoid one short trailing window while keeping every run under 14 minutes."""
+        self.assertIsNotNone(plan_soak_windows, "the long-soak planner should be available")
+        assert plan_soak_windows is not None
+        self.assertEqual(plan_soak_windows(3_600, 780), [720] * 5)
+        self.assertEqual(plan_soak_windows(7_200, 780), [720] * 10)
+
+    def test_rejects_total_or_window_outside_the_perf_lock_contract(self):
+        """Reject totals outside one to two hours and windows outside 60–840 seconds."""
+        self.assertIsNotNone(plan_soak_windows, "the long-soak planner should be available")
+        assert plan_soak_windows is not None
+        for total_seconds, window_seconds in (
+            (3_599, 780),
+            (7_201, 780),
+            (3_600, 59),
+            (3_600, 841),
+        ):
+            with self.subTest(total_seconds=total_seconds, window_seconds=window_seconds):
+                with self.assertRaises(ValueError):
+                    plan_soak_windows(total_seconds, window_seconds)
+
+    def test_builds_each_window_as_a_root_perf_hold_with_the_selected_perf_binary(self):
+        """Keep perf privileges and perf binary scoped to each bounded measurement window."""
+        self.assertIsNotNone(build_perf_window_command, "the long-soak runner should be available")
+        assert build_perf_window_command is not None
+        command = build_perf_window_command(
+            perf_runner=Path("/usr/local/bin/perf-run"),
+            perf=Path("/nix/store/perf/bin/perf"),
+            window_runner=Path("/suite/run_loaded_latency_window.sh"),
+            window_output=Path("/evidence/window-001"),
+            perf_output=Path("/evidence/perf-run"),
+            duration_seconds=720,
+            kit=Path("/kit"),
+            coordinator=Path("/coordinator"),
+            binary=Path("/infraternal"),
+            underlay_rate_mbit=800,
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "/usr/local/bin/perf-run",
+                "--root",
+                "--out",
+                "/evidence/perf-run",
+                "--",
+                "env",
+                "PERF=/nix/store/perf/bin/perf",
+                "/suite/run_loaded_latency_window.sh",
+                "/evidence/window-001",
+                "720",
+                "/kit",
+                "/coordinator",
+                "/infraternal",
+                "--underlay-rate-mbit",
+                "800",
+            ],
+        )
+
+
+class ModerateLoadShapeTests(unittest.TestCase):
+    """Keep the long one-flow soak below the perf VM's full-rate ceiling."""
+
+    def test_builds_a_bounded_tbf_queue_for_the_underlay_rate_cap(self):
+        """Shape each underlay direction to the configured moderate bit rate."""
+        loaded_soak = importlib.import_module("gotatun_break_it.loaded_latency_soak")
+        command_builder = getattr(loaded_soak, "underlay_tbf_command", None)
+        self.assertIsNotNone(command_builder, "the loaded soak should expose its rate shaper")
+        assert command_builder is not None
+        self.assertEqual(
+            command_builder(Path("/usr/sbin/tc"), "underlay0", 800),
+            [
+                "/usr/sbin/tc",
+                "qdisc",
+                "replace",
+                "dev",
+                "underlay0",
+                "root",
+                "tbf",
+                "rate",
+                "800mbit",
+                "burst",
+                "32kb",
+                "latency",
+                "10ms",
+            ],
+        )
+
+    def test_rejects_rate_shaping_outside_the_configured_bound(self):
+        """Reject a rate cap that would not represent the requested moderate-load window."""
+        loaded_soak = importlib.import_module("gotatun_break_it.loaded_latency_soak")
+        command_builder = getattr(loaded_soak, "underlay_tbf_command", None)
+        self.assertIsNotNone(command_builder, "the loaded soak should expose its rate shaper")
+        assert command_builder is not None
+        for rate_mbit in (0, 9_999_999):
+            with self.subTest(rate_mbit=rate_mbit):
+                with self.assertRaises(ValueError):
+                    command_builder(Path("/usr/sbin/tc"), "underlay0", rate_mbit)
 
 
 class SoakTraceTests(unittest.TestCase):

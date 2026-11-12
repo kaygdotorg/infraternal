@@ -38,6 +38,29 @@ def net_tput_command(h2h: Path, destination: str, seconds: int) -> list[str]:
     ]
 
 
+def underlay_tbf_command(tc: Path, interface: str, rate_mbit: int) -> list[str]:
+    """Build a small, bounded TBF queue for one side of the private underlay."""
+    if interface not in {"underlay0", "underlay1"}:
+        raise ValueError("the loaded soak can shape only its private underlay interfaces")
+    if type(rate_mbit) is not int or not 100 <= rate_mbit <= 10_000:
+        raise ValueError("the underlay rate must be between 100 and 10000 Mbit/s")
+    return [
+        str(tc),
+        "qdisc",
+        "replace",
+        "dev",
+        interface,
+        "root",
+        "tbf",
+        "rate",
+        f"{rate_mbit}mbit",
+        "burst",
+        "32kb",
+        "latency",
+        "10ms",
+    ]
+
+
 def _tool(name: str) -> str:
     """Return an installed network tool or explain the missing suite dependency."""
     path = shutil.which(name)
@@ -234,6 +257,7 @@ def main() -> None:
     parser.add_argument("--probe-interval-ms", type=int, default=10)
     parser.add_argument("--counter-interval-ms", type=int, default=1_000)
     parser.add_argument("--underlay-mtu", type=int, default=1500)
+    parser.add_argument("--underlay-rate-mbit", type=int)
     parser.add_argument("--pipeline-diagnostics", action="store_true")
     parser.add_argument("--agent-pids", type=Path)
     parser.add_argument("--capture-start-marker", type=Path)
@@ -246,6 +270,8 @@ def main() -> None:
         parser.error("probe interval must be positive and counter interval at least 100 ms")
     if not 576 <= arguments.underlay_mtu <= 65_535:
         parser.error("underlay MTU must be between 576 and 65535")
+    if arguments.underlay_rate_mbit is not None and not 100 <= arguments.underlay_rate_mbit <= 10_000:
+        parser.error("underlay rate must be between 100 and 10000 Mbit/s")
     for executable in (arguments.binary, arguments.coordinator, arguments.kit_dir / "bin/h2h"):
         if not executable.is_file() or not os.access(executable, os.X_OK):
             parser.error(f"required executable is missing or not executable: {executable}")
@@ -290,6 +316,7 @@ def main() -> None:
         "counter_interval_ms": arguments.counter_interval_ms,
         "tcp_flows": 1,
         "underlay_mtu": arguments.underlay_mtu,
+        "underlay_rate_mbit": arguments.underlay_rate_mbit,
         "pipeline_diagnostics_enabled": arguments.pipeline_diagnostics,
         "pipeline_log_tail_poll_interval_ms": 10 if arguments.pipeline_diagnostics else None,
         "pipeline_counter_path": str(pipeline_counter_path),
@@ -312,6 +339,15 @@ def main() -> None:
     try:
         _check_disposable_user_namespace()
         right_namespace = _start_peer_namespace(arguments.duration_seconds, arguments.underlay_mtu)
+        if arguments.underlay_rate_mbit is not None:
+            tc = Path(_tool("tc"))
+            _run(underlay_tbf_command(tc, "underlay0", arguments.underlay_rate_mbit))
+            _run(
+                _in_namespace(
+                    right_namespace.pid,
+                    *underlay_tbf_command(tc, "underlay1", arguments.underlay_rate_mbit),
+                )
+            )
         environment = os.environ.copy()
         environment["INFRATERNAL_MESH_ENGINE"] = "gotatun"
         environment.pop("GOTATUN_DIAG_PIPELINE", None)

@@ -3,8 +3,8 @@
 # Start a filtered scheduler trace for every app thread before starting traffic.
 set -euo pipefail
 
-if (($# < 5 || $# > 6)); then
-    echo 'usage: run_loaded_latency_window.sh OUT DURATION_SECONDS J88C_KIT COORDINATOR INFRATERNAL_BIN [--pipeline-diagnostics]' >&2
+if (($# < 5)); then
+    echo 'usage: run_loaded_latency_window.sh OUT DURATION_SECONDS J88C_KIT COORDINATOR INFRATERNAL_BIN [--pipeline-diagnostics] [--underlay-rate-mbit N]' >&2
     exit 2
 fi
 
@@ -13,14 +13,35 @@ duration=$2
 kit=$3
 coordinator=$4
 binary=$5
-pipeline_args=()
-if (($# == 6)); then
-    [[ $6 == '--pipeline-diagnostics' ]] || {
-        echo 'the optional sixth argument must be --pipeline-diagnostics' >&2
-        exit 2
-    }
-    pipeline_args+=(--pipeline-diagnostics)
-fi
+shift 5
+window_args=()
+pipeline_seen=0
+rate_seen=0
+while (($#)); do
+    case $1 in
+        --pipeline-diagnostics)
+            ((pipeline_seen == 0)) || { echo 'pipeline diagnostics may be selected only once' >&2; exit 2; }
+            pipeline_seen=1
+            window_args+=(--pipeline-diagnostics)
+            shift
+            ;;
+        --underlay-rate-mbit)
+            (($# >= 2)) || { echo '--underlay-rate-mbit requires a value' >&2; exit 2; }
+            ((rate_seen == 0)) || { echo 'underlay rate may be selected only once' >&2; exit 2; }
+            [[ $2 =~ ^[0-9]+$ ]] && ((10#$2 >= 100 && 10#$2 <= 10000)) || {
+                echo 'underlay rate must be between 100 and 10000 Mbit/s' >&2
+                exit 2
+            }
+            rate_seen=1
+            window_args+=(--underlay-rate-mbit "$2")
+            shift 2
+            ;;
+        *)
+            echo "unknown window option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 python=${PYTHON:-python3}
 perf_binary=${PERF:-$(command -v perf || true)}
@@ -77,7 +98,7 @@ setsid unshare -Urn "$python" -I "$script_dir/loaded_latency_soak.py" \
     --duration-seconds "$duration" \
     --agent-pids "$agent_pids" \
     --capture-start-marker "$capture_start" \
-    "${pipeline_args[@]}" \
+    "${window_args[@]}" \
     >"$soak_stdout" 2>"$soak_stderr" &
 soak_pid=$!
 
