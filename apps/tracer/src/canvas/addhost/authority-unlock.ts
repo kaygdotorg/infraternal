@@ -45,6 +45,8 @@ export interface AuthorityOptions {
   canUnlock?: () => boolean;
   /** Whether any host other than this server itself exists; see `authority-control.on-demand.ts`. Absent means "yes". */
   hasRemoteHosts?: () => boolean;
+  /** Tells the control when the set of hosts changes (the list arrives after the page starts); returns a remover. */
+  onHostsChange?: (listener: () => void) => () => void;
 }
 
 /** Waits at most this long for the browser to be idle: the real control's first check is due 1.2 s after the handle. */

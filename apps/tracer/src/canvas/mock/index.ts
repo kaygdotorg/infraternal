@@ -82,7 +82,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const base = createMockProvisioning({ savedKey: query.get("savedkey") === "1", authority: query.get("ca") ?? "ready" });
   const provisioning = setupDemo ? setupDemo.wrap(base) : base;
   // The lock on host connections: administrators (the operator role) can unlock it, anyone else only sees the state.
-  const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator", hasRemoteHosts: () => query.get("nohosts") !== "1" && sessions.hosts().length > 0 });
+  const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator", hasRemoteHosts: () => query.get("nohosts") !== "1" && sessions.hosts().length > 0, onHostsChange: (listener) => sessions.onChange(listener) });
   // `?inbox=3` adds two more kinds of waiting item, to see the card with several lines (test double only).
   if (new URLSearchParams(location.search).get("inbox") === "3") inboxFor(core).set("mock-extra", mockInboxItems());
   const addHost = createAddHost(core, {
