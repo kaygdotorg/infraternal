@@ -1988,7 +1988,10 @@ mod tests {
             runner.called("stop")
         );
         assert!(guard_remains, "the boot retry files were removed");
-        assert!(!runner.called("stop"), "the guard was disarmed after failure");
+        assert!(
+            !runner.called("stop"),
+            "the guard was disarmed after failure"
+        );
         assert!(responses.iter().all(|frame| !matches!(
             frame,
             Frame::Guard {
