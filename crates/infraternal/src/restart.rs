@@ -1,6 +1,7 @@
 //! Implements local-owner restart requests and same-PID exec without transporting the CA over a named socket [168][217], #154.
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
+use base64::Engine as _;
 use std::{
     ffi::CString,
     fs::OpenOptions,
@@ -30,6 +31,8 @@ pub(crate) struct Options {
 }
 
 const MAX_PATH: usize = 4096;
+/// Caps the public Mesh state document read for a server fingerprint.
+const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024;
 
 /// The private control endpoint: its socket, server data root, and reload signal.
 pub(crate) struct Control {
@@ -389,7 +392,6 @@ fn query_mesh_fingerprint(data: &Path) -> io::Result<String> {
         uid,
     )?;
     let fingerprint = openssl::sha::sha256(&key);
-    use base64::Engine as _;
     Ok(format!(
         "SHA256:{}",
         base64::engine::general_purpose::STANDARD_NO_PAD.encode(fingerprint)
@@ -415,9 +417,9 @@ fn select_server_mesh_key(
     };
     match (durable, runtime) {
         (Some(durable), Some(runtime)) if durable == runtime => Ok(durable),
-        (Some(_), Some(_)) => return Err(io::ErrorKind::InvalidData.into()),
+        (Some(_), Some(_)) => Err(io::ErrorKind::InvalidData.into()),
         (Some(key), None) | (None, Some(key)) => Ok(key),
-        (None, None) => return Err(io::ErrorKind::NotFound.into()),
+        (None, None) => Err(io::ErrorKind::NotFound.into()),
     }
 }
 
@@ -456,11 +458,12 @@ fn public_mesh_key(directory: &Path, uid: u32) -> io::Result<Option<[u8; 32]>> {
     {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024;
-    let mut bytes = Vec::with_capacity(MAX_PUBLIC_STATE_BYTES as usize);
+    let max_public_state_bytes =
+        usize::try_from(MAX_PUBLIC_STATE_BYTES).map_err(|_| io::ErrorKind::InvalidData)?;
+    let mut bytes = Vec::with_capacity(max_public_state_bytes);
     file.take(MAX_PUBLIC_STATE_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PUBLIC_STATE_BYTES as usize {
+    if bytes.len() > max_public_state_bytes {
         return Err(io::ErrorKind::InvalidData.into());
     }
     let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
