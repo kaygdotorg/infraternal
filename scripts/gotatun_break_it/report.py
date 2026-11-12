@@ -32,14 +32,16 @@ def report_case(
     bytes_sent: int,
     bytes_verified: int,
     integrity_ok: bool,
+    bytes_stalled: int | None = None,
     manual_fixes: Sequence[str] = (),
 ) -> dict[str, str | int | float | bool | None | list[str]]:
     """Return one machine-readable result using shared J526 recovery definitions.
 
     Recovery is the first successful probe sent after the fault is cleared. The
     reported fault-to-recovery duration includes the injected outage; the
-    after-clear duration isolates automatic reconvergence. `bytes_unverified`
-    records bytes whose delivery the traffic workload did not verify.
+    after-clear duration isolates automatic reconvergence. `bytes_stalled` is
+    the sender/receiver progress gap at fault-clear time; `bytes_unverified`
+    records bytes whose delivery the workload did not verify at the end.
     """
     if not case.strip():
         raise ValueError("case name must not be empty")
@@ -49,6 +51,10 @@ def report_case(
         raise ValueError("fault timestamps must be monotonic and ordered")
     if bytes_sent < 0 or bytes_verified < 0 or bytes_verified > bytes_sent:
         raise ValueError("verified bytes must be between zero and bytes sent")
+    if bytes_stalled is not None and (
+        type(bytes_stalled) is not int or not 0 <= bytes_stalled <= bytes_sent
+    ):
+        raise ValueError("stalled bytes must be between zero and bytes sent")
 
     ordered = sorted(probes, key=lambda probe: (probe.sent_ns, probe.sequence))
     sequences: set[int] = set()
@@ -103,6 +109,7 @@ def report_case(
         "recovery_probe_loss_pct": round(lost * 100 / len(window), 4) if window else 0.0,
         "bytes_sent": bytes_sent,
         "bytes_verified": bytes_verified,
+        "bytes_stalled": bytes_stalled,
         "bytes_unverified": bytes_sent - bytes_verified,
         "integrity_ok": integrity_ok,
         "manual_fix": bool(manual),
