@@ -20,7 +20,7 @@ import { columnEls, setColumnWidth } from "../layout/column-els";
 import { MARGIN, boxOf, contentSize, defaultWidth, isDefaultWidth, resolve, type Box, type Metrics, type Rect } from "../layout/geometry";
 import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types";
 import { el } from "../dom";
-import { hostNote, LOCKED_NOTE } from "../host-note";
+import { hostNote, LOCKED_NOTE, openShellEntries } from "../host-note";
 import { onDemand, whenIdle } from "../../on-demand";
 import type { EarlyPress, ViewPointer } from "./view-pointer.on-demand";
 import { restPx } from "../springs";
@@ -270,9 +270,14 @@ export function createViews(cx: Ctx): ViewsModule {
   }
 
   /**
-   * The placeholder of a tiled view with no windows. It tells the truth about why: with no host at all it says so and offers
-   * Add host; with a host but no window (the last shell ended) it says no window is open and offers a shell on that host.
-   * It is rebuilt when the answer changes (a host is added or removed), and `mode` records which one is on screen.
+   * The placeholder of a tiled view with no windows. It tells the truth about why and offers what can be done now: with no host
+   * at all it says so and offers Add host; with a host but no window (the last shell ended) it says no window is open and offers
+   * Open shell; a host that cannot connect only because the CA is locked is named, with the one tap that unlocks it.
+   *
+   * The server's own host is always one of `hosts` (an account with one added host has two), so Open shell is offered whenever a
+   * host can be reached: it opens that host's shell when it is the only one, and otherwise the palette limited to "Open shell on
+   * <host>" rows, so no host is ever out of reach because another exists (#500, J539). `mode` records which placeholder is on
+   * screen, and the placeholder is rebuilt when it changes (a host is added, removed, locked or unlocked).
    */
   function paintEmpty(c: ViewRec): void {
     const isEmpty = c.view.layout === "tiled" && c.wins.size === 0;
@@ -281,7 +286,8 @@ export function createViews(cx: Ctx): ViewsModule {
     const only = hosts.length === 1 ? hosts[0] : undefined;
     // Hosts that cannot connect only because the CA is locked (#500, J528): they stay listed, and this says why and offers the one tap.
     const locked = hosts.filter((host) => hostNote(cx, host) === "locked").map((host) => host.name);
-    const mode = hosts.length === 0 ? "no-hosts" : `windows:${only?.id ?? "many"}${locked.length ? `:locked:${locked.join(",")}` : ""}`;
+    const canOpen = hosts.some((host) => host.online !== false);
+    const mode = hosts.length === 0 ? "no-hosts" : `windows:${only?.id ?? "many"}:${canOpen ? "open" : "closed"}${locked.length ? `:locked:${locked.join(",")}` : ""}`;
     if (c.empty?.dataset.mode === mode) return;
     c.empty?.remove();
     const box = el("div", "cl-empty");
@@ -289,30 +295,28 @@ export function createViews(cx: Ctx): ViewsModule {
     const title = hosts.length === 0 ? "No hosts yet" : "No windows open";
     const hint = hosts.length === 0 ? "Add a host and its shell opens here."
       : locked.length ? `${locked.join(", ")} ${locked.length === 1 ? "is" : "are"} ${LOCKED_NOTE}.`
-      : only ? `Open a shell on ${only.name} to pick up where you left off.` : "Open a shell on one of your hosts from the sidebar.";
+      : only ? `Open a shell on ${only.name} to pick up where you left off.` : "Open a shell on one of your hosts to pick up where you left off.";
     box.innerHTML = `<div class="cl-empty-slot" aria-hidden="true"></div><p class="cl-empty-title"></p><p class="cl-empty-hint"></p>`;
     box.querySelector(".cl-empty-title")!.textContent = title;
     box.querySelector(".cl-empty-hint")!.textContent = hint;
     const addHost = cx.adapters.addHost;
+    const pill = (label: string, icon: string, run: () => void): HTMLButtonElement => {
+      const button = el("button", "ui-pill cl-empty-add");
+      button.type = "button";
+      button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg><span>${label}</span>`;
+      button.addEventListener("click", run, { signal });
+      box.append(button);
+      return button;
+    };
+    if (canOpen) {
+      pill("Open shell", '<path d="m5 8 4 4-4 4M12 16h7"/>', () => {
+        if (only) cx.win.open(only.id); else cx.core.showPalette(openShellEntries(cx.adapters.sessions.hosts()));
+      });
+    }
     if (locked.length) {
-      const unlock = el("button", "ui-pill cl-empty-add");
-      unlock.type = "button";
-      unlock.dataset.action = "unlock";
-      unlock.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/></svg><span>Unlock host connections</span>';
-      unlock.addEventListener("click", () => { void cx.adapters.authority?.unlock(); }, { signal });
-      box.append(unlock);
-    } else if (only) {
-      const open = el("button", "ui-pill cl-empty-add");
-      open.type = "button";
-      open.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 8 4 4-4 4M12 16h7"/></svg><span>Open shell</span>';
-      open.addEventListener("click", () => cx.win.open(only.id), { signal });
-      box.append(open);
+      pill("Unlock host connections", '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>', () => { void cx.adapters.authority?.unlock(); }).dataset.action = "unlock";
     } else if (hosts.length === 0 && addHost) {
-      const add = el("button", "ui-pill cl-empty-add");
-      add.type = "button";
-      add.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Add host</span>';
-      add.addEventListener("click", () => addHost(), { signal });
-      box.append(add);
+      pill("Add host", '<path d="M12 5v14M5 12h14"/>', () => addHost());
     }
     c.content.append(box);
     c.empty = box;

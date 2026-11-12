@@ -69,10 +69,14 @@ for (const size of SIZES) {
       await closeAllWindows(page);
       const empty = page.locator(".cl-empty");
       await expect(empty).toContainText("No windows open");
+      // The list of hosts arrives a moment after the first window: wait for the placeholder that knows both hosts before pressing.
+      await expect(empty, "the placeholder knows the added host").toHaveAttribute("data-mode", /^windows:many/, { timeout: 15_000 });
       const open = empty.getByRole("button", { name: "Open shell" });
       await expect(open, "after exit there is a way to open a shell right here").toBeVisible();
       await page.screenshot({ path: tracerEvidencePath("j539", `empty-open-shell-${size.id}.png`) });
       await open.click();
+      await expect(page.locator("#palette"), "Open shell opens the palette").toBeVisible();
+      await page.screenshot({ path: tracerEvidencePath("j539", `empty-palette-${size.id}.png`) });
       const rows = page.locator("#palette-results [role=option]");
       await expect(rows.filter({ hasText: `Open shell on ${HOST}` }), "the added host is one of the shells to open").toHaveCount(1);
       await expect(rows, "only the shells of the two hosts are listed (the server's own and the added one)").toHaveCount(2);

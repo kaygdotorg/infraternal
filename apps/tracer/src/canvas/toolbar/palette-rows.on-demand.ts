@@ -19,6 +19,7 @@ import { isTerminal } from "../views/body";
 import { viewKeys } from "./viewlist";
 import { bindingText } from "./shortcuts";
 import { hostEntries } from "./palette-hosts.on-demand";
+import { openShellEntries } from "../host-note";
 
 /** Every row the canvas offers, for the state as it is now. */
 export function canvasEntries(cx: Ctx): PaletteEntry[] {
@@ -64,10 +65,7 @@ export function canvasEntries(cx: Ctx): PaletteEntry[] {
     if (state.activeWin) out.push({ group: "Canvas", glyph: "▢", icon: ICONS.close, label: "Close window", hint: `the session keeps running · ${bindingText("close-window")}`, action: "canvas:close" });
     out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
     // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
-    for (const host of cx.adapters.sessions.hosts()) {
-      if (host.state) continue;
-      out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
-    }
+    for (const row of openShellEntries(cx.adapters.sessions.hosts())) out.push({ ...row, icon: ICON.terminal });
     // Remove, rename and full-access rows for hosts.
     out.push(...hostEntries(cx));
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });
