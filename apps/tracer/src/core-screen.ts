@@ -22,7 +22,7 @@ import { onDemand } from "./on-demand";
 import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
 import { lookBridge, startThemes } from "./canvas/themes/controller";
-import { readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
+import { cachedThemeChosen, readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
 import { keyboardIsOpen, watchKeyboard } from "./keyboard-viewport";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
@@ -425,7 +425,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const legacyAppearance = options.accountId ? readLegacyAppearance(options.accountId) : undefined;
   const cachedLook = options.accountId ? readCachedLook(options.accountId) : undefined;
   const cachedTheme = cachedLook?.themes.find((theme) => theme.id === cachedLook.selected);
-  const savedThemeId = themeId(legacyAppearance?.theme ?? null) ?? themeId(cachedTheme?.colors ?? null)
+  // A look whose theme the person never picked (D390) holds only the scheme one device showed first, so it is not a saved choice here.
+  const savedThemeId = themeId(legacyAppearance?.theme ?? null) ?? (cachedThemeChosen(cachedLook) ? themeId(cachedTheme?.colors ?? null) : undefined)
     ?? (!options.accountId ? themeId(readLocal("tracer.theme")) : undefined);
   let currentThemeId = themeId(params.get("theme")) ?? savedThemeId ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
@@ -910,9 +911,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
     }, 250);
   };
-  /** Keeps the OS scheme as a fallback only until the account document supplies its saved look. */
+  /**
+   * Follows the OS scheme while no theme store owns the look. Once the page's theme store runs (`startThemes`), it follows the system for an
+   * account that never picked a theme (D390) and leaves a chosen theme alone, so this fallback must not also change the theme.
+   */
   const systemThemeChange = (): void => {
-    if (!themeId(params.get("theme")) && !savedThemeId && !lookBridge()?.hasAccountLook()) {
+    if (!themeId(params.get("theme")) && !savedThemeId && !lookBridge()) {
       currentThemeId = systemDark.matches ? "mocha" : "latte";
       void applyLook();
     }

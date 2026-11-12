@@ -297,6 +297,7 @@ pub(crate) fn look(value: &Value) -> bool {
             "themes",
             "windowSizes",
             "extendedInfo",
+            "themeChosen",
         ],
     ) && value.get("v").and_then(Value::as_u64) == Some(1)
         && string(value, "selected").is_some()
@@ -334,6 +335,9 @@ pub(crate) fn look(value: &Value) -> bool {
                 )
         })
         && value.get("extendedInfo").is_none_or(Value::is_boolean)
+        // D390: whether the person ever picked a theme. Absent reads as "not chosen", so a never-chosen account follows each device's
+        // light or dark setting instead of the theme one device happened to show first.
+        && value.get("themeChosen").is_none_or(Value::is_boolean)
 }
 pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
     doc.get("views")

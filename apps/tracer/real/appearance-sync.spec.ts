@@ -672,6 +672,45 @@ test("account basics and Reset stay the same on clients with different OS scheme
   }
 });
 
+/** D390: a fresh account that never picks a theme follows each device's scheme and saves no theme; picking one makes it the account's on every device. */
+test("a fresh account follows each device's scheme and saves no theme until one is picked (D390)", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
+  const dark = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, colorScheme: "dark" });
+  const light = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, colorScheme: "light" });
+  const theme = (page: Page) => page.locator("html").getAttribute("data-theme");
+  try {
+    const a = watchLayout(await dark.newPage());
+    await enrol(a, server);
+    await settled(a);
+    expect(["mocha", "macchiato", "frappe"], "the dark device shows a dark scheme").toContain(await theme(a));
+    // Reading the account document on its own: the first load must not have saved the dark theme as the account's look.
+    const first = (await cache(a)).canonical.look;
+    expect(first?.themeChosen === true, "the first load saves no chosen theme").toBe(false);
+
+    await light.addCookies(await dark.cookies());
+    const b = watchLayout(await light.newPage());
+    await b.goto(server.origin + "/");
+    await expect(windows(b)).toHaveCount(1);
+    await settled(b);
+    expect(await theme(b), "the light device of the same account shows light").toBe("latte");
+    expect(["mocha", "macchiato", "frappe"], "the dark device is still dark").toContain(await theme(a));
+
+    // Picking a theme is the choice: the account's theme now wins on both devices (D352).
+    await choosePaletteValue(b, "Theme: Frosted");
+    await expect.poll(async () => (await cache(a)).canonical.look?.themeChosen, { timeout: 15_000 }).toBe(true);
+    await settled(a);
+    await settled(b);
+    expect(await theme(a), "the dark device now shows the account's pick").toBe("latte");
+    await a.reload();
+    await expect(windows(a)).toHaveCount(1);
+    expect(await theme(a), "and keeps it after a reload").toBe("latte");
+  } finally {
+    await dark.close();
+    await light.close();
+    await server.dispose();
+  }
+});
+
 test("legacy appearance values migrate once into the new account document", async ({ browser }) => {
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
   const evidence = tracerEvidencePath("appearance-sync");

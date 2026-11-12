@@ -216,3 +216,66 @@ async fn wall_based_recovery_upgrade_ends_old_bearers_without_changing_credentia
         .unwrap();
     assert_eq!(elapsed, 0);
 }
+
+/// D390 (#500): the theme-chosen migration marks every look saved before it as chosen, in the head, the snapshot and the replayed
+/// `look.set` events, and leaves accounts without a look (and looks already flagged) alone.
+#[tokio::test]
+async fn theme_chosen_migration_marks_existing_looks_chosen_and_leaves_the_rest() {
+    let pool = database().await;
+    let mut old = sqlx::migrate!("./migrations");
+    old.migrations
+        .to_mut()
+        .retain(|migration| migration.version < 20_261_112_033_658);
+    old.run(&pool).await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES('has-look','a','a','A',1,'h'),('no-look','b','b','B',0,'h'),('flagged','c','c','C',0,'h');
+         INSERT INTO canvas_heads(account,revision,document,initialized) VALUES
+           ('has-look',3,'{\"revision\":3,\"views\":[],\"look\":{\"v\":1,\"selected\":\"tinted\"}}',1),
+           ('no-look',1,'{\"revision\":1,\"views\":[]}',1),
+           ('flagged',2,'{\"revision\":2,\"views\":[],\"look\":{\"v\":1,\"themeChosen\":false}}',1);
+         INSERT INTO canvas_snapshots(account,revision,document) VALUES('has-look',2,'{\"look\":{\"v\":1,\"selected\":\"solid\"}}');
+         INSERT INTO canvas_operations(account,revision,event) VALUES
+           ('has-look',3,'{\"intent\":{\"type\":\"look.set\",\"look\":{\"v\":1,\"selected\":\"tinted\"}}}'),
+           ('has-look',4,'{\"intent\":{\"type\":\"close\",\"window_id\":\"w\"}}');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    MIGRATIONS.run(&pool).await.unwrap();
+    let chosen = |sql: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(sql)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        chosen("SELECT CAST(json_extract(document,'$.look.themeChosen') AS TEXT) FROM canvas_heads WHERE account='has-look'").await.as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        chosen("SELECT CAST(json_extract(document,'$.look.themeChosen') AS TEXT) FROM canvas_heads WHERE account='no-look'").await,
+        None,
+        "an account without a look gets none"
+    );
+    assert_eq!(
+        chosen("SELECT CAST(json_extract(document,'$.look.themeChosen') AS TEXT) FROM canvas_heads WHERE account='flagged'").await.as_deref(),
+        Some("0"),
+        "an explicit answer is never rewritten"
+    );
+    assert_eq!(
+        chosen("SELECT CAST(json_extract(document,'$.look.themeChosen') AS TEXT) FROM canvas_snapshots WHERE account='has-look'").await.as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        chosen("SELECT CAST(json_extract(event,'$.intent.look.themeChosen') AS TEXT) FROM canvas_operations WHERE revision=3").await.as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        chosen("SELECT CAST(json_extract(event,'$.intent.look.themeChosen') AS TEXT) FROM canvas_operations WHERE revision=4").await,
+        None,
+        "other events are untouched"
+    );
+}
