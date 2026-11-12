@@ -1054,4 +1054,68 @@ mod tests {
             "Mesh state requires the exact 0700 directory mode"
         );
     }
+    /// Waits for the mesh store's directory lock before migration can move its files.
+    #[test]
+    fn migration_waits_for_the_mesh_store_directory_lock() {
+        use std::{
+            os::unix::fs::OpenOptionsExt,
+            sync::mpsc,
+            thread,
+            time::Duration,
+        };
+
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(&durable).expect("create durable mesh directory");
+        fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
+            .expect("make durable mesh directory private");
+        fs::write(volatile.join("mesh-private-key"), [0x71; 32])
+            .expect("write synthetic legacy key");
+
+        let directory_fd = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(&durable)
+            .expect("open the mesh store directory");
+        let store_lock = nix::fcntl::Flock::lock(
+            directory_fd,
+            nix::fcntl::FlockArg::LockExclusive,
+        )
+        .expect("hold the lock used by mesh store writers");
+
+        let (started, started_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let migration_source = volatile.clone();
+        let migration_target = durable.clone();
+        let migration = thread::spawn(move || {
+            started.send(()).expect("signal migration start");
+            result_tx
+                .send(migrate(&migration_source, &migration_target))
+                .expect("send migration result");
+        });
+        started_rx.recv().expect("wait until migration thread is ready");
+
+        // sleep: This bounded observation window proves migration cannot finish while the store lock is held.
+        let while_locked = result_rx.recv_timeout(Duration::from_millis(250));
+        assert!(
+            matches!(while_locked, Err(mpsc::RecvTimeoutError::Timeout)),
+            "migration must wait until the live mesh store releases its directory lock"
+        );
+        drop(store_lock);
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("migration should finish after the store lock is released");
+        migration.join().expect("migration worker");
+        assert!(result.is_ok(), "migration should succeed after lock release");
+        assert_eq!(
+            fs::read(durable.join("mesh-private-key")).expect("durable private key"),
+            [0x71; 32]
+        );
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
 }
