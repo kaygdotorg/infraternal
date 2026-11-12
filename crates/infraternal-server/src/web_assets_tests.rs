@@ -205,6 +205,7 @@ fn release(main: &[u8], main_br: &[u8]) -> (PathBuf, Router) {
     (root, app)
 }
 
+/// Sends one `GET` to `app` as a browser that accepts brotli, with `extra` request headers (the validators under test).
 async fn get(app: &Router, uri: &str, extra: &[(header::HeaderName, &str)]) -> Response {
     let mut request = Request::builder()
         .uri(uri)
