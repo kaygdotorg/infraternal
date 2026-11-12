@@ -151,9 +151,9 @@ fn bundle_fingerprint(root: &Path) -> String {
         for relative in &files {
             digest.update(relative.as_bytes());
             digest.update([0]);
-            let derived = Path::new(relative)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("br") || ext.eq_ignore_ascii_case("gz"));
+            let derived = Path::new(relative).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("br") || ext.eq_ignore_ascii_case("gz")
+            });
             if !hashed_chunk(&format!("/{relative}")) && !derived {
                 let bytes = std::fs::read(root.join(relative))?;
                 digest.update((bytes.len() as u64).to_le_bytes());
