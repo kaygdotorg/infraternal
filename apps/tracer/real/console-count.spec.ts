@@ -6,6 +6,7 @@
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "../test/evidence-path";
 import { enrol, windows } from "./layout-devices";
+import { watchLayout } from "./layout-observer";
 import { startRealServer } from "./server";
 
 test("after the last window closes the Console label no longer counts it", async ({ browser }) => {
@@ -13,7 +14,7 @@ test("after the last window closes the Console label no longer counts it", async
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4673) });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   try {
-    const page = await context.newPage();
+    const page = watchLayout(await context.newPage());
     await enrol(page, server);
     const label = page.locator("#capsule .capsule-session");
     await expect(windows(page)).toHaveCount(1, { timeout: 30_000 });
