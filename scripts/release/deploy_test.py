@@ -194,14 +194,16 @@ class DeploymentTests(unittest.TestCase):
 
         observed_by_old_binary = []
 
-        def restart_for_test(_data, binary):
+        def restart_for_test(_data, binary, rollback=False):
             if binary == release / "infraternal":
+                self.assertFalse(rollback, "candidate upgrade must use the normal restart path")
                 mesh = data / "mesh"
                 mesh.mkdir(mode=0o700)
                 legacy_key.rename(mesh / "mesh-private-key")
                 (mesh / "mesh-private-key").write_bytes(b"latest-candidate-key")
                 (mesh / "mesh-public.json").write_bytes(b'{"enabled":true}')
             else:
+                self.assertTrue(rollback, "previous build requires the writer-quiesced handoff")
                 observed_by_old_binary.append(
                     (
                         legacy_key.read_bytes() if legacy_key.exists() else None,
@@ -224,7 +226,7 @@ class DeploymentTests(unittest.TestCase):
               patch.object(remote, "healthy", side_effect=[True, False, True]),
               patch.object(remote, "same_image", return_value=True),
               patch.object(remote, "endpoint", return_value=(1, 1)),
-              patch.object(remote, "restart", side_effect=restart_for_test),
+              patch.object(remote, "restart", side_effect=restart_for_test) as restart_requested,
               patch.object(remote, "wait_for_success")):
             with self.assertRaisesRegex(ValueError, "deployment refused"):
                 remote.apply(config)
@@ -234,6 +236,50 @@ class DeploymentTests(unittest.TestCase):
             [(b"latest-candidate-key", b'{"enabled":true}')],
             "the previous binary must see latest Mesh identity and public state at the legacy path",
         )
+        self.assertTrue(
+            restart_requested.call_args_list[1].kwargs.get("rollback"),
+            "warm rollback must request the server's writer-quiesced Mesh handoff",
+        )
+
+    def test_rollback_restart_signals_handoff_and_refusal(self):
+        """Mark rollback on the private control frame and stop if handoff is refused."""
+        data = self.root
+        (data / "restart").mkdir()
+        requested = []
+        binary = Path("/old/infraternal")
+        payload = os.fsencode(binary)
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(data / "restart/control.sock"))
+            server.listen()
+            server.settimeout(2)
+
+            def refuse_handoff():
+                try:
+                    peer, _ = server.accept()
+                except socket.timeout:
+                    return
+                with peer:
+                    requested.append(peer.recv(4098))
+                    peer.sendall(b"REFUSED\n")
+
+            worker = threading.Thread(target=refuse_handoff)
+            worker.start()
+            try:
+                try:
+                    with self.assertRaisesRegex(ValueError, "refused"):
+                        remote.restart(data, binary, rollback=True)
+                except TypeError as error:
+                    self.fail(f"rollback handoff is not available on the restart path: {error}")
+            finally:
+                worker.join(3)
+
+        self.assertFalse(worker.is_alive(), "the control fixture must finish")
+        self.assertEqual(len(requested), 1, "the rollback request reaches the server")
+        frame = requested[0]
+        encoded_length = int.from_bytes(frame[:2], "big")
+        self.assertEqual(encoded_length & 0x7FFF, len(payload))
+        self.assertEqual(encoded_length & 0x8000, 0x8000, "the request carries rollback intent")
+        self.assertEqual(frame[2:], payload)
 
     def test_ca_status_refuses_redirect_without_forwarding_session(self):
         seen = []
