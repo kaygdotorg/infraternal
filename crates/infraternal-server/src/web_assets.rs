@@ -19,6 +19,7 @@ use axum::{
 };
 use sha2::{Digest, Sha256};
 use std::{
+    fmt::Write as _,
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -150,8 +151,9 @@ fn bundle_fingerprint(root: &Path) -> String {
         for relative in &files {
             digest.update(relative.as_bytes());
             digest.update([0]);
-            let name = relative.rsplit('/').next().unwrap_or(relative);
-            let derived = name.ends_with(".br") || name.ends_with(".gz");
+            let derived = Path::new(relative)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("br") || ext.eq_ignore_ascii_case("gz"));
             if !hashed_chunk(&format!("/{relative}")) && !derived {
                 let bytes = std::fs::read(root.join(relative))?;
                 digest.update((bytes.len() as u64).to_le_bytes());
@@ -160,18 +162,20 @@ fn bundle_fingerprint(root: &Path) -> String {
         }
         Ok(digest.finalize())
     });
-    match hashed {
-        Ok(digest) => digest[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-        Err(_) => {
+    hashed.map_or_else(
+        |_| {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos());
             format!("p{nanos:x}")
-        }
-    }
+        },
+        |digest| {
+            digest[..8].iter().fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
+        },
+    )
 }
 
 /// Appends the `/`-separated path, relative to `root`, of every file under `dir`.
