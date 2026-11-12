@@ -304,3 +304,91 @@ async fn the_etag_follows_the_whole_bundle() {
     std::fs::remove_dir_all(root_a).unwrap();
     std::fs::remove_dir_all(root_c).unwrap();
 }
+
+/// GET and HEAD identify the same negotiated representation, including SPA fallbacks. Encodings may have
+/// different strong validators because their bytes differ; compare methods with identical Accept-Encoding.
+#[tokio::test]
+async fn head_and_get_share_validators_and_conditional_responses() {
+    let (root, _) = fixture();
+    std::fs::write(root.join("main.js.br"), b"br entry").unwrap();
+    std::fs::write(root.join("main.js.gz"), b"gzip entry").unwrap();
+    let app = router(root.clone());
+    for path in [
+        "/main.js",
+        "/",
+        "/index.html",
+        "/saved/session",
+        "/chunk-deadbeef.js",
+    ] {
+        for encoding in ["identity", "br", "gzip"] {
+            let mut get_headers: Option<axum::http::HeaderMap> = None;
+            for method in ["GET", "HEAD"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header(header::ACCEPT_ENCODING, encoding)
+                            .header(header::IF_MODIFIED_SINCE, "Fri, 01 Jan 2100 00:00:00 GMT")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), 200, "{method} {path} {encoding}");
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+                assert!(response.headers().get(header::LAST_MODIFIED).is_none());
+                if let Some(get_headers) = &get_headers {
+                    for name in [
+                        header::ETAG,
+                        header::CONTENT_LENGTH,
+                        header::CONTENT_ENCODING,
+                    ] {
+                        assert_eq!(
+                            response.headers().get(&name),
+                            get_headers.get(&name),
+                            "{name}: {path} {encoding}"
+                        );
+                    }
+                } else {
+                    get_headers = Some(response.headers().clone());
+                }
+                let tag = response.headers()[header::ETAG].clone();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(
+                    body.is_empty(),
+                    method == "HEAD",
+                    "{method} {path} {encoding}"
+                );
+                let conditional = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header(header::ACCEPT_ENCODING, encoding)
+                            .header(header::IF_NONE_MATCH, &tag)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(conditional.status(), 304, "{method} {path} {encoding}");
+                assert_eq!(conditional.headers()[header::ETAG], tag);
+                assert_eq!(conditional.headers()[header::CACHE_CONTROL], "no-cache");
+                assert!(conditional.headers().get(header::CONTENT_LENGTH).is_none());
+                assert!(
+                    conditional
+                        .into_body()
+                        .collect()
+                        .await
+                        .unwrap()
+                        .to_bytes()
+                        .is_empty()
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
