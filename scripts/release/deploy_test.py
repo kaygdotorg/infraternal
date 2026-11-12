@@ -106,6 +106,27 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual(saved.execute("SELECT value FROM state").fetchall(), [("retained",)])
             self.assertEqual(live.execute("PRAGMA integrity_check").fetchone(), ("ok",))
 
+    def test_pre_upgrade_snapshot_copies_only_the_database_allowlist(self):
+        """Keep D295 snapshots limited to SQLite when new state files appear."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+        (data / "future-state.secret").write_bytes(b"synthetic-future-secret")
+        (mesh / "future-mesh-secret").write_bytes(b"synthetic-future-mesh-secret")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = sorted(
+            path.relative_to(destination).as_posix()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
+        self.assertEqual(saved_files, ["infraternal.sqlite"])
+
     def test_pre_upgrade_snapshot_never_copies_embedded_mesh_private_key(self):
         """Keep the server's Mesh identity outside pre-upgrade snapshots."""
         data = self.root / "data"

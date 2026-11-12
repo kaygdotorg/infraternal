@@ -10,7 +10,6 @@ import re
 import shutil
 import socket
 import sqlite3
-import stat
 import struct
 import subprocess
 import time
@@ -206,94 +205,15 @@ def swap_link(path, target):
     os.replace(temporary, path)
 
 
-def mesh_secret_inodes(data):
-    """Find Mesh private-file and staging inodes so backups can omit their aliases."""
-    mesh = data / "mesh"
-    try:
-        mesh_metadata = mesh.lstat()
-    except FileNotFoundError:
-        return set()
-    if not stat.S_ISDIR(mesh_metadata.st_mode):
-        return set()
-
-    inodes = set()
-    for path in mesh.iterdir():
-        if path.name not in {"mesh-private-key", "mesh-key-rotation.bin"} and not mesh_secret_staging_name(path.name):
-            continue
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISREG(metadata.st_mode):
-            inodes.add((metadata.st_dev, metadata.st_ino))
-    return inodes
-
-
-def mesh_secret_staging_name(name):
-    """Recognize key and rotation-journal staging files left by an interrupted write or move."""
-    if name in {".mesh-private-key.migrate-new", ".mesh-key-rotation.bin.migrate-new"}:
-        return True
-    return name.endswith(".new") and name.startswith((
-        "mesh-private-key.",
-        "mesh-key-rotation.",
-        "mesh-key-rotation.bin.",
-        ".mesh-private-key.migrate-",
-        ".mesh-key-rotation.bin.migrate-",
-    ))
-
-
 def backup(data, destination):
-    """Snapshot database and non-secret state without copying Mesh secret files or their hard links."""
-    secret_inodes = mesh_secret_inodes(data)
-    secret_names = {"mesh-private-key", "mesh-key-rotation.bin"}
-
-    def ignore_state_files(root, names):
-        """Skip unsafe entries and every path that aliases a live Mesh secret inode."""
-        ignored = []
-        for name in names:
-            path = Path(root, name)
-            if name in secret_names or mesh_secret_staging_name(name):
-                ignored.append(name)
-                continue
-            try:
-                metadata = path.lstat()
-            except FileNotFoundError:
-                ignored.append(name)
-                continue
-            if stat.S_ISLNK(metadata.st_mode):
-                ignored.append(name)
-            elif stat.S_ISDIR(metadata.st_mode):
-                continue
-            elif not stat.S_ISREG(metadata.st_mode):
-                ignored.append(name)
-            elif (metadata.st_dev, metadata.st_ino) in secret_inodes:
-                ignored.append(name)
-        return ignored
-
+    """Write D295's SQLite-only snapshot while the live server stays available."""
     destination.mkdir(mode=0o700)
     # The SQLite backup API includes committed WAL pages while serving continues.
-    # Other persisted state is retained unchanged by binary handoff; save encrypted
-    # state/public metadata too, excluding live sockets and mutable database sidecars.
+    # D295 snapshots only this database; the separate release handoff preserves Mesh state.
     database = data / "infraternal.sqlite"
     with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
         with closing(sqlite3.connect(destination / "infraternal.sqlite")) as target:
             source.backup(target)
-    for path in data.iterdir():
-        if path.name.startswith("infraternal.sqlite") or path.name == "restart":
-            continue
-        if path.name in secret_names or mesh_secret_staging_name(path.name):
-            continue
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISDIR(metadata.st_mode):
-            shutil.copytree(path, destination / path.name,
-                            ignore=ignore_state_files)
-        elif (stat.S_ISREG(metadata.st_mode)
-              and path.name not in secret_names
-              and (metadata.st_dev, metadata.st_ino) not in secret_inodes):
-            shutil.copy2(path, destination / path.name)
 
 
 def apply(config):
