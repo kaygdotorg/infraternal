@@ -74,7 +74,8 @@ test("the palette row runs the ceremony and the lock clears", async ({ page }) =
   await paletteLabels(page, "unlock host");
   await page.keyboard.press("Enter");
   await expect(page.locator("#palette")).toBeHidden();
-  await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked");
+  // D336 keeps notifications in a stack; select the result, including while the dismissed lock toast exits.
+  await expect(page.locator(".ui-toast-message").filter({ hasText: "Host connections unlocked" })).toBeVisible();
   expect(await paletteLabels(page, "unlock host")).not.toContain(LABEL);
   await page.keyboard.press("Escape");
   await openSettingsHosts(page);
@@ -145,9 +146,10 @@ for (const [warning, expected] of [
     await inbox.getByRole("button", { name: "Review", exact: true }).click();
     const row = page.locator(SETTINGS_ROW);
     await expect(row).toBeVisible();
+    // D323's grouped Settings rows use the full section identity, Terminal › Hosts.
     await expect.poll(() => page.evaluate(() => (window as unknown as {
       __tracerClusters?: { activeWindow(): string | undefined };
-    }).__tracerClusters?.activeWindow())).toBe("s-hosts");
+    }).__tracerClusters?.activeWindow())).toBe("s-terminal-hosts");
     await expect(row).toBeInViewport({ ratio: 0.5 });
     await expect(row).toContainText(expected);
     const settingsAlignment = await page.evaluate(() => {

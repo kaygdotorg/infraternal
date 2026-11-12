@@ -22,10 +22,15 @@ async function saveScreenshot(page: Page, testInfo: TestInfo, name: string): Pro
   return path;
 }
 
+/** Reads both legacy RGB and the computed sRGB form emitted by D322's color-mix surfaces. */
 function cssChannels(value: string): [number, number, number, number] {
   const channels = [...value.matchAll(/[\d.]+/g)].map((match) => Number(match[0]));
   if (channels.length < 3) throw new Error(`Expected an RGB color, received ${value}`);
-  return [channels[0]!, channels[1]!, channels[2]!, channels[3] ?? 1];
+  const scale = value.startsWith("color(srgb ") ? 255 : 1;
+  // Resolving a nested color-mix can round its serialized channels differently below one hundred-thousandth.
+  const rounded = [channels[0]! * scale, channels[1]! * scale, channels[2]! * scale, channels[3] ?? 1]
+    .map((channel) => Math.round(channel * 100_000) / 100_000);
+  return [rounded[0]!, rounded[1]!, rounded[2]!, rounded[3]!];
 }
 
 function overlaySurface(overlay: string, background: string): string {
@@ -53,24 +58,40 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
   for (const theme of ["paper", "ink"] as const) {
     await page.goto(`/?theme=${theme}&bg=mesh`);
     await waitForAttached(page);
+    // D352 gives the saved account look priority over URL startup values. Choose the colour through its real action.
+    await page.keyboard.press("Control+Shift+K");
+    await page.locator("#palette-input").fill(THEMES[theme]!.name);
+    await page.locator(`#palette-results [data-action="theme:${theme}"]`).click();
+    await expect(page.locator("#terminal-screen")).toHaveAttribute("data-theme", theme);
     await page.mouse.move(width / 2, height / 2);
-    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).getPropertyValue("--mesh-image"))).toContain("blob:");
+    // D322's theme background can use a CSS gradient directly; a raster worker URL is an implementation detail.
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".backdrop")!).backgroundImage)).toMatch(/gradient\(|url\(/);
 
     const material = await page.evaluate(() => {
       const root = getComputedStyle(document.documentElement);
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
+      // Custom properties retain color-mix expressions; resolve them in the same element's colour context.
+      const resolveColor = (selector: string, property: string): string => {
+        const owner = document.querySelector<HTMLElement>(selector)!;
+        const probe = document.createElement("div");
+        probe.style.background = getComputedStyle(owner).getPropertyValue(property);
+        owner.append(probe);
+        const color = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return color;
+      };
       const layers = ["#sidebar-toggle", ".capsule"];
       if (getComputedStyle(document.querySelector<HTMLElement>(".tabs")!).display !== "none") layers.push(".tab-add");
       if (getComputedStyle(document.querySelector<HTMLElement>(".keybar")!).display !== "none") layers.push(".keytray");
       return {
         // The card tint lives on the elements that read it, not on the root (a root token restyles the whole page).
-        root: getComputedStyle(document.querySelector<HTMLElement>(".capsule")!).getPropertyValue("--overlay").trim(),
-        rootPanel: getComputedStyle(document.querySelector<HTMLElement>("#sidebar")!).getPropertyValue("--overlay").trim(),
-        rootLine: root.getPropertyValue("--overlay-line").trim(),
+        root: resolveColor(".capsule", "--overlay"),
+        rootPanel: resolveColor("#sidebar", "--overlay"),
+        rootLine: resolveColor(":root", "--overlay-line"),
         rootShadow: root.getPropertyValue("--shadow").trim(),
         rootLargeShadow: root.getPropertyValue("--overlay-shadow-large").trim(),
-        stage: getComputedStyle(document.querySelector<HTMLElement>("#sidebar-toggle")!).getPropertyValue("--overlay").trim(),
-        stageLine: getComputedStyle(stage).getPropertyValue("--overlay-line").trim(),
+        stage: resolveColor("#sidebar-toggle", "--overlay"),
+        stageLine: resolveColor("#terminal-screen", "--overlay-line"),
         stageShadow: getComputedStyle(stage).getPropertyValue("--shadow").trim(),
         layers: layers.map((selector) => {
           const style = getComputedStyle(document.querySelector<HTMLElement>(selector)!);

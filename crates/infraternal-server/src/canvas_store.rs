@@ -1,6 +1,7 @@
 //! Supplies the canvas plugin with the host's existing SQLite and terminal-ownership context [183,198,243].
 mod recovery;
 
+use infraternal_plugin_canvas::store::Refusal;
 use infraternal_plugin_canvas::{
     model::{self, CHECKPOINT, Document, MAX_DOCUMENT, MAX_INPUT, MAX_RECEIPTS, text},
     reducer::reduce,
@@ -10,22 +11,28 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 
-/// Opaque public refusal avoids revealing foreign account or session existence.
+/// Carries only a safe refusal category; SQL errors and foreign session details never reach callers.
 #[derive(Debug)]
-pub struct Error;
+pub struct Error(
+    /// Public category only, with no underlying database or caller data.
+    pub Refusal,
+);
 impl From<sqlx::Error> for Error {
+    /// Hides storage internals behind the fixed public category.
     fn from(_: sqlx::Error) -> Self {
-        Self
+        Self(Refusal::StorageUnavailable)
     }
 }
 impl From<serde_json::Error> for Error {
+    /// Reports malformed JSON without echoing caller contents.
     fn from(_: serde_json::Error) -> Self {
-        Self
+        Self(Refusal::InvalidRequest)
     }
 }
 impl From<()> for Error {
+    /// Converts reducer rejection into an actionable bounded-edit refusal.
     fn from((): ()) -> Self {
-        Self
+        Self(Refusal::InvalidIntent)
     }
 }
 /// Shares one post-commit invalidation source across every socket worker.
@@ -68,7 +75,7 @@ impl Store {
                 return Ok(vec![snapshot(&Document::default(), false)]);
             };
             if head.get::<i64, _>("kind") != 0 {
-                return Err(Error);
+                return Err(Error(Refusal::InvalidRequest));
             }
             let revision: i64 = head.get("revision");
             let tail = cursor.is_some_and(|after| {
@@ -81,7 +88,7 @@ impl Store {
             let document = if !tail || raw.contains("Recovered: ") {
                 let document = Document(serde_json::from_slice(raw.as_bytes())?);
                 if !document.valid() {
-                    return Err(Error);
+                    return Err(Error(Refusal::InvalidDocument));
                 }
                 Some(document)
             } else {
@@ -105,7 +112,7 @@ impl Store {
                 return Ok(events);
             }
             return Ok(vec![snapshot(
-                &document.ok_or(Error)?,
+                &document.ok_or(Error(Refusal::InvalidRequest))?,
                 head.get::<bool, _>("initialized"),
             )]);
         }
@@ -124,18 +131,57 @@ impl Store {
     }
     /// One transaction path keeps the existing storage futures shared by both actions.
     /// # Errors
-    /// Returns the same opaque refusal as the two declared action wrappers.
+    /// Returns a fixed public reason, shared by the two declared action wrappers.
     pub async fn call(&self, initialize: bool, account: &str, input: &[u8]) -> Result<i64, Error> {
-        self.transact(
-            if initialize {
-                Mode::Initialize
-            } else {
-                Mode::Apply
-            },
-            account,
-            input,
-        )
-        .await
+        let result = self
+            .transact(
+                if initialize {
+                    Mode::Initialize
+                } else {
+                    Mode::Apply
+                },
+                account,
+                input,
+            )
+            .await;
+        if let Err(error) = &result {
+            // Never log the envelope: it contains a session binding and untrusted free text.
+            // Known intent names and byte counts identify the refused work without exposing either.
+            let request = serde_json::from_slice::<Value>(input).ok();
+            let intent = request
+                .as_ref()
+                .and_then(|value| value.get("intent"))
+                .and_then(|value| model::string(value, "type"));
+            let kind = intent
+                .filter(|kind| {
+                    matches!(
+                        *kind,
+                        "view.add"
+                            | "view.remove"
+                            | "view.update"
+                            | "open"
+                            | "split"
+                            | "close"
+                            | "move"
+                            | "membership.add"
+                            | "membership.remove"
+                            | "target"
+                            | "resize"
+                            | "weight"
+                            | "pin"
+                            | "look.set"
+                    )
+                })
+                .unwrap_or("unknown");
+            tracing::warn!(
+                intent = kind,
+                initialize,
+                input_bytes = input.len(),
+                reason = error.0.public().0,
+                "canvas layout refused"
+            );
+        }
+        result
     }
     /// One storage state machine for edits and read repair. The caller holds
     /// only this operation handle rather than another copy of the write futures.
@@ -168,12 +214,12 @@ impl Store {
                 &["op_id", "base_revision", "intent", "session_incarnation"][..]
             };
             if !maintenance && !model::shape(&request, fields) {
-                return Err(Error);
+                return Err(Error(Refusal::InvalidRequest));
             }
             let op_id = if maintenance {
                 ""
             } else {
-                model::string(&request, "op_id").ok_or(Error)?
+                model::string(&request, "op_id").ok_or(Error(Refusal::InvalidRequest))?
             };
             // Permanent retry receipts retain the existing SHA-256 digest, never a
             // second copy of a bootstrap document. Canonical JSON ignores key order.
@@ -208,10 +254,15 @@ impl Store {
             let accepted = !maintenance && retry.is_none();
             if accepted {
                 if initialize {
-                    let mut incoming = Document(request.get("document").cloned().ok_or(Error)?);
+                    let mut incoming = Document(
+                        request
+                            .get("document")
+                            .cloned()
+                            .ok_or(Error(Refusal::InvalidRequest))?,
+                    );
                     if !incoming.valid() || serde_json::to_string(&incoming.0)?.len() > MAX_DOCUMENT
                     {
-                        return Err(Error);
+                        return Err(Error(Refusal::InvalidDocument));
                     }
                     incoming.normalize();
                     ownership(&mut tx, account, OwnershipWindows::Document(&incoming)).await?;
@@ -224,7 +275,9 @@ impl Store {
                     incoming.0["revision"] = json!(document.revision());
                     if initialized {
                         let before = document.clone();
-                        let views = incoming.0["views"].as_array_mut().ok_or(Error)?;
+                        let views = incoming.0["views"]
+                            .as_array_mut()
+                            .ok_or(Error(Refusal::InvalidRequest))?;
                         recovery::merge(&mut document, std::mem::take(views), true)?;
                         import_noop = document == before;
                     } else {
@@ -234,17 +287,19 @@ impl Store {
                     let base = request
                         .get("base_revision")
                         .and_then(Value::as_i64)
-                        .ok_or(Error)?;
+                        .ok_or(Error(Refusal::InvalidRequest))?;
                     if base < 0 || base > document.revision() {
-                        return Err(Error);
+                        return Err(Error(Refusal::InvalidRevision));
                     }
-                    let intent = request.get("intent").ok_or(Error)?;
+                    let intent = request
+                        .get("intent")
+                        .ok_or(Error(Refusal::InvalidRequest))?;
                     // A whole-look replacement has no field merge, so it is a compare-and-set against the last look.
                     // Layout edits that landed after its base do not conflict with it.
                     if model::string(intent, "type") == Some("look.set")
                         && look_superseded(&mut tx, account, base, document.revision()).await?
                     {
-                        return Err(Error);
+                        return Err(Error(Refusal::LookSuperseded));
                     }
                     // Each intent can inspect only its own ID and a split anchor. Probe
                     // the account index instead of loading its lifetime close history.
@@ -274,17 +329,20 @@ impl Store {
                         ownership(
                             &mut tx,
                             account,
-                            OwnershipWindows::One(intent.get("window").ok_or(Error)?),
+                            OwnershipWindows::One(
+                                intent.get("window").ok_or(Error(Refusal::InvalidRequest))?,
+                            ),
                         )
                         .await?;
                     }
                     if model::string(intent, "type") == Some("target") {
                         // Retargeting introduces a reference just as opening does; close must never bypass admission.
-                        let window = json!({"target": intent.get("target").ok_or(Error)?});
+                        let window = json!({"target": intent.get("target").ok_or(Error(Refusal::InvalidRequest))?});
                         ownership(&mut tx, account, OwnershipWindows::One(&window)).await?;
                     }
                     if model::string(intent, "type") == Some("close") {
-                        let id = model::string(intent, "window_id").ok_or(Error)?;
+                        let id = model::string(intent, "window_id")
+                            .ok_or(Error(Refusal::InvalidRequest))?;
                         // At most one tombstone is added per accepted revision; the
                         // permanent receipt quota also bounds this table.
                         sqlx::query(
@@ -301,7 +359,7 @@ impl Store {
                 document.normalize();
                 document.0["revision"] = json!(document.revision() + 1);
                 if !document.valid() {
-                    return Err(Error);
+                    return Err(Error(Refusal::InvalidDocument));
                 }
             }
             let changed = repaired || (accepted && !import_noop);
@@ -334,6 +392,7 @@ impl Store {
         })
     }
 }
+/// Commits and notifies in one finite task so cancellation cannot hide a durable layout change.
 async fn commit(
     tx: Transaction<'static, Sqlite>,
     changes: watch::Sender<()>,
@@ -350,12 +409,13 @@ async fn commit(
         Ok::<(), Error>(())
     })
     .await
-    .map_err(|_| Error)?
+    .map_err(|_| Error(Refusal::StorageUnavailable))?
 }
 #[allow(clippy::items_after_statements)]
+/// Decodes a bounded request and rejects unbounded identifiers before any database access.
 fn decode(input: &[u8], max: usize) -> Result<Value, Error> {
     if input.len() > max || input.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
-        return Err(Error);
+        return Err(Error(Refusal::InvalidRequest));
     }
     // Bound every identifier, including those used only by a no-op, before SQL.
     fn bounded(value: &Value) -> bool {
@@ -368,10 +428,11 @@ fn decode(input: &[u8], max: usize) -> Result<Value, Error> {
     }
     let value: Value = serde_json::from_slice(input)?;
     if !bounded(&value) {
-        return Err(Error);
+        return Err(Error(Refusal::InvalidRequest));
     }
     Ok(value)
 }
+/// Builds the account's canonical layout event without transport-specific state.
 fn snapshot(document: &Document, initialized: bool) -> Value {
     model::object(vec![
         ("type", Value::from("canvas.layout.snapshot")),
@@ -396,6 +457,7 @@ async fn head_document(tx: &mut Transaction<'_, Sqlite>, account: &str) -> Resul
         .get(0);
     Ok(Document(serde_json::from_slice(json.as_bytes())?))
 }
+/// Keeps retries idempotent and reports identity conflicts and receipt capacity without storing another input copy.
 async fn receipt(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
@@ -411,12 +473,12 @@ async fn receipt(
     let value: i64 = row.get("revision");
     if let Some(request) = row.get::<Option<&str>, _>("request") {
         if request != request_hash {
-            return Err(Error);
+            return Err(Error(Refusal::ReceiptConflict));
         }
         return Ok(Some(value));
     }
     if value >= MAX_RECEIPTS || revision >= 9_007_199_254_740_991 {
-        return Err(Error);
+        return Err(Error(Refusal::ReceiptLimit));
     }
     Ok(None)
 }
@@ -448,14 +510,14 @@ async fn ownership_window<'a>(
     window: &'a Value,
     seen: &mut Vec<&'a str>,
 ) -> Result<(), Error> {
-    let target = window.get("target").ok_or(Error)?;
+    let target = window.get("target").ok_or(Error(Refusal::InvalidRequest))?;
     if model::string(target, "type") == Some("session") {
-        let id = model::string(target, "id").ok_or(Error)?;
+        let id = model::string(target, "id").ok_or(Error(Refusal::InvalidRequest))?;
         if seen.contains(&id) {
             return Ok(());
         }
         seen.push(id);
-        let uuid = uuid::Uuid::parse_str(id).map_err(|_| Error)?;
+        let uuid = uuid::Uuid::parse_str(id).map_err(|_| Error(Refusal::ReferenceUnavailable))?;
         let owned: bool =
             sqlx::query("SELECT EXISTS(SELECT 1 FROM terminal_sessions WHERE id=? AND user_id=?)")
                 .bind(uuid.as_bytes().as_slice())
@@ -464,7 +526,7 @@ async fn ownership_window<'a>(
                 .await?
                 .get(0);
         if !owned {
-            return Err(Error);
+            return Err(Error(Refusal::ReferenceUnavailable));
         }
     }
     Ok(())
@@ -518,6 +580,7 @@ async fn save_receipt(
         .await?;
     Ok(())
 }
+/// Commits a bounded canonical document and either its checkpoint or its ordered operation event.
 async fn save(
     tx: &mut Transaction<'_, Sqlite>,
     account: &str,
@@ -527,7 +590,7 @@ async fn save(
 ) -> Result<(), Error> {
     let json = serde_json::to_string(&document.0)?;
     if json.len() > MAX_DOCUMENT {
-        return Err(Error);
+        return Err(Error(Refusal::InvalidRequest));
     }
     sqlx::query("UPDATE canvas_heads SET revision=?,document=?,initialized=1 WHERE account=?")
         .bind(document.revision())
@@ -556,16 +619,17 @@ impl infraternal_plugin_canvas::store::LayoutStore for Store {
     fn changes(&self) -> watch::Receiver<()> {
         self.changes()
     }
+    /// Adapts the server transaction to the plugin while retaining its safe refusal category.
     fn call<'a>(
         &'a self,
         initialize: bool,
         account: &'a str,
         input: &'a [u8],
-    ) -> infraternal_plugin_api::Operation<'a, Result<i64, ()>> {
+    ) -> infraternal_plugin_api::Operation<'a, Result<i64, Refusal>> {
         Box::pin(async move {
             Store::call(self, initialize, account, input)
                 .await
-                .map_err(|_| ())
+                .map_err(|error| error.0)
         })
     }
     fn events<'a>(
@@ -580,6 +644,33 @@ impl infraternal_plugin_canvas::store::LayoutStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Missing and foreign sessions have the same actionable refusal without revealing another account's state.
+    #[tokio::test]
+    async fn refused_session_references_explain_the_boundary_without_disclosing_ownership() {
+        let store = fixture().await;
+        let session = uuid::Uuid::from_u128(532);
+        let initial = serde_json::to_vec(&json!({"op_id": "initialize-reference-test", "document": {
+            "format": "infraternal.canvas", "version": 1, "revision": 0,
+            "views": [{"id": "console", "kind": "console", "name": "Console", "cell": {"x": 0, "y": 0},
+                "layout": {"type": "tiled", "columns": []}}]
+        }})).unwrap();
+        store.initialize("a", &initial).await.unwrap();
+        let input = serde_json::to_vec(&json!({
+            "op_id": "missing-reference", "base_revision": 1,
+            "intent": {"type": "open", "view_id": "console", "column_id": "column",
+                "window": {"id": "window", "target": {"type": "session", "id": session.to_string(), "host": "fixture"}}}
+        })).unwrap();
+        let missing = format!("{:?}", store.apply("a", &input).await.unwrap_err());
+        sqlx::query("INSERT INTO terminal_sessions(id,user_id) VALUES(?,'b')")
+            .bind(session.as_bytes().as_slice())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let foreign = format!("{:?}", store.apply("a", &input).await.unwrap_err());
+        assert_eq!(missing, foreign);
+        assert!(missing.contains("ReferenceUnavailable"), "{missing}");
+    }
+
     async fn fixture() -> Store {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

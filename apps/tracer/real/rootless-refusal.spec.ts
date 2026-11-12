@@ -12,6 +12,7 @@
  * this tab open" must go away while the refused window is still open (#395; it used to stay until the window closed).
  */
 import { expect, test } from "playwright/test";
+import { writeFile } from "node:fs/promises";
 import { startRealServer } from "./server";
 import { cache, watchLayout } from "./layout-observer";
 import { tracerEvidencePath } from "../test/evidence-path";
@@ -56,14 +57,20 @@ for (const [name, viewport, phone] of [["desktop", { width: 1440, height: 900 },
       const pending = page.getByText("Not saved — keep this tab open", { exact: true });
       await expect(pending).toHaveCount(0, { timeout: 10_000 });
       await expect.poll(async () => (await cache(page)).pending.length, { timeout: 10_000 }).toBe(0);
+      const settledRevision = (await cache(page)).canonical.revision;
       for (let i = 0; i < 4; i++) {
         // sleep: the stuck notice was a steady state, so absence is sampled over 20 s rather than awaited once.
         await page.waitForTimeout(5_000);
         await expect(pending).toHaveCount(0);
       }
+      // A momentary empty queue hid an endless repaint/save cycle: no input during this observation may write again.
+      expect((await cache(page)).canonical.revision).toBe(settledRevision);
       await expect(strip.locator(".cl-sx-strip-text")).toHaveText(MESSAGE);
       await page.screenshot({ path: tracerEvidencePath("rootless-refusal", `window-${name}.png`) });
     } finally {
+      // Persist only public counts; the observer's complete envelopes include a private session binding.
+      const layout = await cache(page).catch(() => undefined);
+      if (layout) await writeFile(tracerEvidencePath("rootless-refusal", `settled-${name}.json`), JSON.stringify({ revision: layout.canonical.revision, pending: layout.pending.length }, null, 2));
       try { await context.close(); }
       finally { await server.dispose(); }
     }

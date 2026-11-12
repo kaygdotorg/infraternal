@@ -2,8 +2,20 @@
 import { expect, test } from "bun:test";
 import { edits, reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
+import { parseLook } from "./schema";
+import { createThemeStore } from "../themes/model";
 const doc = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 const open = (id: string): Intent => ({ type: "open", view_id: "console", column_id: "c", window: { id, target: { type: "settings", section: "appearance" } } });
+
+/** Server decoding and local theme snapshots use different field order for the same account appearance (#507). */
+test("equivalent server and local looks do not create another appearance edit", () => {
+  const before = doc(), after = doc();
+  after.look = { ...createThemeStore({ colors: "ink", font: "maple-mono-nf", uiSize: 100 }).snapshot(), uiFont: "mono", windowSizes: { phone: "edge", desktop: "comfortable" }, extendedInfo: false };
+  before.look = parseLook(after.look)!;
+  expect(edits(before, after)).toEqual([]);
+  after.look.extendedInfo = true;
+  expect(edits(before, after).map((intent) => intent.type)).toEqual(["look.set"]);
+});
 test("independent resize and move commute; close survives a stale move", () => {
   const a = doc(); reduce(a, open("a")); reduce(a, open("b")); const b = structuredClone(a);
   const resize: Intent = { type: "resize", window_id: "a", height: 2 };
