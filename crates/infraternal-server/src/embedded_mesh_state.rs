@@ -819,6 +819,60 @@ mod tests {
         );
     }
 
+    /// Lets many first starts race the absent durable directory without losing startup to `mkdir`.
+    #[test]
+    fn concurrent_first_starts_share_one_new_durable_mesh_directory() {
+        use std::{
+            sync::{Arc, Barrier},
+            thread,
+        };
+
+        const STARTS: usize = 32;
+        const ROUNDS: usize = 8;
+        for _ in 0..ROUNDS {
+            let root = fixture_root();
+            let volatile = root.join("run/infraternal");
+            let durable = root.join("var/lib/infraternal/mesh");
+            fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+            fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+                .expect("make legacy runtime private");
+            fs::write(volatile.join("mesh-private-key"), [0x61; 32])
+                .expect("write synthetic legacy key");
+            fs::create_dir_all(durable.parent().expect("durable parent"))
+                .expect("create service data directory");
+
+            let barrier = Arc::new(Barrier::new(STARTS + 1));
+            let starts = (0..STARTS)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let volatile = volatile.clone();
+                    let durable = durable.clone();
+                    thread::spawn(move || {
+                        barrier.wait();
+                        migrate(&volatile, &durable)
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let results = starts
+                .into_iter()
+                .map(|start| start.join().expect("first-start migration thread"))
+                .collect::<Vec<_>>();
+            let failures = results
+                .iter()
+                .filter_map(|result| result.as_ref().err().map(std::io::Error::kind))
+                .collect::<Vec<_>>();
+            let key = fs::read(durable.join("mesh-private-key")).ok();
+            fs::remove_dir_all(root).expect("remove fixture root");
+
+            assert!(
+                results.iter().all(Result::is_ok),
+                "every concurrent first start must accept the one directory another start created; errors: {failures:?}"
+            );
+            assert_eq!(key.as_deref(), Some(&[0x61; 32][..]));
+        }
+    }
+
     /// Keeps an agent's atomic key update when it races a copy from its runtime directory.
     #[test]
     fn a_concurrent_agent_key_update_is_not_unlinked_or_overwritten() {
