@@ -512,10 +512,10 @@ class FaultReportStallTests(unittest.TestCase):
 
 
 class NatPortRebindFaultTests(unittest.TestCase):
-    """Keep NAT recovery timestamps tied to an actually removed source mapping."""
+    """Keep the changed NAT mapping active after its temporary rule is removed."""
 
-    def test_nat_rebind_holds_then_clears_translation_before_fault_clear(self):
-        """Keep the changed port active during traffic and report recovery after cleanup."""
+    def test_nat_rebind_removes_rule_without_flushing_the_active_mapping(self):
+        """Preserve conntrack's changed source port while traffic continues after recovery."""
         matrix = importlib.import_module("gotatun_break_it.linux_matrix")
         events = []
         clock_value = 0
@@ -566,7 +566,7 @@ class NatPortRebindFaultTests(unittest.TestCase):
             and command[-2].rsplit("/", 1)[-1] == "conntrack"
             and command[-1] == "-F"
         ]
-        self.assertGreaterEqual(len(flush_indices), 2)
+        self.assertEqual(len(flush_indices), 1)
         recovery_clock_index = next(
             index
             for index, (kind, _) in enumerate(events)
@@ -576,10 +576,10 @@ class NatPortRebindFaultTests(unittest.TestCase):
             index for index, (kind, _) in enumerate(events) if kind == "clock"
         )
         wait_index = next(index for index, (kind, _) in enumerate(events) if kind == "wait")
-        self.assertLess(delete_index, flush_indices[-1])
         self.assertLess(flush_indices[0], recovery_clock_index)
         self.assertLess(recovery_clock_index, wait_index)
-        self.assertLess(flush_indices[-1], clear_clock_index)
+        self.assertLess(wait_index, delete_index)
+        self.assertLess(delete_index, clear_clock_index)
         self.assertEqual(event["recovery_started_ns"], events[recovery_clock_index][1])
         self.assertEqual(event["fault_cleared_ns"], events[clear_clock_index][1])
 

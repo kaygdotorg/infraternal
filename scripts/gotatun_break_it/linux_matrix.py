@@ -791,10 +791,9 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
             details["recovery_started_ns"] = time.monotonic_ns()
             _wait_for_duration(3)
         finally:
-            try:
-                _run(_in_namespace(namespace, nft, "delete", "table", "ip", "j526"))
-            finally:
-                _run(_in_namespace(namespace, conntrack, "-F"))
+            # Remove the temporary rule but keep established conntrack entries: they hold the new
+            # translated port for this live UDP flow after the rule is gone.
+            _run(_in_namespace(namespace, nft, "delete", "table", "ip", "j526"))
         details.update({"old_source_port": old_port, "new_source_port": new_port})
     elif case.kind in {"loss", "reorder", "duplicate"}:
         if case.kind == "loss":
