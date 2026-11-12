@@ -14,6 +14,49 @@ fn reset_terminal(cols: u16, rows: u16) -> std::io::Result<Terminal> {
 mod tests {
     //! Exercises terminal invariants against real data and frozen expectations.
     use super::*;
+    /// A combined phone rotation pulls history into the newly available rows.
+    #[test]
+    fn growing_rows_while_shrinking_columns_pulls_scrollback() {
+        let mut combined = reset_terminal(5, 2).unwrap();
+        let mut separate = reset_terminal(5, 2).unwrap();
+        for terminal in [&mut combined, &mut separate] {
+            terminal.process(b"1A\r\n2B\r\n3C\r\n");
+        }
+        combined.resize(4, 4).unwrap();
+        separate.resize(5, 4).unwrap();
+        separate.resize(4, 4).unwrap();
+        assert_eq!(combined.engine.history_rows().unwrap(), 0);
+        compare(&combined, &separate, "combined rotation pulls scrollback");
+    }
+
+    /// Repeated rotations retain cursor pins with reflow enabled or disabled on both screens.
+    #[test]
+    fn repeated_phone_rotations_with_scrollback_remain_repaintable() {
+        for (alternate, wraparound) in [(false, true), (false, false), (true, true)] {
+            let mut terminal = reset_terminal(80, 24).unwrap();
+            if alternate {
+                terminal.process(b"\x1b[?1049h");
+            }
+            // Disabling wraparound selects the native column-growth path
+            // whose page backfill must remap cursor pins before freeing pages.
+            if !wraparound {
+                terminal.process(b"\x1b[?7l");
+            }
+            terminal.process(&"row 界 e\u{301}\r\n".repeat(2000).into_bytes());
+            for cycle in 0..32 {
+                for (cols, rows) in [(40, 48), (120, 16), (80, 24), (41, 47)] {
+                    terminal.resize(cols, rows).unwrap();
+                    terminal.process(format!("rotation {cycle}\r\n").as_bytes());
+                    let mut restored = reset_terminal(cols, rows).unwrap();
+                    restored.process(&terminal.snapshot().unwrap());
+                    compare(&terminal, &restored, "rotation snapshot");
+                    terminal.process(b"\x1b7X\x1b8Y\r\n");
+                    restored.process(b"\x1b7X\x1b8Y\r\n");
+                    compare(&terminal, &restored, "rotation cursor continuation");
+                }
+            }
+        }
+    }
     #[test]
     fn fixtures_and_continuations_repaint() {
         for name in ["vim", "htop", "less", "unicode"] {
