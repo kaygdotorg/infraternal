@@ -288,6 +288,14 @@ pub(crate) fn run(
         Err(failure) => return fail(json_output, failure),
     };
     let origin = server.origin().ascii_serialization();
+    // The code and link are a live approval capability for ten minutes. Show
+    // them only to a person at a terminal, never into a pipe, file or CI log,
+    // and do not wait out the lifetime when nobody can see them (#263).
+    if !approval_display_is_terminal(json_output) {
+        return needs_terminal(&origin, json_output);
+    }
+    // A redirected invocation exits before approval, so it should not fail a
+    // host-policy check that only matters when installation can continue.
     #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
     let admin_rules = {
         let ssh_connection = match env::var("SSH_CONNECTION") {
@@ -308,12 +316,6 @@ pub(crate) fn run(
     };
     #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
     let admin_rules = Vec::new();
-    // The code and link are a live approval capability for ten minutes. Show
-    // them only to a person at a terminal, never into a pipe, file or CI log,
-    // and do not wait out the lifetime when nobody can see them (#263).
-    if !approval_display_is_terminal(json_output) {
-        return needs_terminal(&origin, json_output);
-    }
     // Find both privileged programs before an approval is requested, so a
     // missing or replaceable one never wastes the owner's passkey approval.
     let Ok(executable) = env::current_exe() else {
