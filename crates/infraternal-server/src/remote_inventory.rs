@@ -301,8 +301,6 @@ mod tests {
             json!([])
         );
     }
-    /// A window's details name its own host (#410): an unknown or other account's host is `host unavailable`,
-    /// and an admitted host whose agent is not connected is `host offline`. Neither answers with the server's facts.
     /// An invitation host has no SSH bootstrap row; the OS its agent named in
     /// the Hello is what the canvas sees, and a bootstrap name still wins (#146).
     #[tokio::test]
@@ -329,6 +327,8 @@ mod tests {
             "Debian GNU/Linux"
         );
     }
+    /// A window's details name its own host (#410): an unknown or other account's host is `host unavailable`,
+    /// and an admitted host whose agent is not connected is `host offline`. Neither answers with the server's facts.
     #[tokio::test]
     async fn host_facts_refuse_foreign_unknown_and_offline_hosts() {
         let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
