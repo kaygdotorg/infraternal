@@ -52,6 +52,15 @@ run)
   xcrun simctl bootstatus "$UDID" -b > /dev/null 2>&1
   # Face ID enrolment is a notify state that does not survive a simulator restart, and without it Safari refuses to
   # create or use a passkey ("Simulator requires enrolled biometrics"). Enrolling again is harmless, so do it every run.
+  # Reduce Motion on (default): Safari never goes idle while this page animates, and XCUITest then waits a 60 s idle timeout
+  # on every tap, so a run takes minutes instead of seconds. The page honours the setting, so it stops animating. Set
+  # QA_REDUCE_MOTION=0 to test with motion. Safari is restarted once when the setting changes.
+  if [[ "${QA_REDUCE_MOTION:-1}" == 1 ]]; then
+    if [[ "$(xcrun simctl spawn "$UDID" defaults read com.apple.Accessibility ReduceMotionEnabled 2>/dev/null || echo 0)" != 1 ]]; then
+      xcrun simctl spawn "$UDID" defaults write com.apple.Accessibility ReduceMotionEnabled -bool true
+      xcrun simctl terminate "$UDID" com.apple.mobilesafari > /dev/null 2>&1 || true
+    fi
+  fi
   # QA_APPEARANCE=light|dark switches the whole simulator, so a check can be run in both themes.
   [[ -n "${QA_APPEARANCE:-}" ]] && xcrun simctl ui "$UDID" appearance "$QA_APPEARANCE"
   xcrun simctl spawn "$UDID" notifyutil -s com.apple.BiometricKit.enrollmentChanged 1 > /dev/null
