@@ -34,6 +34,8 @@ const NS_A: &str = "d332-a";
 const NS_B: &str = "d332-b";
 /// Names the isolated nftables table used by the direct endpoint proof.
 const HOLE_PUNCH_TABLE: &str = "j510_mesh";
+/// Names the output counter table used to measure a reflected UDP endpoint.
+const J534_OUTPUT_TABLE: &str = "j534_output";
 const STREAM_BYTES: usize = 8 << 20;
 const CHUNK: usize = 64 << 10;
 const RESTART_AFTER: usize = 2 << 20;
@@ -759,6 +761,60 @@ fn j534_rule(ns: &str, marker: &str) -> (String, u64) {
     })
 }
 
+/// Read one marked nft output rule's handle and packet count in its network namespace.
+fn j534_output_rule(ns: &str, marker: &str) -> (String, u64) {
+    in_ns(ns, || {
+        let chain = run(
+            "nft",
+            &["-a", "list", "chain", "inet", J534_OUTPUT_TABLE, "output"],
+        );
+        let line = chain
+            .lines()
+            .find(|line| line.contains(marker))
+            .unwrap_or_else(|| panic!("{ns} has no nft output rule marked {marker:?}: {chain}"));
+        let handle = line
+            .split("handle ")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .unwrap_or_else(|| panic!("{ns} nft output rule has no handle: {line}"))
+            .to_owned();
+        let packets = line
+            .split("packets ")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{ns} nft output rule has no packet count: {line}"));
+        (handle, packets)
+    })
+}
+
+/// Read one marked nft postrouting NAT rule's handle and packet count in its network namespace.
+fn j534_nat_rule(ns: &str, marker: &str) -> (String, u64) {
+    in_ns(ns, || {
+        let chain = run(
+            "nft",
+            &["-a", "list", "chain", "ip6", "j534_nat", "postrouting"],
+        );
+        let line = chain
+            .lines()
+            .find(|line| line.contains(marker))
+            .unwrap_or_else(|| panic!("{ns} has no nft NAT rule marked {marker:?}: {chain}"));
+        let handle = line
+            .split("handle ")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .unwrap_or_else(|| panic!("{ns} nft NAT rule has no handle: {line}"))
+            .to_owned();
+        let packets = line
+            .split("packets ")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("{ns} nft NAT rule has no packet count: {line}"));
+        (handle, packets)
+    })
+}
+
 /// Denied and unknown peer keys get no cookie while an allowed peer keeps normal rate limiting.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
@@ -972,4 +1028,646 @@ fn peers_without_network_access_get_no_reply_while_registered_peers_keep_cookie_
     drop((registered_socket, denied_socket, unregistered_socket));
     cleanup(&[&state_a]);
     fs::remove_file(firewall).unwrap();
+}
+
+/// Delete a marked nft rule after a controlled adversarial packet phase.
+fn j534_delete_rule(ns: &str, marker: &str) {
+    let (handle, _) = j534_rule(ns, marker);
+    in_ns(ns, || {
+        run(
+            "nft",
+            &[
+                "delete",
+                "rule",
+                "inet",
+                HOLE_PUNCH_TABLE,
+                "input",
+                "handle",
+                &handle,
+            ],
+        );
+    });
+}
+
+/// Wait for IPv6 duplicate-address detection before a fixture binds a socket to a new address.
+fn j534_wait_for_ipv6_address(ns: &str, interface: &str, address: &str) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let output = run(
+            "ip",
+            &["-n", ns, "-6", "-o", "address", "show", "dev", interface],
+        );
+        let line = output
+            .lines()
+            .find(|line| line.split_whitespace().any(|field| field == address))
+            .unwrap_or_else(|| panic!("{ns} has no IPv6 address {address}: {output}"));
+        assert!(
+            !line.contains("dadfailed"),
+            "{ns} IPv6 address failed duplicate detection: {line}"
+        );
+        if !line.contains("tentative") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{ns} IPv6 address did not finish duplicate detection: {line}"
+        );
+        // sleep: Linux completes duplicate-address detection asynchronously after an address is added.
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Exercise simultaneous IPv6 endpoint delivery, grants, NAT rebinding, and UDP reflection.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn simultaneous_ipv6_punch_rebinding_and_tunnel_grants() {
+    assert!(
+        std::env::var_os("INFRATERNAL_MESH_PORT").is_none(),
+        "the case exercises the automatic UDP listener"
+    );
+    let (state_a, state_b) = (state("j534-a"), state("j534-b"));
+    let firewall = std::env::temp_dir().join(format!("j534-nft-{}.conf", std::process::id()));
+    let nat_rules = std::env::temp_dir().join(format!("j534-nat-{}.conf", std::process::id()));
+    let reflection_rules =
+        std::env::temp_dir().join(format!("j534-reflection-{}.conf", std::process::id()));
+    fs::write(
+        &firewall,
+        format!(
+            "table inet {HOLE_PUNCH_TABLE} {{\n\
+                 chain input {{\n\
+                     type filter hook input priority filter; policy drop;\n\
+                     iifname \"lo\" accept\n\
+                     icmpv6 type {{ nd-neighbor-solicit, nd-neighbor-advert }} accept\n\
+                     ct state established,related counter accept\n\
+                     counter drop\n\
+                 }}\n\
+             }}\n"
+        ),
+    )
+    .unwrap();
+    run("mkdir", &["-p", "/run/netns"]);
+    run("mount", &["-t", "tmpfs", "netns", "/run/netns"]);
+    cleanup(&[]);
+    for ns in [NS_A, NS_B] {
+        run("ip", &["netns", "add", ns]);
+        run("ip", &["-n", ns, "link", "set", "lo", "up"]);
+    }
+    run(
+        "ip",
+        &[
+            "link", "add", "j534a", "netns", NS_A, "type", "veth", "peer", "j534b", "netns", NS_B,
+        ],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "address", "add", "192.0.2.1/24", "dev", "j534a"],
+    );
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "192.0.2.2/24", "dev", "j534b"],
+    );
+    run(
+        "ip",
+        &[
+            "-n",
+            NS_A,
+            "address",
+            "add",
+            "2001:db8:1::1/64",
+            "dev",
+            "j534a",
+        ],
+    );
+    run(
+        "ip",
+        &[
+            "-n",
+            NS_B,
+            "address",
+            "add",
+            "2001:db8:1::2/64",
+            "dev",
+            "j534b",
+        ],
+    );
+    run("ip", &["-n", NS_A, "link", "set", "j534a", "up"]);
+    run("ip", &["-n", NS_B, "link", "set", "j534b", "up"]);
+    install_hole_punch_firewall(NS_A, &firewall);
+    install_hole_punch_firewall(NS_B, &firewall);
+    let output_rules =
+        std::env::temp_dir().join(format!("j534-output-{}.conf", std::process::id()));
+    fs::write(
+        &output_rules,
+        format!(
+            "table inet {J534_OUTPUT_TABLE} {{\n\
+                 chain output {{ type filter hook output priority filter; policy accept;\n\
+                     udp dport 10254 counter accept comment \"j534-output\"\n\
+                 }}\n\
+             }}\n"
+        ),
+    )
+    .unwrap();
+    for ns in [NS_A, NS_B] {
+        in_ns(ns, || run("nft", &["-f", output_rules.to_str().unwrap()]));
+    }
+    // Keep the live UDP peer flow while allowing its old conntrack mapping to expire quickly.
+    for setting in [
+        "net.netfilter.nf_conntrack_udp_timeout=1",
+        "net.netfilter.nf_conntrack_udp_timeout_stream=1",
+    ] {
+        in_ns(NS_B, || run("sysctl", &["-w", setting]));
+    }
+
+    // The app-owned host input accepts TCP on 10254 while the mesh binds UDP 10254.
+    let tcp_health = in_ns(NS_A, || TcpListener::bind("0.0.0.0:10254").unwrap());
+    let up = |ns: &str, path: &PathBuf| {
+        in_ns(ns, || {
+            let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+            let identity = node.up().unwrap();
+            (node, identity)
+        })
+    };
+    let (mut node_a, id_a) = up(NS_A, &state_a);
+    let (mut node_b, id_b) = up(NS_B, &state_b);
+    assert_eq!(id_a.port, 10_254, "node A uses the default UDP listener");
+    assert_eq!(id_b.port, 10_254, "node B uses the default UDP listener");
+    let a = (1, id_a.public_key);
+    let b = (2, id_b.public_key);
+    let underlay_a: std::net::Ipv6Addr = "2001:db8:1::1".parse().unwrap();
+    let underlay_b: std::net::Ipv6Addr = "2001:db8:1::2".parse().unwrap();
+    let endpoint_a = SocketAddr::new(underlay_a.into(), id_a.port);
+    let endpoint_b = SocketAddr::new(underlay_b.into(), id_b.port);
+
+    // Admit each node's actual UDP listener, matching host policy while keeping tunnel input separate.
+    for (ns, port) in [(NS_A, id_a.port), (NS_B, id_b.port)] {
+        let port = port.to_string();
+        in_ns(ns, || {
+            run(
+                "nft",
+                &[
+                    "insert",
+                    "rule",
+                    "inet",
+                    HOLE_PUNCH_TABLE,
+                    "input",
+                    "udp",
+                    "dport",
+                    &port,
+                    "counter",
+                    "accept",
+                    "comment",
+                    "j534-wireguard-listener",
+                ],
+            );
+        });
+    }
+
+    // Create the peer engines before injecting packets; endpoint-less peers do not start a punch.
+    thread::scope(|scope| {
+        let a_update = scope.spawn(|| {
+            in_ns(NS_A, || {
+                node_a.chunk(j534_snapshot(a, b, None, 1, true)).unwrap()
+            })
+        });
+        let b_update = scope.spawn(|| {
+            in_ns(NS_B, || {
+                node_b.chunk(j534_snapshot(b, a, None, 1, true)).unwrap()
+            })
+        });
+        assert!(a_update.join().unwrap());
+        assert!(b_update.join().unwrap());
+    });
+
+    // Let malformed traffic reach the engine so this check observes its response behavior.
+    in_ns(NS_A, || {
+        run(
+            "nft",
+            &[
+                "insert",
+                "rule",
+                "inet",
+                HOLE_PUNCH_TABLE,
+                "input",
+                "udp",
+                "dport",
+                "10254",
+                "counter",
+                "accept",
+                "comment",
+                "j534-untrusted-probe",
+            ],
+        );
+    });
+    run(
+        "ip",
+        &[
+            "-n",
+            NS_B,
+            "address",
+            "add",
+            "2001:db8:1::23/64",
+            "dev",
+            "j534b",
+        ],
+    );
+    j534_wait_for_ipv6_address(NS_B, "j534b", "2001:db8:1::23/64");
+    fs::write(
+        &reflection_rules,
+        format!(
+            "add rule inet {J534_OUTPUT_TABLE} output ip6 daddr 2001:db8:1::23 udp dport 40003 counter comment \"j534-reflection\"\n"
+        ),
+    )
+    .unwrap();
+    in_ns(NS_A, || {
+        run("nft", &["-f", reflection_rules.to_str().unwrap()])
+    });
+    let untrusted = in_ns(NS_B, || {
+        let socket = UdpSocket::bind("[2001:db8:1::23]:40001").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        for _ in 0..100 {
+            socket
+                .send_to(b"not-a-wireguard-handshake", "[2001:db8:1::1]:10254")
+                .unwrap();
+        }
+        socket
+    });
+    let mut response = [0_u8; 128];
+    let reply = untrusted.recv_from(&mut response);
+    assert!(
+        reply.is_err(),
+        "an unauthenticated packet caused a UDP response to an arbitrary endpoint: {reply:?}"
+    );
+
+    // MAC1 is computable from the receiver's public key. A flood crosses the rate limiter's
+    // per-source threshold; the unregistered source must still receive no UDP reply.
+    let (_, initiation) = j534_mac1_initiation([0x55; 32], id_a.public_key);
+    let unauthenticated_reply = in_ns(NS_B, || {
+        let socket = UdpSocket::bind("[2001:db8:1::23]:40003").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        for _ in 0..101 {
+            socket
+                .send_to(&initiation, "[2001:db8:1::1]:10254")
+                .unwrap();
+        }
+        let mut packet = [0_u8; 128];
+        socket.recv_from(&mut packet)
+    });
+    assert!(
+        unauthenticated_reply.is_err(),
+        "an unregistered valid-MAC1 sender received a UDP reply: {unauthenticated_reply:?}"
+    );
+    let output = in_ns(NS_A, || {
+        run(
+            "nft",
+            &["list", "chain", "inet", J534_OUTPUT_TABLE, "output"],
+        )
+    });
+    let reflection = output
+        .lines()
+        .find(|line| line.contains("j534-reflection"))
+        .unwrap_or_else(|| panic!("no output counter for the unregistered peer address: {output}"));
+    let reflected_packets = reflection
+        .split("packets ")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|count| count.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("the reflection output rule has no packet count: {reflection}"));
+    assert_eq!(
+        reflected_packets, 0,
+        "the listener reflected a cookie to an unregistered endpoint: {output}"
+    );
+    eprintln!(
+        "J534_METRIC unauth_cookie_reply_bytes=0 reflected_packets={reflected_packets} reflected_reply_bytes=0 requests=101 request_bytes_each={} request_bytes_total={}",
+        initiation.len(),
+        initiation.len() * 101
+    );
+    j534_delete_rule(NS_A, "j534-untrusted-probe");
+    drop(untrusted);
+    in_ns(NS_B, || {
+        run(
+            "ip",
+            &["-6", "address", "del", "2001:db8:1::23/64", "dev", "j534b"],
+        );
+    });
+    let mesh_server_a = SocketAddr::from(([10, 254, 0, 1], 5_102));
+    let mesh_server_b = SocketAddr::from(([10, 254, 0, 2], 5_101));
+    let listener_a = in_ns(NS_A, || TcpListener::bind(mesh_server_a).unwrap());
+    let listener_b = in_ns(NS_B, || TcpListener::bind(mesh_server_b).unwrap());
+    let route_a = in_ns(NS_A, || run("ip", &["route", "get", "10.254.0.2"]));
+    let route_b = in_ns(NS_B, || run("ip", &["route", "get", "10.254.0.1"]));
+    assert!(
+        route_a.contains("dev infraternal0"),
+        "A mesh route: {route_a}"
+    );
+    assert!(
+        route_b.contains("dev infraternal0"),
+        "B mesh route: {route_b}"
+    );
+    eprintln!("J534_ROUTE_A={route_a} J534_ROUTE_B={route_b}");
+
+    // Enroll both IPv6 endpoints together so the test exercises the simultaneous punch path.
+    let simultaneous_start = std::sync::Barrier::new(3);
+    thread::scope(|scope| {
+        let a_update = scope.spawn(|| {
+            simultaneous_start.wait();
+            in_ns(NS_A, || {
+                node_a
+                    .chunk(j534_snapshot(a, b, Some(endpoint_b), 2, true))
+                    .unwrap()
+            })
+        });
+        let b_update = scope.spawn(|| {
+            simultaneous_start.wait();
+            in_ns(NS_B, || {
+                node_b
+                    .chunk(j534_snapshot(b, a, Some(endpoint_a), 2, true))
+                    .unwrap()
+            })
+        });
+        simultaneous_start.wait();
+        assert!(a_update.join().unwrap());
+        assert!(b_update.join().unwrap());
+    });
+    let handshake_started = Instant::now();
+    let handshake_deadline = handshake_started + Duration::from_secs(20);
+    let (mut handshake_a, mut handshake_b) = (false, false);
+    while Instant::now() < handshake_deadline && !(handshake_a && handshake_b) {
+        handshake_a = node_a
+            .counters()
+            .unwrap()
+            .get(&id_b.public_key)
+            .is_some_and(|counters| counters.handshake_secs != 0);
+        handshake_b = node_b
+            .counters()
+            .unwrap()
+            .get(&id_a.public_key)
+            .is_some_and(|counters| counters.handshake_secs != 0);
+        if !(handshake_a && handshake_b) {
+            // sleep: poll until both direct handshakes arrive or the deadline expires.
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert!(
+        handshake_a,
+        "node A did not establish the simultaneous IPv6 direct path"
+    );
+    assert!(
+        handshake_b,
+        "node B did not establish the simultaneous IPv6 direct path"
+    );
+    eprintln!(
+        "J534_METRIC simultaneous_ipv6_handshake_ms={}",
+        handshake_started.elapsed().as_millis()
+    );
+    // Grant decrypted tunnel input only after the direct underlay handshake is established.
+    for ns in [NS_A, NS_B] {
+        in_ns(ns, || {
+            run(
+                "nft",
+                &[
+                    "insert",
+                    "rule",
+                    "inet",
+                    HOLE_PUNCH_TABLE,
+                    "input",
+                    "iifname",
+                    "infraternal0",
+                    "accept",
+                ],
+            );
+        });
+    }
+    let client_a = thread::spawn(move || {
+        in_ns(NS_A, || {
+            TcpStream::connect_timeout(&mesh_server_b, Duration::from_secs(20))
+        })
+    });
+    let client_b = thread::spawn(move || {
+        in_ns(NS_B, || {
+            TcpStream::connect_timeout(&mesh_server_a, Duration::from_secs(20))
+        })
+    });
+    let client_stream_a = client_a
+        .join()
+        .unwrap()
+        .expect("A's simultaneous tunnel connection");
+    let mut client_stream_b = client_b
+        .join()
+        .unwrap()
+        .expect("B's simultaneous tunnel connection");
+    let (mut server_stream_a, _) = listener_a.accept().unwrap();
+    let (server_stream_b, _) = listener_b.accept().unwrap();
+    client_stream_b
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    server_stream_a
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    drop((client_stream_a, server_stream_b));
+    thread::scope(|scope| {
+        let a_update = scope.spawn(|| {
+            in_ns(NS_A, || {
+                node_a
+                    .chunk(j534_snapshot(a, b, Some(endpoint_b), 3, false))
+                    .unwrap()
+            })
+        });
+        let b_update = scope.spawn(|| {
+            in_ns(NS_B, || {
+                node_b
+                    .chunk(j534_snapshot(b, a, Some(endpoint_a), 3, false))
+                    .unwrap()
+            })
+        });
+        assert!(a_update.join().unwrap());
+        assert!(b_update.join().unwrap());
+    });
+    let no_grant = in_ns(NS_A, || {
+        TcpStream::connect_timeout(&mesh_server_b, Duration::from_millis(300))
+    });
+    assert!(
+        no_grant.is_err(),
+        "the host infraternal0 accept bypassed a peer with no mesh grant"
+    );
+
+    thread::scope(|scope| {
+        let a_update = scope.spawn(|| {
+            in_ns(NS_A, || {
+                node_a
+                    .chunk(j534_snapshot(a, b, Some(endpoint_b), 4, true))
+                    .unwrap()
+            })
+        });
+        let b_update = scope.spawn(|| {
+            in_ns(NS_B, || {
+                node_b
+                    .chunk(j534_snapshot(b, a, Some(endpoint_a), 4, true))
+                    .unwrap()
+            })
+        });
+        assert!(a_update.join().unwrap());
+        assert!(b_update.join().unwrap());
+    });
+    let granted = in_ns(NS_A, || {
+        TcpStream::connect_timeout(&mesh_server_b, Duration::from_secs(3))
+    });
+    assert!(granted.is_ok(), "a granted tunnel connection was blocked");
+    drop(granted);
+    drop(listener_b);
+
+    // Snapshot v3 removed the peers, so do not mistake a pre-revocation TCP socket for a live
+    // data path after v4 restores them. Start and exercise the flow that will survive the NAT move.
+    drop((client_stream_b, server_stream_a));
+    let mut client_stream_b = in_ns(NS_B, || {
+        TcpStream::connect_timeout(&mesh_server_a, Duration::from_secs(3))
+    })
+    .expect("a granted B-to-A tunnel connection");
+    let (mut server_stream_a, _) = listener_a.accept().unwrap();
+    client_stream_b
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    server_stream_a
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client_stream_b.write_all(b"baseline-request").unwrap();
+    let mut baseline_request = [0; 16];
+    server_stream_a.read_exact(&mut baseline_request).unwrap();
+    assert_eq!(&baseline_request, b"baseline-request");
+    server_stream_a.write_all(b"baseline-response").unwrap();
+    let mut baseline_response = [0; 17];
+    client_stream_b.read_exact(&mut baseline_response).unwrap();
+    assert_eq!(&baseline_response, b"baseline-response");
+
+    // Add an address for B's new public NAT mapping while keeping its local UDP socket and address.
+    run(
+        "ip",
+        &[
+            "-n",
+            NS_B,
+            "address",
+            "add",
+            "2001:db8:1::22/64",
+            "dev",
+            "j534b",
+        ],
+    );
+    j534_wait_for_ipv6_address(NS_B, "j534b", "2001:db8:1::22/64");
+    let rebound_route = in_ns(NS_B, || run("ip", &["-6", "route", "get", "2001:db8:1::1"]));
+    assert!(
+        rebound_route.contains("dev j534b"),
+        "node B cannot route to the peer through its underlay: {rebound_route}"
+    );
+    fs::write(
+        &nat_rules,
+        "table ip6 j534_nat {\n\
+             chain postrouting { type nat hook postrouting priority srcnat; policy accept;\n\
+                 ip6 daddr 2001:db8:1::1 udp sport 10254 counter snat to [2001:db8:1::22]:40002 comment \"j534-rebound-snat\"\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    in_ns(NS_B, || run("nft", &["-f", nat_rules.to_str().unwrap()]));
+    let listener_port = id_a.port.to_string();
+    let rebound_address: std::net::Ipv6Addr = "2001:db8:1::22".parse().unwrap();
+    let rebound_port = 40_002_u16;
+    // Count packets from the rebound address without opening a new rule or changing peer state.
+    in_ns(NS_A, || {
+        run(
+            "nft",
+            &[
+                "insert",
+                "rule",
+                "inet",
+                HOLE_PUNCH_TABLE,
+                "input",
+                "ip6",
+                "saddr",
+                "2001:db8:1::22",
+                "udp",
+                "dport",
+                &listener_port,
+                "counter",
+                "comment",
+                "j534-rebound-observe",
+            ],
+        );
+    });
+    let rebound_endpoint = SocketAddr::new(rebound_address.into(), rebound_port);
+    let rebound_packets_before = j534_rule(NS_A, "j534-rebound-observe").1;
+    let output_before = j534_output_rule(NS_B, "j534-output").1;
+    let snat_before = j534_nat_rule(NS_B, "j534-rebound-snat").1;
+    let nat_before = in_ns(NS_B, || {
+        run("nft", &["list", "chain", "ip6", "j534_nat", "postrouting"])
+    });
+    // Expire the old UDP mapping; the established TCP and WireGuard sessions remain open.
+    // sleep: allow the isolated one-second conntrack timeout to remove the old source mapping.
+    thread::sleep(Duration::from_secs(2));
+    // Version 4 is the last coordinator snapshot; no `node_a.chunk` follows this point.
+    client_stream_b.write_all(b"rebind-request").unwrap();
+    let rebind_deadline = Instant::now() + Duration::from_secs(5);
+    let mut learned = None;
+    while Instant::now() < rebind_deadline {
+        learned = node_a
+            .counters()
+            .unwrap()
+            .get(&id_b.public_key)
+            .and_then(|counters| counters.endpoint);
+        if learned == Some(rebound_endpoint) {
+            break;
+        }
+        // sleep: the authenticated packet updates GotaTun's peer endpoint asynchronously.
+        thread::sleep(Duration::from_millis(10));
+    }
+    let rebound_packets_after = j534_rule(NS_A, "j534-rebound-observe").1;
+    let output_after = j534_output_rule(NS_B, "j534-output").1;
+    let snat_after = j534_nat_rule(NS_B, "j534-rebound-snat").1;
+    let peer_output = in_ns(NS_B, || {
+        run(
+            "nft",
+            &["list", "chain", "inet", J534_OUTPUT_TABLE, "output"],
+        )
+    });
+    let nat_after = in_ns(NS_B, || {
+        run("nft", &["list", "chain", "ip6", "j534_nat", "postrouting"])
+    });
+    eprintln!(
+        "J534_REBIND_DIAG route={rebound_route} input_packets={rebound_packets_after} learned={learned:?} udp_output={output_before}->{output_after} snat={snat_before}->{snat_after} nat_before={nat_before} nat_after={nat_after} peer_output={peer_output}"
+    );
+    assert!(
+        output_after > output_before,
+        "the node did not emit the live-flow UDP packet"
+    );
+    assert!(
+        snat_after > snat_before,
+        "the new NAT mapping did not translate a packet"
+    );
+    assert!(
+        rebound_packets_after > rebound_packets_before,
+        "the rebind packet did not reach the listener through the host UDP rule"
+    );
+    assert_eq!(learned, Some(rebound_endpoint));
+    let mut received = [0; 14];
+    server_stream_a.read_exact(&mut received).unwrap();
+    assert_eq!(&received, b"rebind-request");
+    server_stream_a.write_all(b"rebind-response").unwrap();
+    let mut response = [0; 15];
+    client_stream_b.read_exact(&mut response).unwrap();
+    assert_eq!(&response, b"rebind-response");
+    j534_delete_rule(NS_A, "j534-rebound-observe");
+    eprintln!("J534_METRIC rebound_endpoint={learned:?}");
+
+    in_ns(NS_A, || node_a.down().unwrap());
+    in_ns(NS_B, || node_b.down().unwrap());
+    drop(tcp_health);
+    drop(listener_a);
+    drop((client_stream_b, server_stream_a));
+    cleanup(&[&state_a, &state_b]);
+    fs::remove_file(firewall).unwrap();
+    fs::remove_file(nat_rules).unwrap();
+    fs::remove_file(reflection_rules).unwrap();
+    fs::remove_file(output_rules).unwrap();
 }
