@@ -14,7 +14,16 @@ rev=$(cat "$src/SOURCE")
 [[ "$rev" == "$want"* ]] || { echo "bundle is $rev, expected $want*: aborting"; exit 3; }
 dest=/opt/qa/releases/${rev:0:9}
 echo "start $(date -u +%T); current was $(readlink /opt/qa/current)"
-[ -d "$dest" ] || cp -a "$src" "$dest"
+if [ -d "$dest" ]; then
+  # A directory with this name may hold other bytes than the bundle (an older build with the same prefix): refuse
+  # unless its binary and web tree are byte-identical to the bundle, and print both so the receipt shows it.
+  echo "existing release dir: $(sha256sum "$dest/infraternal" | cut -c1-64) SOURCE=$(cat "$dest/SOURCE")"
+  echo "bundle:               $(sha256sum "$src/infraternal" | cut -c1-64) SOURCE=$rev"
+  cmp -s "$dest/infraternal" "$src/infraternal" && diff -rq "$src/web" "$dest/web" >/dev/null && [ "$(cat "$dest/SOURCE")" = "$rev" ] \
+    || { echo "existing $dest differs from the bundle: aborting before any change"; exit 5; }
+else
+  cp -a "$src" "$dest"
+fi
 ln -sfn "$dest" /opt/qa/current
 systemctl restart infraternal-qa-server
 for i in $(seq 1 60); do curl -fs -m 2 http://127.0.0.1:7021/healthz >/dev/null && break; sleep 1; done

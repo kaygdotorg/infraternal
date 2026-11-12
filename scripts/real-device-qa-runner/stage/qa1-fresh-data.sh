@@ -16,8 +16,11 @@ kept="$data.$label-$(date -u +%Y%m%dT%H%M%SZ)"
 echo "start $(date -u +%T)"
 systemctl stop infraternal-qa-proxy infraternal-qa-server
 sleep 1
-[[ "$(systemctl is-active infraternal-qa-server || true)" == inactive && "$(systemctl show infraternal-qa-server -p MainPID --value)" == 0 ]] \
-  || { echo "QA1 server did not stop: aborting before any move"; exit 4; }
+# Both units must be down before the move: the proxy holds no data, but the rule is "verify what you stopped".
+for u in infraternal-qa-server infraternal-qa-proxy; do
+  [[ "$(systemctl is-active "$u" || true)" == inactive && "$(systemctl show "$u" -p MainPID --value)" == 0 ]] \
+    || { echo "$u did not stop: aborting before any move (units left as found, none restarted)"; exit 4; }
+done
 mv "$data" "$kept"
 install -d -m700 -o infraternal-qa -g infraternal-qa "$data"
 # The restorecon keeps SELinux labels sane for the new directory; it is a no-op when none are needed.
