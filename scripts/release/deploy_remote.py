@@ -10,6 +10,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import struct
 import subprocess
 import time
@@ -203,7 +204,55 @@ def swap_link(path, target):
     os.replace(temporary, path)
 
 
+def mesh_secret_inodes(data):
+    """Find the live inode identities of Mesh private files that backups must omit."""
+    mesh = data / "mesh"
+    try:
+        mesh_metadata = mesh.lstat()
+    except FileNotFoundError:
+        return set()
+    if not stat.S_ISDIR(mesh_metadata.st_mode):
+        return set()
+
+    inodes = set()
+    for name in ("mesh-private-key", "mesh-key-rotation.bin"):
+        try:
+            metadata = (mesh / name).lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(metadata.st_mode):
+            inodes.add((metadata.st_dev, metadata.st_ino))
+    return inodes
+
+
 def backup(data, destination):
+    """Snapshot database and non-secret state without copying Mesh secret files or their hard links."""
+    secret_inodes = mesh_secret_inodes(data)
+    secret_names = {"mesh-private-key", "mesh-key-rotation.bin"}
+
+    def ignore_state_files(root, names):
+        """Skip unsafe entries and every path that aliases a live Mesh secret inode."""
+        ignored = []
+        for name in names:
+            path = Path(root, name)
+            if name in secret_names:
+                ignored.append(name)
+                continue
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                ignored.append(name)
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                ignored.append(name)
+            elif stat.S_ISDIR(metadata.st_mode):
+                continue
+            elif not stat.S_ISREG(metadata.st_mode):
+                ignored.append(name)
+            elif (metadata.st_dev, metadata.st_ino) in secret_inodes:
+                ignored.append(name)
+        return ignored
+
     destination.mkdir(mode=0o700)
     # The SQLite backup API includes committed WAL pages while serving continues.
     # Other persisted state is retained unchanged by binary handoff; save encrypted
@@ -215,12 +264,16 @@ def backup(data, destination):
     for path in data.iterdir():
         if path.name.startswith("infraternal.sqlite") or path.name == "restart":
             continue
-        if path.is_dir() and not path.is_symlink():
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(metadata.st_mode):
             shutil.copytree(path, destination / path.name,
-                            ignore=lambda root, names: [n for n in names if
-                                Path(root, n).is_symlink() or not
-                                (Path(root, n).is_file() or Path(root, n).is_dir())])
-        elif path.is_file() and not path.is_symlink():
+                            ignore=ignore_state_files)
+        elif (stat.S_ISREG(metadata.st_mode)
+              and path.name not in secret_names
+              and (metadata.st_dev, metadata.st_ino) not in secret_inodes):
             shutil.copy2(path, destination / path.name)
 
 
