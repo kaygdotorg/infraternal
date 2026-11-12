@@ -7,8 +7,9 @@
  * 2. The layout leaves its keyboard state when the keyboard goes away, even if the last `visualViewport` event was early or lost.
  * 3. The Add host sign-in step keeps its options in view on a short phone card: the footer is one row, not two stacked buttons.
  * 4. After the only window ends, the screen says "No windows open" while a host exists; "No hosts yet" is for no host.
- * 5. With no saved theme the app follows the system's light or dark scheme (TASTE "Light and dark everywhere"); once the
- *    account's look exists, the account's theme wins on every device (D352), so a later system change does not flip it.
+ * 5. D390 (amends D352): an account that never picked a theme follows the system's light or dark scheme on every device, live
+ *    (TASTE "Light and dark everywhere"), and its first load saves no theme. Once the person picks a theme, the account's theme
+ *    wins on every device, so a later system change does not flip it.
  * 6. The host-key and sign-in titles name the typed port.
  */
 import { expect, test, type Page } from "playwright/test";
@@ -103,7 +104,7 @@ test("the layout leaves its keyboard state when the keyboard goes, even if the l
   await expect(page.locator("html")).toHaveAttribute("data-kb", "closed", { timeout: 3_000 });
 });
 
-test("with no saved theme the app follows the system scheme, and the account's saved theme wins afterwards", async ({ browser, baseURL }) => {
+test("a never-chosen theme follows the system, live and on every device; a picked theme does not (D390)", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL: baseURL!, colorScheme: "dark", viewport: PHONE, hasTouch: true, isMobile: true });
   const page = await context.newPage();
   await page.request.post("/__mock/reset", { maxRetries: 1 });
@@ -111,6 +112,23 @@ test("with no saved theme the app follows the system scheme, and the account's s
   await expect(page.locator(".ui-window").first()).toBeVisible({ timeout: 45_000 });
   const dark = await page.locator("html").getAttribute("data-theme");
   expect(["mocha", "macchiato", "frappe"], `first load in a dark system: ${dark}`).toContain(dark);
+  // The first load saved no theme: the cache holds none that counts as chosen, so a light device is not forced dark.
+  expect(await page.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith("tracer.look")).map(([, value]) => JSON.parse(value).themeChosen))).not.toContain(true);
+  // Nothing was picked, so the system's own change is followed while the page stays open.
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "latte", { timeout: 5_000 });
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", /^(mocha|macchiato|frappe)$/, { timeout: 5_000 });
+  // Picking a theme in the palette is the person's choice: it is saved as chosen, and a later system change no longer moves it.
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("Theme: Frosted");
+  await page.getByRole("option").filter({ hasText: "Theme: Frosted" }).first().click();
+  await expect.poll(() => page.evaluate(() => Object.entries(localStorage).filter(([key]) => key.startsWith("tracer.look")).map(([, value]) => JSON.parse(value).themeChosen)), { timeout: 5_000 }).toContain(true);
+  const picked = await page.locator("html").getAttribute("data-theme");
+  await page.emulateMedia({ colorScheme: "light" });
+  // sleep: a negative check; give a wrongly followed system change time to land before asserting the theme stayed.
+  await page.waitForTimeout(500);
+  expect(await page.locator("html").getAttribute("data-theme")).toBe(picked);
   await context.close();
   const light = await browser.newContext({ baseURL: baseURL!, colorScheme: "light", viewport: PHONE, hasTouch: true, isMobile: true });
   const lightPage = await light.newPage();
