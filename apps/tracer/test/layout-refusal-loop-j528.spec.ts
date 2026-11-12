@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * A refused layout save must not be retried in a loop (#500, J528).
+ * A refused look save must not be retried in a loop (#500, J528).
  *
- * J521 saw "That layout change was not saved. The saved layout is back." climb past 1,000 during Add host. The mechanism: a
- * window this tab opened is not in the server's layout until a save is accepted. When the server refuses the save, the layout
- * is repainted from the server's copy; the repaint kept the unsaved window (it is the person's) and asked for a save again, which
- * was refused again, forever, at network speed, one toast each time.
+ * J521 saw "That layout change was not saved. The saved layout is back." climb past 1,000. The mechanism: the account's saved look
+ * can lack the canvas-level fields a newer page writes (window sizes, extended info, UI font). The page completes such a look by
+ * saving it once; if the server refuses that save (an older or stricter server), the saved look comes back, still incomplete, and
+ * the page completed it again, and again, one toast each time, at network speed.
  *
- * The interceptor refuses every `canvas.layout.apply` and counts them. After one new window is opened the count must stay
- * small (a refusal is told once, and the next save waits for the next change the person makes), at 1440, 402 and 375 px.
- * Functional: no speed is asserted, only that the number of refused saves stops growing.
+ * The interceptor refuses every `look.set` layout save and counts them; the double's account document is then replaced by one
+ * whose look lacks those fields. The count must stop growing after the first refusal (the next real change of the look tries again),
+ * at 1440, 402 and 375 px. Functional: no speed is asserted, only that the number of refused saves stops growing.
  */
 import { expect, test, type Page } from "playwright/test";
 import { decodeMuxedFrame, encodeMuxedFrame } from "../../../packages/protocol/src/codec";
@@ -21,49 +21,60 @@ const SIZES = [
   { id: "375", viewport: { width: 375, height: 640 }, touch: true },
 ] as const;
 
-/** Refuses every layout save the page sends and counts them; every other call goes to the test double. */
-async function refuseSaves(page: Page): Promise<{ saves: () => number }> {
-  let saves = 0;
+/** Refuses every `look.set` layout save the page sends and counts them; every other call goes to the test double. */
+async function refuseLookSaves(page: Page): Promise<{ refused: () => number }> {
+  let refused = 0;
   await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
     const server = socket.connectToServer();
     socket.onMessage((message) => {
       if (typeof message !== "string") {
         const { frame } = decodeMuxedFrame(message);
         if (frame.type === "Call" && frame.actionId === "canvas.layout.apply") {
-          saves++;
-          socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"invalid canvas operation"}') })));
-          return;
+          const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { intent?: { type?: string } };
+          if (input.intent?.type === "look.set") {
+            refused++;
+            socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"invalid canvas operation"}') })));
+            return;
+          }
         }
       }
       server.send(message);
     });
     server.onMessage((message) => socket.send(message));
   });
-  return { saves: () => saves };
+  return { refused: () => refused };
 }
 
 for (const size of SIZES) {
-  test(`a refused layout save is not retried in a loop: ${size.id}`, async ({ browser }) => {
+  test(`a refused look save is not retried in a loop: ${size.id}`, async ({ browser }) => {
     const context = await browser.newContext({ viewport: size.viewport, deviceScaleFactor: size.touch ? 3 : 1, ...(size.touch ? { hasTouch: true, isMobile: true } : {}) });
     const page = await context.newPage();
     try {
-      const { saves } = await refuseSaves(page);
+      const { refused } = await refuseLookSaves(page);
       await page.request.post("/__mock/reset");
       await page.goto("/?mock=1&proto=product&layout=server&fresh=1&bg=none&theme=ink");
       await expect(page.locator(".ui-window").first().locator(".ui-window-host")).toHaveText(/\S/, { timeout: 40_000 });
-      const before = saves();
-      // A new window is a layout change the server refuses.
-      await page.getByRole("button", { name: "New window", exact: true }).click();
-      await expect.poll(() => saves(), { timeout: 15_000, message: "the new window is saved at least once" }).toBeGreaterThan(before);
-      // A loop keeps counting; a bounded retry stops. Compare two reads two seconds apart, then the total.
+      // Let the page's own first saves settle, then hand it an account look written by an older page: no canvas-level fields.
+      // sleep: the first saves and the look's own announce delay
+      await page.waitForTimeout(2500);
+      const before = refused();
+      const replaced = await page.evaluate(async () => {
+        const read = await (await fetch("/__mock/layout")).json() as { document: { look?: Record<string, unknown> } };
+        const document = read.document;
+        if (!document.look) return false;
+        delete document.look.windowSizes; delete document.look.extendedInfo; delete document.look.uiFont;
+        return (await fetch("/__mock/layout", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ document }) })).ok;
+      });
+      expect(replaced, "the double took the older look").toBe(true);
+      await expect.poll(() => refused(), { timeout: 15_000, message: "the page tries to complete the look at least once" }).toBeGreaterThan(before);
       // sleep: let any retry loop run so its growth shows
       await page.waitForTimeout(2000);
-      const first = saves();
+      const first = refused();
       // sleep: a second read after more time proves the count has stopped growing
       await page.waitForTimeout(2000);
-      const second = saves();
-      expect(second, `saves refused: ${first} then ${second}; a loop keeps growing`).toBe(first);
-      expect(second - before, "one refusal per change the person made, not hundreds").toBeLessThanOrEqual(5);
+      const second = refused();
+      expect(second, `look saves refused: ${first} then ${second}; a loop keeps growing`).toBe(first);
+      expect(second - before, "one refusal, not hundreds").toBeLessThanOrEqual(3);
     } finally { await context.close(); }
   });
 }
