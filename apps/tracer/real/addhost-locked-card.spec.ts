@@ -74,11 +74,9 @@ test("a locked server offers Unlock on the Add host card and the host carries on
     const status = async (): Promise<boolean> => (await page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).locked;
     expect(await status()).toBe(false);
 
-    // Open the card while unlocked, then restart the server: the lock returns without the card knowing.
+    // Open the card while unlocked; the lock returns later without the card knowing.
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:addhost", source: "keyboard" } })));
     await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible({ timeout: 30_000 });
-    await server.restart();
-    await expect.poll(async () => { try { return await status(); } catch { return undefined; } }, { timeout: 60_000 }).toBe(true);
 
     const wizard = page.locator(".ah-float");
     await page.locator(".ui-chip-text").click();
@@ -89,8 +87,11 @@ test("a locked server offers Unlock on the Add host card and the host carries on
       // Name the page the card is on, so a changed flow is diagnosed from the log and not from a guess.
       throw new Error(`the card never asked to trust the host key; it shows: ${(await wizard.innerText()).replace(/\s+/g, " ").slice(0, 400)} (${String(error).slice(0, 80)})`);
     });
-    // The server's own key is locked and not installed, so the host asks how to sign in: use the throwaway key.
+    // The server's own key is locked and not installed, so the host asks how to sign in. The card has passed its
+    // authority check by now and remembers it. The server restarts here, so its authority is locked again.
     await wizard.getByText("Use a key from your computer").click({ timeout: 60_000 });
+    await server.restart();
+    await expect.poll(async () => { try { return await status(); } catch { return undefined; } }, { timeout: 60_000 }).toBe(true);
     await wizard.locator("[data-secret='key']").fill(host.privateKey);
     await wizard.getByRole("button", { name: "Sign in", exact: true }).click();
 
