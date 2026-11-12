@@ -150,6 +150,7 @@ let caLocked = true;
 let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
 let installMode: "ok" | "off" = "ok";
 
+/** Puts the double back to its start: no trusted keys, every mode "ok", and the authority locked as after a restart. */
 export function resetBootstrapDouble(): void {
   trusted.clear();
   sshKeyMode = "ok";

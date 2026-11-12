@@ -18,7 +18,8 @@ interface Activity { animations: string[]; rafPerSecond: number; timersPerSecond
 
 /** Counts callbacks and running animations for one second, and compares two backdrop screenshots. */
 async function measure(page: Page): Promise<Activity> {
-  await page.waitForTimeout(1500); // sleep: let the card's entrance and the backdrop's mount finish before measuring
+  // sleep: let the card's entrance and the backdrop's mount finish before measuring
+  await page.waitForTimeout(1500);
   const first = await page.screenshot();
   const counts = await page.evaluate(() => new Promise<{ animations: string[]; raf: number; timers: number }>((resolve) => {
     const w = window as unknown as { __raf: number; __timers: number };

@@ -2956,6 +2956,7 @@ mod tests {
         assert_eq!(issued, 1, "one invitation for a new host id");
     }
 
+    /// A locked CA refuses re-enrollment with the `authority_locked` kind before anything on the host changes.
     #[tokio::test]
     async fn a_locked_ca_refuses_reenrollment_before_anything_changes() {
         let f = fixture(false).await;

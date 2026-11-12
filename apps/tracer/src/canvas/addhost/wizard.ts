@@ -991,6 +991,7 @@ export class Wizard {
     return `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="submit-method"><span>${label}</span></button>`;
   }
 
+  /** Shows the chosen sign-in method's fields (and only those in the Tab order) and names the foot button for it. */
   private selectMethod(value: string): void {
     this.chosen = value;
     for (const reveal of this.current?.querySelectorAll<HTMLElement>(".ah-reveal") ?? []) {
