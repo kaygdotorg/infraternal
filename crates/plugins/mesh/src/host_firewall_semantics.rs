@@ -410,19 +410,19 @@ fn match_selectors(matched: &Value) -> Option<Vec<Selector>> {
             _ => None,
         };
     }
-    if let Some(conntrack) = left.get("ct") {
-        if conntrack.get("key").and_then(Value::as_str) == Some("state") {
-            return Some(vec![Selector::Conntrack(conntrack_states(right)?)]);
-        }
+    if let Some(conntrack) = left.get("ct")
+        && conntrack.get("key").and_then(Value::as_str) == Some("state")
+    {
+        return Some(vec![Selector::Conntrack(conntrack_states(right)?)]);
     }
     let payload = left.get("payload")?;
     let protocol = payload.get("protocol")?.as_str()?;
     let field = payload.get("field")?.as_str()?;
     match (protocol, field) {
-        ("ip", "saddr") | ("ip6", "saddr") => Some(vec![Selector::Source(ip_prefix(right)?)]),
-        ("ip", "daddr") | ("ip6", "daddr") => Some(vec![Selector::Destination(ip_prefix(right)?)]),
+        ("ip" | "ip6", "saddr") => Some(vec![Selector::Source(ip_prefix(right)?)]),
+        ("ip" | "ip6", "daddr") => Some(vec![Selector::Destination(ip_prefix(right)?)]),
         ("ip", "protocol") => Some(vec![Selector::Protocol(protocol_name(right)?)]),
-        ("tcp", "dport") | ("udp", "dport") => Some(vec![Selector::DestinationPort {
+        ("tcp" | "udp", "dport") => Some(vec![Selector::DestinationPort {
             protocol: protocol.to_owned(),
             port: port_number(right)?,
         }]),
@@ -436,7 +436,7 @@ fn match_selectors(matched: &Value) -> Option<Vec<Selector>> {
 
 /// Parse an interface name or a JSON set of names and return it in stable order.
 fn string_set(value: &Value) -> Option<Vec<String>> {
-    let values = set_values(value)?;
+    let values = set_values(value);
     let mut names = values
         .into_iter()
         .map(|value| value.as_str().map(str::to_owned))
@@ -446,13 +446,14 @@ fn string_set(value: &Value) -> Option<Vec<String>> {
 }
 
 /// Read JSON set members whether nft emitted a scalar, array or `set` object.
-fn set_values(value: &Value) -> Option<Vec<&Value>> {
-    if let Some(values) = value.as_array() {
-        Some(values.iter().collect())
-    } else if let Some(values) = value.get("set").and_then(Value::as_array) {
-        Some(values.iter().collect())
+fn set_values(value: &Value) -> Vec<&Value> {
+    if let Some(values) = value
+        .as_array()
+        .or_else(|| value.get("set").and_then(Value::as_array))
+    {
+        values.iter().collect()
     } else {
-        Some(vec![value])
+        vec![value]
     }
 }
 
@@ -469,7 +470,7 @@ fn ip_prefix(value: &Value) -> Option<IpPrefix> {
 
 /// Read one numeric port from nft's scalar or one-member-set form.
 fn port_number(value: &Value) -> Option<u16> {
-    let values = set_values(value)?;
+    let values = set_values(value);
     if values.len() != 1 {
         return None;
     }
@@ -481,7 +482,7 @@ fn port_number(value: &Value) -> Option<u16> {
 
 /// Parse conntrack states from names, numeric constants, or a bit mask.
 fn conntrack_states(value: &Value) -> Option<Vec<String>> {
-    let values = set_values(value)?;
+    let values = set_values(value);
     let mut states = Vec::new();
     for value in values {
         if let Some(text) = value.as_str() {
@@ -640,72 +641,6 @@ impl HostChain {
     }
 }
 
-/// Check that nft-normalized priority, conntrack and protocol values match product policy.
-#[cfg(test)]
-mod tests {
-    use super::{from_nft_json, from_policy, report, states_from_mask};
-    use crate::host_firewall::{AllowRule, Policy};
-    use serde_json::json;
-    use std::path::Path;
-
-    /// Ignore nft's spelling of equivalent priority, state masks and ICMP protocols.
-    #[test]
-    fn nft_json_normalization_matches_the_typed_policy() {
-        let policy = Policy {
-            admin_rules: vec![
-                "wt0,10.69.69.0/24,tcp,22"
-                    .parse::<AllowRule>()
-                    .expect("valid SSH rule"),
-            ],
-            accept_interfaces: vec!["wt0".to_owned()],
-            ..Policy::default()
-        };
-        let current_json = json!({
-            "nftables": [
-                {"table": {"family": "inet", "name": "infraternal_host", "handle": 1}},
-                {"chain": {"family": "inet", "table": "infraternal_host", "name": "input", "type": "filter", "hook": "input", "prio": "filter - 10", "policy": "drop", "handle": 2}},
-                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
-                    {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "wt0"}}, {"counter": {"packets": 9, "bytes": 512}}, {"accept": null}
-                ]}},
-                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
-                    {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "lo"}}, {"accept": null}
-                ]}},
-                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
-                    {"match": {"op": "==", "left": {"ct": {"key": "state"}}, "right": "0x1"}}, {"drop": null}
-                ]}},
-                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
-                    {"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "0x4,0x2"}}, {"accept": null}
-                ]}},
-                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
-                    {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "protocol"}}, "right": 1}}, {"accept": null}
-                ]}},
-                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
-                    {"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": 58}}, {"accept": null}
-                ]}},
-                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
-                    {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"prefix": {"addr": "10.69.69.0", "len": 24}}}},
-                    {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "wt0"}},
-                    {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 22}}, {"accept": null}
-                ]}}
-            ]
-        });
-        let current =
-            from_nft_json(&current_json, Path::new("/usr/sbin/nft")).expect("valid nft JSON table");
-        let desired = from_policy(&policy);
-
-        assert_eq!(
-            report(Some(&current), Some(&desired)),
-            "host firewall migration: no rule differences\n"
-        );
-    }
-
-    /// Keep unknown conntrack mask bits visible instead of silently treating them as known.
-    #[test]
-    fn unknown_conntrack_mask_bits_are_not_accepted() {
-        assert_eq!(states_from_mask(0x8000_0000), None);
-    }
-}
-
 /// Render an extra JSON object for a useful, stable migration receipt.
 fn describe_extra(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "unrenderable nft object".to_owned())
@@ -750,5 +685,70 @@ fn report_ordered_diff<T: Eq>(
             let _ = writeln!(output, "- current: {}", describe(&current[current_index]));
             current_index += 1;
         }
+    }
+}
+
+/// Check that nft-normalized priority, conntrack and protocol values match product policy.
+#[cfg(test)]
+mod tests {
+    use super::{from_nft_json, from_policy, report, states_from_mask};
+    use crate::host_firewall::{AllowRule, Policy};
+    use serde_json::json;
+    use std::path::Path;
+
+    /// Ignore nft's spelling of equivalent priority, state masks and ICMP protocols.
+    #[test]
+    fn nft_json_normalization_matches_the_typed_policy() {
+        let ssh_rule = "wt0,10.69.69.0/24,tcp,22"
+            .parse::<AllowRule>()
+            .unwrap_or_else(|error| panic!("valid SSH rule: {error}"));
+        let policy = Policy {
+            admin_rules: vec![ssh_rule],
+            accept_interfaces: vec!["wt0".to_owned()],
+            ..Policy::default()
+        };
+        let current_json = json!({
+            "nftables": [
+                {"table": {"family": "inet", "name": "infraternal_host", "handle": 1}},
+                {"chain": {"family": "inet", "table": "infraternal_host", "name": "input", "type": "filter", "hook": "input", "prio": "filter - 10", "policy": "drop", "handle": 2}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "wt0"}}, {"counter": {"packets": 9, "bytes": 512}}, {"accept": null}
+                ]}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "lo"}}, {"accept": null}
+                ]}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "==", "left": {"ct": {"key": "state"}}, "right": "0x1"}}, {"drop": null}
+                ]}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "0x4,0x2"}}, {"accept": null}
+                ]}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "protocol"}}, "right": 1}}, {"accept": null}
+                ]}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": 58}}, {"accept": null}
+                ]}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"prefix": {"addr": "10.69.69.0", "len": 24}}}},
+                    {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "wt0"}},
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 22}}, {"accept": null}
+                ]}}
+            ]
+        });
+        let current = from_nft_json(&current_json, Path::new("/usr/sbin/nft"))
+            .unwrap_or_else(|error| panic!("valid nft JSON table: {error}"));
+        let desired = from_policy(&policy);
+
+        assert_eq!(
+            report(Some(&current), Some(&desired)),
+            "host firewall migration: no rule differences\n"
+        );
+    }
+
+    /// Keep unknown conntrack mask bits visible instead of silently treating them as known.
+    #[test]
+    fn unknown_conntrack_mask_bits_are_not_accepted() {
+        assert_eq!(states_from_mask(0x8000_0000), None);
     }
 }
