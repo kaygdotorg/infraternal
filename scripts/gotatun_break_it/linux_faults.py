@@ -42,6 +42,27 @@ def build_fault_matrix() -> tuple[FaultCase, ...]:
     )
 
 
+def select_fault_cases(names: Sequence[str] | None = None) -> tuple[FaultCase, ...]:
+    """Select stable case IDs in matrix order, rejecting misspellings and duplicates."""
+
+    cases = build_fault_matrix()
+    if names is None:
+        return cases
+    requested = list(names)
+    if not requested:
+        raise ValueError("at least one fault case must be selected")
+    if any(not isinstance(name, str) or not name.strip() for name in requested):
+        raise ValueError("fault case IDs must be nonempty strings")
+    if len(set(requested)) != len(requested):
+        raise ValueError("fault case ID is repeated")
+    known = {case.name for case in cases}
+    unknown = [name for name in requested if name not in known]
+    if unknown:
+        raise ValueError(f"unknown fault case ID: {unknown[0]}")
+    selected = set(requested)
+    return tuple(case for case in cases if case.name in selected)
+
+
 def build_netem_command(
     tc: Path,
     interface: str,
@@ -78,6 +99,34 @@ def build_netem_command(
         raise ValueError("reorder correlation only applies to a reorder profile")
     command.extend(("seed", "526"))
     return command
+
+
+def build_bidirectional_netem_commands(
+    tc: Path,
+    *,
+    loss_pct: int | None = None,
+    reorder_pct: int | None = None,
+    reorder_correlation_pct: int | None = None,
+    duplicate_pct: int | None = None,
+) -> tuple[list[str], list[str]]:
+    """Apply one seeded netem profile to both ends of the disposable underlay."""
+    underlay0 = build_netem_command(
+        tc,
+        "underlay0",
+        loss_pct=loss_pct,
+        reorder_pct=reorder_pct,
+        reorder_correlation_pct=reorder_correlation_pct,
+        duplicate_pct=duplicate_pct,
+    )
+    underlay1 = build_netem_command(
+        tc,
+        "underlay1",
+        loss_pct=loss_pct,
+        reorder_pct=reorder_pct,
+        reorder_correlation_pct=reorder_correlation_pct,
+        duplicate_pct=duplicate_pct,
+    )
+    return underlay0, underlay1
 
 
 def build_next_config_chunks(

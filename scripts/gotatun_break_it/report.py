@@ -118,6 +118,50 @@ def report_case(
     }
 
 
+def failed_case_report(
+    *,
+    case: str,
+    platform: str,
+    fault_started_ns: int,
+    fault_cleared_ns: int,
+    probes: Sequence[Probe],
+    bytes_sent: int,
+    bytes_verified: int,
+    bytes_stalled: int | None,
+    error: str,
+    manual_fixes: Sequence[str] = (),
+) -> dict[str, str | int | float | bool | None | list[str]]:
+    """Retain recovery and byte evidence when one side of a case cannot join.
+
+    A live sender's atomic progress file can trail a receiver snapshot by one
+    publication interval. Keep that sender value separately and use the
+    receiver count as the conservative lower bound for total bytes sent.
+    """
+    if not error.strip():
+        raise ValueError("failed case reports need a useful error")
+    observed_sent = max(bytes_sent, bytes_verified)
+    observed_stalled = (
+        None if bytes_stalled is None else min(max(0, bytes_stalled), observed_sent)
+    )
+    report = report_case(
+        case=case,
+        platform=platform,
+        fault_started_ns=fault_started_ns,
+        fault_cleared_ns=fault_cleared_ns,
+        probes=probes,
+        bytes_sent=observed_sent,
+        bytes_verified=bytes_verified,
+        bytes_stalled=observed_stalled,
+        integrity_ok=False,
+        manual_fixes=manual_fixes,
+    )
+    report["error"] = error
+    report["sender_progress_bytes"] = bytes_sent
+    if bytes_sent < bytes_verified:
+        report["progress_snapshot_skew_bytes"] = bytes_verified - bytes_sent
+    return report
+
+
 def _elapsed_ms(started_ns: int, ended_ns: int | None) -> float | None:
     """Convert one ordered monotonic interval to milliseconds."""
     if ended_ns is None:
