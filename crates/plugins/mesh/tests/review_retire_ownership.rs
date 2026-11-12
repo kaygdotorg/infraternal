@@ -477,7 +477,7 @@ fn retire_removes_its_mesh_table_and_leaves_a_foreign_table() {
     let foreign_table = foreign_table_present();
     cleanup(&state);
     let planned = planned.unwrap();
-    assert!(!planned.iter().any(|item| item == "operator_control"));
+    assert!(!planned.iter().any(|item| *item == "operator_control"));
     assert!(planned_kept, "planning changed the kernel");
     assert!(result.unwrap().is_empty());
     assert!(
