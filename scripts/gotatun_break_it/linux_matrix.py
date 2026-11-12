@@ -37,6 +37,10 @@ from .report import Probe, failed_case_report, report_case
 from .tcp_progress import transfer_integrity_ok
 from .trace import load_probe_samples
 
+_TRAFFIC_WARMUP_BYTES = 1_048_576
+# GotaTun's peer byte counter records a WireGuard handshake initiation as 148 sent bytes.
+_HANDSHAKE_INITIATION_BYTES = 148
+
 
 def _tool(name: str) -> str:
     """Return one required VM tool or name the missing dependency."""
@@ -128,6 +132,41 @@ def _progress_bytes(path: Path) -> int:
         return 0
 
 
+def _traffic_warmed_up(sender_bytes: int, receiver_bytes: int) -> bool:
+    """Require one MiB to reach both endpoints before a case injects a fault."""
+    return sender_bytes >= _TRAFFIC_WARMUP_BYTES and receiver_bytes >= _TRAFFIC_WARMUP_BYTES
+
+
+def _node_dns_name(snapshot: dict[str, Any], node_index: int) -> str:
+    """Read a node's assigned DNS label from its first coordinator configuration chunk."""
+    chunks = snapshot.get("chunks")
+    if not isinstance(chunks, list) or not 0 <= node_index < len(chunks):
+        raise RuntimeError("coordinator snapshot did not include the requested node chunks")
+    node_chunks = chunks[node_index]
+    if not isinstance(node_chunks, list) or not node_chunks or not isinstance(node_chunks[0], dict):
+        raise RuntimeError("coordinator snapshot did not include a node configuration chunk")
+    name = node_chunks[0].get("name")
+    if not isinstance(name, str) or not name:
+        raise RuntimeError("coordinator snapshot did not assign a mesh DNS name")
+    return name
+
+
+def _verify_peer_dns(local_ipv4: str, peer_ipv4: str, peer_name: str) -> dict[str, Any]:
+    """Resolve a peer through this node's own policy-filtered mesh DNS listener."""
+    query = f"{peer_name}.internal"
+    answers = query_a(local_ipv4, query)
+    if peer_ipv4 not in answers:
+        raise RuntimeError(
+            f"local mesh DNS returned {answers!r} for {query}, expected {peer_ipv4}"
+        )
+    return {
+        "resolver": local_ipv4,
+        "query": query,
+        "answers": list(answers),
+        "expected_answer": peer_ipv4,
+    }
+
+
 def _interface_counters(interface: str, namespace_pid: int | None = None) -> dict[str, int]:
     """Read byte and packet totals for a disposable underlay interface."""
     command = ["cat", "/proc/net/dev"]
@@ -147,6 +186,142 @@ def _interface_counters(interface: str, namespace_pid: int | None = None) -> dic
                 "tx_packets": values[9],
             }
     raise RuntimeError(f"could not read counters for {interface}")
+
+
+def _peer_transfer_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize public peer routes and counters without retaining key material."""
+    ipv4_addresses: set[str] = set()
+    endpoint_ports: set[int] = set()
+    with_endpoint = 0
+    with_handshake = 0
+    with_unconfirmed_handshake = 0
+    with_sent_bytes = 0
+    samples: list[dict[str, Any]] = []
+    for row in rows:
+        peer = row.get("peer")
+        if not isinstance(peer, dict):
+            continue
+        addresses = peer.get("addresses")
+        counters = row.get("counters")
+        endpoint = peer.get("endpoint")
+        if isinstance(addresses, dict) and isinstance(addresses.get("ipv4"), str):
+            ipv4 = addresses["ipv4"]
+            ipv4_addresses.add(ipv4)
+        else:
+            ipv4 = None
+        endpoint_port: int | None = None
+        if isinstance(endpoint, str) and ":" in endpoint:
+            try:
+                endpoint_port = int(endpoint.rsplit(":", 1)[1])
+            except ValueError:
+                endpoint_port = None
+        if endpoint_port is not None:
+            with_endpoint += 1
+            endpoint_ports.add(endpoint_port)
+        if not isinstance(counters, dict):
+            counters = {}
+        sent_bytes = counters.get("sent_bytes", 0)
+        handshake_secs = counters.get("handshake_secs", 0)
+        if isinstance(sent_bytes, int) and sent_bytes > 0:
+            with_sent_bytes += 1
+        if isinstance(handshake_secs, int) and handshake_secs > 0:
+            with_handshake += 1
+        elif (
+            isinstance(handshake_secs, int)
+            and handshake_secs == 0
+            and isinstance(sent_bytes, int)
+            and sent_bytes >= _HANDSHAKE_INITIATION_BYTES
+        ):
+            # Initial config sends these before the later packet-capture window begins.
+            with_unconfirmed_handshake += 1
+        if len(samples) < 5:
+            samples.append(
+                {
+                    "node": row.get("node"),
+                    "ipv4": ipv4,
+                    "endpoint_port": endpoint_port,
+                    "sent_bytes": sent_bytes if isinstance(sent_bytes, int) else None,
+                    "handshake_secs": handshake_secs
+                    if isinstance(handshake_secs, int)
+                    else None,
+                }
+            )
+    return {
+        "peer_count": len(rows),
+        "unique_ipv4_count": len(ipv4_addresses),
+        "peer_count_with_endpoint": with_endpoint,
+        "peer_count_with_sent_bytes": with_sent_bytes,
+        "peer_count_with_handshake": with_handshake,
+        "peer_count_with_unconfirmed_handshake": with_unconfirmed_handshake,
+        "endpoint_ports": sorted(endpoint_ports),
+        "sample": samples,
+    }
+
+
+def _peer_scale_handshake_summary(
+    rows: list[dict[str, Any]], *, expected_peer_count: int
+) -> dict[str, Any]:
+    """Count peers whose initial config sent a WireGuard initiation without a completed handshake."""
+    if type(expected_peer_count) is not int or expected_peer_count < 1:
+        raise ValueError("expected peer count must be a positive integer")
+
+    attempted_peers = 0
+    for row in rows:
+        counters = row.get("counters")
+        if not isinstance(counters, dict):
+            continue
+        sent_bytes = counters.get("sent_bytes")
+        handshake_secs = counters.get("handshake_secs")
+        if (
+            type(sent_bytes) is int
+            and sent_bytes >= _HANDSHAKE_INITIATION_BYTES
+            and type(handshake_secs) is int
+            and handshake_secs == 0
+        ):
+            attempted_peers += 1
+
+    return {
+        "handshake_attempt_peer_count_after_config": attempted_peers,
+        "handshake_storm_source": "initial_config_commit",
+        "handshake_storm_complete": attempted_peers >= expected_peer_count,
+    }
+
+
+def _mesh_status_summary(node: MeshNode) -> dict[str, Any]:
+    """Keep public node health fields beside a failed coordinator config chunk."""
+    try:
+        status = node.call("mesh.status", {})
+    except Exception as error:
+        return {"available": False, "error_type": type(error).__name__}
+    if not isinstance(status, dict):
+        return {"available": False, "error_type": "invalid_status"}
+    summary = {
+        field: status[field]
+        for field in ("state", "version", "peer_count")
+        if field in status
+    }
+    engine = status.get("engine")
+    if isinstance(engine, dict):
+        summary["engine"] = {
+            field: engine[field]
+            for field in ("stopped", "restarts", "refused_frames", "bad_frames", "tx_queue_len")
+            if field in engine
+        }
+    return summary
+
+
+def _local_key_matches_identity(node: MeshNode, chunk: dict[str, Any]) -> bool | None:
+    """Compare a rejected chunk binding with the node identity without retaining either key."""
+    incoming = chunk.get("local_key")
+    if not isinstance(incoming, list):
+        return None
+    try:
+        identity = node.call("mesh.identity", {"dns_names": True, "key_rotation": True})
+    except Exception:
+        return None
+    if not isinstance(identity, dict) or not isinstance(identity.get("public_key"), list):
+        return None
+    return incoming == identity["public_key"]
 
 
 class NamespacePair:
@@ -216,17 +391,11 @@ class NamespacePair:
             if "dev infraternal0" not in route:
                 raise RuntimeError(f"mesh route did not use infraternal0: {route.strip()}")
             self.route_check = route.strip()
-            answers = query_a(self.right_ipv4, "server.internal")
-            if self.left_ipv4 not in answers:
-                raise RuntimeError(
-                    f"peer DNS returned {answers!r} for server.internal, expected {self.left_ipv4}"
-                )
-            self.dns_check = {
-                "resolver": self.right_ipv4,
-                "query": "server.internal",
-                "answers": list(answers),
-                "expected_answer": self.left_ipv4,
-            }
+            self.dns_check = _verify_peer_dns(
+                self.left_ipv4,
+                self.right_ipv4,
+                _node_dns_name(initial, 1),
+            )
         except BaseException:
             self.close()
             raise
@@ -273,21 +442,47 @@ class NamespacePair:
         _run(_in_namespace(self.peer_pid, _tool("ip"), "addr", "add", "10.220.0.2/24", "dev", "underlay1"))
         _run(_in_namespace(self.peer_pid, _tool("ip"), "link", "set", "underlay1", "up"))
 
-    def _apply_snapshot(self, snapshot: dict[str, Any]) -> list[int]:
-        """Apply every ordered config chunk to both live product nodes."""
+    def _apply_snapshot(
+        self, snapshot: dict[str, Any], *, stage: str = "coordinator config"
+    ) -> list[int]:
+        """Apply ordered config chunks and retain safe context for a refused update."""
         if self.left is None or self.right is None:
             raise RuntimeError("both product nodes must be running before configuration")
         chunks = snapshot.get("chunks")
         if not isinstance(chunks, list) or len(chunks) != 2:
             raise RuntimeError("coordinator snapshot did not include two node chunk lists")
         applied: list[int] = []
-        for node, node_chunks in zip((self.left, self.right), chunks, strict=True):
+        for node_name, node, node_chunks in zip(
+            ("left", "right"), (self.left, self.right), chunks, strict=True
+        ):
             if not isinstance(node_chunks, list) or not node_chunks:
                 raise RuntimeError("coordinator snapshot contains an empty node chunk list")
-            for chunk in node_chunks:
-                result = node.configure(chunk)
-                if result.get("applied") is not True:
-                    raise RuntimeError(f"product node refused coordinator config: {result}")
+            for chunk_index, chunk in enumerate(node_chunks):
+                is_last = chunk.get("last")
+                if type(is_last) is not bool:
+                    raise RuntimeError("coordinator config chunk has no final-chunk marker")
+                try:
+                    result = node.configure(chunk)
+                except RuntimeError as error:
+                    chunk_version = chunk.get("version")
+                    binding_matches_identity = _local_key_matches_identity(node, chunk)
+                    raise RuntimeError(
+                        f"stage={stage} config refused node={node_name} chunk={chunk_index} "
+                        f"from_version={chunk.get('from_version')} version={chunk_version} "
+                        f"last={is_last} local_key_matches_identity={binding_matches_identity}: "
+                        f"{error}; "
+                        f"mesh_status={_mesh_status_summary(node)}"
+                    ) from error
+                if result.get("applied") is not is_last:
+                    raise RuntimeError(
+                        f"product node config chunk {chunk.get('index')} returned an unexpected "
+                        f"applied state: {result}"
+                    )
+                if is_last and result.get("version") != chunk.get("version"):
+                    raise RuntimeError(
+                        f"product node config version {result.get('version')} does not match "
+                        f"coordinator version {chunk.get('version')}"
+                    )
                 applied.append(int(result["apply_us"]))
         return applied
 
@@ -340,8 +535,12 @@ class Traffic:
         self.probe_server: subprocess.Popen[str] | None = None
         self.probe_client: subprocess.Popen[Any] | None = None
         self.sender: subprocess.Popen[Any] | None = None
-        self._start_servers()
-        self._start_clients()
+        try:
+            self._start_servers()
+            self._start_clients()
+        except BaseException:
+            self.close()
+            raise
 
     def _start_servers(self) -> None:
         """Bind the TCP receiver and UDP echo endpoint inside the second network namespace."""
@@ -447,9 +646,11 @@ class Traffic:
         self.sender = sender
         self.processes.append(sender)
         _wait_until(
-            lambda: _progress_bytes(self.sender_progress) >= 65_536
-            and _progress_bytes(self.receiver_progress) >= 65_536,
-            "verified TCP traffic through the mesh",
+            lambda: _traffic_warmed_up(
+                _progress_bytes(self.sender_progress),
+                _progress_bytes(self.receiver_progress),
+            ),
+            "sustained verified TCP traffic through the mesh",
         )
 
     def wait(self) -> tuple[dict[str, Any], dict[str, Any], list[Probe]]:
@@ -475,6 +676,24 @@ class Traffic:
             output.close()
 
 
+def _partial_traffic_progress(
+    output: Path, traffic: Traffic | None
+) -> tuple[int, int, list[Probe]]:
+    """Read partial byte and probe evidence even when Traffic startup raises."""
+    sender_path = output / "sender-progress.json" if traffic is None else traffic.sender_progress
+    receiver_path = (
+        output / "receiver-progress.json" if traffic is None else traffic.receiver_progress
+    )
+    probe_path = output / "probes.jsonl" if traffic is None else traffic.probe_path
+    samples: list[Probe] = []
+    if probe_path.is_file():
+        try:
+            samples = load_probe_samples(probe_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    return _progress_bytes(sender_path), _progress_bytes(receiver_path), samples
+
+
 def _apply_rotation(pair: NamespacePair, *, timer_expired: bool) -> dict[str, Any]:
     """Rotate one real node key through coordinator phases while its peer carries traffic."""
     if pair.coordinator is None or pair.right is None:
@@ -494,17 +713,17 @@ def _apply_rotation(pair: NamespacePair, *, timer_expired: bool) -> dict[str, An
         operation_id=operation_id,
         candidate_public_key=candidate,
     )
-    pair._apply_snapshot(overlap)
+    pair._apply_snapshot(overlap, stage="rekey overlap")
     # sleep: D166 requires a full 120-second dual-key overlap before the local key commits.
     _wait_for_duration(120)
     pair.right.call("mesh.rotation.commit", input_value)
     retiring = pair.coordinator.request("rotation-retiring", operation_id=operation_id)
-    pair._apply_snapshot(retiring)
+    pair._apply_snapshot(retiring, stage="rekey retiring")
     cleanup = pair.coordinator.request("rotation-cleanup", operation_id=operation_id)
-    pair._apply_snapshot(cleanup)
+    pair._apply_snapshot(cleanup, stage="rekey cleanup")
     pair.right.call("mesh.rotation.finish", input_value)
     finished = pair.coordinator.request("rotation-finish", operation_id=operation_id)
-    pair._apply_snapshot(finished)
+    pair._apply_snapshot(finished, stage="rekey finished")
     return {
         "operation_id": operation_id,
         "sequence": operation["sequence"],
@@ -525,6 +744,7 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
         _run(_in_namespace(pair.peer_pid, ip, "addr", "del", "10.220.0.2/24", "dev", "underlay1"))
         _run(_in_namespace(pair.peer_pid, ip, "addr", "add", "10.220.0.3/24", "dev", "underlay1"))
         details["new_underlay_endpoint"] = "10.220.0.3"
+        details["recovery_started_ns"] = time.monotonic_ns()
     elif case.kind == "nat-port":
         nft = _tool("nft")
         conntrack = _tool("conntrack")
@@ -534,39 +754,47 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
             raise RuntimeError("could not choose a distinct NAT source port")
         namespace = pair.peer_pid
         _run(_in_namespace(namespace, nft, "add", "table", "ip", "j526"))
-        _run(
-            _in_namespace(
-                namespace,
-                nft,
-                "add",
-                "chain",
-                "ip",
-                "j526",
-                "postrouting",
-                "{ type nat hook postrouting priority srcnat; policy accept; }",
+        try:
+            _run(
+                _in_namespace(
+                    namespace,
+                    nft,
+                    "add",
+                    "chain",
+                    "ip",
+                    "j526",
+                    "postrouting",
+                    "{ type nat hook postrouting priority srcnat; policy accept; }",
+                )
             )
-        )
-        _run(
-            _in_namespace(
-                namespace,
-                nft,
-                "add",
-                "rule",
-                "ip",
-                "j526",
-                "postrouting",
-                "ip",
-                "daddr",
-                "10.220.0.1",
-                "udp",
-                "sport",
-                str(old_port),
-                "snat",
-                "to",
-                f"10.220.0.2:{new_port}",
+            _run(
+                _in_namespace(
+                    namespace,
+                    nft,
+                    "add",
+                    "rule",
+                    "ip",
+                    "j526",
+                    "postrouting",
+                    "ip",
+                    "daddr",
+                    "10.220.0.1",
+                    "udp",
+                    "sport",
+                    str(old_port),
+                    "snat",
+                    "to",
+                    f"10.220.0.2:{new_port}",
+                )
             )
-        )
-        _run(_in_namespace(namespace, conntrack, "-F"))
+            _run(_in_namespace(namespace, conntrack, "-F"))
+            details["recovery_started_ns"] = time.monotonic_ns()
+            _wait_for_duration(3)
+        finally:
+            try:
+                _run(_in_namespace(namespace, nft, "delete", "table", "ip", "j526"))
+            finally:
+                _run(_in_namespace(namespace, conntrack, "-F"))
         details.update({"old_source_port": old_port, "new_source_port": new_port})
     elif case.kind in {"loss", "reorder", "duplicate"}:
         if case.kind == "loss":
@@ -602,6 +830,7 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
         _run([ip, "link", "set", "underlay0", "down"])
         _wait_for_duration(1)
         _run([ip, "link", "set", "underlay0", "up"])
+        details["recovery_started_ns"] = time.monotonic_ns()
     elif case.kind == "mtu-change":
         _run([ip, "link", "set", "underlay0", "mtu", "1300"])
         _run(_in_namespace(pair.peer_pid, ip, "link", "set", "underlay1", "mtu", "1300"))
@@ -615,15 +844,15 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
     elif case.kind == "server-restart":
         pair.coordinator.restart()
         snapshot = pair.coordinator.configuration("allow", pair.identities)
-        pair._apply_snapshot(snapshot)
+        pair._apply_snapshot(snapshot, stage="server restart restore")
         details["persistent_coordinator_database"] = str(pair.scratch / "coordinator.sqlite")
     elif case.kind == "peer-churn":
         added = pair.coordinator.request("peer-add", count=20)
-        pair._apply_snapshot(added)
+        pair._apply_snapshot(added, stage="peer add")
         details["peers_added"] = 20
         _wait_for_duration(1)
         removed = pair.coordinator.request("peer-remove", count=20)
-        pair._apply_snapshot(removed)
+        pair._apply_snapshot(removed, stage="peer remove")
         details["peers_removed"] = 20
     elif case.kind == "rekey-load":
         details.update(_apply_rotation(pair, timer_expired=False))
@@ -642,12 +871,24 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
         ]
         if len(peers) < int(case.value):
             raise RuntimeError(f"only {len(peers)} routed peers appeared for a {case.value}-peer case")
+        route_misses = [
+            address
+            for address in peers
+            if "dev infraternal0" not in _run([ip, "route", "get", address])
+        ]
+        peer_summary_before_storm = _peer_transfer_summary(peer_rows)
+        handshake_summary = _peer_scale_handshake_summary(
+            peer_rows,
+            expected_peer_count=int(case.value),
+        )
         underlay_before = _interface_counters("underlay0")
+        endpoint_port = int(pair.right.identity["port"])
         storm = trigger_handshake_storm(
             "underlay0",
             peers,
-            endpoint_port=int(pair.right.identity["port"]),
+            endpoint_port=endpoint_port,
         )
+        peer_summary_after_storm = _peer_transfer_summary(pair.left.peers())
         underlay_after = _interface_counters("underlay0")
         resources_at_end = {
             "a": process_counters(pair.left.pid),
@@ -662,10 +903,16 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
         details.update(
             {
                 "routed_peer_rows": len(peer_rows),
+                "peer_route_check_count": len(peers),
+                "peer_route_miss_count": len(route_misses),
+                "peer_route_misses": route_misses,
+                "expected_endpoint_port": endpoint_port,
+                "peer_counters_before_storm": peer_summary_before_storm,
+                "peer_counters_after_storm": peer_summary_after_storm,
                 "handshake_trigger_datagrams": len(peers),
+                "expected_endpoint_port": endpoint_port,
                 **storm,
-                "handshake_storm_complete": storm["handshake_initiation_count"]
-                >= int(case.value),
+                **handshake_summary,
                 "added_peer_count": int(case.value),
                 "process_rss_delta_bytes": rss_after - rss_before,
                 "rss_delta_bytes_per_added_peer": (rss_after - rss_before) // int(case.value),
@@ -697,9 +944,11 @@ def _run_case(
     pair: NamespacePair | None = None
     traffic: Traffic | None = None
     event: dict[str, Any] | None = None
+    fault_started_ns: int | None = None
     try:
         pair = NamespacePair(binary, coordinator_binary, output / "fixture", extra_members=scale)
         traffic = Traffic(pair, output, duration_seconds=duration)
+        fault_started_ns = time.monotonic_ns()
         event = _apply_fault(case, pair)
         sent_at_clear = _progress_bytes(traffic.sender_progress)
         verified_at_clear = _progress_bytes(traffic.receiver_progress)
@@ -711,6 +960,10 @@ def _run_case(
             platform="linux",
             fault_started_ns=int(event["fault_started_ns"]),
             fault_cleared_ns=int(event["fault_cleared_ns"]),
+            recovery_started_ns=int(
+                event.get("recovery_started_ns", event["fault_cleared_ns"])
+            ),
+            recovery_budget_ms=case.recovery_budget_ms,
             probes=probes,
             bytes_sent=int(sent["bytes"]),
             bytes_verified=int(received["bytes"]),
@@ -736,23 +989,33 @@ def _run_case(
         )
     except BaseException as error:
         now_ns = time.monotonic_ns()
-        bytes_sent = 0 if traffic is None else _progress_bytes(traffic.sender_progress)
-        bytes_verified = 0 if traffic is None else _progress_bytes(traffic.receiver_progress)
-        probe_samples: list[Probe] = []
-        if traffic is not None and traffic.probe_path.is_file():
-            try:
-                probe_samples = load_probe_samples(traffic.probe_path)
-            except (OSError, ValueError, json.JSONDecodeError):
-                pass
+        bytes_sent, bytes_verified, probe_samples = _partial_traffic_progress(output, traffic)
         result = failed_case_report(
             case=case.name,
             platform="linux",
-            fault_started_ns=now_ns if event is None else int(event["fault_started_ns"]),
-            fault_cleared_ns=now_ns if event is None else int(event["fault_cleared_ns"]),
+            fault_started_ns=(
+                int(event["fault_started_ns"])
+                if event is not None
+                else fault_started_ns if fault_started_ns is not None else now_ns
+            ),
+            fault_cleared_ns=(
+                int(event["fault_cleared_ns"]) if event is not None else None
+            ),
+            recovery_started_ns=(
+                int(event["recovery_started_ns"])
+                if event is not None and isinstance(event.get("recovery_started_ns"), int)
+                else None
+            ),
+            recovery_budget_ms=case.recovery_budget_ms,
+            observed_through_ns=now_ns,
             probes=probe_samples,
             bytes_sent=bytes_sent,
             bytes_verified=bytes_verified,
-            bytes_stalled=max(0, bytes_sent - bytes_verified) if event is not None else None,
+            bytes_stalled=(
+                max(0, bytes_sent - bytes_verified)
+                if fault_started_ns is not None
+                else None
+            ),
             error=f"{type(error).__name__}: {error}",
         )
     finally:
@@ -785,6 +1048,7 @@ def main() -> None:
                 "case_names": [case.name for case in cases],
                 "flow_count": 1,
                 "tcp_rate_mbit": 80,
+                "tcp_warmup_bytes": _TRAFFIC_WARMUP_BYTES,
                 "probe_interval_ms": 50,
                 "underlay_mtu_bytes": 1500,
                 "manual_fix_policy": "any product recovery needing an operator action is a failure",

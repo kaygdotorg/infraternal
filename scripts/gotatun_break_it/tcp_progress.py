@@ -121,7 +121,7 @@ def send(
                     [], [], [], min((next_allowed_ns - now_ns) / 1_000_000_000, 0.05)
                 )
                 continue
-            writable, _, _ = select.select([], [connection], [], 0.05)
+            _, writable, _ = select.select([], [connection], [], 0.05)
             if not writable:
                 continue
             try:

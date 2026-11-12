@@ -27,7 +27,10 @@ def report_case(
     case: str,
     platform: str,
     fault_started_ns: int,
-    fault_cleared_ns: int,
+    fault_cleared_ns: int | None,
+    recovery_started_ns: int | None = None,
+    recovery_budget_ms: float | None = None,
+    observed_through_ns: int | None = None,
     probes: Sequence[Probe],
     bytes_sent: int,
     bytes_verified: int,
@@ -37,18 +40,40 @@ def report_case(
 ) -> dict[str, str | int | float | bool | None | list[str]]:
     """Return one machine-readable result using shared J526 recovery definitions.
 
-    Recovery is the first successful probe sent after the fault is cleared. The
-    reported fault-to-recovery duration includes the injected outage; the
-    after-clear duration isolates automatic reconvergence. `bytes_stalled` is
-    the sender/receiver progress gap at fault-clear time; `bytes_unverified`
-    records bytes whose delivery the workload did not verify at the end.
+    Recovery is the first successful probe sent after `recovery_started_ns`,
+    or after fault clear when no separate recovery start is supplied. This lets
+    endpoint changes measure reconvergence while the changed path is active.
+    `bytes_stalled` is the sender/receiver progress gap at fault-clear time;
+    `bytes_unverified` records bytes whose delivery the workload did not verify.
     """
     if not case.strip():
         raise ValueError("case name must not be empty")
     if platform not in {"linux", "macos"}:
         raise ValueError("platform must be 'linux' or 'macos'")
-    if fault_started_ns < 0 or fault_cleared_ns < fault_started_ns:
+    if fault_started_ns < 0 or (
+        fault_cleared_ns is not None and fault_cleared_ns < fault_started_ns
+    ):
         raise ValueError("fault timestamps must be monotonic and ordered")
+    if recovery_started_ns is not None and recovery_started_ns < fault_started_ns:
+        raise ValueError("recovery start must not precede the fault")
+    if recovery_budget_ms is not None and (
+        not isinstance(recovery_budget_ms, (int, float))
+        or isinstance(recovery_budget_ms, bool)
+        or not math.isfinite(recovery_budget_ms)
+        or recovery_budget_ms <= 0
+    ):
+        raise ValueError("recovery budget must be finite and positive")
+    observation_end_ns = (
+        observed_through_ns if observed_through_ns is not None else fault_cleared_ns
+    )
+    if observation_end_ns is None:
+        raise ValueError("an uncleared fault needs an observation end timestamp")
+    if observation_end_ns < fault_started_ns or (
+        fault_cleared_ns is not None and observation_end_ns < fault_cleared_ns
+    ):
+        raise ValueError("observation timestamp must follow the fault interval")
+    if recovery_started_ns is not None and recovery_started_ns > observation_end_ns:
+        raise ValueError("recovery start must not follow the observation end")
     if bytes_sent < 0 or bytes_verified < 0 or bytes_verified > bytes_sent:
         raise ValueError("verified bytes must be between zero and bytes sent")
     if bytes_stalled is not None and (
@@ -67,31 +92,53 @@ def report_case(
         if probe.rtt_ms is not None and (not math.isfinite(probe.rtt_ms) or probe.rtt_ms < 0):
             raise ValueError("probe RTT must be finite and non-negative")
 
-    recovery_probe = next(
-        (
-            probe
-            for probe in ordered
-            if probe.sent_ns >= fault_cleared_ns and probe.rtt_ms is not None
-        ),
-        None,
+    recovery_reference_ns = (
+        recovery_started_ns if recovery_started_ns is not None else fault_cleared_ns
+    )
+    recovery_probe = (
+        next(
+            (
+                probe
+                for probe in ordered
+                if probe.sent_ns >= recovery_reference_ns and probe.rtt_ms is not None
+            ),
+            None,
+        )
+        if recovery_reference_ns is not None
+        else None
     )
     recovered_at_ns = (
         recovery_probe.sent_ns + round(recovery_probe.rtt_ms * 1_000_000)
         if recovery_probe is not None
         else None
     )
+    window_end_ns = recovered_at_ns if recovered_at_ns is not None else observation_end_ns
     window = [
         probe
         for probe in ordered
         if probe.sent_ns >= fault_started_ns
-        and (recovered_at_ns is None or probe.sent_ns <= recovered_at_ns)
+        and probe.sent_ns <= window_end_ns
     ]
     lost = sum(probe.rtt_ms is None for probe in window)
     p99_ms = _nearest_rank_latency(window)
     manual = list(manual_fixes)
+    recovery_ms_from_reference = (
+        _elapsed_ms(recovery_reference_ns, recovered_at_ns)
+        if recovery_reference_ns is not None
+        else None
+    )
+    recovery_budget_met = (
+        recovery_ms_from_reference is not None
+        and recovery_ms_from_reference <= recovery_budget_ms
+        if recovery_budget_ms is not None
+        else None
+    )
     outcome = (
         "PASS"
-        if recovered_at_ns is not None and integrity_ok and not manual
+        if recovered_at_ns is not None
+        and integrity_ok
+        and not manual
+        and recovery_budget_met is not False
         else "FAIL"
     )
 
@@ -99,9 +146,24 @@ def report_case(
         "case": case,
         "platform": platform,
         "outcome": outcome,
-        "fault_duration_ms": round((fault_cleared_ns - fault_started_ns) / 1_000_000, 4),
+        "fault_duration_ms": _elapsed_ms(fault_started_ns, fault_cleared_ns),
+        "observation_duration_ms": _elapsed_ms(fault_started_ns, observation_end_ns),
         "recovery_ms_from_fault_start": _elapsed_ms(fault_started_ns, recovered_at_ns),
-        "recovery_ms_after_fault_cleared": _elapsed_ms(fault_cleared_ns, recovered_at_ns),
+        "recovery_ms_from_reference": recovery_ms_from_reference,
+        "recovery_ms_after_fault_cleared": (
+            _elapsed_ms(fault_cleared_ns, recovered_at_ns)
+            if fault_cleared_ns is not None
+            and recovered_at_ns is not None
+            and recovered_at_ns >= fault_cleared_ns
+            else None
+        ),
+        "recovery_reference": (
+            "explicit"
+            if recovery_started_ns is not None
+            else "fault_cleared" if fault_cleared_ns is not None else None
+        ),
+        "recovery_budget_ms": recovery_budget_ms,
+        "recovery_budget_met": recovery_budget_met,
         "p99_recovery_ms": p99_ms,
         "p99_state": _p99_state(window, p99_ms),
         "recovery_probe_count": len(window),
@@ -123,7 +185,10 @@ def failed_case_report(
     case: str,
     platform: str,
     fault_started_ns: int,
-    fault_cleared_ns: int,
+    fault_cleared_ns: int | None,
+    recovery_started_ns: int | None = None,
+    recovery_budget_ms: float | None = None,
+    observed_through_ns: int | None = None,
     probes: Sequence[Probe],
     bytes_sent: int,
     bytes_verified: int,
@@ -148,6 +213,9 @@ def failed_case_report(
         platform=platform,
         fault_started_ns=fault_started_ns,
         fault_cleared_ns=fault_cleared_ns,
+        recovery_started_ns=recovery_started_ns,
+        recovery_budget_ms=recovery_budget_ms,
+        observed_through_ns=observed_through_ns,
         probes=probes,
         bytes_sent=observed_sent,
         bytes_verified=bytes_verified,

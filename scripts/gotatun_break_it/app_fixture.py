@@ -65,6 +65,17 @@ def _send_frame(stream: socket.socket, kind: int, body: bytes) -> None:
     stream.sendall(_encode_varint(0) + _encode_varint(1 + len(body)) + bytes([kind]) + body)
 
 
+def _refusal_summary(payload: bytes) -> str:
+    """Describe a rejected action without copying arbitrary agent output into evidence."""
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return f"invalid refusal reply ({len(payload)} bytes)"
+    if isinstance(decoded, dict) and decoded.get("error") == "Plugin action refused.":
+        return "Plugin action refused."
+    return "agent returned an opaque refusal"
+
+
 def new_private_agent_runtime_root() -> Path:
     """Create short private agent state under the home directory for Unix socket paths."""
     return Path(tempfile.mkdtemp(prefix="j526-", dir=Path.home()))
@@ -137,7 +148,8 @@ class MeshNode:
             if len(response) < 5 or struct.unpack("<I", response[:4])[0] != call_id:
                 raise RuntimeError("infraternal agent returned a mismatched Mesh action reply")
             if response[4] != 1:
-                raise RuntimeError(f"infraternal agent refused Mesh action {action}")
+                detail = _refusal_summary(response[5:])
+                raise RuntimeError(f"infraternal agent refused Mesh action {action}: {detail}")
             return json.loads(response[5:])
 
     def configure(self, chunk: Mapping[str, Any]) -> dict[str, Any]:
@@ -170,9 +182,20 @@ class MeshNode:
         self._start_process()
 
     def close(self) -> None:
-        """Stop this agent, close its files and remove only this fixture's private state."""
-        self._stop_process()
-        shutil.rmtree(self.state, ignore_errors=True)
+        """Turn off a live mesh before stopping the agent and removing private state."""
+        try:
+            if (
+                self.process is not None
+                and self.process.poll() is None
+                and self.channel is not None
+            ):
+                self.call("mesh.down", {})
+                status = self.call("mesh.status", {})
+                if not isinstance(status, dict) or status.get("state") != "Off":
+                    raise RuntimeError("infraternal agent left the mesh on during fixture cleanup")
+        finally:
+            self._stop_process()
+            shutil.rmtree(self.state, ignore_errors=True)
 
     def _start_process(self) -> None:
         """Spawn the agent and complete its authenticated local channel handshake."""
@@ -281,6 +304,7 @@ class CoordinatorFixture:
         self.stderr_path = stderr_path
         self.state_path = state_path
         self.current_version: int | None = None
+        self.current_authority_epoch: str | None = None
         self._start_process()
 
     def _start_process(self) -> None:
@@ -352,14 +376,23 @@ class CoordinatorFixture:
 
             if len(chunks) != 2 or any(not isinstance(node_chunks, list) for node_chunks in chunks):
                 raise RuntimeError("coordinator fixture returned an invalid two-node snapshot")
-            result["chunks"] = [
-                build_next_config_chunks(node_chunks, current_version=self.current_version)
-                for node_chunks in chunks
-            ]
+            if any(not node_chunks or not isinstance(node_chunks[0], dict) for node_chunks in chunks):
+                raise RuntimeError("coordinator fixture returned an empty or invalid config chunk list")
+            next_epoch = chunks[0][0].get("authority_epoch")
+            if chunks[1][0].get("authority_epoch") != next_epoch:
+                raise RuntimeError("coordinator fixture returned mixed authority epochs")
+            if next_epoch == self.current_authority_epoch:
+                result["chunks"] = [
+                    build_next_config_chunks(node_chunks, current_version=self.current_version)
+                    for node_chunks in chunks
+                ]
         if isinstance(chunks, list) and chunks and isinstance(chunks[0], list) and chunks[0]:
-            version = result.get("chunks", chunks)[0][0].get("version")
+            retained_chunks = result.get("chunks", chunks)
+            version = retained_chunks[0][0].get("version")
             if type(version) is int:
                 self.current_version = version
+                authority_epoch = retained_chunks[0][0].get("authority_epoch")
+                self.current_authority_epoch = authority_epoch
         return result
 
     def configuration(self, mode: str, identities: list[dict[str, Any]]) -> dict[str, Any]:

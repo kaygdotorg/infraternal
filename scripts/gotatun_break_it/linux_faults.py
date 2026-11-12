@@ -17,20 +17,22 @@ class FaultCase:
     kind: str
     value: int | float | None = None
     correlation_pct: int | None = None
+    # Maximum time to restore liveness after a network switch, per D41.
+    recovery_budget_ms: int | None = None
 
 
 def build_fault_matrix() -> tuple[FaultCase, ...]:
     """Return the Linux reliability cases required by J526 in run order."""
 
     return (
-        FaultCase("endpoint-ip-rebind", "endpoint-ip"),
-        FaultCase("nat-port-rebind", "nat-port"),
+        FaultCase("endpoint-ip-rebind", "endpoint-ip", recovery_budget_ms=300),
+        FaultCase("nat-port-rebind", "nat-port", recovery_budget_ms=300),
         FaultCase("loss-1pct", "loss", 1),
         FaultCase("loss-5pct", "loss", 5),
         FaultCase("loss-20pct", "loss", 20),
         FaultCase("reorder", "reorder", 25, 50),
         FaultCase("duplicate", "duplicate", 2),
-        FaultCase("link-down-up", "link-down-up"),
+        FaultCase("link-down-up", "link-down-up", recovery_budget_ms=300),
         FaultCase("rekey-under-load", "rekey-load"),
         FaultCase("rekey-timer-expiry-under-load", "rekey-timer-load"),
         FaultCase("agent-restart", "agent-restart"),
@@ -89,14 +91,17 @@ def build_netem_command(
             raise ValueError(f"{name} percentage must be an integer between 0 and 100")
 
     name, value = selected[0]
-    command = [str(tc), "qdisc", "replace", "dev", interface, "root", "netem", name, f"{value}%"]
+    command = [str(tc), "qdisc", "replace", "dev", interface, "root", "netem"]
     if name == "reorder":
+        command.extend(("delay", "10ms", "reorder", f"{value}%"))
         correlation = 0 if reorder_correlation_pct is None else reorder_correlation_pct
         if type(correlation) is not int or not 0 <= correlation <= 100:
             raise ValueError("reorder correlation must be an integer between 0 and 100")
         command.append(f"{correlation}%")
-    elif reorder_correlation_pct is not None:
-        raise ValueError("reorder correlation only applies to a reorder profile")
+    else:
+        command.extend((name, f"{value}%"))
+        if reorder_correlation_pct is not None:
+            raise ValueError("reorder correlation only applies to a reorder profile")
     command.extend(("seed", "526"))
     return command
 

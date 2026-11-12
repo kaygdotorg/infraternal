@@ -28,8 +28,8 @@ struct Request {
     #[serde(default)]
     count: Option<u64>,
 }
-/// Adds `count` extra members to the store, each with a unique public key and
-/// no private key or traffic, so tests can measure a larger mesh.
+/// Adds `count` extra members with valid unique public keys and no private key
+/// or traffic, so tests can measure a larger mesh and trigger real handshakes.
 async fn seed_extra_members(
     store: &infraternal_plugin_mesh::store::Store,
     first_index: u64,
@@ -39,14 +39,12 @@ async fn seed_extra_members(
     let endpoint = format!("10.220.0.2:{endpoint_port}").parse()?;
     let mut node_ids = Vec::with_capacity(usize::try_from(count)?);
     for index in first_index..first_index.saturating_add(count) {
-        let mut key = [0; 32];
-        key[..8].copy_from_slice(&index.to_le_bytes());
-        key[31] = 128;
+        let public_key = infraternal_plugin_mesh::wireguard::Key::generate()?.1;
         // These public-only fixtures share the live endpoint so traffic to their routes triggers real handshake attempts.
         let (node, _) = store
             .attach(
                 &format!("public-{index}"),
-                PublicKey(key),
+                public_key,
                 Some(endpoint),
                 false,
             )
@@ -93,20 +91,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if members.is_some() {
                 return Err("already enrolled".into());
             }
+            // These stable reported names keep the fixture's peers out of the intentionally hidden placeholder state.
             let (server, _) = store
-                .attach(
+                .attach_named(
                     "server",
                     identities[0].public_key,
                     Some(format!("10.220.0.1:{}", identities[0].port).parse()?),
                     true,
+                    Some("server"),
                 )
                 .await?;
             let (node, _) = store
-                .attach(
+                .attach_named(
                     "proof",
                     identities[1].public_key,
                     Some(format!("10.220.0.2:{}", identities[1].port).parse()?),
                     false,
+                    Some("proof"),
                 )
                 .await?;
             members = Some([server, node]);
