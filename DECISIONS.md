@@ -4937,3 +4937,12 @@ access (#341 B19).
      - **Orchestrator's calls (reversible):** the ⌘K hint stays a label until
        search ships; the standalone pages keep their own small copy of the
        pill CSS instead of loading the app's full style sheet.
+
+390. **A never-chosen theme follows the system; `+` opens "Open shell on" (owner, 2026-11-12, #500, #194; amends D352):**
+     - **Theme:** an account that has never picked a theme follows each
+       device's light/dark setting. The first load no longer saves the theme
+       in force. Once the person picks a theme, D352 applies: the account's
+       theme wins on every device. Implemented with a "theme chosen" flag.
+     - **`+` with several hosts:** opens the palette filtered to "Open shell
+       on …" rows, one per host. With exactly one host it opens that host
+       directly.
