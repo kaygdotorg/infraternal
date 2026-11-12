@@ -194,6 +194,7 @@ export class Wizard {
     }
     this.root.addEventListener("click", this.onClick);
     this.root.addEventListener("change", this.onChange);
+    this.root.addEventListener("submit", this.onSubmit);
     // Keys go through the document: after a step change the focused button is gone, and focus is on the body.
     document.addEventListener("keydown", this.onKeyDown, true);
     this.root.addEventListener("paste", this.onPaste, true);
@@ -942,12 +943,17 @@ export class Wizard {
   private renderChoose(page: HTMLElement): void {
     const job = this.fixing!;
     const name = escapeHtml(job.entry.label);
+    // The password is the SSH account's, so the form names that account (`user@host`) for the browser: Safari then
+    // offers "Save Password?" under that name, not an empty one (#510). Without a typed user the server chose it, so
+    // the host alone names the account.
+    const account = escapeHtml(job.entry.user ? `${job.entry.user}@${this.addressText(job.entry)}` : this.addressText(job.entry));
     const first = this.serverKey ? "server" : this.savedKey ? "saved" : "key";
     const option = (value: string, title: string, hint: string): string => `<label class="ah-option"><input type="radio" name="ah-method" value="${value}" ${value === first ? "checked" : ""} /><span class="ah-radio" aria-hidden="true"></span>
       <span class="ah-option-text"><span>${title}</span><span class="ah-option-hint">${hint}</span></span></label>`;
     const reveal = (value: string, inner: string): string => `<div class="ah-reveal" data-reveal="${value}" data-open="${value === first}"><div class="ah-reveal-in">${inner}</div></div>`;
     page.innerHTML = `${this.hero(ICON.key)}<h1 class="ah-title">Sign in to ${escapeHtml(this.nameWithPort(job.entry))}</h1>
       <p class="ah-lede">${escapeHtml(guideFor(job.entry.label, job.view.failure).happened)} Choose how to sign in.</p>
+      <form class="ah-method-form" data-ah-method-form novalidate><button type="submit" hidden tabindex="-1" aria-hidden="true"></button>
       <div class="ah-options" role="radiogroup" aria-label="How to sign in">
         ${this.serverKey ? option("server", "Use this server's key", "SSH public key in ~/.ssh/authorized_keys. Add it to the host, then try again.") + reveal("server", `<div class="ah-keyblock" data-kv="server"></div><p class="ah-text">Add this line to <span class="ah-code">~/.ssh/authorized_keys</span> on ${name}, then choose Try again.${this.serverKey.locked ? " The server's key is locked until an administrator unlocks it with a passkey." : ""}</p>`) : ""}
         ${this.savedKey ? option("saved", `Use ${escapeHtml(this.savedKey.label)}`, "Unlocked with your passkey, used for this one connection.") : ""}
@@ -955,8 +961,9 @@ export class Wizard {
         ${reveal("key", `<textarea class="ah-secret" data-secret="key" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Private key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" tabindex="-1"></textarea>
           <input class="ah-input" data-secret="passphrase" ${ONE_OFF_SECRET_ATTRS} aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
         ${option("password", "Sign in with a password", "SSH password authentication. Sent once for this connection, not stored.")}
-        ${reveal("password", `<input class="ah-input" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
-      </div>
+        ${reveal("password", `<input class="ah-account" type="text" autocomplete="username" value="${account}" readonly tabindex="-1" aria-label="Account" />
+          <input class="ah-input" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
+      </div></form>
       <button class="ah-link ah-alt" type="button" data-ah="install">Or install from the host instead</button>`;
     if (this.serverKey) {
       const list = createKeyValueList("This server's key");
@@ -1139,6 +1146,7 @@ export class Wizard {
     this.deps.service.dispose?.();
     this.root.removeEventListener("click", this.onClick);
     this.root.removeEventListener("change", this.onChange);
+    this.root.removeEventListener("submit", this.onSubmit);
     document.removeEventListener("keydown", this.onKeyDown, true);
     this.root.removeEventListener("paste", this.onPaste, true);
     const gone = (): void => { this.teardown(); after?.(); };
@@ -1166,6 +1174,7 @@ export class Wizard {
     this.deps.service.dispose?.();
     this.root.removeEventListener("click", this.onClick);
     this.root.removeEventListener("change", this.onChange);
+    this.root.removeEventListener("submit", this.onSubmit);
     document.removeEventListener("keydown", this.onKeyDown, true);
     this.root.removeEventListener("paste", this.onPaste, true);
     if (this.alive) { this.alive = false; this.resize.disconnect(); this.release(); this.surface.remove(); }
@@ -1236,6 +1245,16 @@ export class Wizard {
       const primary = this.foot.querySelector<HTMLButtonElement>("[data-ah='as-root']");
       if (primary) primary.disabled = !input.checked;
     } else if (input.name === "ah-method") this.selectMethod(input.value);
+  };
+
+  /**
+   * The sign-in choices are one real form so the browser can pair the password with its account. Its own submit
+   * (Enter in the password field) does what the footer's Sign in button does; the page never navigates.
+   */
+  private readonly onSubmit = (event: SubmitEvent): void => {
+    if (!(event.target as HTMLElement).matches("[data-ah-method-form]")) return;
+    event.preventDefault();
+    void this.submitMethod();
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {

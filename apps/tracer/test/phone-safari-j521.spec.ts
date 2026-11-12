@@ -57,6 +57,25 @@ test("the SSH password and passphrase stay secure fields that tell Safari they a
   }
 });
 
+test("the SSH password is paired with its account in one form, so Safari's Save Password names it (#510)", async ({ page }) => {
+  await open(page);
+  await typeHost(page, "kayg@needs-key.lab");
+  await expect(page.getByRole("heading", { name: /Sign in to needs-key.lab/ })).toBeVisible({ timeout: 15_000 });
+  await page.getByText("Sign in with a password").click();
+  const form = page.locator("form[data-ah-method-form]");
+  const account = form.locator("input[autocomplete='username']");
+  // Without a username field Safari's sheet shows an empty "User Name". The account is the SSH user at the host.
+  await expect(account).toHaveValue("kayg@needs-key.lab");
+  expect(await account.getAttribute("readonly")).not.toBeNull();
+  expect(await page.evaluate(() => { const a = document.querySelector("input[autocomplete=username]"); const p = document.querySelector("[data-secret=password]"); return !!a?.closest("form") && a.closest("form") === p?.closest("form"); })).toBe(true);
+  // Enter in the password field signs in (the form's submit), and the page does not navigate.
+  const url = page.url();
+  await page.locator("[data-secret='password']").fill("correct horse battery staple");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".ah-stage-row[data-stage='detect'] .ah-stage-detail")).toHaveText("Signed in with your password", { timeout: 15_000 });
+  expect(page.url()).toBe(url);
+});
+
 test("the sign-in step keeps its options in view on a short phone card", async ({ page }) => {
   await open(page);
   await typeHost(page, "kayg@needs-key.lab");
