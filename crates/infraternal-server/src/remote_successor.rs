@@ -359,7 +359,8 @@ mod tests {
         let (server_identity, host_identity, root, _) = crate::remote_runtime::tests::identities();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server_config = remote_tls::server_config(&server_identity, &[root.clone()]).unwrap();
+        let server_config =
+            remote_tls::server_config(&server_identity, std::slice::from_ref(&root)).unwrap();
         let host_config = remote_tls::client_config(&host_identity, &[root]).unwrap();
         let (peer_ready, ready) = oneshot::channel();
         let (call_seen, saw_call) = oneshot::channel();
