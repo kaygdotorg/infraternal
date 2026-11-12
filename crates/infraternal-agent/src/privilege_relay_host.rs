@@ -189,12 +189,7 @@ impl Drop for RemoveOnDrop {
     /// Removes the directory, but only one the snippet could have made.
     fn drop(&mut self) {
         // Only the directory the snippet made: a fresh root-owned one under /run.
-        if self.0.starts_with("/run")
-            && self
-                .0
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("infraternal-privilege."))
-        {
+        if is_relay_scratch_directory(&self.0) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
@@ -624,6 +619,9 @@ struct GuardFiles {
 
 /// Run one named system manager operation for a transaction's guard files.
 trait GuardCommandRunner {
+    /// Return the checked manager binary embedded in a transaction's undo script.
+    fn systemctl_binary(&self) -> io::Result<PathBuf>;
+
     /// Run the operation and return only after the manager reports success.
     async fn run(&self, operation: &str, files: &GuardFiles) -> io::Result<()>;
 }
@@ -632,9 +630,13 @@ trait GuardCommandRunner {
 struct SystemdGuardCommandRunner;
 
 impl GuardCommandRunner for SystemdGuardCommandRunner {
+    fn systemctl_binary(&self) -> io::Result<PathBuf> {
+        fixed_root_binary("systemctl")
+    }
+
     /// Run one system manager operation and check its exit status.
     async fn run(&self, operation: &str, files: &GuardFiles) -> io::Result<()> {
-        let systemctl = fixed_root_binary("systemctl")?;
+        let systemctl = self.systemctl_binary()?;
         let unit_name = files
             .unit
             .file_name()
@@ -712,6 +714,12 @@ pub(crate) fn fixed_root_binary(name: &str) -> io::Result<PathBuf> {
             "/run/current-system/sw/bin/systemd-run",
         ],
         "rm" => &["/usr/bin/rm", "/bin/rm", "/run/current-system/sw/bin/rm"],
+        "cat" => &["/usr/bin/cat", "/bin/cat", "/run/current-system/sw/bin/cat"],
+        "rmdir" => &[
+            "/usr/bin/rmdir",
+            "/bin/rmdir",
+            "/run/current-system/sw/bin/rmdir",
+        ],
         "sleep" => &[
             "/usr/bin/sleep",
             "/bin/sleep",
@@ -809,6 +817,16 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// Accept only the direct-child `/run` layout used for relay scratch directories.
+fn is_relay_scratch_directory(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/run"))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("infraternal-privilege."))
+            .is_some_and(|suffix| !suffix.is_empty())
+}
+
 /// Build names for one install transaction; an old guard never shares new state.
 fn guard_paths(config: &GuardConfig, transaction: uuid::Uuid, _pid: u32) -> GuardFiles {
     let suffix = transaction.simple().to_string();
@@ -823,16 +841,24 @@ fn guard_paths(config: &GuardConfig, transaction: uuid::Uuid, _pid: u32) -> Guar
     }
 }
 
-/// Build a rollback script that runs only while its exact install journal is active.
+/// Build a rollback script bound to one journal that retires only its own guard on safe terminal states.
 fn transaction_undo_script(
     rollback: &str,
     own: &str,
     transaction: uuid::Uuid,
     files: &GuardFiles,
     install_base: &Path,
+    systemctl_binary: &Path,
 ) -> io::Result<String> {
     let active = shell_quote(&install_base.join(ACTIVE_TRANSACTION).to_string_lossy());
     let committed = shell_quote(&install_base.join(COMMITTED_TRANSACTION).to_string_lossy());
+    let guard_root = shell_quote(
+        &files
+            .directory
+            .parent()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?
+            .to_string_lossy(),
+    );
     let unit = shell_quote(&files.unit.to_string_lossy());
     let wants = shell_quote(
         &files
@@ -845,14 +871,17 @@ fn transaction_undo_script(
     );
     let directory = shell_quote(&files.directory.to_string_lossy());
     let transaction = shell_quote(&transaction.simple().to_string());
+    let cat = shell_quote(&fixed_root_binary("cat")?.to_string_lossy());
     let rm = shell_quote(&fixed_root_binary("rm")?.to_string_lossy());
-    let own = if own.starts_with("/run/infraternal-privilege.") {
-        format!("{rm} -rf -- {}\n", shell_quote(own))
+    let rmdir = shell_quote(&fixed_root_binary("rmdir")?.to_string_lossy());
+    let systemctl = shell_quote(&systemctl_binary.to_string_lossy());
+    let own = if is_relay_scratch_directory(Path::new(own)) {
+        shell_quote(own)
     } else {
-        String::new()
+        "''".to_owned()
     };
     Ok(format!(
-        "#!/bin/sh\nset -eu\nactive={active}\ncommitted={committed}\ntransaction={transaction}\n# A matching commit receipt makes this transaction's guard permanently inert.\nif [ -f \"$committed\" ] && [ \"$(cat \"$committed\")\" = \"$transaction\" ]; then exit 0; fi\nif [ ! -f \"$active\" ]; then exit 0; fi\n[ \"$(cat \"$active\")\" = \"$transaction\" ] || exit 0\n( {rollback} )\n{own}{rm} -f -- {wants} {unit}\n{rm} -rf -- {directory}\n"
+        "#!/bin/sh\nset -eu\nactive={active}\ncommitted={committed}\nguard_root={guard_root}\nunit={unit}\nwants={wants}\ndirectory={directory}\ntransaction={transaction}\ncat={cat}\nrm={rm}\nrmdir={rmdir}\nsystemctl={systemctl}\nown={own}\n# Remove only this transaction's guard after a safe terminal state.\ncleanup_guard() {{\n  \"$rm\" -f -- \"$wants\" \"$unit\"\n  if [ -e \"$wants\" ] || [ -L \"$wants\" ]; then exit 1; fi\n  if [ -e \"$unit\" ] || [ -L \"$unit\" ]; then exit 1; fi\n  \"$systemctl\" --system daemon-reload\n  if [ -n \"$own\" ]; then\n    \"$rm\" -rf -- \"$own\"\n    if [ -e \"$own\" ] || [ -L \"$own\" ]; then exit 1; fi\n  fi\n  \"$rm\" -rf -- \"$directory\"\n  if [ -e \"$directory\" ] || [ -L \"$directory\" ]; then exit 1; fi\n  if [ -d \"$guard_root\" ] && [ ! -L \"$guard_root\" ]; then\n    \"$rmdir\" --ignore-fail-on-non-empty -- \"$guard_root\"\n  elif [ -e \"$guard_root\" ] || [ -L \"$guard_root\" ]; then\n    exit 1\n  fi\n}}\nif [ -e \"$committed\" ] || [ -L \"$committed\" ]; then\n  if [ ! -f \"$committed\" ] || [ -L \"$committed\" ]; then exit 1; fi\n  committed_transaction=$(\"$cat\" \"$committed\")\n  if [ \"$committed_transaction\" = \"$transaction\" ]; then cleanup_guard; exit 0; fi\nfi\nif [ ! -e \"$active\" ] && [ ! -L \"$active\" ]; then cleanup_guard; exit 0; fi\nif [ ! -f \"$active\" ] || [ -L \"$active\" ]; then exit 1; fi\nactive_transaction=$(\"$cat\" \"$active\")\nif [ \"$active_transaction\" != \"$transaction\" ]; then cleanup_guard; exit 0; fi\n( {rollback} )\ncleanup_guard\n"
     ))
 }
 
@@ -980,8 +1009,15 @@ async fn arm_guard_for_relay<R: GuardCommandRunner>(
         if std::fs::symlink_metadata(&files.unit).is_ok() {
             return Err(io::Error::from(io::ErrorKind::AlreadyExists));
         }
-        let undo =
-            transaction_undo_script(rollback, own, transaction, &files, &config.install_base)?;
+        let systemctl_binary = runner.systemctl_binary()?;
+        let undo = transaction_undo_script(
+            rollback,
+            own,
+            transaction,
+            &files,
+            &config.install_base,
+            &systemctl_binary,
+        )?;
         let watcher = watcher_script(&files, std::process::id())?;
         write_guard_file(&files.undo, undo.as_bytes(), 0o600)?;
         write_guard_file(&files.watcher_script, watcher.as_bytes(), 0o700)?;
@@ -1033,7 +1069,7 @@ async fn disarm_guard(config: &GuardConfig, files: &GuardFiles) -> io::Result<()
 
 /// Exercise checked disarm through a replaceable command runner.
 async fn disarm_guard_with<R: GuardCommandRunner>(
-    _config: &GuardConfig,
+    config: &GuardConfig,
     files: &GuardFiles,
     runner: &R,
 ) -> io::Result<()> {
@@ -1056,6 +1092,9 @@ async fn disarm_guard_with<R: GuardCommandRunner>(
     }
     if let Err(error) = remove_guard_path(&files.directory, true) {
         failures.push(format!("remove {}: {error}", files.directory.display()));
+    }
+    if let Err(error) = remove_empty_guard_root(&config.guard_root) {
+        failures.push(format!("remove {}: {error}", config.guard_root.display()));
     }
     if let Err(error) = runner.run("daemon-reload", files).await {
         failures.push(format!("daemon-reload: {error}"));
@@ -1084,6 +1123,20 @@ fn remove_guard_path(path: &Path, directory: bool) -> io::Result<()> {
             "promotion guard path remains after removal",
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove the shared guard parent when no other transaction still uses it.
+fn remove_empty_guard_root(path: &Path) -> io::Result<()> {
+    match std::fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(nix::libc::ENOTEMPTY) =>
+        {
+            Ok(())
+        }
         Err(error) => Err(error),
     }
 }
@@ -1344,6 +1397,10 @@ mod tests {
     }
 
     impl GuardCommandRunner for TestGuardCommands {
+        fn systemctl_binary(&self) -> io::Result<PathBuf> {
+            Ok(PathBuf::from("/bin/true"))
+        }
+
         async fn run(&self, operation: &str, _files: &GuardFiles) -> io::Result<()> {
             tokio::task::yield_now().await;
             let occurrence = {
@@ -1786,6 +1843,42 @@ mod tests {
         assert_ne!(first.watcher, second.watcher);
     }
 
+    /// Relay cleanup accepts only the exact direct-child scratch path it owns.
+    #[test]
+    fn relay_scratch_cleanup_rejects_nested_or_traversal_paths() {
+        assert!(is_relay_scratch_directory(Path::new(
+            "/run/infraternal-privilege.test"
+        )));
+        assert!(!is_relay_scratch_directory(Path::new(
+            "/run/infraternal-privilege."
+        )));
+        assert!(!is_relay_scratch_directory(Path::new(
+            "/run/nested/infraternal-privilege.test"
+        )));
+        assert!(!is_relay_scratch_directory(Path::new(
+            "/run/infraternal-privilege.test/../../etc"
+        )));
+    }
+
+    /// Removing one guard never removes the shared parent while another transaction uses it.
+    #[test]
+    fn promotion_guard_parent_is_removed_only_when_empty() {
+        let config = test_guard_config();
+        let first = guard_paths(&config, uuid::Uuid::from_u128(0xa), 100);
+        let second = guard_paths(&config, uuid::Uuid::from_u128(0xb), 100);
+        std::fs::create_dir_all(&first.directory).unwrap();
+        std::fs::create_dir_all(&second.directory).unwrap();
+
+        std::fs::remove_dir_all(&first.directory).unwrap();
+        remove_empty_guard_root(&config.guard_root).unwrap();
+        assert!(config.guard_root.is_dir());
+        assert!(second.directory.is_dir());
+
+        std::fs::remove_dir_all(&second.directory).unwrap();
+        remove_empty_guard_root(&config.guard_root).unwrap();
+        assert!(!config.guard_root.exists());
+    }
+
     /// Arming refuses promotion when it cannot prove the independent watcher is active.
     #[tokio::test]
     async fn promotion_guard_refuses_when_watcher_is_not_active() {
@@ -2157,8 +2250,8 @@ mod tests {
         let transaction_a = uuid::Uuid::from_u128(0xa);
         let transaction_b = uuid::Uuid::from_u128(0xb);
         let files = guard_paths(&config, transaction_a, 100);
+        create_guard_fixture(&files);
         std::fs::create_dir_all(&config.install_base).unwrap();
-        std::fs::create_dir_all(&files.directory).unwrap();
         let active = config.install_base.join(ACTIVE_TRANSACTION);
         std::fs::create_dir_all(active.parent().unwrap()).unwrap();
         std::fs::write(&active, format!("{}\n", transaction_a.simple())).unwrap();
@@ -2174,6 +2267,7 @@ mod tests {
             transaction_a,
             &files,
             &config.install_base,
+            Path::new("/bin/true"),
         )
         .unwrap();
         let status = std::process::Command::new("/bin/sh")
@@ -2186,7 +2280,9 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert!(!committed_rollback.exists());
+        assert_guard_fixture_removed(&files);
 
+        create_guard_fixture(&files);
         std::fs::write(&active, format!("{}\n", transaction_b.simple())).unwrap();
         std::fs::write(
             config.install_base.join(COMMITTED_TRANSACTION),
@@ -2200,6 +2296,7 @@ mod tests {
             transaction_a,
             &files,
             &config.install_base,
+            Path::new("/bin/true"),
         )
         .unwrap();
         let status = std::process::Command::new("/bin/sh")
@@ -2212,15 +2309,27 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert!(!rolled_back.exists());
+        assert_eq!(
+            std::fs::read_to_string(&active).unwrap(),
+            format!("{}\n", transaction_b.simple())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&files.committed).unwrap(),
+            format!("{}\n", transaction_b.simple())
+        );
+        assert_guard_fixture_removed(&files);
 
+        // An absent active marker also retires only this transaction's guard.
+        create_guard_fixture(&files);
         std::fs::remove_file(&active).unwrap();
-        std::fs::write(&files.committed, format!("{}\n", transaction_a.simple())).unwrap();
+        std::fs::remove_file(&files.committed).unwrap();
         let script = transaction_undo_script(
             &format!("touch '{}'", rolled_back.display()),
             "",
             transaction_a,
             &files,
             &config.install_base,
+            Path::new("/bin/true"),
         )
         .unwrap();
         let status = std::process::Command::new("/bin/sh")
@@ -2233,6 +2342,106 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert!(!rolled_back.exists());
+        assert_guard_fixture_removed(&files);
+    }
+
+    /// A failed systemd reload is visible and does not erase the transaction's undo script.
+    #[test]
+    fn leftover_promotion_guard_reports_a_failed_systemd_reload() {
+        let config = test_guard_config();
+        let transaction_a = uuid::Uuid::from_u128(0xa1);
+        let transaction_b = uuid::Uuid::from_u128(0xb1);
+        let files = guard_paths(&config, transaction_a, 100);
+        create_guard_fixture(&files);
+        std::fs::create_dir_all(&config.install_base).unwrap();
+        let active = config.install_base.join(ACTIVE_TRANSACTION);
+        std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+        std::fs::write(&active, format!("{}\n", transaction_b.simple())).unwrap();
+
+        let status = run_transaction_undo(
+            &config,
+            &files,
+            transaction_a,
+            "false",
+            Path::new("/bin/false"),
+        );
+
+        assert!(!status.success());
+        assert!(
+            files.directory.is_dir(),
+            "reload failure removed retry files"
+        );
+        assert!(
+            files.undo.is_file(),
+            "reload failure removed the undo script"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&active).unwrap(),
+            format!("{}\n", transaction_b.simple())
+        );
+    }
+
+    /// Run one generated undo script with a chosen test manager binary.
+    fn run_transaction_undo(
+        config: &GuardConfig,
+        files: &GuardFiles,
+        transaction: uuid::Uuid,
+        rollback: &str,
+        systemctl_binary: &Path,
+    ) -> std::process::ExitStatus {
+        use std::process::Stdio;
+
+        let script = transaction_undo_script(
+            rollback,
+            "",
+            transaction,
+            files,
+            &config.install_base,
+            systemctl_binary,
+        )
+        .unwrap();
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+    }
+
+    /// Create the exact file layout a transaction-bound guard owns.
+    fn create_guard_fixture(files: &GuardFiles) {
+        use std::os::unix::fs::symlink;
+
+        std::fs::create_dir_all(&files.directory).unwrap();
+        std::fs::write(&files.undo, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(&files.watcher_script, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::create_dir_all(files.unit.parent().unwrap()).unwrap();
+        std::fs::write(&files.unit, b"[Unit]\n").unwrap();
+        let wants = files.unit.parent().unwrap().join("multi-user.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        symlink(&files.unit, wants.join(files.unit.file_name().unwrap())).unwrap();
+    }
+
+    /// Confirm cleanup removed every persistent path belonging to one guard.
+    fn assert_guard_fixture_removed(files: &GuardFiles) {
+        let wants = files
+            .unit
+            .parent()
+            .unwrap()
+            .join("multi-user.target.wants")
+            .join(files.unit.file_name().unwrap());
+        assert!(!files.directory.exists(), "guard directory remains");
+        assert!(!files.unit.exists(), "boot unit remains");
+        assert!(
+            std::fs::symlink_metadata(&wants).is_err(),
+            "boot wants link remains"
+        );
+        assert!(
+            !files.directory.parent().unwrap().exists(),
+            "shared guard parent remains empty"
+        );
     }
 
     /// A standard root-owned unit directory may be traversable without being writable by others.
