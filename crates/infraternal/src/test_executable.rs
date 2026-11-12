@@ -62,6 +62,22 @@ pub(crate) fn copy(source: &Path, path: &Path, mode: u32) {
     );
 }
 
+/// Links an executable into a private fixture, or copies it with its permission
+/// bits when the target directory and passwd home are on different filesystems.
+/// Other link errors still fail the test. The copy uses [`copy`] so concurrent
+/// test children cannot inherit a writable executable descriptor (#506).
+pub(crate) fn link_or_copy(source: &Path, path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::hard_link(source, path) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(nix::libc::EXDEV) => {
+            let mode = std::fs::metadata(source).unwrap().permissions().mode() & 0o7777;
+            copy(source, path, mode);
+        }
+        Err(error) => panic!("could not link test executable: {error}"),
+    }
+}
+
 /// A unique sibling of `path` for staged bytes, so concurrent tests never share one.
 fn staging_path(path: &Path) -> PathBuf {
     let mut name = path
@@ -94,4 +110,33 @@ fn published_executables_run_and_can_be_replaced() {
         "staging file left behind"
     );
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Build-target executables retain their bytes and mode in temporary fixtures,
+/// whether those directories share a filesystem or require the EXDEV fallback.
+#[test]
+fn fixture_executables_retain_contents_and_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let name = format!("test-exec-{}", uuid::Uuid::new_v4());
+    let build_directory = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(&name);
+    let fixture_directory = std::env::temp_dir().join(&name);
+    std::fs::create_dir(&build_directory).unwrap();
+    std::fs::create_dir(&fixture_directory).unwrap();
+    let source = build_directory.join("source");
+    let installed = fixture_directory.join("installed");
+    let script = b"#!/bin/sh\nexit 7\n";
+    write(&source, script, 0o751);
+    link_or_copy(&source, &installed);
+    assert_eq!(std::fs::read(&installed).unwrap(), script);
+    assert_eq!(
+        std::fs::metadata(&installed).unwrap().permissions().mode() & 0o7777,
+        0o751
+    );
+    assert_eq!(Command::new(&installed).status().unwrap().code(), Some(7));
+    std::fs::remove_dir_all(build_directory).unwrap();
+    std::fs::remove_dir_all(fixture_directory).unwrap();
 }

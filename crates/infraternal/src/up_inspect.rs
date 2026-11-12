@@ -765,12 +765,34 @@ mod tests {
         assert!(resolved_service(OsStr::new("custom.service"), &explicit).is_err());
     }
 
-    /// Common literal exec wrappers must expose named binaries and renamed inode aliases.
+    /// Common literal exec wrappers must expose named binaries and running-inode
+    /// aliases, as well as copied images when passwd home is on another disk.
     #[test]
     fn scheduling_and_privilege_wrappers_expose_installs() {
         let fixture = crate::restart_binary::fixture::Directory::new();
+        let running = std::env::current_exe().unwrap();
+        // Keep an explicit running-inode alias beside the build image: the home
+        // fixture below becomes a different inode when EXDEV requires a copy.
+        let inode_alias = running.with_file_name(format!("control-{}", uuid::Uuid::new_v4()));
+        fs::hard_link(&running, &inode_alias).unwrap();
+        let running_metadata = fs::metadata(&running).unwrap();
+        let alias_metadata = fs::metadata(&inode_alias).unwrap();
+        assert_eq!(
+            (alias_metadata.dev(), alias_metadata.ino()),
+            (running_metadata.dev(), running_metadata.ino())
+        );
+        let mut images = KnownImages::new().unwrap();
+        assert!(
+            images
+                .matches(&inode_alias, &mut fs::File::open(&inode_alias).unwrap())
+                .unwrap()
+        );
+        assert!(
+            images.0.iter().all(|image| image.digest.is_none()),
+            "the running-inode alias must be recognized without hashing"
+        );
         let alias = fixture.0.join("control");
-        fs::hard_link(std::env::current_exe().unwrap(), &alias).unwrap();
+        crate::test_executable::link_or_copy(&running, &alias);
         for (wrapper, options) in [
             ("nice", "-n5"),
             ("setpriv", "--reuid=0"),
@@ -779,7 +801,11 @@ mod tests {
             ("taskset", "-c 0"),
             ("stdbuf", "-oL"),
         ] {
-            for image in ["/opt/infra", alias.to_str().unwrap()] {
+            for image in [
+                "/opt/infra",
+                inode_alias.to_str().unwrap(),
+                alias.to_str().unwrap(),
+            ] {
                 let value = format!(
                     "LoadState=loaded\nExecStart={{ path=/usr/bin/{wrapper} ; argv[]=/usr/bin/{wrapper} {options} {image} server ; }}\n"
                 );
@@ -793,6 +819,7 @@ mod tests {
             );
             resolved_service(OsStr::new("custom.service"), &benign).unwrap();
         }
+        fs::remove_file(inode_alias).unwrap();
     }
 
     /// Unrelated infrastructure text cannot make an unresolved command look like our program.
