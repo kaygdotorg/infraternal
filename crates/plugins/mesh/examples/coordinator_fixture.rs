@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             members = Some([server, node]);
             peer_endpoint_port = Some(identities[1].port);
-            for (node_id, _) in [server, node] {
+            for node_id in [server, node] {
                 sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
                     .bind(i64::try_from(node_id.0)?)
                     .execute(&pool)
@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             service.invalidate_dataplane().await;
         }
         if matches!(request.mode.as_str(), "rotation-begin" | "rotation-timer-begin") {
-            let node_id = i64::try_from(members[1].0.0)?;
+            let node_id = i64::try_from(members[1].0)?;
             let operation_id = request.operation_id.as_deref().ok_or("operation_id required")?;
             let timer_expired = request.mode == "rotation-timer-begin";
             let rotation = begin_fixture_rotation(
@@ -177,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 update_fixture_rotation(
                     &pool,
                     &service,
-                    i64::try_from(members[1].0.0)?,
+                    i64::try_from(members[1].0)?,
                     request.operation_id.as_deref().ok_or("operation_id required")?,
                     request.candidate_public_key.ok_or("candidate key required")?,
                     "overlap",
@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 update_fixture_rotation(
                     &pool,
                     &service,
-                    i64::try_from(members[1].0.0)?,
+                    i64::try_from(members[1].0)?,
                     request.operation_id.as_deref().ok_or("operation_id required")?,
                     PublicKey([0; 32]),
                     "retiring",
@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 update_fixture_rotation(
                     &pool,
                     &service,
-                    i64::try_from(members[1].0.0)?,
+                    i64::try_from(members[1].0)?,
                     request.operation_id.as_deref().ok_or("operation_id required")?,
                     PublicKey([0; 32]),
                     "cleanup",
@@ -210,7 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 finish_fixture_rotation(
                     &pool,
                     &service,
-                    i64::try_from(members[1].0.0)?,
+                    i64::try_from(members[1].0)?,
                     request.operation_id.as_deref().ok_or("operation_id required")?,
                 )
                 .await?,
