@@ -1138,10 +1138,10 @@ mod tests {
         assert!(parse_action("mesh.up", br#"{"enabled":false}"#).is_err());
         assert!(matches!(parse_action("mesh.up", b"{}"), Ok(Request::Up)));
     }
-    /// Preserves the stopping state after failed cleanup and explicit-off intent after reconnect.
+    /// D386 lets mesh cleanup remove a recreated table in the product-owned namespace.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off() {
+    fn mesh_down_removes_a_recreated_product_table_and_keeps_explicit_off() {
         use crate::{
             dataplane::DefaultPolicy,
             policy::model::{Addresses, NodeId},
@@ -1202,19 +1202,24 @@ mod tests {
             .write_all(b"delete table inet infraternal_mesh\nadd table inet infraternal_mesh\n")
             .expect("fixture batch");
         assert!(child.wait().expect("fixture status").success());
-        assert!(plugin.call("mesh.down", b"{}").is_err());
+        let down: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.down", b"{}").expect("mesh down"))
+                .expect("JSON");
+        assert_eq!(down["state"], "Off");
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("status"))
                 .expect("JSON");
-        assert_eq!(status["state"], "Stopping");
+        assert_eq!(status["state"], "Off");
         assert!(
-            Command::new(&nft)
-                .args(["delete", "table", "inet", "infraternal_mesh"])
+            !Command::new(&nft)
+                .args(["-j", "list", "table", "inet", "infraternal_mesh"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
-                .expect("fixture cleanup")
-                .success()
+                .expect("inspect product table")
+                .success(),
+            "D386 cleanup removes the product-owned table even without its old marker"
         );
-        plugin.call("mesh.down", b"{}").expect("finish cleanup");
         assert_eq!(
             plugin.call("mesh.identity", b"{}").expect("reconnect"),
             b"null"
