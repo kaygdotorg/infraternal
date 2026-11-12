@@ -402,6 +402,61 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
             ],
         )
 
+    def test_parses_perf_sched_blocked_time_before_futex_wakeup(self):
+        """Report how long a sleeping GotaTun worker stayed off CPU before wakeup."""
+        events = parse_perf_sched(
+            """
+worker 123/123 [002] 20.000000: sched:sched_switch: prev_comm=worker prev_pid=123 prev_prio=120 prev_state=S ==> next_comm=other next_pid=456 next_prio=120
+worker 123/123 [002] 20.600000: sched:sched_wakeup: comm=worker pid=123 prio=120 target_cpu=002
+worker 123/123 [002] 20.605000: sched:sched_switch: prev_comm=other prev_pid=456 prev_prio=120 prev_state=S ==> next_comm=worker next_pid=123 next_prio=120
+""",
+            target_tids={123},
+        )
+
+        self.assertEqual(
+            events,
+            [
+                SchedulerEvent(
+                    20_600_000_000,
+                    task="worker/123",
+                    event="offcpu_blocked",
+                    delay_ns=600_000_000,
+                ),
+                SchedulerEvent(
+                    20_605_000_000,
+                    task="worker/123",
+                    event="runnable_delay",
+                    delay_ns=5_000_000,
+                ),
+            ],
+        )
+
+    def test_reports_offcpu_blocked_time_inside_a_slow_probe_burst(self):
+        """Keep scheduler sleep time beside queue and goodput evidence for one stall."""
+        report = summarize_soak(
+            probes=[
+                Probe(1, 1_000_000_000, 8.0),
+                Probe(2, 1_100_000_000, 120.0),
+                Probe(3, 1_200_000_000, 240.0),
+                Probe(4, 1_300_000_000, 8.0),
+            ],
+            goodput=[GoodputSample(1_200_000_000, 900_000_000)],
+            counters=[CounterSample(1_200_000_000, {"a_crypto_queue_jobs_max": 16})],
+            scheduler_events=[
+                SchedulerEvent(
+                    1_250_000_000,
+                    task="gotatun-worker/123",
+                    event="offcpu_blocked",
+                    delay_ns=150_000_000,
+                )
+            ],
+        )
+
+        burst = report["stall_bursts"][0]
+        self.assertEqual(burst.get("offcpu_blocked_event_count"), 1)
+        self.assertEqual(burst.get("offcpu_blocked_total_ns"), 150_000_000)
+        self.assertEqual(burst.get("offcpu_blocked_max_ns"), 150_000_000)
+
     def test_aligns_pipeline_queue_events_to_the_host_monotonic_clock(self):
         """Convert J525's per-process pipeline times to the host probe clock."""
         parser = getattr(trace_module, "parse_pipeline_queue_events", None)

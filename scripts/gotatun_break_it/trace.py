@@ -34,7 +34,7 @@ class CounterSample:
 
 @dataclass(frozen=True, slots=True)
 class SchedulerEvent:
-    """A scheduler event with its observed runnable delay and task identity."""
+    """A scheduler event with runnable delay or blocked time and task identity."""
 
     timestamp_ns: int
     task: str
@@ -121,8 +121,9 @@ def parse_perf_sched(
     Record with `perf record --clockid mono`; then these timestamps use the
     same clock as the probe and product-counter streams. When target TIDs are
     supplied, both wakeups and switch contexts outside that set are ignored.
-    The parser pairs each wakeup, or a preempted runnable task, with its next
-    switch onto a CPU so long futex and worker wake delays remain visible.
+    The parser reports blocked intervals through the next wakeup and runnable
+    intervals through the next switch onto a CPU, which keeps futex waits and
+    worker wake delays visible beside the probe timeline.
     """
     if minimum_delay_ns < 0:
         raise ValueError("minimum scheduler delay must be non-negative")
@@ -132,6 +133,7 @@ def parse_perf_sched(
         raise ValueError("target thread IDs must be a non-empty set of positive integers")
     events: list[SchedulerEvent] = []
     ready_at_ns: dict[int, int] = {}
+    blocked_at_ns: dict[int, int] = {}
     event_pattern = re.compile(
         r"(?P<timestamp>\d+(?:\.\d+)?):\s+sched:(?P<kind>\w+):\s*(?P<payload>.*)"
     )
@@ -153,6 +155,18 @@ def parse_perf_sched(
             if pid_match is not None:
                 pid = int(pid_match.group(1))
                 if target_tids is None or pid in target_tids:
+                    blocked_ns = blocked_at_ns.pop(pid, None)
+                    if blocked_ns is not None and timestamp_ns >= blocked_ns:
+                        comm_match = re.search(r"\bcomm=(\S+)", payload)
+                        task_name = comm_match.group(1) if comm_match is not None else "tid"
+                        events.append(
+                            SchedulerEvent(
+                                timestamp_ns,
+                                task=f"{task_name}/{pid}",
+                                event="offcpu_blocked",
+                                delay_ns=timestamp_ns - blocked_ns,
+                            )
+                        )
                     ready_at_ns.setdefault(pid, timestamp_ns)
             continue
         if kind != "sched_switch":
@@ -165,10 +179,14 @@ def parse_perf_sched(
         if next_task is None:
             next_task = re.search(r"==>\s+([^:\s]+):(\d+)\s+\[\d+\]", payload)
 
-        if previous is not None and previous.group(2) == "R":
+        if previous is not None:
             previous_pid = int(previous.group(1))
+            previous_state = previous.group(2)
             if previous_pid != 0 and (target_tids is None or previous_pid in target_tids):
-                ready_at_ns[previous_pid] = timestamp_ns
+                if previous_state.startswith("R"):
+                    ready_at_ns[previous_pid] = timestamp_ns
+                elif previous_state.startswith(("S", "D")):
+                    blocked_at_ns[previous_pid] = timestamp_ns
         if next_task is None:
             continue
         task = next_task.group(1)
@@ -282,6 +300,16 @@ def summarize_soak(
         "counter_drift": _counter_drift(ordered_counters),
         "latency_windows": _latency_windows(ordered_probes, window_seconds),
         "scheduler_event_count": len(ordered_scheduler),
+        "scheduler_offcpu_blocked_event_count": sum(
+            event.event == "offcpu_blocked" for event in ordered_scheduler
+        ),
+        "scheduler_offcpu_blocked_total_ns": sum(
+            event.delay_ns for event in ordered_scheduler if event.event == "offcpu_blocked"
+        ),
+        "scheduler_offcpu_blocked_max_ns": max(
+            (event.delay_ns for event in ordered_scheduler if event.event == "offcpu_blocked"),
+            default=0,
+        ),
         "scheduler_trace_window_ns": list(scheduler_trace_window_ns)
         if scheduler_trace_window_ns is not None
         else None,
@@ -401,6 +429,10 @@ def _summarize_burst(
         matched_scheduler,
         key=lambda event: (-event.delay_ns, event.timestamp_ns, event.task, event.event),
     )[:10]
+    offcpu_waits = sorted(
+        (event for event in matched_scheduler if event.event == "offcpu_blocked"),
+        key=lambda event: (-event.delay_ns, event.timestamp_ns, event.task),
+    )[:10]
     finite_rtts = [probe.rtt_ms for probe in probes if probe.rtt_ms is not None]
 
     return {
@@ -425,6 +457,25 @@ def _summarize_burst(
             _is_crypto_queue_sample(sample) for sample in matched_counters
         ),
         "scheduler_event_count": len(matched_scheduler),
+        "offcpu_blocked_event_count": sum(
+            event.event == "offcpu_blocked" for event in matched_scheduler
+        ),
+        "offcpu_blocked_total_ns": sum(
+            event.delay_ns for event in matched_scheduler if event.event == "offcpu_blocked"
+        ),
+        "offcpu_blocked_max_ns": max(
+            (event.delay_ns for event in matched_scheduler if event.event == "offcpu_blocked"),
+            default=0,
+        ),
+        "offcpu_blocked_top_waits": [
+            {
+                "timestamp_ns": event.timestamp_ns,
+                "task": event.task,
+                "event": event.event,
+                "delay_ns": event.delay_ns,
+            }
+            for event in offcpu_waits
+        ],
         "scheduler_wait_total_ns": sum(event.delay_ns for event in matched_scheduler),
         "scheduler_wait_max_ns": max((event.delay_ns for event in matched_scheduler), default=0),
         "scheduler_top_waits": [
