@@ -88,7 +88,7 @@ fn fallback_after_unobserved_deletion_repairs_inventory() {
 
 /// Measure the worker's idle CPU ticks, context switches, and RSS on the pinned performance VM.
 #[test]
-#[ignore = "Measurement only: execute through perf-run in a disposable network namespace."]
+#[ignore = "Measurement only: execute on the perf VM through perf-run in a disposable network namespace."]
 fn periodic_recheck_idle_measurement() {
     let peers = std::env::var("MESH_BENCH_PEERS")
         .unwrap_or_else(|_| "256".to_owned())

@@ -151,7 +151,7 @@ fn install_nix_profile_tool(name: &str) -> std::path::PathBuf {
 
 /// A failed resolver removal must invalidate the old success cache before records return to it.
 #[test]
-#[ignore = "Run in the J519 private resolver filesystem namespace."]
+#[ignore = "MESH_REVIEW_PROBE: run with scripts/review-j519-dns-regressions in private /etc and Nix profile mounts."]
 fn review_j529_failed_cleanup_does_not_cache_previous_success() {
     let nmcli = install_nix_profile_tool("nmcli");
     let daemon = install_nix_profile_tool("NetworkManager");
@@ -190,7 +190,7 @@ fn review_j529_failed_cleanup_does_not_cache_previous_success() {
 
 /// Changed or deleted forwarding files must be rebuilt even for an identical snapshot.
 #[test]
-#[ignore = "Run in the J519 private resolver filesystem namespace."]
+#[ignore = "MESH_REVIEW_PROBE: run with scripts/review-j519-dns-regressions in private /etc and Nix profile mounts."]
 fn review_j485c_changed_file_invalidates_success() {
     install_nix_profile_tool("nmcli");
     let daemon = install_nix_profile_tool("NetworkManager");

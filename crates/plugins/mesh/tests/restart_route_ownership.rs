@@ -733,7 +733,7 @@ fn wait_for_networkd_configuration() -> bool {
 
 /// A configured link reload must recover every accepted peer through a route-event burst.
 #[test]
-#[ignore = "Run with the J519 private networkd namespace wrapper."]
+#[ignore = "MESH_REVIEW_PROBE: run with scripts/review-j519-networkd-route-repair in a private networkd namespace."]
 fn review_j529_networkd_reload_recovers_all_peers() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("j529-networkd-{}", std::process::id()));

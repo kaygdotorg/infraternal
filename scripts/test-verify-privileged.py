@@ -224,6 +224,19 @@ class IgnoredSelection(unittest.TestCase):
         for target in ('test:kernel', 'test:proxy_ingress_namespace', 'test:review_retire_ownership'):
             self.assertIn(target, found)
 
+    def test_review_wrappers_keep_their_required_mounts(self):
+        """Private resolver/networkd probes use their wrappers; self-contained route proofs stay in the row."""
+        root = Path(__file__).resolve().parents[1]
+        found = p.privileged_ignored(root, 'infraternal-plugin-mesh', 'crates/plugins/mesh')
+        for name in ('review_j529_failed_cleanup_does_not_cache_previous_success',
+                     'review_j485c_changed_file_invalidates_success'):
+            self.assertNotIn(name, found.get('lib', {}))
+        routes = found['test:restart_route_ownership']
+        self.assertNotIn('review_j529_networkd_reload_recovers_all_peers', routes)
+        self.assertIn('review_j529_repair_does_not_follow_a_reused_interface_name', routes)
+        self.assertIn('fallback_after_unobserved_deletion_repairs_inventory', found['lib'])
+        self.assertNotIn('periodic_recheck_idle_measurement', found['lib'])
+
     def test_mesh_dns_is_default_and_explicit_in_the_privileged_matrix(self):
         """Shipping enables mesh DNS; the namespace matrix enables it only for the DNS target."""
         shared = dict((name, f) for name, _, f in p.PACKAGES['mesh'])['infraternal-plugin-mesh']
