@@ -49,7 +49,7 @@ impl Default for State {
 /// this handle can write. Short writer locks serialize updates from independent stores.
 pub struct Store {
     /// Keeps migration's exclusive directory lock out while this store can still write.
-    _directory_lease: nix::fcntl::Flock<fs::File>,
+    directory_lease: nix::fcntl::Flock<fs::File>,
     path: PathBuf,
     route_path: PathBuf,
     // The key of the interface this installation created (#235). It lives in
@@ -248,7 +248,7 @@ impl Store {
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
         Ok((
             Self {
-                _directory_lease: directory_lease,
+                directory_lease,
                 path,
                 route_path,
                 interface_path,
@@ -286,7 +286,7 @@ impl Store {
         let route_body =
             serde_json::to_vec(&BTreeSet::<IpAddr>::new()).map_err(io::Error::other)?;
         Ok(Self {
-            _directory_lease: directory_lease,
+            directory_lease,
             path: parent.join("mesh-public.json"),
             route_path: parent.join("mesh-routes.json"),
             interface_path: parent.join("mesh-interface.json"),
@@ -318,7 +318,7 @@ impl Store {
             self.interface_path
                 .parent()
                 .ok_or(io::ErrorKind::InvalidInput)?,
-            &self._directory_lease,
+            &self.directory_lease,
         )?;
         write_public(
             &self.interface_path,
@@ -384,7 +384,7 @@ impl Store {
             .rotation_path
             .parent()
             .ok_or(io::ErrorKind::InvalidInput)?;
-        let _writer = lock_mesh_store_writer(parent, &self._directory_lease)?;
+        let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
         sweep_rotation_temporaries_locked(&self.rotation_path)?;
         match fs::symlink_metadata(&self.rotation_path) {
             Ok(metadata)
@@ -412,7 +412,7 @@ impl Store {
             self.rotation_path
                 .parent()
                 .ok_or(io::ErrorKind::InvalidInput)?,
-            &self._directory_lease,
+            &self.directory_lease,
         )?;
         let mut removed = false;
         for path in [&self.rotation_path, &self.interface_path] {
@@ -507,7 +507,7 @@ impl Store {
             .rotation_path
             .parent()
             .ok_or(io::ErrorKind::InvalidInput)?;
-        let _writer = lock_mesh_store_writer(parent, &self._directory_lease)?;
+        let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
         if let Ok(metadata) = fs::symlink_metadata(&self.rotation_path)
             && (!metadata.is_file()
                 || metadata.uid() != nix::unistd::Uid::effective().as_raw()
@@ -599,7 +599,7 @@ impl Store {
             self.engine_path
                 .parent()
                 .ok_or(io::ErrorKind::InvalidInput)?,
-            &self._directory_lease,
+            &self.directory_lease,
         )?;
         write_public(
             &self.engine_path,
@@ -623,7 +623,7 @@ impl Store {
         }
         let _writer = lock_mesh_store_writer(
             self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?,
-            &self._directory_lease,
+            &self.directory_lease,
         )?;
         if self.key_path.exists() {
             return Err(io::ErrorKind::AlreadyExists.into());
@@ -641,7 +641,7 @@ impl Store {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let parent = self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-        let _writer = lock_mesh_store_writer(parent, &self._directory_lease)?;
+        let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
         if self
             .read_private_key()?
             .is_some_and(|current| current.as_slice() == key)
@@ -705,7 +705,7 @@ impl Store {
     pub fn remove_private_key(&self) -> io::Result<()> {
         let _writer = lock_mesh_store_writer(
             self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?,
-            &self._directory_lease,
+            &self.directory_lease,
         )?;
         if self.read_private_key()?.is_none() {
             return Ok(());
@@ -722,7 +722,7 @@ impl Store {
             self.route_path
                 .parent()
                 .ok_or(io::ErrorKind::InvalidInput)?,
-            &self._directory_lease,
+            &self.directory_lease,
         )?;
         let mut previous = self.route_body.lock().map_err(|_| io::ErrorKind::Other)?;
         if *previous != body {
@@ -808,7 +808,7 @@ impl Store {
         // lease; migration takes the exclusive directory lock only after every Store closes.
         let _writer = lock_mesh_store_writer(
             self.path.parent().ok_or(io::ErrorKind::InvalidInput)?,
-            &self._directory_lease,
+            &self.directory_lease,
         )?;
         // No-config intent carries no access revision. Avoid parsing the old file
         // so explicit off can replace unreadable retained state; peer-bearing and
@@ -920,7 +920,7 @@ impl Store {
         match self.save(state) {
             Ok(()) => Ok(()),
             Err(atomic_error) => {
-                write_public_in_place(&self.path, &body, &self._directory_lease).inspect_err(
+                write_public_in_place(&self.path, &body, &self.directory_lease).inspect_err(
                     |fallback_error| {
                         tracing::error!(
                             atomic_error_kind = ?atomic_error.kind(),
