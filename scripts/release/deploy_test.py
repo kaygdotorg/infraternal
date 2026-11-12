@@ -159,6 +159,40 @@ class DeploymentTests(unittest.TestCase):
             "pre-upgrade snapshots must not contain Mesh rotation secrets",
         )
 
+    def test_pre_upgrade_snapshot_excludes_crash_left_mesh_secret_staging_copies(self):
+        """Keep key and journal staging copies out of snapshots after an abrupt stop."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+
+        staging = {
+            ".mesh-private-key.migrate-4242-nonce.new": b"synthetic-migration-key-copy",
+            "mesh-private-key.4242.new": b"synthetic-writer-key-copy",
+            ".mesh-key-rotation.bin.migrate-4242-nonce.new": b"synthetic-migration-journal-copy",
+            "mesh-key-rotation.4242.new": b"synthetic-writer-journal-copy",
+        }
+        for index, (name, secret) in enumerate(staging.items()):
+            path = mesh / name
+            path.write_bytes(secret)
+            path.chmod(0o600)
+            os.link(path, data / f"backup-selected-secret-{index}")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = [
+            path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ]
+        self.assertFalse(
+            any(secret in saved for saved in saved_files for secret in staging.values()),
+            "pre-upgrade snapshots must omit crash-left Mesh secret staging copies",
+        )
+
     def test_d295_rollback_restores_latest_mesh_state_before_old_binary_starts(self):
         """Make the old binary's legacy Mesh path ready before a warm rollback."""
         root = self.root / "deployment"
