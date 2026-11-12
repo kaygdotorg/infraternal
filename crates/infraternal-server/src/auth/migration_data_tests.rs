@@ -251,7 +251,6 @@ async fn theme_chosen_migration_marks_existing_looks_chosen_and_leaves_the_rest(
                 .unwrap()
         }
     };
-    let head = "SELECT json_extract(document,'$.look.themeChosen') FROM canvas_heads WHERE account=";
     assert_eq!(
         chosen("SELECT CAST(json_extract(document,'$.look.themeChosen') AS TEXT) FROM canvas_heads WHERE account='has-look'").await.as_deref(),
         Some("1")
@@ -259,7 +258,7 @@ async fn theme_chosen_migration_marks_existing_looks_chosen_and_leaves_the_rest(
     assert_eq!(
         chosen("SELECT CAST(json_extract(document,'$.look.themeChosen') AS TEXT) FROM canvas_heads WHERE account='no-look'").await,
         None,
-        "an account without a look gets none ({head}...)"
+        "an account without a look gets none"
     );
     assert_eq!(
         chosen("SELECT CAST(json_extract(document,'$.look.themeChosen') AS TEXT) FROM canvas_heads WHERE account='flagged'").await.as_deref(),
