@@ -422,19 +422,20 @@ impl Frame {
     }
 }
 
-/// Put a fresh `InputAck` before wholly unstarted raw `Output` while keeping earlier acknowledgments ordered.
+/// Put a fresh input reply before wholly unstarted raw `Output` while keeping earlier replies ordered.
 ///
 /// A partially written frame cannot be moved without corrupting the wire
-/// stream. Non-Ack control frames are ordering fences, so this only crosses
-/// zero or more complete `InputAck` frames before the first unstarted `Output`.
+/// stream. Other control frames are ordering fences, so this only crosses zero
+/// or more complete `InputAck`/`InputState` frames before the first unstarted
+/// `Output`. This also keeps liveness replies from waiting behind a flood.
 /// # Errors
-/// Returns the encoder error if the small Ack frame cannot be encoded.
-pub(crate) fn insert_input_ack_before_unstarted_output(
+/// Returns the encoder error if the small reply frame cannot be encoded.
+pub(crate) fn insert_input_reply_before_unstarted_output(
     wire: &mut Vec<u8>,
     written: usize,
-    sequence: u64,
+    reply: &Frame,
 ) -> io::Result<bool> {
-    if written != 0 {
+    if written != 0 || !matches!(reply, Frame::InputAck(_) | Frame::InputState(_, _)) {
         return Ok(false);
     }
 
@@ -458,18 +459,18 @@ pub(crate) fn insert_input_ack_before_unstarted_output(
             return Ok(false);
         }
         match FrameRef::decode(&wire[insertion + 4..frame_end])? {
-            FrameRef::Owned(Frame::InputAck(_)) => insertion = frame_end,
+            FrameRef::Owned(Frame::InputAck(_) | Frame::InputState(_, _)) => insertion = frame_end,
             FrameRef::Output(_, _) => break,
             _ => return Ok(false),
         }
     }
 
-    let ack = Frame::InputAck(sequence).encode()?;
+    let reply = reply.encode()?;
     let old_len = wire.len();
-    wire.reserve(ack.len());
-    wire.resize(old_len + ack.len(), 0);
-    wire.copy_within(insertion..old_len, insertion + ack.len());
-    wire[insertion..insertion + ack.len()].copy_from_slice(&ack);
+    wire.reserve(reply.len());
+    wire.resize(old_len + reply.len(), 0);
+    wire.copy_within(insertion..old_len, insertion + reply.len());
+    wire[insertion..insertion + reply.len()].copy_from_slice(&reply);
     Ok(true)
 }
 

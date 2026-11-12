@@ -21,7 +21,11 @@
 //! key is acknowledged, its capture waits one 8 ms terminal frame so the PTY
 //! program can render the echo. The 250 ms starvation deadline stays independent
 //! of this repaint grace. A key preempts only when raw output has spent credit,
-//! so a small quiet write alone does not trigger a repaint.
+//! so a small quiet write alone does not trigger a repaint. The bounded writer
+//! priority lane sends only shim-confirmed key acknowledgments and credit-approved
+//! Snapshots; it drops or trims only same-stream raw bytes covered by the cursor.
+//! A 1 MiB Snapshot may borrow from the bulk output it replaces, while a hostile
+//! key burst still shares the same finite credit ledger and coalesced capture.
 //! A closed shim or failed terminal task closes only its mux stream. A session
 //! whose shim is gone answers its stream with the final Close 4404 (#158).
 use crate::{
@@ -36,7 +40,7 @@ use serde::Deserialize;
 use std::{collections::HashMap, io, path::PathBuf, sync::Arc, time::Instant};
 
 pub use crate::daemon_writer::approximate_snapshots_total;
-use crate::daemon_writer::{Message, reply, writer};
+use crate::daemon_writer::{Message, PRIORITY_CAPACITY, PriorityMessage, reply, writer};
 #[cfg(test)]
 use crate::{daemon_writer::deferred_reply, transport::Transmit};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -662,6 +666,16 @@ async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
         .map_err(|_| io::ErrorKind::BrokenPipe.into())
 }
 
+/// Queue a trusted key acknowledgment or repaint on the bounded writer priority lane.
+async fn emit_priority(
+    tx: &mpsc::Sender<PriorityMessage>,
+    message: PriorityMessage,
+) -> io::Result<()> {
+    tx.send(message)
+        .await
+        .map_err(|_| io::ErrorKind::BrokenPipe.into())
+}
+
 /// Publishes the authoritative live-shim set without ever parking terminal dispatch on a slow writer.
 /// True establishes the ordered open fence; false leaves the census pending for retry.
 fn publish_session_snapshot(
@@ -980,6 +994,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
     };
     let (tx, rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
+    let (priority, priority_rx) = mpsc::channel(PRIORITY_CAPACITY);
     #[cfg(test)]
     let control_observer = census_retry_tests::observer(&state);
 
@@ -1208,9 +1223,10 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             let (cancel, cancelled) = oneshot::channel();
                             streams.insert(stream, Stream { commands, _cancel: cancel });
                             let tx = tx.clone();
+                            let priority = priority.clone();
                             jobs.spawn(async move {
                                 let result = tokio::select! {
-                                    result = terminal(path, id, stream, last_out_seq, last_in_seq, rx, tx) => result,
+                                    result = terminal_with_priority(path, id, stream, last_out_seq, last_in_seq, rx, tx, priority) => result,
                                     _ = cancelled => Ok(()),
                                 };
                                 (stream, result)
@@ -1256,6 +1272,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
             socket,
             rx,
             Some(control_rx),
+            Some(priority_rx),
             true,
             renewal.is_some(),
             crate::daemon_writer::supports_identity_rotation(renewal),
@@ -1371,6 +1388,7 @@ async fn run_bound_terminal_mode(
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
     let path = sessions::rendezvous(&state, id);
     let (tx, rx) = mpsc::channel(8);
+    let (priority, priority_rx) = mpsc::channel(PRIORITY_CAPACITY);
     let (commands, command_rx) = mpsc::channel(8);
     let dispatch = async {
         loop {
@@ -1406,12 +1424,12 @@ async fn run_bound_terminal_mode(
             }
         }
     };
-    let writer = writer(channel, rx, None, false, false, false, 0);
+    let writer = writer(channel, rx, None, Some(priority_rx), false, false, false, 0);
     tokio::pin!(writer);
     tokio::select! {
         result = dispatch => result,
         result = &mut writer => result,
-        result = terminal_mode(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx, primed) => {
+        result = terminal_mode(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx, priority, primed) => {
             result?;
             // Successful terminal returns can queue a final Close (gone session,
             // unsupported shim or refused request). Its sole sender is now gone:
@@ -1607,6 +1625,24 @@ async fn relink(
 }
 
 /// All relay errors preserve a sealed exit, including incomplete final handshakes.
+async fn terminal_with_priority(
+    path: PathBuf,
+    id: [u8; 16],
+    stream: u32,
+    cursor: u64,
+    last_input: u64,
+    commands: session_commands::Receiver,
+    tx: mpsc::Sender<Message>,
+    priority: mpsc::Sender<PriorityMessage>,
+) -> io::Result<()> {
+    terminal_mode(
+        path, id, stream, cursor, last_input, commands, tx, priority, false,
+    )
+    .await
+}
+
+/// Preserve existing terminal fixtures while collecting priority replies into their FIFO.
+#[cfg(test)]
 async fn terminal(
     path: PathBuf,
     id: [u8; 16],
@@ -1616,7 +1652,39 @@ async fn terminal(
     commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
-    terminal_mode(path, id, stream, cursor, last_input, commands, tx, false).await
+    let (priority, mut priority_rx) = mpsc::channel(PRIORITY_CAPACITY);
+    let forwarded = tx.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(message) = priority_rx.recv().await {
+            match message {
+                PriorityMessage::InputAck { stream, seq, .. } => {
+                    emit(&forwarded, Message::Shim(stream, Shim::InputAck(seq))).await?;
+                }
+                PriorityMessage::Snapshot {
+                    stream,
+                    seq,
+                    bytes,
+                    approximate,
+                    notice,
+                } => {
+                    if let Some(notice) = notice {
+                        emit(&forwarded, Message::Event(stream, notice)).await?;
+                    }
+                    let frame = if approximate {
+                        Shim::SnapshotWithFlags(seq, 1, bytes)
+                    } else {
+                        Shim::Snapshot(seq, bytes)
+                    };
+                    emit(&forwarded, Message::Shim(stream, frame)).await?;
+                }
+            }
+        }
+        Ok::<(), io::Error>(())
+    });
+    let result =
+        terminal_with_priority(path, id, stream, cursor, last_input, commands, tx, priority).await;
+    collector.await.map_err(io::Error::other)??;
+    result
 }
 
 async fn terminal_mode(
@@ -1627,6 +1695,7 @@ async fn terminal_mode(
     last_input: u64,
     commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
+    priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
 ) -> io::Result<()> {
     match terminal_run(
@@ -1637,6 +1706,7 @@ async fn terminal_mode(
         last_input,
         commands,
         tx.clone(),
+        priority,
         primed,
     )
     .await
@@ -1662,6 +1732,7 @@ async fn terminal_run(
     last_input: u64,
     mut commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
+    priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
 ) -> io::Result<()> {
     // Install ownership before output requests can exhaust credit. Dropping this
@@ -1843,16 +1914,41 @@ async fn terminal_run(
                     };
                     if repainted.is_ok() {
                         deadline = None;
-                        if approximate {
-                            let json = terminal_events::Notice::Snapshot {
-                                session_id: uuid::Uuid::from_bytes(id),
-                                seq,
-                                approximate: true,
+                        let notice = if approximate {
+                            Some(
+                                terminal_events::Notice::Snapshot {
+                                    session_id: uuid::Uuid::from_bytes(id),
+                                    seq,
+                                    approximate: true,
+                                }
+                                .json()?,
+                            )
+                        } else {
+                            None
+                        };
+                        if reserved {
+                            let (Shim::Snapshot(_, bytes) | Shim::SnapshotWithFlags(_, _, bytes)) =
+                                frame
+                            else {
+                                return Err(sessions::invalid("invalid key repaint Snapshot"));
+                            };
+                            emit_priority(
+                                &priority,
+                                PriorityMessage::Snapshot {
+                                    stream,
+                                    seq,
+                                    bytes,
+                                    approximate,
+                                    notice,
+                                },
+                            )
+                            .await?;
+                        } else {
+                            if let Some(notice) = notice {
+                                emit(&tx, Message::Event(stream, notice)).await?;
                             }
-                            .json()?;
-                            emit(&tx, Message::Event(stream, json)).await?;
+                            emit(&tx, Message::Shim(stream, frame)).await?;
                         }
-                        emit(&tx, Message::Shim(stream, frame)).await?;
                         if replay_until.is_some_and(|fence| seq >= fence) {
                             // Repaint bytes contain state through seq, so the
                             // ordered completion event uses the repaint cursor.
@@ -2130,7 +2226,19 @@ async fn terminal_run(
                         if key_repaint_target.is_some() && key_repaint_requested.is_none() => {}
                     frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
                     Shim::InputAck(seq) => {
-                        emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
+                        if key_repaint_target.is_some() {
+                            emit_priority(
+                                &priority,
+                                PriorityMessage::InputAck {
+                                    stream,
+                                    seq,
+                                    output_cursor: output.cursor(),
+                                },
+                            )
+                            .await?;
+                        } else {
+                            emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
+                        }
                         let ack_advanced = seq > acknowledged;
                         acknowledged = acknowledged.max(seq);
                         if let Some(target) = key_repaint_target

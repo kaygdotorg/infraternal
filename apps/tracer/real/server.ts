@@ -101,14 +101,22 @@ export interface Bridge {
     type: "Input" | "Output" | "Credit" | "Ack" | "Snapshot";
     bytes: number;
     sequence?: string;
+    /** Outstanding grant balance when this Input reached the production server. */
+    creditBalance?: number;
     at: number;
   }>;
   /** Optional direction:stage:type keys that keep a busy trace within its fixed event limit. */
   flowFilter?: ReadonlySet<string>;
+  /** Skip output text decoding and retention after content assertions finish. */
+  skipOutputText?: boolean;
   /** Total Output and Snapshot bytes seen without retaining their contents. */
   outputBytesSeen?: number;
   /** Cumulative raw Output bytes by stream, excluding Snapshot replacements. */
   rawOutputBytesSeen?: Map<number, number>;
+  /** Credit grants accepted by the server for each stream, for flow-control measurements. */
+  creditGrantedByStream?: Map<number, number>;
+  /** Output and Snapshot bytes charged by the server for each stream. */
+  creditSpentByStream?: Map<number, number>;
   /** Optional terminal recovery events and closes, enabled only by focused redraw traces. */
   terminalEvents?: Array<{ stream: number; type: string; at: number }>;
   terminalCloses?: Array<{ stream: number; code: number; reason: string; at: number }>;
@@ -187,6 +195,8 @@ type FlowNote = {
   type: "Input" | "Output" | "Credit" | "Ack" | "Snapshot";
   bytes: number;
   sequence?: string;
+  /** Outstanding grant balance when an Input reaches the production server. */
+  creditBalance?: number;
 };
 
 /** The largest content-free frame trace retained by one bridge. */
@@ -211,10 +221,24 @@ function recordFlow(
   stage: NonNullable<Bridge["flowTimes"]>[number]["stage"],
   note: FlowNote,
 ): void {
+  let tracedNote = note;
+  if (direction === "up" && stage === "backend-send" && note.type === "Credit") {
+    const granted = bridge.creditGrantedByStream;
+    if (granted) granted.set(note.stream, (granted.get(note.stream) ?? 0) + note.bytes);
+  }
+  if (direction === "down" && stage === "backend-receive" && (note.type === "Output" || note.type === "Snapshot")) {
+    const spent = bridge.creditSpentByStream;
+    if (spent) spent.set(note.stream, (spent.get(note.stream) ?? 0) + note.bytes);
+  }
+  if (direction === "up" && stage === "backend-send" && note.type === "Input") {
+    const granted = bridge.creditGrantedByStream?.get(note.stream) ?? 0;
+    const spent = bridge.creditSpentByStream?.get(note.stream) ?? 0;
+    tracedNote = { ...note, creditBalance: granted - spent };
+  }
   if (bridge.flowFilter && !bridge.flowFilter.has(`${direction}:${stage}:${note.type}`)) return;
   const times = bridge.flowTimes;
   if (!times || times.length >= FLOW_TRACE_LIMIT) return;
-  times.push({ direction, stage, ...note, at: performance.timeOrigin + performance.now() });
+  times.push({ direction, stage, ...tracedNote, at: performance.timeOrigin + performance.now() });
 }
 
 /**
@@ -403,6 +427,8 @@ export async function startRealServer(options: {
         bridge.flowTimes = [];
         bridge.outputBytesSeen = 0;
         bridge.rawOutputBytesSeen = new Map();
+        bridge.creditGrantedByStream = new Map();
+        bridge.creditSpentByStream = new Map();
       }
       if (options.recordCloses) bridge.terminalCloses = [];
       if (process.env.REAL_OUTPUT_TIMES === "1") {
@@ -507,7 +533,7 @@ export async function startRealServer(options: {
             recordFlow(bridge, "down", "backend-receive", note);
             flow.push(note);
           }
-          if (lean) return;
+          if (lean || bridge.skipOutputText) return;
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") {
             const chunkText = text.decode(f.bytes, { stream: true });

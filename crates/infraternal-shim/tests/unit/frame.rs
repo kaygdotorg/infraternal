@@ -101,12 +101,14 @@ mod tests {
         }
     }
 
-    /// Keep a fresh Ack ahead of unstarted raw output without crossing a partial frame or state fence.
+    /// Keep a fresh input reply ahead of unstarted raw output, after prior replies, without crossing a partial frame.
     #[test]
-    fn input_ack_only_passes_unstarted_output() {
+    fn input_reply_passes_only_unstarted_output_after_prior_replies() {
         let output = Frame::Output(17, b"echo".to_vec());
         let mut wire = output.encode().unwrap();
-        assert!(insert_input_ack_before_unstarted_output(&mut wire, 0, 18).unwrap());
+        assert!(
+            insert_input_reply_before_unstarted_output(&mut wire, 0, &Frame::InputAck(18)).unwrap()
+        );
         assert_eq!(
             Decoder::default().feed(&wire).unwrap(),
             vec![Frame::InputAck(18), output.clone()]
@@ -114,7 +116,10 @@ mod tests {
 
         let mut partial = output.encode().unwrap();
         let original = partial.clone();
-        assert!(!insert_input_ack_before_unstarted_output(&mut partial, 1, 19).unwrap());
+        assert!(
+            !insert_input_reply_before_unstarted_output(&mut partial, 1, &Frame::InputAck(19))
+                .unwrap()
+        );
         assert_eq!(
             partial, original,
             "a partially written frame stays byte-for-byte intact"
@@ -122,11 +127,34 @@ mod tests {
 
         let mut state_fence = Frame::InputState(18, 19).encode().unwrap();
         state_fence.extend(output.encode().unwrap());
-        let original = state_fence.clone();
-        assert!(!insert_input_ack_before_unstarted_output(&mut state_fence, 0, 20).unwrap());
+        assert!(
+            insert_input_reply_before_unstarted_output(&mut state_fence, 0, &Frame::InputAck(20))
+                .unwrap()
+        );
         assert_eq!(
-            state_fence, original,
-            "Ack insertion cannot cross a state fence"
+            Decoder::default().feed(&state_fence).unwrap(),
+            vec![
+                Frame::InputState(18, 19),
+                Frame::InputAck(20),
+                output.clone()
+            ],
+            "a new reply stays after prior input replies"
+        );
+
+        let mut control_fence = Frame::Signal(2).encode().unwrap();
+        control_fence.extend(output.encode().unwrap());
+        let original = control_fence.clone();
+        assert!(
+            !insert_input_reply_before_unstarted_output(
+                &mut control_fence,
+                0,
+                &Frame::InputAck(21)
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            control_fence, original,
+            "input replies do not cross unrelated control frames"
         );
     }
 
@@ -139,7 +167,7 @@ mod tests {
         let mut wire = first.encode().unwrap();
         wire.extend(output.encode().unwrap());
 
-        assert!(insert_input_ack_before_unstarted_output(&mut wire, 0, 19).unwrap());
+        assert!(insert_input_reply_before_unstarted_output(&mut wire, 0, &second).unwrap());
 
         assert_eq!(
             Decoder::default().feed(&wire).unwrap(),

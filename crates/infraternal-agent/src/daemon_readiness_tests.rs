@@ -228,9 +228,18 @@ async fn mux_greeting_omits_cached_native_provider_capabilities() {
     let (bulk, bulk_rx) = mpsc::channel(1);
     drop(bulk);
     let (written, mut frames) = mpsc::unbounded_channel();
-    writer(&Capture(written), bulk_rx, None, true, false, false, 64)
-        .await
-        .unwrap();
+    writer(
+        &Capture(written),
+        bulk_rx,
+        None,
+        None,
+        true,
+        false,
+        false,
+        64,
+    )
+    .await
+    .unwrap();
     let bytes = frames.recv().await.unwrap();
     let greeting = infraternal_protocol::decode_muxed_frame(&bytes).unwrap();
     assert!(
@@ -265,6 +274,7 @@ async fn control_precedes_bulk_without_reordering_snapshot_notice() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            None,
             false,
             false,
             false,
@@ -404,6 +414,7 @@ async fn census_and_open_result_share_fifo_order() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            None,
             false,
             false,
             false,
@@ -647,6 +658,7 @@ async fn fixture_drops_output_left_over_from_the_previous_terminal() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            None,
             false,
             false,
             false,

@@ -13,6 +13,10 @@ use tokio::{task::JoinHandle, time::Instant};
 const MAX_WRITERS: usize = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
 const HEDGE_AFTER: Duration = Duration::from_millis(200);
 const SHADOW_CREDIT: u64 = 16 * 1024;
+/// Credit the attachment forwards separately so D381 can preserve its raw bulk window.
+const KEY_REPAINT_RESERVE_CREDIT: u64 = 64 * 1024;
+/// Maximum credit a primed relay may hold, including the D381 repaint reserve.
+const MAX_HEDGED_CREDIT: u64 = MAX_FRAME_LEN as u64 + KEY_REPAINT_RESERVE_CREDIT;
 
 struct Preparing {
     task: JoinHandle<Result<Shadow, AgentError>>,
@@ -240,6 +244,7 @@ impl State {
             }
         }
     }
+    /// Return when shadow priming needs another bounded flight for input or opening credit.
     fn deadline(&self, attachments: &HashMap<u64, AttachmentState>) -> Option<Instant> {
         let shadow = self.shadow.as_ref()?;
         let mut deadline = None;
@@ -259,7 +264,7 @@ impl State {
             let has_input = a.last_input_end > slot.sent.max(confirmed)
                 && slot.sent.saturating_sub(confirmed) < SHADOW_CREDIT;
             let when =
-                if slot.hedged && (has_input || slot.credit < a.credit.min(MAX_FRAME_LEN as u64)) {
+                if slot.hedged && (has_input || slot.credit < a.credit.min(MAX_HEDGED_CREDIT)) {
                     Some(Instant::now())
                 } else if !slot.hedged {
                     self.waiting
@@ -530,6 +535,7 @@ struct FlightPlan {
     credit: u64,
     sent: u64,
 }
+/// Build a bounded priming flight while keeping terminal input and credit in separate frames.
 fn flight_plan(a: &AttachmentState, slot: &Slot, native: bool) -> Result<FlightPlan, ()> {
     let confirmed = a.last_in_seq.max(slot.ack);
     let start = confirmed.max(slot.sent);
@@ -562,7 +568,7 @@ fn flight_plan(a: &AttachmentState, slot: &Slot, native: bool) -> Result<FlightP
         })?;
     }
     let target = a.credit.min(if slot.hedged {
-        MAX_FRAME_LEN as u64
+        MAX_HEDGED_CREDIT
     } else {
         SHADOW_CREDIT
     });
@@ -1075,6 +1081,7 @@ mod tests {
         );
     }
 
+    /// Keep the shadow's input window independent from the browser's repaint reserve.
     #[tokio::test]
     async fn shadow_input_and_snapshot_credit_have_independent_bounded_windows() {
         let (socket, mut peer) = UnixStream::pair().unwrap();
@@ -1109,7 +1116,7 @@ mod tests {
         assert!(state.hedge(&attachments).await);
         let followup = wire(&mut peer, &mut buffered).await;
         assert!(
-            matches!(decode_muxed_frame(&followup).unwrap().frame, Frame::Credit { bytes } if u64::from(bytes) == MAX_FRAME_LEN as u64 - SHADOW_CREDIT)
+            matches!(decode_muxed_frame(&followup).unwrap().frame, Frame::Credit { bytes } if u64::from(bytes) == MAX_FRAME_LEN as u64 + 1024 - SHADOW_CREDIT)
         );
         let _ = state.flights.next().await;
         assert!(
@@ -1130,6 +1137,62 @@ mod tests {
             matches!(decode_muxed_frame(&next_input).unwrap().frame, Frame::Input { in_seq: 16384, bytes } if bytes.len() == usize::try_from(SHADOW_CREDIT).unwrap())
         );
         assert_eq!(attachments[&1].credit, MAX_FRAME_LEN as u64 + 1024);
+    }
+
+    /// A hedged opening flight carries the browser's separate repaint reserve to the relay.
+    #[test]
+    fn hedged_flight_forwards_the_key_repaint_reserve() {
+        let (mut attachment, _) = attachment();
+        attachment.unacknowledged.clear();
+        attachment.last_input_end = 0;
+        attachment.credit = MAX_FRAME_LEN as u64 + KEY_REPAINT_RESERVE_CREDIT;
+        let slot = Slot {
+            session: attachment.session_id,
+            ack: 0,
+            hedged: true,
+            credit: MAX_FRAME_LEN as u64,
+            ready: true,
+            sent: 0,
+            born: Instant::now(),
+        };
+
+        let plan = flight_plan(&attachment, &slot, true).unwrap();
+        assert_eq!(
+            plan.credit,
+            MAX_FRAME_LEN as u64 + KEY_REPAINT_RESERVE_CREDIT
+        );
+        assert!(matches!(
+            infraternal_protocol::decode_frame(&plan.frames[0]).unwrap().frame,
+            infraternal_protocol::Frame::Credit { bytes }
+                if u64::from(bytes) == KEY_REPAINT_RESERVE_CREDIT
+        ));
+    }
+
+    /// The relay keeps priming until it has forwarded the reserve after the bulk window.
+    #[tokio::test]
+    async fn hedged_credit_deadline_includes_the_key_repaint_reserve() {
+        let (socket, _) = UnixStream::pair().unwrap();
+        let mut state = State::default();
+        state.shadow = Some(shadow(socket));
+        let (mut attachment, _) = attachment();
+        attachment.unacknowledged.clear();
+        attachment.last_input_end = 0;
+        attachment.credit = MAX_FRAME_LEN as u64 + KEY_REPAINT_RESERVE_CREDIT;
+        let slot = state
+            .shadow
+            .as_mut()
+            .unwrap()
+            .slots
+            .get_mut(&attachment.stream_id)
+            .unwrap();
+        slot.hedged = true;
+        slot.credit = MAX_FRAME_LEN as u64;
+
+        assert!(
+            state
+                .deadline(&HashMap::from([(1u64, attachment)]))
+                .is_some()
+        );
     }
 
     #[tokio::test]

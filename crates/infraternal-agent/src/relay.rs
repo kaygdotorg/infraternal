@@ -6,14 +6,23 @@
 //! and ring, and requests replay when credit returns. No idle timer runs.
 //!
 //! Raw output may spend only the ordinary 1 MiB bulk window. A relay attached
-//! for the tracer also protects 64 KiB for an input-triggered repaint. A
+//! for the tracer also protects 64 KiB for an input-triggered repaint. Shadow
+//! priming can split the opening grant into a small part and a large remainder,
+//! so reserve negotiation stays pending until the relay sees credit above the
+//! ordinary window. A legacy 1 MiB grant keeps its full bulk allowance. A
 //! Snapshot spends that reserve first, then unused capped bulk credit, then
 //! credit from unreturned raw Output that the client discards when it accepts
 //! the Snapshot. Each granted byte can fund at most one sent frame: a raw byte
 //! backs at most one replacement, and borrowed bytes become debt until credit
 //! returns. Returned credit pays repaint debt before it funds more output.
 //! Snapshots stay under the shim's 1 MiB frame cap. The unchanged 250 ms path
-//! uses ordinary bulk credit, and every `Output` owns its own budgets.
+//! uses ordinary bulk credit, and every `Output` owns its own budgets. Input
+//! cannot create credit: while a repaint is pending, later keys coalesce to the
+//! latest input offset, and each Snapshot must fit the remaining reserve, unused
+//! bulk credit and replaceable raw bytes after outstanding debt. Repaint
+//! accounting is per stream, so one session never spends or returns another
+//! session's credit. The terminal writer keeps each key's shim-confirmed
+//! acknowledgment ahead of the Snapshot containing its echo.
 
 use infraternal_shim::frame::MAX_FRAME;
 use std::{
@@ -30,9 +39,9 @@ pub const REPAINT_RESERVE: u32 = 64 * 1024;
 pub const KEY_REPAINT_BACKLOG: u64 = 16 * 1024;
 /// Maximum bulk credit raw output may spend in a reserved relay.
 const BULK_WINDOW: u64 = 1024 * 1024;
-/// Reserve setup state before the first client credit grant is inspected.
+/// Reserve setup state until a grant proves the client offered credit above the bulk window.
 const RESERVE_WAITING_FOR_INITIAL_CREDIT: u8 = 1;
-/// Reserve setup state after the client grants the full bulk and repaint budgets.
+/// Reserve setup state after a grant proves the repaint budget is available.
 const RESERVE_ACTIVE: u8 = 2;
 
 /// Invalid sequence arithmetic, ordering, or credit consumption.
@@ -172,7 +181,13 @@ impl Output {
         }
     }
 
-    /// Grant bounded cumulative credit, paying any replacement repaint debt first.
+    /// Grant bounded credit, paying any replacement repaint debt first.
+    ///
+    /// Shadow priming may split the browser's opening grant into a small first
+    /// part and a large remainder. Keep reserve negotiation pending across the
+    /// small part; a grant above the ordinary bulk window proves that the
+    /// reserve is present. A returned frame from a legacy 1 MiB window cannot
+    /// exceed that single-frame cap.
     /// # Errors
     /// Rejects a credit counter overflow without mutating state.
     pub fn grant(&mut self, bytes: u32) -> Result<(), Error> {
@@ -190,14 +205,10 @@ impl Output {
         let already_replaced = self.raw_in_flight - self.raw_replacement_credit;
         self.raw_replacement_credit -= raw_repaid.saturating_sub(already_replaced);
         self.raw_in_flight -= raw_repaid;
-        if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT && bytes > 0 {
-            self.reserve_mode = if u64::from(bytes) >= BULK_WINDOW + u64::from(REPAINT_RESERVE) {
-                self.repaint_reserve = REPAINT_RESERVE;
-                RESERVE_ACTIVE
-            } else {
-                self.repaint_reserve = 0;
-                0
-            };
+        if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT && u64::from(bytes) > BULK_WINDOW
+        {
+            self.repaint_reserve = REPAINT_RESERVE;
+            self.reserve_mode = RESERVE_ACTIVE;
         } else if self.reserve_mode == RESERVE_ACTIVE {
             self.repaint_reserve = self
                 .repaint_reserve

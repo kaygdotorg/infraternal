@@ -42,13 +42,17 @@ const QUIET_PAINT_KEYS = Number(process.env.REAL_QUIET_PAINT_KEYS ?? 200);
 const FLOOD_PAINT_KEYS = 200;
 /** The raw-output window that must be spent before a key belongs to the blocked-flood sample. */
 const BULK_WINDOW_BYTES = 1024 * 1024;
+/** The browser reserves this part of its opening grant for an input-triggered repaint. */
+const REPAINT_RESERVE_BYTES = 64 * 1024;
+/** The complete opening grant includes the repaint reserve beside the raw bulk window. */
+const INITIAL_CREDIT_BYTES = BULK_WINDOW_BYTES + REPAINT_RESERVE_BYTES;
 /** A key whose token has not arrived after this long counts as a typing freeze. */
 const FREEZE_MS = 15_000;
-/** Bound the flood paint batch and let short diagnostic runs retain their partial stage trace. */
-const FLOOD_PAINT_TIMEOUT_MS = Number(process.env.REAL_FLOOD_PAINT_TIMEOUT_MS ?? 150_000);
+/** Allow all 200 serial paint samples to finish at the shaped 300 ms round trip. */
+const FLOOD_PAINT_TIMEOUT_MS = Number(process.env.REAL_FLOOD_PAINT_TIMEOUT_MS ?? 720_000);
 
 test.beforeAll(async ({ browser }) => {
-  server = await startRealServer({ latencyMs: 150, recordFlow: true });
+  server = await startRealServer({ latencyMs: 150, recordFlow: true, recordCloses: true });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
   page = await context.newPage();
   const cdp = await context.newCDPSession(page);
@@ -87,6 +91,11 @@ function terminalStream(): { output: Map<number, string>; acked: Map<number, big
   const stream = [...(bridge?.attached.keys() ?? [])][0];
   if (!bridge || stream === undefined) throw new Error("no attached terminal stream");
   return { output: bridge.output, acked: bridge.acked, stream };
+}
+
+/** Credit the live relay has received, minus its Output and Snapshot charges. */
+function serverCreditBalance(bridge: ReturnType<typeof terminalBridge>, stream: number): number {
+  return (bridge.creditGrantedByStream?.get(stream) ?? 0) - (bridge.creditSpentByStream?.get(stream) ?? 0);
 }
 
 /** The newest token seen so far; tokens are trimmed from the bridge's text once they have been read. */
@@ -130,6 +139,18 @@ function probeP99(report: string): number {
   return Number(match[1]);
 }
 
+/** Finish when all requested keys paint, or surface the probe's own timeout with its partial trace. */
+async function waitForPaintedEchoes(page: Page, count: number, timeoutMs: number): Promise<void> {
+  const outcome = await page.waitForFunction((expected: number) => {
+    const results = document.querySelector("#probe-results")?.textContent ?? "";
+    if (results.includes(`Painted echoes: ${expected} / ${expected}`)) return "complete";
+    const message = document.querySelector("#probe-message")?.textContent ?? "";
+    return message.startsWith("Timed out after") ? message : false;
+  }, count, { timeout: timeoutMs, polling: 50 });
+  const result = await outcome.jsonValue();
+  if (result !== "complete") throw new Error(`paint probe ended before all ${count} echoes: ${String(result)}`);
+}
+
 test("keys typed into a terminal that its own program floods keep showing on screen", async () => {
   test.setTimeout(240_000);
   await expect.poll(() => server.bridges.filter((b) => !b.closed).at(-1)?.attached.size ?? 0).toBe(1);
@@ -162,9 +183,10 @@ test("keys typed into a terminal that its own program floods keep showing on scr
 });
 
 test("measures 200 same-session keydown-to-paint samples through the 300 ms profile", async () => {
-  test.setTimeout(420_000);
+  test.setTimeout(900_000);
   await expect.poll(() => activeTerminalBridge()?.attached.size ?? 0, { timeout: FREEZE_MS }).toBe(1);
   const bridge = terminalBridge();
+  const { stream } = terminalStream();
   const probePanel = page.locator("#probe-panel");
   await probePanel.evaluate((element) => { (element as HTMLElement).hidden = true; });
   await page.locator(".terminal-host").first().click({ position: { x: 60, y: 60 } });
@@ -193,30 +215,79 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   await expect(page.locator("#probe-run")).toBeEnabled({ timeout: FREEZE_MS });
   console.log("SAME_SESSION_PAINT_STAGE reset_complete");
 
-  const { stream } = terminalStream();
+  // Priming may split the opening grant, so use the settled outstanding balance
+  // instead of assuming the first Credit frame contains the whole window.
+  await expect.poll(() => serverCreditBalance(bridge, stream), {
+    timeout: FREEZE_MS,
+    intervals: [10],
+  }).toBe(INITIAL_CREDIT_BYTES);
+  const openingCreditFrames = (bridge.flowTimes ?? [])
+    .filter((event) => event.stream === stream && event.direction === "up"
+      && event.stage === "backend-send" && event.type === "Credit")
+    .slice(0, 8)
+    .map(({ bytes, at }) => ({ bytes, at }));
+  console.log("SAME_SESSION_OPENING_CREDIT " + JSON.stringify({ openingCreditFrames }));
   const rawOutput = bridge.rawOutputBytesSeen;
   if (!rawOutput) throw new Error("the real-server trace did not count raw Output by stream");
   const floodStartBytes = rawOutput.get(stream) ?? 0;
-  console.log("SAME_SESSION_PAINT_STAGE flood_key_begin");
-  await page.keyboard.press("F");
-  console.log("SAME_SESSION_PAINT_STAGE flood_key_sent");
-  // Finish all probe setup before the flood. Count only this terminal's raw
-  // Output bytes, then dispatch as soon as its 1 MiB bulk window has been sent.
-  await expect.poll(() => (rawOutput.get(stream) ?? 0) - floodStartBytes, {
-    timeout: FREEZE_MS,
-    intervals: [5],
-  }).toBeGreaterThanOrEqual(BULK_WINDOW_BYTES);
-  console.log(`SAME_SESSION_PAINT_STAGE raw_bulk_window_spent stream=${stream} bytes=${(rawOutput.get(stream) ?? 0) - floodStartBytes}`);
-
-  // Prior quiet keys filled the recorder. Start a focused trace at the input
-  // boundary so measured keys retain their Input, Ack, Snapshot and Credit events.
+  // Preserve frame counters and stage times, but avoid retaining flood text in
+  // the single-threaded test bridge. This measurement only consumes the raw
+  // byte count and the focused Input/Ack/Snapshot/Credit trace below.
+  bridge.skipOutputText = true;
   bridge.flowFilter = new Set([
     "up:backend-send:Input",
     "down:backend-receive:Ack",
     "down:backend-receive:Snapshot",
+    "down:browser-send:Ack",
+    "down:browser-send:Snapshot",
     "up:backend-send:Credit",
   ]);
   bridge.flowTimes?.splice(0);
+  console.log("SAME_SESSION_PAINT_STAGE flood_key_begin");
+  await page.keyboard.press("F");
+  console.log("SAME_SESSION_PAINT_STAGE flood_key_sent");
+  // Observe one full raw window on the selected stream and keep the original
+  // route attached. The browser's outstanding balance cannot prove the relay's
+  // repaint reserve: a Snapshot can spend it and a paint callback can return
+  // credit while the flood immediately spends that credit again.
+  try {
+    await expect.poll(() => {
+      const rawSent = (rawOutput.get(stream) ?? 0) - floodStartBytes;
+      return rawSent >= BULK_WINDOW_BYTES
+        && activeTerminalBridge()?.id === bridge.id
+        && bridge.attached.has(stream);
+    }, {
+      timeout: FREEZE_MS,
+      intervals: [5],
+    }).toBe(true);
+  } catch (error) {
+    const bridges = server.bridges.slice(-4).map((entry) => ({
+      id: entry.id,
+      closed: entry.closed,
+      closedBy: entry.closedBy,
+      closedReason: entry.closedReason,
+      serverClose: entry.serverClose,
+      attachedStreams: [...entry.attached.keys()],
+      rawOutputBytesSeen: [...(entry.rawOutputBytesSeen ?? new Map())],
+      terminalCloses: entry.terminalCloses,
+      flowTail: entry.flowTimes?.slice(-24),
+    }));
+    console.error("SAME_SESSION_FILL_INCOMPLETE " + JSON.stringify({
+      measuredBridge: bridge.id,
+      measuredStream: stream,
+      measuredRawBytes: (rawOutput.get(stream) ?? 0) - floodStartBytes,
+      browserCreditBalance: serverCreditBalance(bridge, stream),
+      bridges,
+    }));
+    await page.screenshot({ path: test.info().outputPath("same-session-fill-incomplete.png") });
+    throw error;
+  }
+  console.log(`SAME_SESSION_PAINT_STAGE raw_bulk_window_observed stream=${stream} bytes=${(rawOutput.get(stream) ?? 0) - floodStartBytes} route=${bridge.id}`);
+  // Ignore the F command and any flow-control work from filling the window.
+  bridge.flowTimes?.splice(0);
+
+  // The focused trace already excludes flood output and starts at the first
+  // measured input.
   const flowStart = 0;
   const runButton = page.locator("#probe-run");
   await expect(runButton).toBeDisabled();
@@ -225,22 +296,45 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   await runButton.dispatchEvent("click");
   await expect(page.locator("#probe-message")).toHaveText("Sending synthetic keys. They are not followed by Enter.", { timeout: FREEZE_MS });
   try {
-    await expect(page.locator("#probe-results")).toContainText(`Painted echoes: ${FLOOD_PAINT_KEYS} / ${FLOOD_PAINT_KEYS}`, { timeout: FLOOD_PAINT_TIMEOUT_MS });
+    await waitForPaintedEchoes(page, FLOOD_PAINT_KEYS, FLOOD_PAINT_TIMEOUT_MS);
   } catch (error) {
     const flow = bridge.flowTimes?.slice(flowStart) ?? [];
+    const floodProbeTrace = await page.evaluate(() => ({
+      timeOriginMs: performance.timeOrigin,
+      samples: window.__tracerPerformanceProbe?.trace() ?? [],
+    }));
     const partial = {
       profile: "real-browser-150ms-each-way",
       phase: "flood-paint-incomplete",
       probe: {
         results: await page.locator("#probe-results").innerText(),
         message: await page.locator("#probe-message").innerText(),
+        timeOriginMs: floodProbeTrace.timeOriginMs,
+        samples: floodProbeTrace.samples,
       },
       relay: {
         inputs: flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Input"),
         acks: flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Ack"),
+        browserSends: flow.filter((event) => event.stream === stream && event.direction === "down" && event.stage === "browser-send"),
         credits: flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Credit"),
         snapshots: flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Snapshot"),
       },
+      bridges: server.bridges.slice(-4).map((entry) => ({
+        id: entry.id,
+        closed: entry.closed,
+        closedBy: entry.closedBy,
+        closedReason: entry.closedReason,
+        serverClose: entry.serverClose,
+        attachedStreams: [...entry.attached.keys()],
+        attachTimes: entry.attachTimes,
+        attachCursors: entry.attachCursors,
+        terminalEvents: entry.terminalEvents,
+        detached: entry.detached,
+        replays: entry.replays,
+        rawOutputBytesSeen: [...(entry.rawOutputBytesSeen ?? new Map())],
+        terminalCloses: entry.terminalCloses,
+        flowTail: entry.flowTimes?.slice(-32),
+      })),
     };
     await page.screenshot({ path: test.info().outputPath("same-session-paint-incomplete.png") });
     await writeFile(test.info().outputPath("same-session-paint-incomplete.json"), JSON.stringify(partial, null, 2));
@@ -249,8 +343,11 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
       message: partial.probe.message,
       inputs: partial.relay.inputs.length,
       acks: partial.relay.acks.length,
+      browserSends: partial.relay.browserSends.length,
       credits: partial.relay.credits.length,
       snapshots: partial.relay.snapshots.length,
+      samples: partial.probe.samples.length,
+      activeBridge: server.bridges.filter((entry) => !entry.closed).at(-1)?.id,
     }));
     throw error;
   }
@@ -275,6 +372,7 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   const inputs = flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Input" && event.stage === "backend-send");
   const acks = flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Ack" && event.stage === "backend-receive");
   const credits = flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Credit" && event.stage === "backend-send");
+  const browserSends = flow.filter((event) => event.stream === stream && event.direction === "down" && event.stage === "browser-send");
   const ackSpans = floodProbeTrace.samples.flatMap((sample) => {
     const input = inputs.find((candidate) => candidate.sequence === sample.id);
     if (!input || !sample.id) return [];
@@ -295,6 +393,53 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
     const snapshot = snapshots.find((candidate) => candidate.at >= input.at && (!nextInput || candidate.at < nextInput.at));
     return snapshot ? [snapshot.at - input.at] : [];
   });
+  const keydownToInputSpans = floodProbeTrace.samples.flatMap((sample) => {
+    const input = sample.id ? inputs.find((candidate) => candidate.sequence === sample.id) : undefined;
+    const keydown = sample.stages.keydown;
+    return input && keydown !== undefined
+      ? [input.at - (floodProbeTrace.timeOriginMs + keydown)]
+      : [];
+  });
+  const ackToSnapshotSpans = floodProbeTrace.samples.flatMap((sample, index) => {
+    const input = sample.id ? inputs.find((candidate) => candidate.sequence === sample.id) : undefined;
+    const nextId = floodProbeTrace.samples[index + 1]?.id;
+    const nextInput = nextId === undefined ? undefined : inputs.find((candidate) => candidate.sequence === nextId);
+    if (!input || !sample.id) return [];
+    const target = (BigInt(sample.id) + 1n).toString();
+    const ack = acks.find((candidate) => candidate.sequence === target && candidate.at >= input.at);
+    const snapshot = snapshots.find((candidate) => candidate.at >= (ack?.at ?? input.at)
+      && (!nextInput || candidate.at < nextInput.at));
+    return ack && snapshot ? [snapshot.at - ack.at] : [];
+  });
+  const snapshotToBrowserSendSpans = snapshots.flatMap((snapshot) => {
+    const sent = browserSends.find((candidate) => candidate.type === "Snapshot" && candidate.sequence === snapshot.sequence);
+    return sent ? [sent.at - snapshot.at] : [];
+  });
+  const browserSendToPaintSpans = floodProbeTrace.samples.flatMap((sample, index) => {
+    const input = sample.id ? inputs.find((candidate) => candidate.sequence === sample.id) : undefined;
+    const nextId = floodProbeTrace.samples[index + 1]?.id;
+    const nextInput = nextId === undefined ? undefined : inputs.find((candidate) => candidate.sequence === nextId);
+    const snapshot = input && snapshots.find((candidate) => candidate.at >= input.at
+      && (!nextInput || candidate.at < nextInput.at));
+    const sent = snapshot && browserSends.find((candidate) => candidate.type === "Snapshot"
+      && candidate.sequence === snapshot.sequence);
+    return sent && sample.stages.paint !== undefined
+      ? [floodProbeTrace.timeOriginMs + sample.stages.paint - sent.at]
+      : [];
+  });
+  // This is outstanding browser wire credit, not the relay's repaint budget:
+  // paint returns old raw bytes while the flood spends them again.
+  const serverCreditAtInputs = inputs.map((input) => input.creditBalance);
+  expect(keydownToInputSpans.length, "the server trace must pair every painted key with a sent Input")
+    .toBe(FLOOD_PAINT_KEYS);
+  expect(serverCreditAtInputs.length).toBe(FLOOD_PAINT_KEYS);
+  const firstInput = inputs[0];
+  const secondInput = inputs[1];
+  const firstSnapshot = firstInput && snapshots.find((candidate) => candidate.at >= firstInput.at
+    && (!secondInput || candidate.at < secondInput.at));
+  expect(firstSnapshot, "the first measured key must receive its key-triggered Snapshot").toBeDefined();
+  expect(flow.length, "the focused stage trace must retain all keys without storing continuous flood Output")
+    .toBeLessThan(FLOOD_PAINT_KEYS * 10);
   const trace = {
     profile: "real-browser-150ms-each-way",
     keysPerRun: 200,
@@ -303,15 +448,26 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
     growthMs: growth,
     targetMs: 1000 / 120,
     paintCallbackP99Ms: tracePaintP99,
+    keydownToInputP99Ms: p(keydownToInputSpans, 0.99),
     inputAckP99Ms: inputAckP99,
     inputSnapshotP99Ms: inputSnapshotSpans.length > 0 ? p(inputSnapshotSpans, 0.99) : null,
+    ackToSnapshotP99Ms: ackToSnapshotSpans.length > 0 ? p(ackToSnapshotSpans, 0.99) : null,
+    snapshotToBrowserSendP99Ms: snapshotToBrowserSendSpans.length > 0 ? p(snapshotToBrowserSendSpans, 0.99) : null,
+    browserSendToPaintP99Ms: browserSendToPaintSpans.length > 0 ? p(browserSendToPaintSpans, 0.99) : null,
+    serverCreditAtInputs,
+    flowEventCount: flow.length,
     probe: { quiet: quietReport, flood: floodReport, quietTrace: quietProbeTrace, floodTrace: floodProbeTrace },
-    relay: { inputs, acks, credits, snapshots },
+    relay: { inputs, acks, browserSends, credits, snapshots },
   };
   await writeFile(test.info().outputPath("same-session-paint-trace.json"), JSON.stringify(trace, null, 2));
+  await page.screenshot({ path: test.info().outputPath("same-session-paint.png") });
   console.log("SAME_SESSION_PAINT keys=200 quiet_p99_ms=" + quietP99.toFixed(2) +
     " flood_p99_ms=" + floodP99.toFixed(2) + " growth_ms=" + growth.toFixed(2) +
     " input_ack_p99_ms=" + inputAckP99.toFixed(2) +
+    " keydown_to_server_input_p99_ms=" + p(keydownToInputSpans, 0.99).toFixed(2) +
+    " ack_to_snapshot_p99_ms=" + (ackToSnapshotSpans.length > 0 ? p(ackToSnapshotSpans, 0.99).toFixed(2) : "none") +
+    " snapshot_to_browser_send_p99_ms=" + (snapshotToBrowserSendSpans.length > 0 ? p(snapshotToBrowserSendSpans, 0.99).toFixed(2) : "none") +
+    " browser_send_to_paint_p99_ms=" + (browserSendToPaintSpans.length > 0 ? p(browserSendToPaintSpans, 0.99).toFixed(2) : "none") +
     " paint_callback_p99_ms=" + tracePaintP99.toFixed(2) +
     " input_snapshot_p99_ms=" + (inputSnapshotSpans.length > 0 ? p(inputSnapshotSpans, 0.99).toFixed(2) : "none") +
     " target_ms=" + (1000 / 120).toFixed(2) + " snapshots=" + snapshots.length + " credits=" + credits.length +

@@ -252,7 +252,7 @@ impl Peer {
         self.written = 0;
         Ok(())
     }
-    /// Queue the current input reply, moving a fresh Ack ahead of only an unstarted raw Output.
+    /// Queue the current input reply, moving it ahead of only an unstarted raw Output.
     fn queue_input_reply(&mut self, written: u64, accepted: u64) -> io::Result<bool> {
         let Some(reply) = self.input_reply else {
             return Ok(false);
@@ -265,12 +265,11 @@ impl Peer {
             self.queue(&frame)?;
             true
         } else {
-            matches!(reply, InputReply::Ack)
-                && crate::frame::insert_input_ack_before_unstarted_output(
-                    &mut self.pending,
-                    self.written,
-                    written,
-                )?
+            crate::frame::insert_input_reply_before_unstarted_output(
+                &mut self.pending,
+                self.written,
+                &frame,
+            )?
         };
         if queued {
             self.input_reply = None;
@@ -462,6 +461,23 @@ mod input_ack_order_tests {
         assert_eq!(
             Decoder::default().feed(&peer.pending).unwrap(),
             vec![Frame::InputAck(5), output]
+        );
+        assert_eq!(peer.ack_queued, 5);
+        assert!(peer.input_reply.is_none());
+    }
+
+    /// Keep route-liveness state from waiting behind a wholly unstarted flood frame.
+    #[test]
+    fn state_reply_passes_an_unstarted_output_frame() {
+        let (mut peer, _client) = peer();
+        let output = Frame::Output(0, b"flood".to_vec());
+        peer.pending = output.encode().unwrap();
+        peer.input_reply = Some(InputReply::State);
+
+        assert!(peer.queue_input_reply(5, 5).unwrap());
+        assert_eq!(
+            Decoder::default().feed(&peer.pending).unwrap(),
+            vec![Frame::InputState(5, 5), output]
         );
         assert_eq!(peer.ack_queued, 5);
         assert!(peer.input_reply.is_none());

@@ -85,6 +85,7 @@ function setup(initialCount = 20) {
   const hooks = probe.hooks();
   const drop = controls.get("#probe-drop")!;
   const results = controls.get("#probe-results")!;
+  const message = controls.get("#probe-message")!;
   /** Resumes the link and paints the marker's echo `rtt` later, as one reconnect does. */
   const resume = (rtt: number) => {
     hooks.onAttached?.(true, terminal as unknown as TerminalClient);
@@ -92,7 +93,7 @@ function setup(initialCount = 20) {
     hooks.onPaintedOutput?.(new TextEncoder().encode(terminal.typed.at(-1)!), now, 0n);
   };
   const quiet = () => { hooks.onPaintedOutput?.(new Uint8Array(), now, 0n); advance(150); };
-  return { probe, terminal, hooks, drop, run: controls.get("#probe-run")!, results, resume, quiet };
+  return { probe, terminal, hooks, drop, run: controls.get("#probe-run")!, results, message, resume, quiet };
 }
 
 describe("PerformanceProbe forced drops", () => {
@@ -248,6 +249,36 @@ describe("PerformanceProbe key samples", () => {
     probe.dispose();
   });
 
+  test("keeps a slow 200-key paint profile alive for its full collection window", () => {
+    const { probe, run, results, message, quiet } = setup(200);
+    quiet();
+    run.click();
+
+    advance(140_001);
+    expect(results.textContent).toBe("Painted 0 / 200");
+
+    advance(579_998);
+    expect(message.textContent).toBe("Sending synthetic keys. They are not followed by Enter.");
+    advance(1);
+    expect(message.textContent).toBe("Timed out after 0 of 200 painted echoes.");
+    probe.dispose();
+  });
+
+  test("advances once per painted key while unrelated output keeps arriving", () => {
+    const { probe, terminal, hooks, run, quiet } = setup(3);
+    const encoder = new TextEncoder();
+    quiet();
+    run.click();
+    expect(terminal.typed).toEqual(["a"]);
+
+    hooks.onPaintedOutput?.(encoder.encode("a"), now, 1n);
+    hooks.onPaintedOutput?.(encoder.encode("!"), now, 2n);
+    advance(0);
+
+    expect(terminal.typed).toEqual(["a", "b"]);
+    probe.dispose();
+  });
+
   test("does not count a flood's `yes` output as the pending key echo", () => {
     const { probe, terminal, hooks, run, results, quiet } = setup(25);
     const encoder = new TextEncoder();
@@ -262,6 +293,30 @@ describe("PerformanceProbe key samples", () => {
 
     hooks.onPaintedOutput?.(encoder.encode("yes !"), now, 0n);
     expect(results.textContent).toBe("Painted 24 / 25");
+    probe.dispose();
+  });
+
+  test("does not count a key byte inside a terminal control string as a painted echo", () => {
+    const { probe, terminal, hooks, run, results, quiet } = setup(2);
+    const encoder = new TextEncoder();
+    quiet();
+    run.click();
+    expect(terminal.typed.at(-1)).toBe("a");
+
+    // A window-title update is not visible terminal text, even when it contains the pending key.
+    hooks.onPaintedOutput?.(encoder.encode("\x1b]0;"), now, 0n);
+    hooks.onPaintedOutput?.(encoder.encode("a"), now, 1n);
+    hooks.onPaintedOutput?.(encoder.encode("\x07"), now, 2n);
+    expect(results.textContent).toBe("Painted 0 / 2");
+
+    // A real cell update still completes the sample after the control sequence ends.
+    hooks.onPaintedOutput?.(encoder.encode("\x1b[1;1Ha"), now, 3n);
+    expect(results.textContent).toBe("Painted 1 / 2");
+    advance(0);
+    expect(terminal.typed.at(-1)).toBe("b");
+    hooks.onPaintedOutput?.(encoder.encode("\x1b]0;"), now, 4n, "output");
+    hooks.onPaintedOutput?.(encoder.encode("\x1b[1;1Hb"), now, 5n, "snapshot");
+    expect(results.textContent).toContain("Painted echoes: 2 / 2");
     probe.dispose();
   });
 });

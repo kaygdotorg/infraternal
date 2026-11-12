@@ -90,6 +90,35 @@ fn reserved_credit_preserves_the_bulk_window_and_cannot_be_overspent() {
         .unwrap();
 }
 
+/// A fragmented opening grant must retain its repaint reserve through the 16 KiB priming credit.
+#[test]
+fn fragmented_initial_credit_activates_repaint_reserve_without_shrinking_bulk_window() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+    const SHADOW_CREDIT: usize = 16 * 1024;
+    let shadow_credit = u32::try_from(SHADOW_CREDIT).unwrap();
+    let bulk_credit = usize::try_from(BULK_CREDIT).unwrap();
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(shadow_credit).unwrap();
+    assert_eq!(output.suffix(0, SHADOW_CREDIT), Ok(0..SHADOW_CREDIT));
+    output.forward(SHADOW_CREDIT).unwrap();
+
+    output
+        .grant(BULK_CREDIT + REPAINT_RESERVE - shadow_credit)
+        .unwrap();
+
+    assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
+    let rest_of_bulk = bulk_credit - SHADOW_CREDIT;
+    assert_eq!(
+        output.suffix(output.cursor(), BULK_CREDIT as usize),
+        Ok(0..rest_of_bulk)
+    );
+    output.forward(rest_of_bulk).unwrap();
+    assert!(output.bulk_starved());
+    assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
+}
+
 /// Keep an early key repaint from taking credit that raw output could still spend.
 #[test]
 fn key_repaint_does_not_reduce_unspent_bulk_credit() {
