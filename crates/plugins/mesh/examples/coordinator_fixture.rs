@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(&pool)
         .await?;
     sqlx::query("INSERT OR IGNORE INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('owner','owner',1,'fixture','owner','Owner')").execute(&pool).await?;
-    let service = MeshService::new(pool);
+    let service = MeshService::new(pool.clone());
     let store = service.dataplane();
     let mut members = None;
     let mut applied: Option<[Config; 2]> = None;
