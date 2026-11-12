@@ -77,7 +77,7 @@ let
     path.write_text(source.replace(before, after))
     PY
   '';
-  vtVersion = "1.0.0";
+  vtVersion = "1.0.1";
   vtFiles = builtins.listToAttrs (map
     (line: let fields = lib.splitString "  " line; in {
       name = builtins.elemAt fields 1;

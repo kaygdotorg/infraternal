@@ -13,15 +13,17 @@ unchanged; an additive recovery capability is documented below.
 
 ## Build and production dependencies
 
-`scripts/build-vt` builds the MIT-licensed Ghostty source used by Rust
-`libghostty-vt` 0.2.2: commit
-`a887df42c56f6de86c0fe6da9c4eeca37931e083`, archive SHA-256
-`fb4b2f9ffa0af125983041fdbe4ef94d3fa79fb9f2d22b9c213c0e3847a866b6`.
-Zig is exactly 0.15.2. Local verification obtains `nixpkgs#zig_0_15`; CI uses
-the existing architecture-specific checksum-verified `scripts/auth-toolchain`
-download. Both the VT archive and vendored C dependencies use the same Zig.
-Zig package dependencies use upstream's content hashes. The shim remains
-AGPL-3.0-only.
+`scripts/build-vt` builds the MIT-licensed, minisign-verified libghostty-vt
+1.0.1 source and dependency archives. `scripts/libghostty-vt.sha256` pins both
+archives and their signatures; `nix/package.nix` consumes the same inputs.
+Zig is exactly 0.17.0, supplied by the development shell or the existing
+architecture-specific checksum-verified `scripts/auth-toolchain` download.
+Both the VT archive and vendored C dependencies use the same Zig. The shim
+remains AGPL-3.0-only. Rust `libghostty-vt` 0.2.2 is retained only for the
+optional historical `bench-ghostty` comparison; production uses our audited
+C boundary directly. The 1.0.1 compatibility review and qualification are
+tracked on #508 (J537); historical measurements below retain their original
+source and toolchain context.
 
 Native builds explicitly select `x86_64-linux-musl` or `aarch64-linux-musl`,
 baseline CPU, and ReleaseFast; development uses ReleaseSafe. A content-keyed
