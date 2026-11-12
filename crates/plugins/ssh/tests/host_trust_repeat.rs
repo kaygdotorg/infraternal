@@ -15,7 +15,12 @@ use infraternal_plugin_ssh::{
     transport::{ConfirmationAuthority, Credentials, Operation, SshTransport},
     trust::TrustedOpenSsh,
 };
-use std::{os::unix::fs::PermissionsExt, path::Path, process::Command, time::Duration};
+use std::{
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    path::Path,
+    process::Command,
+    time::Duration,
+};
 
 /// A confirmation authority that is either live or revoked.
 struct Authority(bool);
@@ -40,8 +45,13 @@ fn script(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// Builds a trust store whose `ssh` always fails host-key verification and whose key scan returns one fresh key.
+/// Creates a private fixture root and a trust store whose SSH refuses an unknown key.
+/// Its key scan returns one fresh key for the confirmation under test.
 fn rig(root: &Path) -> (TrustedOpenSsh, Destination) {
+    // Short paths use this root directly for credential helpers, whose private-root
+    // check predates these tests. A default-mode directory fails before SSH runs;
+    // longer paths can hide that fixture error by selecting the private runtime root.
+    std::fs::DirBuilder::new().mode(0o700).create(root).unwrap();
     let known = root.join("known");
     std::fs::write(&known, "").unwrap();
     let config = root.join("config");
@@ -114,7 +124,7 @@ async fn observe(trust: &TrustedOpenSsh, destination: &Destination) -> (String, 
         .await
         .err()
         .expect("an unknown key must refuse before sign-in");
-    assert_eq!(failure.kind, FailureKind::HostKey);
+    assert_eq!(failure.kind, FailureKind::HostKey, "{failure:?}");
     (
         failure.host_key_challenge().unwrap().to_string(),
         failure.fingerprints[0].clone(),
@@ -126,7 +136,6 @@ async fn observe(trust: &TrustedOpenSsh, destination: &Destination) -> (String, 
 async fn the_same_confirmation_repeated_answers_success_and_pins_once() {
     let scratch = common::scratch();
     let root = scratch.join(format!("repeat-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir(&root).unwrap();
     let (trust, destination) = rig(&root);
     let (challenge, fingerprint) = observe(&trust, &destination).await;
     let live = Authority(true);
@@ -153,7 +162,6 @@ async fn the_same_confirmation_repeated_answers_success_and_pins_once() {
 async fn simultaneous_identical_confirmations_all_succeed() {
     let scratch = common::scratch();
     let root = scratch.join(format!("race-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir(&root).unwrap();
     let (trust, destination) = rig(&root);
     let (challenge, fingerprint) = observe(&trust, &destination).await;
     let live = Authority(true);
@@ -171,7 +179,6 @@ async fn simultaneous_identical_confirmations_all_succeed() {
 async fn a_repeat_with_another_key_or_revoked_authority_is_still_refused() {
     let scratch = common::scratch();
     let root = scratch.join(format!("other-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir(&root).unwrap();
     let (trust, destination) = rig(&root);
     let (challenge, fingerprint) = observe(&trust, &destination).await;
     trust
@@ -251,7 +258,6 @@ fn the_pin(root: &Path) -> (std::path::PathBuf, String) {
 async fn a_repeat_after_the_pin_was_deleted_is_refused() {
     let scratch = common::scratch();
     let root = scratch.join(format!("gone-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir(&root).unwrap();
     let (trust, destination) = rig(&root);
     let (challenge, fingerprint) = observe(&trust, &destination).await;
     let live = Authority(true);
@@ -276,7 +282,6 @@ async fn a_repeat_after_the_pin_was_deleted_is_refused() {
 async fn a_repeat_after_the_pin_was_replaced_by_another_key_is_refused() {
     let scratch = common::scratch();
     let root = scratch.join(format!("swap-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir(&root).unwrap();
     let (trust, destination) = rig(&root);
     let (challenge, fingerprint) = observe(&trust, &destination).await;
     let live = Authority(true);
@@ -330,7 +335,6 @@ async fn confirmations_for_different_hosts_do_not_wait_for_each_other() {
     }
     let scratch = common::scratch();
     let root = scratch.join(format!("hosts-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir(&root).unwrap();
     let (trust, first) = rig(&root);
     let second = Destination::parse("user@second.invalid").unwrap();
     let (challenge_a, print_a) = observe(&trust, &first).await;
