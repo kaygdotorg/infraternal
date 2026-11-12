@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import inspect
 import select
@@ -78,6 +79,21 @@ except ModuleNotFoundError as error:
 
 class LinuxFaultPlanTests(unittest.TestCase):
     """Keep each requested network failure in the runnable case matrix."""
+
+    def test_agent_runtime_state_root_fits_a_private_unix_socket_path(self):
+        """Keep product socket state short while evidence paths grow independently."""
+        app_fixture = importlib.import_module("gotatun_break_it.app_fixture")
+        create_runtime_root = getattr(app_fixture, "new_private_agent_runtime_root", None)
+        self.assertIsNotNone(create_runtime_root, "short private agent state root is missing")
+        assert create_runtime_root is not None
+        runtime_root = create_runtime_root()
+        try:
+            self.assertEqual(runtime_root.parent, Path.home())
+            self.assertEqual(runtime_root.stat().st_mode & 0o777, 0o700)
+            socket_path = runtime_root / "a-12345678" / "mesh" / "control.sock"
+            self.assertLess(len(str(socket_path).encode("utf-8")), 108)
+        finally:
+            runtime_root.rmdir()
 
     def test_linux_matrix_script_help_works_without_package_context(self):
         """Keep the documented direct script invocation's package imports valid."""

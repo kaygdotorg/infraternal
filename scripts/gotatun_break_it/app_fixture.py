@@ -65,6 +65,11 @@ def _send_frame(stream: socket.socket, kind: int, body: bytes) -> None:
     stream.sendall(_encode_varint(0) + _encode_varint(1 + len(body)) + bytes([kind]) + body)
 
 
+def new_private_agent_runtime_root() -> Path:
+    """Create short private agent state under the home directory for Unix socket paths."""
+    return Path(tempfile.mkdtemp(prefix="j526-", dir=Path.home()))
+
+
 class MeshNode:
     """Keep one real agent process, its durable state and its local Mesh actions."""
 
@@ -76,8 +81,9 @@ class MeshNode:
         label: str,
         namespace_pid: int | None = None,
         environment: Mapping[str, str] | None = None,
+        log_root: Path | None = None,
     ) -> None:
-        """Start a Mesh-enabled product agent in the current or supplied network namespace."""
+        """Start one agent with short private state and optional retained stderr evidence."""
         if not label or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for character in label):
             raise ValueError("agent labels may use lowercase letters, digits, dash and underscore")
         if namespace_pid is not None and namespace_pid < 1:
@@ -87,9 +93,10 @@ class MeshNode:
         self.namespace_pid = namespace_pid
         self.state_root = state_root
         self.state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.state_root, 0o700)
+        self.log_root = state_root if log_root is None else log_root
+        self.log_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state = Path(tempfile.mkdtemp(prefix=f"{label}-", dir=self.state_root))
-        self.log_path = self.state_root / f"{label}.stderr.log"
+        self.log_path = self.log_root / f"{label}.stderr.log"
         self.environment = os.environ.copy()
         if environment is not None:
             self.environment.update(environment)

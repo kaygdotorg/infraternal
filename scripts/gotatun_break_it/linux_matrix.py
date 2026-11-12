@@ -24,7 +24,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "gotatun_break_it"
 
-from .app_fixture import CoordinatorFixture, MeshNode
+from .app_fixture import CoordinatorFixture, MeshNode, new_private_agent_runtime_root
 from .dns_probe import query_a
 from .linux_faults import (
     FaultCase,
@@ -169,18 +169,28 @@ class NamespacePair:
         self.coordinator: CoordinatorFixture | None = None
         self.left: MeshNode | None = None
         self.right: MeshNode | None = None
+        self.runtime_root: Path | None = None
         self.closed = False
         self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             self._create_underlay()
             environment = {"INFRATERAL_MESH_ENGINE": "gotatun"}
-            self.left = MeshNode(binary, scratch / "agent-state", label="a", environment=environment)
+            self.runtime_root = new_private_agent_runtime_root()
+            log_root = scratch / "agent-state"
+            self.left = MeshNode(
+                binary,
+                self.runtime_root,
+                label="a",
+                environment=environment,
+                log_root=log_root,
+            )
             self.right = MeshNode(
                 binary,
-                scratch / "agent-state",
+                self.runtime_root,
                 label="b",
                 namespace_pid=self.peer_namespace.pid,
                 environment=environment,
+                log_root=log_root,
             )
             self.resource_before = {
                 "a": process_counters(self.left.pid),
@@ -304,6 +314,9 @@ class NamespacePair:
             except (OSError, RuntimeError, subprocess.TimeoutExpired):
                 pass
             _stop_process(self.peer_namespace, process_group=True)
+        if self.runtime_root is not None:
+            shutil.rmtree(self.runtime_root, ignore_errors=True)
+            self.runtime_root = None
 
 
 class Traffic:
