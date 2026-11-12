@@ -39,6 +39,7 @@ export interface AuthorityControl {
   dispose(): void;
 }
 
+/** What the authority control needs from its host page: the provisioning service, who may unlock, and what hosts exist. */
 export interface AuthorityOptions {
   service: () => Promise<ProvisioningService>;
   /** Whether the viewer is an administrator, when the client knows; the server enforces it either way. */
