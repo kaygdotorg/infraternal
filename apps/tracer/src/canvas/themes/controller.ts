@@ -52,6 +52,7 @@ interface AppearanceDefaults {
 
 /** What the canvas needs: one complete look to save, a place to apply canonical look updates, and server-confirmation cleanup. */
 export interface LookAdapter {
+  /** Saves the visible look, or keeps the canonical look after that visible completion was definitively refused. */
   snapshot(): DocLook | undefined;
   /** Reports whether this account's canvas document has supplied a valid look to this page. */
   hasAccountLook(): boolean;
@@ -217,6 +218,10 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   let accountLookApplied = false;
   // A local look stays authoritative until the canvas document confirms that exact snapshot.
   let localLookPending = false;
+  // A refused automatic completion is not new input on every canonical repaint. Keep the account's saved value
+  // in layout captures until the person changes appearance or a different canonical look changes the rendering.
+  let accountLook: DocLook | undefined;
+  let refusedLook: DocLook | undefined;
   let appliedUiSize = store.selected().uiSize;
   /** Applies the page preview or the account's font to the document root. */
   const applyUiFont = (): void => {
@@ -248,6 +253,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   const announce = (): void => { announceTimer = 0; for (const listener of [...listeners]) listener(); };
   const scheduleChange = (): void => {
     if (previewing) return;
+    refusedLook = undefined;
     localLookPending = Boolean(accountId);
     window.clearTimeout(cacheTimer);
     cacheTimer = window.setTimeout(flushCache, CACHE_DELAY_MS);
@@ -280,18 +286,20 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   window.addEventListener("pagehide", onHide);
 
   const mine: LookAdapter = {
-    snapshot: () => (previewing ? undefined : snapshot()),
+    snapshot: () => (previewing ? undefined : refusedLook && sameLook(refusedLook, snapshot()) ? accountLook : snapshot()),
     hasAccountLook: () => accountLookApplied,
     apply(look) {
       if (previewing) return;
       if (look === undefined) {
+        accountLook = undefined;
         // D390: a first load saves nothing of its own. Only an upgrade from old browser values has something worth saving.
-        if (themeChosen || legacy) { window.clearTimeout(announceTimer); announce(); }
+        if ((themeChosen || legacy) && (!refusedLook || !sameLook(refusedLook, snapshot()))) { window.clearTimeout(announceTimer); announce(); }
         return;
       }
       const canonical = parseLook(look);
       const restoredAccount = canonical ? restore(canonical) : undefined;
       if (!canonical || !restoredAccount) return;
+      accountLook = canonical;
       accountLookApplied = Boolean(accountId);
       const chosenByAccount = canonical.themeChosen === true;
       const restored = chosenByAccount || urlTheme ? restoredAccount : withSystemColors(restoredAccount);
@@ -328,7 +336,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
       if (changedWindowSizes) window.dispatchEvent(new CustomEvent(SIZE_EVENT));
       if (changedExtendedInfo) window.dispatchEvent(new CustomEvent(EXTENDED_INFO_EVENT));
       writeCache(accountId, snapshot());
-      if (needsCompletion) { window.clearTimeout(announceTimer); announce(); }
+      if (needsCompletion && (!refusedLook || !sameLook(refusedLook, snapshot()))) { window.clearTimeout(announceTimer); announce(); }
     },
     confirmed(look) {
       if (!accountId || previewing || !completeLook(parseLook(look))) return;
@@ -340,6 +348,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
     },
     lookRefused(look) {
       if (!accountId || previewing || !sameLook(look, snapshot())) return;
+      refusedLook = structuredClone(look);
       localLookPending = false;
       window.clearTimeout(cacheTimer); cacheTimer = 0;
       window.clearTimeout(announceTimer); announceTimer = 0;
