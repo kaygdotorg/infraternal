@@ -31,7 +31,8 @@
 //! - It also arms a host-side guard (an undo script, a boot-time unit and a
 //!   watcher unit outside its own process tree), so a relay that is killed,
 //!   crashes or loses its host to a reboot still puts the host back
-//!   (J465 P1). `Commit` or its own rollback disarms the guard.
+//!   (J465 P1). Only this transaction's durable commit receipt or a verified
+//!   successful live rollback lets the relay disarm that guard.
 //! - It blocks `SIGHUP`: the terminal it was started on closes when the
 //!   rootless agent lets go of it, and that must not skip the rollback. Its
 //!   end is the socket's end (J415 B6). `--dir` (its own copy of the
@@ -124,6 +125,8 @@ pub fn run_if_requested() -> Option<ExitCode> {
 const TOKEN_WAIT: Duration = Duration::from_secs(10);
 /// How long the rollback script may run.
 const ROLLBACK_BOUND: Duration = Duration::from_mins(2);
+/// How long to wait for a killed rollback process group to be reaped.
+const ROLLBACK_REAP_BOUND: Duration = Duration::from_secs(5);
 /// Most stdin bytes queued for one step before the relay stops it: a step
 /// that stops reading its stdin must not stall the frame loop (B4), but a
 /// step that is merely slow to start reading (the payload upload takes the
@@ -310,7 +313,7 @@ async fn serve_inner<R: GuardCommandRunner>(
     let mut rollback: Option<Zeroizing<String>> = None;
     let mut transaction = None;
     let mut guard: Option<GuardFiles> = None;
-    let mut committed = false;
+    let mut recovery = RecoveryState::Unarmed;
     let mut authenticated = false;
     let mut decoder = Decoder::default();
     let mut buffer = vec![0; 64 << 10];
@@ -360,6 +363,7 @@ async fn serve_inner<R: GuardCommandRunner>(
                                 guard = Some(files);
                                 transaction = Some(id);
                                 rollback = Some(Zeroizing::new(script));
+                                recovery = RecoveryState::Armed;
                                 if out
                                     .send(Frame::Guard {
                                         transaction: bytes,
@@ -390,6 +394,7 @@ async fn serve_inner<R: GuardCommandRunner>(
                     } else {
                         transaction = Some(id);
                         rollback = Some(Zeroizing::new(script));
+                        recovery = RecoveryState::Armed;
                     }
                 }
                 Frame::Open { channel, script } => {
@@ -457,7 +462,7 @@ async fn serve_inner<R: GuardCommandRunner>(
                                 .await;
                             break 'serve Err(error);
                         }
-                        committed = true;
+                        recovery = RecoveryState::Terminal;
                         match disarm_guard(config, files).await {
                             Ok(()) => {
                                 if out
@@ -482,7 +487,7 @@ async fn serve_inner<R: GuardCommandRunner>(
                             }
                         }
                     } else {
-                        committed = true;
+                        recovery = RecoveryState::Terminal;
                     }
                 }
                 Frame::Close => break 'serve Ok(()),
@@ -504,11 +509,19 @@ async fn serve_inner<R: GuardCommandRunner>(
         }
     }
     let mut cleanup_error = None;
-    if !committed && let Some(script) = rollback {
-        run_rollback(&script).await;
-        if let (Some(config), Some(files)) = (guard_config, guard.as_ref())
-            && let Err(error) = disarm_guard(config, files).await
-        {
+    if recovery == RecoveryState::Armed
+        && let Some(script) = rollback
+    {
+        let rollback_result = run_rollback(&script).await;
+        recovery = recovery.after_rollback(&rollback_result);
+        if recovery.may_disarm() {
+            if let (Some(config), Some(files)) = (guard_config, guard.as_ref())
+                && let Err(error) = disarm_guard(config, files).await
+            {
+                cleanup_error = Some(error);
+            }
+        } else if let Err(error) = rollback_result {
+            // A failed or unknown rollback leaves the independent boot guard armed.
             cleanup_error = Some(error);
         }
     }
@@ -528,6 +541,32 @@ const INSTALL_BASE: &str = "/var/lib/infraternal";
 const ACTIVE_TRANSACTION: &str = ".bootstrap-lock/transaction";
 /// The durable marker that identifies the root install a later abandon may remove.
 const COMMITTED_TRANSACTION: &str = ".promotion-transaction";
+
+/// Which verified terminal state lets one transaction's guard be disarmed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryState {
+    /// No transaction-bound rollback has been accepted yet.
+    Unarmed,
+    /// Rollback has not been proven successful, so the durable guard must remain.
+    Armed,
+    /// The transaction committed exactly or its live rollback exited successfully.
+    Terminal,
+}
+
+impl RecoveryState {
+    /// Mark recovery terminal only when the live rollback is verified successful.
+    fn after_rollback(self, result: &io::Result<()>) -> Self {
+        match (self, result) {
+            (Self::Armed, Ok(())) => Self::Terminal,
+            (state, _) => state,
+        }
+    }
+
+    /// Whether this exact transaction reached a terminal state safe for guard removal.
+    fn may_disarm(self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+}
 /// The system manager's unit directory.
 const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
 
@@ -1057,10 +1096,9 @@ fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
         == 0
 }
 
-/// Run the rollback script as the steps run, with no stdin or output, in
-/// its own process group, killed after [`ROLLBACK_BOUND`].
-async fn run_rollback(script: &str) {
-    let spawned = tokio::process::Command::new("/bin/sh")
+/// Run the rollback script in its own process group and require a zero exit.
+async fn run_rollback(script: &str) -> io::Result<()> {
+    let mut child = tokio::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(script)
         .env_clear()
@@ -1074,21 +1112,56 @@ async fn run_rollback(script: &str) {
         .stderr(Stdio::null())
         .process_group(0)
         .kill_on_drop(true)
-        .spawn();
-    let Ok(mut child) = spawned else {
-        return;
-    };
+        .spawn()?;
     let group = child
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
         .map(nix::unistd::Pid::from_raw);
-    if tokio::time::timeout(ROLLBACK_BOUND, child.wait())
-        .await
-        .is_err()
-        && let Some(group) = group
-    {
-        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+    let status = match tokio::time::timeout(ROLLBACK_BOUND, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            if let Err(stop_error) = terminate_rollback_process(&mut child, group).await {
+                return Err(io::Error::other(format!(
+                    "rollback wait failed: {error}; stopping its process group failed: {stop_error}"
+                )));
+            }
+            return Err(error);
+        }
+        Err(_) => {
+            let timeout_error = io::Error::from(io::ErrorKind::TimedOut);
+            if let Err(stop_error) = terminate_rollback_process(&mut child, group).await {
+                return Err(io::Error::other(format!(
+                    "rollback timed out; stopping its process group failed: {stop_error}"
+                )));
+            }
+            return Err(timeout_error);
+        }
+    };
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "rollback exited with status {status}"
+        )));
     }
+    Ok(())
+}
+
+/// Kill and reap the rollback's whole process group after a wait error or timeout.
+async fn terminate_rollback_process(
+    child: &mut tokio::process::Child,
+    group: Option<nix::unistd::Pid>,
+) -> io::Result<()> {
+    if let Some(group) = group {
+        match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL) {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    } else {
+        child.start_kill()?;
+    }
+    tokio::time::timeout(ROLLBACK_REAP_BOUND, child.wait())
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    Ok(())
 }
 
 /// The process group `group` still has a leader.
@@ -1801,10 +1874,11 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         let runner = TestGuardCommands::failing("show");
-        let responses = guarded_exchange(
+        let (responses, _, _) = guarded_exchange(
             config,
             runner.clone(),
             transaction,
+            "true",
             &format!("touch '{}'", marker.display()),
         )
         .await;
@@ -1833,12 +1907,14 @@ mod tests {
         config: GuardConfig,
         runner: TestGuardCommands,
         transaction: uuid::Uuid,
+        rollback_script: &str,
         script: &str,
-    ) -> Vec<Frame> {
+    ) -> (Vec<Frame>, io::Result<()>, bool) {
+        let files = guard_paths(&config, transaction, std::process::id());
         let (client, server) = tokio::io::duplex(1 << 20);
         let (server_read, server_write) = tokio::io::split(server);
         let task = tokio::spawn(async move {
-            serve_with_guard(
+            let result = serve_with_guard(
                 server_read,
                 server_write,
                 &TOKEN,
@@ -1847,14 +1923,19 @@ mod tests {
                 Path::new("/run/infraternal-privilege.test"),
                 &runner,
             )
-            .await
+            .await;
+            let guard_remains = files.directory.exists()
+                && files.undo.exists()
+                && files.watcher_script.exists()
+                && files.unit.exists();
+            (result, guard_remains)
         });
         let (mut reader, mut writer) = tokio::io::split(client);
         let mut requests = Vec::new();
         Frame::Token { bytes: TOKEN }.encode(&mut requests);
         Frame::Rollback {
             transaction: transaction.into_bytes(),
-            script: "true".into(),
+            script: rollback_script.to_owned(),
         }
         .encode(&mut requests);
         Frame::Open {
@@ -1888,8 +1969,82 @@ mod tests {
                 close_sent = true;
             }
         }
-        let _ = task.await.unwrap();
-        responses
+        let (result, guard_remains) = task.await.unwrap();
+        (responses, result, guard_remains)
+    }
+
+    /// A failed live rollback keeps its transaction guard armed for the boot retry.
+    #[tokio::test]
+    async fn failed_live_rollback_keeps_the_transaction_guard_armed() {
+        let config = test_guard_config();
+        let transaction = uuid::Uuid::from_u128(0xb1);
+        let runner = TestGuardCommands::successful();
+        let (responses, result, guard_remains) =
+            guarded_exchange(config, runner.clone(), transaction, "exit 23", "true").await;
+
+        assert!(
+            result.is_err(),
+            "the failed rollback was hidden; guard_remains={guard_remains}, disarm_started={} ",
+            runner.called("stop")
+        );
+        assert!(guard_remains, "the boot retry files were removed");
+        assert!(!runner.called("stop"), "the guard was disarmed after failure");
+        assert!(responses.iter().all(|frame| !matches!(
+            frame,
+            Frame::Guard {
+                state: infraternal_plugin_remote::privilege_relay::GuardState::Committed,
+                ..
+            }
+        )));
+    }
+
+    /// A rollback process that cannot be spawned leaves the boot retry armed.
+    #[test]
+    fn rollback_spawn_failure_keeps_recovery_armed() {
+        let result = Err(io::Error::from(io::ErrorKind::NotFound));
+        assert_eq!(
+            RecoveryState::Armed.after_rollback(&result),
+            RecoveryState::Armed
+        );
+    }
+
+    /// A process wait error leaves the boot retry armed because its outcome is unknown.
+    #[test]
+    fn rollback_wait_failure_keeps_recovery_armed() {
+        let result = Err(io::Error::other("wait failed"));
+        assert_eq!(
+            RecoveryState::Armed.after_rollback(&result),
+            RecoveryState::Armed
+        );
+    }
+
+    /// A rollback that reaches its time bound leaves the boot retry armed.
+    #[test]
+    fn rollback_timeout_keeps_recovery_armed() {
+        let result = Err(io::Error::from(io::ErrorKind::TimedOut));
+        assert_eq!(
+            RecoveryState::Armed.after_rollback(&result),
+            RecoveryState::Armed
+        );
+    }
+
+    /// A nonzero rollback exit leaves the boot retry armed.
+    #[test]
+    fn rollback_nonzero_exit_keeps_recovery_armed() {
+        let result = Err(io::Error::other("rollback exited with status Some(23)"));
+        assert_eq!(
+            RecoveryState::Armed.after_rollback(&result),
+            RecoveryState::Armed
+        );
+    }
+
+    /// Recovery has one terminal state; errors and an unaccepted transaction cannot disarm.
+    #[test]
+    fn only_a_verified_transaction_terminal_allows_guard_disarm() {
+        assert!(!RecoveryState::Unarmed.may_disarm());
+        assert!(!RecoveryState::Armed.may_disarm());
+        assert!(RecoveryState::Armed.after_rollback(&Ok(())).may_disarm());
+        assert!(RecoveryState::Terminal.may_disarm());
     }
 
     /// Commit through the guarded relay and collect its transaction receipt.
