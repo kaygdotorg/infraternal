@@ -22,8 +22,8 @@ const SIZES = [
 ] as const;
 
 /** Refuses every `look.set` layout save the page sends and counts them; every other call goes to the test double. */
-async function refuseLookSaves(page: Page): Promise<{ refused: () => number }> {
-  let refused = 0;
+async function refuseLookSaves(page: Page): Promise<{ refused: () => number; arm: () => void }> {
+  let refused = 0, armed = false;
   await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
     const server = socket.connectToServer();
     socket.onMessage((message) => {
@@ -31,7 +31,7 @@ async function refuseLookSaves(page: Page): Promise<{ refused: () => number }> {
         const { frame } = decodeMuxedFrame(message);
         if (frame.type === "Call" && frame.actionId === "canvas.layout.apply") {
           const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { intent?: { type?: string } };
-          if (input.intent?.type === "look.set") {
+          if (armed && input.intent?.type === "look.set") {
             refused++;
             socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: false, json: new TextEncoder().encode('{"error":"invalid canvas operation"}') })));
             return;
@@ -42,7 +42,7 @@ async function refuseLookSaves(page: Page): Promise<{ refused: () => number }> {
     });
     server.onMessage((message) => socket.send(message));
   });
-  return { refused: () => refused };
+  return { refused: () => refused, arm: () => { armed = true; } };
 }
 
 for (const size of SIZES) {
@@ -50,18 +50,21 @@ for (const size of SIZES) {
     const context = await browser.newContext({ viewport: size.viewport, deviceScaleFactor: size.touch ? 3 : 1, ...(size.touch ? { hasTouch: true, isMobile: true } : {}) });
     const page = await context.newPage();
     try {
-      const { refused } = await refuseLookSaves(page);
+      const { refused, arm } = await refuseLookSaves(page);
       await page.request.post("/__mock/reset");
       await page.goto("/?mock=1&proto=product&layout=server&fresh=1&bg=none&theme=ink");
       await expect(page.locator(".ui-window").first().locator(".ui-window-host")).toHaveText(/\S/, { timeout: 40_000 });
       // Let the page's own first saves settle, then hand it an account look written by an older page: no canvas-level fields.
       // sleep: the first saves and the look's own announce delay
       await page.waitForTimeout(2500);
+      // From here the server refuses look saves, as an older or stricter one would.
+      arm();
       const before = refused();
       const replaced = await page.evaluate(async () => {
         const read = await (await fetch("/__mock/layout")).json() as { document: { look?: Record<string, unknown> } };
         const document = read.document;
-        if (!document.look) return false;
+        // The double's own copy of the account document: the look the page saved when it first loaded.
+        if (!document.look) throw new Error(`no look in the account document: ${Object.keys(document).join(",")}`);
         delete document.look.windowSizes; delete document.look.extendedInfo; delete document.look.uiFont;
         return (await fetch("/__mock/layout", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ document }) })).ok;
       });
