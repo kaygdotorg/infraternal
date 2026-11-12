@@ -1104,7 +1104,12 @@ fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
     Ok(Some(state))
 }
 
-// Both public files must pass the same ownership, mode and no-follow boundary.
+/// Read an owned public state file without following links.
+///
+/// Both public files pass the same owner, mode, hard-link and no-follow checks. The checked open
+/// descriptor is used for decoding so a path replacement cannot change which bytes are read.
+/// # Errors
+/// Refuses unsafe metadata, malformed JSON, or filesystem errors.
 fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     match OpenOptions::new()
         .read(true)
@@ -1201,6 +1206,11 @@ fn write_public_in_place(
     FileSync::parent(path)
 }
 
+/// Save a private key through a synced 0600 temporary, without replacing an existing identity.
+///
+/// The temporary is hard-linked into place so a concurrent first key cannot be overwritten.
+/// # Errors
+/// Returns a temporary-file, link, write, sync, or directory-sync error.
 fn write_private(path: &Path, key: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension(format!("{}.new", std::process::id()));
     let mut file = OpenOptions::new()

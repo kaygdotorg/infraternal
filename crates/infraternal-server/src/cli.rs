@@ -11,6 +11,7 @@ pub const ID: &str = "server";
 #[cfg(feature = "cli-plugin")]
 const SETUP_TOKEN_COMMAND: [&str; 2] = ["server", "setup-token"];
 
+/// Build the server's CLI actions, including the read-only Mesh identity check.
 #[cfg(feature = "cli-plugin")]
 #[must_use]
 pub fn plugin() -> PluginDefinition {
@@ -51,6 +52,7 @@ pub fn plugin() -> PluginDefinition {
     plugin
 }
 
+/// Define the command that reads the running server's public Mesh fingerprint.
 #[cfg(all(feature = "cli-plugin", feature = "remote"))]
 fn server_mesh_status_action() -> ActionDefinition {
     let data = JsonSchema::object(

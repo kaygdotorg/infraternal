@@ -222,6 +222,9 @@ fn dispatch_selected_action(
 }
 
 // Keep feature-gated command handlers beside their registry mappings.
+/// Dispatch one registered action to its local, remote, or server handler.
+///
+/// Feature-gated handlers share this path so unavailable actions return the same CLI result.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,

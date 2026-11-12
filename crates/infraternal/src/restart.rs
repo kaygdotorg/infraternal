@@ -18,6 +18,7 @@ use tokio::{
     signal::unix::{SignalKind, signal},
 };
 
+/// Select the replacement image and whether the current build must hand Mesh state back first.
 #[derive(Debug, clap::Args)]
 pub(crate) struct Options {
     /// Replacement executable (root-owned handoff-capable builds can retain CA unlock).
@@ -500,6 +501,12 @@ fn executable(binary: &Path) -> io::Result<()> {
     crate::restart_binary::Opened::open(binary.to_owned()).map(|_| ())
 }
 
+/// Ask the running server to restart into an optional binary over its private control socket.
+///
+/// A rollback request must name its previous binary so the server can hand Mesh state back before
+/// that image starts. The receiver validates and opens the image; this request only sends its path.
+/// # Errors
+/// Reports an invalid rollback request, an unsafe path, a missing socket, or a failed frame write.
 pub(crate) async fn request(
     data: &Path,
     binary: Option<&Path>,

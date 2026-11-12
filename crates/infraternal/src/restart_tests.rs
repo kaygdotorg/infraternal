@@ -585,6 +585,7 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
     );
 }
 
+/// A default restart asks the receiver to open its current executable only once.
 #[tokio::test]
 async fn default_restart_opens_the_receiver_target_exactly_once() {
     const NAME: &str = "restart::tests::default_restart_opens_the_receiver_target_exactly_once";

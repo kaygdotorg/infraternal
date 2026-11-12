@@ -3563,6 +3563,7 @@ fn spawn_socketpair_agent_with_mesh_state(
     Err(AgentError::Unavailable)
 }
 
+/// Stop one embedded child and wait for its process to finish.
 #[cfg(unix)]
 async fn stop_child(pid: nix::unistd::Pid) {
     let _ = tokio::task::spawn_blocking(move || stop_child_sync(pid)).await;

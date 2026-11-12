@@ -36,6 +36,7 @@ const fn action(
         fresh_passkey: false,
     }
 }
+/// Mesh node actions shared by the API and command-line adapters.
 pub const ACTIONS: &[ActionDef] = &[
     action(
         "mesh.status",
