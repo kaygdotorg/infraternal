@@ -1268,7 +1268,6 @@ impl PendingWorker {
                             &info.interface,
                             &records,
                             nix::unistd::Uid::effective().as_raw(),
-                            false,
                         ) {
                             tracing::warn!(
                                 "mesh DNS host resolver integration could not be updated: {error}"
@@ -1767,7 +1766,6 @@ impl RuntimeState {
                 &interface,
                 &dns_records,
                 nix::unistd::Uid::effective().as_raw(),
-                false,
             ) {
                 tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
             }
