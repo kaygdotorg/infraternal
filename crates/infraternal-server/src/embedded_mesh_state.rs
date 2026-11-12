@@ -1,89 +1,248 @@
-//! Holds the embedded server node's mesh files durably and migrates the old runtime copy [J501, #489].
+//! Holds the embedded server node's mesh files durably and moves them safely across rollback [J501, #489].
 
 use std::{
     fs::{self, DirBuilder, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
 };
 
 /// Node files written by the mesh store; keep this list aligned with `Store::open`.
 const MESH_FILES: &[&str] = &[
-    "mesh-private-key",
     "mesh-public.json",
     "mesh-routes.json",
     "mesh-interface.json",
     "mesh-key-rotation.bin",
     "mesh-engine.json",
     "mesh-authority.json",
+    "mesh-private-key",
 ];
 
 /// A durable marker that lets an interrupted cross-filesystem move resume safely.
 const MIGRATION_MARKER: &str = ".mesh-state-migration.pending";
+/// Versioned marker header; its body lists the files that the interrupted transfer owns.
+const MIGRATION_MARKER_HEADER: &str = "J501 mesh state migration v1";
+/// Marker body used by the first candidate; recovery infers its file list from both directories.
+const LEGACY_MIGRATION_MARKER: &[u8] = b"J501 mesh state migration\n";
+/// A source replaced repeatedly by an uncooperative writer is left intact and retried next start.
+const MAX_SOURCE_RETRIES: usize = 16;
 
-/// Ensure the embedded node's durable mesh directory is ready before its child starts.
+/// The direction recorded for one recoverable move between durable and runtime mesh state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Direction {
+    Forward,
+    Rollback,
+}
+
+/// A bounded manifest that keeps an interrupted transfer from forgetting any planned file.
+/// Describes which files and direction an interrupted mesh-state handoff must recover.
+struct Marker {
+    direction: Direction,
+    /// True only for the earlier marker format, which did not record its own file list.
+    legacy: bool,
+    files: Vec<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Device and inode numbers for the exact mesh file observed before a transfer.
+/// Keeping this identity lets cleanup detect a replacement and leave the new file intact.
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    /// Capture the inode identity used to keep cleanup from unlinking a writer's newer file.
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// Ensure embedded server mesh files are ready before its child starts.
 ///
-/// A durable private key selects the whole durable identity when both copies exist. Otherwise,
-/// each legacy file is copied to a synced 0600 temporary, linked into the durable directory
-/// without replacement, then removed from the runtime directory. A marker keeps a partial move
-/// resumable; errors stop server startup so the mesh store cannot silently mint another key.
+/// This takes the same directory flock that guards mesh-store writes. A durable private key wins
+/// over stale runtime files unless a pending rollback marker says the previous build may have
+/// updated its runtime copy. Transfers use unique synced 0600 temporaries, atomic renames, and
+/// source inode checks. A marker records the exact unfinished file set; startup never clears an
+/// incomplete marker or starts a child that could mint another identity.
+///
 /// Mesh private keys stay outside the D147 backup set, which contains the database, CA key and
 /// configuration.
 /// # Errors
 /// Refuses unsafe owners, permissions, file types, or any failed filesystem operation.
 pub(crate) fn migrate(volatile: &Path, durable: &Path) -> io::Result<()> {
     let uid = nix::unistd::Uid::effective().as_raw();
-    ensure_durable_directory(durable, uid)?;
+    ensure_mesh_directory(durable, uid)?;
+    let _durable_lock = lock_mesh_directory(durable)?;
+    let legacy_exists = owned_directory(volatile, uid, true)?;
+    let _legacy_lock = if legacy_exists {
+        Some(lock_mesh_directory(volatile)?)
+    } else {
+        None
+    };
+
+    sweep_migration_temporaries(durable, uid)?;
+    if legacy_exists {
+        sweep_migration_temporaries(volatile, uid)?;
+    }
     let marker = durable.join(MIGRATION_MARKER);
-    let pending = owned_file(&marker, uid, true)?;
-    let durable_key = owned_file(&durable.join("mesh-private-key"), uid, true)?;
-    let legacy_directory = owned_directory(volatile, uid, false)?;
-
-    if durable_key && !pending {
-        if legacy_directory {
-            remove_legacy_files(volatile, uid)?;
+    if let Some(mut pending) = read_marker(&marker, uid)? {
+        if pending.legacy {
+            pending.files = union_files(volatile, durable, uid)?;
         }
-        return Ok(());
-    }
-    if !legacy_directory || !has_legacy_files(volatile, uid)? {
+        if pending.direction == Direction::Rollback {
+            for name in present_files(volatile, uid)? {
+                if !pending.files.contains(&name) {
+                    pending.files.push(name);
+                }
+            }
+        }
+        if pending.legacy || pending.direction == Direction::Rollback {
+            rewrite_marker(&marker, Direction::Forward, &pending.files)?;
+            sync_directory(durable)?;
+        }
+        ensure_recoverable_plan(volatile, durable, &pending.files, uid)?;
+        validate_private_key(volatile, &present_files(volatile, uid)?, uid)?;
+        if !present_files(volatile, uid)?.contains(&"mesh-private-key") {
+            validate_private_key(durable, &present_files(durable, uid)?, uid)?;
+        }
+        // A rollback marker makes the previous build's possibly updated runtime identity
+        // authoritative on re-upgrade. Its expanded file list is durable before this move.
+        move_plan(volatile, durable, &pending.files, uid)?;
         finish_marker(&marker, uid)?;
-        return Ok(());
-    }
-    if !pending {
-        create_marker(&marker)?;
         sync_directory(durable)?;
+        return if legacy_exists {
+            sync_directory(volatile)
+        } else {
+            Ok(())
+        };
     }
 
-    migrate_legacy_files(volatile, durable, uid)?;
+    let durable_files = present_files(durable, uid)?;
+    let legacy_files = if legacy_exists {
+        present_files(volatile, uid)?
+    } else {
+        Vec::new()
+    };
+    validate_private_key(durable, &durable_files, uid)?;
+    validate_private_key(volatile, &legacy_files, uid)?;
+
+    if durable_files.contains(&"mesh-private-key") {
+        // Without a rollback marker, the complete durable identity wins over stale /run files.
+        remove_files(volatile, &legacy_files, uid)?;
+        return sync_directory(durable);
+    }
+    if legacy_files.is_empty() {
+        return Ok(());
+    }
+
+    create_marker(&marker, Direction::Forward, &legacy_files)?;
+    sync_directory(durable)?;
+    move_plan(volatile, durable, &legacy_files, uid)?;
     finish_marker(&marker, uid)?;
     sync_directory(durable)?;
     sync_directory(volatile)
 }
 
-/// Create the durable mesh directory privately or tighten a directory owned by this service.
+/// Hand current mesh state back to the legacy /run path before a previous binary starts.
+///
+/// The caller first stops and reaps the embedded writer. This function then takes the same
+/// directory flock used by mesh-store writers, copies the selected state, verifies destination
+/// files and source inodes, and only then removes durable entries. Its marker remains until the
+/// next new build migrates the previous build's possibly updated state forward.
+/// # Errors
+/// Refuses an unsafe directory, incomplete state, or any copy, sync, or unlink failure.
+pub fn rollback_handoff(durable: &Path, volatile: &Path) -> io::Result<()> {
+    let uid = nix::unistd::Uid::effective().as_raw();
+    ensure_mesh_directory(durable, uid)?;
+    ensure_mesh_directory(volatile, uid)?;
+    // Store writers and both migration directions use this stable lock order.
+    let _durable_lock = lock_mesh_directory(durable)?;
+    let _legacy_lock = lock_mesh_directory(volatile)?;
+    sweep_migration_temporaries(durable, uid)?;
+    sweep_migration_temporaries(volatile, uid)?;
+
+    let marker = durable.join(MIGRATION_MARKER);
+    if read_marker(&marker, uid)?.is_some() {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    let files = present_files(durable, uid)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+    validate_private_key(durable, &files, uid)?;
+    // Existing runtime bytes are stale, but their path types and link counts must be safe to replace.
+    present_files(volatile, uid)?;
+    create_marker(&marker, Direction::Rollback, &files)?;
+    sync_directory(durable)?;
+
+    let mut sources = Vec::with_capacity(files.len());
+    for name in &files {
+        let source = durable.join(name);
+        let target = volatile.join(name);
+        let identity = copy_one(&source, &target, uid)?.ok_or(io::ErrorKind::InvalidData)?;
+        sources.push((source, identity));
+    }
+    validate_private_key(volatile, &present_files(volatile, uid)?, uid)?;
+    sync_directory(volatile)?;
+    // Check the complete source set before removing any source. The exclusive directory locks
+    // make each following unlink safe against every mesh-store writer.
+    for (source, identity) in &sources {
+        if !same_file_identity(source, *identity)? {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+    }
+    for (source, identity) in sources {
+        if !remove_if_same(&source, identity, uid)? {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+    }
+    sync_directory(durable)
+}
+
+/// Create a mesh directory privately or tighten one owned by this service.
 /// # Errors
 /// Rejects a symlink, non-directory, different owner, or failed permission update.
-fn ensure_durable_directory(path: &Path, uid: u32) -> io::Result<()> {
+fn ensure_mesh_directory(path: &Path, uid: u32) -> io::Result<()> {
+    let mut path_may_be_new = false;
+    let mut mode_changed = false;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && metadata.uid() == uid => {
-            if metadata.mode() & 0o777 != 0o700 {
+            if metadata.mode() & 0o7777 != 0o700 {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                mode_changed = true;
             }
         }
         Ok(_) => return Err(io::ErrorKind::PermissionDenied.into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            DirBuilder::new().mode(0o700).create(path)?;
+            path_may_be_new = true;
+            // Concurrent server starts may both observe the missing path; the loser verifies
+            // and secures the directory created by the winner below.
+            match DirBuilder::new().mode(0o700).create(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
         }
         Err(error) => return Err(error),
     }
-    if owned_directory(path, uid, false)? {
+    if owned_directory(path, uid, true)? {
+        if path_may_be_new || mode_changed {
+            sync_directory(path)?;
+        }
+        if path_may_be_new {
+            sync_parent(path)?;
+        }
         Ok(())
     } else {
         Err(io::ErrorKind::PermissionDenied.into())
     }
 }
 
-/// Check a directory without following symlinks, optionally tightening a durable directory.
+/// Check a directory without following symlinks, optionally tightening it to 0700.
 /// # Errors
 /// Rejects a non-directory, unowned path, or a directory that cannot be secured.
 fn owned_directory(path: &Path, uid: u32, repair_mode: bool) -> io::Result<bool> {
@@ -95,145 +254,435 @@ fn owned_directory(path: &Path, uid: u32, repair_mode: bool) -> io::Result<bool>
     if !metadata.is_dir() || metadata.uid() != uid {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    if metadata.mode() & 0o777 != 0o700 {
+    if metadata.mode() & 0o7777 != 0o700 {
         if !repair_mode {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         let secured = fs::symlink_metadata(path)?;
-        if !secured.is_dir() || secured.uid() != uid || secured.mode() & 0o777 != 0o700 {
+        if !secured.is_dir() || secured.uid() != uid || secured.mode() & 0o7777 != 0o700 {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
     }
     Ok(true)
 }
 
-/// Check a regular file's owner and optionally set its durable mode to 0600.
+/// Check a singly-linked regular file and optionally set its mode to exactly 0600.
 /// # Errors
-/// Rejects a symlink, non-file, different owner, or failed permission update.
+/// Rejects symlinks, hard links, non-files, different owners, and failed permission updates.
 fn owned_file(path: &Path, uid: u32, repair_mode: bool) -> io::Result<bool> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    if !metadata.is_file() || metadata.uid() != uid {
+    if !metadata.is_file() || metadata.uid() != uid || metadata.nlink() != 1 {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    if repair_mode && metadata.mode() & 0o777 != 0o600 {
+    if repair_mode && metadata.mode() & 0o7777 != 0o600 {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         let secured = fs::symlink_metadata(path)?;
-        if !secured.is_file() || secured.uid() != uid || secured.mode() & 0o777 != 0o600 {
+        if !secured.is_file()
+            || secured.uid() != uid
+            || secured.nlink() != 1
+            || secured.mode() & 0o7777 != 0o600
+        {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
     }
     Ok(true)
 }
 
-/// Return whether the runtime directory has any known mesh files to migrate.
+/// Return known mesh files present in one already-locked directory.
 /// # Errors
-/// Rejects a non-file or foreign-owned entry at a mesh state path.
-fn has_legacy_files(volatile: &Path, uid: u32) -> io::Result<bool> {
+/// Rejects unsafe types, owners, hard links, or mode updates.
+fn present_files(directory: &Path, uid: u32) -> io::Result<Vec<&'static str>> {
+    let mut files = Vec::new();
     for name in MESH_FILES {
-        if owned_file(&volatile.join(name), uid, false)? {
-            return Ok(true);
+        if owned_file(&directory.join(name), uid, true)? {
+            files.push(*name);
         }
     }
-    Ok(false)
+    Ok(files)
 }
 
-/// Write the non-secret marker before the first file so a later start can resume a partial move.
+/// Validate every present private key before migration can delete either copy.
 /// # Errors
-/// Returns an error if the marker cannot be created or synced privately.
-fn create_marker(path: &Path) -> io::Result<()> {
+/// Refuses a key file whose stored seed is not exactly 32 bytes.
+fn validate_private_key(directory: &Path, files: &[&str], uid: u32) -> io::Result<()> {
+    if files.contains(&"mesh-private-key") {
+        let path = directory.join("mesh-private-key");
+        if !owned_file(&path, uid, true)? || fs::symlink_metadata(&path)?.len() != 32 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+    }
+    Ok(())
+}
+
+/// Open the mesh directory and take the same exclusive flock that guards mesh-store writes.
+/// # Errors
+/// Returns path validation, open, or lock failures.
+fn lock_mesh_directory(path: &Path) -> io::Result<nix::fcntl::Flock<File>> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(path)?;
+    nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error.into())
+}
+
+/// Write a non-secret, versioned manifest before moving files so recovery knows what must exist.
+/// # Errors
+/// Returns an error if the marker cannot be created, made private, or synced.
+fn create_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Result<()> {
+    let body = marker_body(direction, files)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(path)?;
-    file.write_all(b"J501 mesh state migration\n")?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(body.as_bytes())?;
     file.sync_all()
 }
 
-/// Move every known mesh file, preserving existing durable files and syncing both directories.
+/// Replace a pending marker atomically when rollback added runtime files absent from its manifest.
 /// # Errors
-/// Leaves the marker and any unremoved runtime file in place when a move fails.
-fn migrate_legacy_files(volatile: &Path, durable: &Path, uid: u32) -> io::Result<()> {
-    for name in MESH_FILES {
-        migrate_one(&volatile.join(name), &durable.join(name), uid)?;
+/// Refuses unsafe marker paths and reports failed private staging, rename, or sync operations.
+fn rewrite_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Result<()> {
+    let body = marker_body(direction, files)?;
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let uid = nix::unistd::Uid::effective().as_raw();
+    if !owned_file(path, uid, true)? {
+        return Err(io::ErrorKind::NotFound.into());
     }
-    sync_directory(volatile)?;
-    sync_directory(durable)
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let temporary = path.with_file_name(format!(
+        ".{name}.migrate-{}-{}.new",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        sync_directory(parent)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
-/// Copy one legacy file only when its durable counterpart is absent, then unlink the source.
+/// Encode the marker's non-secret direction and stable list of mesh files.
 /// # Errors
-/// Refuses unsafe files and returns copy, sync, link, or unlink errors without starting the child.
-fn migrate_one(source: &Path, target: &Path, uid: u32) -> io::Result<()> {
-    if !owned_file(source, uid, false)? {
-        return Ok(());
+/// Rejects empty or unknown file lists.
+fn marker_body(direction: Direction, files: &[&str]) -> io::Result<String> {
+    if files.is_empty() || files.iter().any(|name| !MESH_FILES.contains(name)) {
+        return Err(io::ErrorKind::InvalidInput.into());
     }
-    if owned_file(target, uid, true)? {
-        fs::remove_file(source)?;
-        return sync_parent(source);
-    }
-    publish_copy(source, target, uid)?;
-    fs::remove_file(source)?;
-    sync_parent(source)
+    let direction = match direction {
+        Direction::Forward => "forward",
+        Direction::Rollback => "rollback",
+    };
+    Ok(format!(
+        "{MIGRATION_MARKER_HEADER}\n{direction}\n{}\n",
+        files.join("\n")
+    ))
 }
 
-/// Publish a synced private copy with no-replace semantics, so an existing durable file wins.
+/// Read a pending marker without following links and decode its bounded non-secret manifest.
 /// # Errors
-/// Preserves the source and pending marker if a copy cannot be completed.
-fn publish_copy(source: &Path, target: &Path, uid: u32) -> io::Result<()> {
-    let name = target.file_name().ok_or(io::ErrorKind::InvalidInput)?;
-    let temporary = target.with_file_name(format!(".{}.migrate-new", name.to_string_lossy()));
-    if owned_file(&temporary, uid, false)? {
-        fs::remove_file(&temporary)?;
+/// Rejects malformed marker data or unsafe file metadata without clearing the marker.
+fn read_marker(path: &Path, uid: u32) -> io::Result<Option<Marker>> {
+    if !owned_file(path, uid, true)? {
+        return Ok(None);
     }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    if file.metadata()?.len() > 1024 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut body = Vec::new();
+    file.read_to_end(&mut body)?;
+    if body == LEGACY_MIGRATION_MARKER {
+        return Ok(Some(Marker {
+            direction: Direction::Forward,
+            legacy: true,
+            files: Vec::new(),
+        }));
+    }
+    let text = std::str::from_utf8(&body).map_err(|_| io::ErrorKind::InvalidData)?;
+    let mut lines = text.lines();
+    if lines.next() != Some(MIGRATION_MARKER_HEADER) {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let direction = match lines.next() {
+        Some("forward") => Direction::Forward,
+        Some("rollback") => Direction::Rollback,
+        _ => return Err(io::ErrorKind::InvalidData.into()),
+    };
+    let mut files = Vec::new();
+    for line in lines {
+        let Some(name) = MESH_FILES.iter().copied().find(|name| *name == line) else {
+            return Err(io::ErrorKind::InvalidData.into());
+        };
+        if files.contains(&name) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        files.push(name);
+    }
+    if files.is_empty() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(Some(Marker {
+        direction,
+        legacy: false,
+        files,
+    }))
+}
+
+/// Rebuild an old marker's file list from both sides while both directories are locked.
+/// # Errors
+/// Refuses unsafe entries or an empty plan, which indicates there is nothing to resume.
+fn union_files(source: &Path, target: &Path, uid: u32) -> io::Result<Vec<&'static str>> {
+    let mut files = present_files(source, uid)?;
+    for name in present_files(target, uid)? {
+        if !files.contains(&name) {
+            files.push(name);
+        }
+    }
+    if files.is_empty() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(files)
+}
+
+/// Confirm that a marked transfer can still recover every file before changing either side.
+/// # Errors
+/// Leaves the marker in place if any planned file has disappeared from both directories.
+fn ensure_recoverable_plan(
+    source: &Path,
+    target: &Path,
+    files: &[&str],
+    uid: u32,
+) -> io::Result<()> {
+    if files.is_empty() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    for name in files {
+        let from = owned_file(&source.join(name), uid, true)?;
+        let to = owned_file(&target.join(name), uid, true)?;
+        if !from && !to {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+    }
+    Ok(())
+}
+
+/// Move a marked set from the runtime path to durable storage and sync both directories.
+/// # Errors
+/// Leaves the marker and any unfinished source file in place when a move fails.
+fn move_plan(source: &Path, target: &Path, files: &[&str], uid: u32) -> io::Result<()> {
+    ensure_recoverable_plan(source, target, files, uid)?;
+    for name in files {
+        move_one(&source.join(name), &target.join(name), uid)?;
+    }
+    for name in files {
+        if !owned_file(&target.join(name), uid, true)? || owned_file(&source.join(name), uid, true)?
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+    }
+    validate_private_key(target, files, uid)?;
+    sync_directory(target)?;
+    if owned_directory(source, uid, false)? {
+        sync_directory(source)?;
+    }
+    Ok(())
+}
+
+/// Copy a source by atomic rename and unlink only the exact inode that was copied.
+/// # Errors
+/// Refuses unsafe entries and stops after bounded retries if a writer keeps replacing the source.
+fn move_one(source: &Path, target: &Path, uid: u32) -> io::Result<()> {
+    for _ in 0..MAX_SOURCE_RETRIES {
+        let Some(identity) = copy_one(source, target, uid)? else {
+            // The source may already have been consumed by a prior interrupted transfer.
+            if owned_file(target, uid, true)? {
+                if target
+                    .file_name()
+                    .is_some_and(|name| name == "mesh-private-key")
+                {
+                    let parent = target.parent().ok_or(io::ErrorKind::InvalidInput)?;
+                    validate_private_key(parent, &["mesh-private-key"], uid)?;
+                }
+                return Ok(());
+            }
+            return Err(io::ErrorKind::InvalidData.into());
+        };
+        if remove_if_same(source, identity, uid)? {
+            return Ok(());
+        }
+    }
+    Err(io::ErrorKind::WouldBlock.into())
+}
+
+/// Publish one stable source as a unique, synced 0600 temporary followed by an atomic rename.
+///
+/// Ok(None) means a concurrent atomic writer changed the source before publication; callers retry
+/// from its new inode. The directory flock normally prevents that race, while the identity check
+/// keeps a non-cooperating writer's replacement from being unlinked.
+/// # Errors
+/// Refuses symlinks, hard links, malformed keys, and failed read, write, rename, or sync steps.
+fn copy_one(source: &Path, target: &Path, uid: u32) -> io::Result<Option<FileIdentity>> {
+    for _ in 0..MAX_SOURCE_RETRIES {
+        match copy_one_attempt(source, target, uid)? {
+            Some(identity) => return Ok(Some(identity)),
+            None if !owned_file(source, uid, true)? => {
+                if owned_file(target, uid, true)? {
+                    return Ok(None);
+                }
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            None => {}
+        }
+    }
+    Err(io::ErrorKind::WouldBlock.into())
+}
+
+/// Copy one stable inode; the caller retries if an atomic writer replaced its pathname.
+fn copy_one_attempt(source: &Path, target: &Path, uid: u32) -> io::Result<Option<FileIdentity>> {
+    if !owned_file(source, uid, true)? {
+        if owned_file(target, uid, true)? {
+            return Ok(None);
+        }
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let is_key = source
+        .file_name()
+        .is_some_and(|name| name == "mesh-private-key");
+    let source_metadata = fs::symlink_metadata(source)?;
+    if is_key && source_metadata.len() != 32 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let identity = FileIdentity::from_metadata(&source_metadata);
     let mut input = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(source)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&temporary)?;
-    io::copy(&mut input, &mut output)?;
-    output.sync_all()?;
-    drop(output);
-    drop(input);
-
-    match fs::hard_link(&temporary, target) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            owned_file(target, uid, true)?;
-        }
-        Err(error) => return Err(error),
+    let opened = input.metadata()?;
+    if !opened.is_file()
+        || opened.uid() != uid
+        || opened.nlink() != 1
+        || FileIdentity::from_metadata(&opened) != identity
+        || opened.len() != source_metadata.len()
+    {
+        return Ok(None);
     }
-    fs::remove_file(&temporary)?;
-    sync_parent(target)
+    if is_key && opened.len() != 32 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let target_parent = target.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let target_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let temporary = target.with_file_name(format!(
+        ".{target_name}.migrate-{}-{}.new",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let _ = owned_file(target, uid, true)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        output.set_permissions(fs::Permissions::from_mode(0o600))?;
+        io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        drop(output);
+        let current = fs::symlink_metadata(source)?;
+        if !current.is_file()
+            || current.uid() != uid
+            || current.nlink() != 1
+            || FileIdentity::from_metadata(&current) != identity
+        {
+            return Ok(None);
+        }
+        // The mesh directory lock makes replacement atomic with respect to every Store writer.
+        fs::rename(&temporary, target)?;
+        sync_directory(target_parent)?;
+        Ok(Some(identity))
+    })();
+    if !matches!(&result, Ok(Some(_))) {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
-/// Delete legacy mesh files after an already-present durable key has won.
-/// # Errors
-/// Refuses unsafe runtime entries and returns unlink or directory-sync errors.
-fn remove_legacy_files(volatile: &Path, uid: u32) -> io::Result<()> {
-    for name in MESH_FILES {
-        let path = volatile.join(name);
-        if owned_file(&path, uid, false)? {
-            fs::remove_file(path)?;
-        }
+/// Check a pathname still names the copied inode and unlink it only when that check succeeds.
+fn remove_if_same(path: &Path, expected: FileIdentity, uid: u32) -> io::Result<bool> {
+    if !owned_file(path, uid, true)? {
+        return Ok(true);
     }
-    sync_directory(volatile)
+    if !same_file_identity(path, expected)? {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    sync_parent(path)?;
+    Ok(true)
 }
 
-/// Remove a completed marker only after all copies and source unlinks have been synced.
+/// Compare an existing pathname with the exact inode captured before the copy.
+fn same_file_identity(path: &Path, expected: FileIdentity) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            Ok(FileIdentity::from_metadata(&metadata) == expected)
+        }
+        Ok(_) => Err(io::ErrorKind::PermissionDenied.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove stale runtime files only after a valid durable key has won.
+fn remove_files(directory: &Path, files: &[&str], uid: u32) -> io::Result<()> {
+    for name in files {
+        let path = directory.join(name);
+        if owned_file(&path, uid, true)? {
+            let metadata = fs::symlink_metadata(&path)?;
+            if !remove_if_same(&path, FileIdentity::from_metadata(&metadata), uid)? {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+    }
+    if owned_directory(directory, uid, false)? {
+        sync_directory(directory)?;
+    }
+    Ok(())
+}
+
+/// Remove a completed marker only after every planned source and destination is durable.
 /// # Errors
-/// Returns validation, unlink, or sync errors.
+/// Returns validation, unlink, or sync errors without silently clearing an incomplete transfer.
 fn finish_marker(path: &Path, uid: u32) -> io::Result<()> {
     if owned_file(path, uid, true)? {
         fs::remove_file(path)?;
@@ -242,7 +691,44 @@ fn finish_marker(path: &Path, uid: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// Sync the directory containing `path` after publishing or removing an entry.
+/// Remove crash-left staging copies while holding the mesh directory's exclusive lock.
+///
+/// A staging key is safe to delete only because the transfer source remains present until after
+/// its atomic destination rename. The old fixed staging name is accepted for recovery from the
+/// first candidate; all new names include a process ID and random nonce.
+/// # Errors
+/// Refuses unsafe temporary entries and reports directory enumeration or unlink failures.
+fn sweep_migration_temporaries(directory: &Path, uid: u32) -> io::Result<()> {
+    let mut removed = false;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let has_new_extension = Path::new(&name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("new"));
+        let is_temporary = MESH_FILES.iter().any(|mesh_name| {
+            name == format!(".{mesh_name}.migrate-new")
+                || (name.starts_with(&format!(".{mesh_name}.migrate-")) && has_new_extension)
+        }) || (name.starts_with(&format!(".{MIGRATION_MARKER}.migrate-"))
+            && has_new_extension);
+        if !is_temporary {
+            continue;
+        }
+        if !entry.file_type()?.is_file() || !owned_file(&entry.path(), uid, true)? {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        fs::remove_file(entry.path())?;
+        removed = true;
+    }
+    if removed {
+        sync_directory(directory)?;
+    }
+    Ok(())
+}
+
+/// Sync the directory containing path after publishing or removing an entry.
 /// # Errors
 /// Returns a parent lookup, open, or sync error.
 fn sync_parent(path: &Path) -> io::Result<()> {
@@ -254,18 +740,22 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns an open or sync error.
 fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(path)?
+        .sync_all()
 }
 
 #[cfg(test)]
 mod tests {
     //! Proves legacy identity migration, durable precedence, permissions, and retry behavior.
 
-    use super::{MIGRATION_MARKER, migrate, rollback_handoff};
+    use super::{FileIdentity, MIGRATION_MARKER, migrate, remove_if_same, rollback_handoff};
     use std::{
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt},
-        path::PathBuf,
+        path::{Path, PathBuf},
         process::Command,
     };
 
@@ -275,6 +765,18 @@ mod tests {
     /// Build a unique fixture root outside the repository so no private test key is committed.
     fn fixture_root() -> PathBuf {
         std::env::temp_dir().join(format!("j501-mesh-state-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Find this migration's unique private staging file without depending on its random suffix.
+    fn migration_temporary_exists(directory: &Path, file_name: &str) -> bool {
+        let prefix = format!(".{file_name}.migrate-");
+        fs::read_dir(directory).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(&prefix) && name.ends_with(".new")
+            })
+        })
     }
 
     /// Moves the old private identity and public snapshot into a private durable directory.
@@ -288,7 +790,7 @@ mod tests {
         fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
             .expect("make legacy runtime private");
         fs::create_dir_all(&data).expect("create server data directory");
-        fs::write(volatile.join("mesh-private-key"), b"fixture-private-key")
+        fs::write(volatile.join("mesh-private-key"), [0x11; 32])
             .expect("write synthetic legacy key");
         fs::write(volatile.join("mesh-public.json"), br#"{"enabled":true}"#)
             .expect("write synthetic public state");
@@ -297,7 +799,7 @@ mod tests {
 
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable private key"),
-            b"fixture-private-key"
+            [0x11; 32]
         );
         assert_eq!(
             fs::read(durable.join("mesh-public.json")).expect("durable public state"),
@@ -327,11 +829,11 @@ mod tests {
         fs::create_dir_all(&durable).expect("create durable mesh directory");
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o755))
             .expect("make durable fixture initially broad");
-        fs::write(volatile.join("mesh-private-key"), b"runtime-key")
+        fs::write(volatile.join("mesh-private-key"), [0x21; 32])
             .expect("write synthetic runtime key");
         fs::write(volatile.join("mesh-public.json"), b"runtime-public")
             .expect("write synthetic runtime state");
-        fs::write(durable.join("mesh-private-key"), b"durable-key")
+        fs::write(durable.join("mesh-private-key"), [0x42; 32])
             .expect("write synthetic durable key");
         fs::set_permissions(
             durable.join("mesh-private-key"),
@@ -345,7 +847,7 @@ mod tests {
 
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable key"),
-            b"durable-key"
+            [0x42; 32]
         );
         assert_eq!(
             fs::read(durable.join("mesh-public.json")).expect("durable public state"),
@@ -411,11 +913,11 @@ mod tests {
         fs::create_dir_all(&durable).expect("create durable mesh directory");
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
             .expect("make durable mesh private");
-        fs::write(volatile.join("mesh-private-key"), b"same-key")
+        fs::write(volatile.join("mesh-private-key"), [0x33; 32])
             .expect("write synthetic runtime key");
         fs::write(volatile.join("mesh-public.json"), b"runtime-public")
             .expect("write synthetic runtime state");
-        fs::write(durable.join("mesh-private-key"), b"same-key")
+        fs::write(durable.join("mesh-private-key"), [0x33; 32])
             .expect("write already-published durable key");
         fs::write(
             durable.join(MIGRATION_MARKER),
@@ -432,7 +934,7 @@ mod tests {
 
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable key"),
-            b"same-key"
+            [0x33; 32]
         );
         assert_eq!(
             fs::read(durable.join("mesh-public.json")).expect("durable public state"),
@@ -516,7 +1018,7 @@ mod tests {
         fs::create_dir(&actual).expect("create actual runtime directory");
         fs::set_permissions(&actual, fs::Permissions::from_mode(0o700))
             .expect("make actual runtime private");
-        fs::write(actual.join("mesh-private-key"), b"synthetic-private-key")
+        fs::write(actual.join("mesh-private-key"), [0x53; 32])
             .expect("write synthetic runtime key");
         symlink(&actual, &volatile).expect("link legacy runtime directory");
 
@@ -528,7 +1030,7 @@ mod tests {
         );
         assert_eq!(
             fs::read(actual.join("mesh-private-key")).expect("actual legacy key remains"),
-            b"synthetic-private-key"
+            [0x53; 32]
         );
         assert!(!durable.join("mesh-private-key").exists());
         fs::remove_dir_all(root).expect("remove fixture root");
@@ -546,7 +1048,7 @@ mod tests {
         fs::create_dir_all(&volatile).expect("create legacy runtime directory");
         fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
             .expect("make legacy runtime private");
-        fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+        fs::write(volatile.join("mesh-private-key"), [0x53; 32])
             .expect("write synthetic runtime key");
         fs::create_dir_all(durable.parent().expect("durable parent"))
             .expect("create durable parent");
@@ -563,7 +1065,7 @@ mod tests {
         );
         assert_eq!(
             fs::read(volatile.join("mesh-private-key")).expect("legacy key remains"),
-            b"synthetic-private-key"
+            [0x53; 32]
         );
         assert!(!actual.join("mesh-private-key").exists());
         fs::remove_dir_all(root).expect("remove fixture root");
@@ -615,7 +1117,7 @@ mod tests {
         fs::create_dir_all(&durable).expect("create durable mesh directory");
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
             .expect("make durable mesh directory private");
-        fs::write(durable.join("mesh-private-key"), b"synthetic-current-key")
+        fs::write(durable.join("mesh-private-key"), [0x55; 32])
             .expect("write synthetic durable key");
         fs::set_permissions(
             durable.join("mesh-private-key"),
@@ -630,11 +1132,11 @@ mod tests {
         )
         .expect("make synthetic state private");
 
-        migrate(&durable, &volatile).expect("restore durable state for the old binary");
+        rollback_handoff(&durable, &volatile).expect("restore durable state for the old binary");
 
         assert_eq!(
             fs::read(volatile.join("mesh-private-key")).expect("rollback key"),
-            b"synthetic-current-key"
+            [0x55; 32]
         );
         assert_eq!(
             fs::read(volatile.join("mesh-public.json")).expect("rollback public state"),
@@ -677,8 +1179,11 @@ mod tests {
             "server_public_key": base64::engine::general_purpose::STANDARD.encode(PUBLIC),
         });
         let public_path = durable.join("mesh-public.json");
-        fs::write(&public_path, serde_json::to_vec(&public_state).expect("encode public state"))
-            .expect("write public-key fixture");
+        fs::write(
+            &public_path,
+            serde_json::to_vec(&public_state).expect("encode public state"),
+        )
+        .expect("write public-key fixture");
         fs::set_permissions(&public_path, fs::Permissions::from_mode(0o600))
             .expect("make public state private");
 
@@ -736,14 +1241,13 @@ mod tests {
         fs::create_dir_all(&durable).expect("create durable mesh directory");
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
             .expect("make durable mesh private");
-        fs::write(durable.join("mesh-private-key"), b"synthetic-private-key")
+        fs::write(durable.join("mesh-private-key"), [0x53; 32])
             .expect("write already-published durable key");
         let temporary = durable.join(".mesh-private-key.migrate-new");
-        fs::write(&temporary, b"synthetic-private-key")
-            .expect("write interrupted migration temporary");
+        fs::write(&temporary, [0x53; 32]).expect("write interrupted migration temporary");
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
             .expect("make interrupted temporary private");
-        fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+        fs::write(volatile.join("mesh-private-key"), [0x53; 32])
             .expect("write remaining legacy source");
         fs::write(
             durable.join(MIGRATION_MARKER),
@@ -763,7 +1267,7 @@ mod tests {
         fs::remove_dir_all(root).expect("remove fixture root");
 
         assert!(!temporary_remains, "retry must remove the extra key copy");
-        assert_eq!(durable_key, b"synthetic-private-key");
+        assert_eq!(durable_key, [0x53; 32]);
     }
 
     /// Serializes two server starts so neither can unlink the other's in-progress staging file.
@@ -778,24 +1282,28 @@ mod tests {
         fs::create_dir_all(&durable).expect("create durable mesh directory");
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
             .expect("make durable mesh private");
-        let key = vec![b'K'; 64 * 1024 * 1024];
-        fs::write(volatile.join("mesh-private-key"), &key).expect("write synthetic key fixture");
+        let key = [b'K'; 32];
+        fs::write(
+            volatile.join("mesh-public.json"),
+            vec![b'P'; 64 * 1024 * 1024],
+        )
+        .expect("write large public state to hold the migration copy");
+        fs::write(volatile.join("mesh-private-key"), key).expect("write synthetic key fixture");
 
         let first_source = volatile.clone();
         let first_durable = durable.clone();
         let first = std::thread::spawn(move || migrate(&first_source, &first_durable));
-        let temporary = durable.join(".mesh-private-key.migrate-new");
         for _ in 0..1_000_000 {
-            if temporary.exists() {
+            if migration_temporary_exists(&durable, "mesh-public.json") {
                 break;
             }
             std::thread::yield_now();
         }
-        let temporary_was_published = temporary.exists();
+        let temporary_was_published = migration_temporary_exists(&durable, "mesh-public.json");
         let second = migrate(&volatile, &durable);
         let first = first.join().expect("first migration thread");
         let durable_key = fs::read(durable.join("mesh-private-key")).ok();
-        let temporary_remains = temporary.exists();
+        let temporary_remains = migration_temporary_exists(&durable, "mesh-public.json");
         fs::remove_dir_all(root).expect("remove fixture root");
 
         assert!(
@@ -886,30 +1394,32 @@ mod tests {
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
             .expect("make durable mesh private");
         let source = volatile.join("mesh-private-key");
-        let original = vec![b'O'; 64 * 1024 * 1024];
-        fs::write(&source, &original).expect("write synthetic original key");
-        drop(original);
-
+        let original = [0x11; 32];
+        fs::write(
+            volatile.join("mesh-public.json"),
+            vec![b'P'; 64 * 1024 * 1024],
+        )
+        .expect("write large public state to hold the migration copy");
+        fs::write(&source, original).expect("write synthetic original key");
         let migration_source = volatile.clone();
         let migration_target = durable.clone();
         let migration = std::thread::spawn(move || migrate(&migration_source, &migration_target));
-        let temporary = durable.join(".mesh-private-key.migrate-new");
         for _ in 0..1_000_000 {
-            if temporary.exists() {
+            if migration_temporary_exists(&durable, "mesh-public.json") {
                 break;
             }
             std::thread::yield_now();
         }
-        let temporary_was_published = temporary.exists();
+        let temporary_was_published = migration_temporary_exists(&durable, "mesh-public.json");
         let writer_temporary = volatile.join("mesh-private-key.4242.new");
-        fs::write(&writer_temporary, b"rotated-key").expect("write synthetic rotated key");
+        fs::write(&writer_temporary, [0x24; 32]).expect("write synthetic rotated key");
         fs::set_permissions(&writer_temporary, fs::Permissions::from_mode(0o600))
             .expect("make rotated key private");
         fs::rename(&writer_temporary, &source).expect("atomically publish rotated key");
 
         let result = migration.join().expect("migration thread");
         let durable_is_latest =
-            fs::read(durable.join("mesh-private-key")).ok().as_deref() == Some(&b"rotated-key"[..]);
+            fs::read(durable.join("mesh-private-key")).ok().as_deref() == Some(&[0x24; 32][..]);
         fs::remove_dir_all(root).expect("remove fixture root");
 
         assert!(temporary_was_published, "migration reached its copy phase");
@@ -917,6 +1427,42 @@ mod tests {
         assert!(
             durable_is_latest,
             "the durable path must receive the agent's latest key, not an older inode"
+        );
+    }
+
+    /// Does not unlink a newer key that replaced the copied source inode.
+    #[test]
+    fn does_not_remove_a_newer_atomic_key_replacement() {
+        let root = fixture_root();
+        let directory = root.join("mesh");
+        fs::create_dir_all(&directory).expect("create private fixture directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("make fixture directory private");
+        let source = directory.join("mesh-private-key");
+        let old = [0x11; 32];
+        let newer = [0x24; 32];
+        fs::write(&source, old).expect("write original synthetic key");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600))
+            .expect("make original key private");
+        let copied = FileIdentity::from_metadata(
+            &fs::symlink_metadata(&source).expect("read original key identity"),
+        );
+        let temporary = directory.join("mesh-private-key.4242.new");
+        fs::write(&temporary, newer).expect("write replacement synthetic key");
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+            .expect("make replacement key private");
+        fs::rename(&temporary, &source).expect("atomically publish replacement key");
+
+        let removed = remove_if_same(&source, copied, nix::unistd::Uid::effective().as_raw())
+            .expect("check copied source before cleanup");
+        let retained = fs::read(&source).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(!removed, "cleanup must not unlink a replacement inode");
+        assert_eq!(
+            retained.as_deref(),
+            Some(&newer[..]),
+            "the newer key must remain intact"
         );
     }
 
@@ -934,11 +1480,10 @@ mod tests {
         fs::create_dir_all(&durable).expect("create durable mesh directory");
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
             .expect("make durable mesh directory private");
-        fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+        fs::write(volatile.join("mesh-private-key"), [0x53; 32])
             .expect("write synthetic legacy key");
         let backup_selected_path = data.join("backup-selected-config");
-        fs::write(&backup_selected_path, b"synthetic-private-key")
-            .expect("write synthetic backup-selected file");
+        fs::write(&backup_selected_path, [0x53; 32]).expect("write synthetic backup-selected file");
         fs::hard_link(&backup_selected_path, durable.join("mesh-private-key"))
             .expect("link durable key into backup-selected path");
 
@@ -971,8 +1516,7 @@ mod tests {
         fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
             .expect("make durable mesh directory private");
         let backup_selected_path = data.join("backup-selected-config");
-        fs::write(&backup_selected_path, b"synthetic-private-key")
-            .expect("write synthetic backup-selected file");
+        fs::write(&backup_selected_path, [0x53; 32]).expect("write synthetic backup-selected file");
         fs::hard_link(&backup_selected_path, volatile.join("mesh-private-key"))
             .expect("link legacy key into backup-selected path");
 
@@ -1006,7 +1550,7 @@ mod tests {
             fs::create_dir_all(&durable).expect("create durable mesh directory");
             fs::set_permissions(&durable, fs::Permissions::from_mode(0o700))
                 .expect("make durable mesh directory private");
-            fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+            fs::write(volatile.join("mesh-private-key"), [0x53; 32])
                 .expect("write synthetic legacy key");
             fs::set_permissions(
                 volatile.join("mesh-private-key"),
@@ -1067,7 +1611,7 @@ mod tests {
                 .expect("make legacy runtime directory private");
             fs::create_dir_all(durable.parent().expect("durable parent"))
                 .expect("create service data directory");
-            fs::write(volatile.join("mesh-private-key"), b"synthetic-private-key")
+            fs::write(volatile.join("mesh-private-key"), [0x53; 32])
                 .expect("write synthetic legacy key");
             fs::set_permissions(
                 volatile.join("mesh-private-key"),
@@ -1108,15 +1652,11 @@ mod tests {
             "Mesh state requires the exact 0700 directory mode"
         );
     }
+
     /// Waits for the mesh store's directory lock before migration can move its files.
     #[test]
     fn migration_waits_for_the_mesh_store_directory_lock() {
-        use std::{
-            os::unix::fs::OpenOptionsExt,
-            sync::mpsc,
-            thread,
-            time::Duration,
-        };
+        use std::{os::unix::fs::OpenOptionsExt, sync::mpsc, thread, time::Duration};
 
         let root = fixture_root();
         let volatile = root.join("run/infraternal");
@@ -1135,11 +1675,8 @@ mod tests {
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
             .open(&durable)
             .expect("open the mesh store directory");
-        let store_lock = nix::fcntl::Flock::lock(
-            directory_fd,
-            nix::fcntl::FlockArg::LockExclusive,
-        )
-        .expect("hold the lock used by mesh store writers");
+        let store_lock = nix::fcntl::Flock::lock(directory_fd, nix::fcntl::FlockArg::LockExclusive)
+            .expect("hold the lock used by mesh store writers");
 
         let (started, started_rx) = mpsc::sync_channel(1);
         let (result_tx, result_rx) = mpsc::sync_channel(1);
@@ -1151,7 +1688,9 @@ mod tests {
                 .send(migrate(&migration_source, &migration_target))
                 .expect("send migration result");
         });
-        started_rx.recv().expect("wait until migration thread is ready");
+        started_rx
+            .recv()
+            .expect("wait until migration thread is ready");
 
         // sleep: This bounded observation window proves migration cannot finish while the store lock is held.
         let while_locked = result_rx.recv_timeout(Duration::from_millis(250));
@@ -1165,7 +1704,10 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("migration should finish after the store lock is released");
         migration.join().expect("migration worker");
-        assert!(result.is_ok(), "migration should succeed after lock release");
+        assert!(
+            result.is_ok(),
+            "migration should succeed after lock release"
+        );
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable private key"),
             [0x71; 32]

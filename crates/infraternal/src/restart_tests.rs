@@ -80,7 +80,7 @@ pub(super) fn bounded_output(
 #[tokio::test]
 async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     let directory = Directory::new();
-    assert!(request(directory.state(), None).await.is_err());
+    assert!(request(directory.state(), None, false).await.is_err());
     assert!(!directory.state().join("restart").exists());
     let control = Control::start(directory.state()).unwrap();
     assert_eq!(
@@ -124,6 +124,100 @@ async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socke
     assert!(server.await.is_err_and(|error| error.is_cancelled()));
 }
 
+/// The owner-only Mesh status reports a running server's public-key fingerprint and no secret.
+#[tokio::test]
+async fn same_uid_mesh_status_reports_only_the_running_servers_public_fingerprint() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = Directory::new();
+    let mesh = directory.state().join("mesh");
+    std::fs::create_dir(&mesh).unwrap();
+    std::fs::set_permissions(&mesh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let public_path = mesh.join("mesh-public.json");
+    std::fs::write(&public_path, mesh_public_state([7_u8; 32])).unwrap();
+    std::fs::set_permissions(&public_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(query_mesh_fingerprint(directory.state()).is_err());
+    let mut control = Control::start(directory.state()).unwrap();
+    let source =
+        std::sync::Arc::new(infraternal_server::ca_memory::MemoryCaSource::unprovisioned(None));
+    let server = tokio::spawn(async move {
+        loop {
+            let _ = control.requested(Some(source.as_ref())).await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), io::Error>(())
+    });
+
+    let state = directory.state().to_owned();
+    let fingerprint = tokio::task::spawn_blocking(move || query_mesh_fingerprint(&state))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fingerprint,
+        "SHA256:S7Bvjk46dxXSAdVz0KpCN2LlXavWGiwCJ4+lbMbSlOA",
+    );
+    server.abort();
+    assert!(server.await.is_err_and(|error| error.is_cancelled()));
+}
+
+/// Refuse a fingerprint when the legacy runtime state location cannot be resolved.
+#[test]
+fn mesh_identity_refuses_an_unresolved_runtime_state_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = Directory::new();
+    let mesh = directory.state().join("mesh");
+    std::fs::create_dir(&mesh).unwrap();
+    std::fs::set_permissions(&mesh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let public_path = mesh.join("mesh-public.json");
+    std::fs::write(&public_path, mesh_public_state([7_u8; 32])).unwrap();
+    std::fs::set_permissions(&public_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert_eq!(
+        select_server_mesh_key(
+            &mesh,
+            Err(io::ErrorKind::PermissionDenied.into()),
+            nix::unistd::Uid::effective().as_raw(),
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::PermissionDenied,
+    );
+}
+
+/// The public identity reader refuses symlinks and hard-link aliases.
+#[test]
+fn public_mesh_identity_refuses_linked_state_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = Directory::new();
+    let mesh = directory.state().join("mesh");
+    std::fs::create_dir(&mesh).unwrap();
+    std::fs::set_permissions(&mesh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let public_path = mesh.join("mesh-public.json");
+    std::fs::write(&public_path, mesh_public_state([7_u8; 32])).unwrap();
+    std::fs::set_permissions(&public_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let alias = mesh.join("mesh-public-alias.json");
+    std::fs::hard_link(&public_path, &alias).unwrap();
+    assert!(public_mesh_key(&mesh, nix::unistd::Uid::effective().as_raw()).is_err());
+    std::fs::remove_file(&alias).unwrap();
+    std::fs::remove_file(&public_path).unwrap();
+    std::os::unix::fs::symlink(&alias, &public_path).unwrap();
+    assert!(public_mesh_key(&mesh, nix::unistd::Uid::effective().as_raw()).is_err());
+}
+
+/// Encode the public fields of a saved Mesh state using the node store's current schema.
+fn mesh_public_state(local_key: [u8; 32]) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "enabled": true,
+        "config": { "local_key": local_key },
+    }))
+    .expect("encode public mesh state")
+}
+
 /// The control endpoint accepts a read-only status request frame.
 #[tokio::test]
 async fn private_control_endpoint_accepts_a_read_only_status_request_frame() {
@@ -131,6 +225,41 @@ async fn private_control_endpoint_accepts_a_read_only_status_request_frame() {
     client.write_u16(0).await.unwrap();
     client.write_u8(1).await.unwrap();
     assert!(read_request(&mut server).await.is_ok());
+}
+
+/// Carry an explicit rollback request to the server that owns its replacement image.
+#[tokio::test]
+async fn rollback_request_sets_the_mesh_handoff_control_bit() {
+    let directory = Directory::new();
+    let restart_directory = directory.state().join("restart");
+    std::fs::create_dir(&restart_directory).unwrap();
+    std::fs::set_permissions(&restart_directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket_path = restart_directory.join("control.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let previous = PathBuf::from("/verified/previous");
+    let server = async move {
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut peer).await.unwrap();
+        let received = match request {
+            ControlRequest::Restart {
+                binary,
+                reload,
+                rollback,
+            } => (binary, reload, rollback),
+            ControlRequest::Status => panic!("rollback request decoded as status"),
+        };
+        peer.write_all(b"RESTARTING\n").await.unwrap();
+        received
+    };
+    let (received, sent) = tokio::time::timeout(HANG_BOUND, async {
+        tokio::join!(server, request(directory.state(), Some(&previous), true))
+    })
+    .await
+    .expect("rollback frame must complete");
+    assert!(sent.unwrap());
+    assert_eq!(received, (previous, false, true));
 }
 
 /// Check default-path admission in a compact running image and refuse untrusted paths.
@@ -144,7 +273,10 @@ async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();
     let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
-        tokio::join!(control.requested(None), request(directory.state(), None))
+        tokio::join!(
+            control.requested(None),
+            request(directory.state(), None, false)
+        )
     })
     .await
     .expect("owner restart request deadline");
@@ -393,7 +525,10 @@ async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
         .await
         .expect("closed reply fixture must finish");
     let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
-        tokio::join!(control.requested(None), request(directory.state(), None))
+        tokio::join!(
+            control.requested(None),
+            request(directory.state(), None, false)
+        )
     })
     .await
     .expect("valid request after a closed reply must finish");
@@ -480,7 +615,10 @@ async fn default_restart_opens_the_receiver_target_exactly_once() {
     let mut control = Control::start(directory.state()).unwrap();
     crate::restart_binary::reset_test_opens();
     let (received, sent) = tokio::time::timeout(HANG_BOUND, async {
-        tokio::join!(control.requested(None), request(directory.state(), None))
+        tokio::join!(
+            control.requested(None),
+            request(directory.state(), None, false)
+        )
     })
     .await
     .expect("default restart request must finish");
@@ -603,7 +741,8 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let mut control = Control::start(&state).unwrap();
-            let (received, sent) = tokio::join!(control.requested(None), request(&state, None));
+            let (received, sent) =
+                tokio::join!(control.requested(None), request(&state, None, false));
             assert!(received.is_ok());
             assert!(!sent.unwrap());
         });

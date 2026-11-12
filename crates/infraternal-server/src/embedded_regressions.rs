@@ -1333,6 +1333,60 @@ async fn unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound() {
     );
 }
 
+/// Reaps an embedded child when Tokio cancels its actor during server shutdown.
+#[test]
+fn runtime_shutdown_reaps_embedded_child_before_returning() {
+    use std::io::Read;
+
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf ready; exec sleep 60"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start a child that stays alive until signaled");
+    let mut ready = [0; 5];
+    child
+        .stdout
+        .take()
+        .expect("child readiness pipe")
+        .read_exact(&mut ready)
+        .expect("wait for child readiness");
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).expect("child PID"));
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a runtime for the embedded actor");
+    let (started, ready) = tokio::sync::oneshot::channel();
+    runtime.block_on(async move {
+        let (mut connection, _peer) = connection();
+        connection.pid = Some(pid);
+        tokio::spawn(async move {
+            let _connection = connection;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.expect("embedded actor entered its task");
+    });
+    runtime.shutdown_timeout(Duration::from_secs(4));
+
+    let result = nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
+    let reaped = matches!(
+        result,
+        Err(nix::errno::Errno::ECHILD)
+            | Ok(nix::sys::wait::WaitStatus::Exited(..) | nix::sys::wait::WaitStatus::Signaled(..),)
+    );
+    if !reaped {
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        let _ = nix::sys::wait::waitpid(pid, None);
+    }
+    let _ = child.wait();
+    assert!(
+        reaped,
+        "server runtime shutdown must stop and reap the embedded process before handoff"
+    );
+}
+
 #[test]
 fn server_reload_mask_is_not_inherited_by_embedded_children() {
     use std::{

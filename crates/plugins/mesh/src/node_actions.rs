@@ -46,7 +46,7 @@ pub const ACTIONS: &[ActionDef] = &[
         &[
             "Read whether the mesh is on, its addresses, and which access rules apply.",
             "Read how this machine reaches its server: over the mesh, or over the enrolled port.",
-            "Add --json for the same facts as data.",
+            "With --json, data.public_key is the active public key only; the field is absent without a Mesh identity.",
         ],
     ),
     action(
@@ -622,6 +622,10 @@ impl AgentPlugin for MeshNodePlugin {
                         "Waiting"
                     };
                     let mut status = json!({"state":state,"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node)});
+                    // Public identity is useful for continuity checks; private key material never leaves the node.
+                    if let Some(public_key) = node.interface_key() {
+                        status["public_key"] = json!(public_key.0);
+                    }
                     if let Some(probe) = &self.proxy_containment {
                         let (kind, detail) = probe();
                         status["proxy_containment"] = json!({"kind": kind, "detail": detail});
@@ -765,6 +769,29 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    /// `mesh.status` exposes only the live public identity needed to verify persistence.
+    #[test]
+    fn status_reports_its_public_mesh_key_without_private_material() {
+        use crate::{dataplane::Identity, policy::model::PublicKey};
+
+        let mut plugin = MeshNodePlugin::from_node(Node::with_identity_for_action_test(Identity {
+            public_key: PublicKey([7; 32]),
+            port: 44000,
+            compact_access: false,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: false,
+        }));
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
+                .expect("status JSON");
+
+        assert_eq!(status["public_key"], json!(vec![7; 32]));
+        assert!(status.get("private_key").is_none());
+    }
+
     /// An unenrolled rootless mesh component can be inspected without probing a privileged firewall.
     #[test]
     fn rootless_owner_can_read_an_inactive_mesh_without_kernel_setup() {

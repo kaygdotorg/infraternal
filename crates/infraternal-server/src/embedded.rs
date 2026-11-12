@@ -1070,6 +1070,11 @@ impl Drop for AgentConnection {
                 link.retire();
             }
         }
+        // Runtime cancellation can bypass the async connection cleanup task. Reap the embedded
+        // child before this drop returns so no local writer survives a server restart handoff.
+        if let Some(pid) = self.pid.take() {
+            stop_child_sync(pid);
+        }
     }
 }
 #[cfg(feature = "remote")]
@@ -3560,40 +3565,54 @@ fn spawn_socketpair_agent_with_mesh_state(
 
 #[cfg(unix)]
 async fn stop_child(pid: nix::unistd::Pid) {
+    let _ = tokio::task::spawn_blocking(move || stop_child_sync(pid)).await;
+}
+
+/// Terminate and reap one embedded child even when no async runtime remains.
+///
+/// Actor cancellation runs `AgentConnection::drop` synchronously, before a restart can hand mesh
+/// state to an older build. Keep the graceful signal window, then wait after `SIGKILL` so no
+/// writer can survive that handoff.
+#[cfg(unix)]
+fn stop_child_sync(pid: nix::unistd::Pid) {
     use nix::sys::{
         signal::{Signal, kill},
         wait::{WaitPidFlag, WaitStatus, waitpid},
     };
-    // Keep escalation inside the blocking task: runtime cancellation may drop
-    // its async waiter, but must not cancel the SIGKILL deadline or reaping.
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = kill(pid, Signal::SIGTERM);
-        let graceful = std::time::Instant::now() + Duration::from_secs(2);
-        let final_deadline = graceful + Duration::from_secs(1);
-        let mut escalated = false;
-        loop {
-            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
-                // Reap only this child. On return, no later signal can target a
-                // reused PID; ECHILD also retires the identity immediately.
-                _ => return,
-            }
-            let now = std::time::Instant::now();
-            if !escalated && now >= graceful {
-                let _ = kill(pid, Signal::SIGKILL);
-                escalated = true;
-            }
-            if now >= final_deadline {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+    let mut graceful = None;
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
+            // Reap only this child. On return, no later signal can target a
+            // reused PID; ECHILD also retires the identity immediately.
+            _ => return,
         }
-    })
-    .await;
+        if graceful.is_none() {
+            // Confirm the PID is still our unreaped child before signaling it; this avoids ever
+            // sending a late signal to a process that reused a stale PID.
+            let _ = kill(pid, Signal::SIGTERM);
+            graceful = Some(std::time::Instant::now() + Duration::from_secs(2));
+        }
+        if graceful.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            let _ = kill(pid, Signal::SIGKILL);
+            loop {
+                match waitpid(pid, None) {
+                    Ok(_) | Err(nix::errno::Errno::ECHILD) => return,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(_) => return,
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(not(unix))]
 async fn stop_child(_pid: nix::unistd::Pid) {}
+
+/// Keep non-Unix builds compatible with the connection's unconditional drop guard.
+#[cfg(not(unix))]
+fn stop_child_sync(_pid: nix::unistd::Pid) {}
 
 #[cfg(test)]
 #[path = "embedded_regressions.rs"]

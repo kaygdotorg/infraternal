@@ -42,10 +42,52 @@ pub fn plugin() -> PluginDefinition {
         }
     }
     #[cfg(feature = "remote")]
+    {
+        plugin
+            .actions
+            .push(infraternal_plugin_remote::cli::restart_action());
+        plugin.actions.push(server_mesh_status_action());
+    }
     plugin
-        .actions
-        .push(infraternal_plugin_remote::cli::restart_action());
-    plugin
+}
+
+#[cfg(all(feature = "cli-plugin", feature = "remote"))]
+fn server_mesh_status_action() -> ActionDefinition {
+    let data = JsonSchema::object(
+        [
+            (
+                "running".to_owned(),
+                JsonSchema::boolean("The running server answered its private control socket."),
+            ),
+            (
+                "public_key_fingerprint".to_owned(),
+                JsonSchema::string("SHA-256 fingerprint of the server's public Mesh key."),
+            ),
+        ],
+        ["running".to_owned(), "public_key_fingerprint".to_owned()],
+    );
+    ActionDefinition::new(
+        ["server", "mesh", "status"],
+        "Show the running server's Mesh public-key fingerprint.",
+        "Use this command on the server host, as the account that runs the server, to verify Mesh identity continuity.",
+        [
+            "Pass the server's private data directory with --data.",
+            "The command checks the live server control socket and prints only the public-key fingerprint.",
+        ],
+        JsonSchema::empty_object(),
+        JsonSchema::command_result_with(data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "server.status",
+            DryRun::Unsupported,
+        ),
+    )
+    .with_cli_handler(CliHandler::ServerMeshStatus)
+    .with_example(
+        "server mesh status --data /var/lib/infraternal --json",
+        "Read the running server's public Mesh fingerprint.",
+    )
 }
 
 #[cfg(feature = "cli-plugin")]

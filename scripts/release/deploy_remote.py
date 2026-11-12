@@ -147,14 +147,16 @@ def same_image(pid, binary):
         return hashlib.file_digest(running, "sha256").digest() == hashlib.file_digest(installed, "sha256").digest()
 
 
-def restart(data, binary):
+def restart(data, binary, rollback=False):
+    """Request a restart, asking the current server to hand Mesh state back on rollback."""
     payload = os.fsencode(binary)
     if len(payload) > 4096:
         raise ValueError("replacement path exceeds control bound")
     with socket.socket(socket.AF_UNIX) as peer:
         peer.settimeout(5)
         peer.connect(str(data / "restart/control.sock"))
-        peer.sendall(struct.pack("!H", len(payload)) + payload)
+        length = len(payload) | (0x8000 if rollback else 0)
+        peer.sendall(struct.pack("!H", length) + payload)
         reply = bytearray()
         while b"\n" not in reply and len(reply) < 128:
             part = peer.recv(128 - len(reply))
@@ -205,7 +207,7 @@ def swap_link(path, target):
 
 
 def mesh_secret_inodes(data):
-    """Find the live inode identities of Mesh private files that backups must omit."""
+    """Find Mesh private-file and staging inodes so backups can omit their aliases."""
     mesh = data / "mesh"
     try:
         mesh_metadata = mesh.lstat()
@@ -215,14 +217,29 @@ def mesh_secret_inodes(data):
         return set()
 
     inodes = set()
-    for name in ("mesh-private-key", "mesh-key-rotation.bin"):
+    for path in mesh.iterdir():
+        if path.name not in {"mesh-private-key", "mesh-key-rotation.bin"} and not mesh_secret_staging_name(path.name):
+            continue
         try:
-            metadata = (mesh / name).lstat()
+            metadata = path.lstat()
         except FileNotFoundError:
             continue
         if stat.S_ISREG(metadata.st_mode):
             inodes.add((metadata.st_dev, metadata.st_ino))
     return inodes
+
+
+def mesh_secret_staging_name(name):
+    """Recognize key and rotation-journal staging files left by an interrupted write or move."""
+    if name in {".mesh-private-key.migrate-new", ".mesh-key-rotation.bin.migrate-new"}:
+        return True
+    return name.endswith(".new") and name.startswith((
+        "mesh-private-key.",
+        "mesh-key-rotation.",
+        "mesh-key-rotation.bin.",
+        ".mesh-private-key.migrate-",
+        ".mesh-key-rotation.bin.migrate-",
+    ))
 
 
 def backup(data, destination):
@@ -235,7 +252,7 @@ def backup(data, destination):
         ignored = []
         for name in names:
             path = Path(root, name)
-            if name in secret_names:
+            if name in secret_names or mesh_secret_staging_name(name):
                 ignored.append(name)
                 continue
             try:
@@ -263,6 +280,8 @@ def backup(data, destination):
             source.backup(target)
     for path in data.iterdir():
         if path.name.startswith("infraternal.sqlite") or path.name == "restart":
+            continue
+        if path.name in secret_names or mesh_secret_staging_name(path.name):
             continue
         try:
             metadata = path.lstat()
@@ -378,7 +397,7 @@ def apply(config):
             # recovery: its signed image already exists in the retained backup.
             if requested:
                 before_rollback = endpoint(data)
-                restart(data, previous)
+                restart(data, previous, rollback=True)
                 wait_for_success(config, before_rollback, previous)
             # Never overwrite a running SQLite database. Restoring a database is
             # a separate cold recovery operation; automatic rollback keeps its data.
