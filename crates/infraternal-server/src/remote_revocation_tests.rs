@@ -154,6 +154,7 @@ async fn revocation_must_cancel_input_on_existing_tls_transport() {
     );
 }
 
+/// Expired certificates cannot open a new terminal attachment on a live transport.
 #[tokio::test]
 async fn expired_identity_must_refuse_new_attachment_on_existing_transport() {
     let (store, pool, _host, fingerprint, _listeners, actor, peer, _observed) =
@@ -170,9 +171,12 @@ async fn expired_identity_must_refuse_new_attachment_on_existing_transport() {
     .await
     .unwrap()
     .unwrap();
+    // The schema requires an exact seven-day interval, so keep both bounds on
+    // the same integer-second snapshot instead of crossing an epoch boundary.
+    let expired_at = now().unwrap();
     sqlx::query("UPDATE remote_certificates SET not_before=?, not_after=? WHERE fingerprint=?")
-        .bind(now().unwrap() - 604_801)
-        .bind(now().unwrap() - 1)
+        .bind(expired_at - 604_801)
+        .bind(expired_at - 1)
         .bind(fingerprint.as_slice())
         .execute(&pool)
         .await
