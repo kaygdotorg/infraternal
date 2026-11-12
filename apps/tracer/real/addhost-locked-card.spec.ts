@@ -29,10 +29,13 @@ async function startHost(): Promise<{ port: number; privateKey: string; stop(): 
     `Port ${port}`, "ListenAddress 127.0.0.1", `HostKey ${join(dir, "host_ed25519")}`, `AuthorizedKeysFile ${join(dir, "authorized_keys")}`,
     "PasswordAuthentication no", "KbdInteractiveAuthentication no", "UsePAM no", "StrictModes no", `PidFile ${join(dir, "pid")}`, "LogLevel ERROR",
   ].join("\n"));
-  const child: ChildProcess = spawn("/usr/sbin/sshd", ["-D", "-e", "-f", join(dir, "sshd_config")], { stdio: "ignore", detached: true });
+  // A transient user unit, not a bare process: shells of a bare sshd have no user systemd manager, and the host check
+  // then (rightly) calls the host unsupported. The unit's environment carries XDG_RUNTIME_DIR into the sessions.
+  const unit = `j510-host-${port}`;
+  const child: ChildProcess = spawn("systemd-run", ["--user", "--quiet", "--collect", "--unit", unit, `--setenv=XDG_RUNTIME_DIR=${process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`}`, "/usr/sbin/sshd", "-D", "-e", "-f", join(dir, "sshd_config")], { stdio: "ignore" });
   const privateKey = readFileSync(join(dir, "user"), "utf8");
   await new Promise((resolve) => setTimeout(resolve, 500)); // sleep: give sshd time to bind its port before the first connection
-  return { port, privateKey, stop: () => { try { if (child.pid) process.kill(child.pid, "SIGTERM"); } catch { /* already gone */ } rmSync(dir, { recursive: true, force: true }); } };
+  return { port, privateKey, stop: () => { spawnSync("systemctl", ["--user", "stop", unit], { stdio: "ignore", timeout: 10_000 }); child.kill(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
 test("a locked server offers Unlock on the Add host card and the host carries on after it (#510)", async ({ browser }) => {
