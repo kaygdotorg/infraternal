@@ -288,8 +288,8 @@ def main() -> None:
         parser.error("agent PID output and capture-start marker must be supplied together")
     if arguments.pipeline_diagnostics and arguments.queue_depth_sampling:
         parser.error("full pipeline logging and sampled queue depth are mutually exclusive")
-    if not 60 <= arguments.duration_seconds <= 840:
-        parser.error("one perf-lock window must run between 60 and 840 seconds")
+    if not 60 <= arguments.duration_seconds <= 7_200:
+        parser.error("the loaded-latency run must last between 60 and 7200 seconds")
     if arguments.probe_interval_ms < 1 or arguments.counter_interval_ms < 100:
         parser.error("probe interval must be positive and counter interval at least 100 ms")
     if not 576 <= arguments.underlay_mtu <= 65_535:

@@ -53,8 +53,8 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 python=${PYTHON:-python3}
 perf_binary=${PERF:-$(command -v perf || true)}
 
-[[ $duration =~ ^[0-9]+$ && $duration -ge 60 && $duration -le 840 ]] || {
-    echo 'duration must be between 60 and 840 seconds per perf-lock window' >&2
+[[ $duration =~ ^[0-9]+$ && $duration -ge 60 && $duration -le 7200 ]] || {
+    echo 'duration must be between 60 and 7200 seconds' >&2
     exit 2
 }
 [[ -x $kit/bin/h2h && -x $coordinator && -x $binary ]] || {

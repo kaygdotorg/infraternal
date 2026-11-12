@@ -91,40 +91,35 @@ class RecoveryReportTests(unittest.TestCase):
 
 
 class LongSoakPlanTests(unittest.TestCase):
-    """Keep a one- or two-hour latency soak inside separate perf-lock windows."""
+    """Keep one GotaTun process pair alive for the full long latency soak."""
 
-    def test_splits_one_and_two_hours_into_even_windows(self):
-        """Avoid one short trailing window while keeping every run under 14 minutes."""
+    def test_uses_one_continuous_window_for_one_or_two_hours(self):
+        """Do not restart the product agents between windows of a leak soak."""
         self.assertIsNotNone(plan_soak_windows, "the long-soak planner should be available")
         assert plan_soak_windows is not None
-        self.assertEqual(plan_soak_windows(3_600, 780), [720] * 5)
-        self.assertEqual(plan_soak_windows(7_200, 780), [720] * 10)
+        self.assertEqual(plan_soak_windows(3_600), [3_600])
+        self.assertEqual(plan_soak_windows(7_200), [7_200])
 
-    def test_rejects_total_or_window_outside_the_perf_lock_contract(self):
-        """Reject totals outside one to two hours and windows outside 60–840 seconds."""
+    def test_rejects_soak_durations_outside_one_to_two_hours(self):
+        """Reject totals outside the continuous one-to-two-hour measurement range."""
         self.assertIsNotNone(plan_soak_windows, "the long-soak planner should be available")
         assert plan_soak_windows is not None
-        for total_seconds, window_seconds in (
-            (3_599, 780),
-            (7_201, 780),
-            (3_600, 59),
-            (3_600, 841),
-        ):
-            with self.subTest(total_seconds=total_seconds, window_seconds=window_seconds):
+        for total_seconds in (3_599, 7_201):
+            with self.subTest(total_seconds=total_seconds):
                 with self.assertRaises(ValueError):
-                    plan_soak_windows(total_seconds, window_seconds)
+                    plan_soak_windows(total_seconds)
 
-    def test_builds_each_window_as_a_root_perf_hold_with_the_selected_perf_binary(self):
-        """Keep perf privileges and perf binary scoped to each bounded measurement window."""
+    def test_builds_one_root_perf_hold_for_the_entire_soak(self):
+        """Keep perf privileges and the agent pair alive for the measured hour."""
         self.assertIsNotNone(build_perf_window_command, "the long-soak runner should be available")
         assert build_perf_window_command is not None
         command = build_perf_window_command(
             perf_runner=Path("/usr/local/bin/perf-run"),
             perf=Path("/nix/store/perf/bin/perf"),
             window_runner=Path("/suite/run_loaded_latency_window.sh"),
-            window_output=Path("/evidence/window-001"),
+            window_output=Path("/evidence/continuous-soak"),
             perf_output=Path("/evidence/perf-run"),
-            duration_seconds=720,
+            duration_seconds=3_600,
             kit=Path("/kit"),
             coordinator=Path("/coordinator"),
             binary=Path("/infraternal"),
@@ -142,8 +137,8 @@ class LongSoakPlanTests(unittest.TestCase):
                 "env",
                 "PERF=/nix/store/perf/bin/perf",
                 "/suite/run_loaded_latency_window.sh",
-                "/evidence/window-001",
-                "720",
+                "/evidence/continuous-soak",
+                "3600",
                 "/kit",
                 "/coordinator",
                 "/infraternal",

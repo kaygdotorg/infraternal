@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 import shutil
@@ -15,28 +14,16 @@ import sys
 from typing import Any
 
 
-# Keep total duration and each perf lock hold inside the reliability-suite limits.
+# Keep one continuous agent-pair run inside the requested one-to-two-hour range.
 MIN_SOAK_SECONDS = 3_600
 MAX_SOAK_SECONDS = 7_200
-MIN_WINDOW_SECONDS = 60
-MAX_WINDOW_SECONDS = 840
 
 
-def plan_soak_windows(total_seconds: int, maximum_window_seconds: int) -> list[int]:
-    """Split one or two hours evenly so each exclusive perf hold stays bounded."""
+def plan_soak_windows(total_seconds: int) -> list[int]:
+    """Use one continuous perf hold so resource drift belongs to the same agent pair."""
     if type(total_seconds) is not int or not MIN_SOAK_SECONDS <= total_seconds <= MAX_SOAK_SECONDS:
         raise ValueError("the loaded-latency soak must run for 3600–7200 seconds")
-    if (
-        type(maximum_window_seconds) is not int
-        or not MIN_WINDOW_SECONDS <= maximum_window_seconds <= MAX_WINDOW_SECONDS
-    ):
-        raise ValueError("each perf window must run for 60–840 seconds")
-    count = math.ceil(total_seconds / maximum_window_seconds)
-    base_seconds, longer_windows = divmod(total_seconds, count)
-    return [
-        base_seconds + int(index < longer_windows)
-        for index in range(count)
-    ]
+    return [total_seconds]
 
 
 def build_perf_window_command(
@@ -52,9 +39,9 @@ def build_perf_window_command(
     binary: Path,
     underlay_rate_mbit: int = 800,
 ) -> list[str]:
-    """Build one isolated root perf hold and pass its tools to the window runner."""
-    if not MIN_WINDOW_SECONDS <= duration_seconds <= MAX_WINDOW_SECONDS:
-        raise ValueError("each perf window must run for 60–840 seconds")
+    """Build the single root perf hold that contains the complete continuous soak."""
+    if not MIN_SOAK_SECONDS <= duration_seconds <= MAX_SOAK_SECONDS:
+        raise ValueError("the continuous perf hold must run for 3600–7200 seconds")
     if type(underlay_rate_mbit) is not int or not 100 <= underlay_rate_mbit <= 10_000:
         raise ValueError("the underlay rate must be between 100 and 10000 Mbit/s")
     command = [
@@ -95,19 +82,18 @@ def _window_report(path: Path) -> dict[str, Any] | None:
 
 
 def main() -> None:
-    """Run all planned windows and retain their reports and perf-run receipts."""
+    """Run one continuous product pair and retain its trace and perf-run receipt."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("total_seconds", type=int)
     parser.add_argument("kit", type=Path)
     parser.add_argument("coordinator", type=Path)
     parser.add_argument("binary", type=Path)
-    parser.add_argument("--window-seconds", type=int, default=780)
     parser.add_argument("--perf", type=Path, default=os.environ.get("PERF"))
     parser.add_argument("--underlay-rate-mbit", type=int, default=800)
     arguments = parser.parse_args()
     try:
-        durations = plan_soak_windows(arguments.total_seconds, arguments.window_seconds)
+        durations = plan_soak_windows(arguments.total_seconds)
     except ValueError as error:
         parser.error(str(error))
     if not 100 <= arguments.underlay_rate_mbit <= 10_000:
@@ -116,7 +102,7 @@ def main() -> None:
         parser.error("set PERF to the executable perf binary or pass --perf")
     perf_runner = shutil.which("perf-run")
     if perf_runner is None:
-        parser.error("perf-run is required so each window gets its own exclusive measurement hold")
+        parser.error("perf-run is required for the continuous isolated measurement hold")
     window_runner = Path(__file__).with_name("run_loaded_latency_window.sh")
     if not window_runner.is_file() or not os.access(window_runner, os.X_OK):
         parser.error(f"loaded-latency window runner is missing: {window_runner}")
@@ -132,7 +118,7 @@ def main() -> None:
         "case": "single-flow-loaded-latency-soak",
         "platform": "linux",
         "total_seconds_requested": arguments.total_seconds,
-        "maximum_window_seconds": arguments.window_seconds,
+        "continuous_process_pair": True,
         "underlay_rate_mbit": arguments.underlay_rate_mbit,
         "queue_depth_sampling_enabled": True,
         "status": "running",
@@ -141,8 +127,8 @@ def main() -> None:
     }
     _write_index(index_path, index)
 
-    for number, duration_seconds in enumerate(durations, start=1):
-        window_output = arguments.output / f"window-{number:03d}"
+    for duration_seconds in durations:
+        window_output = arguments.output / "continuous-soak"
         perf_output = arguments.output / "perf-run"
         command = build_perf_window_command(
             perf_runner=Path(perf_runner),
@@ -160,7 +146,7 @@ def main() -> None:
         report = _window_report(window_output / "report.json")
         index["windows"].append(
             {
-                "window": number,
+                "window": 1,
                 "duration_seconds": duration_seconds,
                 "exit_code": result.returncode,
                 "report": str(window_output / "report.json"),
