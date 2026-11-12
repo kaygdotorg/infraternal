@@ -270,9 +270,10 @@
   --ui-button-transition: color var(--t-press) ease, transform var(--t-press) var(--ease-out);
   margin-left: -0.5rem;
 }
+/* On a phone the short Back/Cancel and the main action share one row, so the footer costs one button's height, not two:
+   stacked, they took about 100 pt a phone's short card could not spare, and pushed the sign-in options out of sight. */
 @media (max-width: 480px) {
-  .ah-foot:has(.ah-secondary) { flex-direction: column-reverse; align-items: stretch; }
-  .ah-foot:has(.ah-secondary) :is(.ah-primary, .ah-secondary) { width: 100%; margin: 0; }
+  .ah-foot:has(.ah-secondary) .ah-primary { flex: 1 1 auto; min-width: 0; }
 }
 
 /* ── Focus: rings only during Tab navigation ──────────────────────────────── */

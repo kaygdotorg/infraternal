@@ -1,4 +1,5 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { keyboardIsOpen, watchKeyboard } from "./keyboard-viewport";
 import { exitStatusText } from "./canvas/status";
 import { keysIn } from "./input-keys";
 import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
@@ -412,7 +413,8 @@ export class TerminalClient {
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
   private readonly prediction: PredictiveEcho | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
-  private readonly onViewportChange = (): void => this.syncVisualViewport();
+  /** Stops the keyboard watcher that keeps the screen's height right (keyboard-viewport.ts). */
+  private stopKeyboardWatch: (() => void) | undefined;
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
   private readonly onBlinkInput = (): void => this.restartCursorBlink();
   private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
@@ -487,8 +489,7 @@ export class TerminalClient {
       this.scheduleFit();
     });
     this.resizeObserver.observe(config.host);
-    window.visualViewport?.addEventListener("resize", this.onViewportChange);
-    window.visualViewport?.addEventListener("scroll", this.onViewportChange);
+    this.stopKeyboardWatch = watchKeyboard(() => this.syncVisualViewport());
     this.terminal.onResize(({ cols, rows }) => {
       // The grid is readable from the page (specs, and anyone judging that a line did not rewrap).
       config.host.dataset.cols = String(cols); config.host.dataset.rows = String(rows);
@@ -1030,8 +1031,7 @@ export class TerminalClient {
     this.offRoundTrip();
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
-    window.visualViewport?.removeEventListener("resize", this.onViewportChange);
-    window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
+    this.stopKeyboardWatch?.();
     this.inputResendNotice?.dispose();
     this.remoteCopyNotice?.dispose();
     this.clipboardWrites.reset();
@@ -2671,11 +2671,12 @@ export class TerminalClient {
     return position !== undefined && position.visible && !position.alternate && position.viewportY === 0;
   }
 
+  /** Fits the screen to the visible area while the keyboard is up, and back to full height when it is not (see keyboard-viewport.ts). */
   private syncVisualViewport(): void {
     const viewport = window.visualViewport;
     if (!viewport) return;
     this.wakeTerminal();
-    const keyboardOpen = viewport.height < window.innerHeight - 120;
+    const keyboardOpen = keyboardIsOpen();
     this.screen.style.height = keyboardOpen ? `${viewport.height}px` : "";
     this.screen.style.transform = keyboardOpen ? `translateY(${viewport.offsetTop}px)` : "";
     this.scheduleFit();
