@@ -3598,9 +3598,9 @@ fn stop_child_sync(pid: nix::unistd::Pid) {
             let _ = kill(pid, Signal::SIGKILL);
             loop {
                 match waitpid(pid, None) {
-                    Ok(_) | Err(nix::errno::Errno::ECHILD) => return,
-                    Err(nix::errno::Errno::EINTR) => continue,
-                    Err(_) => return,
+                    // Only an interrupted wait is retryable; every other result retires this child.
+                    Err(nix::errno::Errno::EINTR) => {}
+                    _ => return,
                 }
             }
         }
