@@ -7,11 +7,15 @@
 
 use std::{
     io::Read,
-    os::unix::{fs::PermissionsExt, net::UnixListener, process::ExitStatusExt},
+    os::{
+        fd::AsFd,
+        unix::{fs::PermissionsExt, net::UnixListener, process::ExitStatusExt},
+    },
     process::{Command, Output, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+use nix::poll::{PollFd, PollFlags, poll};
 use serde_json::Value;
 
 fn home(tag: &str) -> std::path::PathBuf {
@@ -130,6 +134,18 @@ fn json_help_and_version_are_envelopes_too() {
     }
 }
 
+/// Reap the disposable CLI even when request readiness or interrupt handling fails.
+struct InterruptChild(std::process::Child);
+
+impl Drop for InterruptChild {
+    /// Close out the owned subprocess on both successful and panicking test paths.
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Interrupt an accepted request and require one complete JSON envelope and SIGINT termination.
 #[test]
 fn ctrl_c_in_json_mode_ends_with_an_interrupted_envelope_and_exit_130() {
     // A local socket that accepts the call and never answers keeps `mesh status` waiting.
@@ -137,8 +153,9 @@ fn ctrl_c_in_json_mode_ends_with_an_interrupted_envelope_and_exit_130() {
     let state = home.join("state");
     std::fs::create_dir_all(&state).unwrap();
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let _listener = UnixListener::bind(state.join("plugins.sock")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+    let listener = UnixListener::bind(state.join("plugins.sock")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_infraternal"));
+    command
         .args([
             "--json",
             "mesh",
@@ -149,39 +166,48 @@ fn ctrl_c_in_json_mode_ends_with_an_interrupted_envelope_and_exit_130() {
         .env("HOME", &home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    // Background test runners inherit SIG_IGN, which the CLI correctly preserves.
+    // This fixture models a foreground command without changing the runner's signals.
+    infraternal_shim::prepare_child(&mut command);
+    let mut child = InterruptChild(command.spawn().unwrap());
+    // Receiving request bytes proves startup and handler installation have finished.
+    // These timeouts only bound a broken fixture; they do not assert startup speed.
+    let mut incoming = [PollFd::new(listener.as_fd(), PollFlags::POLLIN)];
+    assert_eq!(poll(&mut incoming, 5000_u16).unwrap(), 1, "no CLI request");
+    let (mut request, _) = listener.accept().unwrap();
+    request
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(800));
-    let status = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let started = Instant::now();
-    let code = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "still running after SIGINT"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    request.read_exact(&mut [0_u8; 1]).unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(child.0.id()).unwrap()),
+        nix::sys::signal::Signal::SIGINT,
+    )
+    .unwrap();
+    // HUP arrives when the CLI closes stdout on exit. Wait for that event rather
+    // than sleeping or consuming a partial envelope before the process finishes.
+    let mut completed = [PollFd::new(
+        child.0.stdout.as_ref().unwrap().as_fd(),
+        PollFlags::POLLHUP,
+    )];
+    assert_eq!(
+        poll(&mut completed, 5000_u16).unwrap(),
+        1,
+        "still running after SIGINT"
+    );
+    let code = child.0.wait().unwrap();
     let mut out = String::new();
     child
+        .0
         .stdout
         .take()
         .unwrap()
         .read_to_string(&mut out)
         .unwrap();
     // A shell reports 130 for SIGINT termination; a direct process wait sees signal 2.
-    assert!(
-        code.code() == Some(130) || code.signal() == Some(2),
-        "unexpected end: {code:?}"
-    );
-    let envelope: Value = serde_json::from_str(out.lines().next().unwrap_or(""))
+    assert_eq!(code.signal(), Some(2), "unexpected end: {code:?}");
+    let envelope: Value = serde_json::from_str(&out)
         .unwrap_or_else(|_| panic!("JSON mode must say it was interrupted; stdout was {out:?}"));
     assert_eq!(envelope["error"]["code"], "interrupted");
 }
