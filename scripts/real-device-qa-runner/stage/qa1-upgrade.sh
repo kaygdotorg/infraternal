@@ -22,7 +22,15 @@ if [ -d "$dest" ]; then
   cmp -s "$dest/infraternal" "$src/infraternal" && diff -rq "$src/web" "$dest/web" >/dev/null && [ "$(cat "$dest/SOURCE")" = "$rev" ] \
     || { echo "existing $dest differs from the bundle: aborting before any change"; exit 5; }
 else
+  # The bundle must be the WHOLE release (`share/infraternal`: server, web/, SOURCE and the four static
+  # `infraternal-*-musl` host binaries), or Add host fails on the phone ("matching static binary is unavailable").
+  for f in infraternal web SOURCE infraternal-x86_64-musl infraternal-x86_64-session-musl; do
+    [ -e "$src/$f" ] || { echo "bundle is incomplete: $src/$f missing, aborting before any change"; exit 6; }
+  done
   cp -a "$src" "$dest"
+  # `cp -a` keeps the SELinux type of the staging directory (tmp_t when it came from /tmp), and systemd then refuses
+  # to exec the server (203/EXEC, "Permission denied"). Give the copy the labels the policy wants for /opt.
+  restorecon -RF "$dest"
 fi
 ln -sfn "$dest" /opt/qa/current
 systemctl restart infraternal-qa-server

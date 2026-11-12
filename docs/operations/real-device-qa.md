@@ -124,6 +124,15 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
   device of the same account shows a light one. Once someone picks a theme (Settings > Themes, or the palette), the account's
   theme wins on every device (D352) and the system setting no longer moves it: a dark run on such an account needs a dark theme
   picked. Before D390 (2026-11-12) every "dark" screenshot of an account whose first load was light stayed light.
+- **Upgrading QA1 (2026-11-12 lesson):** stage the WHOLE release (`share/infraternal` of the Nix result, not just `infraternal`,
+  `web/` and `SOURCE`). The four static `infraternal-*-musl` host binaries must sit beside the server, or Add host ends in "The
+  matching static infraternal binary is unavailable". Copy it with `stage/qa1-upgrade.sh`, which also runs `restorecon -RF`: a
+  `cp -a` from `/tmp` keeps the `tmp_t` SELinux type and systemd then fails the unit with 203/EXEC "Permission denied". Not a
+  product bug: the product labels only binaries it installs on managed hosts (#401); the server release directory is placed by
+  whoever deploys (here this script), so the deploy step owns its labels.
+- A restart while Add host is installing stops that install ("Setup stopped before this host was ready"); re-run it.
+- Safari offers "Save Password?" (with an empty user name field) after the host password form is submitted. It stalls the next
+  tap; dismiss it with a tap on "Not Now" by position (`xy~0.315~0.526`).
 - Never `kill` by pattern on std: its `kayg` user is shared with other lanes (calternal). Kill by exact PID.
 
 ## Known gaps
