@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Review regression: protocol-250 peer routes must survive a networkd configuration reload (#483).
+# Run through build-slot nice -n10 on a build VM with systemd-networkd and D-Bus installed.
+# The wrapper creates private user, network, mount and PID namespaces before any mutation.
+# A failing final route assertion is the J519 finding, not a fixture setup success.
+set -euo pipefail
+if [ "${1:-}" != --inside-namespace ]; then
+    exec unshare -Urnmpf --mount-proc bash "$0" --inside-namespace
+fi
+# Refuse a real-root invocation of the internal entrypoint before mounting over system paths.
+read -r mapped_uid outside_uid mapped_count < /proc/self/uid_map
+test "$mapped_uid" = 0 && test "$outside_uid" != 0 && test "$mapped_count" = 1
+umask 022
+unset XDG_RUNTIME_DIR
+mount --make-rprivate /
+mount -t sysfs sysfs /sys
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /etc
+mkdir -p /run/dbus /run/systemd/netif/links /run/systemd/netif/leases /run/systemd/netif/lldp /etc/systemd/network
+printf 'root:x:0:0:root:/root:/bin/sh\nsystemd-network:x:0:0:network:/run/systemd:/usr/sbin/nologin\n' > /etc/passwd
+printf 'root:x:0:\nsystemd-network:x:0:\n' > /etc/group
+printf '0123456789abcdef0123456789abcdef\n' > /etc/machine-id
+printf '[Match]\nName=infraternal0\n[Network]\nAddress=10.254.0.1/32\nAddress=fd01::1/128\nLinkLocalAddressing=no\n' > /etc/systemd/network/10-j519.network
+/usr/bin/dbus-daemon --session --address=unix:path=/run/dbus/system_bus_socket --fork --print-pid > /run/dbus.pid
+ip link add infraternal0 type dummy
+mkdir -p /run/udev/data
+printf 'I:1\nE:ID_NET_DRIVER=dummy\n' > "/run/udev/data/n$(cat /sys/class/net/infraternal0/ifindex)"
+ip link set lo up
+ip link set infraternal0 up
+/lib/systemd/systemd-networkd > /run/networkd.log 2>&1 &
+networkdpid=$!
+trap 'kill "$networkdpid" "$(cat /run/dbus.pid)" 2>/dev/null || true; cat /run/networkd.log' EXIT
+for ((i=0;i<100;i++)); do
+ if networkctl status infraternal0 --no-pager 2>/dev/null | grep -q configured; then break; fi
+ kill -0 "$networkdpid"
+ # sleep: bounded wait for the private network manager to finish initial configuration.
+ sleep 0.1
+done
+networkctl status infraternal0 --no-pager
+networkctl status infraternal0 --no-pager | grep -q "10-j519.network"
+networkctl status infraternal0 --no-pager | grep -q "(configured)"
+ip route replace 10.254.0.2/32 dev infraternal0 proto 250 scope link
+ip -6 route replace fd01::2/128 dev infraternal0 proto 250
+networkctl --version
+networkctl reload
+timeout 2 ip monitor route || test "$?" = 124
+printf 'AFTER_UNCHANGED_NETWORKCTL_RELOAD\n'
+ip -j route show 10.254.0.2/32
+ip -j -6 route show fd01::2/128
+# A reload without a changed file need not reconfigure the link. Request a changed file reload too.
+printf '\n[Link]\nMTUBytes=1400\n' >> /etc/systemd/network/10-j519.network
+networkctl reload
+# Observe deferred reconciliation after reload rather than claiming the acknowledgement is convergence.
+timeout 2 ip monitor route || test "$?" = 124
+printf 'AFTER_NETWORKCTL_RELOAD\n'
+ip -j route show 10.254.0.2/32
+ip -j -6 route show fd01::2/128
+test "$(ip route show 10.254.0.2/32 | wc -l)" = 1
+test "$(ip -6 route show fd01::2/128 | wc -l)" = 1
+printf 'NETWORKD_ROUTE_SURVIVAL_PASS\n'
