@@ -49,7 +49,7 @@ for (const size of SIZES) {
     try {
       const { saves } = await refuseSaves(page);
       await page.request.post("/__mock/reset");
-      await page.goto("/?mock=1&proto=product&fresh=1&bg=none&theme=ink");
+      await page.goto("/?mock=1&proto=product&layout=server&fresh=1&bg=none&theme=ink");
       await expect(page.locator(".ui-window").first().locator(".ui-window-host")).toHaveText(/\S/, { timeout: 40_000 });
       const before = saves();
       // A new window is a layout change the server refuses.
