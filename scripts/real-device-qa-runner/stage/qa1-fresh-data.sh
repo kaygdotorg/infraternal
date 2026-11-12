@@ -17,8 +17,11 @@ echo "start $(date -u +%T)"
 systemctl stop infraternal-qa-proxy infraternal-qa-server
 sleep 1
 # Both units must be down before the move: the proxy holds no data, but the rule is "verify what you stopped".
+# Each unit's receipt is printed BEFORE the move, so the log itself proves both were down.
 for u in infraternal-qa-server infraternal-qa-proxy; do
-  [[ "$(systemctl is-active "$u" || true)" == inactive && "$(systemctl show "$u" -p MainPID --value)" == 0 ]] \
+  state=$(systemctl is-active "$u" || true); mainpid=$(systemctl show "$u" -p MainPID --value)
+  echo "receipt $u: active=$state MainPID=$mainpid at $(date -u +%T)"
+  [[ "$state" == inactive && "$mainpid" == 0 ]] \
     || { echo "$u did not stop: aborting before any move (units left as found, none restarted)"; exit 4; }
 done
 mv "$data" "$kept"
