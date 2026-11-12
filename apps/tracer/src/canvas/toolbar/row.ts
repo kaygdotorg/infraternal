@@ -9,6 +9,7 @@ import { isMacPlatform } from "../../../../../packages/ui/src/platform";
 import { refreshTip } from "../../../../../packages/ui/src/tooltip";
 import type { ToolbarItem, ToolbarRow } from "../../core-screen";
 import type { Ctx, WinRec } from "../context";
+import { onDemand } from "../../on-demand";
 import { el } from "../dom";
 import { isInteractive, isTerminal } from "../views/body";
 import { SESSION_ICON } from "../views/icons";
@@ -32,22 +33,25 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   stage.querySelector(".tabs")?.prepend(lockBtn);
   lockBtn.addEventListener("click", () => cx.nav.setCanvasLock(!state.canvasLock), { signal });
 
-  // The "+" beside the top pill opens a new shell window on the first host.
+  // The "+" beside the top pill opens a shell (D390). Without app windows: with one admitted host it opens that host's shell straight away. With several it opens
+  // the command palette showing only the "Open shell on <host>" rows, one per admitted host (offline and locked ones too, as every list of
+  // hosts shows them), so choosing where to work is the one palette the person already knows (TASTE: no second door to the same room).
   const add = stage.querySelector<HTMLButtonElement>(".tab-add");
   if (add) {
     add.disabled = false;
     add.setAttribute("aria-label", "New window");
     add.dataset.tip = "New window";
-    // With app windows on, "+" opens the picker: the shells, screens and app windows of every machine behind one field (D208).
-    // Without them it opens a shell on the first host, as it always did.
     add.addEventListener("click", (e) => {
+      // With app windows on, "+" still opens the picker: the shells, screens and app windows of every machine behind one field (D208).
       const appWindows = cx.adapters.appWindows;
       if (appWindows?.available()) {
         const loading = cx.appWindows?.load();
         if (loading) { const source = e.detail === 0 ? "keyboard" : "pointer"; void loading.then((runtime) => { if (runtime && add.isConnected) runtime.togglePicker(add, source); }); }
         return;
       }
-      const host = cx.adapters.sessions.hosts()[0]; if (host) cx.win.open(host.name);
+      const hosts = cx.adapters.sessions.hosts().filter((host) => !host.state);
+      if (hosts.length === 1) { cx.win.open(hosts[0]!.name); return; }
+      if (hosts.length > 1) void onDemand(() => import("./palette-rows.on-demand")).then((m) => { if (!signal.aborted) core.showPalette(m.openShellEntries(cx)); });
     }, { signal });
   }
 

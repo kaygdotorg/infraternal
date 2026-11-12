@@ -7,7 +7,6 @@
  * one that is offline because the lock is on needs one passkey tap, so its row and the empty console say exactly that and carry
  * the way to do it. A host must never vanish from a list because it cannot be reached: it stays, with this note.
  */
-import type { PaletteEntry } from "../core-screen";
 import type { Ctx } from "./context";
 import type { HostEntry } from "./sessions/adapter";
 
@@ -27,16 +26,4 @@ export function hostNote(cx: Pick<Ctx, "adapters">, host: HostEntry): HostNote {
   if (host.online !== false) return undefined;
   const authority = cx.adapters.authority;
   return authority?.state() === "locked" && authority.canUnlock() ? "locked" : "offline";
-}
-
-/**
- * The palette rows "Open shell on <host>", one per admitted host, in the order given. The same rows are in the command palette and
- * in the palette the empty console's Open shell button opens, so a host is named and found one way everywhere. A host whose
- * agent is not connected says "offline" in the hint (it can be chosen: the window explains why it cannot open).
- */
-export function openShellEntries(hosts: readonly HostEntry[]): PaletteEntry[] {
-  return hosts.filter((host) => !host.state).map((host) => ({
-    group: "Console", glyph: "›_", label: `Open shell on ${host.name}`,
-    hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}`,
-  }));
 }

@@ -8,6 +8,10 @@
  * missing state. An existing account look wins over legacy device values; those values seed only a look the account has not saved yet. Once the complete look is
  * confirmed by the canvas store, this module refreshes its derived cache and removes old appearance keys. `uiFont` follows that same account-first migration
  * rule, so the first account value wins over any later device-local copy.
+ *
+ * D390: an account that never picked a theme follows each device's light or dark setting. Its look carries `themeChosen: false`, the first
+ * load saves no look of its own, and the theme colours inside such a look are never applied; they are only the scheme one device showed.
+ * The flag becomes true when the person selects a theme or changes its Colour, and from then on D352 applies: the account's theme wins on every device.
  */
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { parseLook, type DocLook, type DocWindowSizes } from "../model/schema";
@@ -18,10 +22,11 @@ import { DEFAULT_SIZES, SIZE_EVENT, type WindowSizes } from "../window-sizes";
 import { EXTENDED_INFO_EVENT } from "../windows/extended-info";
 import { DEFAULT_GRADIENT } from "./backgrounds";
 import { applyLook } from "./apply";
-import { createThemeStore, restore, type AppearanceTheme, type ThemeStore } from "./model";
+import { createThemeStore, restore, type AppearanceTheme, type SavedThemes, type ThemeStore } from "./model";
 import {
   clearLegacyAppearance,
   readCache,
+  cachedThemeChosen,
   readCachedLook,
   readLegacyAppearance,
   readLegacyUiFont,
@@ -150,11 +155,24 @@ function completeLook(look: DocLook | undefined): look is DocLook & { windowSize
   return Boolean(look?.windowSizes && typeof look.extendedInfo === "boolean" && (look.uiFont === "mono" || look.uiFont === "sans"));
 }
 
-/** Compares valid looks after the document schema normalizes their nested object field order. */
+/** Reads the one scheme this device's setting asks for: dark shows Mocha, light shows Latte (the same pair the first paint uses). */
+function systemColors(): string { return matchMedia("(prefers-color-scheme: dark)").matches ? "mocha" : "latte"; }
+
+/** Gives a never-chosen account's saved themes this device's own scheme, so a scheme another device saved never reaches this screen (D390). */
+function withSystemColors(saved: SavedThemes): SavedThemes {
+  const colors = systemColors();
+  return { ...saved, basics: { ...saved.basics, colors }, themes: saved.themes.map((theme) => ({ ...theme, colors })) };
+}
+
+/**
+ * Compares valid looks after the document schema normalizes their nested object field order. A look without `themeChosen` equals one
+ * that says false: the page writes the flag explicitly, but a look saved by a page that never heard of it still has to count as confirmed.
+ */
 function sameLook(left: unknown, right: unknown): boolean {
   const canonicalLeft = parseLook(left), canonicalRight = parseLook(right);
-  return canonicalLeft !== undefined && canonicalRight !== undefined
-    && JSON.stringify(canonicalLeft) === JSON.stringify(canonicalRight);
+  if (canonicalLeft === undefined || canonicalRight === undefined) return false;
+  const normal = (look: DocLook): string => JSON.stringify({ ...look, themeChosen: look.themeChosen === true });
+  return normal(canonicalLeft) === normal(canonicalRight);
 }
 
 /** Starts the page's Themes and look bridge. Calling it again stops the first instance. */
@@ -174,7 +192,13 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   const selected = selectedTheme(cachedLook);
   const uiSize = (accountId ? readLegacyUiSize(legacy) : undefined) ?? selected?.uiSize ?? (accountId ? 100 : readUiSize());
   const now = core.appearance();
-  const store = createThemeStore({ colors: now.theme, font: now.font, uiSize }, cache);
+  // D390: has the person ever picked a theme? An old browser theme key was a pick, a cached look says so itself, and a `?theme=` preview
+  // on the test double pins the colours. Anything else follows this device's light or dark setting.
+  const urlTheme = query.get("theme") !== null;
+  let themeChosen = Boolean(legacy?.theme && Object.hasOwn(THEMES, legacy.theme)) || cachedThemeChosen(cachedLook);
+  const restoredCache = restore(cache);
+  const startFollowing = !themeChosen && !urlTheme && restoredCache !== undefined;
+  const store = createThemeStore({ colors: now.theme, font: now.font, uiSize }, startFollowing ? withSystemColors(restoredCache) : cache);
   legacyThemePatch(store, legacy, cachedLook);
   shared = store;
 
@@ -219,7 +243,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
 
   const listeners = new Set<() => void>();
   let cacheTimer = 0, announceTimer = 0;
-  const snapshot = (): DocLook => ({ ...store.snapshot(), uiFont, windowSizes: { ...defaults.windowSizes }, extendedInfo: defaults.extendedInfo });
+  const snapshot = (): DocLook => ({ ...store.snapshot(), uiFont, windowSizes: { ...defaults.windowSizes }, extendedInfo: defaults.extendedInfo, themeChosen });
   const flushCache = (): void => { cacheTimer = 0; if (!previewing) writeCache(accountId, snapshot()); };
   const announce = (): void => { announceTimer = 0; for (const listener of [...listeners]) listener(); };
   const scheduleChange = (): void => {
@@ -230,11 +254,27 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
     window.clearTimeout(announceTimer);
     announceTimer = window.setTimeout(announce, ANNOUNCE_DELAY_MS);
   };
+  let lastSelected = store.selectedId(), lastColors = store.selected().colors;
   const off = store.onChange(() => {
     render();
+    const selectedNow = store.selectedId(), colorsNow = store.selected().colors;
+    const picked = selectedNow !== lastSelected || colorsNow !== lastColors;
+    lastSelected = selectedNow; lastColors = colorsNow;
     if (applyingDocument || previewing) return;
+    // Selecting a theme or changing its Colour is the person's pick (D390); a tint slider or a font is not.
+    if (picked && !urlTheme) themeChosen = true;
     scheduleChange();
   });
+  /** While no theme was picked, a change of this device's light or dark setting changes the shown scheme, and nothing is saved. */
+  const system = matchMedia("(prefers-color-scheme: dark)");
+  const followSystem = (): void => {
+    if (themeChosen || previewing || urlTheme) return;
+    const now = store.snapshot(), colors = systemColors();
+    if (now.basics.colors === colors && now.themes.every((theme) => theme.colors === colors)) return;
+    applyingDocument = true;
+    try { store.load(withSystemColors(now)); } finally { applyingDocument = false; }
+  };
+  system.addEventListener("change", followSystem);
   // A page that is being hidden sends the final appearance edit now.
   const onHide = (): void => { if (announceTimer) { window.clearTimeout(announceTimer); announce(); } };
   window.addEventListener("pagehide", onHide);
@@ -244,11 +284,17 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
     hasAccountLook: () => accountLookApplied,
     apply(look) {
       if (previewing) return;
-      if (look === undefined) { window.clearTimeout(announceTimer); announce(); return; }
+      if (look === undefined) {
+        // D390: a first load saves nothing of its own. Only an upgrade from old browser values has something worth saving.
+        if (themeChosen || legacy) { window.clearTimeout(announceTimer); announce(); }
+        return;
+      }
       const canonical = parseLook(look);
-      const restored = canonical ? restore(canonical) : undefined;
-      if (!canonical || !restored) return;
+      const restoredAccount = canonical ? restore(canonical) : undefined;
+      if (!canonical || !restoredAccount) return;
       accountLookApplied = Boolean(accountId);
+      const chosenByAccount = canonical.themeChosen === true;
+      const restored = chosenByAccount || urlTheme ? restoredAccount : withSystemColors(restoredAccount);
       const nextDefaults: AppearanceDefaults = {
         windowSizes: {
           phone: canonical.windowSizes?.phone ?? defaults.windowSizes.phone,
@@ -261,7 +307,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
       const changedWindowSizes = nextDefaults.windowSizes.phone !== defaults.windowSizes.phone
         || nextDefaults.windowSizes.desktop !== defaults.windowSizes.desktop;
       const changedExtendedInfo = nextDefaults.extendedInfo !== defaults.extendedInfo;
-      const next: DocLook = { ...restored, uiFont: nextUiFont, ...nextDefaults };
+      const next: DocLook = { ...restored, uiFont: nextUiFont, ...nextDefaults, themeChosen: chosenByAccount };
       if (localLookPending && !sameLook(next, snapshot())) {
         // Preserve the unsent local look until DocumentSync captures it. Its operation then uses the canvas journal's
         // current base revision and op id, so the server's ordinary document order decides the winner.
@@ -273,6 +319,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
       defaults.windowSizes = { ...nextDefaults.windowSizes };
       defaults.extendedInfo = nextDefaults.extendedInfo;
       uiFont = nextUiFont;
+      themeChosen = chosenByAccount;
       try {
         // Loading emits synchronously, so the store listener already renders this remote look once.
         store.load(restored);
@@ -346,6 +393,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
     window.removeEventListener("tracer:appearance", onAppearance);
     window.removeEventListener("tracer:ui-font", onUiFont);
     window.removeEventListener("pagehide", onHide);
+    system.removeEventListener("change", followSystem);
     if (cacheTimer) { window.clearTimeout(cacheTimer); flushCache(); }
     if (announceTimer) { window.clearTimeout(announceTimer); announce(); }
     if (shared === store) shared = undefined;

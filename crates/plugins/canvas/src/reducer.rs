@@ -760,6 +760,12 @@ mod tests {
         next["themes"].as_array_mut().unwrap().pop();
         reduce(&mut doc, &json!({"type":"look.set","look":next}), &[]).unwrap();
         assert_eq!(doc.0["look"]["themes"].as_array().unwrap().len(), 2);
+        // D390: a look may say whether the person chose its theme, with either answer; a look without the flag is still valid.
+        for chosen in [true, false] {
+            let mut flagged = look();
+            flagged["themeChosen"] = json!(chosen);
+            assert!(valid_intent(&json!({"type":"look.set","look":flagged})));
+        }
     }
     /// Rejects malformed and out-of-range looks without changing the saved document.
     #[test]
@@ -791,6 +797,7 @@ mod tests {
             bad(&|v| v["windowSizes"]["phone"] = json!("tablet")),
             bad(&|v| v["windowSizes"]["desktop"] = json!("compact")),
             bad(&|v| v["extendedInfo"] = json!("yes")),
+            bad(&|v| v["themeChosen"] = json!("yes")),
             bad(&|v| v["windowSizes"]["extra"] = json!(true)),
             bad(&|v| {
                 let t = v["themes"][0].clone();

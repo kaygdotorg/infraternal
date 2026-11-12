@@ -20,7 +20,7 @@ import { columnEls, setColumnWidth } from "../layout/column-els";
 import { MARGIN, boxOf, contentSize, defaultWidth, isDefaultWidth, resolve, type Box, type Metrics, type Rect } from "../layout/geometry";
 import type { ColumnModel, ViewId, ViewModel, WindowModel } from "../model/types";
 import { el } from "../dom";
-import { hostNote, LOCKED_NOTE, openShellEntries } from "../host-note";
+import { hostNote, LOCKED_NOTE } from "../host-note";
 import { onDemand, whenIdle } from "../../on-demand";
 import type { EarlyPress, ViewPointer } from "./view-pointer.on-demand";
 import { restPx } from "../springs";
@@ -310,7 +310,8 @@ export function createViews(cx: Ctx): ViewsModule {
     };
     if (canOpen) {
       pill("Open shell", '<path d="m5 8 4 4-4 4M12 16h7"/>', () => {
-        if (only) cx.win.open(only.id); else cx.core.showPalette(openShellEntries(cx.adapters.sessions.hosts()));
+        if (only) cx.win.open(only.id);
+        else void onDemand(() => import("../toolbar/palette-rows.on-demand")).then((m) => { if (!signal.aborted) cx.core.showPalette(m.openShellEntries(cx)); });
       });
     }
     if (locked.length) {
