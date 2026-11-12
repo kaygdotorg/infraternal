@@ -1223,7 +1223,7 @@ pub(crate) mod tests {
     use super::*;
     use std::{
         collections::BTreeMap,
-        os::unix::fs::{PermissionsExt, symlink},
+        os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -1252,6 +1252,36 @@ pub(crate) mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    /// Keeps migration's exclusive directory lock out while a live store may write state.
+    #[test]
+    fn live_mesh_store_excludes_exclusive_migration_lock() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("open mesh store");
+        let directory_fd = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(&directory.0)
+            .expect("open mesh directory for migration lock");
+
+        assert!(
+            nix::fcntl::Flock::lock(directory_fd, nix::fcntl::FlockArg::LockExclusiveNonblock)
+                .is_err(),
+            "migration must wait while a live mesh store can write its files"
+        );
+
+        drop(store);
+        let directory_fd = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(&directory.0)
+            .expect("reopen mesh directory after store exit");
+        let _migration_lock = nix::fcntl::Flock::lock(
+            directory_fd,
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        )
+        .expect("migration lock is released after the store closes");
+    }
+
     /// Build a minimal accepted mesh view with one local identity binding.
     fn binding_state(local_key: crate::policy::model::PublicKey) -> State {
         State {
