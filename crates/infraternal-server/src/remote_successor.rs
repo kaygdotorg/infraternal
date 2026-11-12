@@ -35,6 +35,9 @@ pub(crate) const TAKE_OVER: &str = "privilege.take_over";
 /// `infraternal_agent::privilege_take_over::abandon`.
 pub(crate) const ABANDON: &str = "privilege.abandon";
 
+/// The host's cleanup unit permits 250 seconds; reserve another 50 seconds for its receipt.
+const ABANDON_RECEIPT_BOUND: Duration = Duration::from_secs(300);
+
 /// Whether the host confirmed that transaction-bound abandonment cleanup finished.
 fn abandon_completed(reply: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(reply).is_ok_and(|reply| reply["completed"] == true)
@@ -183,7 +186,7 @@ async fn deliver_uninstall(
             }))
             .map_err(io::Error::other)?;
             let reply =
-                tokio::time::timeout(Duration::from_mins(1), actor.privilege_call(ABANDON, input))
+                tokio::time::timeout(ABANDON_RECEIPT_BOUND, actor.privilege_call(ABANDON, input))
                     .await;
             matches!(&reply, Ok(Ok(bytes)) if abandon_completed(bytes))
         }
@@ -252,5 +255,224 @@ mod tests {
         assert!(!abandon_completed(br#"{"accepted":true}"#));
         assert!(!abandon_completed(br#"{"completed":false}"#));
         assert!(abandon_completed(br#"{"completed":true}"#));
+    }
+
+    /// Keep the uninstall outbox pending while host cleanup takes its full 250-second bound.
+    #[tokio::test]
+    async fn abandon_outbox_waits_past_host_bound_for_receipt() {
+        use crate::{
+            enrollment::{
+                CertificateRecord,
+                authority::tests::enrolled,
+                promotion::{Bound, Method, Settled, SuccessorPurpose},
+            },
+            remote_guard::AuthorityGuard,
+            remote_link::RemoteLink,
+        };
+        use infraternal_agent::{
+            remote_quic, remote_tls,
+            transport::{Receive, Transmit},
+        };
+        use infraternal_protocol::Frame;
+        use sha2::Digest;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use tokio::{net::TcpListener, sync::oneshot};
+        use uuid::Uuid;
+
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let (store, pool, host) = enrolled().await;
+        sqlx::query("UPDATE remote_certificates SET not_before=?, not_after=?")
+            .bind(now - 10)
+            .bind(now + 604_790)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES ('s','owner','fixture',?,?,1)")
+            .bind(now + 3600)
+            .bind(now - 5)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let attempt = Uuid::from_u128(0x522);
+        let transaction = Uuid::from_u128(0xa);
+        store
+            .begin_promotion(
+                "s",
+                host,
+                attempt,
+                Method::Sudo,
+                Bound {
+                    from_uid: 1002,
+                    from_fingerprint: [1; 32],
+                    link_generation: Uuid::from_u128(5),
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        store.reserve_try("s", attempt, true, now).await.unwrap();
+        store
+            .settle_try(attempt, Settled::Rooted, now + 1)
+            .await
+            .unwrap();
+        let key = [8; 32];
+        let key_digest: [u8; 32] = sha2::Sha256::digest(key).into();
+        let token = store
+            .issue_successor_token(attempt, &key_digest, now)
+            .await
+            .unwrap();
+        store
+            .redeem_successor(
+                token.secret(),
+                host,
+                now,
+                &CertificateRecord {
+                    fingerprint: [7; 32],
+                    issuer_fingerprint: [9; 32],
+                    public_key: key,
+                    not_before: now,
+                    not_after: now + 604_800,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .record_install_transaction(attempt, transaction)
+            .await
+            .unwrap();
+        store.abandon_promotion(attempt, now + 2).await.unwrap();
+        let authority = AuthorityGuard::admit_transport(store.clone(), [7; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            authority.successor_authority().unwrap().purpose,
+            SuccessorPurpose::Uninstall
+        );
+
+        let (server_identity, host_identity, root, _) = crate::remote_runtime::tests::identities();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_config = remote_tls::server_config(&server_identity, &[root.clone()]).unwrap();
+        let host_config = remote_tls::client_config(&host_identity, &[root]).unwrap();
+        let (peer_ready, ready) = oneshot::channel();
+        let (call_seen, saw_call) = oneshot::channel();
+        let (release_receipt, wait_for_receipt) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let connection = remote_tls::dial(address, "localhost", &host_config)
+                .await
+                .unwrap();
+            let mut receive = Receive::default();
+            Transmit::default()
+                .send(
+                    &connection.channel,
+                    0,
+                    &Frame::Hello {
+                        version: 1,
+                        caps: remote_quic::REMOTE_WRITER_BINDING,
+                        client_info: "test",
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                receive.next(&connection.channel).await.unwrap().frame,
+                Frame::Hello { .. }
+            ));
+            let _ = peer_ready.send(());
+
+            let mut call_seen = Some(call_seen);
+            let mut wait_for_receipt = wait_for_receipt;
+            let mut call_id = None;
+            loop {
+                tokio::select! {
+                    decoded = receive.next(&connection.channel) => {
+                        let decoded = match decoded {
+                            Ok(decoded) => decoded,
+                            Err(error)
+                                if call_id.is_some()
+                                    && error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                            {
+                                break;
+                            }
+                            Err(error) => panic!("unexpected peer transport error: {error}"),
+                        };
+                        match decoded.frame {
+                            Frame::Call { call_id: id, action_id, input_json } => {
+                                assert_eq!(action_id, ABANDON);
+                                let input: serde_json::Value = serde_json::from_slice(input_json).unwrap();
+                                assert_eq!(input["host"], host.simple().to_string());
+                                assert_eq!(input["transaction"], transaction.simple().to_string());
+                                call_id = Some(id);
+                                let _ = call_seen.take().unwrap().send(());
+                            }
+                            Frame::Ping { nonce, sent_us } => {
+                                Transmit::default()
+                                    .send(&connection.channel, 0, &Frame::Pong { nonce, sent_us })
+                                    .await
+                                    .unwrap();
+                            }
+                            other => panic!("unexpected server frame: {other:?}"),
+                        }
+                    }
+                    _ = &mut wait_for_receipt => {
+                        let call_id = call_id.expect("the cleanup call arrived before its receipt");
+                        Transmit::default()
+                            .send(
+                                &connection.channel,
+                                0,
+                                &Frame::Result {
+                                    call_id,
+                                    ok: true,
+                                    json: br#"{"completed":true}"#,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                }
+            }
+        });
+
+        let (socket, _) = listener.accept().await.unwrap();
+        let connection = remote_tls::accept(socket, &server_config).await.unwrap();
+        let link = RemoteLink::tcp(connection.channel).await.unwrap();
+        let delivery = tokio::spawn(deliver_uninstall(authority, link, attempt));
+        ready.await.unwrap();
+        saw_call.await.unwrap();
+
+        let cleanup = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT cleanup FROM remote_host_promotions WHERE attempt=?",
+            )
+            .bind(attempt.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(cleanup().await, "uninstall");
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(251)).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !delivery.is_finished(),
+            "the outbox driver stopped waiting before cleanup returned its receipt"
+        );
+        tokio::time::resume();
+        assert_eq!(cleanup().await, "uninstall");
+
+        release_receipt.send(()).unwrap();
+        delivery.await.unwrap().unwrap();
+        peer.await.unwrap();
+        assert_eq!(cleanup().await, "done");
     }
 }
