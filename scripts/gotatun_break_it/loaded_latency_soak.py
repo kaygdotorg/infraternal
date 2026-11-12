@@ -120,6 +120,73 @@ def _read_ready_json(stream: TextIO | None, name: str, timeout_seconds: float = 
     return row
 
 
+def _agent_thread_ids(pids: object) -> list[int]:
+    """Read all live kernel thread IDs for the configured product process pair."""
+    if (
+        not isinstance(pids, list)
+        or len(pids) != 2
+        or any(type(pid) is not int or pid < 1 for pid in pids)
+        or pids[0] == pids[1]
+    ):
+        raise RuntimeError("the product fixture did not report two distinct agent process IDs")
+    tids: set[int] = set()
+    for pid in pids:
+        task_directory = Path("/proc") / str(pid) / "task"
+        try:
+            tids.update(int(task.name) for task in task_directory.iterdir())
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"cannot enumerate GotaTun threads for process {pid}") from error
+    if len(tids) < 2 or not set(pids).issubset(tids):
+        raise RuntimeError("the configured GotaTun processes have no complete thread listing")
+    return sorted(tids)
+
+
+def _publish_agent_pids(
+    path: Path, pids: object, tids: object, tids_after: object | None = None
+) -> None:
+    """Publish the process pair with thread snapshots bracketing the trace window."""
+    if (
+        not isinstance(pids, list)
+        or len(pids) != 2
+        or any(type(pid) is not int or pid < 1 for pid in pids)
+        or pids[0] == pids[1]
+    ):
+        raise RuntimeError("the product fixture did not report two distinct agent process IDs")
+    if (
+        not isinstance(tids, list)
+        or len(tids) < 2
+        or any(type(tid) is not int or tid < 1 for tid in tids)
+        or len(set(tids)) != len(tids)
+        or not set(pids).issubset(tids)
+    ):
+        raise RuntimeError("the product fixture did not expose a complete GotaTun thread listing")
+    if tids_after is not None and (
+        not isinstance(tids_after, list)
+        or len(tids_after) < 2
+        or any(type(tid) is not int or tid < 1 for tid in tids_after)
+        or len(set(tids_after)) != len(tids_after)
+        or not set(pids).issubset(tids_after)
+    ):
+        raise RuntimeError("the product fixture did not expose a complete final thread listing")
+    manifest = {"pids": pids, "tids": tids}
+    if tids_after is not None:
+        manifest["tids_after"] = tids_after
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _wait_for_capture_start(marker: Path, timeout_seconds: float = 60.0) -> None:
+    """Keep traffic idle until the parent confirms that filtered tracing is active."""
+    deadline = time.monotonic() + timeout_seconds
+    while not marker.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("TID-filtered scheduler capture did not become ready")
+        # sleep: poll the parent-created marker while the already-configured peers remain idle.
+        time.sleep(0.01)
+
+
 def _wait_for_tunnel_server(h2h: Path, destination: str, server: subprocess.Popen[bytes]) -> None:
     """Wait for the real tunnel TCP endpoint while keeping its helper failure visible."""
     deadline = time.monotonic() + 15.0
@@ -168,7 +235,11 @@ def main() -> None:
     parser.add_argument("--counter-interval-ms", type=int, default=1_000)
     parser.add_argument("--underlay-mtu", type=int, default=1500)
     parser.add_argument("--pipeline-diagnostics", action="store_true")
+    parser.add_argument("--agent-pids", type=Path)
+    parser.add_argument("--capture-start-marker", type=Path)
     arguments = parser.parse_args()
+    if (arguments.agent_pids is None) != (arguments.capture_start_marker is None):
+        parser.error("agent PID output and capture-start marker must be supplied together")
     if not 60 <= arguments.duration_seconds <= 840:
         parser.error("one perf-lock window must run between 60 and 840 seconds")
     if arguments.probe_interval_ms < 1 or arguments.counter_interval_ms < 100:
@@ -186,7 +257,7 @@ def main() -> None:
     counter_path = arguments.output / "counters.jsonl"
     pipeline_counter_path = arguments.output / "pipeline-counters.jsonl"
     probe_path = arguments.output / "probes.jsonl"
-    outputs = (
+    outputs = [
         arguments.output / "counter-start",
         arguments.output / "counter-stop",
         counter_path,
@@ -198,6 +269,12 @@ def main() -> None:
         arguments.output / "probe-server.stderr",
         arguments.output / "probe-client.stderr",
         arguments.output / "net-tput.log",
+        arguments.output / "warmup-tput.log",
+    ]
+    outputs.extend(
+        path
+        for path in (arguments.agent_pids, arguments.capture_start_marker)
+        if path is not None
     )
     if any(path.exists() for path in outputs):
         parser.error("output already contains window evidence; choose a fresh window directory")
@@ -216,8 +293,11 @@ def main() -> None:
         "pipeline_diagnostics_enabled": arguments.pipeline_diagnostics,
         "pipeline_log_tail_poll_interval_ms": 10 if arguments.pipeline_diagnostics else None,
         "pipeline_counter_path": str(pipeline_counter_path),
+        "thread_snapshot_policy": "after one 1-second TCP warm-up and after measured transfer",
         "manual_fixes": [],
     }
+    agent_pids: object | None = None
+    agent_tids: list[int] | None = None
     right_namespace: subprocess.Popen[bytes] | None = None
     sampler: subprocess.Popen[str] | None = None
     tcp_server: subprocess.Popen[bytes] | None = None
@@ -283,6 +363,8 @@ def main() -> None:
                 "configure_apply_us": ready["configure_apply_us"],
             }
         )
+        if arguments.agent_pids is not None:
+            agent_pids = ready.get("pids")
 
         h2h = arguments.kit_dir / "bin/h2h"
         tcp_server = subprocess.Popen(
@@ -322,6 +404,28 @@ def main() -> None:
         if probe_ready != {"ready": True, "bind": "0.0.0.0", "port": 5202}:
             raise RuntimeError("probe echo server published an unexpected endpoint")
 
+        # Warm up thread pools before taking the TID snapshot; this keeps lazy workers inside the trace.
+        warmup_log = (arguments.output / "warmup-tput.log").open("wb")
+        try:
+            warmup = subprocess.run(
+                net_tput_command(h2h, destination, 1),
+                stdin=subprocess.DEVNULL,
+                stdout=warmup_log,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=15,
+            )
+        finally:
+            warmup_log.close()
+        run_record["thread_warmup_exit_status"] = warmup.returncode
+        if warmup.returncode != 0:
+            raise RuntimeError("the one-flow thread warm-up failed")
+        if arguments.agent_pids is not None:
+            agent_tids = _agent_thread_ids(agent_pids)
+            _publish_agent_pids(arguments.agent_pids, agent_pids, agent_tids)
+        if arguments.capture_start_marker is not None:
+            _wait_for_capture_start(arguments.capture_start_marker)
+
         run_started_ns = time.monotonic_ns()
         counter_start.touch()
         probe_client = subprocess.Popen(
@@ -357,6 +461,18 @@ def main() -> None:
         load_status = load_client.wait(timeout=arguments.duration_seconds + 30)
         probe_status = probe_client.wait(timeout=arguments.duration_seconds + 30)
         run_ended_ns = time.monotonic_ns()
+        if arguments.agent_pids is not None:
+            if agent_tids is None:
+                raise RuntimeError("the initial GotaTun thread snapshot was not recorded")
+            agent_tids_after = _agent_thread_ids(agent_pids)
+            _publish_agent_pids(arguments.agent_pids, agent_pids, agent_tids, agent_tids_after)
+            run_record.update(
+                {
+                    "agent_tids_start": agent_tids,
+                    "agent_tids_end": agent_tids_after,
+                    "agent_tids_stable": agent_tids_after == agent_tids,
+                }
+            )
         counter_stop.touch()
         if sampler.stdin is not None:
             sampler.stdin.write("quit\n")

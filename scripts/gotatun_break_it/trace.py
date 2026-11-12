@@ -5,12 +5,14 @@ from __future__ import annotations
 import math
 import re
 import json
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import subprocess
 
+from .perf_capture import read_agent_manifest
 from .report import Probe
 
 
@@ -109,17 +111,25 @@ def goodput_from_counters(
 
 
 def parse_perf_sched(
-    lines: str | Iterable[str], *, minimum_delay_ns: int = 0
+    lines: str | Iterable[str],
+    *,
+    minimum_delay_ns: int = 0,
+    target_tids: set[int] | None = None,
 ) -> list[SchedulerEvent]:
-    """Convert `perf script` scheduler events to monotonic runnable delays.
+    """Convert scheduler events to monotonic runnable delays for selected tasks.
 
-    Run `perf sched record` with `--clockid mono`; then these timestamps use
-    the same clock as the probe and product-counter streams. The parser pairs
-    each wakeup, or a preempted runnable task, with the next switch onto that
-    task so long futex and worker wake delays remain visible.
+    Record with `perf record --clockid mono`; then these timestamps use the
+    same clock as the probe and product-counter streams. When target TIDs are
+    supplied, both wakeups and switch contexts outside that set are ignored.
+    The parser pairs each wakeup, or a preempted runnable task, with its next
+    switch onto a CPU so long futex and worker wake delays remain visible.
     """
     if minimum_delay_ns < 0:
         raise ValueError("minimum scheduler delay must be non-negative")
+    if target_tids is not None and (
+        not target_tids or any(type(tid) is not int or tid < 1 for tid in target_tids)
+    ):
+        raise ValueError("target thread IDs must be a non-empty set of positive integers")
     events: list[SchedulerEvent] = []
     ready_at_ns: dict[int, int] = {}
     event_pattern = re.compile(
@@ -138,24 +148,33 @@ def parse_perf_sched(
         payload = match.group("payload")
         if kind in {"sched_wakeup", "sched_wakeup_new"}:
             pid_match = re.search(r"\bpid=(\d+)\b", payload)
+            if pid_match is None:
+                pid_match = re.search(r"(?:^|\s)[^:\s]+:(\d+)\s+\[\d+\]", payload)
             if pid_match is not None:
                 pid = int(pid_match.group(1))
-                ready_at_ns.setdefault(pid, timestamp_ns)
+                if target_tids is None or pid in target_tids:
+                    ready_at_ns.setdefault(pid, timestamp_ns)
             continue
         if kind != "sched_switch":
             continue
 
         previous = re.search(r"\bprev_pid=(\d+)\b.*?\bprev_state=(\S+)", payload)
+        next_task = re.search(r"\bnext_comm=(\S+)\s+next_pid=(\d+)\b", payload)
+        if previous is None:
+            previous = re.search(r"(?:^|\s)[^:\s]+:(\d+)\s+\[\d+\]\s+(\S+)\s+==>", payload)
+        if next_task is None:
+            next_task = re.search(r"==>\s+([^:\s]+):(\d+)\s+\[\d+\]", payload)
+
         if previous is not None and previous.group(2) == "R":
             previous_pid = int(previous.group(1))
-            if previous_pid != 0:
+            if previous_pid != 0 and (target_tids is None or previous_pid in target_tids):
                 ready_at_ns[previous_pid] = timestamp_ns
-
-        next_task = re.search(r"\bnext_comm=(\S+)\s+next_pid=(\d+)\b", payload)
         if next_task is None:
             continue
         task = next_task.group(1)
         pid = int(next_task.group(2))
+        if target_tids is not None and pid not in target_tids:
+            continue
         ready_ns = ready_at_ns.pop(pid, None)
         delay_ns = timestamp_ns - ready_ns if ready_ns is not None else -1
         if delay_ns >= minimum_delay_ns:
@@ -503,7 +522,7 @@ def summarize_soak_files(
     slow_threshold_ms: float = 100.0,
     scheduler_trace_window_ns: tuple[int, int] | None = None,
 ) -> dict[str, object]:
-    """Join raw monotonic probes and counters to a captured `perf sched` data file."""
+    """Join raw monotonic probes and counters to a TID-filtered scheduler trace."""
     probes = load_probe_samples(probe_path)
     counters = load_counter_samples(counter_path)
     pipeline_counter_path = counter_path.with_name("pipeline-counters.jsonl")
@@ -511,15 +530,33 @@ def summarize_soak_files(
         load_counter_samples(pipeline_counter_path) if pipeline_counter_path.is_file() else []
     )
     counters.extend(pipeline_counters)
+    pid_manifest = probe_path.with_name("agent-pids.json")
+    target_pids: tuple[int, int] = ()
+    target_tids: tuple[int, ...] = ()
+    target_tids_after: tuple[int, ...] | None = None
+    manifest_error: str | None = None
+    if pid_manifest.is_file():
+        try:
+            target_pids, target_tids, target_tids_after = read_agent_manifest(pid_manifest)
+            if target_tids_after is None:
+                manifest_error = "the manifest is missing its end-of-window TID snapshot"
+            elif target_tids_after != target_tids:
+                manifest_error = "GotaTun TIDs changed during the scheduler capture window"
+        except ValueError as error:
+            manifest_error = str(error)
     events: list[SchedulerEvent] = []
     with subprocess.Popen(
-        ["perf", "script", "-i", str(perf_data_path)],
+        [os.environ.get("PERF", "perf"), "script", "-i", str(perf_data_path)],
         stdout=subprocess.PIPE,
         text=True,
     ) as process:
         if process.stdout is None:
             raise RuntimeError("perf script did not expose its output stream")
-        events = parse_perf_sched(process.stdout, minimum_delay_ns=100_000)
+        events = parse_perf_sched(
+            process.stdout,
+            minimum_delay_ns=100_000,
+            target_tids=set(target_tids) if target_tids else None,
+        )
         if process.wait() != 0:
             raise RuntimeError("perf script could not read the scheduler trace")
     report = summarize_soak(
@@ -530,6 +567,19 @@ def summarize_soak_files(
         slow_threshold_ms=slow_threshold_ms,
         scheduler_trace_window_ns=scheduler_trace_window_ns,
     )
+    if target_pids and target_tids and target_tids_after == target_tids:
+        report["scheduler_capture_scope"] = "event_filtered"
+        report["scheduler_target_pids"] = list(target_pids)
+        report["scheduler_target_tids"] = list(target_tids)
+    else:
+        report["scheduler_capture_scope"] = "unknown"
+        report["scheduler_target_pids"] = []
+        report["scheduler_target_tids"] = []
+        if manifest_error is not None:
+            report["scheduler_capture_scope_error"] = manifest_error
+        report["correlation_status"] = "incomplete"
+        for burst in report["stall_bursts"]:
+            burst["correlation_status"] = "incomplete"
     queue_samples = sum(
         any(
             name in sample.counters
@@ -558,6 +608,10 @@ def summarize_soak_files(
         if lock_event_count
         else "missing"
     )
+    if not queue_samples:
+        report["correlation_status"] = "incomplete"
+        for burst in report["stall_bursts"]:
+            burst["correlation_status"] = "incomplete"
     return report
 
 

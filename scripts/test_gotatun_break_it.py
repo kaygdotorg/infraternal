@@ -324,6 +324,31 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
         self.assertEqual(report["correlation_status"], "complete")
         self.assertEqual(report["stall_bursts"][0]["correlation_status"], "complete")
 
+    def test_parses_filtered_perf_script_switches_for_target_threads(self):
+        """Read perf's normal scheduler text and ignore events outside the agent TIDs."""
+        lines = [
+            "gotatun-crypto-0 456 [002] 12.345000: sched:sched_wakeup: gotatun-crypto-1:457 [120] CPU:002",
+            "gotatun-crypto-0 456 [002] 12.595000: sched:sched_switch: gotatun-crypto-0:456 [120] S ==> gotatun-crypto-1:457 [120]",
+            "worker 900 [003] 12.346000: sched:sched_wakeup: worker:901 [120] CPU:003",
+            "worker 900 [003] 12.596000: sched:sched_switch: worker:900 [120] S ==> worker:901 [120]",
+        ]
+        try:
+            events = parse_perf_sched(lines, target_tids={457})
+        except TypeError as error:
+            self.fail(f"scheduler parser does not filter by the captured TIDs: {error}")
+
+        self.assertEqual(
+            events,
+            [
+                SchedulerEvent(
+                    timestamp_ns=12_595_000_000,
+                    task="gotatun-crypto-1/457",
+                    event="runnable_delay",
+                    delay_ns=250_000_000,
+                )
+            ],
+        )
+
     def test_probe_payload_round_trips_sequence_and_monotonic_send_time(self):
         """Keep each fixed-rate probe tied to its original monotonic send time."""
         self.assertEqual(decode_probe(encode_probe(42, 9_876_543_210)), (42, 9_876_543_210))
@@ -500,64 +525,6 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
         with self.assertRaises(ValueError):
             command_builder(Path("/opt/j88c/bin/h2h"), "10.254.0.2", 0)
 
-    def test_perf_capture_is_load_scoped_and_readable_after_root_capture(self):
-        """Keep scheduler traces small and readable after perf-run captures them as root."""
-        runner = Path(__file__).parent / "gotatun_break_it" / "run_loaded_latency_window.sh"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            capture_args = root / "perf-args.json"
-            fake_perf = fake_bin / "perf"
-            fake_perf.write_text(
-                "#!/usr/bin/env python3\n"
-                "\"\"\"Record the harness arguments and a root-only fake trace file.\"\"\"\n"
-                "import json, os, pathlib, sys\n"
-                "args = sys.argv[1:]\n"
-                "if args[:2] == ['sched', 'record']:\n"
-                "    pathlib.Path(os.environ['PERF_CAPTURE_ARGS']).write_text(json.dumps(args))\n"
-                "    trace = pathlib.Path(args[args.index('-o') + 1])\n"
-                "    trace.write_bytes(b'fake trace')\n"
-                "    trace.chmod(0o600)\n"
-                "    trace.parent.joinpath('probes.jsonl').write_text('')\n"
-                "    trace.parent.joinpath('counters.jsonl').write_text('')\n"
-                "elif args[:1] != ['script']:\n"
-                "    raise SystemExit(2)\n",
-                encoding="utf-8",
-            )
-            fake_perf.chmod(0o755)
-            binary = root / "infraternal"
-            coordinator = root / "coordinator"
-            for executable in (binary, coordinator):
-                executable.write_bytes(b"fixture")
-                executable.chmod(0o755)
-            kit = root / "kit"
-            (kit / "bin").mkdir(parents=True)
-            (kit / "lib").mkdir()
-            h2h = kit / "bin" / "h2h"
-            h2h.write_bytes(b"fixture")
-            h2h.chmod(0o755)
-            (kit / "lib" / "mesh_agent_fixture.py").write_text("\n", encoding="utf-8")
-            output = root / "output"
-            environment = os.environ.copy()
-            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
-            environment["PERF_CAPTURE_ARGS"] = str(capture_args)
-
-            result = subprocess.run(
-                ["bash", str(runner), str(output), "60", str(kit), str(coordinator), str(binary)],
-                capture_output=True,
-                text=True,
-                check=False,
-                env=environment,
-                timeout=15,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            perf_args = json.loads(capture_args.read_text(encoding="utf-8"))
-            self.assertEqual(perf_args[:2], ["sched", "record"])
-            self.assertNotIn("-a", perf_args)
-            self.assertEqual((output / "perf.data").stat().st_mode & 0o777, 0o644)
-            self.assertTrue((output / "report.json").is_file())
-
     def test_probe_echo_server_reports_readiness_after_binding(self):
         """Let the soak start fixed-rate probes only after the tunnel echo socket binds."""
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reservation:
@@ -606,6 +573,323 @@ worker 123/123 [002] 20.250000: sched:sched_switch: prev_comm=idle prev_pid=0 pr
         self.assertIsNone(report["recovery_ms_after_fault_cleared"])
         self.assertEqual(report["p99_state"], "infinite_due_to_loss")
         self.assertEqual(report["outcome"], "FAIL")
+
+
+class PerfCaptureTests(unittest.TestCase):
+    """Keep loaded-latency scheduler recording attached to the product processes."""
+
+    def test_scheduler_record_command_filters_switches_to_the_reported_agent_tids(self):
+        """Filter scheduler switch and wakeup records to the app's full thread set."""
+        try:
+            from gotatun_break_it.perf_capture import build_scheduler_record_command
+        except ImportError:
+            self.fail("PID-attached scheduler command builder is missing")
+
+        command = build_scheduler_record_command(
+            Path("/opt/perf"),
+            Path("/tmp/perf.data"),
+            (412, 836),
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "/opt/perf",
+                "record",
+                "--all-cpus",
+                "--event",
+                "sched:sched_switch",
+                "--filter",
+                "prev_pid == 412 || next_pid == 412 || prev_pid == 836 || next_pid == 836",
+                "--event",
+                "sched:sched_wakeup",
+                "--filter",
+                "pid == 412 || pid == 836",
+                "--event",
+                "sched:sched_wakeup_new",
+                "--filter",
+                "pid == 412 || pid == 836",
+                "--compression-level=1",
+                "--clockid",
+                "mono",
+                "--output",
+                "/tmp/perf.data",
+            ],
+        )
+
+    def test_perf_capture_cli_executes_the_event_filtered_record_command(self):
+        """Execute the tested command builder through the runner's capture entry point."""
+        helper = Path(__file__).parent / "gotatun_break_it" / "perf_capture.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_perf = root / "perf"
+            args_path = root / "perf-args.json"
+            pid_path = root / "agent-pids.json"
+            output_path = root / "perf.data"
+            fake_perf.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "with open(os.environ['PERF_CAPTURE_ARGS'], 'w') as out:\n"
+                "    json.dump(sys.argv[1:], out)\n",
+                encoding="utf-8",
+            )
+            fake_perf.chmod(0o755)
+            pid_path.write_text(
+                json.dumps({"pids": [400, 800], "tids": [400, 412, 800, 836]}),
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["PERF_CAPTURE_ARGS"] = str(args_path)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(helper),
+                    "--perf",
+                    str(fake_perf),
+                    "--agent-pids",
+                    str(pid_path),
+                    "--output",
+                    str(output_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=environment,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(args_path.read_text(encoding="utf-8")),
+                [
+                    "record",
+                    "--all-cpus",
+                    "--event",
+                    "sched:sched_switch",
+                    "--filter",
+                    "prev_pid == 400 || next_pid == 400 || prev_pid == 412 || next_pid == 412 || prev_pid == 800 || next_pid == 800 || prev_pid == 836 || next_pid == 836",
+                    "--event",
+                    "sched:sched_wakeup",
+                    "--filter",
+                    "pid == 400 || pid == 412 || pid == 800 || pid == 836",
+                    "--event",
+                    "sched:sched_wakeup_new",
+                    "--filter",
+                    "pid == 400 || pid == 412 || pid == 800 || pid == 836",
+                "--compression-level=1",
+                    "--clockid",
+                    "mono",
+                    "--output",
+                    str(output_path),
+                ],
+            )
+
+
+class AgentThreadSnapshotTests(unittest.TestCase):
+    """Keep the scheduler manifest complete before and after the measured window."""
+
+    def test_snapshot_includes_both_agent_process_leaders(self):
+        """Read every live task ID while the two product process leaders are alive."""
+        from gotatun_break_it.loaded_latency_soak import _agent_thread_ids
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import threading; threading.Event().wait()"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            tids = _agent_thread_ids([os.getpid(), child.pid])
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+        self.assertEqual(tids, sorted(set(tids)))
+        self.assertIn(os.getpid(), tids)
+        self.assertIn(child.pid, tids)
+
+    def test_manifest_records_start_and_end_thread_snapshots(self):
+        """Keep both thread snapshots available to the report's scope validator."""
+        from gotatun_break_it.loaded_latency_soak import _publish_agent_pids
+        from gotatun_break_it.perf_capture import read_agent_manifest
+
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "agent-pids.json"
+            _publish_agent_pids(manifest_path, [400, 800], [400, 412, 800, 836])
+            initial = read_agent_manifest(manifest_path)
+            _publish_agent_pids(
+                manifest_path,
+                [400, 800],
+                [400, 412, 800, 836],
+                [400, 412, 800, 836],
+            )
+            complete = read_agent_manifest(manifest_path)
+
+        self.assertEqual(initial, ((400, 800), (400, 412, 800, 836), None))
+        self.assertEqual(complete, ((400, 800), (400, 412, 800, 836), (400, 412, 800, 836)))
+
+
+class SchedulerScopeReportTests(unittest.TestCase):
+    """Make the scheduler report state which product processes were traced."""
+
+    def test_report_records_the_event_filtered_capture_targets(self):
+        """Keep the trace's declared process scope beside the correlated stall data."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_path = root / "probes.jsonl"
+            counter_path = root / "counters.jsonl"
+            perf_path = root / "perf.data"
+            perf_binary = root / "perf"
+            probe_path.write_text(
+                '{"sequence":1,"sent_ns":100,"rtt_ms":2.0}\n'
+                '{"sequence":2,"sent_ns":200,"rtt_ms":3.0}\n',
+                encoding="utf-8",
+            )
+            counter_path.write_text(
+                '{"timestamp_ns":100,"counters":{"b_gotatun_rx_bytes":0}}\n'
+                '{"timestamp_ns":200,"counters":{"b_gotatun_rx_bytes":100}}\n',
+                encoding="utf-8",
+            )
+            perf_path.write_bytes(b"fixture")
+            (root / "agent-pids.json").write_text(
+                '{"pids":[400,800],"tids":[400,412,800,836],'
+                '"tids_after":[400,412,800,836]}\n',
+                encoding="utf-8",
+            )
+            perf_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            perf_binary.chmod(0o755)
+
+            with patch.dict(os.environ, {"PERF": str(perf_binary)}):
+                report = trace_module.summarize_soak_files(
+                    probe_path,
+                    counter_path,
+                    perf_path,
+                    scheduler_trace_window_ns=(50, 250),
+                )
+
+        self.assertEqual(report.get("scheduler_capture_scope"), "event_filtered")
+        self.assertEqual(report.get("scheduler_target_pids"), [400, 800])
+        self.assertEqual(report.get("scheduler_target_tids"), [400, 412, 800, 836])
+        self.assertEqual(report.get("pipeline_queue_trace_status"), "missing")
+        self.assertEqual(report.get("correlation_status"), "incomplete")
+
+    def test_unscoped_scheduler_data_cannot_mark_stall_correlation_complete(self):
+        """Do not certify a stall with a scheduler trace that has no target manifest."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_path = root / "probes.jsonl"
+            counter_path = root / "counters.jsonl"
+            perf_path = root / "perf.data"
+            perf_binary = root / "perf"
+            probe_path.write_text(
+                '{"sequence":1,"sent_ns":1000000000,"rtt_ms":10.0}\n'
+                '{"sequence":2,"sent_ns":1100000000,"rtt_ms":120.0}\n',
+                encoding="utf-8",
+            )
+            counter_path.write_text(
+                '{"timestamp_ns":1000000000,"counters":{"b_gotatun_rx_bytes":100}}\n'
+                '{"timestamp_ns":1100000000,"counters":{"b_gotatun_rx_bytes":1100}}\n',
+                encoding="utf-8",
+            )
+            perf_path.write_bytes(b"fixture")
+            perf_binary.write_text(
+                "#!/bin/sh\n"
+                "cat <<'TRACE'\n"
+                "worker 1 [001] 1.050000000: sched:sched_wakeup: comm=worker pid=412 prio=120\n"
+                "worker 1 [001] 1.200000000: sched:sched_switch: prev_comm=other prev_pid=1 prev_prio=120 prev_state=S ==> next_comm=worker next_pid=412 next_prio=120\n"
+                "TRACE\n",
+                encoding="utf-8",
+            )
+            perf_binary.chmod(0o755)
+
+            with patch.dict(os.environ, {"PERF": str(perf_binary)}):
+                report = trace_module.summarize_soak_files(
+                    probe_path,
+                    counter_path,
+                    perf_path,
+                    scheduler_trace_window_ns=(900_000_000, 1_300_000_000),
+                )
+
+        self.assertEqual(report.get("scheduler_capture_scope"), "unknown")
+        self.assertEqual(report.get("correlation_status"), "incomplete")
+
+    def test_invalid_scheduler_target_manifest_marks_capture_incomplete(self):
+        """Reject a process-only manifest because it cannot scope scheduler records."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_path = root / "probes.jsonl"
+            counter_path = root / "counters.jsonl"
+            perf_path = root / "perf.data"
+            perf_binary = root / "perf"
+            probe_path.write_text(
+                '{"sequence":1,"sent_ns":1000000000,"rtt_ms":10.0}\n'
+                '{"sequence":2,"sent_ns":1100000000,"rtt_ms":120.0}\n',
+                encoding="utf-8",
+            )
+            counter_path.write_text(
+                '{"timestamp_ns":1000000000,"counters":{"b_gotatun_rx_bytes":100}}\n'
+                '{"timestamp_ns":1100000000,"counters":{"b_gotatun_rx_bytes":1100}}\n',
+                encoding="utf-8",
+            )
+            perf_path.write_bytes(b"fixture")
+            (root / "agent-pids.json").write_text(
+                '{"pids":[400,800],"tids":[]}\n', encoding="utf-8"
+            )
+            perf_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            perf_binary.chmod(0o755)
+
+            with patch.dict(os.environ, {"PERF": str(perf_binary)}):
+                report = trace_module.summarize_soak_files(
+                    probe_path,
+                    counter_path,
+                    perf_path,
+                    scheduler_trace_window_ns=(900_000_000, 1_300_000_000),
+                )
+
+        self.assertEqual(report.get("scheduler_capture_scope"), "unknown")
+        self.assertEqual(report.get("scheduler_target_tids"), [])
+        self.assertEqual(report.get("correlation_status"), "incomplete")
+
+    def test_new_agent_thread_invalidates_the_scheduler_capture_scope(self):
+        """Do not claim complete TID coverage when an agent added a thread mid-run."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_path = root / "probes.jsonl"
+            counter_path = root / "counters.jsonl"
+            perf_path = root / "perf.data"
+            perf_binary = root / "perf"
+            probe_path.write_text(
+                '{"sequence":1,"sent_ns":100,"rtt_ms":2.0}\n'
+                '{"sequence":2,"sent_ns":200,"rtt_ms":3.0}\n',
+                encoding="utf-8",
+            )
+            counter_path.write_text(
+                '{"timestamp_ns":100,"counters":{"b_gotatun_rx_bytes":0}}\n'
+                '{"timestamp_ns":200,"counters":{"b_gotatun_rx_bytes":100}}\n',
+                encoding="utf-8",
+            )
+            perf_path.write_bytes(b"fixture")
+            (root / "agent-pids.json").write_text(
+                '{"pids":[400,800],"tids":[400,412,800,836],'
+                '"tids_after":[400,412,800,836,999]}\n',
+                encoding="utf-8",
+            )
+            perf_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            perf_binary.chmod(0o755)
+
+            with patch.dict(os.environ, {"PERF": str(perf_binary)}):
+                report = trace_module.summarize_soak_files(
+                    probe_path,
+                    counter_path,
+                    perf_path,
+                    scheduler_trace_window_ns=(50, 250),
+                )
+
+        self.assertEqual(report.get("scheduler_capture_scope"), "unknown")
+        self.assertEqual(report.get("scheduler_target_tids"), [])
+        self.assertEqual(report.get("correlation_status"), "incomplete")
 
 
 if __name__ == "__main__":
