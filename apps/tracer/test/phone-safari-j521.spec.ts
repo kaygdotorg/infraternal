@@ -67,6 +67,7 @@ test("the SSH password is paired with its account in one form, so Safari's Save 
   // Without a username field Safari's sheet shows an empty "User Name". The account is the SSH user at the host.
   await expect(account).toHaveValue("kayg@needs-key.lab");
   expect(await account.getAttribute("readonly")).not.toBeNull();
+  expect(await account.getAttribute("tabindex"), "the hidden account never takes a Tab stop").toBe("-1");
   expect(await page.evaluate(() => { const a = document.querySelector("input[autocomplete=username]"); const p = document.querySelector("[data-secret=password]"); return !!a?.closest("form") && a.closest("form") === p?.closest("form"); })).toBe(true);
   // Enter in the password field signs in (the form's submit), and the page does not navigate.
   const url = page.url();

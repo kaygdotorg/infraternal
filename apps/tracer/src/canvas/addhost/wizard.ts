@@ -943,10 +943,10 @@ export class Wizard {
   private renderChoose(page: HTMLElement): void {
     const job = this.fixing!;
     const name = escapeHtml(job.entry.label);
-    // The password is the SSH account's, so the form names that account (`user@host`) for the browser: Safari then
-    // offers "Save Password?" under that name, not an empty one (#510). Without a typed user the server chose it, so
-    // the host alone names the account.
-    const account = escapeHtml(job.entry.user ? `${job.entry.user}@${this.addressText(job.entry)}` : this.addressText(job.entry));
+    // The password is the SSH account's, so the form names that account for the browser: Safari then offers "Save
+    // Password?" under that name, not an empty one (#510). It is `user@host[:port]`, or the bare host when the server
+    // chooses the user. (Not `addressText`: for a listed host that is the listing's id, not an account.)
+    const account = escapeHtml(`${job.entry.user ? `${job.entry.user}@` : ""}${job.entry.address}${job.entry.port ? `:${job.entry.port}` : ""}`);
     const first = this.serverKey ? "server" : this.savedKey ? "saved" : "key";
     const option = (value: string, title: string, hint: string): string => `<label class="ah-option"><input type="radio" name="ah-method" value="${value}" ${value === first ? "checked" : ""} /><span class="ah-radio" aria-hidden="true"></span>
       <span class="ah-option-text"><span>${title}</span><span class="ah-option-hint">${hint}</span></span></label>`;
@@ -986,7 +986,7 @@ export class Wizard {
     for (const reveal of this.current?.querySelectorAll<HTMLElement>(".ah-reveal") ?? []) {
       const open = reveal.dataset.reveal === value;
       reveal.dataset.open = String(open);
-      for (const field of reveal.querySelectorAll<HTMLElement>("textarea, input")) field.tabIndex = open ? 0 : -1;
+      for (const field of reveal.querySelectorAll<HTMLElement>("textarea, input:not(.ah-account)")) field.tabIndex = open ? 0 : -1;
     }
     const primary = this.foot.querySelector<HTMLElement>("[data-ah='submit-method'] span");
     if (primary) primary.textContent = value === "server" ? "Try again" : "Sign in";

@@ -733,7 +733,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(failure).toContainText("administrator passkey");
     await page.screenshot({ path: tracerEvidencePath("addhost-510", `locked-card-${viewport.width}.png`) });
     // The same Unlock as the host-connections toast: it runs the shared ceremony, then the host carries on.
-    await inWizard(page, "Unlock").click();
+    await wizard(page).locator("footer, .ah-foot").getByRole("button", { name: "Unlock", exact: true }).click();
     await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock.lab");
   });
 
