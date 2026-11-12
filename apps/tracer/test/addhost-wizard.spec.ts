@@ -721,6 +721,22 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });
   });
 
+  test(`a locked server offers Unlock on the card and carries on after it at ${viewport.width} (#510)`, async ({ page }) => {
+    // The card opened while the server was unlocked, then the server restarted and locked again: the card's own
+    // check passed, so the lock arrives as the host's failure. The card must not be a dead end.
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@relock.lab");
+    const failure = onScreen(page, "failure");
+    await expect(failure.getByRole("heading", { name: "Host connections are locked" })).toBeVisible({ timeout: 15_000 });
+    await expect(failure).toContainText("administrator passkey");
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `locked-card-${viewport.width}.png`) });
+    // The same Unlock as the host-connections toast: it runs the shared ceremony, then the host carries on.
+    await inWizard(page, "Unlock").click();
+    await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock.lab");
+  });
+
   test(`a failed host's progress row says it in one line beside its name at ${viewport.width}`, async ({ page }) => {
     await open(page);
     await page.setViewportSize(viewport);

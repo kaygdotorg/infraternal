@@ -30,7 +30,7 @@
  * - `added*`: the host is already added: an `install` failure with `already_added` and the existing `host_id`, no details
  * - `running*`: `setup_running` once; the retry succeeds
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
- * - `installed*`: a finished install this server doesn't know (#394); `noacct*`: the login name is no account there
+ * - `installed*`: a finished install this server doesn't know (#394); `relock*`: the server's authority is locked until the page unlocks it (`caLocked` in the config endpoint); `noacct*`: the login name is no account there
  * - `unproven-cache*` / `unproven-prepared*` / `unproven-foreign*`: a staging step refused files it can't prove are its own (`unproven_files`
  *   with that `refusal`, J314 P2-1)
  * - `takeover*`: the same, but proven ours: in root mode the attempt pauses on the Take over offer (D359), carrying
@@ -57,7 +57,7 @@ const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 
 type Step = "check" | "install" | "facts" | "connect" | "done" | "failed";
 /** The failure kinds the double can script, mirroring the server contract (contracts/ssh-bootstrap.md). */
-type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account";
+type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account" | "authority_locked";
 const PHASES = [
   { step: "check", message: "Checking the system" },
   { step: "install", message: "Installing the infraternal agent" },
@@ -145,12 +145,15 @@ const ADDED_HOST_ID = "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30";
 /** Host keys the person trusted on the same bootstrap socket, until `reset`. */
 const trusted = new Set<string>();
 let sshKeyMode: "ok" | "locked" | "missing" = "ok";
+/** Whether the double's certificate authority is locked, as a real server's is after a restart. `relock*` hosts fail while it is. */
+let caLocked = true;
 let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
 let installMode: "ok" | "off" = "ok";
 
 export function resetBootstrapDouble(): void {
   trusted.clear();
   sshKeyMode = "ok";
+  caLocked = true;
   discoveryMode = "ok";
   installMode = "ok";
 }
@@ -168,6 +171,7 @@ function failureOf(target: Target): Failure | undefined {
   if (/^(newkey|changedkey)/.test(name) && !trusted.has(name)) {
     return { phase: 0, beforeLogin: true, kind: "host-key", message: "The SSH host key is not trusted.", evidence: "Checking SSH and host support.", fingerprints: [fingerprintOf(name)], ...(name.startsWith("changedkey") ? { keyChanged: true } : {}) };
   }
+  if (/^relock/.test(name) && caLocked) return { phase: 0, beforeLogin: false, kind: "authority_locked", message: "Set up or unlock host connections with an administrator passkey before adding a host.", evidence: "" };
   if (target.fixed) return undefined;
   if (host?.reachability === "unreachable") return { phase: 0, beforeLogin: true, kind: "unreachable", message: "No SSH answer on port 22", evidence: host.evidence };
   if (host?.reachability === "mesh-policy") return { phase: 0, beforeLogin: true, kind: "mesh-policy", message: "Blocked by the mesh policy", evidence: host.evidence };
@@ -546,6 +550,7 @@ export async function handleBootstrapHttp(request: IncomingMessage, response: Se
   if (path === "/__mock/bootstrap/config" && request.method === "POST") {
     const body = await bodyOf(request);
     if (body?.sshKey === "ok" || body?.sshKey === "locked" || body?.sshKey === "missing") sshKeyMode = body.sshKey;
+    if (typeof body?.caLocked === "boolean") caLocked = body.caLocked;
     if (body?.discovery === "ok" || body?.discovery === "empty" || body?.discovery === "error" || body?.discovery === "hang" || body?.discovery === "off") discoveryMode = body.discovery;
     if (body?.install === "ok" || body?.install === "off") installMode = body.install;
     json(response, 200, { ok: true });
