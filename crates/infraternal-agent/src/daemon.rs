@@ -961,7 +961,10 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
         // startup (J415 B4). Each call is also bounded in time. Builds
         // without root upgrades keep it empty, which masks its select arm.
         #[cfg_attr(not(all(feature = "remote", target_os = "linux")), allow(unused_mut))]
-        let mut privileges: JoinSet<(u32, io::Result<Vec<u8>>)> = JoinSet::new();
+        let mut privileges: JoinSet<(
+            u32,
+            io::Result<infraternal_plugin_api::ActionReply>,
+        )> = JoinSet::new();
         let mut opens: JoinSet<(
             u32,
             u32,
@@ -1037,8 +1040,10 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                 }
                 result = join_privilege(&mut privileges), if !SESSION_ONLY && control_ready && !privileges.is_empty() => {
                     let (call_id, result) = result.ok_or_else(|| sessions::invalid("missing privilege task"))?.map_err(io::Error::other)?;
-                    let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
-                    reply(&control, Message::Result(0, call_id, ok, json))?;
+                    match result {
+                        Ok(reply_value) => reply(&control, Message::Deferred(0, call_id, reply_value))?,
+                        Err(_) => reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?,
+                    }
                 }
                 result = opens.join_next(), if !SESSION_ONLY && control_ready && !opens.is_empty() => {
                     // The private image never starts these jobs. Keep their result
@@ -1135,7 +1140,12 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             } else {
                                 let action = action_id.to_owned(); let state = state.clone(); let input = input_json.to_vec();
                                 privileges.spawn(async move {
-                                    let result = tokio::time::timeout(crate::privilege_agent::CALL_BOUND, crate::privilege_agent::execute(&action, &input, &state)).await;
+                                    let bound = if action == "privilege.abandon" {
+                                        crate::privilege_agent::ABANDON_CALL_BOUND
+                                    } else {
+                                        crate::privilege_agent::CALL_BOUND
+                                    };
+                                    let result = tokio::time::timeout(bound, crate::privilege_agent::execute(&action, &input, &state)).await;
                                     (call_id, result.unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into())))
                                 });
                             }
@@ -2064,7 +2074,8 @@ pub(crate) async fn run_bound_terminal_opened_mode(
 /// The next finished `privilege.*` call. On builds without root upgrades
 /// the lane stays empty, so its select arm is always masked off.
 async fn join_privilege(
-    privileges: &mut JoinSet<(u32, io::Result<Vec<u8>>)>,
-) -> Option<Result<(u32, io::Result<Vec<u8>>), tokio::task::JoinError>> {
+    privileges: &mut JoinSet<(u32, io::Result<infraternal_plugin_api::ActionReply>)>,
+) -> Option<Result<(u32, io::Result<infraternal_plugin_api::ActionReply>), tokio::task::JoinError>>
+{
     privileges.join_next().await
 }

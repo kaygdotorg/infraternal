@@ -1252,13 +1252,10 @@ pub(crate) fn promotion_retire_if_requested() -> Option<std::process::ExitCode> 
 /// abandoned root upgrade (D376, #399, J465 P1). Only the root agent starts
 /// this, in its own transient unit (`infraternal_agent::privilege_take_over::abandon`).
 ///
-/// In order, each step a no-op when there is nothing to do:
-/// 1. wait two seconds, so the agent's reply leaves before its unit stops;
-/// 2. roll back install `transaction` of `host` with the install's own root
-///    rollback (journal, unit, launcher, base), as the relay would have;
-/// 3. if this host's install is still there (the upgrade had committed),
-///    uninstall it the way a host removal does;
-/// 4. remove relay copies left in `/run` by killed tries.
+/// Roll back only an open journal with this transaction id, then remove only
+/// the committed installation whose durable marker still names that id.
+/// Exit 75 means the request was stale and safely changed nothing; the caller
+/// uses that result to leave a later root daemon running.
 #[cfg(all(feature = "ssh", target_os = "linux"))]
 pub(crate) fn promotion_abandon_if_requested() -> Option<std::process::ExitCode> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
@@ -1268,7 +1265,7 @@ pub(crate) fn promotion_abandon_if_requested() -> Option<std::process::ExitCode>
     {
         return None;
     }
-    let execute = || -> io::Result<()> {
+    let execute = || -> io::Result<bool> {
         let [_, _, host, transaction] = arguments.as_slice() else {
             return Err(refused());
         };
@@ -1279,8 +1276,6 @@ pub(crate) fn promotion_abandon_if_requested() -> Option<std::process::ExitCode>
             uuid::Uuid::try_parse(host.to_str().ok_or_else(refused)?).map_err(|_| refused())?;
         let transaction = uuid::Uuid::try_parse(transaction.to_str().ok_or_else(refused)?)
             .map_err(|_| refused())?;
-        // sleep: let the agent's accepted reply reach the server first.
-        std::thread::sleep(std::time::Duration::from_secs(2));
         let rollback =
             infraternal_plugin_ssh::install::Installation::root_rollback_script(host, transaction);
         let rolled = std::process::Command::new("/bin/sh")
@@ -1294,64 +1289,37 @@ pub(crate) fn promotion_abandon_if_requested() -> Option<std::process::ExitCode>
             .current_dir("/")
             .stdin(std::process::Stdio::null())
             .status()?;
-        println!("rollback exit {:?}", rolled.code());
-        let base = std::path::Path::new("/var/lib/infraternal");
-        let owner = std::fs::read_to_string(base.join(".bootstrap-owner")).unwrap_or_default();
-        if owner.trim() == host.simple().to_string() && !base.join(".bootstrap-lock").exists() {
-            let home = std::path::PathBuf::from("/root");
-            let plan = infraternal_plugin_remote::uninstall::installation(
-                &host.simple().to_string(),
+        let rolled_back = match rolled.code() {
+            Some(75) => false,
+            Some(0) => true,
+            _ => return Err(io::Error::other("transaction-bound rollback failed")),
+        };
+        let home = std::path::PathBuf::from("/root");
+        let plan = infraternal_plugin_remote::uninstall::installation(
+            &host.simple().to_string(),
+            &home,
+            0,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let cleaned =
+            runtime.block_on(infraternal_plugin_remote::uninstall::cleanup_for_promotion(
+                &plan,
                 &home,
                 0,
-            );
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            let result = infraternal_agent::block_on_io(
-                &runtime,
-                Box::pin(async {
-                    infraternal_plugin_remote::uninstall::cleanup(
-                        &plan,
-                        &home,
-                        0,
-                        infraternal_agent::plugins::KERNEL,
-                    )
-                    .await
-                    .map(|_| ())
-                }),
-            );
-            println!(
-                "uninstall {}",
-                if result.is_ok() { "done" } else { "failed" }
-            );
-        }
-        sweep_relay_copies(std::path::Path::new("/run"));
-        Ok(())
+                transaction,
+                infraternal_agent::plugins::KERNEL,
+            ))?;
+        Ok(rolled_back || cleaned)
     };
-    Some(if execute().is_ok() {
-        std::process::ExitCode::SUCCESS
-    } else {
-        std::process::ExitCode::FAILURE
+    Some(match execute() {
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        Ok(false) => std::process::ExitCode::from(
+            infraternal_agent::privilege_take_over::STALE_ABANDON_EXIT_CODE,
+        ),
+        Err(_) => std::process::ExitCode::FAILURE,
     })
-}
-
-/// Remove `infraternal-privilege.*` directories in `run` (relay copies left
-/// by killed tries). They are root's own 0700 directories; anything that
-/// isn't a real directory is left alone.
-#[cfg(all(feature = "ssh", target_os = "linux"))]
-fn sweep_relay_copies(run: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(run) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let named = entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with("infraternal-privilege.");
-        if named && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
 }
 
 /// Host uninstall: the independent helper service, or the owner by hand (#235).

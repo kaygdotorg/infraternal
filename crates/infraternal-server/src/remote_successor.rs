@@ -35,6 +35,11 @@ pub(crate) const TAKE_OVER: &str = "privilege.take_over";
 /// `infraternal_agent::privilege_take_over::abandon`.
 pub(crate) const ABANDON: &str = "privilege.abandon";
 
+/// Whether the host confirmed that transaction-bound abandonment cleanup finished.
+fn abandon_completed(reply: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(reply).is_ok_and(|reply| reply["completed"] == true)
+}
+
 /// Successors that are connected and waiting for their promotion's driver,
 /// keyed by promotion. Each entry owns its actor; the lane task holds the
 /// link until the driver releases it, the promotion ends, or the link drops.
@@ -180,8 +185,7 @@ async fn deliver_uninstall(
             let reply =
                 tokio::time::timeout(Duration::from_mins(1), actor.privilege_call(ABANDON, input))
                     .await;
-            matches!(&reply, Ok(Ok(bytes)) if serde_json::from_slice::<serde_json::Value>(bytes)
-                .is_ok_and(|reply| reply["accepted"] == true))
+            matches!(&reply, Ok(Ok(bytes)) if abandon_completed(bytes))
         }
         None => matches!(
             tokio::time::timeout(
@@ -234,5 +238,19 @@ pub(crate) async fn retire_predecessor(
             .is_ok_and(|reply| reply["retired"] == true)
     {
         let _ = store.confirm_retirement(attempt).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The durable outbox is consumed only by a completed cleanup receipt.
+    use super::*;
+
+    /// Starting a cleanup worker is not enough to retire the server's outbox entry.
+    #[test]
+    fn uninstall_outbox_requires_completed_abandonment() {
+        assert!(!abandon_completed(br#"{"accepted":true}"#));
+        assert!(!abandon_completed(br#"{"completed":false}"#));
+        assert!(abandon_completed(br#"{"completed":true}"#));
     }
 }

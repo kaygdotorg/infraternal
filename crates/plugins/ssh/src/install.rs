@@ -1201,9 +1201,15 @@ fi
     /// # Errors
     /// Reports a refused or failed commit; nothing is marked committed then.
     async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
+        let marker = if self.mode == InstallMode::Root {
+            commit_transaction_marker()
+        } else {
+            String::new()
+        };
         let script = self.script(&format!(
             r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
 stage="$base/.bootstrap-lock"
+{marker}
 {COMMIT_RETIRE}"#
         ));
         let result = if let Some(timeout) = timeout {
@@ -1234,6 +1240,11 @@ stage="$base/.bootstrap-lock"
             })?;
             return self.commit_with_timeout(timeout).await;
         }
+        let marker = if self.mode == InstallMode::Root {
+            commit_transaction_marker()
+        } else {
+            String::new()
+        };
         // The parent-directory guard is taken only after approval. The new
         // agent takes a shared lock on that directory before it binds (#230);
         // holding the exclusive guard across the proof wait would keep the
@@ -1251,6 +1262,7 @@ read -r approved || exit 1
 [ -z "$approved" ] || exit 1
 setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
+{marker}
 {COMMIT_RETIRE}"#
             ),
         );
@@ -1433,7 +1445,18 @@ fi
     /// root `Installation` of that transaction.
     #[must_use]
     pub fn root_rollback_script(host: uuid::Uuid, transaction: uuid::Uuid) -> String {
-        Self::rollback_script_for(InstallMode::Root, host, transaction)
+        let guarded = format!(
+            r#"{SETUP_LOCK}
+stage="$base/.bootstrap-lock"
+if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then exit 75; fi
+[ -d "$stage" ] && [ ! -L "$stage" ] && [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] && [ -O "$stage/transaction" ] && [ "$(stat -c '%a:%s:%h' "$stage/transaction")" = 600:33:1 ] || exit 72
+[ "$(cat "$stage/transaction")" = "$transaction" ] || exit 75
+{RUNTIME_CLEANUP}
+{FRESH_CLEANUP}
+preserve_session=no
+{ROLLBACK_TRANSACTION}"#
+        );
+        Self::script_for(InstallMode::Root, host, transaction, &guarded)
     }
 
     /// The one rollback text, for any mode; see [`Self::rollback`].
@@ -1688,6 +1711,33 @@ retire_setup_lease
 rm -rf "$stage"
 retire_set_aside"#;
 
+/// Atomically bind a committed root install to its exact transaction. The old
+/// marker is backed up inside the still-open journal so rollback can restore it.
+pub(crate) fn commit_transaction_marker() -> String {
+    r#"
+marker="$base/.bootstrap-transaction"
+previous="$stage/previous-transaction"
+previous_absent="$stage/previous-transaction-absent"
+if [ -e "$previous" ] || [ -L "$previous" ] || [ -e "$previous_absent" ] || [ -L "$previous_absent" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] && [ "$(stat -c '%a:%s:%h' "$marker")" = 600:33:1 ] && [ "$(cat "$marker")" = "$transaction" ] || exit 72
+elif [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] && [ "$(stat -c '%a:%h' "$marker")" = 600:1 ] || exit 72
+    previous_tmp="$stage/previous-transaction.tmp"
+    [ ! -e "$previous_tmp" ] && [ ! -L "$previous_tmp" ] || exit 72
+    (umask 077; set -C; cat "$marker" > "$previous_tmp")
+    mv -T "$previous_tmp" "$previous"
+else
+    (umask 077; set -C; : > "$previous_absent")
+fi
+marker_tmp="$base/.bootstrap-transaction-$transaction.tmp"
+[ ! -e "$marker_tmp" ] && [ ! -L "$marker_tmp" ] || exit 72
+(umask 077; set -C; printf '%s\n' "$transaction" > "$marker_tmp")
+[ -f "$marker_tmp" ] && [ ! -L "$marker_tmp" ] && [ -O "$marker_tmp" ] && [ "$(stat -c '%a:%s:%h' "$marker_tmp")" = 600:33:1 ] || exit 72
+mv -T "$marker_tmp" "$marker"
+"#
+    .to_owned()
+}
+
 /// Roll back this transaction's setup on the host: an acquired or staged fresh
 /// install is removed through its receipt, an upgrade is put back from its
 /// rollback copies, and a new setup location it began but never renamed into
@@ -1755,6 +1805,35 @@ case "$kind" in
     upgrade) :;;
     *) exit 71;;
 esac
+marker="$base/.bootstrap-transaction"
+previous="$stage/previous-transaction"
+previous_absent="$stage/previous-transaction-absent"
+marker_tmp="$base/.bootstrap-transaction-rollback-$transaction.tmp"
+if [ -e "$previous" ] || [ -L "$previous" ]; then
+    [ -f "$previous" ] && [ ! -L "$previous" ] && [ -O "$previous" ] && [ "$(stat -c '%a:%h' "$previous")" = 600:1 ] || exit 72
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+        [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] && [ "$(stat -c '%a:%h' "$marker")" = 600:1 ] || exit 72
+        if ! cmp -s "$marker" "$previous"; then
+            [ "$(stat -c '%s' "$marker")" = 33 ] && [ "$(cat "$marker")" = "$transaction" ] || exit 72
+            [ ! -e "$marker_tmp" ] && [ ! -L "$marker_tmp" ] || exit 72
+            (umask 077; set -C; cat "$previous" > "$marker_tmp")
+            chmod 600 "$marker_tmp"
+            mv -T "$marker_tmp" "$marker"
+        fi
+    else
+        [ ! -e "$marker_tmp" ] && [ ! -L "$marker_tmp" ] || exit 72
+        (umask 077; set -C; cat "$previous" > "$marker_tmp")
+        chmod 600 "$marker_tmp"
+        mv -T "$marker_tmp" "$marker"
+    fi
+elif [ -e "$previous_absent" ] || [ -L "$previous_absent" ]; then
+    [ -f "$previous_absent" ] && [ ! -L "$previous_absent" ] && [ -O "$previous_absent" ] && [ "$(stat -c '%a:%s:%h' "$previous_absent")" = 600:0:1 ] || exit 72
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+        [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] && [ "$(stat -c '%a:%s:%h' "$marker")" = 600:33:1 ] && [ "$(cat "$marker")" = "$transaction" ] || exit 72
+        rm "$marker"
+    fi
+fi
+rm -f "$base/.bootstrap-transaction-$transaction.tmp"
 if [ -e "$stage/activating" ] || [ -L "$stage/activating" ]; then
     [ -f "$stage/activating" ] && [ ! -L "$stage/activating" ] && [ -O "$stage/activating" ] && [ "$(stat -c '%a:%h:%s' "$stage/activating")" = 600:1:0 ] || exit 71
     [ ! -e "$stage/failed" ] && [ ! -L "$stage/failed" ] || exit 71
@@ -2108,6 +2187,7 @@ fn invalid_setup() -> Failure {
 mod tests {
     //! Pins the check-time transfer record and the script compaction rules (#189).
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// J465 P1: the host-side rollback of an abandoned root upgrade is built
     /// from ids alone and is the root rollback of exactly that transaction.
@@ -2119,7 +2199,8 @@ mod tests {
         assert!(script.contains(&host.simple().to_string()));
         assert!(script.contains(&transaction.simple().to_string()));
         assert!(script.contains("/var/lib/infraternal"));
-        assert_eq!(
+        assert!(script.contains("exit 75"));
+        assert_ne!(
             script,
             Installation::rollback_script_for(InstallMode::Root, host, transaction)
         );
@@ -2129,10 +2210,105 @@ mod tests {
         );
     }
 
+    /// A delayed abandon for A must leave a later staged transaction B untouched.
+    #[test]
+    fn root_rollback_is_a_noop_for_a_later_transaction() {
+        let root = std::env::temp_dir().join(format!(
+            "infraternal-root-rollback-transaction-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let base = root.join("base");
+        let stage = base.join(".bootstrap-lock");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = uuid::Uuid::from_u128(0x522);
+        let transaction_a = uuid::Uuid::from_u128(0xa);
+        let transaction_b = uuid::Uuid::from_u128(0xb);
+        std::fs::write(
+            base.join(".bootstrap-owner"),
+            format!("{}\n", host.simple()),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            base.join(".bootstrap-owner"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        std::fs::write(
+            stage.join("transaction"),
+            format!("{}\n", transaction_b.simple()),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            stage.join("transaction"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        std::fs::write(stage.join("kind"), "fresh\n").unwrap();
+        let mut script = Installation::root_rollback_script(host, transaction_a)
+            .replace("/var/lib/infraternal", &base.display().to_string());
+        if nix::unistd::geteuid().as_raw() != 0 {
+            script = script.replace(
+                "exec sudo -n sh -c \"$program\";",
+                "exec sh -c \"$program\";",
+            );
+        }
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .unwrap();
+
+        assert_eq!(status.code(), Some(75));
+        assert_eq!(
+            std::fs::read_to_string(stage.join("transaction")).unwrap(),
+            format!("{}\n", transaction_b.simple())
+        );
+        assert!(base.join(".bootstrap-owner").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A committed root install keeps its transaction id for delayed abandonment checks.
+    #[test]
+    fn root_commit_persists_its_transaction_marker() {
+        let base = std::env::temp_dir().join(format!(
+            "infraternal-root-commit-transaction-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let stage = base.join(".bootstrap-lock");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let transaction = uuid::Uuid::from_u128(0x522);
+        let script = format!(
+            "set -eu\nbase='{}'\nstage='{}'\ntransaction='{}'\n{}",
+            base.display(),
+            stage.display(),
+            transaction.simple(),
+            commit_transaction_marker()
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(base.join(".bootstrap-transaction")).ok(),
+            Some(format!("{}\n", transaction.simple()))
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// The root installation path may be traversable while rootless stays private.
     #[test]
     fn only_the_root_base_may_be_traversable() {
         // J145 P3-4: the rootless base stays exactly 0700.
-        use std::os::unix::fs::PermissionsExt;
         let home =
             std::env::temp_dir().join(format!("infraternal-base-modes-{}", std::process::id()));
         let base = home.join(".local/share/infraternal");

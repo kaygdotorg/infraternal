@@ -18,8 +18,15 @@
 //! admits it only as a private successor before the handover, whose link
 //! carries no terminal, login, mesh or proxy work, and after the handover
 //! this call comes first on its ordinary link.
+use infraternal_plugin_api::ActionReply;
 use serde::Deserialize;
-use std::{io, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    ffi::OsString,
+    io,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 /// The hidden command word the root agent runs as the account.
 pub const COMMAND: &str = "--promotion-retire";
@@ -27,6 +34,19 @@ pub const COMMAND: &str = "--promotion-retire";
 pub const ABANDON_COMMAND: &str = "--promotion-abandon";
 /// How long retiring the rootless install may take (it stops a user unit).
 const RETIRE_BOUND: Duration = Duration::from_secs(90);
+/// Bound rollback and uninstall in the independent transient unit.
+const ABANDON_BOUND: Duration = Duration::from_secs(250);
+/// A successful no-op for a stale transaction leaves the current daemon running.
+pub const STALE_ABANDON_EXIT_CODE: u8 = 75;
+
+/// The result of a completed abandonment unit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbandonResult {
+    /// This request rolled back or removed the installation it named.
+    Removed,
+    /// A different transaction now owns the installation, so no files changed.
+    Stale,
+}
 
 /// Run `privilege.take_over` and return `{"retired":true}` once the rootless
 /// install of `fromUid` is gone.
@@ -95,15 +115,16 @@ pub async fn execute(input: &[u8]) -> io::Result<Vec<u8>> {
 /// the relay died mid-install), then uninstall this agent, then sweep the
 /// relay's leftovers in `/run`.
 ///
-/// Stopping this agent's own unit would kill a child, so the work runs in a
-/// separate transient unit, started here; the reply (`{"accepted":true}`)
-/// goes out before that unit stops this agent. Only ids cross the wire: the
-/// host builds the rollback itself from its install scripts.
+/// The rollback and transaction-bound uninstall run in a transient unit and
+/// must finish before the receipt is returned. Its unit disables and removes
+/// the installed service but leaves this process alive until the receipt frame
+/// has been written; the post-write hook then stops this process. Only ids
+/// cross the wire: the host builds the rollback from its install scripts.
 ///
 /// # Errors
 /// A malformed request, or the transient unit couldn't be started; the
 /// server keeps its outbox entry and asks again on the next connection.
-pub async fn abandon(input: &[u8]) -> io::Result<Vec<u8>> {
+pub async fn abandon(input: &[u8]) -> io::Result<ActionReply> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     /// The `privilege.abandon` request body.
@@ -117,20 +138,55 @@ pub async fn abandon(input: &[u8]) -> io::Result<Vec<u8>> {
     let transaction =
         uuid::Uuid::try_parse(&request.transaction).map_err(|_| io::ErrorKind::InvalidInput)?;
     let exe = std::env::current_exe()?;
-    let unit = format!(
-        "infraternal-promotion-abandon-{}",
-        &transaction.simple().to_string()[..12]
-    );
+    let runner = crate::privilege_relay_host::fixed_root_binary("systemd-run")?;
+    let unit = format!("infraternal-promotion-abandon-{}", transaction.simple());
+    let args = [
+        OsString::from(ABANDON_COMMAND),
+        OsString::from(host.simple().to_string()),
+        OsString::from(transaction.simple().to_string()),
+    ];
+    let result = run_cleanup_unit(&runner, &unit, &exe, &args).await?;
+    let after_write = (result == AbandonResult::Removed).then(|| {
+        Box::new(|| {
+            let _ =
+                nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGTERM);
+        }) as infraternal_plugin_api::AfterReply
+    });
+    Ok(ActionReply {
+        json: br#"{"completed":true}"#.to_vec(),
+        after_write,
+    })
+}
+
+/// Wait for the independent abandonment unit's final exit status. A zero exit
+/// proves cleanup finished; code 75 is the transaction-bound stale no-op.
+async fn run_cleanup_unit(
+    runner: &Path,
+    unit: &str,
+    executable: &Path,
+    args: &[OsString],
+) -> io::Result<AbandonResult> {
+    if !runner.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cleanup runner must be a fixed absolute path",
+        ));
+    }
     let status = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::process::Command::new("systemd-run")
-            .args(["--quiet", "--collect", "--service-type=exec", "--unit"])
-            .arg(&unit)
+        ABANDON_BOUND,
+        tokio::process::Command::new(runner)
+            .args([
+                "--quiet",
+                "--collect",
+                "--wait",
+                "--service-type=exec",
+                "--property=RuntimeMaxSec=240s",
+                "--unit",
+            ])
+            .arg(unit)
             .arg("--")
-            .arg(&exe)
-            .arg(ABANDON_COMMAND)
-            .arg(host.simple().to_string())
-            .arg(transaction.simple().to_string())
+            .arg(executable)
+            .args(args)
             .env_clear()
             .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
             .current_dir("/")
@@ -142,8 +198,91 @@ pub async fn abandon(input: &[u8]) -> io::Result<Vec<u8>> {
     )
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-    if !status.success() {
-        return Err(io::Error::other("the cleanup unit could not start"));
+    match status.code() {
+        Some(0) => Ok(AbandonResult::Removed),
+        Some(code) if code == i32::from(STALE_ABANDON_EXIT_CODE) => Ok(AbandonResult::Stale),
+        _ => Err(io::Error::other(
+            "abandonment cleanup did not finish successfully",
+        )),
     }
-    Ok(br#"{"accepted":true}"#.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    //! A cleanup receipt means the independent cleanup process has finished.
+    use super::*;
+    use std::{ffi::OsString, os::unix::fs::PermissionsExt};
+
+    /// The action cannot return its receipt while a detached cleanup child is still running.
+    #[tokio::test]
+    async fn cleanup_receipt_waits_for_the_unit_to_finish() {
+        let root = std::env::temp_dir().join(format!(
+            "infraternal-abandon-wait-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let runner = root.join("systemd-run");
+        std::fs::write(
+            &runner,
+            b"#!/bin/sh\nwait_for_child=no\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = --wait ]; then wait_for_child=yes; fi\n  if [ \"$1\" = -- ]; then shift; break; fi\n  shift\ndone\n\"$@\" &\nchild=$!\nif [ \"$wait_for_child\" = yes ]; then wait \"$child\"; else exit 0; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = root.join("started");
+        let release = root.join("release");
+        let finished = root.join("finished");
+        // sleep: the fake cleanup child waits for explicit release so the test can observe early acknowledgement.
+        let child = format!(
+            "touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; touch '{}'",
+            started.display(),
+            release.display(),
+            finished.display()
+        );
+        let executable = PathBuf::from("/bin/sh");
+        let args = vec![OsString::from("-c"), OsString::from(child)];
+        let unit = format!("infraternal-promotion-test-{}", std::process::id());
+        let running =
+            tokio::spawn(async move { run_cleanup_unit(&runner, &unit, &executable, &args).await });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.exists() {
+                // sleep: poll the fake cleanup child until its start marker appears.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let returned_before_cleanup = running.is_finished();
+        std::fs::write(release, b"continue").unwrap();
+        assert_eq!(running.await.unwrap().unwrap(), AbandonResult::Removed);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !finished.exists() {
+                // sleep: poll until the fake cleanup child records its exit work.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(finished.exists());
+        assert!(
+            !returned_before_cleanup,
+            "cleanup was acknowledged before it finished"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A privileged cleanup worker refuses a command name that would be resolved through `PATH`.
+    #[tokio::test]
+    async fn cleanup_refuses_a_path_searched_runner() {
+        let result = run_cleanup_unit(
+            Path::new("systemd-run"),
+            "infraternal-promotion-test",
+            Path::new("/bin/true"),
+            &[],
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
 }

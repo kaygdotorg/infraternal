@@ -56,6 +56,35 @@ pub fn installation(host: &str, home: &Path, uid: u32) -> Context {
         sessions: base.join("sessions"),
     }
 }
+
+/// Whether `base` still contains exactly the committed transaction that asked
+/// for cleanup. Any staged transaction makes the old marker stale.
+fn committed_transaction_matches(
+    base: &Path,
+    transaction: uuid::Uuid,
+    uid: u32,
+) -> io::Result<bool> {
+    let stage = base.join(".bootstrap-lock");
+    match std::fs::symlink_metadata(stage) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let marker = base.join(".bootstrap-transaction");
+    let metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(denied());
+    }
+    Ok(public_file(&marker, uid, 33)? == format!("{}\n", transaction.simple()))
+}
 fn layout(context: &Context, home: &Path, uid: u32) -> io::Result<Layout> {
     if context.uid != uid
         || context.host.len() != 32
@@ -642,6 +671,39 @@ pub async fn cleanup(
     // Held until return: a re-add of this host meanwhile is refused with
     // "Setup is already running" instead of racing the removal (#235).
     let _setup = setup_guard(&paths.base).await?;
+    cleanup_locked(context, &paths, home, uid, kernel, true).await
+}
+
+/// Remove a committed root install only while its transaction still owns the
+/// base. Stale abandonment is an idempotent no-op and cannot stop a later install.
+/// # Errors
+/// Reports validation, manager and file cleanup failures without claiming completion.
+pub async fn cleanup_for_promotion(
+    context: &Context,
+    home: &Path,
+    uid: u32,
+    transaction: uuid::Uuid,
+    kernel: Kernel,
+) -> io::Result<bool> {
+    let paths = layout(context, home, uid)?;
+    // Check the transaction under the same lock that fences setup and cleanup.
+    let _setup = setup_guard(&paths.base).await?;
+    if !committed_transaction_matches(&paths.base, transaction, uid)? {
+        return Ok(false);
+    }
+    cleanup_locked(context, &paths, home, uid, kernel, false).await?;
+    Ok(true)
+}
+
+/// Run the checked removal while the caller holds the setup lock.
+async fn cleanup_locked(
+    context: &Context,
+    paths: &Layout,
+    home: &Path,
+    uid: u32,
+    kernel: Kernel,
+    stop_agent: bool,
+) -> io::Result<Vec<String>> {
     validate(context, home, uid)?;
     (kernel.inspect)(&context.sessions)?;
     let sockets = context.sessions.join("sessions");
@@ -661,7 +723,13 @@ pub async fn cleanup(
             }
         }
     }
-    manager(&paths, &["disable", "--now", "infraternal-agent.service"]).await?;
+    if stop_agent {
+        manager(paths, &["disable", "--now", "infraternal-agent.service"]).await?;
+    } else {
+        // The abandonment reply travels over this daemon's live link. Disable
+        // its unit now, then stop the already-running process after the reply.
+        manager(paths, &["disable", "infraternal-agent.service"]).await?;
+    }
     // Recheck after manager calls; never unlink a replacement made during stop.
     validate(context, home, uid)?;
     let report: Vec<String> = (kernel.retire)(&context.sessions)?
@@ -671,7 +739,7 @@ pub async fn cleanup(
     std::fs::remove_file(&paths.unit)?;
     infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
     std::fs::remove_file(&paths.launcher)?;
-    manager(&paths, &["daemon-reload"]).await?;
+    manager(paths, &["daemon-reload"]).await?;
     // A rootful agent may have written mesh SSH's client files (#221); they
     // go with it. Only files infraternal wrote are removed.
     let mut report = report;
@@ -725,7 +793,13 @@ pub async fn retire_for_promotion(context: &Context, home: &Path, uid: u32) -> i
             _ => {}
         }
     }
-    for file in [".bootstrap-ready", PLAN, STAGED, ".bootstrap-owner"] {
+    for file in [
+        ".bootstrap-ready",
+        ".bootstrap-transaction",
+        PLAN,
+        STAGED,
+        ".bootstrap-owner",
+    ] {
         match std::fs::remove_file(paths.base.join(file)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
@@ -775,7 +849,13 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
             _ => {}
         }
     }
-    for file in [".bootstrap-ready", PLAN, STAGED, ".bootstrap-owner"] {
+    for file in [
+        ".bootstrap-ready",
+        ".bootstrap-transaction",
+        PLAN,
+        STAGED,
+        ".bootstrap-owner",
+    ] {
         match std::fs::remove_file(base.join(file)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
@@ -1314,6 +1394,38 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert!(intact && matches);
+    }
+
+    /// A delayed cleanup for A may finish as a no-op after B has committed, but it cannot claim B's install.
+    #[test]
+    fn promotion_cleanup_matches_only_its_committed_transaction() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!(
+            "infraternal-promotion-transaction-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let transaction_a = uuid::Uuid::from_u128(0xa);
+        let transaction_b = uuid::Uuid::from_u128(0xb);
+        let marker = base.join(".bootstrap-transaction");
+        std::fs::write(&marker, format!("{}\n", transaction_b.simple())).unwrap();
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let uid = nix::unistd::geteuid().as_raw();
+        assert!(!committed_transaction_matches(&base, transaction_a, uid).unwrap());
+        assert!(committed_transaction_matches(&base, transaction_b, uid).unwrap());
+
+        // A remains the last committed transaction while B is staged. A's
+        // delayed cleanup must not treat the old marker as authority over B.
+        std::fs::write(&marker, format!("{}\n", transaction_a.simple())).unwrap();
+        let active = base.join(".bootstrap-lock/transaction");
+        std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+        std::fs::write(&active, format!("{}\n", transaction_b.simple())).unwrap();
+        assert!(!committed_transaction_matches(&base, transaction_a, uid).unwrap());
+
+        std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
     fn replies_name_the_objects_left_as_valid_json() {

@@ -29,7 +29,7 @@ use crate::{
     host_activity::{self, Kind},
     host_privilege::{self, AgentPump, Elevation, Probe, Way},
     remote_http::InvitationIssuer,
-    remote_runtime::RemoteHosts,
+    remote_runtime::{RemoteHosts, TerminalPromotionGuard},
 };
 use infraternal_plugin_ssh::{
     install::{Installation, JoinMaterial, PayloadSource},
@@ -364,6 +364,14 @@ impl Promotions {
             sealed.zeroize();
             return Ok(json!({"outcome": "offline"}));
         };
+        let Ok(terminal_admission) = self.hosts.block_terminal_opens(host).await else {
+            let _ = self
+                .store
+                .settle_try(attempt, Settled::Failed { typed: false }, now)
+                .await;
+            sealed.zeroize();
+            return Err(Refused::Unavailable);
+        };
         self.set(attempt, bound_generation, Stage::Checking);
         let Ok(digest) = self.digest(&agent).await else {
             let _ = self
@@ -388,7 +396,9 @@ impl Promotions {
                 self.set(attempt, bound_generation, Stage::Elevated);
                 let driver = self.clone();
                 tokio::spawn(async move {
-                    driver.install(host, attempt, agent, bound_generation).await;
+                    driver
+                        .install(host, attempt, agent, bound_generation, terminal_admission)
+                        .await;
                 });
                 return Ok(json!({"outcome": "started", "method": way.word()}));
             }
@@ -612,6 +622,7 @@ impl Promotions {
         attempt: Uuid,
         agent: crate::embedded::EmbeddedAgent,
         generation: Uuid,
+        admission: TerminalPromotionGuard,
     ) {
         let person = self.person(attempt).await.unwrap_or_default();
         // The failed step's fixed word goes to the activity log; the
@@ -621,7 +632,7 @@ impl Promotions {
             Duration::from_secs(
                 u64::try_from(crate::enrollment::promotion::LIFETIME).unwrap_or(900),
             ),
-            self.install_steps(host, attempt, &agent, generation),
+            self.install_steps(host, attempt, &agent, generation, &admission),
         )
         .await
         .unwrap_or(Err("deadline"));
@@ -674,6 +685,7 @@ impl Promotions {
         attempt: Uuid,
         agent: &crate::embedded::EmbeddedAgent,
         generation: Uuid,
+        admission: &TerminalPromotionGuard,
     ) -> Result<(), &'static str> {
         // A short name: Unix socket paths are capped at 108 bytes, and the
         // data directory in front of it can be long (found on the guest rig,
@@ -704,7 +716,13 @@ impl Promotions {
         let install =
             Installation::new_pending(session.clone(), &target, host).map_err(|_| "install")?;
         // R4: before any step, the relay learns how to put the host back.
-        session.arm_rollback(install.rollback_script());
+        if let Err(failure) = session
+            .arm_rollback(install.transaction(), install.rollback_script())
+            .await
+        {
+            session.close();
+            return Err(failure.message);
+        }
         // J465 P1: if the relay itself dies later, the uninstall outbox rolls
         // back this exact transaction through the abandoned successor.
         self.store
@@ -712,7 +730,9 @@ impl Promotions {
             .await
             .map_err(|_| "install")?;
         let result = self
-            .run_install(host, attempt, agent, generation, &session, &install)
+            .run_install(
+                host, attempt, agent, generation, &session, &install, admission,
+            )
             .await;
         if result.is_err() && !install.committed() {
             let _ = install.rollback().await;
@@ -731,6 +751,7 @@ impl Promotions {
         generation: Uuid,
         session: &Arc<RelaySession>,
         install: &Installation,
+        admission: &TerminalPromotionGuard,
     ) -> Result<(), &'static str> {
         let architecture = self.architecture(agent).await.map_err(|()| "facts")?;
         let binary = self
@@ -798,7 +819,10 @@ impl Promotions {
         // rootless link that carries it. With `Commit` first it ends without
         // a rollback; a handover that then fails is undone by the
         // successor's own uninstall (R5).
-        session.commit();
+        session
+            .commit(install.transaction())
+            .await
+            .map_err(|failure| failure.message)?;
         if !session.finish(READY_BOUND).await {
             return Err("relay");
         }
@@ -816,24 +840,28 @@ impl Promotions {
         // abandons; the committed root install is then removed by the
         // successor's uninstall outbox.
         let now = crate::runtime::unix_seconds().map_err(|_| "clock")?;
-        if let Err(reason) = self
-            .still_bound(host, generation)
-            .await
-            .and_then(|()| no_open_terminals(agent))
-        {
+        if let Err(reason) = self.still_bound(host, generation).await {
             let _ = self.store.abandon_promotion(attempt, now).await;
             return Err(reason);
         }
-        if self
-            .store
-            .handover(attempt, &fingerprint, now)
-            .await
-            .is_err()
-        {
+        let result = handover_after_final_census(
+            admission,
+            || no_open_terminals(agent),
+            std::future::ready(()),
+            async {
+                self.store
+                    .handover(attempt, &fingerprint, now)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| "handover")
+            },
+        )
+        .await;
+        if let Err(reason) = result {
             // The root install is committed on the host but never became the
             // host: abandon, which queues its own uninstall (R5).
             let _ = self.store.abandon_promotion(attempt, now).await;
-            return Err("handover");
+            return Err(reason);
         }
         Ok(())
     }
@@ -857,6 +885,23 @@ fn no_open_terminals(agent: &crate::embedded::EmbeddedAgent) -> Result<(), &'sta
         }
         _ => Err("terminals"),
     }
+}
+
+/// Run the final census while admission stays closed, then commit handover.
+async fn handover_after_final_census<Census, Checkpoint, Handover>(
+    _admission: &TerminalPromotionGuard,
+    census: Census,
+    checkpoint: Checkpoint,
+    handover: Handover,
+) -> Result<(), &'static str>
+where
+    Census: FnOnce() -> Result<(), &'static str>,
+    Checkpoint: std::future::Future<Output = ()>,
+    Handover: std::future::Future<Output = Result<(), &'static str>>,
+{
+    census()?;
+    checkpoint.await;
+    handover.await
 }
 
 /// The answer for a host whose operating system this upgrade doesn't
@@ -924,6 +969,43 @@ mod tests {
         assert_eq!(no_open_terminals(&agent), Err("terminals"));
         agent.set_session_inventory_for_test(SessionInventoryState::Unavailable);
         assert_eq!(no_open_terminals(&agent), Err("terminals"));
+    }
+
+    /// An open attempted after the final census cannot cross the handover boundary.
+    #[tokio::test]
+    async fn a_terminal_open_at_the_census_checkpoint_is_refused() {
+        let hosts = crate::remote_runtime::RemoteHosts::default();
+        let host = Uuid::from_u128(0x522);
+        let admission = Arc::new(hosts.block_terminal_opens(host).await.unwrap());
+        let task_admission = Arc::clone(&admission);
+        let (at_census, reached_census) = tokio::sync::oneshot::channel();
+        let (resume_handover, continue_handover) = tokio::sync::oneshot::channel();
+        let handed_over = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let recorded_handover = handed_over.clone();
+        let task = tokio::spawn(async move {
+            handover_after_final_census(
+                task_admission.as_ref(),
+                || Ok(()),
+                async move {
+                    let _ = at_census.send(());
+                    let _ = continue_handover.await;
+                },
+                async move {
+                    recorded_handover.store(true, std::sync::atomic::Ordering::Release);
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        reached_census.await.unwrap();
+        assert!(hosts.admit_terminal_open(host).is_err());
+        assert!(!handed_over.load(std::sync::atomic::Ordering::Acquire));
+        resume_handover.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        assert!(handed_over.load(std::sync::atomic::Ordering::Acquire));
+        drop(admission);
+        assert!(hosts.admit_terminal_open(host).is_ok());
     }
 
     /// A Mac is refused with a pointer to the mesh service; Linux and

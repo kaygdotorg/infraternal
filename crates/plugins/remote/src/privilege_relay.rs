@@ -70,11 +70,58 @@ pub enum Frame {
     /// Agent → relay, first and once: the 32-byte one-time token typed to the
     /// relay's terminal. The relay refuses a socket whose first frame isn't it.
     Token { bytes: [u8; 32] },
-    /// Server → relay, before any `Open`: the rollback script, kept by the
-    /// relay and run if the upgrade ends without `Commit`.
-    Rollback { script: String },
-    /// Server → relay: the install committed; a later end needs no rollback.
-    Commit,
+    /// Server → relay, before any `Open`: this install transaction's rollback script.
+    Rollback {
+        transaction: [u8; 16],
+        script: String,
+    },
+    /// Server → relay: this exact install transaction committed.
+    Commit { transaction: [u8; 16] },
+    /// Relay → server: the persistent guard's checked state for one transaction.
+    Guard {
+        transaction: [u8; 16],
+        state: GuardState,
+    },
+}
+
+/// The checked result of preparing or clearing a promotion's persistent guard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardState {
+    /// The boot unit and independent watcher are verified active.
+    Armed,
+    /// The install's committed receipt is verified and guard cleanup completed.
+    Committed,
+    /// This host has no usable systemd system manager, so promotion was refused.
+    SystemdUnavailable,
+    /// A required rollback guard step failed, so promotion was refused.
+    ArmFailed,
+    /// Guard cleanup could not be verified, so handover was refused.
+    DisarmFailed,
+}
+
+impl GuardState {
+    /// Encode the fixed guard result tag used by the private relay protocol.
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Armed => 0,
+            Self::Committed => 1,
+            Self::SystemdUnavailable => 2,
+            Self::ArmFailed => 3,
+            Self::DisarmFailed => 4,
+        }
+    }
+
+    /// Decode a fixed tag without accepting unknown guard result states.
+    fn from_tag(tag: u8) -> Result<Self, Malformed> {
+        match tag {
+            0 => Ok(Self::Armed),
+            1 => Ok(Self::Committed),
+            2 => Ok(Self::SystemdUnavailable),
+            3 => Ok(Self::ArmFailed),
+            4 => Ok(Self::DisarmFailed),
+            _ => Err(Malformed::Body),
+        }
+    }
 }
 
 impl Frame {
@@ -92,7 +139,8 @@ impl Frame {
             Self::Stderr { .. } => 9,
             Self::Token { .. } => 10,
             Self::Rollback { .. } => 11,
-            Self::Commit => 12,
+            Self::Commit { .. } => 12,
+            Self::Guard { .. } => 13,
         }
     }
 
@@ -102,6 +150,37 @@ impl Frame {
     /// When a body is larger than the protocol allows; callers split data
     /// with [`MAX_CHUNK`] and scripts are fixed text far below [`MAX_SCRIPT`].
     pub fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Rollback {
+                transaction,
+                script,
+            } => {
+                let body_len = 16usize.saturating_add(script.len());
+                assert!(body_len <= MAX_SCRIPT + 16, "relay frame body too large");
+                out.push(self.kind());
+                out.extend_from_slice(&0u32.to_be_bytes());
+                out.extend_from_slice(&u32::try_from(body_len).unwrap_or(u32::MAX).to_be_bytes());
+                out.extend_from_slice(transaction);
+                out.extend_from_slice(script.as_bytes());
+                return;
+            }
+            Self::Commit { transaction } => {
+                out.push(self.kind());
+                out.extend_from_slice(&0u32.to_be_bytes());
+                out.extend_from_slice(&16u32.to_be_bytes());
+                out.extend_from_slice(transaction);
+                return;
+            }
+            Self::Guard { transaction, state } => {
+                out.push(self.kind());
+                out.extend_from_slice(&0u32.to_be_bytes());
+                out.extend_from_slice(&17u32.to_be_bytes());
+                out.extend_from_slice(transaction);
+                out.push(state.tag());
+                return;
+            }
+            _ => {}
+        }
         // An exit's two body bytes live here so the borrow below outlives the match.
         let exit = match self {
             Self::Exit {
@@ -111,14 +190,14 @@ impl Frame {
         };
         let (channel, body): (u32, &[u8]) = match self {
             Self::Open { channel, script } => (*channel, script.as_bytes()),
-            Self::Rollback { script } => (0, script.as_bytes()),
             Self::Token { bytes } => (0, &bytes[..]),
             Self::Stdin { channel, bytes }
             | Self::Stdout { channel, bytes }
             | Self::Stderr { channel, bytes } => (*channel, bytes),
             Self::StdinEnd { channel } | Self::Kill { channel } => (*channel, &[]),
             Self::Exit { channel, .. } => (*channel, &exit[..]),
-            Self::Ready | Self::Close | Self::Commit => (0, &[]),
+            Self::Ready | Self::Close => (0, &[]),
+            Self::Rollback { .. } | Self::Commit { .. } | Self::Guard { .. } => unreachable!(),
         };
         assert!(
             body.len() <= limit(self.kind()),
@@ -134,11 +213,14 @@ impl Frame {
 /// The largest body a frame of `kind` may carry.
 const fn limit(kind: u8) -> usize {
     match kind {
-        1 | 11 => MAX_SCRIPT,
+        1 => MAX_SCRIPT,
+        11 => MAX_SCRIPT + 16,
         2 | 5 => MAX_CHUNK,
         9 => MAX_STDERR,
         6 => 2,
         10 => 32,
+        12 => 16,
+        13 => 17,
         _ => 0,
     }
 }
@@ -175,7 +257,7 @@ impl Decoder {
             return Ok(None);
         }
         let kind = self.buffer[0];
-        if !(1..=12).contains(&kind) {
+        if !(1..=13).contains(&kind) {
             return Err(Malformed::Kind);
         }
         let channel = u32::from_be_bytes([
@@ -229,10 +311,33 @@ impl Decoder {
             10 => Frame::Token {
                 bytes: body.try_into().map_err(|_| Malformed::Length)?,
             },
-            11 => Frame::Rollback {
-                script: String::from_utf8(body).map_err(|_| Malformed::Body)?,
-            },
-            _ => Frame::Commit,
+            11 => {
+                if channel != 0 || body.len() < 16 {
+                    return Err(Malformed::Length);
+                }
+                Frame::Rollback {
+                    transaction: body[..16].try_into().map_err(|_| Malformed::Length)?,
+                    script: String::from_utf8(body[16..].to_vec()).map_err(|_| Malformed::Body)?,
+                }
+            }
+            12 => {
+                if channel != 0 || body.len() != 16 {
+                    return Err(Malformed::Length);
+                }
+                Frame::Commit {
+                    transaction: body.try_into().map_err(|_| Malformed::Length)?,
+                }
+            }
+            13 => {
+                if channel != 0 || body.len() != 17 {
+                    return Err(Malformed::Length);
+                }
+                Frame::Guard {
+                    transaction: body[..16].try_into().map_err(|_| Malformed::Length)?,
+                    state: GuardState::from_tag(body[16])?,
+                }
+            }
+            _ => return Err(Malformed::Kind),
         };
         Ok(Some(frame))
     }
@@ -276,9 +381,12 @@ mod tests {
             Frame::Kill { channel: 3 },
             Frame::Token { bytes: [7; 32] },
             Frame::Rollback {
+                transaction: [0; 16],
                 script: "rollback".into(),
             },
-            Frame::Commit,
+            Frame::Commit {
+                transaction: [0; 16],
+            },
             Frame::Close,
         ];
         let mut wire = Vec::new();
@@ -294,6 +402,37 @@ mod tests {
             }
         }
         assert_eq!(seen, frames);
+    }
+
+    /// Rollback setup and commit receipts stay bound to one exact install transaction.
+    #[test]
+    fn guard_protocol_round_trips_the_transaction_identity() {
+        let transaction = [0x05; 16];
+        let frames = [
+            Frame::Rollback {
+                transaction,
+                script: "rollback".into(),
+            },
+            Frame::Guard {
+                transaction,
+                state: GuardState::Armed,
+            },
+            Frame::Commit { transaction },
+            Frame::Guard {
+                transaction,
+                state: GuardState::Committed,
+            },
+        ];
+        let mut bytes = Vec::new();
+        for frame in &frames {
+            frame.encode(&mut bytes);
+        }
+        let mut decoder = Decoder::default();
+        decoder.push(&bytes);
+        for expected in frames {
+            assert_eq!(decoder.frame().unwrap(), Some(expected));
+        }
+        assert!(decoder.frame().unwrap().is_none());
     }
 
     /// Unknown kinds, oversized bodies, bad exits and non-UTF-8 scripts are
@@ -328,7 +467,11 @@ mod tests {
         assert_eq!(decoder.frame(), Err(Malformed::Length));
 
         let mut decoder = Decoder::default();
-        decoder.push(&[13, 0, 0, 0, 0, 0, 0, 0, 0]);
+        decoder.push(&[14, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(decoder.frame(), Err(Malformed::Kind));
+
+        let mut decoder = Decoder::default();
+        decoder.push(&[13, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(decoder.frame(), Err(Malformed::Length));
     }
 }

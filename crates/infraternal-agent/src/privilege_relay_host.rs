@@ -44,6 +44,8 @@ use infraternal_plugin_remote::privilege_relay::{
 };
 use std::{
     collections::HashMap,
+    ffi::OsString,
+    io,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{ExitCode, Stdio},
@@ -104,12 +106,12 @@ pub fn run_if_requested() -> Option<ExitCode> {
     else {
         return Some(ExitCode::FAILURE);
     };
-    // Only the real relay arms the host-side guard; `serve`'s tests don't.
-    let _ = GUARDED.set(own);
+    let config = GuardConfig::system();
+    let runner = SystemdGuardCommandRunner;
     let result = runtime.block_on(async {
         let stream = connect(&socket, uid).await?;
         let (reader, writer) = stream.into_split();
-        serve(reader, writer, &token, LIFETIME).await
+        serve_with_guard(reader, writer, &token, LIFETIME, &config, &own, &runner).await
     });
     Some(if result.is_ok() {
         ExitCode::SUCCESS
@@ -244,11 +246,55 @@ struct Channel {
 /// The stream broke or carried something that is not relay protocol (the
 /// rollback has run by then).
 pub async fn serve(
+    reader: impl AsyncRead + Unpin,
+    writer: impl AsyncWrite + Unpin + Send + 'static,
+    token: &[u8; 32],
+    lifetime: Duration,
+) -> std::io::Result<()> {
+    serve_inner(
+        reader,
+        writer,
+        token,
+        lifetime,
+        None,
+        None,
+        &SystemdGuardCommandRunner,
+    )
+    .await
+}
+
+/// Serve a promotion only after preparing its transaction-bound persistent guard.
+async fn serve_with_guard<R: GuardCommandRunner>(
+    reader: impl AsyncRead + Unpin,
+    writer: impl AsyncWrite + Unpin + Send + 'static,
+    token: &[u8; 32],
+    lifetime: Duration,
+    config: &GuardConfig,
+    own: &Path,
+    runner: &R,
+) -> io::Result<()> {
+    serve_inner(
+        reader,
+        writer,
+        token,
+        lifetime,
+        Some(config),
+        Some(own),
+        runner,
+    )
+    .await
+}
+
+/// Run the relay protocol with optional host guard configuration for tests.
+async fn serve_inner<R: GuardCommandRunner>(
     mut reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin + Send + 'static,
     token: &[u8; 32],
     lifetime: Duration,
-) -> std::io::Result<()> {
+    guard_config: Option<&GuardConfig>,
+    own: Option<&Path>,
+    runner: &R,
+) -> io::Result<()> {
     let (out, mut outgoing) = mpsc::channel::<Frame>(64);
     let write = tokio::spawn(async move {
         let mut bytes = Vec::new();
@@ -262,6 +308,8 @@ pub async fn serve(
     });
     let mut channels: HashMap<u32, Channel> = HashMap::new();
     let mut rollback: Option<Zeroizing<String>> = None;
+    let mut transaction = None;
+    let mut guard: Option<GuardFiles> = None;
     let mut committed = false;
     let mut authenticated = false;
     let mut decoder = Decoder::default();
@@ -299,11 +347,50 @@ pub async fn serve(
                 }
             }
             match frame {
-                Frame::Rollback { script } if rollback.is_none() => {
-                    if guarded() {
-                        arm_guard(&script).await;
+                Frame::Rollback {
+                    transaction: bytes,
+                    script,
+                } if rollback.is_none() => {
+                    let id = uuid::Uuid::from_bytes(bytes);
+                    if let Some(config) = guard_config {
+                        let own = own
+                            .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+                        match arm_guard_for_relay(config, id, &script, &own, runner).await {
+                            Ok(files) => {
+                                guard = Some(files);
+                                transaction = Some(id);
+                                rollback = Some(Zeroizing::new(script));
+                                if out
+                                    .send(Frame::Guard {
+                                        transaction: bytes,
+                                        state: infraternal_plugin_remote::privilege_relay::GuardState::Armed,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break 'serve Err(std::io::ErrorKind::BrokenPipe.into());
+                                }
+                            }
+                            Err(error) => {
+                                let state = if error.to_string().contains("systemd system manager")
+                                {
+                                    infraternal_plugin_remote::privilege_relay::GuardState::SystemdUnavailable
+                                } else {
+                                    infraternal_plugin_remote::privilege_relay::GuardState::ArmFailed
+                                };
+                                let _ = out
+                                    .send(Frame::Guard {
+                                        transaction: bytes,
+                                        state,
+                                    })
+                                    .await;
+                                break 'serve Err(error);
+                            }
+                        }
+                    } else {
+                        transaction = Some(id);
+                        rollback = Some(Zeroizing::new(script));
                     }
-                    rollback = Some(Zeroizing::new(script));
                 }
                 Frame::Open { channel, script } => {
                     channels.retain(|_, open| open.group.is_some_and(alive));
@@ -352,10 +439,50 @@ pub async fn serve(
                         let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
                     }
                 }
-                Frame::Commit => {
-                    committed = true;
-                    if guarded() {
-                        disarm_guard().await;
+                Frame::Commit { transaction: bytes } => {
+                    let id = uuid::Uuid::from_bytes(bytes);
+                    if transaction != Some(id) {
+                        break 'serve Err(invalid());
+                    }
+                    if let Some(config) = guard_config {
+                        let Some(files) = guard.as_ref() else {
+                            break 'serve Err(invalid());
+                        };
+                        if let Err(error) = write_commit_receipt(files, id) {
+                            let _ = out
+                                .send(Frame::Guard {
+                                    transaction: bytes,
+                                    state: infraternal_plugin_remote::privilege_relay::GuardState::DisarmFailed,
+                                })
+                                .await;
+                            break 'serve Err(error);
+                        }
+                        committed = true;
+                        match disarm_guard(config, files).await {
+                            Ok(()) => {
+                                if out
+                                    .send(Frame::Guard {
+                                        transaction: bytes,
+                                        state: infraternal_plugin_remote::privilege_relay::GuardState::Committed,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break 'serve Err(std::io::ErrorKind::BrokenPipe.into());
+                                }
+                            }
+                            Err(error) => {
+                                let _ = out
+                                    .send(Frame::Guard {
+                                        transaction: bytes,
+                                        state: infraternal_plugin_remote::privilege_relay::GuardState::DisarmFailed,
+                                    })
+                                    .await;
+                                break 'serve Err(error);
+                            }
+                        }
+                    } else {
+                        committed = true;
                     }
                 }
                 Frame::Close => break 'serve Ok(()),
@@ -363,6 +490,7 @@ pub async fn serve(
                 // sends, is a protocol error.
                 Frame::Token { .. }
                 | Frame::Rollback { .. }
+                | Frame::Guard { .. }
                 | Frame::Stdout { .. }
                 | Frame::Stderr { .. }
                 | Frame::Exit { .. }
@@ -375,137 +503,217 @@ pub async fn serve(
             let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
         }
     }
+    let mut cleanup_error = None;
     if !committed && let Some(script) = rollback {
         run_rollback(&script).await;
-        if guarded() {
-            disarm_guard().await;
+        if let (Some(config), Some(files)) = (guard_config, guard.as_ref())
+            && let Err(error) = disarm_guard(config, files).await
+        {
+            cleanup_error = Some(error);
         }
     }
     drop(out);
     let _ = tokio::time::timeout(Duration::from_secs(2), write).await;
-    result
-}
-
-/// Set by the real relay ([`run_if_requested`]); in-process tests of
-/// [`serve`] leave it unset and never touch the host.
-/// It holds this relay's own `/run` directory (its binary copy), which the
-/// guard also removes: `RemoveOnDrop` can't run after a SIGKILL.
-static GUARDED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-/// Whether this process is the real relay, which arms the host guard.
-fn guarded() -> bool {
-    GUARDED.get().is_some()
-}
-
-/// Where the guard keeps its undo script (root-only).
-const GUARD_DIR: &str = "/var/lib/infraternal-promotion";
-/// The boot-time unit that runs the undo script after a reboot.
-const GUARD_UNIT: &str = "infraternal-promotion-rollback.service";
-
-/// The undo script: the install's rollback, then the relay's own copy in
-/// `/run` (`own`, empty for none) and the guard itself go.
-fn undo_script(rollback: &str, own: &str) -> String {
-    let own = if own.starts_with("/run/infraternal-privilege.") && !own.contains('\'') {
-        format!("rm -rf -- '{own}'\n")
-    } else {
-        String::new()
-    };
-    format!(
-        "( {rollback} ) || :\n{own}rm -f /etc/systemd/system/multi-user.target.wants/{GUARD_UNIT} /etc/systemd/system/{GUARD_UNIT}\nrm -rf {GUARD_DIR}\nsystemctl daemon-reload || :\n"
-    )
-}
-
-/// The boot-time unit text.
-fn guard_unit() -> String {
-    format!(
-        "[Unit]\nDescription=infraternal: undo an interrupted root upgrade\nConditionPathExists={GUARD_DIR}/undo\nAfter=local-fs.target\n\n[Service]\nType=oneshot\nExecStart=/bin/sh {GUARD_DIR}/undo\n\n[Install]\nWantedBy=multi-user.target\n"
-    )
-}
-
-/// Arm the host-side guard of this upgrade (J465 P1): put the host back
-/// even when this relay can't, because it was killed, crashed or the host
-/// rebooted mid-install.
-///
-/// - `undo` (the rollback, then the guard removing itself) goes to a
-///   root-only directory;
-/// - a oneshot unit enabled for boot runs it after a reboot;
-/// - a transient watcher unit, outside this relay's process tree, waits for
-///   this process to end and then runs it if it is still armed.
-///
-/// [`disarm_guard`] removes all three once the install committed or this
-/// relay rolled back itself. Arming is best effort: a failure here leaves
-/// the relay's own rollback (R4) and the uninstall outbox (R5).
-async fn arm_guard(rollback: &str) {
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
-    let dir = Path::new(GUARD_DIR);
-    let _ = std::fs::DirBuilder::new().mode(0o700).create(dir);
-    let undo = dir.join("undo");
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&undo)
-        .and_then(|mut file| {
-            let own = GUARDED
-                .get()
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            std::io::Write::write_all(&mut file, undo_script(rollback, &own).as_bytes())
-        });
-    if written.is_err() {
-        return;
+    match cleanup_error {
+        Some(error) => Err(error),
+        None => result,
     }
-    let unit = Path::new("/etc/systemd/system").join(GUARD_UNIT);
-    // 0644 like every unit file (the relay's umask is 077).
-    let written = std::fs::write(&unit, guard_unit()).and_then(|()| {
-        std::fs::set_permissions(&unit, std::os::unix::fs::PermissionsExt::from_mode(0o644))
-    });
-    if written.is_ok() {
-        let wants = Path::new("/etc/systemd/system/multi-user.target.wants");
-        let _ = std::fs::create_dir_all(wants);
-        let _ = std::os::unix::fs::symlink(&unit, wants.join(GUARD_UNIT));
-        let _ = quiet_command("systemctl", &["daemon-reload"]).await;
+}
+
+/// The shared parent paths for each transaction's systemd rollback guard.
+const GUARD_ROOT: &str = "/var/lib/infraternal-promotion";
+/// The root install base where the active journal and committed transaction live.
+const INSTALL_BASE: &str = "/var/lib/infraternal";
+/// The install journal field that says which transaction is still reversible.
+const ACTIVE_TRANSACTION: &str = ".bootstrap-lock/transaction";
+/// The durable marker that identifies the root install a later abandon may remove.
+const COMMITTED_TRANSACTION: &str = ".promotion-transaction";
+/// The system manager's unit directory.
+const SYSTEMD_UNIT_ROOT: &str = "/etc/systemd/system";
+
+/// Paths used by the production guard and its filesystem tests.
+struct GuardConfig {
+    /// Parent directory for per-transaction undo scripts.
+    guard_root: PathBuf,
+    /// Directory that contains system manager unit files.
+    unit_root: PathBuf,
+    /// Root install base whose journal binds this guard's undo script.
+    install_base: PathBuf,
+    #[cfg(test)]
+    /// Scratch parent removed after a guard lifecycle test.
+    scratch_root: PathBuf,
+}
+
+impl GuardConfig {
+    /// Use the fixed root-owned host paths for a real promotion.
+    fn system() -> Self {
+        Self {
+            guard_root: PathBuf::from(GUARD_ROOT),
+            unit_root: PathBuf::from(SYSTEMD_UNIT_ROOT),
+            install_base: PathBuf::from(INSTALL_BASE),
+            #[cfg(test)]
+            scratch_root: PathBuf::new(),
+        }
     }
-    let pid = std::process::id().to_string();
-    let watch = format!(
-        "while kill -0 {pid} 2>/dev/null; do sleep 1; done; [ -f {GUARD_DIR}/undo ] && exec /bin/sh {GUARD_DIR}/undo; exit 0"
-    );
-    let _ = quiet_command(
-        "systemd-run",
-        &[
-            "--quiet",
-            "--collect",
-            "--unit",
-            &format!("infraternal-promotion-watch-{pid}"),
-            "/bin/sh",
-            "-c",
-            &watch,
+}
+
+#[cfg(test)]
+impl Drop for GuardConfig {
+    /// Remove this test's guard fixture without touching production paths.
+    fn drop(&mut self) {
+        if !self.scratch_root.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.scratch_root);
+        }
+    }
+}
+
+/// The persistent paths owned by one install transaction.
+struct GuardFiles {
+    /// Transaction-specific private directory containing both scripts.
+    directory: PathBuf,
+    /// The undo script path in the private directory.
+    undo: PathBuf,
+    /// The watcher script path in the private directory.
+    watcher_script: PathBuf,
+    /// Boot unit file for this transaction.
+    unit: PathBuf,
+    /// Independent watcher unit name for this transaction.
+    watcher: String,
+    /// Durable install marker checked by delayed cleanup.
+    committed: PathBuf,
+}
+
+/// Run one named system manager operation for a transaction's guard files.
+trait GuardCommandRunner {
+    /// Run the operation and return only after the manager reports success.
+    async fn run(&self, operation: &str, files: &GuardFiles) -> io::Result<()>;
+}
+
+/// Run a checked systemd command without resolving privileged binaries through `PATH`.
+struct SystemdGuardCommandRunner;
+
+impl GuardCommandRunner for SystemdGuardCommandRunner {
+    /// Run one system manager operation and check its exit status.
+    async fn run(&self, operation: &str, files: &GuardFiles) -> io::Result<()> {
+        let systemctl = fixed_root_binary("systemctl")?;
+        let unit_name = files
+            .unit
+            .file_name()
+            .ok_or_else(|| io::Error::other("invalid promotion guard unit path"))?;
+        let watcher = OsString::from(&files.watcher);
+        let args = match operation {
+            "show" => {
+                let output = checked_output(
+                    systemctl,
+                    vec!["--system", "show", "--property=Version", "--value"]
+                        .into_iter()
+                        .map(OsString::from)
+                        .collect(),
+                    "systemd system manager",
+                )
+                .await?;
+                if output.iter().all(u8::is_ascii_whitespace) {
+                    return Err(io::Error::other(
+                        "systemd system manager returned no version",
+                    ));
+                }
+                return Ok(());
+            }
+            "daemon-reload" => vec!["--system", "daemon-reload"],
+            "enable" => vec!["--system", "enable", "--no-reload"],
+            "is-enabled" => vec!["--system", "is-enabled", "--quiet"],
+            "is-active" => vec!["--system", "is-active", "--quiet"],
+            "stop" => vec!["--system", "stop"],
+            "disable" => vec!["--system", "disable"],
+            "start" => {
+                let systemd_run = fixed_root_binary("systemd-run")?;
+                let watcher_path = files
+                    .watcher_script
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("invalid promotion watcher path"))?;
+                return checked_status(
+                    systemd_run,
+                    vec![
+                        OsString::from("--system"),
+                        OsString::from("--quiet"),
+                        OsString::from("--collect"),
+                        OsString::from("--service-type=exec"),
+                        OsString::from("--unit"),
+                        watcher,
+                        OsString::from("/bin/sh"),
+                        OsString::from(watcher_path),
+                    ],
+                    operation,
+                )
+                .await;
+            }
+            _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+        };
+        let mut args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+        match operation {
+            "enable" | "is-enabled" | "disable" => args.push(unit_name.to_os_string()),
+            "is-active" | "stop" => args.push(watcher),
+            _ => {}
+        }
+        checked_status(systemctl, args, operation).await
+    }
+}
+
+/// Resolve a small fixed set of root-owned systemd executables.
+pub(crate) fn fixed_root_binary(name: &str) -> io::Result<PathBuf> {
+    let candidates: &[&str] = match name {
+        "systemctl" => &[
+            "/usr/bin/systemctl",
+            "/bin/systemctl",
+            "/run/current-system/sw/bin/systemctl",
         ],
-    )
-    .await;
+        "systemd-run" => &[
+            "/usr/bin/systemd-run",
+            "/bin/systemd-run",
+            "/run/current-system/sw/bin/systemd-run",
+        ],
+        "rm" => &["/usr/bin/rm", "/bin/rm", "/run/current-system/sw/bin/rm"],
+        "sleep" => &[
+            "/usr/bin/sleep",
+            "/bin/sleep",
+            "/run/current-system/sw/bin/sleep",
+        ],
+        _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+    };
+    for candidate in candidates {
+        let path = Path::new(candidate);
+        let Ok(link_metadata) = std::fs::symlink_metadata(path) else {
+            continue;
+        };
+        let Ok(target) = std::fs::canonicalize(path) else {
+            continue;
+        };
+        let Ok(target_metadata) = std::fs::metadata(&target) else {
+            continue;
+        };
+        if link_metadata.uid() == 0
+            && target_metadata.is_file()
+            && target_metadata.uid() == 0
+            && target_metadata.mode() & 0o022 == 0
+        {
+            return Ok(path.to_path_buf());
+        }
+    }
+    Err(io::Error::other(format!(
+        "fixed root-owned {name} binary is unavailable"
+    )))
 }
 
-/// Disarm the guard: the upgrade committed, or this relay rolled back.
-async fn disarm_guard() {
-    let _ = std::fs::remove_file(
-        Path::new("/etc/systemd/system/multi-user.target.wants").join(GUARD_UNIT),
-    );
-    let _ = std::fs::remove_file(Path::new("/etc/systemd/system").join(GUARD_UNIT));
-    let _ = std::fs::remove_dir_all(GUARD_DIR);
-    let _ = quiet_command("systemctl", &["daemon-reload"]).await;
-}
-
-/// Run a fixed system command with a clean environment, cwd `/`, no
-/// output, bounded to 30 s.
-async fn quiet_command(program: &str, args: &[&str]) -> bool {
+/// Run one fixed command with a clean environment, cwd `/`, and a 30-second bound.
+async fn checked_status(program: PathBuf, args: Vec<OsString>, operation: &str) -> io::Result<()> {
     let status = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::process::Command::new(program)
             .args(args)
             .env_clear()
             .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
             .current_dir("/")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -513,8 +721,332 @@ async fn quiet_command(program: &str, args: &[&str]) -> bool {
             .kill_on_drop(true)
             .status(),
     )
-    .await;
-    matches!(status, Ok(Ok(status)) if status.success())
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "systemd {operation} failed with status {:?}",
+            status.code()
+        )))
+    }
+}
+
+/// Run a fixed command and return its successful stdout, with the same bound as status checks.
+async fn checked_output(
+    program: PathBuf,
+    args: Vec<OsString>,
+    operation: &str,
+) -> io::Result<Vec<u8>> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(program)
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(io::Error::other(format!(
+            "{operation} failed with status {:?}",
+            output.status.code()
+        )))
+    }
+}
+
+/// Keep a shell argument literal even when its path contains a quote.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Build names for one install transaction; an old guard never shares new state.
+fn guard_paths(config: &GuardConfig, transaction: uuid::Uuid, _pid: u32) -> GuardFiles {
+    let suffix = transaction.simple().to_string();
+    let unit_name = format!("infraternal-promotion-{suffix}.service");
+    GuardFiles {
+        directory: config.guard_root.join(&suffix),
+        undo: config.guard_root.join(&suffix).join("undo"),
+        watcher_script: config.guard_root.join(&suffix).join("watcher"),
+        unit: config.unit_root.join(unit_name),
+        watcher: format!("infraternal-promotion-watch-{suffix}.service"),
+        committed: config.install_base.join(COMMITTED_TRANSACTION),
+    }
+}
+
+/// Build a rollback script that runs only while its exact install journal is active.
+fn transaction_undo_script(
+    rollback: &str,
+    own: &str,
+    transaction: uuid::Uuid,
+    files: &GuardFiles,
+    install_base: &Path,
+) -> io::Result<String> {
+    let active = shell_quote(&install_base.join(ACTIVE_TRANSACTION).to_string_lossy());
+    let committed = shell_quote(&install_base.join(COMMITTED_TRANSACTION).to_string_lossy());
+    let unit = shell_quote(&files.unit.to_string_lossy());
+    let wants = shell_quote(
+        &files
+            .unit
+            .parent()
+            .unwrap_or_else(|| Path::new(SYSTEMD_UNIT_ROOT))
+            .join("multi-user.target.wants")
+            .join(files.unit.file_name().unwrap_or_default())
+            .to_string_lossy(),
+    );
+    let directory = shell_quote(&files.directory.to_string_lossy());
+    let transaction = shell_quote(&transaction.simple().to_string());
+    let rm = shell_quote(&fixed_root_binary("rm")?.to_string_lossy());
+    let own = if own.starts_with("/run/infraternal-privilege.") {
+        format!("{rm} -rf -- {}\n", shell_quote(own))
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "#!/bin/sh\nset -eu\nactive={active}\ncommitted={committed}\ntransaction={transaction}\n# A matching commit receipt makes this transaction's guard permanently inert.\nif [ -f \"$committed\" ] && [ \"$(cat \"$committed\")\" = \"$transaction\" ]; then exit 0; fi\nif [ ! -f \"$active\" ]; then exit 0; fi\n[ \"$(cat \"$active\")\" = \"$transaction\" ] || exit 0\n( {rollback} )\n{own}{rm} -f -- {wants} {unit}\n{rm} -rf -- {directory}\n"
+    ))
+}
+
+/// Render the boot unit for one transaction's private undo script.
+fn guard_unit(files: &GuardFiles) -> String {
+    format!(
+        "[Unit]\nDescription=infraternal: undo interrupted root upgrade {}\nConditionPathExists={}\nAfter=local-fs.target\n\n[Service]\nType=oneshot\nExecStart=/bin/sh {}\n\n[Install]\nWantedBy=multi-user.target\n",
+        files.watcher,
+        files.undo.display(),
+        files.undo.display()
+    )
+}
+
+/// Render the independent watcher that runs this transaction's undo after relay loss.
+fn watcher_script(files: &GuardFiles, pid: u32) -> io::Result<String> {
+    let sleep = shell_quote(&fixed_root_binary("sleep")?.to_string_lossy());
+    Ok(format!(
+        "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do {sleep} 1; done\nexec /bin/sh {}\n",
+        shell_quote(&files.undo.to_string_lossy())
+    ))
+}
+
+/// Create or verify an owned directory without following a pre-existing symlink.
+fn ensure_guard_directory(path: &Path, create: bool, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    if create {
+        match std::fs::DirBuilder::new().mode(mode).create(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    let permissions = metadata.mode() & 0o777;
+    let permission_mismatch = if mode.trailing_zeros() >= 6 {
+        permissions != mode
+    } else {
+        permissions & 0o700 != 0o700 || permissions & 0o022 != 0
+    };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || permission_mismatch
+    {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    Ok(())
+}
+
+/// Write one guard file through a private sibling, then fsync and rename it into place.
+fn write_guard_file(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        std::fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Persist the exact install transaction before disarming its recovery guard.
+fn write_commit_receipt(files: &GuardFiles, transaction: uuid::Uuid) -> io::Result<()> {
+    let parent = files
+        .committed
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    ensure_guard_directory(parent, false, 0o755)?;
+    let receipt = format!("{}\n", transaction.simple());
+    write_guard_file(&files.committed, receipt.as_bytes(), 0o600)
+}
+
+/// Exercise the checked guard lifecycle through a replaceable command runner.
+#[cfg(test)]
+async fn arm_guard_with<R: GuardCommandRunner>(
+    config: &GuardConfig,
+    transaction: uuid::Uuid,
+    rollback: &str,
+    runner: &R,
+) -> io::Result<GuardFiles> {
+    arm_guard_for_relay(config, transaction, rollback, "", runner).await
+}
+
+/// Shared implementation used by the relay and its command-failure tests.
+async fn arm_guard_for_relay<R: GuardCommandRunner>(
+    config: &GuardConfig,
+    transaction: uuid::Uuid,
+    rollback: &str,
+    own: &str,
+    runner: &R,
+) -> io::Result<GuardFiles> {
+    let files = guard_paths(config, transaction, std::process::id());
+    runner.run("show", &files).await.map_err(|_| {
+        io::Error::other("a working systemd system manager is required for root promotion")
+    })?;
+    let prepared = (|| {
+        ensure_guard_directory(&config.guard_root, true, 0o700)?;
+        ensure_guard_directory(&config.unit_root, false, 0o755)?;
+        ensure_guard_directory(&files.directory, false, 0o700).or_else(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                ensure_guard_directory(&files.directory, true, 0o700)
+            } else {
+                Err(error)
+            }
+        })?;
+        if std::fs::symlink_metadata(&files.unit).is_ok() {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        let undo =
+            transaction_undo_script(rollback, own, transaction, &files, &config.install_base)?;
+        let watcher = watcher_script(&files, std::process::id())?;
+        write_guard_file(&files.undo, undo.as_bytes(), 0o600)?;
+        write_guard_file(&files.watcher_script, watcher.as_bytes(), 0o700)?;
+        write_guard_file(&files.unit, guard_unit(&files).as_bytes(), 0o644)?;
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        return Err(fail_guard_setup(config, &files, runner, error).await);
+    }
+    for operation in [
+        "daemon-reload",
+        "enable",
+        "is-enabled",
+        "start",
+        "is-active",
+    ] {
+        if let Err(error) = runner.run(operation, &files).await {
+            return Err(fail_guard_setup(
+                config,
+                &files,
+                runner,
+                io::Error::other(format!("promotion guard {operation} failed: {error}")),
+            )
+            .await);
+        }
+    }
+    Ok(files)
+}
+
+/// Remove a partial guard after arming failed, retaining both failure reasons.
+async fn fail_guard_setup<R: GuardCommandRunner>(
+    config: &GuardConfig,
+    files: &GuardFiles,
+    runner: &R,
+    original: io::Error,
+) -> io::Error {
+    match disarm_guard_with(config, files, runner).await {
+        Ok(()) => original,
+        Err(cleanup) => io::Error::other(format!(
+            "{original}; partial promotion guard cleanup also failed: {cleanup}"
+        )),
+    }
+}
+
+/// Disarm every guard layer and report any stop, disable, removal or reload failure.
+async fn disarm_guard(config: &GuardConfig, files: &GuardFiles) -> io::Result<()> {
+    disarm_guard_with(config, files, &SystemdGuardCommandRunner).await
+}
+
+/// Exercise checked disarm through a replaceable command runner.
+async fn disarm_guard_with<R: GuardCommandRunner>(
+    _config: &GuardConfig,
+    files: &GuardFiles,
+    runner: &R,
+) -> io::Result<()> {
+    let mut failures = Vec::new();
+    for operation in ["stop", "disable"] {
+        if let Err(error) = runner.run(operation, files).await {
+            failures.push(format!("{operation}: {error}"));
+        }
+    }
+    let wants = files
+        .unit
+        .parent()
+        .unwrap_or_else(|| Path::new(SYSTEMD_UNIT_ROOT))
+        .join("multi-user.target.wants")
+        .join(files.unit.file_name().unwrap_or_default());
+    for path in [&wants, &files.unit] {
+        if let Err(error) = remove_guard_path(path, false) {
+            failures.push(format!("remove {}: {error}", path.display()));
+        }
+    }
+    if let Err(error) = remove_guard_path(&files.directory, true) {
+        failures.push(format!("remove {}: {error}", files.directory.display()));
+    }
+    if let Err(error) = runner.run("daemon-reload", files).await {
+        failures.push(format!("daemon-reload: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(failures.join("; ")))
+    }
+}
+
+/// Remove a guard path and verify that no file remains at that transaction's name.
+fn remove_guard_path(path: &Path, directory: bool) -> io::Result<()> {
+    let result = if directory {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Err(io::Error::other(
+            "promotion guard path remains after removal",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Equal without an early exit on the first differing byte.
@@ -686,6 +1218,98 @@ mod tests {
     //! The relay runs scripts with their stdin and reports stdout and exit codes.
     use super::*;
 
+    /// A command runner that records guard operations and can refuse selected ones.
+    #[derive(Clone)]
+    struct TestGuardCommands {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        failures: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    }
+
+    impl TestGuardCommands {
+        /// Build a runner that fails the named operation.
+        fn failing(operation: &str) -> Self {
+            Self {
+                calls: std::sync::Arc::default(),
+                failures: std::sync::Arc::new(std::sync::Mutex::new(
+                    [operation.to_owned()].into_iter().collect(),
+                )),
+            }
+        }
+
+        /// Build a runner that accepts every operation.
+        fn successful() -> Self {
+            Self {
+                calls: std::sync::Arc::default(),
+                failures: std::sync::Arc::default(),
+            }
+        }
+
+        /// Build a runner that fails the selected occurrence of one operation.
+        fn failing_nth(operation: &str, occurrence: usize) -> Self {
+            let runner = Self::successful();
+            runner
+                .failures
+                .lock()
+                .unwrap()
+                .insert(format!("{operation}#{occurrence}"));
+            runner
+        }
+
+        /// Make later calls to `operation` fail.
+        fn fail_on(&self, operation: &str) {
+            self.failures.lock().unwrap().insert(operation.to_owned());
+        }
+
+        /// Whether the runner was asked to perform `operation`.
+        fn called(&self, operation: &str) -> bool {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|called| called == operation)
+        }
+    }
+
+    impl GuardCommandRunner for TestGuardCommands {
+        async fn run(&self, operation: &str, _files: &GuardFiles) -> io::Result<()> {
+            tokio::task::yield_now().await;
+            let occurrence = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(operation.to_owned());
+                calls
+                    .iter()
+                    .filter(|called| called.as_str() == operation)
+                    .count()
+            };
+            let failures = self.failures.lock().unwrap();
+            if failures.contains(operation)
+                || failures.contains(&format!("{operation}#{occurrence}"))
+            {
+                Err(io::Error::other("injected system manager failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Keep temporary guard files alive for one test and remove them afterward.
+    fn test_guard_config() -> GuardConfig {
+        let scratch_root = std::env::temp_dir().join(format!(
+            "infraternal-guard-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch_root).unwrap();
+        let config = GuardConfig {
+            guard_root: scratch_root.join("promotion"),
+            unit_root: scratch_root.join("systemd"),
+            install_base: scratch_root.join("install"),
+            scratch_root,
+        };
+        std::fs::create_dir_all(&config.unit_root).unwrap();
+        std::fs::create_dir_all(&config.install_base).unwrap();
+        config
+    }
+
     /// Drive `serve` over an in-memory pipe: send `frames`, collect everything
     /// it answers until it ends.
     async fn exchange(frames: Vec<Frame>) -> Vec<Frame> {
@@ -697,6 +1321,7 @@ mod tests {
         let mut bytes = Vec::new();
         Frame::Token { bytes: TOKEN }.encode(&mut bytes);
         Frame::Rollback {
+            transaction: [0; 16],
             script: "true".into(),
         }
         .encode(&mut bytes);
@@ -922,7 +1547,10 @@ mod tests {
         let ran = dir.path().join("ran");
         let frames = vec![
             Frame::Token { bytes: [6; 32] },
-            Frame::Rollback { script },
+            Frame::Rollback {
+                transaction: [0; 16],
+                script,
+            },
             Frame::Open {
                 channel: 1,
                 script: format!("touch '{}'", ran.display()),
@@ -940,7 +1568,10 @@ mod tests {
         let (dir, script) = marker();
         let frames = vec![
             Frame::Token { bytes: TOKEN },
-            Frame::Rollback { script },
+            Frame::Rollback {
+                transaction: [0; 16],
+                script,
+            },
             Frame::Open {
                 channel: 1,
                 script: "sleep 600".into(),
@@ -957,6 +1588,7 @@ mod tests {
         let frames = vec![
             Frame::Token { bytes: TOKEN },
             Frame::Rollback {
+                transaction: [0; 16],
                 script: script.clone(),
             },
             Frame::Close,
@@ -966,8 +1598,13 @@ mod tests {
         let (dir, script) = marker();
         let frames = vec![
             Frame::Token { bytes: TOKEN },
-            Frame::Rollback { script },
-            Frame::Commit,
+            Frame::Rollback {
+                transaction: [0; 16],
+                script,
+            },
+            Frame::Commit {
+                transaction: [0; 16],
+            },
             Frame::Close,
         ];
         run(frames, TOKEN, LIFETIME, true).await.unwrap();
@@ -978,7 +1615,13 @@ mod tests {
     #[tokio::test]
     async fn the_lifetime_rolls_back_a_silent_upgrade() {
         let (dir, script) = marker();
-        let frames = vec![Frame::Token { bytes: TOKEN }, Frame::Rollback { script }];
+        let frames = vec![
+            Frame::Token { bytes: TOKEN },
+            Frame::Rollback {
+                transaction: [0; 16],
+                script,
+            },
+        ];
         run(frames, TOKEN, Duration::from_millis(300), true)
             .await
             .unwrap();
@@ -1004,27 +1647,12 @@ mod tests {
         let frames = vec![
             Frame::Token { bytes: TOKEN },
             Frame::Rollback {
+                transaction: [0; 16],
                 script: format!("pwd > '{}'", marker.display()),
             },
         ];
         run(frames, TOKEN, LIFETIME, false).await.unwrap();
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "/\n");
-    }
-
-    /// J465 P1: the undo script runs the rollback, then removes the guard;
-    /// the boot unit only runs while the undo script exists.
-    #[test]
-    fn the_guard_undoes_then_removes_itself() {
-        let undo = undo_script("echo rollback", "/run/infraternal-privilege.abcd1234");
-        assert!(undo.starts_with("( echo rollback ) || :"));
-        assert!(undo.contains("rm -rf -- '/run/infraternal-privilege.abcd1234'"));
-        assert!(!undo_script("x", "/home/kayg").contains("/home/kayg"));
-        assert!(undo.contains(&format!("rm -rf {GUARD_DIR}")));
-        assert!(undo.contains(GUARD_UNIT));
-        let unit = guard_unit();
-        assert!(unit.contains(&format!("ConditionPathExists={GUARD_DIR}/undo")));
-        assert!(unit.contains("WantedBy=multi-user.target"));
-        assert!(!guarded());
     }
 
     /// R4: a step is refused until the rollback script is known.
@@ -1051,7 +1679,10 @@ mod tests {
         let (dir, script) = marker();
         let mut frames = vec![
             Frame::Token { bytes: TOKEN },
-            Frame::Rollback { script },
+            Frame::Rollback {
+                transaction: [0; 16],
+                script,
+            },
             Frame::Open {
                 channel: 1,
                 script: "sleep 600".into(),
@@ -1069,5 +1700,396 @@ mod tests {
             .expect("Close was served")
             .unwrap();
         assert!(dir.path().join("rolled-back").exists());
+    }
+
+    /// Each relay transaction owns an independent persistent guard and watcher name.
+    #[test]
+    fn promotion_guards_have_transaction_scoped_paths() {
+        let config = test_guard_config();
+        let first = guard_paths(&config, uuid::Uuid::from_u128(0xa), 100);
+        let second = guard_paths(&config, uuid::Uuid::from_u128(0xb), 100);
+        assert_ne!(first.directory, second.directory);
+        assert_ne!(first.unit, second.unit);
+        assert_ne!(first.watcher, second.watcher);
+    }
+
+    /// Arming refuses promotion when it cannot prove the independent watcher is active.
+    #[tokio::test]
+    async fn promotion_guard_refuses_when_watcher_is_not_active() {
+        let config = test_guard_config();
+        let runner = TestGuardCommands::failing("is-active");
+        let result = arm_guard_with(
+            &config,
+            uuid::Uuid::from_u128(0xa),
+            "touch /tmp/should-not-run",
+            &runner,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(runner.called("is-active"));
+    }
+
+    /// Arming stops before starting services when the undo script cannot be written safely.
+    #[tokio::test]
+    async fn promotion_guard_refuses_when_undo_script_cannot_be_written() {
+        let config = test_guard_config();
+        std::fs::create_dir_all(config.guard_root.parent().unwrap()).unwrap();
+        std::fs::write(&config.guard_root, b"not a directory").unwrap();
+        let runner = TestGuardCommands::successful();
+
+        assert!(
+            arm_guard_with(&config, uuid::Uuid::from_u128(0xa), "true", &runner,)
+                .await
+                .is_err()
+        );
+        assert!(!runner.called("enable"));
+        assert!(!runner.called("start"));
+    }
+
+    /// Arming refuses when systemd does not confirm that the boot guard is enabled.
+    #[tokio::test]
+    async fn promotion_guard_refuses_when_boot_unit_is_not_enabled() {
+        let config = test_guard_config();
+        let runner = TestGuardCommands::failing("is-enabled");
+
+        assert!(
+            arm_guard_with(&config, uuid::Uuid::from_u128(0xa), "true", &runner,)
+                .await
+                .is_err()
+        );
+        assert!(runner.called("is-enabled"));
+        assert!(!runner.called("start"));
+    }
+
+    /// Arming refuses when systemd cannot reload the newly written boot unit.
+    #[tokio::test]
+    async fn promotion_guard_refuses_when_boot_unit_reload_fails() {
+        let config = test_guard_config();
+        let runner = TestGuardCommands::failing("daemon-reload");
+
+        assert!(
+            arm_guard_with(&config, uuid::Uuid::from_u128(0xa), "true", &runner,)
+                .await
+                .is_err()
+        );
+        assert!(runner.called("daemon-reload"));
+        assert!(!runner.called("start"));
+    }
+
+    /// A host without a running system manager gets a clear refusal before guard files are written.
+    #[tokio::test]
+    async fn promotion_guard_refuses_a_missing_systemd_manager() {
+        let config = test_guard_config();
+        let runner = TestGuardCommands::failing("show");
+        let result = arm_guard_with(&config, uuid::Uuid::from_u128(0xa), "true", &runner).await;
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("systemd system manager"))
+        );
+        assert!(!config.guard_root.exists());
+    }
+
+    /// A relay must report guard failure and reject install steps when the manager is missing.
+    #[tokio::test]
+    async fn relay_refuses_install_steps_when_guard_cannot_be_armed() {
+        let config = test_guard_config();
+        let transaction = uuid::Uuid::from_u128(0xa);
+        let marker = std::env::temp_dir().join(format!(
+            "infraternal-install-step-ran-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let runner = TestGuardCommands::failing("show");
+        let responses = guarded_exchange(
+            config,
+            runner.clone(),
+            transaction,
+            &format!("touch '{}'", marker.display()),
+        )
+        .await;
+
+        let guard_refusal = responses.iter().any(|frame| matches!(
+            frame,
+            Frame::Guard {
+                transaction: seen,
+                state: infraternal_plugin_remote::privilege_relay::GuardState::SystemdUnavailable,
+            } if *seen == transaction.into_bytes()
+        ));
+        let step_ran = marker.exists();
+        let step_reported_exit = responses
+            .iter()
+            .any(|frame| matches!(frame, Frame::Exit { channel: 1, .. }));
+        let system_manager_checked = runner.called("show");
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            guard_refusal && !step_ran && !step_reported_exit && system_manager_checked,
+            "guard_refusal={guard_refusal}, step_ran={step_ran}, step_reported_exit={step_reported_exit}, system_manager_checked={system_manager_checked}"
+        );
+    }
+
+    /// Send one install step behind rollback and collect the relay's response frames.
+    async fn guarded_exchange(
+        config: GuardConfig,
+        runner: TestGuardCommands,
+        transaction: uuid::Uuid,
+        script: &str,
+    ) -> Vec<Frame> {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (server_read, server_write) = tokio::io::split(server);
+        let task = tokio::spawn(async move {
+            serve_with_guard(
+                server_read,
+                server_write,
+                &TOKEN,
+                LIFETIME,
+                &config,
+                Path::new("/run/infraternal-privilege.test"),
+                &runner,
+            )
+            .await
+        });
+        let (mut reader, mut writer) = tokio::io::split(client);
+        let mut requests = Vec::new();
+        Frame::Token { bytes: TOKEN }.encode(&mut requests);
+        Frame::Rollback {
+            transaction: transaction.into_bytes(),
+            script: "true".into(),
+        }
+        .encode(&mut requests);
+        Frame::Open {
+            channel: 1,
+            script: script.to_owned(),
+        }
+        .encode(&mut requests);
+        writer.write_all(&requests).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut decoder = Decoder::default();
+        let mut buffer = [0u8; 4096];
+        let mut responses = Vec::new();
+        let mut step_exited = false;
+        let mut close_sent = false;
+        loop {
+            let count = reader.read(&mut buffer).await.unwrap();
+            if count == 0 {
+                break;
+            }
+            decoder.push(&buffer[..count]);
+            while let Some(frame) = decoder.frame().unwrap() {
+                step_exited |= matches!(frame, Frame::Exit { channel: 1, .. });
+                responses.push(frame);
+            }
+            if step_exited && !close_sent {
+                let mut close = Vec::new();
+                Frame::Close.encode(&mut close);
+                writer.write_all(&close).await.unwrap();
+                writer.flush().await.unwrap();
+                close_sent = true;
+            }
+        }
+        let _ = task.await.unwrap();
+        responses
+    }
+
+    /// Commit through the guarded relay and collect its transaction receipt.
+    async fn guarded_commit_exchange(
+        config: GuardConfig,
+        runner: TestGuardCommands,
+        transaction: uuid::Uuid,
+    ) -> Vec<Frame> {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (server_read, server_write) = tokio::io::split(server);
+        let task = tokio::spawn(async move {
+            serve_with_guard(
+                server_read,
+                server_write,
+                &TOKEN,
+                LIFETIME,
+                &config,
+                Path::new("/run/infraternal-privilege.test"),
+                &runner,
+            )
+            .await
+        });
+        let (mut reader, mut writer) = tokio::io::split(client);
+        let mut requests = Vec::new();
+        Frame::Token { bytes: TOKEN }.encode(&mut requests);
+        Frame::Rollback {
+            transaction: transaction.into_bytes(),
+            script: "true".into(),
+        }
+        .encode(&mut requests);
+        Frame::Commit {
+            transaction: transaction.into_bytes(),
+        }
+        .encode(&mut requests);
+        writer.write_all(&requests).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let mut decoder = Decoder::default();
+        let mut buffer = [0u8; 4096];
+        let mut responses = Vec::new();
+        loop {
+            let count = reader.read(&mut buffer).await.unwrap();
+            if count == 0 {
+                break;
+            }
+            decoder.push(&buffer[..count]);
+            while let Some(frame) = decoder.frame().unwrap() {
+                responses.push(frame);
+            }
+        }
+        let _ = task.await.unwrap();
+        responses
+    }
+
+    /// Disarm reports a manager reload failure instead of hiding an incomplete cleanup.
+    #[tokio::test]
+    async fn promotion_guard_disarm_reports_reload_failure() {
+        let config = test_guard_config();
+        let transaction = uuid::Uuid::from_u128(0xa);
+        let runner = TestGuardCommands::successful();
+        let files = arm_guard_with(&config, transaction, "true", &runner)
+            .await
+            .unwrap();
+        runner.fail_on("daemon-reload");
+
+        assert!(disarm_guard_with(&config, &files, &runner).await.is_err());
+    }
+
+    /// The relay reports a disarm failure instead of acknowledging an incomplete commit.
+    #[tokio::test]
+    async fn relay_reports_guard_disarm_failure_after_commit() {
+        let config = test_guard_config();
+        let transaction = uuid::Uuid::from_u128(0xa);
+        let runner = TestGuardCommands::failing_nth("daemon-reload", 2);
+        let responses = guarded_commit_exchange(config, runner, transaction).await;
+
+        assert!(responses.iter().any(|frame| matches!(
+            frame,
+            Frame::Guard {
+                transaction: seen,
+                state: infraternal_plugin_remote::privilege_relay::GuardState::DisarmFailed,
+            } if *seen == transaction.into_bytes()
+        )));
+    }
+
+    /// Disarm reports a filesystem removal failure even after the manager accepted the disable.
+    #[tokio::test]
+    async fn promotion_guard_disarm_reports_removal_failure() {
+        let config = test_guard_config();
+        let transaction = uuid::Uuid::from_u128(0xa);
+        let runner = TestGuardCommands::successful();
+        let files = arm_guard_with(&config, transaction, "true", &runner)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&files.directory).unwrap();
+        std::fs::write(&files.directory, b"unexpected file").unwrap();
+
+        assert!(disarm_guard_with(&config, &files, &runner).await.is_err());
+    }
+
+    /// A committed or superseded install makes an old guard inert before rollback runs.
+    #[test]
+    fn leftover_promotion_guard_cannot_change_a_committed_or_later_install() {
+        use std::process::Stdio;
+
+        let config = test_guard_config();
+        let transaction_a = uuid::Uuid::from_u128(0xa);
+        let transaction_b = uuid::Uuid::from_u128(0xb);
+        let files = guard_paths(&config, transaction_a, 100);
+        std::fs::create_dir_all(&config.install_base).unwrap();
+        std::fs::create_dir_all(&files.directory).unwrap();
+        let active = config.install_base.join(ACTIVE_TRANSACTION);
+        std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+        std::fs::write(&active, format!("{}\n", transaction_a.simple())).unwrap();
+        std::fs::write(
+            config.install_base.join(COMMITTED_TRANSACTION),
+            format!("{}\n", transaction_a.simple()),
+        )
+        .unwrap();
+        let committed_rollback = config.install_base.join("committed-rollback");
+        let script = transaction_undo_script(
+            &format!("touch '{}'", committed_rollback.display()),
+            "",
+            transaction_a,
+            &files,
+            &config.install_base,
+        )
+        .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(!committed_rollback.exists());
+
+        std::fs::write(&active, format!("{}\n", transaction_b.simple())).unwrap();
+        std::fs::write(
+            config.install_base.join(COMMITTED_TRANSACTION),
+            format!("{}\n", transaction_b.simple()),
+        )
+        .unwrap();
+        let rolled_back = config.install_base.join("rolled-back");
+        let script = transaction_undo_script(
+            &format!("touch '{}'", rolled_back.display()),
+            "",
+            transaction_a,
+            &files,
+            &config.install_base,
+        )
+        .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(!rolled_back.exists());
+
+        std::fs::remove_file(&active).unwrap();
+        std::fs::write(&files.committed, format!("{}\n", transaction_a.simple())).unwrap();
+        let script = transaction_undo_script(
+            &format!("touch '{}'", rolled_back.display()),
+            "",
+            transaction_a,
+            &files,
+            &config.install_base,
+        )
+        .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(!rolled_back.exists());
+    }
+
+    /// A standard root-owned unit directory may be traversable without being writable by others.
+    #[tokio::test]
+    async fn promotion_guard_accepts_a_root_owned_systemd_unit_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = test_guard_config();
+        std::fs::set_permissions(&config.unit_root, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let runner = TestGuardCommands::successful();
+        assert!(
+            arm_guard_with(&config, uuid::Uuid::from_u128(0xc), "true", &runner)
+                .await
+                .is_ok()
+        );
     }
 }

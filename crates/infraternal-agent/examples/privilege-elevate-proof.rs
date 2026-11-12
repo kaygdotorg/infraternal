@@ -100,7 +100,7 @@ async fn call(
     sessions: &std::path::Path,
 ) -> Result<serde_json::Value, Failed> {
     let reply = privilege_agent::execute(action, request.to_string().as_bytes(), sessions).await?;
-    Ok(serde_json::from_slice(&reply)?)
+    Ok(serde_json::from_slice(&reply.json)?)
 }
 
 /// The proof itself: probe, seal, elevate, one step through the relay, end.
@@ -180,6 +180,7 @@ async fn prove(way: &str, mut password: Vec<u8>) -> Result<ExitCode, Failed> {
     // The relay runs no step before it knows how to put the host back
     // (J415 R4). This proof installs nothing, so its rollback only logs.
     Frame::Rollback {
+        transaction: uuid::Uuid::nil().into_bytes(),
         script: "logger -t infraternal-privilege-proof rollback-ran".into(),
     }
     .encode(&mut send);

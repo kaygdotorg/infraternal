@@ -67,6 +67,8 @@ pub const LANE: usize = 2;
 /// Longest any one `privilege.*` call may run before the daemon answers it
 /// with a failure: an elevation's prompt and relay bounds, plus margin.
 pub const CALL_BOUND: Duration = Duration::from_mins(2);
+/// Longest a transaction-bound abandonment can wait for its 240-second unit.
+pub const ABANDON_CALL_BOUND: Duration = Duration::from_secs(260);
 
 /// The action ids, as the server sends them.
 pub const ACTIONS: [&str; 7] = [
@@ -121,23 +123,38 @@ fn state() -> &'static Mutex<State> {
 /// # Errors
 /// A malformed request, an unknown action, or a local failure. The server
 /// treats every error as "nothing changed".
-pub async fn execute(action: &str, input: &[u8], sessions: &Path) -> io::Result<Vec<u8>> {
+pub async fn execute(
+    action: &str,
+    input: &[u8],
+    sessions: &Path,
+) -> io::Result<infraternal_plugin_api::ActionReply> {
     if nix::unistd::Uid::effective().is_root() {
         // A root infraternal agent is already the upgraded one; it only
         // finishes the upgrade that made it (R5).
         return match action {
-            "privilege.take_over" => crate::privilege_take_over::execute(input).await,
+            "privilege.take_over" => crate::privilege_take_over::execute(input)
+                .await
+                .map(plain_reply),
             "privilege.abandon" => crate::privilege_take_over::abandon(input).await,
-            _ => Ok(br#"{"full":true}"#.to_vec()),
+            _ => Ok(plain_reply(br#"{"full":true}"#.to_vec())),
         };
     }
-    match action {
+    let json = match action {
         "privilege.probe" => Ok(probe().await.into_bytes()),
         "privilege.key" => key(input).await,
         "privilege.elevate" => elevate(input, sessions).await,
         "privilege.pump" => pump(input).await,
         "privilege.end" => end(input).await,
         _ => Err(io::ErrorKind::Unsupported.into()),
+    }?;
+    Ok(plain_reply(json))
+}
+
+/// Wrap a normal action response without deferring any effect until write.
+fn plain_reply(json: Vec<u8>) -> infraternal_plugin_api::ActionReply {
+    infraternal_plugin_api::ActionReply {
+        json,
+        after_write: None,
     }
 }
 

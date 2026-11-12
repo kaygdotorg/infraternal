@@ -32,7 +32,9 @@ use crate::{
     process::execute,
     transport::{CommandOutput, Input, Operation, SshSession},
 };
-use infraternal_plugin_remote::privilege_relay::{Decoder, Frame, MAX_CHUNK, MAX_STDERR};
+use infraternal_plugin_remote::privilege_relay::{
+    Decoder, Frame, GuardState, MAX_CHUNK, MAX_STDERR,
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -52,6 +54,8 @@ use tokio::{
 pub const CHANNEL_COMMAND: &str = "__privilege-channel";
 /// Exit code of a step whose relay went away (the SSH client's own code).
 const LOST: u8 = 255;
+/// Bound how long a promotion waits for the host to verify a guard operation.
+const GUARD_ACK_BOUND: Duration = Duration::from_secs(180);
 
 /// Moves relay bytes between the server and the host.
 pub trait Pump: Send + Sync {
@@ -77,6 +81,12 @@ struct Hub {
     routes: Mutex<HashMap<u32, mpsc::UnboundedSender<Frame>>>,
     /// Frames for the relay.
     outgoing: mpsc::UnboundedSender<Frame>,
+    /// Guard-arm replies keyed by the exact install transaction.
+    arm_waiters: Mutex<HashMap<[u8; 16], tokio::sync::oneshot::Sender<GuardState>>>,
+    /// Guard-commit replies keyed by the exact install transaction.
+    commit_waiters: Mutex<HashMap<[u8; 16], tokio::sync::oneshot::Sender<GuardState>>>,
+    /// Steps remain closed until the matching transaction reports `Armed`.
+    guard_armed: AtomicBool,
     lost: AtomicBool,
 }
 
@@ -110,6 +120,9 @@ impl RelaySession {
             pending: Mutex::new(HashMap::new()),
             routes: Mutex::new(HashMap::new()),
             outgoing,
+            arm_waiters: Mutex::new(HashMap::new()),
+            commit_waiters: Mutex::new(HashMap::new()),
+            guard_armed: AtomicBool::new(false),
             lost: AtomicBool::new(false),
         });
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -142,18 +155,128 @@ impl RelaySession {
         true
     }
 
-    /// Hand the relay the install's rollback script
-    /// ([`crate::install::Installation::rollback_script`]). Frames keep their
-    /// order, so it reaches the relay before any step queued after it. The
-    /// relay keeps the first one it gets.
-    pub fn arm_rollback(&self, script: String) {
-        let _ = self.hub.outgoing.send(Frame::Rollback { script });
+    /// Hand the relay the install's rollback script and wait for its matching
+    /// transaction guard to be verified before allowing any step to run.
+    ///
+    /// # Errors
+    /// Returns an install failure if the relay stops or cannot verify the guard.
+    pub async fn arm_rollback(
+        &self,
+        transaction: uuid::Uuid,
+        script: String,
+    ) -> Result<(), Failure> {
+        if self.lost() {
+            return Err(Failure::install("The host's upgrade helper has stopped."));
+        }
+        let bytes = transaction.into_bytes();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut waiters = lock(&self.hub.arm_waiters);
+            if waiters.contains_key(&bytes) {
+                return Err(Failure::install(
+                    "The install transaction already has a guard request.",
+                ));
+            }
+            waiters.insert(bytes, sender);
+        }
+        if self
+            .hub
+            .outgoing
+            .send(Frame::Rollback {
+                transaction: bytes,
+                script,
+            })
+            .is_err()
+        {
+            lock(&self.hub.arm_waiters).remove(&bytes);
+            return Err(Failure::install("The host's upgrade helper has stopped."));
+        }
+        let state = match tokio::time::timeout(GUARD_ACK_BOUND, receiver).await {
+            Ok(Ok(state)) => state,
+            Ok(Err(_)) => {
+                return Err(Failure::install(
+                    "The host stopped before confirming its rollback guard.",
+                ));
+            }
+            Err(_) => {
+                lock(&self.hub.arm_waiters).remove(&bytes);
+                return Err(Failure::install(
+                    "The host did not confirm its rollback guard; root promotion was not started.",
+                ));
+            }
+        };
+        match state {
+            GuardState::Armed => {
+                self.hub.guard_armed.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            GuardState::SystemdUnavailable => Err(Failure::install(
+                "This host needs a working systemd system manager for a safe root upgrade.",
+            )),
+            GuardState::ArmFailed => Err(Failure::install(
+                "The host could not verify its rollback guard; root promotion was not started.",
+            )),
+            GuardState::Committed | GuardState::DisarmFailed => Err(Failure::install(
+                "The host returned a commit result before its rollback guard was armed.",
+            )),
+        }
     }
 
-    /// Tell the relay the install committed, so its end needs no rollback.
+    /// Tell the relay the install committed and wait for checked guard cleanup.
     /// Call it only after the install's own commit step succeeded.
-    pub fn commit(&self) {
-        let _ = self.hub.outgoing.send(Frame::Commit);
+    ///
+    /// # Errors
+    /// Returns an install failure if the relay stops or cannot confirm guard cleanup.
+    pub async fn commit(&self, transaction: uuid::Uuid) -> Result<(), Failure> {
+        if self.lost() {
+            return Err(Failure::install("The host's upgrade helper has stopped."));
+        }
+        let bytes = transaction.into_bytes();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut waiters = lock(&self.hub.commit_waiters);
+            if waiters.contains_key(&bytes) {
+                return Err(Failure::install(
+                    "The install transaction already has a commit request.",
+                ));
+            }
+            waiters.insert(bytes, sender);
+        }
+        if self
+            .hub
+            .outgoing
+            .send(Frame::Commit { transaction: bytes })
+            .is_err()
+        {
+            lock(&self.hub.commit_waiters).remove(&bytes);
+            return Err(Failure::install("The host's upgrade helper has stopped."));
+        }
+        let state = match tokio::time::timeout(GUARD_ACK_BOUND, receiver).await {
+            Ok(Ok(state)) => state,
+            Ok(Err(_)) => {
+                return Err(Failure::install(
+                    "The host stopped before confirming committed guard cleanup.",
+                ));
+            }
+            Err(_) => {
+                lock(&self.hub.commit_waiters).remove(&bytes);
+                return Err(Failure::install(
+                    "The host did not confirm committed guard cleanup.",
+                ));
+            }
+        };
+        self.hub.guard_armed.store(false, Ordering::SeqCst);
+        match state {
+            GuardState::Committed => Ok(()),
+            GuardState::DisarmFailed => Err(Failure::install(
+                "The root install committed, but the host could not finish removing its rollback guard.",
+            )),
+            GuardState::Armed | GuardState::SystemdUnavailable | GuardState::ArmFailed => {
+                Err(Failure::install(
+                    "The host returned a guard-arm result instead of a commit result.",
+                ))
+            }
+        }
     }
 
     /// The relay has gone away; every later step fails.
@@ -192,6 +315,11 @@ impl SshSession for RelaySession {
                 return Err(Failure::new(
                     crate::model::FailureKind::Unreachable,
                     "The host's upgrade helper has stopped.",
+                ));
+            }
+            if !self.hub.guard_armed.load(Ordering::SeqCst) {
+                return Err(Failure::install(
+                    "The host has not confirmed a rollback guard; no root install step was started.",
                 ));
             }
             let channel = self.hub.next.fetch_add(1, Ordering::SeqCst);
@@ -289,6 +417,20 @@ async fn pump_loop(
                     broken = true;
                     break;
                 }
+                Ok(Some(Frame::Guard { transaction, state })) => {
+                    let sender = match state {
+                        GuardState::Armed
+                        | GuardState::SystemdUnavailable
+                        | GuardState::ArmFailed => lock(&hub.arm_waiters).remove(&transaction),
+                        GuardState::Committed | GuardState::DisarmFailed => {
+                            lock(&hub.commit_waiters).remove(&transaction)
+                        }
+                    };
+                    if sender.is_none_or(|sender| sender.send(state).is_err()) {
+                        broken = true;
+                        break;
+                    }
+                }
                 Ok(Some(Frame::Stderr { channel, bytes })) => {
                     let forwarded = stderr.entry(channel).or_default();
                     let keep = bytes.len().min(MAX_STDERR.saturating_sub(*forwarded));
@@ -329,6 +471,9 @@ async fn pump_loop(
         }
     }
     hub.lost.store(true, Ordering::SeqCst);
+    lock(&hub.arm_waiters).clear();
+    lock(&hub.commit_waiters).clear();
+    hub.guard_armed.store(false, Ordering::SeqCst);
     for (channel, route) in lock(&hub.routes).drain() {
         let _ = route.send(Frame::Exit {
             channel,
