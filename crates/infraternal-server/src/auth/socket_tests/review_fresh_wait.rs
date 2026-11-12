@@ -1,13 +1,12 @@
 //! Verify destructive Mesh authority at the write boundary after a real WAL writer wait [D28, #108].
 use super::*;
 
+/// A held SQLite writer cannot preserve expired authority for a destructive edit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_mesh_delete_refused_when_freshness_expires_during_writer_wait() {
     let _guard = SERIAL.lock().await;
-    let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::PathBuf::from("target"),
-        std::path::PathBuf::from,
-    );
+    // Live SQLite data must not contend with compiler artifacts on the build disk.
+    let root = std::env::temp_dir();
     let path = root.join(format!("mesh-fresh-wait-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
