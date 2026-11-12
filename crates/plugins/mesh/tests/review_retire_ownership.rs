@@ -150,6 +150,7 @@ fn owned_table() {
             .success()
     );
 }
+/// Check whether the product-owned mesh table exists in the test namespace.
 fn table_present() -> bool {
     Command::new("nft")
         .args(["list", "table", "inet", "infraternal_mesh"])

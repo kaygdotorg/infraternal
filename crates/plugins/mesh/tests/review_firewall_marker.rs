@@ -23,6 +23,7 @@ fn command(tool: &str, args: &[&str]) {
     );
 }
 
+/// Treat an exact infraternal table name as owned even when its comment differs.
 #[test]
 #[ignore = "Run in a disposable user/network namespace, #173."]
 fn infraternal_mesh_table_is_owned_even_with_an_unfamiliar_comment() {

@@ -1,9 +1,11 @@
 //! Renders and applies the host input policy owned by infraternal, D386.
 
+/// Compare live nft JSON with the policy built from infraternal's configuration.
 #[path = "host_firewall_semantics.rs"]
 mod host_firewall_semantics;
 
 #[cfg(any(test, feature = "test-support"))]
+/// Provides a checked nft executable for privileged namespace tests.
 #[path = "../tests/support/nft_fixture.rs"]
 mod nft_fixture;
 
