@@ -104,9 +104,17 @@ test("a locked server offers Unlock on the Add host card and the host carries on
     // Unlock on the card itself, then the same host is tried again; the lock must not come back.
     await wizard.locator(".ah-foot").getByRole("button", { name: "Unlock", exact: true }).click();
     await expect.poll(status, { timeout: 60_000 }).toBe(false);
+    // The key was used once and is not kept, so the card asks for it again and says why.
+    await expect(wizard.locator(".ah-page[data-page='choose']:not(.is-leaving) .ah-lede")).toContainText("was used once and isn't kept", { timeout: 30_000 });
+    await page.screenshot({ path: tracerEvidencePath("addhost-510-real", "sign-in-again-real.png") });
+    await wizard.getByText("Use a key from your computer").click();
+    await wizard.locator("[data-secret='key']").fill(host.privateKey);
+    await wizard.getByRole("button", { name: "Sign in", exact: true }).click();
+    // Past the lock the install goes on: it must not stop on the lock again. (This build carries no host payload, so
+    // it may stop for that reason instead; only the lock is under test.)
     await expect(wizard.locator(".ah-page[data-page='progress']:not(.is-leaving)")).toBeVisible({ timeout: 30_000 });
-    // Past the lock the install goes on (or stops for a reason that is not the lock; this build has no host payload).
-    await expect(wizard.getByRole("heading", { name: "Host connections are locked" })).toHaveCount(0, { timeout: 30_000 });
+    await expect(wizard.locator(".ah-stage-row[data-stage='detect'] .ah-stage-detail")).toHaveText("Signed in with your key", { timeout: 60_000 });
+    await expect(wizard.getByRole("heading", { name: "Host connections are locked" })).toHaveCount(0);
     await page.screenshot({ path: tracerEvidencePath("addhost-510-real", "after-unlock-real.png") });
   } finally {
     try { await context.close(); }
