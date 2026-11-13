@@ -1118,6 +1118,14 @@ impl RuntimeState {
         self.update_mtu(previous_mtu.max(mtu))?;
         if !changed.is_empty() || !retired.is_empty() {
             // One device transaction: packet workers never see a half-applied snapshot.
+            //
+            // Known limit (J555 note, #483): `add_or_update_peers` overwrites every field of a
+            // changed peer, including the endpoint. When a snapshot changes a peer for another
+            // reason (its access, addresses or rotation keys), the coordinator's endpoint, or
+            // none, replaces an endpoint the device learned from that peer's authenticated
+            // traffic after a NAT rebinding. The peer's next keepalive (at most 25 s) or data
+            // packet moves it back, so a rebinding that coincides with such a snapshot can take
+            // up to 25 s to recover. Peers the snapshot leaves unchanged keep their endpoint.
             if let Err(error) = device
                 .write(async |device| {
                     device.add_or_update_peers(changed).await;
