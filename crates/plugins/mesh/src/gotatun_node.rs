@@ -961,17 +961,13 @@ impl RuntimeState {
     /// or the next direct-path candidate of a walk (#515). Keys, routes and keepalive stay as the
     /// configuration says; only the address the next packet goes to changes.
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
-        let policy = self
-            .config
-            .as_ref()
-            .and_then(|config| {
-                config
-                    .peers
-                    .values()
-                    .find(|policy| active_peer_key(&policy.peer) == key)
-            })
+        let config = self.config.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let (id, policy) = config
+            .peers
+            .iter()
+            .find(|(_, policy)| active_peer_key(&policy.peer) == key)
             .ok_or(io::ErrorKind::NotFound)?;
-        let mut peers = peer_for_policy(policy)?;
+        let mut peers = peer_for_policy(policy, keepalive_for(config, *id))?;
         let active = peers
             .iter_mut()
             .find(|peer| peer.public_key.as_bytes() == &key.0)
@@ -1078,16 +1074,13 @@ impl RuntimeState {
         if has_session {
             return self.set_endpoint(key, endpoint).await;
         }
-        let policy =
-            self.config
-                .as_ref()
-                .and_then(|config| {
-                    config.peers.values().find(|policy| {
-                        policy.peer.key == key || policy.peer.previous_key == Some(key)
-                    })
-                })
-                .ok_or(io::ErrorKind::NotFound)?;
-        let mut peers = peer_for_policy(policy)?;
+        let config = self.config.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let (id, policy) = config
+            .peers
+            .iter()
+            .find(|(_, policy)| policy.peer.key == key || policy.peer.previous_key == Some(key))
+            .ok_or(io::ErrorKind::NotFound)?;
+        let mut peers = peer_for_policy(policy, keepalive_for(config, *id))?;
         // Drop the direct-path attempt still in flight: GotaTun's forced handshake would wait
         // for it rather than send a fresh initiation. An endpoint-less responder learns the
         // relay shim's address from the authenticated initiation, so only one side initiates.
@@ -1229,7 +1222,7 @@ impl RuntimeState {
                         .and_then(|old| old.peers.get(id))
                         .is_none_or(|old| !peer_has_network_access(old) || old.peer != policy.peer)
             })
-            .map(|(_, policy)| peer_for_policy(policy))
+            .map(|(id, policy)| peer_for_policy(policy, keepalive_for(&config, *id)))
             .collect::<io::Result<Vec<_>>>()?;
         let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
         // Peers that keep their access but get a new first address: tell them at once (`initiate`).
@@ -1526,11 +1519,30 @@ impl IpRecv for LinuxPacketIo {
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let peers = config
         .peers
-        .values()
-        .filter(|peer| peer_has_network_access(peer))
-        .map(peer_for_policy)
+        .iter()
+        .filter(|(_, peer)| peer_has_network_access(peer))
+        .map(|(id, peer)| peer_for_policy(peer, keepalive_for(config, *id)))
         .collect::<io::Result<Vec<_>>>()?;
     Ok(peers.into_iter().flatten().collect())
+}
+
+/// The persistent keepalive toward ordinary peers: the usual interval that keeps NAT mappings open.
+const PEER_KEEPALIVE: u16 = 25;
+
+/// The persistent keepalive toward the server's own node. The server reads each node's
+/// server-reflexive address from the packets it receives (#515, presence.rs), so this bounds how
+/// long a NAT rebind of an idle node stays unseen: at most 10 s plus one 5 s presence poll, where
+/// 25 s left peers on a dead address for up to 30 s. It costs one 32-byte packet per 10 s per node,
+/// and the server receives one per node per 10 s.
+const SERVER_KEEPALIVE: u16 = 10;
+
+/// The keepalive for peer `id` in `config`: shorter toward the server's own node.
+fn keepalive_for(config: &Config, id: crate::policy::model::NodeId) -> u16 {
+    if config.server == Some(id) {
+        SERVER_KEEPALIVE
+    } else {
+        PEER_KEEPALIVE
+    }
 }
 
 /// Convert each configured peer to one live identity or its journaled overlap pair.
@@ -1539,7 +1551,10 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
 /// a handshake during overlap without stealing routes or initiating a competing path.
 /// # Errors
 /// Rejects invalid host routes before they reach the userspace device.
-fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
+fn peer_for_policy(
+    policy: &crate::dataplane::PeerPolicy,
+    keepalive: u16,
+) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
     let addresses = vec![
         IpNetwork::new(IpAddr::V4(peer.addresses.ipv4), 32)
@@ -1553,7 +1568,7 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
         current.endpoint = peer.endpoint;
         // The first due keepalive initiates a handshake after endpoint discovery,
         // before user traffic exists.
-        current.keepalive = Some(25);
+        current.keepalive = Some(keepalive);
         return Ok(vec![current]);
     };
     let previous_active = peer.previous_active;
@@ -1579,7 +1594,7 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
     active.endpoint = peer.endpoint;
     // Both peers initiate after learning the endpoint to open conntrack state
     // through strict input firewalls.
-    active.keepalive = Some(25);
+    active.keepalive = Some(keepalive);
     Ok(vec![previous_peer, current_peer])
 }
 
@@ -1641,7 +1656,10 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{EngineKind, admitted_peer_keys, peer_keys_with_network_access, peers_for_config};
+    use super::{
+        EngineKind, PEER_KEEPALIVE, SERVER_KEEPALIVE, admitted_peer_keys,
+        peer_keys_with_network_access, peers_for_config,
+    };
     use crate::listen_port::Request;
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -1958,7 +1976,14 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].public_key.as_bytes(), &[3; 32]);
         assert_eq!(peers[0].endpoint, Some(endpoint));
-        assert_eq!(peers[0].keepalive, Some(25));
+        // This peer is the server's own node, which reads reflexive addresses from keepalives (#515).
+        assert_eq!(peers[0].keepalive, Some(SERVER_KEEPALIVE));
+        let mut ordinary = config.clone();
+        ordinary.server = Some(NodeId(9));
+        assert_eq!(
+            peers_for_config(&ordinary).expect("convert ordinary peer")[0].keepalive,
+            Some(PEER_KEEPALIVE)
+        );
         assert_eq!(
             peers[0]
                 .allowed_ips
