@@ -968,9 +968,9 @@ fn launcher_left_running_after_shutdown(fail_thread: bool, slow_start: bool) -> 
     fs::write(
         &exe,
         format!(
-            "#!/bin/sh\n{}echo $$ > '{}'\nexec sleep 300\n",
+            "#!/bin/sh\n{}echo $$ > '{p}.tmp' && mv '{p}.tmp' '{p}'\nexec sleep 300\n",
             if slow_start { "sleep 1\n" } else { "" },
-            pid_file.display()
+            p = pid_file.display()
         ),
     )
     .unwrap();
@@ -979,9 +979,13 @@ fn launcher_left_running_after_shutdown(fail_thread: bool, slow_start: bool) -> 
         .enable_all()
         .build()
         .unwrap();
+    // The 300 ms bound starts once the launcher has published its pid (renamed into place whole), so a loaded
+    // host that is slow to start `sh` cannot end the launch before there is a pid to read (#509).
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(pid_file.clone())));
     let result = runtime.block_on(launch_detached(&exe, &state, None));
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     assert!(result.is_err(), "a shim that never binds fails the launch");
     // The cleanup task was spawned by the failing launch, and block_on returned without polling it.
     FAIL_CLEANUP_THREAD.with(|fail| fail.set(fail_thread));
@@ -1203,8 +1207,15 @@ async fn cancelled_lineage_outcome(
     let launcher_pid = root.join("launcher.pid");
     let descendant_pid = root.join("descendant.pid");
     let body = body(&launcher_pid, &descendant_pid, &ready);
+    // The stand-in shim binds only once the launcher has reached its post-fork state. Bound at once, it answered
+    // the launch within the 2 s Hello bound while a loaded host was still starting the launcher's interpreter,
+    // and the launch ended before `ready` existed (#509).
+    let bind_when_ready = {
+        let ready = ready.clone();
+        async move { file_appears(&ready).await }
+    };
     let (exe, shim, closed) =
-        detached_fixture(&state, &root, std::time::Duration::ZERO, 1, false, &body);
+        detached_fixture_gated(&state, &root, bind_when_ready, 1, false, &body);
     let launch = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4()));
     tokio::select! {
         _ = launch => {}
