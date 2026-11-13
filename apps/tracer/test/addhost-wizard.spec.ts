@@ -16,6 +16,7 @@ type Probe = { views(): Array<{ id: string; windows: string[] }>; activeWindow()
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
+/** Sets the test double's scripted modes (`/__mock/bootstrap/config`); `drop: true` closes every open bootstrap socket, as a server restart does. */
 async function config(page: Page, body: Record<string, string | boolean>): Promise<void> {
   await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
