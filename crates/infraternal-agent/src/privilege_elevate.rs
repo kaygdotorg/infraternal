@@ -860,4 +860,91 @@ mod tests {
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
         std::fs::remove_dir_all(&scratch).unwrap();
     }
+
+    /// J569 P1 (#399, D274, D376): the terminal the password is typed to must
+    /// be private to the infraternal agent.
+    ///
+    /// `elevate` types the opened password to an `openpty` terminal. Its
+    /// `/dev/pts/N` belongs to the account (mode 0620), so any other process
+    /// of that account can open it by path and `read` the line before su,
+    /// sudo or doas does: no ptrace needed, so the agent being non-dumpable
+    /// doesn't help. On the su path the line is the *root* password, and
+    /// `choose` takes that path exactly when the account is not an admin. A
+    /// local race on hd01 won 19 of 20 times against a reader already blocked
+    /// with echo off (`/tmp/j569/ptyrace.py`, J569 evidence).
+    ///
+    /// This drives the real su path with no secret, so nothing ever reaches
+    /// PAM: `elevate` stops at the prompt. Meanwhile a thread of this account
+    /// opens every terminal device of ours that appears. It must not get one.
+    /// (Run it alone: another test's terminal could also be seen.)
+    #[tokio::test]
+    async fn another_process_of_the_account_cannot_open_the_password_terminal() {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let posix =
+            root_shell_is_posix(&std::fs::read_to_string("/etc/passwd").unwrap_or_default());
+        if !posix || command(Way::Su, MARK, ["", "", "", ""]).is_none() {
+            eprintln!("no su with a POSIX root shell here; nothing to check");
+            return;
+        }
+        let uid = nix::unistd::getuid().as_raw();
+        let names = || -> std::collections::HashSet<std::ffi::OsString> {
+            std::fs::read_dir("/dev/pts")
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok().map(|e| e.file_name()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let before = names();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watching = stop.clone();
+        let scanner = std::thread::spawn(move || {
+            while !watching.load(Ordering::Acquire) {
+                for name in names() {
+                    if before.contains(&name) || name == "ptmx" {
+                        continue;
+                    }
+                    let path = std::path::Path::new("/dev/pts").join(&name);
+                    if std::fs::metadata(&path).is_ok_and(|m| m.uid() == uid)
+                        && std::fs::OpenOptions::new()
+                            .read(true)
+                            .custom_flags(nix::libc::O_NOCTTY | nix::libc::O_NONBLOCK)
+                            .open(&path)
+                            .is_ok()
+                    {
+                        return Some(path);
+                    }
+                }
+                std::thread::yield_now();
+            }
+            None
+        });
+        for _ in 0..3 {
+            let attempt = elevate(
+                Way::Su,
+                None,
+                &[0; 32],
+                [
+                    "/nonexistent/j569",
+                    &"0".repeat(64),
+                    "/nonexistent/j569.sock",
+                    "65534",
+                ],
+                Duration::from_secs(5),
+            )
+            .await;
+            assert!(attempt.is_ok_and(|done| done.elevated.is_none()));
+            if scanner.is_finished() {
+                break;
+            }
+        }
+        stop.store(true, Ordering::Release);
+        let opened = scanner.join().unwrap();
+        assert!(
+            opened.is_none(),
+            "another process of this account opened the password terminal {opened:?}"
+        );
+    }
 }
