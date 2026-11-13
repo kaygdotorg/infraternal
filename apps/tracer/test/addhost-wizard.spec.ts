@@ -347,6 +347,23 @@ test("a changed key after a restart is shown as changed, not as a new key (#510)
   await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-changedkey.lab");
 });
 
+test("a key that is different after a restart's re-ask is called out as changed, not shown as the same question (#510, J558)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  const block = wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-keyblock");
+  await expect(block).toContainText(/SHA256:/, { timeout: 15_000 });
+  const before = await block.textContent();
+  // The person is comparing this fingerprint with the host when the server restarts, and the key the host presents
+  // is a different one by the time the card asks again (a machine in the path swapped it during the restart window).
+  await config(page, { rotateKey: true });
+  await config(page, { drop: true });
+  await expect.poll(() => block.textContent(), { timeout: 15_000 }).not.toBe(before);
+  // Same title, same neutral lede and the same "Trust and continue" in the same place: someone who already compared
+  // the first key clicks it. The page must say that the key differs from the one shown before the restart.
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-lede")).toContainText(/changed/i);
+});
+
 test("a double click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
   await trustWithRapidClicks(page, 2);
 });
