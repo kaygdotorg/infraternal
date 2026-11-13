@@ -187,6 +187,33 @@ pub(super) fn from_policy(policy: &Policy) -> HostTable {
     table
 }
 
+/// Build the semantic model of the accept-policy table that names only mesh input.
+pub(super) fn from_mesh_only_policy(policy: &Policy) -> HostTable {
+    let mut table = HostTable {
+        chain: Some(HostChain {
+            kind: Some("filter".to_owned()),
+            hook: Some("input".to_owned()),
+            priority: Some(-10),
+            policy: Some("accept".to_owned()),
+        }),
+        ..HostTable::default()
+    };
+    if policy.mesh_enabled {
+        table.push_rule(rule(
+            [Selector::Interface(vec!["infraternal0".to_owned()])],
+            "accept",
+        ));
+        table.push_rule(rule(
+            [Selector::DestinationPort {
+                protocol: "udp".to_owned(),
+                port: policy.mesh_udp_port(),
+            }],
+            "accept",
+        ));
+    }
+    table
+}
+
 /// Report structured differences while retaining the existing readable rule summary.
 pub(super) fn report(current: Option<&HostTable>, desired: Option<&HostTable>) -> String {
     let empty = HostTable::default();

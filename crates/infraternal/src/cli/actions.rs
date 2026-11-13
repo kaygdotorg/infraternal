@@ -494,7 +494,7 @@ fn up_action() -> ActionDefinition {
         "host_firewall_allow".to_owned(),
         JsonSchema::array(
             JsonSchema::string("INTERFACE,SOURCE,tcp|udp,PORT; use * for any."),
-            "Extra host input rules. `up` keeps the current SSH source automatically.",
+            "Administrator input rules saved for a host policy that drops by default. A joined machine only opens mesh input, so these take effect only if a server policy is added; `up` records the current SSH port automatically.",
         ),
     ));
     let action = ActionDefinition::new(
@@ -505,7 +505,7 @@ fn up_action() -> ActionDefinition {
             "Approve this machine with a fresh passkey in the browser before the request expires.",
             "This command installs the Linux system service with one sudo prompt.",
             "After approval, it enrolls this machine over HTTPS and reports service status.",
-            "System installs keep the active SSH path and apply the host input policy before networking.",
+            "System installs open the mesh's input before networking and block nothing else.",
         ],
         JsonSchema::object(inputs, ["server".to_owned()]),
         JsonSchema::command_result_with(data),

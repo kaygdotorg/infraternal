@@ -269,7 +269,7 @@ impl Install {
     /// Validate and retain the agent's input rules until their root-owned file is published.
     #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
     pub(super) fn with_host_firewall_policy(mut self, policy: Policy) -> io::Result<Self> {
-        host_firewall::validate(&policy)
+        host_firewall::validate_agent(&policy)
             .map_err(|_| refused("The agent host firewall policy is invalid."))?;
         self.host_firewall_policy = Some(policy);
         Ok(self)
@@ -284,7 +284,7 @@ impl Install {
         let policy = self.host_firewall_policy.as_ref().ok_or_else(|| {
             refused("The agent host firewall policy was not supplied to the installer.")
         })?;
-        host_firewall::validate(policy)
+        host_firewall::validate_agent(policy)
             .map_err(|_| refused("The agent host firewall policy is invalid."))?;
         let policy_path = self
             .root

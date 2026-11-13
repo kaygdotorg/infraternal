@@ -1,4 +1,15 @@
 //! Renders and applies the host input policy owned by infraternal, D386.
+//!
+//! Two shapes share the one `inet infraternal_host` table, chosen by role in
+//! [`InputMode::for_roles`]:
+//! - **Enforce** (a server policy exists): default drop, with the server's
+//!   listeners, the administrators' rules, and the mesh input when mesh runs.
+//! - **Mesh only** (no server policy: a machine joined with `infraternal up`):
+//!   `policy accept`, adding only `infraternal0` and the bound mesh UDP port.
+//!   It never drops anything, so it cannot lock an administrator out (J555).
+//!
+//! An accept in this table cannot override a drop in another table's base
+//! chain; tables not named `infraternal_*` are never touched (D386).
 
 /// Compare live nft JSON with the policy built from infraternal's configuration.
 #[path = "host_firewall_semantics.rs"]
@@ -67,6 +78,33 @@ pub enum PolicyRole {
     Server,
     /// The local infraternal agent's administrator and mesh policy.
     Agent,
+}
+
+/// How the host table treats input the policy does not name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputMode {
+    /// Default drop: only the policy's rules, loopback, replies and ICMP get in.
+    Enforce,
+    /// Default accept: the table only names the input the mesh needs.
+    MeshOnly,
+}
+
+impl InputMode {
+    /// Pick the table shape from which roles have a saved policy.
+    ///
+    /// Only the server role gets the default-drop input policy. Other machines
+    /// get the mesh input and nothing else, because a default drop whose only
+    /// SSH rule is the installer's address can lock other administrators out
+    /// (J555, #483). This is the safe default from 2026-11-14 until the owner
+    /// decides; flipping it is this one function.
+    #[must_use]
+    pub fn for_roles(server: Option<&Policy>) -> Self {
+        if server.is_some() {
+            Self::Enforce
+        } else {
+            Self::MeshOnly
+        }
+    }
 }
 
 /// Names the owned role files and loader paths used by host-policy lifecycle operations.
@@ -609,6 +647,18 @@ pub fn validate(policy: &Policy) -> Result<(), PolicyError> {
     Ok(())
 }
 
+/// Validate an agent role policy, which needs no admin rule of its own.
+///
+/// An agent policy alone renders [`InputMode::MeshOnly`], which drops nothing.
+/// Its admin rules, if any, only take effect under a server policy, and
+/// [`validate`] checks the combined policy then.
+///
+/// # Errors
+/// Returns [`PolicyError::InvalidRule`] for malformed fields.
+pub fn validate_agent(policy: &Policy) -> Result<(), PolicyError> {
+    validate_fields(policy)
+}
+
 /// Validate stored rule fields before their role-specific policies are merged.
 fn validate_fields(policy: &Policy) -> Result<(), PolicyError> {
     if policy.mesh_udp_port == Some(0) {
@@ -777,6 +827,37 @@ pub fn render(policy: &Policy) -> Result<String, PolicyError> {
     Ok(unique)
 }
 
+/// Render the accept-policy table that only names the mesh's input.
+///
+/// # Errors
+/// Returns [`PolicyError::InvalidRule`] for malformed fields.
+pub fn render_mesh_only(policy: &Policy) -> Result<String, PolicyError> {
+    validate_fields(policy)?;
+    let mut rules = String::from(
+        "table inet infraternal_host {\n    chain input {\n        type filter hook input priority filter - 10; policy accept;\n",
+    );
+    if policy.mesh_enabled {
+        let _ = write!(
+            rules,
+            "        iifname \"infraternal0\" accept\n        udp dport {} accept\n",
+            policy.mesh_udp_port()
+        );
+    }
+    rules.push_str("    }\n}\n");
+    Ok(rules)
+}
+
+/// Render the table for `mode`.
+///
+/// # Errors
+/// Returns an error when the policy is invalid for that mode.
+pub fn render_for(policy: &Policy, mode: InputMode) -> Result<String, PolicyError> {
+    match mode {
+        InputMode::Enforce => render(policy),
+        InputMode::MeshOnly => render_mesh_only(policy),
+    }
+}
+
 /// Return the fixed system paths checked before the Nix store.
 #[must_use]
 pub fn nft_candidates() -> &'static [&'static str] {
@@ -791,14 +872,16 @@ pub fn nft_candidates() -> &'static [&'static str] {
 /// # Errors
 /// Returns an error for invalid policy, missing or unsafe nft, or a rejected batch.
 pub fn apply(policy: &Policy, nft_path: Option<&Path>) -> Result<String, PolicyError> {
-    let ssh_connection = match std::env::var("SSH_CONNECTION") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(PolicyError::AdminPathWouldBeLost);
-        }
-    };
-    apply_with_ssh_connection(policy, nft_path, ssh_connection.as_deref())
+    apply_with_ssh_connection(policy, nft_path, ssh_connection_from_env()?.as_deref())
+}
+
+/// Read `SSH_CONNECTION`; a value that is not UTF-8 cannot be checked, so it refuses.
+fn ssh_connection_from_env() -> Result<Option<String>, PolicyError> {
+    match std::env::var("SSH_CONNECTION") {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(PolicyError::AdminPathWouldBeLost),
+    }
 }
 
 /// Apply a policy after checking a caller-supplied SSH connection.
@@ -813,8 +896,26 @@ pub fn apply_with_ssh_connection(
     nft_path: Option<&Path>,
     ssh_connection: Option<&str>,
 ) -> Result<String, PolicyError> {
-    validate_ssh_connection(policy, ssh_connection)?;
-    let desired = render(policy)?;
+    apply_mode_with_ssh_connection(policy, InputMode::Enforce, nft_path, ssh_connection)
+}
+
+/// Apply a policy in the given table shape after checking the SSH connection.
+///
+/// [`InputMode::MeshOnly`] drops nothing, so it skips the admin-path checks;
+/// switching from an enforcing table to it only opens input.
+///
+/// # Errors
+/// Returns an error when validation, SSH preservation, nft discovery, or the batch fails.
+pub fn apply_mode_with_ssh_connection(
+    policy: &Policy,
+    mode: InputMode,
+    nft_path: Option<&Path>,
+    ssh_connection: Option<&str>,
+) -> Result<String, PolicyError> {
+    if mode == InputMode::Enforce {
+        validate_ssh_connection(policy, ssh_connection)?;
+    }
+    let desired = render_for(policy, mode)?;
     let nft = discover_nft(nft_path)?;
     let inventory = run_nft(&nft, &["-j", "list", "tables"], None)?;
     let tables: serde_json::Value = serde_json::from_slice(&inventory.stdout)
@@ -832,8 +933,13 @@ pub fn apply_with_ssh_connection(
     } else {
         None
     };
-    let desired_semantics = host_firewall_semantics::from_policy(policy);
-    ensure_existing_admin_rules_are_preserved(current.as_ref(), &desired_semantics)?;
+    let desired_semantics = match mode {
+        InputMode::Enforce => host_firewall_semantics::from_policy(policy),
+        InputMode::MeshOnly => host_firewall_semantics::from_mesh_only_policy(policy),
+    };
+    if mode == InputMode::Enforce {
+        ensure_existing_admin_rules_are_preserved(current.as_ref(), &desired_semantics)?;
+    }
     let report = host_firewall_semantics::report(current.as_ref(), Some(&desired_semantics));
     if report == "host firewall migration: no rule differences\n" {
         return Ok(report);
@@ -860,6 +966,22 @@ fn replace_table_transaction(rendered: &str, exists: bool) -> String {
     }
     transaction.push_str(rendered);
     transaction
+}
+
+/// Apply the saved role policies in the shape [`InputMode::for_roles`] picks.
+fn apply_roles(
+    server: Option<Policy>,
+    agent: Option<Policy>,
+    nft_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    let mode = InputMode::for_roles(server.as_ref());
+    let ssh_connection = ssh_connection_from_env()?;
+    apply_mode_with_ssh_connection(
+        &combine(server, agent),
+        mode,
+        nft_path,
+        ssh_connection.as_deref(),
+    )
 }
 
 /// Load and apply the merged policy stored by the server and agent installers.
@@ -893,7 +1015,7 @@ pub fn apply_from_config_at(
         report.push_str(&remove_owned_loader(paths, systemctl_path)?);
         return Ok(report);
     }
-    apply(&combine(server, agent), nft_path)
+    apply_roles(server, agent, nft_path)
 }
 
 /// Clear one role's policy and reconcile the remaining host input configuration.
@@ -936,7 +1058,7 @@ pub fn clear_role_from_config_at(
     let mut report = if no_remaining_policy {
         remove_host_table(nft_path)?
     } else {
-        apply(&combine(remaining_server, remaining_agent), nft_path)?
+        apply_roles(remaining_server, remaining_agent, nft_path)?
     };
     let policy_path = match role {
         PolicyRole::Server => paths.server_policy_path(),
@@ -1405,10 +1527,9 @@ pub fn set_mesh_listener_at(
         return Ok(None);
     }
     let changed = update_mesh_listener(&mut agent, udp_port);
-    let combined = combine(server, agent.clone());
     // Apply first: a rejected nft transaction leaves both the live table and
     // the saved file at the previous listener, so a retry starts consistent.
-    let report = apply(&combined, nft_path)?;
+    let report = apply_roles(server, agent.clone(), nft_path)?;
     if changed {
         let Some(policy) = agent else {
             return Err(PolicyError::Io(io::Error::other(
@@ -1934,6 +2055,51 @@ mod tests {
         assert!(super::compare_versions("1.1.10", "1.1.7").is_gt());
         assert!(super::compare_versions("1.1", "1.1.1").is_lt());
         assert!(super::compare_versions("1.0.9", "1.0.9").is_eq());
+    }
+
+    /// Only a server policy makes the host table drop by default (J555, #483).
+    #[test]
+    fn only_the_server_role_gets_a_default_drop_table() {
+        let server = Policy {
+            admin_rules: vec!["*,*,tcp,22".parse().expect("admin rule")],
+            ..Policy::default()
+        };
+        assert_eq!(
+            super::InputMode::for_roles(Some(&server)),
+            super::InputMode::Enforce
+        );
+        assert_eq!(
+            super::InputMode::for_roles(None),
+            super::InputMode::MeshOnly
+        );
+    }
+
+    /// A joined machine's table accepts by default and names only the mesh's input.
+    #[test]
+    fn mesh_only_table_drops_nothing_and_opens_the_bound_port() {
+        let agent = Policy {
+            admin_rules: vec!["*,192.0.2.5,tcp,22".parse().expect("admin rule")],
+            mesh_enabled: true,
+            mesh_udp_port: Some(32_001),
+            ..Policy::default()
+        };
+        super::validate_agent(&Policy::default()).expect("an agent needs no admin rule");
+        let rendered = super::render_mesh_only(&agent).expect("render");
+        assert_eq!(
+            rendered,
+            concat!(
+                "table inet infraternal_host {\n",
+                "    chain input {\n",
+                "        type filter hook input priority filter - 10; policy accept;\n",
+                "        iifname \"infraternal0\" accept\n",
+                "        udp dport 32001 accept\n",
+                "    }\n",
+                "}\n",
+            )
+        );
+        let stopped = super::render_mesh_only(&Policy::default()).expect("render");
+        assert!(!stopped.contains(" drop"), "{stopped}");
+        assert!(!stopped.contains("dport"), "{stopped}");
     }
 
     /// Every rendered rule reaches the nft batch, including ones that start with a source address.

@@ -133,8 +133,9 @@ server listener, data, web root, origin, TLS, remote-listener and proxy flags
 as the current service because `server init` also rewrites that service unit.
 The dry run shows the plan before it is applied.
 
-If an agent role still has a marked policy, infraternal applies that policy and
-keeps the shared table and loader. If no role remains, it atomically deletes
+If an agent role still has a marked policy, infraternal keeps the shared table
+and loader, but switches the table to the agent-only shape described below
+(`policy accept`, mesh input only). If no role remains, it atomically deletes
 `inet infraternal_host`, reports the removed rule lines, unlinks only the
 product-marked network-pre loader and policy files, then reloads systemd. This
 opens input instead of retaining a default-drop table. A cleared configuration
@@ -159,9 +160,13 @@ over SSH to complete this migration; the product install performs the takeover
 and reports the rule differences.
 
 `infraternal up` installs the same early boot unit on hosts that run only an
-infraternal agent. It
-stores a root-owned agent policy, keeps the active SSH source (or accepts
-additional `--host-firewall-allow` entries), and takes over this hand loader
-with rollback support. Both server and agent installs leave unrelated nftables
+infraternal agent. It stores a root-owned agent policy and takes over this hand
+loader with rollback support. On a host without a server policy the table
+never drops by default: it is `policy accept` and names only `infraternal0` and
+the mesh's bound UDP port (J555, #483; the owner may change this). The agent
+policy records the active SSH port from any source, plus any
+`--host-firewall-allow` entries; those rules take effect only if a server
+policy later makes the table drop by default. An accept in this table cannot
+override a drop in another table, which infraternal never touches (D386). Both server and agent installs leave unrelated nftables
 tables alone. Their migration report is written to the system journal by
 `infraternal-firewall.service`.

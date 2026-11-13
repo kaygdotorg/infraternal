@@ -650,6 +650,80 @@ fn mesh_listener_opens_exactly_the_bound_port_and_closes_on_stop() {
     );
 }
 
+/// A machine with only an agent policy gets mesh input and no default drop (J555, #483).
+///
+/// The agent policy saved by `infraternal up` carries the SSH port it ran
+/// from; it must not turn into a default-drop table on a machine without a
+/// server policy. Adding a server policy switches the same table to drop, and
+/// removing it switches back.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn agent_only_host_gets_mesh_input_without_default_drop() {
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    write_policy_file(
+        config.paths.agent_policy_path(),
+        &Policy {
+            admin_rules: vec![AllowRule::from_str("*,*,tcp,22").expect("recorded SSH port")],
+            ..Policy::default()
+        },
+    )
+    .expect("save marked agent policy");
+    let udp = [(payload("udp", "dport"), json!(10_254))];
+    let tunnel = [(meta("iifname"), json!("infraternal0"))];
+
+    apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("apply the agent-only policy");
+    let idle = table_json(&nft, "infraternal_host");
+    assert_eq!(input_chain(&idle)["policy"], "accept", "{idle:?}");
+    assert!(accept_rules(&idle).is_empty(), "{idle:?}");
+
+    set_mesh_listener_at(&config.paths, Some(&nft), Some(10_254))
+        .expect("record the mesh listener")
+        .expect("agent policy exists, so the host table is managed");
+    let meshed = table_json(&nft, "infraternal_host");
+    assert_eq!(input_chain(&meshed)["policy"], "accept", "{meshed:?}");
+    assert!(has_accept_rule(&meshed, &udp), "{meshed:?}");
+    assert!(has_accept_rule(&meshed, &tunnel), "{meshed:?}");
+    assert_eq!(
+        accept_rules(&meshed).len(),
+        2,
+        "only mesh input: {meshed:?}"
+    );
+    let repeated = set_mesh_listener_at(&config.paths, Some(&nft), Some(10_254))
+        .expect("repeat the listener")
+        .expect("managed host table");
+    assert!(repeated.contains("no rule differences"), "{repeated}");
+
+    write_policy_file(
+        config.paths.server_policy_path(),
+        &Policy {
+            admin_rules: vec![
+                AllowRule::from_str("wt0,10.69.69.0/24,tcp,22").expect("server admin rule"),
+            ],
+            ..Policy::default()
+        },
+    )
+    .expect("save marked server policy");
+    apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("a server policy switches the table to enforce");
+    let enforced = table_json(&nft, "infraternal_host");
+    assert_eq!(input_chain(&enforced)["policy"], "drop", "{enforced:?}");
+    assert!(has_accept_rule(&enforced, &udp), "{enforced:?}");
+
+    clear_role_from_config_at(
+        PolicyRole::Server,
+        &config.paths,
+        Some(&nft),
+        Some(&config.systemctl),
+    )
+    .expect("clear the server role");
+    let back = table_json(&nft, "infraternal_host");
+    assert_eq!(input_chain(&back)["policy"], "accept", "{back:?}");
+    assert!(has_accept_rule(&back, &udp), "{back:?}");
+}
+
 /// Take over a hand-made host table without changing unrelated nft state.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]

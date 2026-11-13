@@ -90,7 +90,7 @@ enum Failure {
     NoSystemd,
     /// Local installation conflicts are distinct from a remote approval refusal.
     InstallConflict,
-    /// A system firewall needs a valid administrator TCP (SSH) rule.
+    /// The host firewall rules given to `up`, or the SSH session, could not be read.
     HostFirewall,
 }
 
@@ -166,7 +166,7 @@ impl Failure {
                 "The local installation was refused. Resolve the conflict reported above before retrying infraternal up."
             }
             Self::HostFirewall => {
-                "The host firewall needs a valid TCP administrator (SSH) path. Add --host-firewall-allow or run infraternal up over SSH."
+                "The host firewall settings are invalid. Check each --host-firewall-allow rule (INTERFACE,SOURCE,PROTOCOL,PORT), then rerun infraternal up."
             }
             Self::NoSystemd => {
                 "infraternal up installs a systemd system service, and systemctl is not installed in a system directory."
@@ -389,13 +389,13 @@ pub(crate) fn run(
     #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
     let host_firewall_service: Option<&str> = None;
     let success_message = if host_firewall_service.is_some() {
-        "This machine joined; infraternal owns its host input firewall through infraternal-firewall.service."
+        "This machine joined; infraternal-firewall.service admits the mesh's input and blocks nothing else."
     } else {
         "This machine joined the server and its system service is active."
     };
     let success_body = if host_firewall_service.is_some() {
         format!(
-            "Machine joined as {hostname}.\nService: active\nHost input firewall: active (infraternal-firewall.service)\nCommand: {PATH_BINARY}"
+            "Machine joined as {hostname}.\nService: active\nHost input firewall: mesh input only (infraternal-firewall.service)\nCommand: {PATH_BINARY}"
         )
     } else {
         format!("Machine joined as {hostname}.\nService: active\nCommand: {PATH_BINARY}")
@@ -444,7 +444,10 @@ fn parse_agent_host_firewall_rules(values: &[String]) -> Result<Vec<AllowRule>, 
         .collect()
 }
 
-/// Build a validated default-drop host policy for the new system service.
+/// Build the validated agent policy saved for the new system service.
+///
+/// An agent policy on its own renders the mesh-only, accept-policy table
+/// ([`host_firewall::InputMode::for_roles`]), so it needs no admin rule.
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 fn agent_host_firewall_policy(values: &[String]) -> Result<Policy, String> {
     let admin_rules = parse_agent_host_firewall_rules(values)?;
@@ -452,11 +455,19 @@ fn agent_host_firewall_policy(values: &[String]) -> Result<Policy, String> {
         admin_rules,
         ..Policy::default()
     };
-    host_firewall::validate(&policy).map_err(|error| error.to_string())?;
+    host_firewall::validate_agent(&policy).map_err(|error| error.to_string())?;
     Ok(policy)
 }
 
-/// Keep the active SSH path and validate additional administrator rules before approval.
+/// Record the administrator rules to save with the agent policy, before approval.
+///
+/// A machine joined with `up` gets no default-drop input policy (J555, #483),
+/// so nothing here can lock anyone out and a local terminal needs no rule.
+/// Over SSH, the session's sshd port is still recorded, from any source and
+/// on any interface, so the saved policy would keep every administrator's
+/// SSH path if a default drop is ever applied on top of it. Rejected: pinning
+/// the installer's own address, which drops a second administrator or the same
+/// one after their address changes.
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 fn agent_host_firewall_rules(
     values: &[String],
@@ -464,15 +475,20 @@ fn agent_host_firewall_rules(
 ) -> Result<Vec<String>, String> {
     let mut admin_rules = parse_agent_host_firewall_rules(values)?;
     if let Some(connection) = ssh_connection {
-        let policy = Policy {
-            admin_rules: admin_rules.clone(),
-            ..Policy::default()
+        let port = connection
+            .split_ascii_whitespace()
+            .nth(3)
+            .and_then(|port| port.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .ok_or_else(|| "the active SSH path could not be read".to_owned())?;
+        let session = AllowRule {
+            interface: None,
+            source: None,
+            protocol: host_firewall::Protocol::Tcp,
+            port,
         };
-        if host_firewall::validate_ssh_connection(&policy, Some(connection)).is_err() {
-            admin_rules.push(
-                host_firewall::admin_rule_for_ssh_connection(connection)
-                    .map_err(|error| error.to_string())?,
-            );
+        if !admin_rules.contains(&session) {
+            admin_rules.push(session);
         }
     }
     if admin_rules.len() > MAX_HOST_FIREWALL_RULES {
@@ -482,7 +498,7 @@ fn agent_host_firewall_rules(
         admin_rules,
         ..Policy::default()
     };
-    host_firewall::validate(&policy).map_err(|error| error.to_string())?;
+    host_firewall::validate_agent(&policy).map_err(|error| error.to_string())?;
     Ok(policy.admin_rules.iter().map(ToString::to_string).collect())
 }
 
@@ -2029,29 +2045,23 @@ mod tests {
         assert_eq!(decoded.admin_rules, admin_rules);
     }
 
-    /// Save the active SSH source together with configured administrator paths for boot.
+    /// Save the active SSH port from any source, together with configured administrator paths.
     #[cfg(feature = "plugin-mesh")]
     #[test]
-    fn agent_host_policy_keeps_the_live_ssh_source_and_extra_admin_rule() {
+    fn agent_host_policy_keeps_the_live_ssh_port_and_extra_admin_rule() {
         let rules = super::agent_host_firewall_rules(
             &["eth0,10.69.0.99,tcp,7011".to_owned()],
-            Some("10.69.69.5 43122 10.69.69.89 22"),
+            Some("10.69.69.5 43122 10.69.69.89 2222"),
         )
-        .expect("an active SSH path supplies the required administrator rule");
+        .expect("an active SSH path is recorded");
 
-        assert!(rules.contains(&"eth0,10.69.0.99,tcp,7011".to_owned()));
-        assert!(
-            rules
-                .iter()
-                .any(|rule| { rule.contains("10.69.69.5") && rule.ends_with(",tcp,22") })
+        assert_eq!(
+            rules,
+            vec![
+                "eth0,10.69.0.99,tcp,7011".to_owned(),
+                "*,*,tcp,2222".to_owned()
+            ]
         );
-    }
-
-    /// Require an explicit SSH path when `up` runs outside an SSH session.
-    #[cfg(feature = "plugin-mesh")]
-    #[test]
-    fn agent_host_policy_without_ssh_or_tcp_22_rule_is_refused() {
-        assert!(super::agent_host_firewall_rules(&[], None).is_err());
     }
 
     /// J555 review (P1): `infraternal up` over SSH must not leave the machine
@@ -2084,8 +2094,8 @@ mod tests {
 
     /// J555 review (P2): running `infraternal up` in a local terminal (no SSH
     /// session, no `--host-firewall-allow`) must still join the machine.
-    /// Today it is refused before approval because the new host firewall
-    /// demands a TCP/22 administrator rule on every agent install.
+    /// It used to be refused before approval because the host firewall
+    /// demanded a TCP/22 administrator rule on every agent install.
     #[cfg(feature = "plugin-mesh")]
     #[test]
     fn review_j555_local_up_without_ssh_still_joins() {
