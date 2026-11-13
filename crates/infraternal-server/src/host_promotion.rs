@@ -631,7 +631,9 @@ impl Promotions {
     }
 
     /// Write one activity row for `person` (a user id); a failure to log
-    /// never changes the upgrade.
+    /// never changes the upgrade, but it is never silent either: D274 says
+    /// every privileged action is recorded, so a lost row is logged for the
+    /// operator (J569 P3-4).
     async fn record(
         &self,
         host: Uuid,
@@ -655,6 +657,14 @@ impl Promotions {
             now,
         )
         .await
+        .inspect_err(|error| {
+            tracing::error!(
+                ?kind,
+                ?reason,
+                %error,
+                "a root upgrade activity row could not be recorded"
+            );
+        })
     }
 
     /// The install, from the relay to the handover (see the module docs).
@@ -779,7 +789,9 @@ impl Promotions {
             .await
         {
             session.close();
-            return Err(untouched(failure.message));
+            // P3-4: the activity row takes a fixed word, never the failure's
+            // sentence (its CHECK refuses one, and the row was lost).
+            return Err(untouched(logged("relay", &failure)));
         }
         // J465 P1: if the relay itself dies later, the uninstall outbox rolls
         // back this exact transaction through the abandoned successor.
@@ -879,7 +891,7 @@ impl Promotions {
         session
             .commit(install.transaction())
             .await
-            .map_err(|failure| failure.message)?;
+            .map_err(|failure| logged("relay", &failure))?;
         if !session.finish(READY_BOUND).await {
             return Err("relay");
         }
