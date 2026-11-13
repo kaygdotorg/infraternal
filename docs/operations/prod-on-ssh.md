@@ -4,8 +4,9 @@ The infraternal server owns `inet infraternal_host` on Linux system installs.
 The server saves its typed listener, trusted-proxy, remote-listener and admin
 settings under `/var/lib/infraternal`; the product-owned
 `infraternal-firewall.service` applies them in one nft transaction before
-`network-pre.target`. Mesh activation adds `infraternal0` and UDP 10254 to that
-same table. The mesh grant filter still decides which mesh flows pass.
+`network-pre.target`. Mesh activation adds `infraternal0` and the UDP port the
+mesh node actually bound (10254 by default) to that same table, and stopping
+the mesh removes both. The mesh grant filter still decides which mesh flows pass.
 
 ## Current hand-installed policy
 
