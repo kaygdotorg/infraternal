@@ -313,7 +313,9 @@ async fn begin_fixture_rotation(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(json!({"operation_id":operation_id,"sequence":sequence,"phase":"preparing","timer_due":timer_expired}))
+    Ok(
+        json!({"operation_id":operation_id,"sequence":sequence,"phase":"preparing","timer_due":timer_expired}),
+    )
 }
 
 /// Publish the candidate key while retaining the predecessor during the live data-path overlap.
