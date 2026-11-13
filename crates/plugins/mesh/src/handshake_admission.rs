@@ -551,4 +551,53 @@ mod tests {
             Ok(())
         );
     }
+
+    /// CPU per received initiation under a flood (J572, #483); run by hand, it asserts nothing.
+    ///
+    /// `cargo test -p infraternal-plugin-mesh --features agent --release --lib
+    /// bench_handshake_flood_cpu -- --ignored --nocapture` floods the guard on the calling
+    /// thread with real time, once from one source and once from 65,536 spoofed sources, and
+    /// prints this thread's CPU time per initiation and how many key agreements ran. The receive
+    /// task is single-threaded, so CPU per initiation sets the flood rate that saturates it.
+    #[test]
+    #[ignore = "measurement; run by hand on a build VM"]
+    fn bench_handshake_flood_cpu() {
+        /// This thread's consumed CPU time.
+        fn thread_cpu() -> Duration {
+            let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_THREAD_CPUTIME_ID)
+                .expect("thread CPU clock");
+            Duration::from(time)
+        }
+        let admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let flood = initiation([0x55; 32]);
+        let packets = 200_000_u32;
+        for (name, spoofed) in [("one source", false), ("65,536 spoofed sources", true)] {
+            let started = Instant::now();
+            let cpu = thread_cpu();
+            let mut key_agreements = 0_u32;
+            for index in 0..packets {
+                let [_, _, high, low] = if spoofed {
+                    index.to_be_bytes()
+                } else {
+                    [0, 0, 0, 1]
+                };
+                let from = SocketAddr::from(([198, 18, high, low], 40000));
+                let verdict = admission.check(&Packet::copy_from(&flood), from, Instant::now());
+                if verdict == Err(Refusal::UnknownKey) {
+                    key_agreements += 1;
+                }
+            }
+            let cpu = thread_cpu().saturating_sub(cpu);
+            let wall = started.elapsed();
+            println!(
+                "J572 flood ({name}): {packets} initiations, {key_agreements} key agreements, \
+                 thread CPU {:.3} s, wall {:.3} s, {:.2} us CPU per initiation, \
+                 saturates one core at {:.0} initiations/s",
+                cpu.as_secs_f64(),
+                wall.as_secs_f64(),
+                cpu.as_secs_f64() * 1e6 / f64::from(packets),
+                f64::from(packets) / cpu.as_secs_f64(),
+            );
+        }
+    }
 }
