@@ -10,6 +10,8 @@
 #      ff02::1:2:547; the child "server" answers unicast from [fe80::b]:547.
 #      The reply must reach the outer client. Exit 1 when it is dropped.
 # NO_TABLE=1 runs the same probes without the table, as the harness control.
+# The table follows the renderer, including J573's DHCPv6 reply rule.
+# LEGACY_TABLE=1 leaves that rule out, reproducing J555's red.
 set -u
 NFT=${NFT:-$(command -v nft || echo /usr/sbin/nft)}
 ip link set lo up
@@ -24,8 +26,10 @@ ip link set v0 up
 in_child ip link set lo up
 in_child ip addr add fe80::b/64 dev v1 nodad
 in_child ip link set v1 up
+DHCPV6_RULE='ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept'
+[ -n "${LEGACY_TABLE:-}" ] && DHCPV6_RULE='# (legacy table: no DHCPv6 reply rule)'
 if [ -z "${NO_TABLE:-}" ]; then
-"$NFT" -f - <<'NFT'
+"$NFT" -f - <<NFT
 table inet infraternal_host {
     chain input {
         type filter hook input priority filter - 10; policy drop;
@@ -34,6 +38,7 @@ table inet infraternal_host {
         ct state established,related accept
         ip protocol icmp accept
         meta l4proto ipv6-icmp accept
+        $DHCPV6_RULE
         tcp dport 22 accept
     }
 }

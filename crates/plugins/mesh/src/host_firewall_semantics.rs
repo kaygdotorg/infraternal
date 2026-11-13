@@ -52,6 +52,8 @@ enum Selector {
     Protocol(String),
     /// A destination transport port, which also implies its protocol.
     DestinationPort { protocol: String, port: u16 },
+    /// A source transport port, used only by the `DHCPv6` client-reply rule.
+    SourcePort { protocol: String, port: u16 },
     /// An expression the product does not need to interpret yet.
     Other(Value),
 }
@@ -146,6 +148,23 @@ pub(super) fn from_policy(policy: &Policy) -> HostTable {
     ));
     table.push_rule(rule([Selector::Protocol("icmp".to_owned())], "accept"));
     table.push_rule(rule([Selector::Protocol("ipv6-icmp".to_owned())], "accept"));
+    table.push_rule(rule(
+        [
+            Selector::Source(IpPrefix {
+                address: IpAddr::V6(std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0)),
+                prefix: 10,
+            }),
+            Selector::SourcePort {
+                protocol: "udp".to_owned(),
+                port: super::DHCPV6_SERVER_PORT,
+            },
+            Selector::DestinationPort {
+                protocol: "udp".to_owned(),
+                port: super::DHCPV6_CLIENT_PORT,
+            },
+        ],
+        "accept",
+    ));
     for admin in &policy.admin_rules {
         table.push_rule(allow_rule(admin));
     }
@@ -426,6 +445,10 @@ fn match_selectors(matched: &Value) -> Option<Vec<Selector>> {
             protocol: protocol.to_owned(),
             port: port_number(right)?,
         }]),
+        ("tcp" | "udp", "sport") => Some(vec![Selector::SourcePort {
+            protocol: protocol.to_owned(),
+            port: port_number(right)?,
+        }]),
         ("th", "dport") => Some(vec![Selector::DestinationPort {
             protocol: "th".to_owned(),
             port: port_number(right)?,
@@ -617,6 +640,9 @@ impl HostRule {
                 Selector::DestinationPort { protocol, port } => {
                     parts.push(format!("{protocol} dport {port}"));
                 }
+                Selector::SourcePort { protocol, port } => {
+                    parts.push(format!("{protocol} sport {port}"));
+                }
                 Selector::Other(expression) => parts.push(format!("nft expression {expression}")),
             }
         }
@@ -728,6 +754,11 @@ mod tests {
                 ]}},
                 {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
                     {"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": 58}}, {"accept": null}
+                ]}},
+                {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "ip6", "field": "saddr"}}, "right": {"prefix": {"addr": "fe80::", "len": 10}}}},
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "sport"}}, "right": 547}},
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}}, "right": 546}}, {"accept": null}
                 ]}},
                 {"rule": {"family": "inet", "table": "infraternal_host", "chain": "input", "expr": [
                     {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"prefix": {"addr": "10.69.69.0", "len": 24}}}},

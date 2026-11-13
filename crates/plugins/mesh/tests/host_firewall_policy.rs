@@ -97,6 +97,7 @@ fn prod_shaped_policy_renders_listeners_admin_rules_and_default_drop() {
             "        ct state established,related accept\n",
             "        ip protocol icmp accept\n",
             "        meta l4proto ipv6-icmp accept\n",
+            "        ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept\n",
             "        iifname \"eth0\" udp dport 51820 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 22 accept\n",
             "        iifname \"wt0\" ip saddr 10.69.69.99 tcp dport 7011 accept\n",

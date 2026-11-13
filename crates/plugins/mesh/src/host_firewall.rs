@@ -42,6 +42,10 @@ const NFT_CANDIDATES: &[&str] = &[
 pub const HOST_TABLE: &str = "infraternal_host";
 /// The standard mesh UDP port (D386), used until a node records its bound port.
 pub const MESH_UDP_DEFAULT_PORT: u16 = 10_254;
+/// The UDP port `DHCPv6` servers and relays send from (RFC 8415).
+pub(crate) const DHCPV6_SERVER_PORT: u16 = 547;
+/// The UDP port `DHCPv6` clients listen on (RFC 8415).
+pub(crate) const DHCPV6_CLIENT_PORT: u16 = 546;
 /// Server-owned listener and proxy settings read by the boot service.
 pub const SERVER_POLICY_PATH: &str = "/var/lib/infraternal/host-firewall-server.json";
 /// Agent-owned administrator and mesh settings read by the boot service.
@@ -698,6 +702,15 @@ pub fn render(policy: &Policy) -> Result<String, PolicyError> {
     }
     rules.push_str(
         "        iifname \"lo\" accept\n        ct state invalid drop\n        ct state established,related accept\n        ip protocol icmp accept\n        meta l4proto ipv6-icmp accept\n",
+    );
+    // DHCPv6 clients solicit the ff02::1:2 multicast group, so conntrack never
+    // sees the server's unicast link-local reply as established. Without this
+    // rule a DHCPv6 host loses its address at lease renewal (J555). Neighbour
+    // discovery and router advertisements are untracked ICMPv6, which the
+    // line above already admits.
+    let _ = writeln!(
+        rules,
+        "        ip6 saddr fe80::/10 udp sport {DHCPV6_SERVER_PORT} udp dport {DHCPV6_CLIENT_PORT} accept"
     );
     for rule in &policy.admin_rules {
         render_rule(
@@ -1943,7 +1956,7 @@ mod tests {
         }
     }
 
-    /// J555 review (P2): a host that gets IPv6 addresses by DHCPv6 must keep
+    /// J555 review (P2): a host that gets IPv6 addresses by `DHCPv6` must keep
     /// receiving server replies. The client sends to the `ff02::1:2`
     /// multicast group, so conntrack cannot match the unicast reply from the
     /// server's link-local address as established; without an explicit
