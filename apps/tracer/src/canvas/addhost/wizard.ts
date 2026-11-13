@@ -72,6 +72,11 @@ interface Job {
   /** Set while the host is being asked again after the server went away under its key check: how many tries so far. */
   reasks?: number;
 }
+/**
+ * Whether the host is at the key check: a new key waiting for the person's OK, or a key that differs from the pinned one
+ * (shown as a warning with its own Replace button). Both depend on the server's memory of what it showed.
+ */
+const atKeyCheck = (view: TargetView): boolean => awaitingKey(view) || (view.state === "failed" && view.failure?.kind === "host-key" && !!view.failure.fingerprints?.length);
 /** How many times a host is asked again after a restart, one second apart: a restart takes a few seconds, not minutes. */
 const REASK_TRIES = 15;
 
@@ -690,7 +695,7 @@ export class Wizard {
       // The server went away while this host waited for the person to check its key (a restart). What the page held of
       // that observation is gone with the run, and Trust could only refuse. Ask the host again on a new run: the key
       // comes back as a new observation, and the person confirms that one (#510).
-      if (awaitingKey(job.view)) { job.reasks = 0; restarted.push(job); continue; }
+      if (atKeyCheck(job.view)) { job.reasks = 0; restarted.push(job); continue; }
       // A new run that closed before it said anything: the server is still coming back. Ask again shortly.
       if (job.reasks !== undefined && job.reasks < REASK_TRIES && (job.view.state === "pending" || job.view.state === "running")) {
         job.reasks++;
