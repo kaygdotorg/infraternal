@@ -67,7 +67,13 @@ interface Entry {
 }
 
 /** One host of the batch; everything about its progress is `view`, folded from server events. */
-interface Job { entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean }
+interface Job {
+  entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean;
+  /** Set while the host is being asked again after the server went away under its key check: how many tries so far. */
+  reasks?: number;
+}
+/** How many times a host is asked again after a restart, one second apart: a restart takes a few seconds, not minutes. */
+const REASK_TRIES = 15;
 
 /** What the person sees for a host: an attempt paused on leftovers reads as needing attention, like a failure. */
 const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : awaitingKey(job.view) ? "running" : job.view.state;
@@ -649,6 +655,7 @@ export class Wizard {
     const job = this.jobs.find((item) => item.run === run && item.target === event.target);
     if (!job) return;
     const was = job.view.state;
+    delete job.reasks;
     job.view = foldEvent(job.view, event);
     this.paint(job);
     this.summarise();
@@ -683,7 +690,13 @@ export class Wizard {
       // The server went away while this host waited for the person to check its key (a restart). What the page held of
       // that observation is gone with the run, and Trust could only refuse. Ask the host again on a new run: the key
       // comes back as a new observation, and the person confirms that one (#510).
-      if (awaitingKey(job.view)) { restarted.push(job); continue; }
+      if (awaitingKey(job.view)) { job.reasks = 0; restarted.push(job); continue; }
+      // A new run that closed before it said anything: the server is still coming back. Ask again shortly.
+      if (job.reasks !== undefined && job.reasks < REASK_TRIES && (job.view.state === "pending" || job.view.state === "running")) {
+        job.reasks++;
+        window.setTimeout(() => { if (this.alive && !this.closing && job.reasks !== undefined && !job.run) this.retryJob(job); }, 1000);
+        continue;
+      }
       if (job.view.state === "pending" || job.view.state === "running") {
         const message = "The connection to the server ended before setup finished.";
         job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] }, leftovers: undefined };
