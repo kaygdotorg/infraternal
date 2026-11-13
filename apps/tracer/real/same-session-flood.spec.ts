@@ -11,6 +11,7 @@
  */
 import { expect, test, type Page } from "playwright/test";
 import { personName, startRealServer, type RealServer } from "./server";
+import { scanTokens } from "./flood-token";
 import { writeFile } from "node:fs/promises";
 
 test.describe.configure({ mode: "serial" });
@@ -105,12 +106,13 @@ let newestSeen = 0;
  * The newest row-1 token the browser was sent, by raw output or repaint. The bridge appends Output and replaces on
  * Snapshot. Each call scans everything recorded since the last call, then keeps only a tail long enough to hold a
  * token split across frames, so a flood cannot grow that string without bound and no token is trimmed unread.
+ * A repaint positions every cell on its own, so `scanTokens` reads tokens with control sequences removed.
  */
 function newestToken(): number {
   const { output, stream } = terminalStream();
-  const text = output.get(stream) ?? "";
-  for (const match of text.matchAll(/<K(\d{6})>/g)) newestSeen = Math.max(newestSeen, Number(match[1]));
-  output.set(stream, text.slice(-16));
+  const { newest, tail } = scanTokens(output.get(stream) ?? "", newestSeen);
+  newestSeen = newest;
+  output.set(stream, tail);
   return newestSeen;
 }
 
