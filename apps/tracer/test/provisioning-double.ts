@@ -147,6 +147,8 @@ const trusted = new Set<string>();
 let sshKeyMode: "ok" | "locked" | "missing" = "ok";
 /** Whether the double's certificate authority is locked, as a real server's is after a restart. `relock*` hosts fail while it is. */
 let caLocked = true;
+/** Every open bootstrap socket, so a spec can drop them all the way a server restart does (`drop` in the config endpoint). */
+const openSockets = new Set<WebSocket>();
 let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
 let installMode: "ok" | "off" = "ok";
 
@@ -498,7 +500,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
   });
 
   // Disconnect cancels outstanding work; hosts that were running free their slot.
+  openSockets.add(socket);
   socket.on("close", () => {
+    openSockets.delete(socket);
     closed = true;
     for (const target of targets.values()) {
       const wasRunning = target.state === "active" && (target.timers.size > 0 || !!target.challenge);
@@ -554,6 +558,7 @@ export async function handleBootstrapHttp(request: IncomingMessage, response: Se
     const body = await bodyOf(request);
     if (body?.sshKey === "ok" || body?.sshKey === "locked" || body?.sshKey === "missing") sshKeyMode = body.sshKey;
     if (typeof body?.caLocked === "boolean") caLocked = body.caLocked;
+    if (body?.drop === true) for (const open of [...openSockets]) open.terminate();
     if (body?.discovery === "ok" || body?.discovery === "empty" || body?.discovery === "error" || body?.discovery === "hang" || body?.discovery === "off") discoveryMode = body.discovery;
     if (body?.install === "ok" || body?.install === "off") installMode = body.install;
     json(response, 200, { ok: true });

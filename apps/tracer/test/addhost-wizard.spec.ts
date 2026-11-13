@@ -16,7 +16,7 @@ type Probe = { views(): Array<{ id: string; windows: string[] }>; activeWindow()
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
-async function config(page: Page, body: Record<string, string>): Promise<void> {
+async function config(page: Page, body: Record<string, string | boolean>): Promise<void> {
   await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
 
@@ -268,6 +268,21 @@ async function trustWithRapidClicks(page: Page, clicks: number): Promise<void> {
   expect(await sawFailure(page)).toEqual([]);
   expect(confirmations).toHaveLength(1);
 }
+
+test("a server restart under the host-key step is recovered: the key is fetched again and can be trusted (#510)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  // The server restarts under the open card: its sockets close, and what the page knew of the key is gone.
+  await config(page, { drop: true });
+  // The card must recover by itself and ask again for the new observation, never stay on a dead "Trust" button.
+  const trust = inWizard(page, "Trust and continue");
+  await expect(trust).toBeVisible({ timeout: 15_000 });
+  await trust.click();
+  await expect(wizard(page).locator(".ah-error")).toHaveCount(0);
+  await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-newkey.lab");
+});
 
 test("a double click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
   await trustWithRapidClicks(page, 2);
