@@ -362,6 +362,12 @@ test("a key that is different after a restart's re-ask is called out as changed,
   // Same title, same neutral lede and the same "Trust and continue" in the same place: someone who already compared
   // the first key clicks it. The page must say that the key differs from the one shown before the restart.
   await expect(wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-lede")).toContainText(/changed/i);
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-hero")).toBeVisible();
+  // Evidence for the issue: the changed-key page at desktop and phone width.
+  for (const width of [1440, 393]) {
+    await page.setViewportSize({ width, height: width === 393 ? 852 : 900 });
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `rekeyed-after-restart-${width}.png`) });
+  }
 });
 
 test("a double click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
