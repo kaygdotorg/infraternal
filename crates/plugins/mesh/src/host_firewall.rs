@@ -813,29 +813,28 @@ pub fn apply_with_ssh_connection(
     if report == "host firewall migration: no rule differences\n" {
         return Ok(report);
     }
-    let mut transaction = String::new();
-    if exists {
-        transaction.push_str("delete table inet infraternal_host\n");
-    }
-    transaction.push_str("add table inet infraternal_host\n");
-    transaction.push_str(
-        "add chain inet infraternal_host input { type filter hook input priority filter - 10; policy drop; }\n",
-    );
-    for line in desired.lines().filter(|line| {
-        line.trim_start().starts_with("iifname")
-            || line.trim_start().starts_with("ct state")
-            || line.trim_start().starts_with("ip protocol")
-            || line.trim_start().starts_with("meta l4proto")
-            || line.trim_start().starts_with("tcp dport")
-            || line.trim_start().starts_with("udp dport")
-    }) {
-        let rule = line.trim();
-        transaction.push_str("add rule inet infraternal_host input ");
-        transaction.push_str(rule);
-        transaction.push('\n');
-    }
-    run_nft(&nft, &["-f", "-"], Some(transaction.as_bytes()))?;
+    run_nft(
+        &nft,
+        &["-f", "-"],
+        Some(replace_table_transaction(&desired, exists).as_bytes()),
+    )?;
     Ok(report)
+}
+
+/// Build the one nft batch that swaps the live host table for the rendered one.
+///
+/// The rendered table goes into the batch verbatim, so every rule
+/// [`render`] writes is installed, whatever selector it starts with. (An
+/// earlier version re-filtered rendered lines by prefix and silently dropped
+/// rules starting with `ip saddr` or `ip6 saddr`, J573.) The delete and the
+/// add share one transaction, so the kernel never runs without the table.
+fn replace_table_transaction(rendered: &str, exists: bool) -> String {
+    let mut transaction = String::with_capacity(rendered.len() + 40);
+    if exists {
+        let _ = writeln!(transaction, "delete table inet {HOST_TABLE}");
+    }
+    transaction.push_str(rendered);
+    transaction
 }
 
 /// Load and apply the merged policy stored by the server and agent installers.
@@ -1910,6 +1909,38 @@ mod tests {
         assert!(super::compare_versions("1.1.10", "1.1.7").is_gt());
         assert!(super::compare_versions("1.1", "1.1.1").is_lt());
         assert!(super::compare_versions("1.0.9", "1.0.9").is_eq());
+    }
+
+    /// Every rendered rule reaches the nft batch, including ones that start with a source address.
+    #[test]
+    fn replace_transaction_keeps_source_restricted_rules() {
+        let policy = Policy {
+            admin_rules: vec!["*,192.0.2.0/24,tcp,22".parse().expect("admin rule")],
+            listeners: vec![super::Listener {
+                interface: None,
+                address: "0.0.0.0:443".parse().expect("listener address"),
+                protocol: super::Protocol::Tcp,
+                sources: vec!["198.51.100.0/24".parse().expect("source")],
+            }],
+            ..Policy::default()
+        };
+        let rendered = render(&policy).expect("render");
+        for exists in [false, true] {
+            let batch = super::replace_table_transaction(&rendered, exists);
+            assert!(
+                batch.contains("ip saddr 192.0.2.0/24 tcp dport 22 accept"),
+                "{batch}"
+            );
+            assert!(
+                batch.contains("ip saddr 198.51.100.0/24 tcp dport 443 accept"),
+                "{batch}"
+            );
+            assert_eq!(
+                batch.starts_with("delete table inet infraternal_host\n"),
+                exists,
+                "{batch}"
+            );
+        }
     }
 
     /// J555 review (P2): a host that gets IPv6 addresses by DHCPv6 must keep
