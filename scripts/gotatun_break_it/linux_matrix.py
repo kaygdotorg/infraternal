@@ -363,7 +363,9 @@ class NamespacePair:
                     self.runtime_root / "server-data",
                     stderr_path=scratch / "server.stderr.log",
                 )
-            environment = {"INFRATERAL_MESH_ENGINE": "gotatun"}
+            # Name the engine explicitly so the matrix keeps testing GotaTun even if the Linux
+            # default ever changes (D346).
+            environment = {"INFRATERNAL_MESH_ENGINE": "gotatun"}
             log_root = scratch / "agent-state"
             self.left = MeshNode(
                 binary,

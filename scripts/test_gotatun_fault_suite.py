@@ -105,6 +105,13 @@ class BreakItRunGuideTests(unittest.TestCase):
         self.assertIn("D41's 300 ms reconnect budget", text)
 
 
+    def test_linux_matrix_selects_gotatun_by_the_variable_the_agent_reads(self):
+        """Choose the engine with the exact variable name the agent reads, not a misspelling."""
+        matrix = Path(__file__).with_name("gotatun_break_it").joinpath("linux_matrix.py")
+        text = matrix.read_text(encoding="utf-8")
+        self.assertIn('{"INFRATERNAL_MESH_ENGINE": "gotatun"}', text)
+        self.assertNotIn("INFRATERAL_MESH_ENGINE", text)
+
 class LinuxFaultPlanTests(unittest.TestCase):
     """Keep each requested network failure in the runnable case matrix."""
 
