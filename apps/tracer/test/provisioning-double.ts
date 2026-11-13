@@ -149,6 +149,8 @@ let sshKeyMode: "ok" | "locked" | "missing" = "ok";
 let caLocked = true;
 /** Every open bootstrap socket, so a spec can drop them all the way a server restart does (`drop` in the config endpoint). */
 const openSockets = new Set<WebSocket>();
+/** While true a new bootstrap socket is closed at once, as when the server is still coming back after a restart (`refuse` in the config endpoint). */
+let refuseSockets = false;
 let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
 let installMode: "ok" | "off" = "ok";
 
@@ -157,6 +159,7 @@ export function resetBootstrapDouble(): void {
   trusted.clear();
   sshKeyMode = "ok";
   caLocked = true;
+  refuseSockets = false;
   discoveryMode = "ok";
   installMode = "ok";
 }
@@ -500,6 +503,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
   });
 
   // Disconnect cancels outstanding work; hosts that were running free their slot.
+  if (refuseSockets) { socket.close(); return; }
   openSockets.add(socket);
   socket.on("close", () => {
     openSockets.delete(socket);
@@ -558,6 +562,7 @@ export async function handleBootstrapHttp(request: IncomingMessage, response: Se
     const body = await bodyOf(request);
     if (body?.sshKey === "ok" || body?.sshKey === "locked" || body?.sshKey === "missing") sshKeyMode = body.sshKey;
     if (typeof body?.caLocked === "boolean") caLocked = body.caLocked;
+    if (typeof body?.refuse === "boolean") refuseSockets = body.refuse;
     if (body?.drop === true) for (const open of [...openSockets]) open.terminate();
     if (body?.discovery === "ok" || body?.discovery === "empty" || body?.discovery === "error" || body?.discovery === "hang" || body?.discovery === "off") discoveryMode = body.discovery;
     if (body?.install === "ok" || body?.install === "off") installMode = body.install;
