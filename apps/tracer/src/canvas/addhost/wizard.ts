@@ -71,6 +71,12 @@ interface Job {
   entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean;
   /** Set while the host is being asked again after the server went away under its key check: how many tries so far. */
   reasks?: number;
+  /**
+   * The fingerprint the person was first shown at the key check, kept across a restart's re-ask. The host key page compares
+   * the key it shows now with this one: a different key is said to have changed, because someone who already compared the
+   * first key would otherwise trust one they never compared. Cleared once a key is trusted.
+   */
+  seenKey?: string;
 }
 /**
  * Whether the host is at the key check: a new key waiting for the person's OK, or a key that differs from the pinned one
@@ -695,7 +701,7 @@ export class Wizard {
       // The server went away while this host waited for the person to check its key (a restart). What the page held of
       // that observation is gone with the run, and Trust could only refuse. Ask the host again on a new run: the key
       // comes back as a new observation, and the person confirms that one (#510).
-      if (atKeyCheck(job.view)) { job.reasks = 0; restarted.push(job); continue; }
+      if (atKeyCheck(job.view)) { job.seenKey ??= job.view.failure?.fingerprints?.[0]; job.reasks = 0; restarted.push(job); continue; }
       // A new run that closed before it said anything: the server is still coming back. Ask again shortly.
       if (job.reasks !== undefined && job.reasks < REASK_TRIES && (job.view.state === "pending" || job.view.state === "running")) {
         job.reasks++;
@@ -961,9 +967,11 @@ export class Wizard {
     const print = job.view.failure?.fingerprints?.[0];
     const key = hostKeyPresentation(job.view.failure?.host_key_type);
     const changed = job.view.failure?.host_key_changed === true;
-    // A new key is an ordinary question (neutral icon). Only a changed pin is a warning (TASTE: the icon matches the news).
-    page.innerHTML = `${changed ? this.hero(ICON.warning, "danger") : this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(this.nameWithPort(job.entry))}'s key</h1>
-      <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : "Compare this fingerprint with the one on the host before trusting it."}</p>
+    // The key differs from the one the person was shown before a restart's re-ask (a new key, not a changed pin).
+    const moved = !changed && !!print && !!job.seenKey && job.seenKey !== print;
+    // A new key is an ordinary question (neutral icon). A changed pin, or a key that differs from the one already shown, is a warning (TASTE: the icon matches the news).
+    page.innerHTML = `${changed || moved ? this.hero(ICON.warning, "danger") : this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(this.nameWithPort(job.entry))}'s key</h1>
+      <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : moved ? "Warning: this host’s key changed since you last saw it. Compare this new fingerprint with the host before trusting it." : "Compare this fingerprint with the one on the host before trusting it."}</p>
       <div class="ah-keyblock" data-kv></div>
       <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>${this.detailsBlock(job)}`;
     const list = createKeyValueList("Host key fingerprint");
@@ -1077,6 +1085,7 @@ export class Wizard {
     this.setBusy(true);
     try {
       await this.deps.service.trustHostKey(this.addressText(job.entry), print);
+      delete job.seenKey;
       // A restart that landed while this awaited has already asked the host again (retryJob left `fixing`): a second
       // retry here would start a second run for the same host.
       if (this.fixing === job) this.retryJob(job);
