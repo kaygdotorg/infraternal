@@ -72,6 +72,10 @@ pub mod gotatun_node;
 mod gotatun_tun;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+/// Drops handshake initiations from ungranted keys before the userspace engine sees them.
+mod handshake_admission;
+
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Derives per-peer mesh route MTUs and a shared IPv6-safe interface MTU.
 mod mesh_mtu;
 

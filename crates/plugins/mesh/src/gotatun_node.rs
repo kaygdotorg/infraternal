@@ -2,11 +2,10 @@
 
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
-    noise::{handshake::parse_handshake_anon, rate_limiter::RateLimiter},
-    packet::{Ip, Packet, PacketBufPool, WgKind, WgPacketType},
+    packet::{Ip, Packet, PacketBufPool},
     tun::{IpRecv, IpSend, MtuWatcher},
     udp::{
-        UdpRecv, UdpTransportFactory, UdpTransportFactoryParams,
+        UdpTransportFactory, UdpTransportFactoryParams,
         socket::{UdpSocket as GotaUdpSocket, UdpSocketFactory},
     },
     x25519::{PublicKey as X25519PublicKey, StaticSecret},
@@ -36,6 +35,7 @@ use tokio::{
     time::Instant,
 };
 
+use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 use crate::{
     dataplane::Config,
@@ -190,132 +190,6 @@ struct BoundUdpFactory {
     admission: Arc<RwLock<PeerAdmission>>,
 }
 
-/// Holds the live mesh identities allowed to reach `GotaTun`'s handshake cookie limiter.
-///
-/// `GotaTun` can answer a valid initiation with a cookie before it looks up a peer. This guard first
-/// validates MAC1, then decrypts the sender identity so an unregistered key cannot cause a reply.
-/// Admitted peers still reach `GotaTun`'s normal limiter. The peer list changes only after a device
-/// snapshot succeeds, while both key checks follow live local-key rotation.
-struct PeerAdmission {
-    private_key: StaticSecret,
-    public_key: X25519PublicKey,
-    /// Checks MAC1 before peer-identity decryption; admitted peers still use `GotaTun`'s limiter.
-    mac1: RateLimiter,
-    peers: BTreeSet<PublicKey>,
-}
-
-impl PeerAdmission {
-    /// Create an empty admission set for the node's current `WireGuard` identity.
-    fn new(private_key: StaticSecret) -> Self {
-        let public_key = X25519PublicKey::from(&private_key);
-        let mac1 = RateLimiter::new(&public_key, u64::MAX);
-        Self {
-            private_key,
-            public_key,
-            mac1,
-            peers: BTreeSet::new(),
-        }
-    }
-
-    /// Replace the identities accepted by the most recently applied device snapshot.
-    fn set_peers(&mut self, peers: impl IntoIterator<Item = PublicKey>) {
-        self.peers = peers.into_iter().collect();
-    }
-
-    /// Replace the local identity after `GotaTun` accepts a key rotation.
-    fn set_private_key(&mut self, private_key: StaticSecret) {
-        self.public_key = X25519PublicKey::from(&private_key);
-        self.mac1 = RateLimiter::new(&self.public_key, u64::MAX);
-        self.private_key = private_key;
-    }
-
-    /// Mark only handshake initiations for cryptographic peer admission.
-    fn needs_admission(packet: &Packet) -> bool {
-        packet.as_ref().first() == Some(&WgPacketType::HandshakeInit.0)
-    }
-
-    /// Admit non-initiation traffic unchanged and only pass initiations from configured peers.
-    fn admits(&self, packet: &Packet) -> bool {
-        if !Self::needs_admission(packet) {
-            return true;
-        }
-        // Keep malformed traffic out of the static-key decryption path and out of the real
-        // limiter. MAC1 does not depend on the source address, so keep the validator's per-IP
-        // counter on one fixed key instead of letting spoofed sources grow a second map.
-        self.mac1.try_reset_count();
-        let validation_source = SocketAddr::from(([0, 0, 0, 0], 0));
-        let validation_packet: Packet = Packet::copy_from(packet.as_ref());
-        let Ok(WgKind::HandshakeInit(initiation)) = self
-            .mac1
-            .verify_packet(validation_source, validation_packet)
-        else {
-            return false;
-        };
-        let Ok(sender) = parse_handshake_anon(&self.private_key, &self.public_key, &initiation)
-        else {
-            return false;
-        };
-        self.peers.contains(&PublicKey(sender.peer_static_public))
-    }
-}
-
-/// Keeps the socket's batched receive path while filtering unregistered handshakes before `GotaTun`.
-struct PeerAdmissionUdpReceiver {
-    socket: GotaUdpSocket,
-    admission: Arc<RwLock<PeerAdmission>>,
-}
-
-impl UdpRecv for PeerAdmissionUdpReceiver {
-    type RecvManyBuf = <GotaUdpSocket as UdpRecv>::RecvManyBuf;
-
-    /// Receive one packet and suppress any valid-MAC1 initiation from an unknown peer key.
-    async fn recv_from(
-        &mut self,
-        pool: &mut PacketBufPool,
-    ) -> io::Result<(Packet, std::net::SocketAddr)> {
-        loop {
-            let packet = self.socket.recv_from(pool).await?;
-            if !PeerAdmission::needs_admission(&packet.0)
-                || self.admission.read().await.admits(&packet.0)
-            {
-                return Ok(packet);
-            }
-        }
-    }
-
-    /// Preserve `GotaTun`'s socket batch receive and remove only rejected handshake initiations.
-    async fn recv_many_from(
-        &mut self,
-        recv_buf: &mut Self::RecvManyBuf,
-        pool: &mut PacketBufPool,
-        packets: &mut Vec<(Packet, std::net::SocketAddr)>,
-    ) -> io::Result<()> {
-        let first_new_packet = packets.len();
-        self.socket.recv_many_from(recv_buf, pool, packets).await?;
-        let mut read = first_new_packet;
-        let mut write = first_new_packet;
-        while read < packets.len() {
-            let packet = &packets[read].0;
-            let admitted = !PeerAdmission::needs_admission(packet)
-                || self.admission.read().await.admits(packet);
-            if admitted {
-                if write != read {
-                    packets.swap(write, read);
-                }
-                write += 1;
-            }
-            read += 1;
-        }
-        packets.truncate(write);
-        Ok(())
-    }
-
-    /// Keep the underlying socket's UDP GRO support available to `GotaTun`.
-    fn enable_udp_gro(&self) -> io::Result<()> {
-        self.socket.enable_udp_gro()
-    }
-}
-
 impl UdpTransportFactory for BoundUdpFactory {
     type Send = GotaUdpSocket;
     type Recv = PeerAdmissionUdpReceiver;
@@ -330,10 +204,7 @@ impl UdpTransportFactory for BoundUdpFactory {
         }
         std::future::ready(Ok((
             self.send.clone(),
-            PeerAdmissionUdpReceiver {
-                socket: self.receive.clone(),
-                admission: Arc::clone(&self.admission),
-            },
+            PeerAdmissionUdpReceiver::new(self.receive.clone(), Arc::clone(&self.admission)),
         )))
     }
 }
@@ -1978,60 +1849,5 @@ mod tests {
                 .any(|ip| ip.to_string() == "10.254.0.1/32")
         );
         assert_eq!(previous.endpoint, Some(endpoint));
-    }
-
-    /// J555 F1 (#483): the admission guard must not do unbounded X25519 work per source.
-    ///
-    /// Anyone who knows a node's public key can compute MAC1. Before J510c, `GotaTun`'s limiter
-    /// answered the 101st initiation from one address within a second with a cookie, so a
-    /// flood cost one MAC check each and never reached Diffie-Hellman. The guard now runs MAC1
-    /// with a limit of `u64::MAX` and then `parse_handshake_anon` (an X25519 and an AEAD open)
-    /// for every valid-MAC1 initiation, before `GotaTun`'s limiter and inside the single UDP
-    /// receive task. A single unspoofed sender can therefore drive unbounded key agreement on
-    /// the path that also carries every peer's data packets. The guard's MAC1 limiter is its
-    /// only per-packet budget, so it must trip at `GotaTun`'s own 100-per-second budget;
-    /// past it the guard must drop (or hand to `GotaTun`'s cookie path) without decrypting.
-    #[test]
-    fn j555_admission_guard_stops_x25519_after_the_handshake_budget() {
-        use gotatun::{
-            noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
-            packet::{Packet, WgKind},
-            x25519::{PublicKey as X25519PublicKey, StaticSecret},
-        };
-        let node = StaticSecret::from([0x31; 32]);
-        let node_public = X25519PublicKey::from(&node);
-        let admission = super::PeerAdmission::new(node);
-        let stranger = StaticSecret::from([0x55; 32]);
-        let stranger_public = X25519PublicKey::from(&stranger);
-        let mut initiator = Tunn::new(
-            stranger,
-            node_public,
-            None,
-            None,
-            IndexTable::from_os_rng(),
-            std::sync::Arc::new(RateLimiter::new(&stranger_public, 100)),
-        );
-        let initiation = initiator
-            .format_handshake_initiation(false)
-            .expect("a MAC1-valid initiation from an unknown key")
-            .into_bytes()
-            .as_ref()
-            .to_vec();
-        // Every packet of the flood reaches the guard's decryption step today.
-        for _ in 0..100 {
-            assert!(!admission.admits(&Packet::copy_from(&initiation)));
-        }
-        let next = admission
-            .mac1
-            .verify_packet(SocketAddr::from(([0, 0, 0, 0], 0)), Packet::copy_from(&initiation));
-        assert!(
-            matches!(
-                next,
-                Err(TunnResult::WriteToNetwork(WgKind::CookieReply(_)))
-            ),
-            "after 100 MAC2-less initiations in one second the guard still treats the next as \
-             admissible for X25519 decryption (got {:?})",
-            next.map(|_| "a decryptable initiation").map_err(|_| "another error")
-        );
     }
 }
