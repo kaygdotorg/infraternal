@@ -108,6 +108,10 @@ impl Snapshot {
     /// The server's own node gets no list either: it only answers its nodes, which always reach it first, and it
     /// observes their server-reflexive addresses from where its device sends. A walk there would move that address
     /// away from what the nodes' packets proved.
+    ///
+    /// A peer without network access in either direction gets no list (J585 F1): the compiler keeps denied peers in
+    /// every snapshot so a later grant changes only policy, and a LAN address must not reach a neighbour the Access
+    /// policy keeps apart. A grant changes the policy, which recompiles the snapshot with the list.
     fn order_candidates(&self, node: NodeId, config: &mut Config) {
         if !self.loaded.accepts_candidates.contains(&node) || Some(node) == config.server {
             return;
@@ -115,6 +119,9 @@ impl Snapshot {
         let empty = crate::candidates::NodeCandidates::default();
         let viewer = self.loaded.candidates.get(&node).unwrap_or(&empty);
         for (peer, policy) in &mut config.peers {
+            if !policy.has_network_access() {
+                continue;
+            }
             let Some(known) = self.loaded.candidates.get(peer) else {
                 continue;
             };

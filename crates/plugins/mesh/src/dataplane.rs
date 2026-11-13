@@ -98,6 +98,20 @@ pub struct PeerPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_ssh: Option<bool>,
 }
+impl PeerPolicy {
+    /// Whether this peer may exchange any traffic with the node, in either direction. A peer
+    /// without it stays in snapshots (so a later grant changes only policy) but gets no packets,
+    /// and no more of the node's coordinates than an older node would (#515).
+    #[must_use]
+    pub fn has_network_access(&self) -> bool {
+        let open = |policy: &TrafficPolicy| match policy {
+            TrafficPolicy::All => true,
+            TrafficPolicy::Ports(ports) => !ports.is_empty(),
+            TrafficPolicy::None => false,
+        };
+        open(&self.inbound) || open(&self.outbound)
+    }
+}
 
 /// Coordinator-owned DNS identity used by mesh-only listeners and names [#266, #281].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
