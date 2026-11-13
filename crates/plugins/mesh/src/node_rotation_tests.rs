@@ -328,11 +328,16 @@ fn gotatun_rotation_applies_the_complete_key_binding_delta() {
             .map_err(|error| error.to_string())?;
         node.commit_rotation(operation, 1)
             .map_err(|error| error.to_string())?;
+        if node.interface_key() != Some(candidate) {
+            return Err("committed engine identity did not advance to the candidate".to_owned());
+        }
 
         let mut next = previous.clone();
         next.local_key = Some(candidate);
         next.version = 5;
         for chunk in crate::configuration::chunks(Some(&previous), &next).map_err(str::to_owned)? {
+            node.validate_binding(&chunk)
+                .map_err(|error| format!("committed key binding validation: {error:?}"))?;
             node.chunk(chunk)
                 .map_err(|error| format!("committed key binding delta: {error:?}"))?;
         }
