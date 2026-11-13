@@ -8,6 +8,24 @@ use std::{
 #[path = "../../infraternal-server/tests/support/release_signing.rs"]
 mod signing;
 
+/// Keep executable fixtures beneath the effective user's private home root.
+/// Build-artifact ancestors may be group writable; restart admission must keep
+/// refusing those paths even when their final cache directory is private (#509).
+fn image_root() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let home = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+        .unwrap()
+        .expect("test account has a home directory")
+        .dir;
+    let parent = home.join(".cache/infraternal-restart-tests");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&parent)
+        .unwrap();
+    parent
+}
+
 /// Private roots for executable admission and short Unix sockets, owned by one test.
 /// Executables stay under the effective user's real home even when the gate puts state in /tmp.
 pub(crate) struct Directory(
@@ -21,17 +39,7 @@ impl Directory {
     /// Allocate unique private roots without relying on shared state or the invoking user's HOME.
     pub(crate) fn new() -> Self {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        let home = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
-            .unwrap()
-            .expect("test account has a home directory")
-            .dir;
-        let parent = home.join(".cache/infraternal-restart-tests");
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&parent)
-            .unwrap();
-        let images = nix::unistd::mkdtemp(&parent.join("r-XXXXXX")).unwrap();
+        let images = nix::unistd::mkdtemp(&image_root().join("r-XXXXXX")).unwrap();
         let mut directory = Self(images, PathBuf::new());
         let requested = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map(PathBuf::from);
         let sockets = if let Some(root) = requested.filter(|root| {
@@ -242,6 +250,8 @@ impl Signed {
 /// fixtures therefore run from this copy (about 60 MB). It is made once per
 /// build of the test executable and shared; each test still signs its own
 /// private copy. A `source` that already is a stripped image is returned as is.
+/// The cache uses the same trusted home ancestry as signed fixtures, so a
+/// group-writable build directory cannot turn a valid self-reload into refusal.
 pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     /// Serializes building the cached image within this test process.
@@ -252,8 +262,7 @@ pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
     {
         return source.to_owned();
     }
-    let target_root = crate::restart_binary::fixture::scratch_root();
-    let cache = target_root.join("restart-test-images");
+    let cache = image_root().join("stripped");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
     // Include source identity so a rebuilt test executable cannot reuse stale fixture bytes.

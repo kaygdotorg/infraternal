@@ -15,6 +15,7 @@ use infraternal_plugin_ssh::{
 };
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 
+/// Banner policy remains correct while external SSH helpers await the host.
 #[tokio::test]
 async fn a_long_pre_authentication_banner_does_not_refuse_the_host() {
     let scratch = common::scratch();
@@ -72,13 +73,36 @@ exit 0
         scratch: root.clone(),
         command_timeout: Duration::from_secs(5),
     };
-    let opened = adapter
-        .open(
-            Destination::parse("user@fixture").unwrap(),
-            Credentials::Network,
-            MeshEvidence::default(),
-        )
-        .await;
+    // This assertion covers banner policy, independently of how long real
+    // ssh/awk/Python helpers wait for host scheduling or disk pages (#509).
+    // Keep the runtime runnable so paused time cannot automatically advance
+    // past the preflight or master deadline while an external child works.
+    tokio::time::pause();
+    let opening = adapter.open(
+        Destination::parse("user@fixture").unwrap(),
+        Credentials::Network,
+        MeshEvidence::default(),
+    );
+    tokio::pin!(opening);
+    let hang_guard = std::time::Instant::now() + Duration::from_secs(600);
+    let opened = loop {
+        tokio::select! {
+            biased;
+            result = &mut opening => break result,
+            () = tokio::task::yield_now() => {
+                assert!(
+                    std::time::Instant::now() < hang_guard,
+                    "the banner fixture's external helper stopped making progress"
+                );
+                // Only wake the master's readiness poll after the child has
+                // actually bound its socket. Host latency consumes no deadline.
+                if root.join("master.ready").exists() {
+                    tokio::time::advance(Duration::from_millis(10)).await;
+                }
+            },
+        }
+    };
+    tokio::time::resume();
     let refusal = opened.as_ref().err().map(|error| error.message);
     drop(opened);
     std::fs::remove_dir_all(root).unwrap();

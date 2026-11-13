@@ -109,13 +109,13 @@ async fn review_account_scope_statement_rollback_is_quiet_and_later_commit_wakes
     );
 }
 
+/// A committed logout still publishes when its Rust waiter is cancelled.
 #[tokio::test]
 async fn review_account_scope_committed_logout_keeps_wake_when_waiter_is_cancelled() {
     use futures_util::FutureExt;
     let _guard = SERIAL.lock().await;
-    let root = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| PathBuf::from("target"), PathBuf::from)
-        .join("review-logout");
+    // Real commit visibility is tested independently of build-disk contention.
+    let root = std::env::temp_dir().join("review-logout");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join(format!("{}.sqlite", Uuid::new_v4()));
     let options = SqliteConnectOptions::new()
