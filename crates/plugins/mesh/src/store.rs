@@ -104,8 +104,12 @@ impl Snapshot {
     /// Give a node that walks candidates each peer's full ordered list (#515, D391): `endpoint` is the first to
     /// try and `candidates` the rest. LAN addresses appear only for peers behind this node's own public address
     /// ([`crate::candidates::order`]). An older node keeps the single address the compiler already set.
+    ///
+    /// The server's own node gets no list either: it only answers its nodes, which always reach it first, and it
+    /// observes their server-reflexive addresses from where its device sends. A walk there would move that address
+    /// away from what the nodes' packets proved.
     fn order_candidates(&self, node: NodeId, config: &mut Config) {
-        if !self.loaded.accepts_candidates.contains(&node) {
+        if !self.loaded.accepts_candidates.contains(&node) || Some(node) == config.server {
             return;
         }
         let empty = crate::candidates::NodeCandidates::default();
@@ -2590,14 +2594,21 @@ mod candidate_tests {
         let server_view = store.config(server).await.unwrap();
         assert_eq!(
             tries(&server_view, a),
-            [at("198.51.100.21:30254"), at("198.51.100.21:10254")],
-            "a node elsewhere never learns the LAN address"
+            [at("198.51.100.21:30254")],
+            "the server's own node only answers, so it gets the observed address alone"
         );
         let older = store.config(c).await.unwrap();
         assert_eq!(tries(&older, a), [at("198.51.100.21:30254")]);
         assert_eq!(older.peers[&a].peer.candidates, Vec::<SocketAddr>::new());
         // Unobserved `b` keeps the pre-#515 address for the older node.
         assert_eq!(tries(&older, b), [at("198.51.100.21:10254")]);
+        // Once `c` takes lists, it gets them, still without the LAN address of another site.
+        assert!(store.record_candidates(c, Some(&[])).await.unwrap());
+        assert_eq!(
+            tries(&store.config(c).await.unwrap(), a),
+            [at("198.51.100.21:30254"), at("198.51.100.21:10254")],
+            "a node elsewhere never learns the LAN address"
+        );
     }
 
     /// An unproven observation of an address the coordinator published itself (the server's device may hold it
