@@ -1,4 +1,8 @@
-//! Supplies production-schema coordinator configurations to the isolated real-daemon proof [165,169,216].
+//! Supplies production-schema coordinator snapshots to isolated real-daemon proofs [165,169,216].
+//!
+//! Each JSON line creates or updates two test identities and prints the exact
+//! snapshot chunks consumed by production mesh nodes.
+
 use infraternal_plugin_mesh::{
     api::MeshService,
     configuration,
@@ -7,11 +11,19 @@ use infraternal_plugin_mesh::{
 use serde::Deserialize;
 use serde_json::json;
 use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
+
+/// One line of test input for compiling production-schema mesh snapshots.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
+    /// The two authenticated identities to attach on the first request.
     #[serde(default)]
     identities: Option<[Identity; 2]>,
+    /// The coordinator-observed UDP endpoints to publish for those identities.
+    #[serde(default)]
+    endpoints: Option<[SocketAddr; 2]>,
+    /// The access or enrollment operation to apply.
     mode: String,
 }
 /// Adds `count` extra members to the store, each with a unique public key and
@@ -36,6 +48,7 @@ async fn seed_extra_members(
     }
     Ok(())
 }
+/// Compile test coordinator requests into the same snapshots production nodes consume.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let extra_members: u64 = std::env::args()
@@ -52,42 +65,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = MeshService::new(pool);
     let store = service.dataplane();
     let mut members = None;
+    let mut peer_identities: Option<[Identity; 2]> = None;
     let mut applied: Option<[Config; 2]> = None;
     for line in io::stdin().lock().lines() {
-        let request: Request = serde_json::from_str(&line?)?;
-        if request.mode == "unbound-identity" {
-            return enrollment_policy(&service, request.identities.ok_or("identities required")?)
+        let Request {
+            identities: request_identities,
+            endpoints,
+            mode,
+        } = serde_json::from_str(&line?)?;
+        if mode == "unbound-identity" {
+            return enrollment_policy(&service, request_identities.ok_or("identities required")?)
                 .await;
         }
-        if let Some(identities) = request.identities {
+        if let Some(identities) = request_identities {
             if members.is_some() {
                 return Err("already enrolled".into());
             }
+            let endpoints = endpoints.unwrap_or([
+                format!("10.220.0.1:{}", identities[0].port).parse()?,
+                format!("10.220.0.2:{}", identities[1].port).parse()?,
+            ]);
             let (server, _) = store
-                .attach(
-                    "server",
-                    identities[0].public_key,
-                    Some(format!("10.220.0.1:{}", identities[0].port).parse()?),
-                    true,
-                )
+                .attach("server", identities[0].public_key, Some(endpoints[0]), true)
                 .await?;
             let (node, _) = store
-                .attach(
-                    "proof",
-                    identities[1].public_key,
-                    Some(format!("10.220.0.2:{}", identities[1].port).parse()?),
-                    false,
-                )
+                .attach("proof", identities[1].public_key, Some(endpoints[1]), false)
                 .await?;
             members = Some([server, node]);
+            peer_identities = Some(identities);
             seed_extra_members(&store, extra_members).await?;
+        } else if let Some(endpoints) = endpoints {
+            let identities = peer_identities.as_ref().ok_or("identities required")?;
+            store
+                .attach("server", identities[0].public_key, Some(endpoints[0]), true)
+                .await?;
+            store
+                .attach("proof", identities[1].public_key, Some(endpoints[1]), false)
+                .await?;
         }
         let members = members.ok_or("identities required")?;
         let now = 1_800_000_000;
-        if request.mode == "port" {
+        if mode == "port" {
             service.execute("owner", "mesh.grant.create", &serde_json::to_vec(&json!({"name":"proof-port","from":{"Node":members[0].0},"to":{"Node":members[1].0},"both_ways":false,"ports":{"Ports":[{"protocol":"Tcp","number":5211}]}}))?, now).await.map_err(|_|"Access grant refused")?;
         } else {
-            let policy = match request.mode.as_str() {
+            let policy = match mode.as_str() {
                 "allow" => DefaultPolicy::Allow,
                 "deny" => DefaultPolicy::Deny,
                 _ => return Err("unknown mode".into()),
