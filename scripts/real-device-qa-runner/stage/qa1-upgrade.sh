@@ -24,7 +24,7 @@ if [ -d "$dest" ]; then
 else
   # The bundle must be the WHOLE release (`share/infraternal`: server, web/, SOURCE and the four static
   # `infraternal-*-musl` host binaries), or Add host fails on the phone ("matching static binary is unavailable").
-  for f in infraternal web SOURCE infraternal-x86_64-musl infraternal-x86_64-session-musl; do
+  for f in infraternal web SOURCE infraternal-x86_64-musl infraternal-x86_64-session-musl infraternal-aarch64-musl infraternal-aarch64-session-musl; do
     [ -e "$src/$f" ] || { echo "bundle is incomplete: $src/$f missing, aborting before any change"; exit 6; }
   done
   cp -a "$src" "$dest"
