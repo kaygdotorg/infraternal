@@ -2411,6 +2411,51 @@ mod tests {
         );
     }
 
+    /// J569 (#399, D376): the setup guard must lock something only the
+    /// install's owner can open.
+    ///
+    /// A root install's base is `/var/lib/infraternal`, so the guard locks
+    /// `/var/lib`: root-owned, 0755, and openable read-only by every local
+    /// account. `flock` needs only an open descriptor, so any account can hold
+    /// it (even a shared lock), and then every root setup step, the relay's
+    /// rollback, the watcher's undo and the successor's abandon exit 73. A
+    /// failed root upgrade then keeps its root install (proven as root on
+    /// compute01 with uid 65534 holding `flock -s`: root's guard exited 73).
+    /// This fixture reproduces the root layout: a 0755 parent the test owns.
+    #[test]
+    fn the_setup_guard_locks_nothing_another_account_can_open() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = std::env::temp_dir().join(format!(
+            "j569-guard-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch).unwrap();
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Same shape as /var/lib: owned by the installer, 0755.
+        let parent = scratch.join("var-lib");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let base = parent.join("infraternal");
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "set -eu\nbase='{}'\n{SETUP_GUARD}\nsetup_guard\nstat -L -c %a /proc/$$/fd/9\n",
+                base.display()
+            ))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&scratch).unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mode = u32::from_str_radix(String::from_utf8_lossy(&output.stdout).trim(), 8).unwrap();
+        assert_eq!(
+            mode & 0o044,
+            0,
+            "the setup guard locks a {mode:o} object that any local account can open and flock, \
+             blocking root setup, rollback and abandon with exit 73"
+        );
+    }
+
     #[test]
     fn compaction_drops_only_comment_lines_and_indentation() {
         assert_eq!(
