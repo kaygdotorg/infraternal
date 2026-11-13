@@ -18,6 +18,8 @@ use std::{
     time::Duration,
 };
 
+use serde_json::{Value, json};
+
 use infraternal_plugin_mesh::host_firewall::{
     AllowRule, HostFirewallPaths, Listener, Policy, PolicyRole, Protocol, apply_from_config_at,
     apply_with_ssh_connection, clear_role_from_config_at, discover_nft, render, validate,
@@ -316,7 +318,7 @@ fn clearing_host_policy_removes_its_table_config_and_loader() {
         )),
     );
     assert!(setup.status.success(), "host-policy fixture was rejected");
-    let unrelated_before = list_table(&nft, "unrelated_control");
+    let unrelated_before = table_json(&nft, "unrelated_control");
     write_policy_file(
         config.paths.server_policy_path(),
         &Policy {
@@ -347,7 +349,7 @@ fn clearing_host_policy_removes_its_table_config_and_loader() {
         .success(),
         "the product host table must be removed"
     );
-    assert_eq!(unrelated_before, list_table(&nft, "unrelated_control"));
+    assert_eq!(unrelated_before, table_json(&nft, "unrelated_control"));
     assert!(!config.paths.server_policy_path().exists());
     assert!(!config.paths.unit_path().exists());
     assert!(!config.paths.enabled_path().exists());
@@ -426,7 +428,7 @@ fn empty_config_removes_only_the_product_table_and_marked_loader() {
         )),
     );
     assert!(setup.status.success(), "host-policy fixture was rejected");
-    let unrelated_before = list_table(&nft, "unrelated_control");
+    let unrelated_before = table_json(&nft, "unrelated_control");
     fs::create_dir_all(config.paths.unit_path().parent().expect("unit parent"))
         .expect("create fake systemd directory");
     fs::write(
@@ -463,7 +465,7 @@ fn empty_config_removes_only_the_product_table_and_marked_loader() {
         .success(),
         "the product table must be removed"
     );
-    assert_eq!(unrelated_before, list_table(&nft, "unrelated_control"));
+    assert_eq!(unrelated_before, table_json(&nft, "unrelated_control"));
     assert!(
         config.paths.unit_path().exists(),
         "an unmarked unit is foreign"
@@ -591,34 +593,62 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
         "initial nft fixture was rejected: {}",
         String::from_utf8_lossy(&setup.stderr)
     );
-    let unrelated_before = list_table(&nft, "unrelated_control");
-    let mesh_before = list_table(&nft, "infraternal_mesh");
+    let unrelated_before = table_json(&nft, "unrelated_control");
+    let mesh_before = table_json(&nft, "infraternal_mesh");
     let report = apply_with_ssh_connection(&prod_policy(true), Some(&nft), None)
         .expect("product policy takes over the legacy host table");
-    let installed = list_table(&nft, "infraternal_host");
-    let unrelated_after = list_table(&nft, "unrelated_control");
-    let mesh_after = list_table(&nft, "infraternal_mesh");
+    let installed = table_json(&nft, "infraternal_host");
+    let unrelated_after = table_json(&nft, "unrelated_control");
+    let mesh_after = table_json(&nft, "infraternal_mesh");
 
     assert!(
         report.starts_with("host firewall migration: current and desired rules differ\n"),
         "takeover reports semantic differences from the hand-built table: {report}"
     );
-    assert!(installed.contains("policy drop"));
-    assert!(installed.contains("10.69.69.0/24 tcp dport 22 accept"));
-    assert!(installed.contains("udp dport 10254 accept"));
+    let chain = input_chain(&installed);
+    assert_eq!(
+        chain["policy"], "drop",
+        "host input must default to drop: {chain}"
+    );
+    assert_eq!(
+        chain["type"], "filter",
+        "host input must be a filter chain: {chain}"
+    );
+    assert!(
+        has_accept_rule(
+            &installed,
+            &[
+                (meta("iifname"), json!("wt0")),
+                (
+                    payload("ip", "saddr"),
+                    json!({ "prefix": { "addr": "10.69.69.0", "len": 24 } })
+                ),
+                (payload("tcp", "dport"), json!(22)),
+            ]
+        ),
+        "the administrator SSH rule must survive the takeover: {installed:?}"
+    );
+    assert!(
+        has_accept_rule(&installed, &[(payload("udp", "dport"), json!(10254))]),
+        "the mesh UDP port must be open from any source: {installed:?}"
+    );
+    assert!(
+        has_accept_rule(&installed, &[(meta("iifname"), json!("infraternal0"))]),
+        "traffic arriving on the mesh interface must be admitted: {installed:?}"
+    );
     assert_eq!(unrelated_before, unrelated_after);
     assert_eq!(
         mesh_before, mesh_after,
         "host policy updates must preserve the mesh table"
     );
 
-    let installed_with_handles = list_table_with_handles(&nft, "infraternal_host");
+    let installed_with_handles = installed.clone();
     let repeated = apply_with_ssh_connection(&prod_policy(true), Some(&nft), None)
         .expect("reapplying the current policy is safe");
     assert!(repeated.contains("no rule differences"));
     assert_eq!(
         installed_with_handles,
-        list_table_with_handles(&nft, "infraternal_host"),
+        table_json(&nft, "infraternal_host"),
         "an unchanged policy must not delete and recreate the nft table"
     );
 
@@ -639,7 +669,7 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
         )
         .is_err()
     );
-    assert_eq!(before_bad_apply, list_table(&nft, "infraternal_host"));
+    assert_eq!(before_bad_apply, table_json(&nft, "infraternal_host"));
 
     assert!(
         !run_nft(
@@ -650,7 +680,7 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
         .status
         .success()
     );
-    assert_eq!(before_bad_apply, list_table(&nft, "infraternal_host"));
+    assert_eq!(before_bad_apply, table_json(&nft, "infraternal_host"));
 }
 
 /// Prove SSH, bidirectional mesh, fixed mesh UDP, and default-drop with real nft in netns.
@@ -843,7 +873,7 @@ fn start_policy_host(
             "legacy host table fixture was rejected: {}",
             String::from_utf8_lossy(&fixture.stderr)
         );
-        let unrelated_before = list_table(&nft, "unrelated_control");
+        let unrelated_before = table_json(&nft, "unrelated_control");
         let policy = Policy {
             admin_rules: vec![
                 AllowRule::from_str("wt0,10.70.1.0/24,tcp,22").expect("typed administrator rule"),
@@ -859,7 +889,7 @@ fn start_policy_host(
         assert!(report.contains("+ desired: udp dport 10254 accept"));
         assert_eq!(
             unrelated_before,
-            list_table(&nft, "unrelated_control"),
+            table_json(&nft, "unrelated_control"),
             "the host takeover must not change another nft table"
         );
         HostSockets {
@@ -947,6 +977,10 @@ fn enter_network_namespace(namespace: &str) {
 }
 
 /// Run one nft command from the absolute executable path found by the product.
+///
+/// stdout and stderr are always captured: `wait_with_output` only collects
+/// streams that were piped, and an inherited stdout would leave every listing
+/// empty, which made table comparisons pass without comparing anything.
 fn run_nft(nft: &Path, arguments: &[&str], input: Option<&str>) -> std::process::Output {
     let mut command = Command::new(nft);
     command.args(arguments);
@@ -955,6 +989,8 @@ fn run_nft(nft: &Path, arguments: &[&str], input: Option<&str>) -> std::process:
     } else {
         Stdio::null()
     });
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
     let mut child = command.spawn().expect("start nft in namespace");
     if let Some(input) = input {
         child
@@ -967,16 +1003,94 @@ fn run_nft(nft: &Path, arguments: &[&str], input: Option<&str>) -> std::process:
     child.wait_with_output().expect("wait for nft")
 }
 
-/// Read a named table's canonical text without handles.
-fn list_table(nft: &Path, name: &str) -> String {
-    let output = run_nft(nft, &["-n", "list", "table", "inet", name], None);
-    assert!(output.status.success(), "nft table listing failed");
-    String::from_utf8(output.stdout).expect("nft output is UTF-8")
+/// Read one table as nft's JSON objects so checks compare policy, not text layout.
+///
+/// The `metainfo` entry (nft and schema versions) is dropped. Handles are
+/// kept on purpose: equal snapshots prove the kernel objects were left in
+/// place, not merely replaced by equivalent ones. An empty listing is a
+/// fixture failure, never a value to compare.
+fn table_json(nft: &Path, name: &str) -> Vec<Value> {
+    let output = run_nft(nft, &["-j", "list", "table", "inet", name], None);
+    assert!(
+        output.status.success(),
+        "nft could not list inet {name}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&output.stdout).expect("nft JSON listing");
+    let objects: Vec<Value> = document["nftables"]
+        .as_array()
+        .expect("nft JSON has an nftables array")
+        .iter()
+        .filter(|object| object.get("metainfo").is_none())
+        .cloned()
+        .collect();
+    assert!(
+        objects.iter().any(|object| object["table"]["name"] == name),
+        "nft listing for inet {name} has no table object: {objects:?}"
+    );
+    objects
 }
 
-/// Include nft handles to prove an unchanged policy avoids a replacement transaction.
-fn list_table_with_handles(nft: &Path, name: &str) -> String {
-    let output = run_nft(nft, &["-a", "-n", "list", "table", "inet", name], None);
-    assert!(output.status.success(), "nft table listing failed");
-    String::from_utf8(output.stdout).expect("nft output is UTF-8")
+/// Return the base chain hooked on input, the one whose default policy guards the host.
+fn input_chain(table: &[Value]) -> &Value {
+    table
+        .iter()
+        .map(|object| &object["chain"])
+        .find(|chain| chain["hook"] == "input")
+        .unwrap_or_else(|| panic!("no input base chain in {table:?}"))
+}
+
+/// Reduce each accepting rule to its `left == right` matches, as JSON pairs.
+///
+/// Only rules whose verdict is `accept` are returned, because the checks
+/// below ask "which traffic does the host admit".
+fn accept_rules(table: &[Value]) -> Vec<Vec<(Value, Value)>> {
+    table
+        .iter()
+        .filter_map(|object| object.get("rule"))
+        .filter_map(|rule| {
+            let expressions = rule["expr"].as_array()?;
+            expressions
+                .iter()
+                .any(|expression| expression.get("accept").is_some())
+                .then(|| {
+                    expressions
+                        .iter()
+                        .filter_map(|expression| expression.get("match"))
+                        .filter(|matched| matched["op"] == "==" || matched["op"] == "in")
+                        .map(|matched| (matched["left"].clone(), matched["right"].clone()))
+                        .collect()
+                })
+        })
+        .collect()
+}
+
+/// The JSON left-hand side nft uses for a packet header field such as `tcp dport`.
+fn payload(protocol: &str, field: &str) -> Value {
+    json!({ "payload": { "protocol": protocol, "field": field } })
+}
+
+/// The JSON left-hand side nft uses for a meta key such as `iifname`.
+fn meta(key: &str) -> Value {
+    json!({ "meta": { "key": key } })
+}
+
+/// Find an accepting rule whose matches are exactly `wanted`, in any order.
+///
+/// Exact sets matter: a rule that also pinned an interface or a source would
+/// admit less than the policy promises, and a missing match would admit more.
+/// `meta l4proto` and `meta nfproto` matches are skipped unless `wanted` names
+/// them, because some nft versions list them as the implied dependency of a
+/// header match (`tcp dport` implies TCP), which selects no different packets.
+fn has_accept_rule(table: &[Value], wanted: &[(Value, Value)]) -> bool {
+    let implied = [meta("l4proto"), meta("nfproto")];
+    accept_rules(table).iter().any(|matches| {
+        let relevant: Vec<&(Value, Value)> = matches
+            .iter()
+            .filter(|(left, _)| {
+                !implied.contains(left) || wanted.iter().any(|(wanted, _)| wanted == left)
+            })
+            .collect();
+        relevant.len() == wanted.len() && wanted.iter().all(|pair| relevant.contains(&pair))
+    })
 }

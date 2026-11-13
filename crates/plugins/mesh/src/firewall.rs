@@ -903,6 +903,30 @@ mod tests {
         assert!(!open.contains(gate));
     }
 
+    /// Snapshot the host input table as nft JSON objects, without `metainfo`.
+    ///
+    /// Comparing these values, handles included, proves that a mesh update
+    /// left the host table's kernel objects untouched, independent of how a
+    /// given nft version prints them as text.
+    fn host_table_json(nft: &std::path::Path) -> Vec<serde_json::Value> {
+        let output = nft_output(nft, &["-j", "list", "table", "inet", "infraternal_host"])
+            .expect("list the host input table");
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("nft JSON listing");
+        let objects: Vec<serde_json::Value> = document["nftables"]
+            .as_array()
+            .expect("nft JSON has an nftables array")
+            .iter()
+            .filter(|object| object.get("metainfo").is_none())
+            .cloned()
+            .collect();
+        assert!(
+            objects.iter().any(|object| object.get("rule").is_some()),
+            "host table snapshot must contain its rules: {objects:?}"
+        );
+        objects
+    }
+
     /// Measure replacement cost while checking that a rejected nft batch is atomic.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
@@ -916,9 +940,7 @@ mod tests {
             "add table inet infraternal_host\nadd chain inet infraternal_host input { type filter hook input priority filter - 10; policy drop; }\nadd rule inet infraternal_host input iifname \"lo\" accept\n",
         )
         .expect("host policy fixture");
-        let host_before = nft_output(&nft, &["-n", "list", "table", "inet", "infraternal_host"])
-            .expect("host policy before mesh update")
-            .stdout;
+        let host_before = host_table_json(&nft);
         let mut named_table = Firewall::default();
         named_table
             .adopt()
@@ -927,9 +949,7 @@ mod tests {
         named_table.remove().expect("takeover fixture cleanup");
         assert_eq!(
             host_before,
-            nft_output(&nft, &["-n", "list", "table", "inet", "infraternal_host"],)
-                .expect("host policy after mesh table adoption")
-                .stdout,
+            host_table_json(&nft),
             "mesh ownership must preserve the separately owned host table"
         );
         let mut filter = Firewall::default();
@@ -940,9 +960,7 @@ mod tests {
         let initial = started.elapsed().as_micros();
         assert_eq!(
             host_before,
-            nft_output(&nft, &["-n", "list", "table", "inet", "infraternal_host"],)
-                .expect("host policy after mesh policy install")
-                .stdout,
+            host_table_json(&nft),
             "mesh policy updates must leave host input rules unchanged"
         );
         let broken = format!("delete table inet {TABLE}\ninvalid syntax\n");
@@ -965,9 +983,7 @@ mod tests {
         filter.remove().expect("off");
         assert_eq!(
             host_before,
-            nft_output(&nft, &["-n", "list", "table", "inet", "infraternal_host"],)
-                .expect("host policy after mesh policy removal")
-                .stdout,
+            host_table_json(&nft),
             "mesh policy removal must leave host input rules unchanged"
         );
         let mut absent = Firewall::default();
