@@ -776,6 +776,98 @@ fn a_grant_after_a_deny_reaches_the_gotatun_engine() {
     cleanup(&[&state_a, &state_b]);
 }
 
+/// J585 F4 (#515), end to end: a peer whose candidate walk already found it stays on its working
+/// address when an unrelated snapshot is applied later. Before the fix the worker dropped every
+/// settled walk, so the next apply started a new one; with the session idle (keepalives add no
+/// received bytes, and no new handshake comes within 5 s) that walk moved the peer to its dead
+/// second candidate after one step.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn a_settled_walk_survives_a_later_snapshot() {
+    let (state_a, state_b) = (state("j587-walk-a"), state("j587-walk-b"));
+    run("mkdir", &["-p", "/run/netns"]);
+    run("mount", &["-t", "tmpfs", "netns", "/run/netns"]);
+    cleanup(&[]);
+    for ns in [NS_A, NS_B] {
+        run("ip", &["netns", "add", ns]);
+        run("ip", &["-n", ns, "link", "set", "lo", "up"]);
+    }
+    run(
+        "ip",
+        &[
+            "link", "add", "j587a", "netns", NS_A, "type", "veth", "peer", "j587b", "netns", NS_B,
+        ],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "address", "add", "192.0.2.1/24", "dev", "j587a"],
+    );
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "192.0.2.2/24", "dev", "j587b"],
+    );
+    run("ip", &["-n", NS_A, "link", "set", "j587a", "up"]);
+    run("ip", &["-n", NS_B, "link", "set", "j587b", "up"]);
+    let up = |ns: &str, path: &PathBuf| {
+        in_ns(ns, || {
+            let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+            let identity = node.up().unwrap();
+            (node, identity)
+        })
+    };
+    let (mut node_a, id_a) = up(NS_A, &state_a);
+    let (mut node_b, id_b) = up(NS_B, &state_b);
+    let a = (1, id_a.public_key);
+    let b = (2, id_b.public_key);
+    let working = SocketAddr::from(([192, 0, 2, 2], id_b.port));
+    // Nothing listens there: a walk that reaches it loses the peer.
+    let dead = SocketAddr::from(([192, 0, 2, 2], id_b.port.wrapping_add(1)));
+    let for_a = |version| {
+        let mut chunk = j534_snapshot(a, b, Some(working), version, true);
+        for policy in chunk.upserted.values_mut() {
+            policy.peer.candidates = vec![dead];
+        }
+        chunk
+    };
+    let started = Instant::now();
+    in_ns(NS_A, || assert!(node_a.chunk(for_a(1)).unwrap()));
+    in_ns(NS_B, || {
+        let endpoint_a = Some(SocketAddr::from(([192, 0, 2, 1], id_a.port)));
+        assert!(
+            node_b
+                .chunk(j534_snapshot(b, a, endpoint_a, 1, true))
+                .unwrap()
+        );
+    });
+    // The test waits on an external protocol event, not a measured duration.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let seen = |node: &Node| node.counters().unwrap().get(&id_b.public_key).cloned();
+    while Instant::now() < deadline && seen(&node_a).is_none_or(|c| c.handshake_secs == 0) {
+        // sleep: allow the GotaTun workers to exchange the first handshake
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        seen(&node_a).is_some_and(|c| c.handshake_secs != 0),
+        "fixture: no handshake on the working address"
+    );
+    // sleep: let the first walk take its 5 s step, see the handshake and settle
+    thread::sleep(
+        (started + Duration::from_millis(5_500)).saturating_duration_since(Instant::now()),
+    );
+    in_ns(NS_A, || assert!(node_a.chunk(for_a(2)).unwrap()));
+    // sleep: one walk step (5 s) and margin, still well before B's first 25 s keepalive
+    thread::sleep(Duration::from_millis(6_500));
+    let endpoint = seen(&node_a).and_then(|c| c.endpoint);
+    in_ns(NS_A, || node_a.down().unwrap());
+    in_ns(NS_B, || node_b.down().unwrap());
+    cleanup(&[&state_a, &state_b]);
+    assert_eq!(
+        endpoint,
+        Some(working),
+        "an idle, established peer was walked off its working address"
+    );
+}
+
 /// Build a peer snapshot with either full directional network access or no access.
 fn j534_snapshot(
     local: (u32, PublicKey),
