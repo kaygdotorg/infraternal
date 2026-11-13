@@ -27,10 +27,13 @@ async function startHost(): Promise<{ port: number; privateKey: string; stop(): 
   const port = await new Promise<number>((resolve) => { const probe = createServer(); probe.listen(0, "127.0.0.1", () => { const p = (probe.address() as { port: number }).port; probe.close(() => resolve(p)); }); });
   for (const type of ["ed25519"]) spawnSync("ssh-keygen", ["-q", "-t", type, "-N", "", "-f", join(dir, `host_${type}`)], { stdio: "ignore" });
   spawnSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", join(dir, "user")], { stdio: "ignore" });
+  // The host's sessions get a private HOME: the install this spec lets begin writes its setup state under $HOME, and it
+  // must not touch the real account's home (a shared account, and a second run would then meet "leftovers").
+  mkdirSync(join(dir, "home"), { mode: 0o700 });
   writeFileSync(join(dir, "authorized_keys"), readFileSync(join(dir, "user.pub")), { mode: 0o600 });
   writeFileSync(join(dir, "sshd_config"), [
     `Port ${port}`, "ListenAddress 127.0.0.1", `HostKey ${join(dir, "host_ed25519")}`, `AuthorizedKeysFile ${join(dir, "authorized_keys")}`,
-    "PasswordAuthentication no", "KbdInteractiveAuthentication no", "UsePAM no", "StrictModes no", `SetEnv XDG_RUNTIME_DIR=${runtimeDir}`, `PidFile ${join(dir, "pid")}`, "LogLevel ERROR",
+    "PasswordAuthentication no", "KbdInteractiveAuthentication no", "UsePAM no", "StrictModes no", `SetEnv XDG_RUNTIME_DIR=${runtimeDir} HOME=${join(dir, "home")}`, `PidFile ${join(dir, "pid")}`, "LogLevel ERROR",
   ].join("\n"));
   // A transient user unit, so the daemon is owned by the user's manager and stops with `systemctl --user stop`.
   const unit = `j510-host-${port}`;
@@ -66,13 +69,22 @@ test("a locked server offers Unlock on the Add host card and the host carries on
     await page.getByRole("button", { name: "Open infraternal" }).click();
     await page.locator(".cl-viewport").waitFor();
 
-    // Unlock once from the sign-in toast, the way a person does after a restart, so the Add host card's own check passes
-    // (the state a long-open card is in).
-    const unlockViaToast = async (): Promise<void> => {
-      await page.locator(".ui-toast").getByRole("button", { name: "Unlock", exact: true }).click({ timeout: 60_000 });
+    // Unlock once from the palette row: a brand-new account has no host yet, so it gets no restart toast (#512), but
+    // the first host needs the unlock all the same. The row appears once the page has learned the lock state (about a
+    // second after first paint), so the palette is opened again until it is there.
+    const unlockViaPalette = async (): Promise<void> => {
+      await expect.poll(async () => {
+        await page.keyboard.press("Control+Shift+K");
+        await expect(page.locator("#palette")).toBeVisible();
+        await page.keyboard.type("Unlock host");
+        const found = (await page.locator("#palette-results .result-label").allTextContents()).includes("Unlock host connections");
+        if (!found) { await page.keyboard.press("Escape"); await expect(page.locator("#palette")).toBeHidden(); }
+        return found;
+      }, { timeout: 30_000 }).toBe(true);
+      await page.keyboard.press("Enter");
       await expect(page.locator(".ui-toast").filter({ hasText: "Host connections unlocked" })).toBeVisible({ timeout: 30_000 });
     };
-    await unlockViaToast();
+    await unlockViaPalette();
     const status = async (): Promise<boolean> => (await page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).locked;
     expect(await status()).toBe(false);
 
@@ -99,6 +111,7 @@ test("a locked server offers Unlock on the Add host card and the host carries on
 
     const locked = wizard.locator(".ah-page[data-page='failure']:not(.is-leaving)");
     await expect(locked.getByRole("heading", { name: "Host connections are locked" })).toBeVisible({ timeout: 90_000 });
+    await expect(wizard.locator(".ah-page.is-leaving")).toHaveCount(0, { timeout: 10_000 });
     await page.screenshot({ path: tracerEvidencePath("addhost-510-real", "locked-card-real.png") });
 
     // Unlock on the card itself, then the same host is tried again; the lock must not come back.
@@ -106,6 +119,8 @@ test("a locked server offers Unlock on the Add host card and the host carries on
     await expect.poll(status, { timeout: 60_000 }).toBe(false);
     // The key was used once and is not kept, so the card asks for it again and says why.
     await expect(wizard.locator(".ah-page[data-page='choose']:not(.is-leaving) .ah-lede")).toContainText("was used once and isn't kept", { timeout: 30_000 });
+    // The previous page is still fading out under the new one for a moment; shoot only once it has left the DOM.
+    await expect(wizard.locator(".ah-page.is-leaving")).toHaveCount(0, { timeout: 10_000 });
     await page.screenshot({ path: tracerEvidencePath("addhost-510-real", "sign-in-again-real.png") });
     await wizard.getByText("Use a key from your computer").click();
     await wizard.locator("[data-secret='key']").fill(host.privateKey);
