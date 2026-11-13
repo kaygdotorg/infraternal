@@ -1,5 +1,5 @@
 /** Seeded operation sequences compare every accepted browser projection with the shipping Rust reducer (#243). */
-import { expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import { reduce, type Intent } from "./operations";
 import type { CanvasDocument, DocTarget } from "./schema";
 
@@ -40,10 +40,24 @@ function sequence(seed: number): Intent[] {
   return intents;
 }
 
+/** Repository root, the working directory for the oracle build and run. */
+const repo = new URL("../../../../../", import.meta.url).pathname;
+/** Cargo arguments that select the layout oracle example, shared by its build and its run. */
+const oracleArgs = ["-p", "infraternal-plugin-canvas", "--example", "layout_oracle"];
+
+// Compiling the Rust oracle is setup, not the behaviour under test. On a shared build host it can wait on
+// cargo's target-dir lock or rebuild dependencies for minutes, so it gets its own bound here and the
+// property test below measures only the oracle run and the comparison (#509).
+beforeAll(async () => {
+  const build = Bun.spawn(["cargo", "build", "--quiet", ...oracleArgs], { cwd: repo, stdout: "ignore", stderr: "pipe" });
+  const [stderr, status] = await Promise.all([new Response(build.stderr).text(), build.exited]);
+  if (status !== 0) throw Error(`layout_oracle did not build:\n${stderr}`);
+}, 1_800_000);
+
 test("property: accepted random operation sequences match the real server reducer", () => {
   const cases = Array.from({ length: 32 }, (_, seed) => ({ document: initial(), intents: sequence(seed + 1) }));
-  const oracle = Bun.spawnSync(["cargo", "run", "--quiet", "-p", "infraternal-plugin-canvas", "--example", "layout_oracle"], {
-    cwd: new URL("../../../../../", import.meta.url).pathname,
+  const oracle = Bun.spawnSync(["cargo", "run", "--quiet", ...oracleArgs], {
+    cwd: repo,
     stdin: new TextEncoder().encode(cases.map((entry) => JSON.stringify(entry)).join("\n") + "\n"), maxBuffer: 128 * 1024 * 1024,
   });
   if (oracle.exitCode !== 0) throw Error(new TextDecoder().decode(oracle.stderr));
