@@ -401,6 +401,28 @@ mod tests {
         }
     }
 
+    /// J585 F4 (#515): `step_walks` drops a settled walk and `refresh_walks` starts a new one for
+    /// every peer missing from `walks`, so each later snapshot apply walks every settled peer again.
+    /// An idle established peer (a handshake, no data in the next 5 s; keepalives add no bytes)
+    /// sitting on its working first candidate must not be moved to the next one: that sends its
+    /// traffic to a dead address until the peer's next keepalive roams it back (up to 25 s).
+    #[test]
+    fn an_established_idle_peer_is_not_walked_off_its_working_address() {
+        let start = Instant::now();
+        let list = vec![at("198.51.100.21:30254"), at("198.51.100.21:10254")];
+        let established = Seen {
+            received: 4_096,
+            handshake: 1_800_000_000,
+            endpoint: Some(list[0]),
+        };
+        let walk = Rotation::new(list.clone(), start, established);
+        let moved = walk.and_then(|mut walk| walk.tick(start + STEP, established));
+        assert_eq!(
+            moved, None,
+            "an established session on the first candidate was walked to {moved:?}"
+        );
+    }
+
     /// A single candidate needs no walk.
     #[test]
     fn one_candidate_has_nothing_to_walk() {
