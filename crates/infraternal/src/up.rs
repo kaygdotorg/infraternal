@@ -2079,6 +2079,17 @@ mod tests {
         );
     }
 
+    /// J555 review (P2): running `infraternal up` in a local terminal (no SSH
+    /// session, no `--host-firewall-allow`) must still join the machine.
+    /// Today it is refused before approval because the new host firewall
+    /// demands a TCP/22 administrator rule on every agent install.
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn review_j555_local_up_without_ssh_still_joins() {
+        let result = super::agent_host_firewall_rules(&[], None);
+        assert!(result.is_ok(), "local up is refused: {result:?}");
+    }
+
     /// Apply the agent's saved host input policy before system networking starts.
     #[cfg(feature = "plugin-mesh")]
     #[test]
