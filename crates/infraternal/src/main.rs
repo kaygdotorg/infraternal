@@ -1377,12 +1377,15 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
                 .map_err(|_| "host firewall allow rule is invalid".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // Any TCP admin rule may be sshd's (it need not listen on 22); the live
+    // session, when there is one, is checked port-exactly at install time.
     if !admin_rules
         .iter()
-        .any(|rule| rule.protocol == Protocol::Tcp && rule.port == 22)
+        .any(|rule| rule.protocol == Protocol::Tcp)
     {
-        let active_ssh = std::env::var("SSH_CONNECTION")
-            .map_err(|_| "set an explicit TCP/22 --host-firewall-allow rule".to_owned())?;
+        let active_ssh = std::env::var("SSH_CONNECTION").map_err(|_| {
+            "set an explicit TCP --host-firewall-allow rule for sshd's port".to_owned()
+        })?;
         admin_rules.push(
             host_firewall::admin_rule_for_ssh_connection(&active_ssh).map_err(|_| {
                 "the active SSH path could not be added to the host policy".to_owned()
@@ -1440,7 +1443,7 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
         mesh_udp_port: None,
     };
     host_firewall::validate(&policy).map_err(|_| {
-        "host firewall policy needs valid rules and an explicit TCP/22 admin path".to_owned()
+        "host firewall policy needs valid rules and an explicit TCP admin path for sshd".to_owned()
     })?;
     Ok(policy)
 }

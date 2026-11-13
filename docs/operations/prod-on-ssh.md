@@ -82,7 +82,8 @@ and UDP rules come from `--remote-listen`, its interface and its allowed source
 networks. The extra rules cover NetBird UDP ingress, SSH, fridge ingress and
 the proxy health listener. They retain each existing source/interface/port
 allowance while listener-derived rules also match the configured destination.
-A system install needs an explicit TCP/22 admin rule; when installed over SSH,
+A system install needs an explicit TCP admin rule for sshd's port (22 or
+another); when installed over SSH,
 the active connection is checked before the host table is replaced.
 
 ## Expected product ruleset

@@ -585,6 +585,9 @@ fn selector_sort_key(selector: &Selector) -> String {
 }
 
 /// Identify current explicit TCP/22 accepts that must stay in the candidate.
+///
+/// Port 22 is the only port a live table identifies as sshd's; a session on
+/// another port is protected by the live `SSH_CONNECTION` check instead.
 impl HostRule {
     /// Return whether this direct rule admits an administrator SSH path.
     fn is_admin_ssh(&self) -> bool {

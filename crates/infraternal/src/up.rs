@@ -90,7 +90,7 @@ enum Failure {
     NoSystemd,
     /// Local installation conflicts are distinct from a remote approval refusal.
     InstallConflict,
-    /// A system firewall needs a valid administrator TCP/22 rule.
+    /// A system firewall needs a valid administrator TCP (SSH) rule.
     HostFirewall,
 }
 
@@ -166,7 +166,7 @@ impl Failure {
                 "The local installation was refused. Resolve the conflict reported above before retrying infraternal up."
             }
             Self::HostFirewall => {
-                "The host firewall needs a valid TCP/22 administrator path. Add --host-firewall-allow or run infraternal up over SSH."
+                "The host firewall needs a valid TCP administrator (SSH) path. Add --host-firewall-allow or run infraternal up over SSH."
             }
             Self::NoSystemd => {
                 "infraternal up installs a systemd system service, and systemctl is not installed in a system directory."

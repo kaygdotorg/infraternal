@@ -467,13 +467,17 @@ pub enum PolicyError {
     /// A policy entry contains invalid network or interface data.
     #[error("host firewall rule is invalid")]
     InvalidRule,
-    /// The default-drop policy does not explicitly preserve TCP/22 administration.
-    #[error("host firewall policy needs an explicit TCP/22 admin rule")]
+    /// The default-drop policy has no explicit TCP administrator (SSH) rule.
+    #[error("host firewall policy needs an explicit TCP admin rule for sshd's port")]
     MissingAdminPath,
     /// Applying a candidate policy would remove the SSH connection running this command.
     #[error("host firewall policy would drop the current SSH admin path")]
     AdminPathWouldBeLost,
     /// Replacing the current table would remove a configured TCP/22 path.
+    ///
+    /// Only port 22 is recognised in a live table, because nothing there says
+    /// which other TCP accept is sshd's. A non-22 session is protected by
+    /// [`PolicyError::AdminPathWouldBeLost`] instead.
     #[error("host firewall policy would remove an existing TCP/22 allow rule")]
     ExistingAdminPathWouldBeLost,
     /// A host policy file is not a root-owned, non-writable regular file.
@@ -580,17 +584,25 @@ pub enum PolicyError {
     },
 }
 
-/// Ensure that all rule fields are safe and preserve an explicit SSH path.
+/// Ensure that all rule fields are safe and keep an explicit SSH path.
+///
+/// Any explicit TCP admin rule counts, whatever its port: sshd may listen on
+/// a port other than 22 (J555). When the command runs over SSH,
+/// [`validate_ssh_connection`] additionally checks that the rules admit the
+/// live session's exact port, source and interface. Rejected: reading the
+/// port from `sshd_config` (Include, Match blocks and socket activation make
+/// it unreliable) or from listening sockets (a root-only /proc scan, and it
+/// cannot run at boot before sshd starts).
 ///
 /// # Errors
 /// Returns [`PolicyError::InvalidRule`] for malformed fields or
-/// [`PolicyError::MissingAdminPath`] when TCP/22 is not explicitly allowed.
+/// [`PolicyError::MissingAdminPath`] when no TCP admin rule is configured.
 pub fn validate(policy: &Policy) -> Result<(), PolicyError> {
     validate_fields(policy)?;
     if !policy
         .admin_rules
         .iter()
-        .any(|rule| rule.protocol == Protocol::Tcp && rule.port == 22)
+        .any(|rule| rule.protocol == Protocol::Tcp)
     {
         return Err(PolicyError::MissingAdminPath);
     }
@@ -632,7 +644,7 @@ fn validate_fields(policy: &Policy) -> Result<(), PolicyError> {
 /// Refuse an apply that would remove the admin path in `SSH_CONNECTION`.
 ///
 /// Systemd boot applies have no SSH connection environment and rely on the
-/// persisted explicit TCP/22 rule validated by [`validate`]. Interactive
+/// persisted explicit TCP admin rule validated by [`validate`]. Interactive
 /// invocations additionally match the active remote address, port, and local
 /// interface before nft is called.
 ///
@@ -691,7 +703,7 @@ pub fn validate_ssh_connection_on(
 /// Render a complete default-drop host table from structured policy.
 ///
 /// # Errors
-/// Returns an error when the policy is invalid or has no explicit TCP/22 admin rule.
+/// Returns an error when the policy is invalid or has no explicit TCP admin rule.
 pub fn render(policy: &Policy) -> Result<String, PolicyError> {
     validate(policy)?;
     let mut rules = String::from(

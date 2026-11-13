@@ -187,11 +187,13 @@ fn server_and_agent_policy_merge_listeners_admin_rules_and_mesh_state() {
     assert!(combined.mesh_enabled);
 }
 
-/// Reject a host policy that has no explicit SSH admin rule.
+/// Reject a host policy that has no explicit TCP admin rule (sshd may use any port).
 #[test]
 fn policy_without_tcp_ssh_admin_rule_is_rejected() {
     let mut policy = prod_policy(false);
-    policy.admin_rules.retain(|rule| rule.port != 22);
+    policy
+        .admin_rules
+        .retain(|rule| rule.protocol != Protocol::Tcp);
 
     assert!(validate(&policy).is_err());
     assert!(render(&policy).is_err());
