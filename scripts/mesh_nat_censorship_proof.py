@@ -752,6 +752,7 @@ class Observer:
         self.next_poll = time.monotonic()
         self.started = time.monotonic()
         self.publications: list[dict[str, object]] = []
+        self.readings: list[dict[str, object]] = []
 
     def pages(self) -> list[object]:
         """Every presence page of the server node's current peer table."""
@@ -784,8 +785,13 @@ class Observer:
         return snapshot
 
     def poll(self) -> None:
-        """One presence poll, exactly as often as the server's."""
-        self.request({"mode": "keep", "observe": self.pages()})
+        """One presence poll, exactly as often as the server's. Its rows are kept as evidence."""
+        pages = self.pages()
+        self.readings.append({
+            "t": round(time.monotonic() - self.started, 3),
+            "rows": [row for page in pages for row in page.get("peers", [])],
+        })
+        self.request({"mode": "keep", "observe": pages})
         self.next_poll = time.monotonic() + PRESENCE_POLL_SECONDS
 
     def idle(self, seconds: float) -> None:
@@ -859,6 +865,9 @@ def run_product_profile(scenario: Scenario, binary: str, coordinator_path: str, 
         row["what_the_user_sees"] = peer_view(nodes[1])
         if first is None:
             row["conntrack"] = topology.conntrack()
+            # Which way A's packets for B would go, for the failure's evidence.
+            row["node_a_routes"] = ns(topology.nodes["A"], "ip", "route", "show", "table", "all", check=False).splitlines()
+            row["node_a_status"] = nodes[1].call("mesh.status", {})
             return row
         pinger.take()
         observer.idle(1.0)
@@ -899,6 +908,7 @@ def run_product_profile(scenario: Scenario, binary: str, coordinator_path: str, 
             pinger.stop()
         if observer is not None:
             row["publications"] = observer.publications
+            row["server_readings"] = observer.readings
         if coordinator is not None:
             coordinator.child.kill()
             coordinator.child.wait(timeout=5)
