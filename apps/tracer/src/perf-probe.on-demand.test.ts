@@ -3,7 +3,7 @@
  * time while a resume is running, and a second drop cannot start until the first one's marker echo is painted.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { PerformanceProbe } from "./perf-probe";
+import { PerformanceProbe } from "./perf-probe.on-demand";
 import type { TerminalClient } from "./terminal";
 
 /** A stand-in for one panel control: just the fields the probe reads and writes, plus a way to click it. */

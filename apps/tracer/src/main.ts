@@ -20,7 +20,7 @@ import { BRAND_MARK } from "./auth-marks";
 import { loading } from "../../../packages/ui/src/countup";
 import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
-import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
+import type { PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
 import { onDemand } from "./on-demand";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
@@ -615,7 +615,12 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     }
     return;
   }
-  if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
+  if (probeMode) {
+    // The latency probe is a measuring tool for `?probe=1` pages, so its code loads only for them and stays off the first-screen budget.
+    const { PerformanceProbe } = await onDemand(() => import("./perf-probe.on-demand"));
+    if (generation !== sessionGeneration) return;
+    performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
+  }
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.

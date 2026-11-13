@@ -1,4 +1,4 @@
-/** Measures synthetic terminal keydown-to-paint latency and forced-drop recovery. */
+/** Measures synthetic terminal keydown-to-paint latency and forced-drop recovery. Loaded only by `?probe=1` pages (an on-demand module, D188). */
 import type { TerminalClient, TerminalHooks, TerminalTraceHop } from "./terminal";
 
 /** The characters the probe types, one after another. */
