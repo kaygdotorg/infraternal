@@ -698,6 +698,7 @@ mod tests {
                                 previous_active: false,
                                 addresses: address(id),
                                 endpoint: None,
+                                candidates: Vec::new(),
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,

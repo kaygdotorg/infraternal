@@ -187,6 +187,7 @@ fn compile_inner(
                         .get(other)
                         .ok_or(MeshError::InvalidAllocation)?,
                     endpoint: endpoints.get(&other).copied(),
+                    candidates: Vec::new(),
                 },
                 inbound,
                 outbound,

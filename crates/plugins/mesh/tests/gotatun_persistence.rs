@@ -121,6 +121,7 @@ fn snapshot_with_endpoint(
                     previous_active: false,
                     addresses: addresses(peer.0),
                     endpoint,
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,

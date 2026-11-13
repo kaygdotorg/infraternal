@@ -65,6 +65,7 @@ fn config() -> Config {
                         ipv6: "fd66:6821:bc63:834e::1".parse().unwrap(),
                     },
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,

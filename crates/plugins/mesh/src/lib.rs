@@ -22,6 +22,9 @@ pub mod dataplane;
 /// Chooses the stable mesh UDP listener and its configured fallback behavior.
 mod listen_port;
 
+/// Direct-path candidates and the order nodes try them in (#515, D391).
+pub mod candidates;
+
 pub mod configuration;
 
 pub mod access_updates;

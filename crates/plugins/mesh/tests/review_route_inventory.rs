@@ -149,6 +149,7 @@ fn refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes() {
             ipv6: "fd01::2".parse().unwrap(),
         },
         endpoint: None,
+        candidates: Vec::new(),
     };
     Device::peers(std::slice::from_ref(&peer), &[]).unwrap();
     Device::routes(std::slice::from_ref(&peer), false).unwrap();

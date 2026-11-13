@@ -72,6 +72,7 @@ fn public_state(peers: u16) -> State {
                         ipv6: std::net::Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, index),
                     },
                     endpoint: Some(([10, 220, a, b], 7443).into()),
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::None,

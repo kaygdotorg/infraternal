@@ -363,6 +363,10 @@ struct IdentityProbe {
     key_rotation: bool,
     #[serde(default)]
     authority_epoch: bool,
+    /// The coordinator can send ordered direct-path candidates and wants this node's LAN
+    /// addresses (#515). Asked on its own, so a strict older node refuses only this probe.
+    #[serde(default)]
+    candidates: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -413,6 +417,7 @@ pub enum Request {
         dns_names: bool,
         key_rotation: bool,
         authority_epoch: bool,
+        candidates: bool,
     },
     RotationPrepare(RotationOperation),
     RotationCommit(RotationOperation),
@@ -436,6 +441,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 dns_names: probe.dns_names,
                 key_rotation: probe.key_rotation,
                 authority_epoch: probe.authority_epoch,
+                candidates: probe.candidates,
             })
         }
         "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
@@ -485,9 +491,13 @@ fn rotation_response(
     Ok((value, node.interface_key() != before))
 }
 /// The identity reply, offering each optional capability only when both the node and the requester support it.
+///
+/// `lan` is this node's LAN candidates ([`crate::candidates::lan_addresses`]); it is sent only to a
+/// coordinator that asked for candidates.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
     requested: IdentityProbe,
+    lan: Vec<std::net::SocketAddr>,
 ) -> Option<IdentityResponse> {
     identity.map(|identity| IdentityResponse {
         public_key: identity.public_key,
@@ -497,6 +507,12 @@ fn identity_response(
         authority_epoch: identity.authority_epoch && requested.authority_epoch,
         #[cfg(feature = "mesh-dns")]
         dns_names: identity.dns_names && requested.dns_names,
+        candidates: requested.candidates,
+        lan: if requested.candidates {
+            lan
+        } else {
+            Vec::new()
+        },
     })
 }
 /// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
@@ -515,6 +531,12 @@ struct IdentityResponse {
     #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dns_names: bool,
+    /// This node accepts `Peer::candidates` and walks them in order (#515).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    candidates: bool,
+    /// This node's LAN candidates, for peers behind the same public address (#515).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lan: Vec<std::net::SocketAddr>,
 }
 
 impl AgentPlugin for MeshNodePlugin {
@@ -579,6 +601,7 @@ impl AgentPlugin for MeshNodePlugin {
                     dns_names,
                     key_rotation,
                     authority_epoch,
+                    candidates,
                 } => {
                     let requested = IdentityProbe {
                         compact_access,
@@ -586,16 +609,29 @@ impl AgentPlugin for MeshNodePlugin {
                         dns_names,
                         key_rotation,
                         authority_epoch,
+                        candidates,
                     };
-                    json!(identity_response(
-                        node.ensure().map_err(|_| PluginError::Rejected)?,
-                        requested,
-                    ))
+                    let identity = node.ensure().map_err(|_| PluginError::Rejected)?;
+                    let lan = match (&identity, candidates) {
+                        (Some(identity), true) => {
+                            // The node's own mesh addresses are never LAN candidates.
+                            let own: Vec<std::net::IpAddr> = node
+                                .config()
+                                .map(|config| {
+                                    vec![config.addresses.ipv4.into(), config.addresses.ipv6.into()]
+                                })
+                                .unwrap_or_default();
+                            crate::candidates::lan_addresses(identity.port, &own)
+                        }
+                        _ => Vec::new(),
+                    };
+                    json!(identity_response(identity, requested, lan))
                 }
                 Request::Up => {
                     json!(identity_response(
                         Some(node.up().map_err(|_| PluginError::Rejected)?),
                         IdentityProbe::default(),
+                        Vec::new(),
                     ))
                 }
                 request @ (Request::RotationPrepare(_)
@@ -939,6 +975,7 @@ mod tests {
                             ipv6: "fd01::2".parse().expect("IPv6"),
                         },
                         endpoint: None,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1071,6 +1108,7 @@ mod tests {
                             ipv6: "fd01::1".parse().expect("peer IPv6"),
                         },
                         endpoint: None,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1243,6 +1281,7 @@ mod tests {
 /// The identity reply keeps its legacy shape unless a capability is requested.
 #[cfg(all(test, target_os = "linux"))]
 mod identity_upgrade_tests {
+    #![allow(clippy::expect_used)]
     /// An ordinary identity request gets the reply older coordinators read.
     #[test]
     fn ordinary_identity_reply_retains_the_legacy_shape() {
@@ -1258,6 +1297,7 @@ mod identity_upgrade_tests {
         let legacy = serde_json::json!(super::identity_response(
             Some(identity.clone()),
             super::IdentityProbe::default(),
+            vec!["10.1.0.2:44000".parse().expect("LAN fixture")],
         ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
@@ -1270,7 +1310,9 @@ mod identity_upgrade_tests {
                 dns_names: true,
                 key_rotation: true,
                 authority_epoch: true,
+                candidates: false,
             },
+            Vec::new(),
         ));
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
@@ -1283,12 +1325,49 @@ mod identity_upgrade_tests {
                 compact_access: true,
                 ..super::IdentityProbe::default()
             },
+            Vec::new(),
         ));
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
         assert!(compact_only.get("authority_epoch").is_none());
         #[cfg(feature = "mesh-dns")]
         assert!(compact_only.get("dns_names").is_none());
+    }
+
+    /// A coordinator that asks for candidates learns that this node takes them, and its LAN
+    /// addresses; nobody else sees either field (#515).
+    #[test]
+    fn candidates_and_lan_addresses_are_sent_only_when_asked() {
+        let identity = crate::dataplane::Identity {
+            public_key: crate::policy::model::PublicKey([1; 32]),
+            port: 10254,
+            compact_access: false,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: false,
+        };
+        let lan: Vec<std::net::SocketAddr> = vec!["10.9.0.3:10254".parse().expect("LAN fixture")];
+        let asked = serde_json::json!(super::identity_response(
+            Some(identity.clone()),
+            super::IdentityProbe {
+                candidates: true,
+                ..super::IdentityProbe::default()
+            },
+            lan.clone(),
+        ));
+        assert_eq!(asked["candidates"], true);
+        assert_eq!(asked["lan"], serde_json::json!(["10.9.0.3:10254"]));
+        let parsed: super::IdentityProbe =
+            super::parse(br#"{"candidates":true}"#).expect("candidate probe");
+        assert!(parsed.candidates);
+        let plain = serde_json::json!(super::identity_response(
+            Some(identity),
+            super::IdentityProbe::default(),
+            lan,
+        ));
+        assert!(plain.get("candidates").is_none());
+        assert!(plain.get("lan").is_none());
     }
 }
 
@@ -1341,6 +1420,7 @@ mod peer_page_tests {
                                     [203, 0, 113, 7],
                                     40_000,
                                 ))),
+                                candidates: Vec::new(),
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,

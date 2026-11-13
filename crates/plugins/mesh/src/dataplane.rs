@@ -70,7 +70,15 @@ pub struct Peer {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub previous_active: bool,
     pub addresses: Addresses,
+    /// The first underlay address to send to; `None` waits for the peer to reach this node first.
     pub endpoint: Option<SocketAddr>,
+    /// Further addresses to try, in order, while `endpoint` has not carried a packet back (#515,
+    /// D391): the peer's LAN address when both nodes share a public address, its server-reflexive
+    /// address, and the coordinator's older guess. The coordinator sends them only to nodes whose
+    /// identity reply said they accept them, because this struct refuses unknown fields: an older
+    /// node gets `endpoint` alone. Empty is omitted, so a snapshot without candidates is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<SocketAddr>,
 }
 /// Directional network access for initiating tuples and their authenticated replies [242].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +371,7 @@ mod compatibility_tests {
                 ipv6: "fd01::2".parse().unwrap(),
             },
             endpoint: None,
+            candidates: Vec::new(),
         };
         let encoded = serde_json::to_vec(&peer).unwrap();
         let legacy: PreRotationPeer = serde_json::from_slice(&encoded).unwrap();

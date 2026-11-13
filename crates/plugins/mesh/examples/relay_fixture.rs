@@ -347,6 +347,7 @@ async fn node() {
                         previous_active: peer.previous_active,
                         addresses: peer.addresses,
                         endpoint: peer.endpoint,
+                        candidates: Vec::new(),
                     })
                     .collect();
                 for (index, peer) in list.iter().zip(&installed).enumerate() {

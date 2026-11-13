@@ -1,0 +1,356 @@
+//! Direct-path candidates: which underlay addresses a node tries for a peer, and in which order
+//! (#515, D391, the first slice of D316's path finding).
+//!
+//! Before this slice the coordinator published one address per node: the source IP it saw on the
+//! node's control connection, joined to the node's *local* mesh UDP port. A NAT that changes the
+//! port (carrier-grade NAT, a home router behind one, a symmetric NAT) makes every peer aim at a
+//! dead port, and two nodes behind one router without hairpin cannot reach each other at all.
+//! Three kinds of candidate fix that, without touching the `WireGuard` handshake:
+//!
+//! - **LAN**: the private address a node's kernel picks for its default route, with its mesh port.
+//!   Only a peer the coordinator sees behind the *same* public address gets it, so private
+//!   addresses never leave the site they belong to.
+//! - **Server-reflexive**: the public address *and port* the server's own mesh device sees the
+//!   node's mesh packets come from (`presence.rs` observes it). For an endpoint-independent NAT that
+//!   is exactly the mapping every peer must aim at.
+//! - **Guess**: the older control-IP-plus-local-port address, kept last. It is still right for a
+//!   port-preserving NAT before the server has observed the node, and for older servers.
+//!
+//! The coordinator puts them in that order ([`order`]); a node that accepts the list
+//! ([`crate::dataplane::Peer::candidates`]) walks it with a [`Rotation`] until a packet comes back.
+//! Choices, and the alternatives rejected:
+//! - LAN addresses come from the default route, not from every interface: an interface list carries
+//!   container bridges and VPN addresses, and a peer would aim at its own container bridge.
+//! - The walk advances on a received packet, not on a handshake: an established session does not
+//!   handshake again for two minutes, so a handshake test would walk away from a working address.
+//! - The walk ends after [`ROUNDS`] rounds on the first candidate, so an unreachable peer costs
+//!   nothing forever; a new list (the coordinator republishes on any change) starts a new walk.
+//! - No ICE engine yet: D316 puts full path finding in its chosen ICE engine. These are the same host
+//!   and server-reflexive candidates it would gather, so this slice carries over unchanged.
+
+use std::net::{IpAddr, SocketAddr};
+
+/// The most LAN addresses a node reports: one per address family.
+pub const MAX_LAN: usize = 2;
+
+/// Everything the coordinator knows about where one node can be reached.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeCandidates {
+    /// The control connection's source IP with the node's own listen port (the pre-#515 address).
+    pub guess: Option<SocketAddr>,
+    /// The public address and port the server's mesh device last saw this node's packets come from.
+    pub reflexive: Option<SocketAddr>,
+    /// The node's own private addresses with its listen port, at most [`MAX_LAN`].
+    pub lan: Vec<SocketAddr>,
+}
+
+impl NodeCandidates {
+    /// The public address this node is seen from: the reflexive one when known, else the guess.
+    #[must_use]
+    pub fn public_ip(&self) -> Option<IpAddr> {
+        self.reflexive.or(self.guess).map(|address| address.ip())
+    }
+
+    /// The one address an older node gets, which cannot take a list: reflexive first.
+    #[must_use]
+    pub fn primary(&self) -> Option<SocketAddr> {
+        self.reflexive.or(self.guess)
+    }
+}
+
+/// The addresses `viewer` should try for `peer`, best first, without duplicates.
+///
+/// LAN addresses come first, and only when both nodes are seen from one public address: a
+/// shared router that does not hairpin can only be crossed on the LAN, and the LAN is the
+/// shortest path anyway. Then the server-reflexive address, then the guess.
+#[must_use]
+pub fn order(viewer: &NodeCandidates, peer: &NodeCandidates) -> Vec<SocketAddr> {
+    let mut list = Vec::with_capacity(MAX_LAN + 2);
+    let shared = viewer.public_ip().is_some() && viewer.public_ip() == peer.public_ip();
+    let lan: &[SocketAddr] = if shared { &peer.lan } else { &[] };
+    for address in lan.iter().copied().chain(peer.reflexive).chain(peer.guess) {
+        if !list.contains(&address) {
+            list.push(address);
+        }
+    }
+    list
+}
+
+/// Whether `ip` is a private address that only makes sense on a LAN: RFC 1918, the shared
+/// carrier range `100.64.0.0/10` (RFC 6598), or an IPv6 unique local address (`fc00::/7`).
+#[must_use]
+pub fn is_lan(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private() || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(ip) => (ip.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+/// Keep only LAN addresses that can be sent to another node, at most [`MAX_LAN`].
+///
+/// The coordinator applies this to what a node reports, so a node cannot make its peers aim at
+/// a public host, a loopback or a link-local address in the name of a LAN candidate.
+#[must_use]
+pub fn valid_lan(reported: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut lan = Vec::new();
+    for address in reported {
+        if let Ok(address) = crate::policy::discovery::usable_address(*address)
+            && is_lan(address.ip())
+            && !lan.contains(&address)
+            && lan.len() < MAX_LAN
+        {
+            lan.push(address);
+        }
+    }
+    lan
+}
+
+/// This node's LAN candidates: the private source address its kernel picks for the default
+/// IPv4 and IPv6 routes, each with the mesh `port`. `exclude` holds the node's own mesh
+/// addresses, which are never LAN candidates.
+///
+/// A UDP socket that is only connected, never written to, asks the kernel for the route's
+/// source address; no packet leaves the machine. The destinations are documentation addresses
+/// (RFC 5737, RFC 3849), so the answer follows the default route whatever the network is.
+#[cfg(feature = "agent")]
+#[must_use]
+pub fn lan_addresses(port: u16, exclude: &[IpAddr]) -> Vec<SocketAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
+    let probes = [
+        (
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9)),
+        ),
+        (
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+            SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 9)),
+        ),
+    ];
+    let found: Vec<SocketAddr> = probes
+        .iter()
+        .filter_map(|(bind, probe)| {
+            let socket = UdpSocket::bind(bind).ok()?;
+            socket.connect(probe).ok()?;
+            let ip = socket.local_addr().ok()?.ip();
+            (!exclude.contains(&ip)).then(|| SocketAddr::new(ip, port))
+        })
+        .collect();
+    valid_lan(&found)
+}
+
+/// How long one candidate gets before the next: one `WireGuard` handshake retry interval
+/// (`REKEY_TIMEOUT`), so every retry lands on a fresh address.
+pub const STEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How many times a walk goes round its list before it settles on the first candidate.
+pub const ROUNDS: usize = 3;
+
+/// A node's walk through one peer's candidate list.
+///
+/// It starts on the first candidate. While no packet has come back from the peer, each [`STEP`]
+/// moves it to the next one, wrapping, for [`ROUNDS`] rounds; then it returns to the first and
+/// stops. The first received packet stops it for good: `WireGuard` has then roamed to the address
+/// that packet came from, which is a working path by definition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rotation {
+    list: Vec<SocketAddr>,
+    index: usize,
+    since: std::time::Instant,
+    received: u64,
+    steps_left: usize,
+    settled: bool,
+}
+
+impl Rotation {
+    /// Start a walk over `list` at `now`, given the peer's received-bytes counter. `None` when
+    /// there is nothing to walk (fewer than two candidates).
+    #[must_use]
+    pub fn new(list: Vec<SocketAddr>, now: std::time::Instant, received: u64) -> Option<Self> {
+        (list.len() >= 2).then(|| Self {
+            steps_left: ROUNDS * list.len() - 1,
+            list,
+            index: 0,
+            since: now,
+            received,
+            settled: false,
+        })
+    }
+
+    /// The candidate list this walk covers, first candidate first.
+    #[must_use]
+    pub fn list(&self) -> &[SocketAddr] {
+        &self.list
+    }
+
+    /// Whether the walk has stopped: a packet came back, or every round is spent.
+    #[must_use]
+    pub const fn settled(&self) -> bool {
+        self.settled
+    }
+
+    /// When the walk next needs a [`Self::tick`], if it has not stopped.
+    #[must_use]
+    pub fn due(&self) -> Option<std::time::Instant> {
+        (!self.settled).then(|| self.since + STEP)
+    }
+
+    /// Advance the walk at `now` with the peer's received-bytes counter. Returns the address to
+    /// install when the node should switch, else `None`.
+    pub fn tick(&mut self, now: std::time::Instant, received: u64) -> Option<SocketAddr> {
+        if self.settled {
+            return None;
+        }
+        if received != self.received {
+            // Any change, including a reset counter after a rebuild, means packets flowed.
+            self.settled = true;
+            return None;
+        }
+        if now.saturating_duration_since(self.since) < STEP {
+            return None;
+        }
+        self.since = now;
+        if self.steps_left == 0 {
+            self.settled = true;
+            return (self.index != 0).then(|| {
+                self.index = 0;
+                self.list[0]
+            });
+        }
+        self.steps_left -= 1;
+        self.index = (self.index + 1) % self.list.len();
+        Some(self.list[self.index])
+    }
+}
+
+/// Candidate ordering, LAN filtering and the walk.
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn at(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    fn node(guess: &str, reflexive: Option<&str>, lan: &[&str]) -> NodeCandidates {
+        NodeCandidates {
+            guess: Some(at(guess)),
+            reflexive: reflexive.map(at),
+            lan: lan.iter().map(|address| at(address)).collect(),
+        }
+    }
+
+    /// Behind a port-translating NAT the reflexive address comes before the stale guess.
+    #[test]
+    fn reflexive_comes_before_the_guess() {
+        let viewer = node("198.51.100.22:10254", Some("198.51.100.22:30254"), &[]);
+        let peer = node(
+            "198.51.100.21:10254",
+            Some("198.51.100.21:30254"),
+            &["10.1.0.2:10254"],
+        );
+        assert_eq!(
+            order(&viewer, &peer),
+            [at("198.51.100.21:30254"), at("198.51.100.21:10254")]
+        );
+    }
+
+    /// A peer behind the same public address gets the LAN address first; others never see it.
+    #[test]
+    fn lan_addresses_go_only_to_peers_behind_the_same_public_address() {
+        let peer = node(
+            "198.51.100.21:10254",
+            Some("198.51.100.21:10255"),
+            &["10.9.0.3:10254"],
+        );
+        let neighbour = node("198.51.100.21:10254", Some("198.51.100.21:10254"), &[]);
+        assert_eq!(
+            order(&neighbour, &peer),
+            [
+                at("10.9.0.3:10254"),
+                at("198.51.100.21:10255"),
+                at("198.51.100.21:10254")
+            ]
+        );
+        let stranger = node("203.0.113.9:10254", None, &[]);
+        assert!(
+            !order(&stranger, &peer).contains(&at("10.9.0.3:10254")),
+            "a private address must not leave its site"
+        );
+    }
+
+    /// Before any observation the list is the guess alone, exactly the pre-#515 address.
+    #[test]
+    fn an_unobserved_peer_keeps_the_older_address() {
+        let viewer = node("198.51.100.22:10254", None, &[]);
+        let peer = node("198.51.100.21:10254", None, &[]);
+        assert_eq!(order(&viewer, &peer), [at("198.51.100.21:10254")]);
+        assert_eq!(peer.primary(), Some(at("198.51.100.21:10254")));
+    }
+
+    /// Reported LAN addresses must be private, sendable and few.
+    #[test]
+    fn only_private_sendable_addresses_count_as_lan() {
+        let reported = [
+            at("10.1.0.2:10254"),
+            at("198.51.100.4:10254"),
+            at("127.0.0.1:10254"),
+            at("169.254.1.1:10254"),
+            at("100.64.11.2:10254"),
+            at("[fd00::2]:10254"),
+            at("10.1.0.2:10254"),
+        ];
+        assert_eq!(
+            valid_lan(&reported),
+            [at("10.1.0.2:10254"), at("100.64.11.2:10254")]
+        );
+        assert!(is_lan("172.16.0.1".parse().unwrap()));
+        assert!(is_lan("fd12::1".parse().unwrap()));
+        assert!(!is_lan("100.128.0.1".parse().unwrap()));
+        assert!(!is_lan("2001:db8::1".parse().unwrap()));
+    }
+
+    /// The walk moves every step, wraps, and settles on the first candidate after its rounds.
+    #[test]
+    fn a_silent_peer_is_walked_round_then_left_on_the_first_candidate() {
+        let start = Instant::now();
+        let list = vec![at("10.9.0.3:10254"), at("198.51.100.21:10255")];
+        let mut walk = Rotation::new(list.clone(), start, 7).unwrap();
+        assert_eq!(walk.tick(start + Duration::from_secs(4), 7), None);
+        let mut installed = Vec::new();
+        let mut now = start;
+        for _ in 0..10 {
+            now += STEP;
+            if let Some(next) = walk.tick(now, 7) {
+                installed.push(next);
+            }
+        }
+        assert_eq!(
+            installed,
+            [list[1], list[0], list[1], list[0], list[1], list[0]]
+        );
+        assert!(walk.settled());
+        assert_eq!(walk.due(), None);
+    }
+
+    /// The first packet back ends the walk where it is.
+    #[test]
+    fn a_received_packet_stops_the_walk() {
+        let start = Instant::now();
+        let list = vec![at("10.9.0.3:10254"), at("198.51.100.21:10255")];
+        let mut walk = Rotation::new(list.clone(), start, 0).unwrap();
+        assert_eq!(walk.tick(start + STEP, 0), Some(list[1]));
+        assert_eq!(walk.tick(start + STEP * 2, 92), None);
+        assert!(walk.settled());
+        assert_eq!(walk.tick(start + STEP * 9, 92), None);
+    }
+
+    /// A single candidate needs no walk.
+    #[test]
+    fn one_candidate_has_nothing_to_walk() {
+        assert!(Rotation::new(vec![at("198.51.100.21:10255")], Instant::now(), 0).is_none());
+    }
+}

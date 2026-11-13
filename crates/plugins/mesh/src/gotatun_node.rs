@@ -38,6 +38,7 @@ use tokio::{
 use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 use crate::{
+    candidates::Rotation,
     dataplane::Config,
     gotatun_tun::LinuxTun,
     policy::{model::PublicKey, rules::TrafficPolicy},
@@ -383,6 +384,7 @@ impl Engine {
                     info,
                     health: worker_health,
                     restart_at: None,
+                    walks: BTreeMap::new(),
                 };
                 runtime.block_on(run_worker(
                     receiver,
@@ -700,6 +702,9 @@ struct RuntimeState {
     health: Arc<Health>,
     /// When a device that stopped on a fatal error is rebuilt.
     restart_at: Option<Instant>,
+    /// Each peer's walk through its direct-path candidates (#515), by the key that owns its
+    /// endpoint, with the peer it was started for: a re-installed peer starts a new walk.
+    walks: BTreeMap<PublicKey, (crate::dataplane::Peer, Rotation)>,
 }
 
 struct PendingDevice {
@@ -724,6 +729,14 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
+/// Wait until the next candidate walk step is due, or forever when no walk is running.
+async fn walk_due(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the worker.
 ///
 /// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
@@ -740,15 +753,23 @@ async fn run_worker(
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
+    // A restored configuration may already carry candidates.
+    state.refresh_walks().await;
     loop {
+        let next_walk = state.next_walk();
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
                     let result = state.apply(*config).await;
-                    if result.is_ok() {
+                    let applied = result.is_ok();
+                    if applied {
                         observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
                     }
                     let _ = reply.send(result);
+                    // After the reply: a new walk reads the counters once, off the apply path.
+                    if applied {
+                        state.refresh_walks().await;
+                    }
                 }
                 Some(WorkerCommand::SetMtu { mtu, reply }) => {
                     let _ = reply.send(state.update_mtu(mtu));
@@ -813,6 +834,9 @@ async fn run_worker(
             }
             () = restart_due(state.restart_at), if state.restart_at.is_some() => {
                 state.restart().await;
+            }
+            () = walk_due(next_walk), if next_walk.is_some() => {
+                state.step_walks().await;
             }
         }
     }
@@ -921,8 +945,9 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Install a relay endpoint on the peer whose key currently owns its host routes.
-    #[cfg(feature = "relay")]
+    /// Install `endpoint` on the peer whose key currently owns its host routes: a relay address,
+    /// or the next direct-path candidate of a walk (#515). Keys, routes and keepalive stay as the
+    /// configuration says; only the address the next packet goes to changes.
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         let policy = self
             .config
@@ -945,7 +970,86 @@ impl RuntimeState {
             .ok_or(io::ErrorKind::NotConnected)?
             .write(async |device| device.add_or_update_peers(peers).await)
             .await
-            .map_err(|_| io::Error::other("GotaTun relay endpoint could not be installed."))
+            .map_err(|_| io::Error::other("GotaTun peer endpoint could not be installed."))
+    }
+
+    /// Start a candidate walk for each peer whose list is new, and drop walks whose peer changed
+    /// or left (#515).
+    ///
+    /// `apply` re-installs a peer, and with it the first candidate, only when the peer itself
+    /// changed. So a walk survives exactly while its peer is unchanged, and an unrelated policy
+    /// edit never sends a peer back to its first candidate.
+    async fn refresh_walks(&mut self) {
+        let Some(config) = self.config.as_ref() else {
+            self.walks.clear();
+            return;
+        };
+        let wanted: BTreeMap<PublicKey, crate::dataplane::Peer> = config
+            .peers
+            .values()
+            .filter(|policy| {
+                peer_has_network_access(policy)
+                    && policy.peer.endpoint.is_some()
+                    && !policy.peer.candidates.is_empty()
+            })
+            .map(|policy| (active_peer_key(&policy.peer), policy.peer.clone()))
+            .collect();
+        self.walks
+            .retain(|key, (peer, _)| wanted.get(key).is_some_and(|wanted| wanted == peer));
+        if wanted.keys().all(|key| self.walks.contains_key(key)) {
+            return;
+        }
+        let Ok(counters) = self.counters().await else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        for (key, peer) in wanted {
+            if self.walks.contains_key(&key) {
+                continue;
+            }
+            let list = peer
+                .endpoint
+                .into_iter()
+                .chain(peer.candidates.iter().copied());
+            let received = counters.get(&key).map_or(0, |stats| stats.received_bytes);
+            if let Some(walk) = Rotation::new(list.collect(), now, received) {
+                self.walks.insert(key, (peer, walk));
+            }
+        }
+    }
+
+    /// When the earliest running walk needs its next step.
+    fn next_walk(&self) -> Option<Instant> {
+        self.walks
+            .values()
+            .filter_map(|(_, walk)| walk.due())
+            .min()
+            .map(Instant::from_std)
+    }
+
+    /// Step every due walk with the peers' received counters and install the addresses they
+    /// move to. A stopped device has no counters to judge by, so nothing moves until it is back.
+    async fn step_walks(&mut self) {
+        if self.device.is_none() {
+            return;
+        }
+        let Ok(counters) = self.counters().await else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let moves: Vec<_> = self
+            .walks
+            .iter_mut()
+            .filter_map(|(key, (_, walk))| {
+                let received = counters.get(key).map_or(0, |stats| stats.received_bytes);
+                walk.tick(now, received).map(|next| (*key, next))
+            })
+            .collect();
+        for (key, endpoint) in moves {
+            // A failed install leaves the old address; the walk's next step tries again.
+            let _ = self.set_endpoint(key, endpoint).await;
+        }
+        self.walks.retain(|_, (_, walk)| !walk.settled());
     }
 
     /// Prepare a peer for relayed traffic while preserving any session it already established.
@@ -1203,6 +1307,7 @@ impl RuntimeState {
         self.tun.take();
         self.config = None;
         self.restart_at = None;
+        self.walks.clear();
     }
 }
 
@@ -1722,6 +1827,7 @@ mod tests {
             },
             health: Arc::clone(&health),
             restart_at: None,
+            walks: BTreeMap::new(),
         };
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
         let endpoint_refresh = Arc::new(EndpointRefreshSignal::default());
@@ -1786,6 +1892,7 @@ mod tests {
                             ipv6: "fd01::1".parse().expect("peer IPv6"),
                         },
                         endpoint,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

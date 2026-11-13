@@ -4134,6 +4134,7 @@ mod tests {
                                 previous_active: false,
                                 addresses: addresses(id),
                                 endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
+                                candidates: Vec::new(),
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
