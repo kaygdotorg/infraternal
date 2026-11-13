@@ -271,6 +271,12 @@ impl PeerAdmissionUdpReceiver {
         Self { socket, admission }
     }
 
+    /// The address the wrapped socket is bound to, for the Mac tests that check socket reuse.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
     /// Run the guard on one received datagram.
     async fn admits(&self, packet: &Packet, source: SocketAddr) -> bool {
         !PeerAdmission::needs_admission(packet)

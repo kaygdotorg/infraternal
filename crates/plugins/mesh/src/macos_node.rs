@@ -1,6 +1,7 @@
 //! Restores the Mac userspace Mesh node and its utun routes across daemon lifetimes.
 
 use crate::dataplane::Config;
+use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
 use bytes::Buf;
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
@@ -41,6 +42,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::{
+        RwLock,
         mpsc::{self, UnboundedReceiver, UnboundedSender},
         watch,
     },
@@ -122,16 +124,22 @@ impl RotationKey {
     }
 }
 
+/// Holds the already-bound UDP sockets and the live handshake admission state for `GotaTun`.
+///
+/// Every receive half it hands out runs the shared admission guard (J555 F2), so an initiation
+/// from a key this Mac has not installed gets no reply, the same as on Linux. Clones share the
+/// listener and the guard.
 #[derive(Clone)]
 struct BoundUdpFactory {
     send: GotaUdpSocket,
     receive: GotaUdpSocket,
     port: u16,
+    admission: Arc<RwLock<PeerAdmission>>,
 }
 
 impl UdpTransportFactory for BoundUdpFactory {
     type Send = GotaUdpSocket;
-    type Recv = GotaUdpSocket;
+    type Recv = PeerAdmissionUdpReceiver;
 
     async fn bind(
         &mut self,
@@ -140,8 +148,19 @@ impl UdpTransportFactory for BoundUdpFactory {
         if params.addr.is_some() || params.port != self.port {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        Ok((self.send.clone(), self.receive.clone()))
+        Ok((
+            self.send.clone(),
+            PeerAdmissionUdpReceiver::new(self.receive.clone(), Arc::clone(&self.admission)),
+        ))
     }
+}
+
+/// The identities a peer list installs in `GotaTun`, which are the ones the guard admits.
+fn installed_keys(peers: &[WireGuardPeer]) -> BTreeSet<crate::policy::model::PublicKey> {
+    peers
+        .iter()
+        .map(|peer| crate::policy::model::PublicKey(*peer.public_key.as_bytes()))
+        .collect()
 }
 
 /// Peer statistics use the same public shape as the Linux kernel adapter.
@@ -1214,9 +1233,11 @@ impl PendingWorker {
                         return;
                     }
                 };
+                // The listener's guard gets its own copy; the device takes `private_key` below.
+                let guard_key = private_key.clone();
                 let initialized = runtime.block_on(async move {
                     let utun = MacUtun::from_open(open)?;
-                    let (factory, port) = bind_udp(requested_port).await?;
+                    let (factory, port) = bind_udp(requested_port, guard_key).await?;
                     let info = RuntimeInfo {
                         interface: utun.name().to_owned(),
                         port,
@@ -1231,6 +1252,7 @@ impl PendingWorker {
                         return;
                     }
                 };
+                let admission = Arc::clone(&factory.admission);
                 let PathBudgets {
                     route_mtus: initial_route_mtus,
                     interface_mtu,
@@ -1266,6 +1288,8 @@ impl PendingWorker {
                         .map(peers_for_config)
                         .transpose()?
                         .unwrap_or_default();
+                    // The guard knows the first peers before the device receives anything.
+                    admission.write().await.set_peers(installed_keys(&peers));
                     let device = DeviceBuilder::new()
                         .with_udp(factory)
                         .with_private_key(private_key)
@@ -1318,6 +1342,7 @@ impl PendingWorker {
                     route_mtus: initial_route_mtus,
                     interface_mtu,
                     port: info.port,
+                    admission,
                     #[cfg(feature = "mesh-dns")]
                     dns_resolver,
                     #[cfg(feature = "mesh-dns")]
@@ -1373,12 +1398,18 @@ impl PendingWorker {
 ///
 /// The bound socket remains owned by the worker, and the returned port is persisted and advertised
 /// so coordinator peers target the actual listener. An explicit operator override stays exact.
+/// The returned factory carries a handshake admission guard for `private_key` with no peers
+/// yet; the worker installs its peers before the device receives anything.
 /// # Errors
 /// Returns socket errors, rejects the reserved kernel `WireGuard` port, or reports allocation failure.
-async fn bind_udp(request: crate::listen_port::Request) -> io::Result<(BoundUdpFactory, u16)> {
+async fn bind_udp(
+    request: crate::listen_port::Request,
+    private_key: StaticSecret,
+) -> io::Result<(BoundUdpFactory, u16)> {
     if request.port == 51_820 {
         return Err(io::ErrorKind::InvalidInput.into());
     }
+    let admission = Arc::new(RwLock::new(PeerAdmission::new(private_key)));
     let mut factory = UdpSocketFactory::default();
     if request.port != 0 {
         let params = UdpTransportFactoryParams {
@@ -1396,6 +1427,7 @@ async fn bind_udp(request: crate::listen_port::Request) -> io::Result<(BoundUdpF
                         send,
                         receive,
                         port,
+                        admission,
                     },
                     port,
                 ));
@@ -1417,6 +1449,7 @@ async fn bind_udp(request: crate::listen_port::Request) -> io::Result<(BoundUdpF
                     send,
                     receive,
                     port,
+                    admission,
                 },
                 port,
             ));
@@ -1527,6 +1560,8 @@ struct RuntimeState {
     /// The utun MTU of the applied snapshot; a failed update restores it without re-probing.
     interface_mtu: u16,
     port: u16,
+    /// The receive guard; it follows the peers and key the live device accepted.
+    admission: Arc<RwLock<PeerAdmission>>,
     #[cfg(feature = "mesh-dns")]
     dns_resolver: Option<crate::dns::Resolver>,
     #[cfg(feature = "mesh-dns")]
@@ -1582,9 +1617,12 @@ impl RuntimeState {
         self.device
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
-            .set_private_key(private_key)
+            .set_private_key(private_key.clone())
             .await
-            .map_err(|_| io::Error::other("WireGuard private key could not be changed."))
+            .map_err(|_| io::Error::other("WireGuard private key could not be changed."))?;
+        // The guard follows only a key the live device accepted.
+        self.admission.write().await.set_private_key(private_key);
+        Ok(())
     }
 
     /// Apply one accepted snapshot, its endpoint-derived route MTUs, and its DNS names.
@@ -1702,6 +1740,7 @@ impl RuntimeState {
         let new_routes = route_addresses(&config);
         validate_underlay_routes(&config, &new_routes)?;
         let peers = peers_for_config(&config)?;
+        let admitted = installed_keys(&peers);
         let old_config = self.config.clone();
         let old_routes = self.routes.clone();
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -1816,6 +1855,9 @@ impl RuntimeState {
                 self.dns_resolver = pending_dns_resolver;
             }
         }
+        // The receive guard follows only snapshots the live device fully accepted. A failure
+        // above has restored (or, for an authority replacement, stopped) the old peers.
+        self.admission.write().await.set_peers(admitted);
         self.config = Some(config);
         Ok(RuntimeInfo {
             interface,
@@ -3096,12 +3138,12 @@ mod tests {
     mod authority_mtu;
 
     use super::{
-        BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, UdpSocketFactory,
-        UdpTransportFactoryParams, Worker, WorkerCommand, macos_snapshot_binding_is_authorized,
-        mpsc, parse_utun_payload, peers_for_config, read_public_state, reconcile,
-        rotation_crash_checkpoint, route_addresses, route_mtus_to_refresh, stage_chunk,
-        utun_family, valid_utun_name, validate_config, validate_underlay_routes,
-        write_public_state, write_public_state_full_snapshot,
+        BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, PeerAdmission, RuntimeInfo, RwLock,
+        SavedState, StaticSecret, UdpSocketFactory, UdpTransportFactoryParams, Worker,
+        WorkerCommand, macos_snapshot_binding_is_authorized, mpsc, parse_utun_payload,
+        peers_for_config, read_public_state, reconcile, rotation_crash_checkpoint, route_addresses,
+        route_mtus_to_refresh, stage_chunk, utun_family, valid_utun_name, validate_config,
+        validate_underlay_routes, write_public_state, write_public_state_full_snapshot,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -4917,6 +4959,7 @@ mod tests {
             send,
             receive,
             port,
+            admission: Arc::new(RwLock::new(PeerAdmission::new(StaticSecret::from([7; 32])))),
         };
         let (reused_send, reused_receive) = bound
             .bind(&UdpTransportFactoryParams { addr: None, port })
@@ -4997,10 +5040,13 @@ mod tests {
             udp::UdpRecv as _,
             x25519::{PublicKey as X25519PublicKey, StaticSecret},
         };
-        let (mut factory, port) = super::bind_udp(crate::listen_port::Request {
-            port: 0,
-            allow_fallback: true,
-        })
+        let (mut factory, port) = super::bind_udp(
+            crate::listen_port::Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            StaticSecret::from([0x31; 32]),
+        )
         .await
         .expect("listener");
         let (_send, mut receive) = factory
