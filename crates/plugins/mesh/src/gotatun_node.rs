@@ -687,6 +687,8 @@ fn engine_runtime() -> io::Result<(tokio::runtime::Runtime, bool)> {
     Ok((runtime, thp_disabled))
 }
 
+/// Everything the engine worker owns: the TUN, the live device, its rebuild material, the applied
+/// configuration and each peer's candidate walk (#515).
 struct RuntimeState {
     tun: Option<LinuxPacketIo>,
     /// Shared only with forced-handshake tasks, which `stop` ends before stopping the device.
@@ -749,11 +751,13 @@ async fn walk_due(at: Option<Instant>) {
     }
 }
 
-/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the worker.
+/// The engine worker's loop: serve commands one at a time, reap handshake tasks, rebuild a failed
+/// device, keep mesh routes on the peers' live endpoints, and step candidate walks when one is due.
 ///
 /// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
 /// either direction requests re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
-/// writes run on Tokio's blocking pool.
+/// writes run on Tokio's blocking pool. A walk step that moves a peer's address shows up in that
+/// scan too, so the routes follow the walk.
 async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
     mut state: RuntimeState,
@@ -1099,6 +1103,7 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("GotaTun relay peer could not be reset."))
     }
 
+    /// Point `key` at a relay `endpoint` and start a handshake through it at once.
     #[cfg(feature = "relay")]
     async fn force_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         self.set_endpoint(key, endpoint).await?;
@@ -1334,6 +1339,7 @@ impl RuntimeState {
         Ok(counters)
     }
 
+    /// Stop the device and drop the TUN, the configuration and every walk.
     async fn stop(&mut self) {
         // Ending every handshake task drops its device handle, so this one is the last.
         self.handshakes.abort_all();
@@ -1967,6 +1973,8 @@ mod tests {
         }
     }
 
+    /// A coordinator peer becomes one `GotaTun` peer with its key, address, host routes and the
+    /// keepalive for its role.
     #[test]
     fn peer_conversion_uses_coordinator_keys_endpoints_and_host_allowed_ips() {
         let endpoint: SocketAddr = "192.0.2.4:51831".parse().expect("endpoint");

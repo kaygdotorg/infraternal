@@ -365,6 +365,7 @@ mod tests {
         serde_json::to_vec(page).unwrap()
     }
 
+    /// One presence row without an engine address.
     fn row(node: u64, handshake: u64, received: u64, keepalive: u64) -> PeerRow {
         PeerRow {
             node: NodeId(node),
