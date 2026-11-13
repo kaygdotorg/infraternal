@@ -283,9 +283,7 @@ impl RemoteBackend {
             return Err(unavailable());
         };
         if !self.issuer.ready() {
-            return Err(Failure::install(
-                "Set up or unlock host connections with an administrator passkey before adding a host.",
-            ));
+            return Err(Failure::authority_locked());
         }
         if let Some(host_id) = self
             .existing_host(&authority.owner, address, lookup, retire)
@@ -571,9 +569,7 @@ impl RemoteBackend {
             }
         };
         if !self.issuer.ready() {
-            return Err(Failure::install(
-                "Set up or unlock host connections with an administrator passkey before adding a host.",
-            ));
+            return Err(Failure::authority_locked());
         }
         let (mode, uid) = match target.mode {
             InstallMode::Rootless => (Mode::Rootless, check.uid),
@@ -998,9 +994,7 @@ impl Backend for RemoteBackend {
                 ));
             }
             if !self.issuer.ready() {
-                return Err(Failure::install(
-                    "Set up or unlock host connections with an administrator passkey before adding a host.",
-                ));
+                return Err(Failure::authority_locked());
             }
             let uid = match target.mode {
                 InstallMode::Rootless => check.uid,
@@ -1265,9 +1259,7 @@ fn decide_stuck_install(facts: &StuckFacts) -> Result<StuckInstall, Failure> {
         return Ok(StuckInstall::Finish);
     }
     if !facts.ca_ready {
-        return Err(Failure::install(
-            "Set up or unlock host connections with an administrator passkey before adding a host.",
-        ));
+        return Err(Failure::authority_locked());
     }
     Ok(StuckInstall::Replace)
 }
@@ -2964,6 +2956,7 @@ mod tests {
         assert_eq!(issued, 1, "one invitation for a new host id");
     }
 
+    /// A locked CA refuses re-enrollment with the `authority_locked` kind before anything on the host changes.
     #[tokio::test]
     async fn a_locked_ca_refuses_reenrollment_before_anything_changes() {
         let f = fixture(false).await;
@@ -2977,6 +2970,11 @@ mod tests {
             failed.message.contains("administrator passkey"),
             "{}",
             failed.message
+        );
+        // The page offers its own Unlock only for this kind (#510); it must not depend on the sentence.
+        assert_eq!(
+            failed.failure.as_ref().map(|failure| failure.kind),
+            Some(infraternal_plugin_ssh::model::FailureKind::AuthorityLocked)
         );
         assert!(events.iter().all(|event| event.leftovers.is_none()));
         assert_eq!(mutating(&scripts), Vec::<&str>::new());

@@ -338,6 +338,10 @@
 @media (prefers-reduced-motion: reduce) { .ah-error { animation: none; } }
 .ah-keyblock { margin: 0 0 0.875rem; }
 .ah-keyblock .ui-kv { margin: 0; }
+/* The account name that pairs the password for the browser (#510): out of sight and reach, but a real field, not display:none. */
+.ah-account { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; border: 0; opacity: 0; overflow: hidden; pointer-events: none; }
+.ah-method-form { margin: 0; }
+.ah-reveal-in { position: relative; }
 .ah-input { display: block; width: 100%; height: var(--ah-field-h); margin: 0.75rem 0 0; padding: 0 0.875rem; border: 1px solid var(--line); border-radius: var(--r-md); outline: none; background: var(--ah-field); color: var(--fg); font: var(--fw-body) var(--ui-size-body)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); }
 .ah-input::placeholder { color: var(--fg-3); opacity: 1; }
 .ah-input:focus { border-color: rgb(from var(--fg) r g b / 0.28); background: var(--ah-field-focus); }

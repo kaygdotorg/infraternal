@@ -52,6 +52,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "unrecognized_install": return takeoverStopped(failure) ? "Take over didn't finish" : "Already set up elsewhere";
     case "unproven_files": return "Setup files it can't vouch for";
     case "no_account": return "Couldn't find that account on this host";
+    case "authority_locked": return "Host connections are locked";
     case "install":
       // Manager failures use the old generic kind so cached clients remain truthful (#433).
       if (failure.exit_status === 80 || failure.exit_status === 81) return "Take over didn't finish";
@@ -159,7 +160,7 @@ export function stagesOf(view: TargetView): StageView[] {
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "unlock" | "none";
 
 /**
  * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
@@ -311,6 +312,14 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       happened: "Use an account that exists there, or add it as root.",
       next: "",
       fix: "none", tone: "danger",
+    };
+    // The server's certificate authority is locked (it restarted while this card was open). Nothing was changed on the
+    // host. The card offers the same passkey unlock as the host-connections toast, then tries again.
+    case "authority_locked": return {
+      title: "Host connections are locked",
+      happened: "This server needs an administrator passkey to connect new hosts again.",
+      next: `Unlock them to carry on with ${name}.`,
+      fix: "unlock", tone: "info",
     };
     case "install":
       // Current clients retain the specific Take over copy; older clients show a generic setup failure.

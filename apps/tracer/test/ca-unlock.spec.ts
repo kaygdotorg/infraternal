@@ -225,3 +225,19 @@ test("the inbox line is collapsed, expands to Unlock, and unlocking clears the c
   await expect(card).toHaveCount(0);
   await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked");
 });
+
+test("a brand-new account with no host is not told the server restarted, and a host brings the toast (#512)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "ca=locked&nohosts=1");
+  // sleep: the authority status check runs 1.2 s after load, and an absence can only be shown after it.
+  await page.waitForTimeout(2200);
+  await expect(page.locator(".ui-toast")).toHaveCount(0);
+  await page.locator("#sidebar-toggle").click();
+  await expect(page.locator(".ui-inbox:not([hidden])")).toHaveCount(0);
+  // The palette still offers the unlock: a first host needs it.
+  expect(await paletteLabels(page, "unlock host")).toContain(LABEL);
+  await page.keyboard.press("Escape");
+  // With hosts the same lock is news: the toast says so.
+  await open(page, "ca=locked");
+  await expect(page.locator(".ui-toast")).toContainText("The server restarted", { timeout: 8000 });
+});

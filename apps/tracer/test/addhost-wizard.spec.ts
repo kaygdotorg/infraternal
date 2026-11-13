@@ -16,7 +16,8 @@ type Probe = { views(): Array<{ id: string; windows: string[] }>; activeWindow()
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
-async function config(page: Page, body: Record<string, string>): Promise<void> {
+/** Sets the test double's scripted modes (`/__mock/bootstrap/config`); `drop: true` closes every open bootstrap socket, as a server restart does. */
+async function config(page: Page, body: Record<string, string | boolean>): Promise<void> {
   await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
 
@@ -268,6 +269,21 @@ async function trustWithRapidClicks(page: Page, clicks: number): Promise<void> {
   expect(await sawFailure(page)).toEqual([]);
   expect(confirmations).toHaveLength(1);
 }
+
+test("a server restart under the host-key step is recovered: the key is fetched again and can be trusted (#510)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  // The server restarts under the open card: its sockets close, and what the page knew of the key is gone.
+  await config(page, { drop: true });
+  // The card must recover by itself and ask again for the new observation, never stay on a dead "Trust" button.
+  const trust = inWizard(page, "Trust and continue");
+  await expect(trust).toBeVisible({ timeout: 15_000 });
+  await trust.click();
+  await expect(wizard(page).locator(".ah-error")).toHaveCount(0);
+  await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-newkey.lab");
+});
 
 test("a double click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
   await trustWithRapidClicks(page, 2);
@@ -719,6 +735,43 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(wizard(page).locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("Use an account that exists there, or add it as root.");
     await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });
+  });
+
+  test(`a locked server offers Unlock on the card and carries on after it at ${viewport.width} (#510)`, async ({ page }) => {
+    // The card opened while the server was unlocked, then the server restarted and locked again: the card's own
+    // check passed, so the lock arrives as the host's failure. The card must not be a dead end.
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@relock.lab");
+    const failure = onScreen(page, "failure");
+    await expect(failure.getByRole("heading", { name: "Host connections are locked" })).toBeVisible({ timeout: 15_000 });
+    await expect(failure).toContainText("administrator passkey");
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `locked-card-${viewport.width}.png`) });
+    // The same Unlock as the host-connections toast: it runs the shared ceremony, then the host carries on.
+    await wizard(page).locator("footer, .ah-foot").getByRole("button", { name: "Unlock", exact: true }).click();
+    await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock.lab");
+  });
+
+  test(`after Unlock a host whose password was used once asks for it again, and says why at ${viewport.width} (#510)`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@relock-pw.lab");
+    await expect(page.getByRole("heading", { name: /Sign in to relock-pw.lab/ })).toBeVisible({ timeout: 15_000 });
+    await page.getByText("Sign in with a password").click();
+    await page.locator("[data-secret='password']").fill("not-a-real-password");
+    await inWizard(page, "Sign in").click();
+    await expect(onScreen(page, "failure").getByRole("heading", { name: "Host connections are locked" })).toBeVisible({ timeout: 15_000 });
+    await wizard(page).locator(".ah-foot").getByRole("button", { name: "Unlock", exact: true }).click();
+    // The password was sent once and is gone: a retry would fail to sign in, so the card asks for it again.
+    const choose = onScreen(page, "choose");
+    await expect(choose.locator(".ah-lede")).toContainText("Your password was used once and isn't kept", { timeout: 15_000 });
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `sign-in-again-${viewport.width}.png`) });
+    await page.getByText("Sign in with a password").click();
+    await page.locator("[data-secret='password']").fill("not-a-real-password");
+    await inWizard(page, "Sign in").click();
+    await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock-pw.lab");
   });
 
   test(`a failed host's progress row says it in one line beside its name at ${viewport.width}`, async ({ page }) => {

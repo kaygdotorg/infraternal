@@ -67,7 +67,13 @@ interface Entry {
 }
 
 /** One host of the batch; everything about its progress is `view`, folded from server events. */
-interface Job { entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean }
+interface Job {
+  entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean;
+  /** Set while the host is being asked again after the server went away under its key check: how many tries so far. */
+  reasks?: number;
+}
+/** How many times a host is asked again after a restart, one second apart: a restart takes a few seconds, not minutes. */
+const REASK_TRIES = 15;
 
 /** What the person sees for a host: an attempt paused on leftovers reads as needing attention, like a failure. */
 const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : awaitingKey(job.view) ? "running" : job.view.state;
@@ -194,6 +200,7 @@ export class Wizard {
     }
     this.root.addEventListener("click", this.onClick);
     this.root.addEventListener("change", this.onChange);
+    this.root.addEventListener("submit", this.onSubmit);
     // Keys go through the document: after a step change the focused button is gone, and focus is on the body.
     document.addEventListener("keydown", this.onKeyDown, true);
     this.root.addEventListener("paste", this.onPaste, true);
@@ -578,6 +585,31 @@ export class Wizard {
     } finally { this.setBusy(false); }
   }
 
+  /**
+   * The card's own Unlock: the same ceremony and failure wording as the host-connections toast (`runUnlock`), then the
+   * failed host tries again on its open run. A refusal stays on this page with the reason, so the person can try again.
+   */
+  private async unlockAndRetry(job: Job): Promise<void> {
+    if (this.busy || !this.deps.service.unlockAuthority) return;
+    this.setBusy(true);
+    try {
+      const result = await runUnlock(this.deps.service);
+      if (!this.alive || this.closing) return;
+      if (!result.ok) { this.showError(result.message); return; }
+      this.authorityReady = true;
+      // A password or key is sent once and is gone after the attempt that used it (D274), so trying the host again
+      // would only fail to sign in. Ask for it again, saying why, instead of a retry that cannot work.
+      const method = job.view.authentication?.method;
+      if (method === "password" || method === "user-key") {
+        this.chooseLede = `Host connections are unlocked. Your ${method === "password" ? "password" : "key"} was used once and isn't kept, so sign in to ${job.entry.label} again.`;
+        this.go("choose");
+      } else this.retryJob(job);
+    } finally { this.setBusy(false); }
+  }
+
+  /** Replaces the sign-in page's first sentence once (set after an unlock that used up a one-off password or key). */
+  private chooseLede: string | undefined;
+
   private beginBatch(root: boolean): void {
     this.closeAllRuns();
     const ids = this.targetIds(this.selected);
@@ -623,6 +655,7 @@ export class Wizard {
     const job = this.jobs.find((item) => item.run === run && item.target === event.target);
     if (!job) return;
     const was = job.view.state;
+    delete job.reasks;
     job.view = foldEvent(job.view, event);
     this.paint(job);
     this.summarise();
@@ -650,9 +683,20 @@ export class Wizard {
   private onRunClosed(run: ProvisioningRun): void {
     if (!this.alive || this.closing) return;
     let changed = false;
+    const restarted: Job[] = [];
     for (const job of this.jobs) {
       if (job.run !== run) continue;
       job.run = undefined;
+      // The server went away while this host waited for the person to check its key (a restart). What the page held of
+      // that observation is gone with the run, and Trust could only refuse. Ask the host again on a new run: the key
+      // comes back as a new observation, and the person confirms that one (#510).
+      if (awaitingKey(job.view)) { job.reasks = 0; restarted.push(job); continue; }
+      // A new run that closed before it said anything: the server is still coming back. Ask again shortly.
+      if (job.reasks !== undefined && job.reasks < REASK_TRIES && (job.view.state === "pending" || job.view.state === "running")) {
+        job.reasks++;
+        window.setTimeout(() => { if (this.alive && !this.closing && job.reasks !== undefined && !job.run) this.retryJob(job); }, 1000);
+        continue;
+      }
       if (job.view.state === "pending" || job.view.state === "running") {
         const message = "The connection to the server ended before setup finished.";
         job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] }, leftovers: undefined };
@@ -661,6 +705,7 @@ export class Wizard {
       }
     }
     if (changed) { this.summarise(); this.settle(); }
+    for (const job of restarted) this.retryJob(job);
   }
 
   private enrolledOf(job: Job): EnrolledHost {
@@ -779,7 +824,7 @@ export class Wizard {
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.
-    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : "Install from the host";
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : fix === "unlock" ? "Unlock" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -860,8 +905,9 @@ export class Wizard {
     }
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
+    const unlock = guide.fix === "unlock" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="unlock-retry">${svg(ICON.shieldCheck)}<span>Unlock</span></button>` : "";
     const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${guide.fix === "none" || guide.fix === "take-over" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${unlock}${guide.fix === "none" || guide.fix === "take-over" || guide.fix === "unlock" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
     if (closing.length) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       if (label) label.textContent = closing.length === 1 ? "Close it and start fresh" : "Close them and start fresh";
@@ -925,12 +971,17 @@ export class Wizard {
   private renderChoose(page: HTMLElement): void {
     const job = this.fixing!;
     const name = escapeHtml(job.entry.label);
+    // The password is the SSH account's, so the form names that account for the browser: Safari then offers "Save
+    // Password?" under that name, not an empty one (#510). It is `user@host[:port]`, or the bare host when the server
+    // chooses the user. (Not `addressText`: for a listed host that is the listing's id, not an account.)
+    const account = escapeHtml(`${job.entry.user ? `${job.entry.user}@` : ""}${job.entry.address}${job.entry.port ? `:${job.entry.port}` : ""}`);
     const first = this.serverKey ? "server" : this.savedKey ? "saved" : "key";
     const option = (value: string, title: string, hint: string): string => `<label class="ah-option"><input type="radio" name="ah-method" value="${value}" ${value === first ? "checked" : ""} /><span class="ah-radio" aria-hidden="true"></span>
       <span class="ah-option-text"><span>${title}</span><span class="ah-option-hint">${hint}</span></span></label>`;
     const reveal = (value: string, inner: string): string => `<div class="ah-reveal" data-reveal="${value}" data-open="${value === first}"><div class="ah-reveal-in">${inner}</div></div>`;
     page.innerHTML = `${this.hero(ICON.key)}<h1 class="ah-title">Sign in to ${escapeHtml(this.nameWithPort(job.entry))}</h1>
-      <p class="ah-lede">${escapeHtml(guideFor(job.entry.label, job.view.failure).happened)} Choose how to sign in.</p>
+      <p class="ah-lede">${this.chooseLede ? escapeHtml(this.chooseLede) : `${escapeHtml(guideFor(job.entry.label, job.view.failure).happened)} Choose how to sign in.`}</p>
+      <form class="ah-method-form" data-ah-method-form novalidate><button type="submit" hidden tabindex="-1" aria-hidden="true"></button>
       <div class="ah-options" role="radiogroup" aria-label="How to sign in">
         ${this.serverKey ? option("server", "Use this server's key", "SSH public key in ~/.ssh/authorized_keys. Add it to the host, then try again.") + reveal("server", `<div class="ah-keyblock" data-kv="server"></div><p class="ah-text">Add this line to <span class="ah-code">~/.ssh/authorized_keys</span> on ${name}, then choose Try again.${this.serverKey.locked ? " The server's key is locked until an administrator unlocks it with a passkey." : ""}</p>`) : ""}
         ${this.savedKey ? option("saved", `Use ${escapeHtml(this.savedKey.label)}`, "Unlocked with your passkey, used for this one connection.") : ""}
@@ -938,8 +989,9 @@ export class Wizard {
         ${reveal("key", `<textarea class="ah-secret" data-secret="key" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Private key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" tabindex="-1"></textarea>
           <input class="ah-input" data-secret="passphrase" ${ONE_OFF_SECRET_ATTRS} aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
         ${option("password", "Sign in with a password", "SSH password authentication. Sent once for this connection, not stored.")}
-        ${reveal("password", `<input class="ah-input" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
-      </div>
+        ${reveal("password", `<input class="ah-account" type="text" autocomplete="username" value="${account}" readonly tabindex="-1" aria-label="Account" />
+          <input class="ah-input" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
+      </div></form>
       <button class="ah-link ah-alt" type="button" data-ah="install">Or install from the host instead</button>`;
     if (this.serverKey) {
       const list = createKeyValueList("This server's key");
@@ -947,6 +999,7 @@ export class Wizard {
       page.querySelector<HTMLElement>("[data-kv='server']")!.append(list.root);
     }
     this.chosen = first;
+    this.chooseLede = undefined;
     this.setFoot(this.chooseFoot(first));
   }
 
@@ -957,12 +1010,13 @@ export class Wizard {
     return `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="submit-method"><span>${label}</span></button>`;
   }
 
+  /** Shows the chosen sign-in method's fields (and only those in the Tab order) and names the foot button for it. */
   private selectMethod(value: string): void {
     this.chosen = value;
     for (const reveal of this.current?.querySelectorAll<HTMLElement>(".ah-reveal") ?? []) {
       const open = reveal.dataset.reveal === value;
       reveal.dataset.open = String(open);
-      for (const field of reveal.querySelectorAll<HTMLElement>("textarea, input")) field.tabIndex = open ? 0 : -1;
+      for (const field of reveal.querySelectorAll<HTMLElement>("textarea, input:not(.ah-account)")) field.tabIndex = open ? 0 : -1;
     }
     const primary = this.foot.querySelector<HTMLElement>("[data-ah='submit-method'] span");
     if (primary) primary.textContent = value === "server" ? "Try again" : "Sign in";
@@ -1122,6 +1176,7 @@ export class Wizard {
     this.deps.service.dispose?.();
     this.root.removeEventListener("click", this.onClick);
     this.root.removeEventListener("change", this.onChange);
+    this.root.removeEventListener("submit", this.onSubmit);
     document.removeEventListener("keydown", this.onKeyDown, true);
     this.root.removeEventListener("paste", this.onPaste, true);
     const gone = (): void => { this.teardown(); after?.(); };
@@ -1149,6 +1204,7 @@ export class Wizard {
     this.deps.service.dispose?.();
     this.root.removeEventListener("click", this.onClick);
     this.root.removeEventListener("change", this.onChange);
+    this.root.removeEventListener("submit", this.onSubmit);
     document.removeEventListener("keydown", this.onKeyDown, true);
     this.root.removeEventListener("paste", this.onPaste, true);
     if (this.alive) { this.alive = false; this.resize.disconnect(); this.release(); this.surface.remove(); }
@@ -1182,6 +1238,7 @@ export class Wizard {
     else if (action === "cancel-install") this.dismiss();
     else if (action === "reload") void this.loadDiscovery();
     else if (action === "retry") { if (this.fixing) this.retryJob(this.fixing); }
+    else if (action === "unlock-retry") { if (this.fixing) void this.unlockAndRetry(this.fixing); }
     else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing, this.fixing.view.failure?.closes?.close_challenge); }
     else if (action === "review-take-over") { if (this.fixing) this.go("takeover"); }
     else if (action === "take-over") { if (this.fixing) this.takeOver(this.fixing); }
@@ -1218,6 +1275,16 @@ export class Wizard {
       const primary = this.foot.querySelector<HTMLButtonElement>("[data-ah='as-root']");
       if (primary) primary.disabled = !input.checked;
     } else if (input.name === "ah-method") this.selectMethod(input.value);
+  };
+
+  /**
+   * The sign-in choices are one real form so the browser can pair the password with its account. Its own submit
+   * (Enter in the password field) does what the footer's Sign in button does; the page never navigates.
+   */
+  private readonly onSubmit = (event: SubmitEvent): void => {
+    if (!(event.target as HTMLElement).matches("[data-ah-method-form]")) return;
+    event.preventDefault();
+    void this.submitMethod();
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {

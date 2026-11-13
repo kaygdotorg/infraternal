@@ -177,6 +177,13 @@ test("a login name with no account says so, by name, and offers the two ways for
   expect(guideFor("minipc01", { ...failure, log_tail: [] }).title).toBe("minipc01 couldn't find the account used to sign in");
 });
 
+test("a locked authority offers the card's own Unlock, not a dead end or a plain retry (#510)", () => {
+  const guide = guideFor("minipc01", { kind: "authority_locked", message: "Set up or unlock host connections with an administrator passkey before adding a host.", log_tail: [] });
+  expect(guide.fix).toBe("unlock");
+  expect(guide.title).toBe("Host connections are locked");
+  expect(guide.next).toContain("minipc01");
+});
+
 test("the progress row's line for every install step is one short phrase, never the server's paragraph", () => {
   for (const failed_step of ["connect", "upload", "install", "join", "start", "readiness"] as const) {
     const line = failureLine({ kind: "install", failed_step, message: "A long server sentence. Check things, then try again.", log_tail: ["The remote setup command returned a failure status."] });

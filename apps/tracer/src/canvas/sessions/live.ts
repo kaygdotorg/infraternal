@@ -30,6 +30,7 @@ import { onDemand, whenIdle } from "../../on-demand";
 import type { RefusalAction } from "../../terminal-refusal";
 import type { HostEntry, LinkInfo, SessionBinding, SessionService } from "./adapter";
 import type { ScreenCache } from "./screen-cache.on-demand";
+import { reportShellExit } from "./exit-report";
 
 /** The product's sessions service: terminal windows bound to real sessions, plus the host list the palette and sidebar read. */
 export interface LiveSessionsOptions {
@@ -269,7 +270,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onStaleScreen: (stale) => { if (stale !== this.staleScreen) { this.staleScreen = stale; this.connectionChanged?.(); } },
         onInputHeld: (keys) => { if (keys !== this.heldKeys) { this.heldKeys = keys; this.connectionChanged?.(); } },
         onDisconnected: (forced) => { this.setConnected(false); if (first) options.firstHooks?.onDisconnected?.(forced); },
-        onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
+        onExited: (status) => { reportShellExit(options.onSessionGone, this.model.host, this.model.sessionId, status); this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
         onSessionGone: (status) => { if (first) settle(); options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status); },
         onOpenRefused: (message, sessionList, action) => {

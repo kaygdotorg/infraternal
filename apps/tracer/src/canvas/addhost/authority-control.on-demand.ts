@@ -73,6 +73,10 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
   const emit = (): void => { for (const listener of [...listeners]) listener(); };
   const service = options.service;
   const canUnlock = options.canUnlock ?? ((): boolean => true);
+  // "The server restarted, confirm to reconnect your hosts" is news only when a host exists whose connection is
+  // locked. A brand-new account has none, so neither the toast nor the inbox card is shown (#512); the palette row
+  // stays, because the first host needs the unlock too. Absent answer means a host exists.
+  const hasHosts = options.hasRemoteHosts ?? ((): boolean => true);
 
   const warningRoots = (): AuthorityRootStatus[] => {
     if (!status?.initialized || !canUnlock()) return [];
@@ -93,7 +97,7 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
   /** Our sign-in toast only: other toasts in the stack (an error beside it) are not ours to dismiss. */
   let toastId: string | undefined;
   const publish = (): void => {
-    const waiting = state === "locked" && toastOver && !busy;
+    const waiting = state === "locked" && toastOver && !busy && hasHosts();
     const items: InboxItem[] = warningRoots().map((root) => ({
       id: `authority-expiry-${root.generation}`,
       icon: ICONS.warning,
@@ -111,7 +115,7 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
     inbox?.set("authority", items);
   };
   const offerToast = (): void => {
-    if (offered || state !== "locked" || !canUnlock()) return;
+    if (offered || state !== "locked" || !canUnlock() || !hasHosts()) return;
     offered = true;
     toastOpen = true;
     toastId = core.toast.show({
@@ -164,11 +168,13 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
   // A page that was hidden (another tab, a locked phone) asks again when it returns: another tab's unlock arrives here.
   const onVisible = (): void => { if (document.visibilityState === "visible" && Date.now() - checkedAt > RESUME_MS) void refresh(); };
   document.addEventListener("visibilitychange", onVisible);
+  // The host list can arrive after the first status answer; the toast and the card follow it, in either direction.
+  const offHosts = options.onHostsChange?.(() => { offerToast(); publish(); });
   const first = window.setTimeout(() => { void refresh(); }, Math.max(0, FIRST_CHECK_MS - (Date.now() - createdAt)));
 
   return {
     state: () => state, canUnlock, expiryWarnings: () => warningRoots().map(expiryWarningTitle), review, refresh, unlock,
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { window.clearTimeout(first); window.removeEventListener("tracer:canvas-action", onAction); document.removeEventListener("visibilitychange", onVisible); removeProvider(); existingInbox(core)?.set("authority", []); listeners.clear(); },
+    dispose() { offHosts?.(); window.clearTimeout(first); window.removeEventListener("tracer:canvas-action", onAction); document.removeEventListener("visibilitychange", onVisible); removeProvider(); existingInbox(core)?.set("authority", []); listeners.clear(); },
   };
 }

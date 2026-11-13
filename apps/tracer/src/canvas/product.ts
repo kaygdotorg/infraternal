@@ -193,7 +193,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     open(): void { void mountAddHostNow().then((mounted) => mounted?.open(), () => core.toast.show({ message: "The add-host flow couldn't load. Check your connection and try again." })); },
     dispose(): void { void addHostMount?.then((mounted) => mounted?.dispose(), () => undefined); },
   };
-  const authority = createAuthorityControl(core, { service: loadProvisioning });
+  const authority = createAuthorityControl(core, {
+    service: loadProvisioning,
+    // Hosts other than this server itself: only they have connections that a restart locks.
+    hasRemoteHosts: () => sessions.hosts().some((entry) => entry.id !== "embedded"),
+    onHostsChange: (listener) => sessions.onChange(listener),
+  });
   let welcomedOnce = false;
   const offAuthorityWelcome = connection.onWelcome(() => {
     // A restart can lock the CA while this page retains its old unlocked state.
