@@ -237,6 +237,13 @@ impl Promotions {
         host: Uuid,
         now: i64,
     ) -> Result<Value, Refused> {
+        // J569 P3-3: only a host admin inside the admin window gets past
+        // here. Anyone else learns nothing about the host (not its terminals,
+        // its way in or its 2-try wait), the host is not called, and no
+        // activity row is written in their name. The insert rechecks this.
+        if !self.admin(session_hash, host, now).await {
+            return Err(Refused::Forbidden);
+        }
         // A crashed driver's leftovers end before anything new begins.
         let _ = self.store.sweep_promotions(now, false).await;
         let (agent, uid, fingerprint, generation) =

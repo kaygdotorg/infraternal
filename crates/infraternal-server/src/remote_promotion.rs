@@ -200,6 +200,23 @@ const LOCKED: &str = "EXISTS(SELECT 1 FROM (SELECT count(*) AS n, MAX(COALESCE(f
     WHERE n >= 2 AND last + 900 > ?n)";
 
 /// [`LOCKED`] with its placeholders replaced by SQL expressions.
+/// The `FROM ... WHERE` of a promotion begin, without the 2-try wait: who
+/// may begin (an unlocked owner session inside its admin window, for a live
+/// rootless host) and what it binds to (an admissible active certificate of
+/// that host and uid). Parameters: `?4` rootless certificate, `?6` now,
+/// `?8` host, `?9` uid, `?10` session hash, `?11` admin window.
+const BEGIN_ALLOWED: &str = "FROM remote_hosts h JOIN sessions s ON s.user_id = h.owner_id \
+     JOIN users u ON u.id = s.user_id \
+     JOIN remote_certificates c ON c.host_id = h.id AND c.fingerprint = ?4 \
+     WHERE h.id = ?8 AND h.mode = 'rootless' AND h.execution_uid = ?9 AND h.revoked_at IS NULL \
+     AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id = h.id AND q.confirmed = 0) \
+     AND s.token_hash = ?10 AND s.unlocked = 1 AND s.expires > ?6 AND u.owner = 1 \
+     AND s.fresh <= ?6 AND ?6 - s.fresh < ?11 \
+     AND c.role = 'active' AND c.execution_uid = h.execution_uid AND c.revoked_at IS NULL \
+     AND c.not_before <= ?6 AND c.not_after > ?6";
+
+/// The 2-try wait clause ([`LOCKED`]) for the given host, account and time
+/// expressions, spliced into a statement's WHERE.
 fn locked(host: &str, account: &str, now: &str) -> String {
     LOCKED
         .replace("?h", host)
@@ -238,7 +255,9 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// [`PromotionError::Busy`] when another promotion of the host is live,
-    /// [`PromotionError::Locked`] during the 2-try wait, otherwise `Denied`.
+    /// [`PromotionError::Locked`]
+    /// during the 2-try wait (told only to a caller who may begin),
+    /// otherwise `Denied`.
     pub(crate) async fn begin_promotion(
         &self,
         session_hash: &str,
@@ -255,15 +274,7 @@ impl EnrollmentStore {
             "INSERT INTO remote_host_promotions(attempt, host_id, person, method, account, from_uid, \
              from_fingerprint, link_generation, started_at, expires_at) \
              SELECT ?1, h.id, s.user_id, ?2, ?3, h.execution_uid, ?4, ?5, ?6, ?6 + ?7 \
-             FROM remote_hosts h JOIN sessions s ON s.user_id = h.owner_id JOIN users u ON u.id = s.user_id \
-             JOIN remote_certificates c ON c.host_id = h.id AND c.fingerprint = ?4 \
-             WHERE h.id = ?8 AND h.mode = 'rootless' AND h.execution_uid = ?9 AND h.revoked_at IS NULL \
-             AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id = h.id AND q.confirmed = 0) \
-             AND s.token_hash = ?10 AND s.unlocked = 1 AND s.expires > ?6 AND u.owner = 1 \
-             AND s.fresh <= ?6 AND ?6 - s.fresh < ?11 \
-             AND c.role = 'active' AND c.execution_uid = h.execution_uid AND c.revoked_at IS NULL \
-             AND c.not_before <= ?6 AND c.not_after > ?6 \
-             AND NOT {}",
+             {BEGIN_ALLOWED} AND NOT {}",
             locked("h.id", "?3", "?6")
         );
         let inserted = sqlx::query(&sql)
@@ -282,12 +293,53 @@ impl EnrollmentStore {
             .await;
         match inserted {
             Ok(done) if done.rows_affected() == 1 => Ok(()),
-            Ok(_) => match self.retry_after(host, method, now).await? {
+            Ok(_) => {
+                self.refused_begin(session_hash, host, method, bound, now)
+                    .await
+            }
+            Err(error) if unique_violation(&error) => Err(PromotionError::Busy),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Why [`Self::begin_promotion`]'s insert added no row, in this order:
+    /// - a caller who may not begin at all is `Denied`, and learns nothing
+    ///   about the host's state (J569 P3-3: before, a locked session, one
+    ///   outside its admin window or another owner was told the 2-try wait);
+    /// - the 2-try wait is `Locked`;
+    /// - anything else (a stale binding) is `Denied`.
+    async fn refused_begin(
+        &self,
+        session_hash: &str,
+        host: Uuid,
+        method: Method,
+        bound: Bound,
+        now: i64,
+    ) -> Result<(), PromotionError> {
+        // The same numbered parameters as the insert; the ones it doesn't
+        // use (`?1`–`?3`, `?5`, `?7`) are bound to NULL.
+        let sql = format!("SELECT 1 {BEGIN_ALLOWED}");
+        let unused = None::<i64>;
+        let allowed: Option<i64> = sqlx::query_scalar(&sql)
+            .bind(unused)
+            .bind(unused)
+            .bind(unused)
+            .bind(bound.from_fingerprint.as_slice())
+            .bind(unused)
+            .bind(now)
+            .bind(unused)
+            .bind(host.as_bytes().as_slice())
+            .bind(i64::from(bound.from_uid))
+            .bind(session_hash)
+            .bind(infraternal_plugin_api::ADMIN_WINDOW_SECONDS)
+            .fetch_optional(&self.0)
+            .await?;
+        match allowed {
+            None => Err(PromotionError::Denied),
+            Some(_) => match self.retry_after(host, method, now).await? {
                 Some(retry_after) => Err(PromotionError::Locked { retry_after }),
                 None => Err(PromotionError::Denied),
             },
-            Err(error) if unique_violation(&error) => Err(PromotionError::Busy),
-            Err(error) => Err(error.into()),
         }
     }
 
