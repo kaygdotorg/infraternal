@@ -713,6 +713,37 @@ impl Device {
         Ok(())
     }
 
+    /// Replace peer host routes on one proven link with explicit packet budgets.
+    ///
+    /// Unlike [`Device::routes_with_mtu_overrides`], which resolves whichever marked link holds the
+    /// shared name at write time, this writes only to `link`, the identity the route-repair worker
+    /// captured (J485). Its index, engine and owner are checked again right before the batch, and
+    /// every write uses that index, so a replacement link, even one carrying this node's marker,
+    /// is never written (#489 J549 P2).
+    /// # Errors
+    /// Refuses a missing or changed link before any write; returns route-netlink errors.
+    pub(crate) fn replace_peer_routes_on(
+        link: &ActiveLink,
+        routes: &[(&Peer, u16)],
+    ) -> io::Result<()> {
+        if routes.is_empty() {
+            return Ok(());
+        }
+        Self::verify_repair_link(link)?;
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        for (peer, mtu) in routes {
+            for (family, prefix, address) in [
+                (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
+                (10, 128, peer.addresses.ipv6.octets().to_vec()),
+            ] {
+                let payload =
+                    peer_route_payload(family, prefix, &address, link.ifindex, Some(*mtu))?;
+                socket.request(24, 4 | 0x100 | 0x400, &payload)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Re-add one missing route only when no route already occupies its destination.
     ///
     /// The caller has matched the deleted address against the currently installed peer set. The

@@ -25,7 +25,8 @@ use std::{
 /// of a copy taken when its relay shim started. `live_endpoints` holds authenticated endpoints
 /// learned by `GotaTun`; it only overrides route selection and never changes the accepted snapshot.
 /// A key missing from `peers` means the coordinator removed that peer: callbacks for it write
-/// nothing.
+/// nothing. `link` is the mesh link the route-repair worker proved when it started; live-endpoint
+/// refreshes write only to that link, never to whichever link holds the shared name later.
 #[derive(Clone, Debug, Default)]
 struct PeerRouteState {
     /// Active relay budgets; a peer without an entry uses its direct-path budget.
@@ -34,6 +35,9 @@ struct PeerRouteState {
     live_endpoints: BTreeMap<crate::policy::model::PublicKey, std::net::SocketAddr>,
     /// Installed peers, refreshed with their routes for repair and relay path updates.
     peers: BTreeMap<crate::policy::model::PublicKey, crate::dataplane::Peer>,
+    /// The owner-marked link the running route-repair worker proved (J485), or `None` while no
+    /// worker runs. Its index, engine and owner are re-checked before each live-endpoint write.
+    link: Option<crate::wireguard::ActiveLink>,
 }
 
 impl PeerRouteState {
@@ -74,6 +78,10 @@ struct RouteRepairWorker {
     cancel: UnixStream,
     /// The listener that reads route notifications in the node's network namespace.
     worker: Option<JoinHandle<()>>,
+    /// Shared route state, whose `link` this worker publishes while it runs.
+    state: Arc<Mutex<PeerRouteState>>,
+    /// The proven link this worker repairs, and the only link live-endpoint refreshes may write.
+    link: crate::wireguard::ActiveLink,
 }
 
 impl RouteRepairWorker {
@@ -87,11 +95,15 @@ impl RouteRepairWorker {
     }
 
     /// Spawn the worker with a proven identity and an optional listener; absence uses the fallback.
+    ///
+    /// The proven link is published in the shared route state, so live-endpoint refreshes write to
+    /// the same link identity this worker verifies (#489 J549 P2).
     fn start_for_link(
         state: Arc<Mutex<PeerRouteState>>,
         link: crate::wireguard::ActiveLink,
         mut monitor: Option<crate::wireguard::RouteMonitor>,
     ) -> io::Result<Self> {
+        let shared = Arc::clone(&state);
         let (cancel_read, cancel) = UnixStream::pair()?;
         let worker = thread::Builder::new()
             .name("mesh-route-repair".to_owned())
@@ -127,13 +139,19 @@ impl RouteRepairWorker {
                     }
                 }
             })?;
+        lock_route_state(&shared).link = Some(link);
         Ok(Self {
             cancel,
             worker: Some(worker),
+            state: shared,
+            link,
         })
     }
 
     /// Stop and join the passive listener before the node tears down its link.
+    ///
+    /// It also withdraws the link it published, unless a newer worker already replaced it, so
+    /// live-endpoint refreshes stop writing once no worker vouches for the link.
     fn stop(&mut self) {
         let Some(worker) = self.worker.take() else {
             return;
@@ -141,6 +159,10 @@ impl RouteRepairWorker {
         let _ = self.cancel.shutdown(Shutdown::Write);
         if worker.join().is_err() {
             tracing::error!("mesh route repair listener panicked");
+        }
+        let mut state = lock_route_state(&self.state);
+        if state.link == Some(self.link) {
+            state.link = None;
         }
     }
 
@@ -266,8 +288,13 @@ fn refresh_peer_routes_from(
 /// A `None` live endpoint returns to the accepted coordinator endpoint. Stable endpoints still
 /// need a new route budget because the underlay MTU can change independently. Endpoints for peers
 /// that are no longer installed are ignored, so a late packet cannot restore a retired host route.
+///
+/// Writes go only to the link the route-repair worker proved (`state.link`), re-verified right
+/// before the batch. A callback that outlives that link, even when a replacement link carries our
+/// marker under the shared name, therefore writes nothing (#489 J549 P2).
 /// # Errors
-/// Returns route-netlink errors and restores learned endpoint state if a direct route update fails.
+/// Returns route-netlink errors, a missing or changed proven link, and restores learned endpoint
+/// state if a direct route update fails.
 fn update_live_peer_endpoints(
     state: &Mutex<PeerRouteState>,
     endpoints: &[(
@@ -305,9 +332,22 @@ fn update_live_peer_endpoints(
         .filter_map(|key| state.peers.get(key))
         .map(|peer| state.route_peer(peer))
         .collect();
-    if !route_peers.is_empty()
-        && let Err(error) = Device::routes_with_mtu_overrides(&route_peers, &state.overrides, false)
-    {
+    if route_peers.is_empty() {
+        return Ok(());
+    }
+    let Some(link) = state.link else {
+        state.live_endpoints = previous_endpoints;
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "mesh route refresh skipped: no proven mesh link",
+        ));
+    };
+    let mut probe = crate::mesh_mtu::EndpointProbe::default();
+    let routes: Vec<_> = route_peers
+        .iter()
+        .map(|peer| (peer, probe.mesh_mtu(peer.endpoint)))
+        .collect();
+    if let Err(error) = Device::replace_peer_routes_on(&link, &routes) {
         state.live_endpoints = previous_endpoints;
         return Err(error);
     }
@@ -1378,8 +1418,14 @@ impl Node {
     }
 
     /// Restore relay budgets and the installed peer set after a failed configuration transaction.
+    ///
+    /// The proven link belongs to the running route-repair worker, not to the transaction, so it
+    /// is kept as it is now.
     fn restore_peer_route_state(&self, previous: PeerRouteState) {
-        *lock_route_state(&self.peer_route_state) = previous;
+        let mut state = lock_route_state(&self.peer_route_state);
+        let link = state.link;
+        *state = previous;
+        state.link = link;
     }
 
     fn apply_peer_changes(
@@ -1413,7 +1459,12 @@ impl Node {
             store.record_routes(&BTreeSet::new())?;
         }
         self.routes.clear();
-        *lock_route_state(&self.peer_route_state) = PeerRouteState::default();
+        // The route-repair worker withdraws its own proven link when it stops.
+        let mut state = lock_route_state(&self.peer_route_state);
+        *state = PeerRouteState {
+            link: state.link,
+            ..PeerRouteState::default()
+        };
         Ok(())
     }
     /// The key an interrupted Linux rotation left as this node's identity: the candidate once
@@ -3592,6 +3643,112 @@ mod tests {
         assert_eq!(
             after_v6, before_v6,
             "endpoint callback must leave a foreign interface's IPv6 route alone"
+        );
+    }
+
+    /// Create a persistent TUN under the shared name, mark it as `owner`'s, and give both peer
+    /// host routes a 1400-byte budget; return the link identity the kernel reports for it.
+    fn review_marked_tun(owner: crate::policy::model::PublicKey) -> crate::wireguard::ActiveLink {
+        review_route_command(&["tuntap", "add", "dev", "infraternal0", "mode", "tun"]);
+        Device::mark_tun(owner).expect("mark the TUN as this node's");
+        review_route_command(&["link", "set", "infraternal0", "up"]);
+        review_route_command(&[
+            "route",
+            "add",
+            "10.254.0.2/32",
+            "dev",
+            "infraternal0",
+            "mtu",
+            "1400",
+        ]);
+        review_route_command(&[
+            "-6",
+            "route",
+            "add",
+            "fd01::2/128",
+            "dev",
+            "infraternal0",
+            "mtu",
+            "1400",
+        ]);
+        Device::active_link()
+            .expect("read the mesh link")
+            .expect("the marked TUN holds the shared name")
+    }
+
+    /// Read both peer host routes, IPv4 then IPv6, as `ip` prints them.
+    fn review_peer_routes() -> (String, String) {
+        (
+            review_route_command(&["route", "show", "exact", "10.254.0.2/32"]),
+            review_route_command(&["-6", "route", "show", "exact", "fd01::2/128"]),
+        )
+    }
+
+    /// A live-endpoint refresh writes only to the link the route-repair worker proved, never to a
+    /// replacement that took the shared name with this node's own marker (#489 J549 P2).
+    #[test]
+    #[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+    fn live_endpoint_refresh_stays_on_the_proven_link() {
+        use crate::policy::model::{Addresses, PublicKey};
+        review_route_command(&["link", "set", "lo", "up"]);
+        let owner = PublicKey([9; 32]);
+        let proven = review_marked_tun(owner);
+        let key = PublicKey([7; 32]);
+        let peer = crate::dataplane::Peer {
+            key,
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("IPv4"),
+                ipv6: "fd01::2".parse().expect("IPv6"),
+            },
+            endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        };
+        let state = Mutex::new(PeerRouteState::default());
+        {
+            let mut route_state = lock_route_state(&state);
+            route_state.set_peers(std::slice::from_ref(&peer));
+            route_state.link = Some(proven);
+        }
+
+        // Control: the proven link takes the learned loopback endpoint's much larger budget.
+        update_live_peer_endpoints(
+            &state,
+            &[(key, Some("127.0.0.2:51820".parse().expect("endpoint")))],
+        )
+        .expect("refresh the proven link");
+        let (proven_v4, proven_v6) = review_peer_routes();
+        assert!(
+            proven_v4.contains("proto 250") && !proven_v4.contains("mtu 1400"),
+            "{proven_v4}"
+        );
+        assert!(
+            proven_v6.contains("proto 250") && !proven_v6.contains("mtu 1400"),
+            "{proven_v6}"
+        );
+
+        // Replace the link: same name, same owner marker, a new interface index.
+        review_route_command(&["link", "del", "infraternal0"]);
+        let replacement = review_marked_tun(owner);
+        assert_ne!(replacement.ifindex, proven.ifindex);
+        assert_eq!(replacement.owner, proven.owner);
+        let before = review_peer_routes();
+        let result = update_live_peer_endpoints(
+            &state,
+            &[(key, Some("127.0.0.3:51820".parse().expect("endpoint")))],
+        );
+        let after = review_peer_routes();
+        eprintln!(
+            "REVIEW marked replacement proven={} replacement={} result={result:?} before={before:?} after={after:?}",
+            proven.ifindex, replacement.ifindex
+        );
+        assert!(
+            result.is_err(),
+            "a refresh bound to a replaced link must refuse"
+        );
+        assert_eq!(
+            after, before,
+            "a marked replacement link's routes must stay untouched"
         );
     }
 
