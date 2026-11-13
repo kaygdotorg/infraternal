@@ -36,6 +36,7 @@ def build_fault_matrix() -> tuple[FaultCase, ...]:
         FaultCase("rekey-under-load", "rekey-load"),
         FaultCase("rekey-timer-expiry-under-load", "rekey-timer-load"),
         FaultCase("agent-restart", "agent-restart"),
+        FaultCase("coordinator-restart", "coordinator-restart"),
         FaultCase("server-restart", "server-restart"),
         FaultCase("coordinator-peer-churn", "peer-churn"),
         FaultCase("mtu-change-mid-flow", "mtu-change"),

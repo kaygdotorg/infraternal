@@ -51,12 +51,18 @@ Before injecting a fault, the runner requires at least 1 MiB to be sent and
 received. A flow that cannot establish that sustained payload fails setup and
 its probe and payload processes are stopped.
 
-The `server-restart` row restarts the production-schema coordinator fixture
-with its SQLite database preserved. The `rekey-timer-expiry-under-load` row
-marks the coordinator's persisted schedule due before exercising the real
-infraternal agent's rotation actions. These fixture boundaries are recorded in
-the case details so they are not mistaken for an HTTP-server process restart
-or an independently scheduled background worker.
+The `coordinator-restart` row restarts the production-schema coordinator
+fixture with its SQLite database preserved, then reapplies its config. The
+`server-restart` row restarts the real `infraternal server` process in the
+isolated test namespace while the already-configured peer flow remains active;
+its private data directory is retained and `/healthz` must return 200 after the
+new process starts. The coordinator fixture still supplies the test peers in
+this row, so it measures whether a server outage interrupts the established
+data plane, not recovery of a server-owned mesh database. The
+`rekey-timer-expiry-under-load` row marks the coordinator's persisted schedule
+due before exercising the real infraternal agent's rotation actions. These
+fixture boundaries are recorded in the case details so they are not mistaken
+for an independently scheduled background worker.
 
 ## Continuous loaded-latency soak
 

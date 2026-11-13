@@ -9,11 +9,14 @@ import os
 from pathlib import Path
 import select
 import shutil
+import signal
 import socket
 import struct
 import subprocess
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Mapping
 
 
@@ -422,4 +425,117 @@ class CoordinatorFixture:
             self.stderr = None
 
 
-__all__ = ["CoordinatorFixture", "MeshNode"]
+class ServerProcessFixture:
+    """Run the product server in the suite namespace and keep its private state across restart."""
+
+    # Each matrix run owns a fresh network namespace. A fixed port avoids releasing a probed
+    # listener for the server process to bind later.
+    LISTEN_PORT = 52_602
+
+    def __init__(self, executable: Path, state_root: Path) -> None:
+        """Start an isolated infraternal server and wait for its health route."""
+        self.executable = executable
+        self.state_root = state_root
+        self.state_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        self.process: subprocess.Popen[bytes] | None = None
+        self.health_status: int | None = None
+        try:
+            self._start_process()
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def pid(self) -> int:
+        """Return the live server process ID used to prove a process replacement."""
+        if self.process is None:
+            raise RuntimeError("the infraternal server is not running")
+        return self.process.pid
+
+    def restart(self) -> dict[str, int | bool]:
+        """Restart the server over the same private data directory and confirm health."""
+        previous_pid = self.pid
+        previous_directory_inode = self.state_root.stat().st_ino
+        self._stop_process()
+        self._start_process()
+        current_directory_inode = self.state_root.stat().st_ino
+        return {
+            "server_pid_before": previous_pid,
+            "server_pid_after": self.pid,
+            "server_health_status": self.health_status or 0,
+            "server_data_directory_preserved": current_directory_inode
+            == previous_directory_inode,
+        }
+
+    def close(self) -> None:
+        """Stop only this fixture's server process group."""
+        self._stop_process()
+        shutil.rmtree(self.state_root, ignore_errors=True)
+
+    def _start_process(self) -> None:
+        """Launch the product server without retaining its one-time setup token in logs."""
+        command = [
+            str(self.executable),
+            "server",
+            "--data",
+            str(self.state_root),
+            "--listen",
+            f"127.0.0.1:{self.LISTEN_PORT}",
+            "--public-origin",
+            "https://auth.example.test",
+            "--behind-proxy",
+            "--trusted-proxy",
+            "127.0.0.1/32",
+        ]
+        self.process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.health_status = self._wait_for_health()
+
+    def _wait_for_health(self) -> int:
+        """Return the first successful health response or fail on exit or timeout."""
+        if self.process is None:
+            raise RuntimeError("the infraternal server process was not started")
+        url = f"http://127.0.0.1:{self.LISTEN_PORT}/healthz"
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError(
+                    f"infraternal server exited before health check: {self.process.returncode}"
+                )
+            try:
+                with urllib.request.urlopen(url, timeout=0.5) as response:
+                    if response.status == 200:
+                        return response.status
+            except (OSError, urllib.error.URLError):
+                pass
+            # sleep: readiness polling gives the server a short interval to bind its listener.
+            time.sleep(0.05)
+        raise TimeoutError("infraternal server did not become healthy within 30 seconds")
+
+    def _stop_process(self) -> None:
+        """Ask this private process group to exit and enforce a bounded cleanup."""
+        process = self.process
+        if process is None:
+            return
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=10)
+        self.process = None
+
+
+__all__ = ["CoordinatorFixture", "MeshNode", "ServerProcessFixture"]

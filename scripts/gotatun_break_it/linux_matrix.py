@@ -24,7 +24,12 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "gotatun_break_it"
 
-from .app_fixture import CoordinatorFixture, MeshNode, new_private_agent_runtime_root
+from .app_fixture import (
+    CoordinatorFixture,
+    MeshNode,
+    ServerProcessFixture,
+    new_private_agent_runtime_root,
+)
 from .dns_probe import query_a
 from .linux_faults import (
     FaultCase,
@@ -334,6 +339,7 @@ class NamespacePair:
         scratch: Path,
         *,
         extra_members: int = 0,
+        with_server: bool = False,
     ) -> None:
         """Create a fresh peer namespace and apply one allow-all coordinator snapshot."""
         self.binary = binary
@@ -342,6 +348,7 @@ class NamespacePair:
         self.extra_members = extra_members
         self.peer_namespace: subprocess.Popen[bytes] | None = None
         self.coordinator: CoordinatorFixture | None = None
+        self.server: ServerProcessFixture | None = None
         self.left: MeshNode | None = None
         self.right: MeshNode | None = None
         self.runtime_root: Path | None = None
@@ -349,6 +356,8 @@ class NamespacePair:
         self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             self._create_underlay()
+            if with_server:
+                self.server = ServerProcessFixture(binary, scratch / "server-data")
             environment = {"INFRATERAL_MESH_ENGINE": "gotatun"}
             self.runtime_root = new_private_agent_runtime_root()
             log_root = scratch / "agent-state"
@@ -470,7 +479,7 @@ class NamespacePair:
                         f"stage={stage} config refused node={node_name} chunk={chunk_index} "
                         f"from_version={chunk.get('from_version')} version={chunk_version} "
                         f"last={is_last} local_key_matches_identity={binding_matches_identity}: "
-                        f"{error}; "
+                        f"{error}; agent_stderr_log={node.log_path}; "
                         f"mesh_status={_mesh_status_summary(node)}"
                     ) from error
                 if result.get("applied") is not is_last:
@@ -498,6 +507,8 @@ class NamespacePair:
         if self.closed:
             return
         self.closed = True
+        if self.server is not None:
+            self.server.close()
         for node in (self.left, self.right):
             if node is not None:
                 node.close()
@@ -840,11 +851,23 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
     elif case.kind == "agent-restart":
         pair.right.restart()
         details["restarted_pid"] = pair.right.pid
-    elif case.kind == "server-restart":
+    elif case.kind == "coordinator-restart":
         pair.coordinator.restart()
         snapshot = pair.coordinator.configuration("allow", pair.identities)
-        pair._apply_snapshot(snapshot, stage="server restart restore")
+        pair._apply_snapshot(snapshot, stage="coordinator restart restore")
         details["persistent_coordinator_database"] = str(pair.scratch / "coordinator.sqlite")
+    elif case.kind == "server-restart":
+        if pair.server is None:
+            raise RuntimeError("server restart needs the live product server fixture")
+        restart = pair.server.restart()
+        if restart["server_pid_before"] == restart["server_pid_after"]:
+            raise RuntimeError("infraternal server process ID did not change after restart")
+        if restart["server_health_status"] != 200:
+            raise RuntimeError("infraternal server health check did not return 200 after restart")
+        if not restart["server_data_directory_preserved"]:
+            raise RuntimeError("infraternal server data directory changed during restart")
+        details.update(restart)
+        details["server_data_directory"] = str(pair.server.state_root)
     elif case.kind == "peer-churn":
         added = pair.coordinator.request("peer-add", count=20)
         pair._apply_snapshot(added, stage="peer add")
@@ -945,7 +968,13 @@ def _run_case(
     event: dict[str, Any] | None = None
     fault_started_ns: int | None = None
     try:
-        pair = NamespacePair(binary, coordinator_binary, output / "fixture", extra_members=scale)
+        pair = NamespacePair(
+            binary,
+            coordinator_binary,
+            output / "fixture",
+            extra_members=scale,
+            with_server=case.kind == "server-restart",
+        )
         traffic = Traffic(pair, output, duration_seconds=duration)
         fault_started_ns = time.monotonic_ns()
         event = _apply_fault(case, pair)

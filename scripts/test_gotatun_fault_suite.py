@@ -190,6 +190,7 @@ class LinuxFaultPlanTests(unittest.TestCase):
                 "rekey-under-load",
                 "rekey-timer-expiry-under-load",
                 "agent-restart",
+                "coordinator-restart",
                 "server-restart",
                 "coordinator-peer-churn",
                 "mtu-change-mid-flow",
@@ -197,6 +198,56 @@ class LinuxFaultPlanTests(unittest.TestCase):
                 "peer-scale-200",
             },
         )
+
+    def test_server_restart_targets_the_product_process_not_the_coordinator_fixture(self):
+        """Restart the real server while keeping coordinator restart a separate fault."""
+        matrix = importlib.import_module("gotatun_break_it.linux_matrix")
+        case = next(case for case in build_fault_matrix() if case.name == "server-restart")
+
+        class Coordinator:
+            """Fail the regression if the server fault restarts only its fixture."""
+
+            restart_count = 0
+
+            def restart(self):
+                """Count coordinator restarts without changing its fake process."""
+                self.restart_count += 1
+
+        class Server:
+            """Return distinct process IDs as a product server restart would."""
+
+            pid = 101
+            state_root = Path("/private/server-data")
+
+            def restart(self):
+                """Advance the fake server process while preserving its state directory."""
+                previous = self.pid
+                self.pid += 1
+                return {
+                    "server_pid_before": previous,
+                    "server_pid_after": self.pid,
+                    "server_health_status": 200,
+                    "server_data_directory_preserved": True,
+                }
+
+        coordinator = Coordinator()
+        server = Server()
+        pair = SimpleNamespace(
+            coordinator=coordinator,
+            server=server,
+            left=object(),
+            right=object(),
+        )
+        with patch.object(matrix, "_tool", return_value="/nix/bin/ip"):
+            event = matrix._apply_fault(case, pair)
+
+        self.assertEqual(coordinator.restart_count, 0)
+        self.assertEqual(server.pid, 102)
+        self.assertEqual(event["server_pid_before"], 101)
+        self.assertEqual(event["server_pid_after"], 102)
+        self.assertEqual(event["server_health_status"], 200)
+        self.assertTrue(event["server_data_directory_preserved"])
+        self.assertEqual(event["server_data_directory"], str(server.state_root))
 
     def test_case_selector_preserves_matrix_order_for_requested_cases(self):
         """Run selected case IDs in their stable suite order."""
@@ -973,6 +1024,7 @@ class MeshNodeControlChannelTests(unittest.TestCase):
             def __init__(self, label):
                 """Keep the fixture node name used in config failure evidence."""
                 self.label = label
+                self.log_path = Path(f"/private/{label}.stderr.log")
 
             def configure(self, _chunk):
                 """Refuse the right node config and accept the left node config."""
@@ -1016,6 +1068,7 @@ class MeshNodeControlChannelTests(unittest.TestCase):
         self.assertIn("from_version=7", message)
         self.assertIn("version=8", message)
         self.assertIn("local_key_matches_identity=True", message)
+        self.assertIn("agent_stderr_log=/private/right.stderr.log", message)
         self.assertIn("Plugin action refused", message)
         self.assertIn("'state': 'On'", message)
         self.assertIn("'version': 7", message)
