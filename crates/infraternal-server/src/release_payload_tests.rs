@@ -137,9 +137,9 @@ impl Release {
     fn with_artifacts(size: usize, version: &str, extra: usize, sessions: bool) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;
-        let root =
-            PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
-                .join(format!("bucket-{}", uuid::Uuid::new_v4()));
+        // The downloader bounds every write and fsync at 30 s; the slow build disk's
+        // fsync stalls exceed that, so the fixture lives on the private TMPDIR (#509).
+        let root = std::env::temp_dir().join(format!("bucket-{}", uuid::Uuid::new_v4()));
         // The same fixture root owns latest-check staging and the payload cache.
         super::private_directory(&root).unwrap();
         let key = root.join("fixture-key");
