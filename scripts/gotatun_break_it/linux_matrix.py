@@ -804,7 +804,26 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
                     f"10.220.0.2:{new_port}",
                 )
             )
-            _run(_in_namespace(namespace, conntrack, "-F"))
+            # Drop only the underlay UDP mapping so the next datagram gets the new source port.
+            # A full `conntrack -F` also wiped the namespace's state for the inner TCP flow, and
+            # the product firewall rightly drops mid-stream TCP that looks new without a SYN, so
+            # the row failed on the injector rather than on rebind recovery (#260, J561). A real
+            # NAT rebind happens on a router and leaves the endpoint's own conntrack alone.
+            _run(
+                _in_namespace(
+                    namespace,
+                    conntrack,
+                    "-D",
+                    "-p",
+                    "udp",
+                    "--orig-src",
+                    "10.220.0.2",
+                    "--orig-dst",
+                    "10.220.0.1",
+                    "--orig-port-src",
+                    str(old_port),
+                )
+            )
             details["recovery_started_ns"] = time.monotonic_ns()
             _wait_for_duration(3)
         finally:

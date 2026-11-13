@@ -618,12 +618,32 @@ class NatPortRebindFaultTests(unittest.TestCase):
             and command[-5].rsplit("/", 1)[-1] == "nft"
             and command[-4:] == ("delete", "table", "ip", "j526")
         )
+        conntrack_commands = [
+            command
+            for kind, command in events
+            if kind == "run"
+            and any(part.rsplit("/", 1)[-1] == "conntrack" for part in command)
+        ]
+        # Only the underlay UDP mapping goes; a full flush would also wipe the inner TCP
+        # flow's state, which the product firewall then drops as a non-SYN new flow.
+        self.assertTrue(all("-F" not in command for command in conntrack_commands))
         flush_indices = [
             index
             for index, (kind, command) in enumerate(events)
             if kind == "run"
-            and command[-2].rsplit("/", 1)[-1] == "conntrack"
-            and command[-1] == "-F"
+            and "conntrack" in " ".join(command)
+            and command[-9:]
+            == (
+                "-D",
+                "-p",
+                "udp",
+                "--orig-src",
+                "10.220.0.2",
+                "--orig-dst",
+                "10.220.0.1",
+                "--orig-port-src",
+                "51821",
+            )
         ]
         self.assertEqual(len(flush_indices), 1)
         recovery_clock_index = next(
