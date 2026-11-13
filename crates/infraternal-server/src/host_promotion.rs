@@ -104,6 +104,10 @@ pub(crate) struct Promotions {
     scratch: PathBuf,
     /// Progress of the promotions this process drives, by attempt.
     progress: Arc<Mutex<HashMap<Uuid, (Uuid, Stage)>>>,
+    /// Test only: `finish` waits here right after it reserved the try, so a
+    /// test can cut the request off at that point (J569 P2-1).
+    #[cfg(test)]
+    after_reserve: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
 }
 
 /// A refused request, as the HTTP layer reports it.
@@ -166,6 +170,8 @@ impl Promotions {
             exe,
             scratch,
             progress: Arc::default(),
+            #[cfg(test)]
+            after_reserve: Arc::default(),
         })
     }
 
@@ -337,6 +343,17 @@ impl Promotions {
             }
             Err(error) => return Err(error.into()),
         };
+        #[cfg(test)]
+        {
+            let gate = self
+                .after_reserve
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+        }
         let way = match method {
             Method::SudoNoPassword => Way::SudoNoPassword,
             Method::Sudo => Way::Sudo,
@@ -1006,6 +1023,150 @@ mod tests {
         assert!(handed_over.load(std::sync::atomic::Ordering::Acquire));
         drop(admission);
         assert!(hosts.admit_terminal_open(host).is_ok());
+    }
+
+    /// A [`Promotions`] on the real SQLite fixture (host 42, rootless as uid
+    /// 1002, owner session `s` unlocked with its admin window opened at 150)
+    /// and an empty host registry: the host has no live link, so a finish
+    /// that gets past its reservation ends at the R7 check. The returned
+    /// sender releases a `finish` held right after its reservation.
+    async fn promotions() -> (
+        Promotions,
+        EnrollmentStore,
+        SqlitePool,
+        Uuid,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        /// A payload source with nothing to give; the harness never installs.
+        struct NoPayload;
+        impl PayloadSource for NoPayload {
+            fn get(
+                &self,
+                _architecture: Architecture,
+            ) -> infraternal_plugin_ssh::transport::Operation<'_, PathBuf> {
+                Box::pin(async {
+                    Err(infraternal_plugin_ssh::model::Failure::new(
+                        infraternal_plugin_ssh::model::FailureKind::Install,
+                        "no payload in the harness",
+                    ))
+                })
+            }
+        }
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES ('s','owner','fixture',100000,150,1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let auth = crate::auth::Auth::new(
+            pool.clone(),
+            "auth.example.test",
+            "https://auth.example.test",
+        )
+        .await
+        .unwrap();
+        let material = crate::ca::tests::test_material();
+        let issuer = InvitationIssuer::new(
+            auth,
+            pool.clone(),
+            store.clone(),
+            crate::remote_http::EnrollmentService {
+                source: Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+                    material.issuer().clone(),
+                )),
+                endpoint: crate::remote_http::EnrollmentEndpoint {
+                    ca_der: material.issuer().to_der().unwrap(),
+                    endpoint: "127.0.0.1:4443".parse().unwrap(),
+                    server_name: "localhost".into(),
+                },
+            },
+        );
+        let scratch = std::env::temp_dir().join(format!("j574-promotions-{}", Uuid::new_v4()));
+        let promotions = Promotions::new(
+            store.clone(),
+            pool.clone(),
+            RemoteHosts::default(),
+            issuer,
+            Arc::new(NoPayload),
+            "/proc/self/exe".into(),
+            scratch,
+        )
+        .unwrap();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *promotions.after_reserve.lock().unwrap() = Some(gate);
+        (promotions, store, pool, host, release)
+    }
+
+    /// The state and try flag of `attempt`'s row.
+    async fn row(pool: &SqlitePool, attempt: Uuid) -> (String, i64) {
+        sqlx::query_as("SELECT state, tried FROM remote_host_promotions WHERE attempt = ?")
+            .bind(attempt.as_bytes().as_slice())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// J569 P2-1: a `finish` that the request deadline cuts off after its try
+    /// was reserved still settles the row. Before, the work ran inside the
+    /// request: a dropped request left the row `elevating` (409 Busy for up
+    /// to 15 minutes), never ended the host side, and the sweeper later
+    /// counted it as a typed try.
+    #[tokio::test]
+    async fn a_finish_cut_off_after_its_reservation_still_settles() {
+        let (promotions, store, pool, host, release) = promotions().await;
+        let attempt = Uuid::from_u128(0x574);
+        let now = 200;
+        store
+            .begin_promotion(
+                "s",
+                host,
+                attempt,
+                Method::Su,
+                Bound {
+                    from_uid: 1002,
+                    from_fingerprint: [1; 32],
+                    link_generation: Uuid::from_u128(5),
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        let request = tokio::spawn({
+            let promotions = promotions.clone();
+            async move {
+                promotions
+                    .finish("s", attempt, Some("sealed".into()), now)
+                    .await
+            }
+        });
+        // Wait until the try is reserved, then cut the request off there,
+        // as the 2-minute deadline middleware does.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while row(&pool, attempt).await.0 != "elevating" {
+                // sleep: polling the row for the reservation; the outcome never depends on timing.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        let _ = request.await;
+        let _ = release.send(());
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let row = row(&pool, attempt).await;
+                if row.0 != "elevating" {
+                    return row;
+                }
+                // sleep: polling the row for the settlement; the outcome never depends on timing.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert_eq!(
+            settled.ok(),
+            Some(("failed".to_owned(), 0)),
+            "a finish cut off after its reservation left the row elevating"
+        );
     }
 
     /// A Mac is refused with a pointer to the mesh service; Linux and
