@@ -98,18 +98,19 @@ pub fn is_lan(ip: IpAddr) -> bool {
     }
 }
 
-/// Keep only LAN addresses that can be sent to another node, at most [`MAX_LAN`].
+/// Keep only LAN addresses that can be sent to another node: the first of each address family,
+/// so at most [`MAX_LAN`].
 ///
 /// The coordinator applies this to what a node reports, so a node cannot make its peers aim at
-/// a public host, a loopback or a link-local address in the name of a LAN candidate.
+/// a public host, a loopback or a link-local address in the name of a LAN candidate, nor make
+/// them walk a long list of its addresses.
 #[must_use]
 pub fn valid_lan(reported: &[SocketAddr]) -> Vec<SocketAddr> {
-    let mut lan = Vec::new();
+    let mut lan: Vec<SocketAddr> = Vec::new();
     for address in reported {
         if let Ok(address) = crate::policy::discovery::usable_address(*address)
             && is_lan(address.ip())
-            && !lan.contains(&address)
-            && lan.len() < MAX_LAN
+            && !lan.iter().any(|kept| kept.is_ipv4() == address.is_ipv4())
         {
             lan.push(address);
         }
@@ -400,7 +401,12 @@ mod tests {
         ];
         assert_eq!(
             valid_lan(&reported),
-            [at("10.1.0.2:10254"), at("100.64.11.2:10254")]
+            [at("10.1.0.2:10254"), at("[fd00::2]:10254")]
+        );
+        assert_eq!(
+            valid_lan(&[at("100.64.11.2:10254")]),
+            [at("100.64.11.2:10254")],
+            "carrier-grade NAT space counts as LAN"
         );
         assert!(is_lan("172.16.0.1".parse().unwrap()));
         assert!(is_lan("fd12::1".parse().unwrap()));

@@ -2836,11 +2836,8 @@ mod candidate_tests {
         store.record_candidates(b, Some(&[])).await.unwrap();
         assert_eq!(
             tries(&store.config(b).await.unwrap(), a),
-            [
-                at("10.9.0.2:10254"),
-                at("192.168.1.2:10254"),
-                at("198.51.100.21:10254")
-            ]
+            [at("10.9.0.2:10254"), at("198.51.100.21:10254")],
+            "one LAN address per family"
         );
     }
 }

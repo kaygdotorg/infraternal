@@ -71,7 +71,7 @@ counts no bytes for a keepalive, so this second rule is what sees an idle
 node's NAT rebind. The store writes, and the coordinator republishes, only a
 changed address. A node's LAN candidates are the private (RFC 1918, 100.64.0.0/10,
 fc00::/7) source addresses of its default IPv4 and IPv6 routes, with its mesh
-port, at most two; the coordinator keeps only addresses these rules accept and
+port, at most one per address family; the coordinator keeps only addresses these rules accept and
 sends them only to peers whose control connection comes from the same public
 address. That is the TCP source of the control connection, which a member
 cannot forge, not the UDP-observed reflexive address, which one spoofed
