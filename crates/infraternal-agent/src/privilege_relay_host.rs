@@ -2367,6 +2367,27 @@ mod tests {
         std::fs::remove_dir_all(&config.scratch_root).unwrap();
     }
 
+    /// J569 P3 (#399): the watcher waits on the relay's bare PID number.
+    ///
+    /// `while kill -0 <pid>` is run by root, so it succeeds for whatever
+    /// process holds that number. After an abnormal relay death the number can
+    /// be reused, and the undo then waits on an unrelated process, until the
+    /// next boot in the worst case. The watcher has to tie the PID to the
+    /// relay's identity, for example its start time from `/proc/<pid>/stat`
+    /// recorded when the guard is armed.
+    #[test]
+    fn watcher_binds_the_relay_pid_to_its_start_time() {
+        let config = test_guard_config();
+        let files = guard_paths(&config, uuid::Uuid::from_u128(0xf), 100);
+        let pid = std::process::id();
+        let script = watcher_script(&files, pid).unwrap();
+        std::fs::remove_dir_all(&config.scratch_root).unwrap();
+        assert!(
+            script.contains(&format!("/proc/{pid}/stat")),
+            "the watcher trusts a reusable pid: {script}"
+        );
+    }
+
     /// A committed or superseded install makes an old guard inert before rollback runs.
     #[test]
     fn leftover_promotion_guard_cannot_change_a_committed_or_later_install() {
