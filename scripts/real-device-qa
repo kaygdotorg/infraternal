@@ -50,8 +50,8 @@ cmd_prepare() {
   local ca; ca="$(mktemp -d)"
   ssh "$STAGING" 'sudo cat /opt/qa/tls/ca.pem' > "$ca/qa-ca.pem" 2>/dev/null || die "stage the QA server first (scripts/real-device-qa stage)"
   std "cat > $SIM/qa/qa-ca.pem" < "$ca/qa-ca.pem"
-  std "xcrun simctl boot \$(xcrun simctl list devices | awk -F'[()]' '/ infraternal-01 \\(/ {print \$2; exit}') 2>/dev/null; \
-       xcrun simctl keychain \$(xcrun simctl list devices | awk -F'[()]' '/ infraternal-01 \\(/ {print \$2; exit}') add-root-cert $SIM/qa/qa-ca.pem && echo ca-trusted-in-simulator"
+  # Boot and CA install change the infraternal-01 simulator, so they go through run.sh and its lock.
+  std "cd $SIM/qa-runner && export PATH=\$PATH:/nix/var/nix/profiles/default/bin && ./run.sh trust-ca $SIM/qa/qa-ca.pem"
   rm -rf "$ca"
 }
 

@@ -6,6 +6,7 @@
 # `qa-lines.txt` (every QA_RESULT / QA_FRAME line) in a fresh out/<run>/ directory.
 #
 #   run.sh build
+#   run.sh trust-ca <pem>               # boot the simulator, trust the QA CA in its own keychain
 #   run.sh run <name> '<ACTIONS>'        # env: SIM_UDID (default: look up "infraternal-01"), RUNNER_OUT
 #
 # The lock is /tmp/infraternal-std-sim.lock, never calternal's. Nothing here edits a dotfile or touches the host
@@ -44,6 +45,13 @@ for config in data.get("TestConfigurations", []):
 plistlib.dump(data, open(path, "wb"))
 PY
   echo "runner built"
+  ;;
+trust-ca)
+  # Boots infraternal-01 and adds the QA server's CA to the SIMULATOR's own keychain (never the Mac's), under the lock.
+  pem=${2:?pem file}
+  [[ "$(xcrun simctl list devices | /usr/bin/grep "$UDID" || true)" == *'(Booted)'* ]] || xcrun simctl boot "$UDID"
+  xcrun simctl bootstatus "$UDID" -b > /dev/null 2>&1
+  xcrun simctl keychain "$UDID" add-root-cert "$pem" && echo ca-trusted-in-simulator
   ;;
 run)
   name=${2:?name}; actions=${3:?ACTIONS}
