@@ -53,6 +53,10 @@ async fn seed_extra_members(
     }
     Ok(node_ids)
 }
+/// Serve production-schema coordinator requests over stdin and return JSON responses.
+///
+/// The optional arguments seed public-only peers and select a persistent SQLite
+/// path, which lets the isolated mesh tests exercise churn and server restarts.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
