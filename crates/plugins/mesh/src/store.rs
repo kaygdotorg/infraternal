@@ -1680,23 +1680,32 @@ impl Store {
     }
     /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs).
     ///
+    /// A proven observation replaces a different stored address. An unproven one is accepted only when the
+    /// coordinator never published that address for the node (not its guess, reflexive or LAN address): the
+    /// server's device sets those itself, so only an authenticated packet can have put any other address there.
     /// Each address is compared with the cached snapshot first, so a steady mesh costs no database write; only a
     /// changed address is written, all in one transaction with one revision. Returns whether anything changed.
     /// # Errors
     /// Returns fixed public errors, not database input.
     pub async fn record_reflexive(
         &self,
-        observed: &[(NodeId, SocketAddr)],
+        observed: &[crate::presence::Reflexive],
     ) -> Result<bool, &'static str> {
         let loaded = self.load().await.map_err(|_| "Mesh storage unavailable.")?;
         let changed: Vec<_> = observed
             .iter()
-            .filter(|(node, address)| {
-                loaded
-                    .candidates
-                    .get(node)
-                    .is_some_and(|known| known.reflexive != Some(*address))
+            .filter(|seen| {
+                loaded.candidates.get(&seen.node).is_some_and(|known| {
+                    if seen.proven {
+                        known.reflexive != Some(seen.address)
+                    } else {
+                        known.guess != Some(seen.address)
+                            && known.reflexive != Some(seen.address)
+                            && !known.lan.contains(&seen.address)
+                    }
+                })
             })
+            .map(|seen| (seen.node, seen.address))
             .collect();
         if changed.is_empty() {
             return Ok(false);
@@ -2508,6 +2517,14 @@ mod candidate_tests {
         (store, ids.try_into().unwrap())
     }
 
+    fn seen(node: NodeId, address: &str, proven: bool) -> crate::presence::Reflexive {
+        crate::presence::Reflexive {
+            node,
+            address: at(address),
+            proven,
+        }
+    }
+
     fn tries(config: &Config, peer: NodeId) -> Vec<SocketAddr> {
         let peer = &config.peers[&peer].peer;
         peer.endpoint
@@ -2548,13 +2565,13 @@ mod candidate_tests {
         let before = store.load().await.unwrap().revision;
         assert!(
             store
-                .record_reflexive(&[(a, at("198.51.100.21:30254"))])
+                .record_reflexive(&[seen(a, "198.51.100.21:30254", true)])
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .record_reflexive(&[(a, at("198.51.100.21:30254"))])
+                .record_reflexive(&[seen(a, "198.51.100.21:30254", true)])
                 .await
                 .unwrap(),
             "an unchanged observation costs no write"
@@ -2581,6 +2598,45 @@ mod candidate_tests {
         assert_eq!(older.peers[&a].peer.candidates, Vec::<SocketAddr>::new());
         // Unobserved `b` keeps the pre-#515 address for the older node.
         assert_eq!(tries(&older, b), [at("198.51.100.21:10254")]);
+    }
+
+    /// An unproven observation of an address the coordinator published itself (the server's device may hold it
+    /// from the coordinator's list or a walk) changes nothing; a new one is a NAT's new mapping and is taken.
+    #[tokio::test]
+    async fn an_unproven_observation_counts_only_for_an_address_never_published() {
+        let (store, [_, a, _, _]) = mesh().await;
+        store
+            .record_candidates(a, Some(&[at("10.9.0.2:10254")]))
+            .await
+            .unwrap();
+        for published in ["198.51.100.21:10254", "10.9.0.2:10254"] {
+            assert!(
+                !store
+                    .record_reflexive(&[seen(a, published, false)])
+                    .await
+                    .unwrap(),
+                "{published} came from the coordinator itself"
+            );
+        }
+        assert!(
+            store
+                .record_reflexive(&[seen(a, "198.51.100.21:41000", false)])
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_reflexive(&[seen(a, "198.51.100.21:10254", false)])
+                .await
+                .unwrap(),
+            "the guess cannot displace an observed mapping without proof"
+        );
+        assert!(
+            store
+                .record_reflexive(&[seen(a, "198.51.100.21:10254", true)])
+                .await
+                .unwrap()
+        );
     }
 
     /// A node cannot plant a public, loopback or excess LAN address.

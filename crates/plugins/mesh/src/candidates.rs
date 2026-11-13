@@ -21,8 +21,9 @@
 //! Choices, and the alternatives rejected:
 //! - LAN addresses come from the default route, not from every interface: an interface list carries
 //!   container bridges and VPN addresses, and a peer would aim at its own container bridge.
-//! - The walk advances on a received packet, not on a handshake: an established session does not
-//!   handshake again for two minutes, so a handshake test would walk away from a working address.
+//! - The walk stops on anything coming back (bytes, a handshake, or the engine roaming to a packet's
+//!   source), not on a handshake alone: an established session does not handshake again for two
+//!   minutes, so a handshake test would walk away from a working address.
 //! - The walk ends after [`ROUNDS`] rounds on the first candidate, so an unreachable peer costs
 //!   nothing forever; a new list (the coordinator republishes on any change) starts a new walk.
 //! - No ICE engine yet: D316 puts full path finding in its chosen ICE engine. These are the same host
@@ -147,33 +148,45 @@ pub const STEP: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many times a walk goes round its list before it settles on the first candidate.
 pub const ROUNDS: usize = 3;
 
+/// What the engine reports for one peer, as far as a walk needs it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    /// The received-bytes counter. `GotaTun` counts handshakes and data, not keepalives.
+    pub received: u64,
+    /// The last handshake's time, `0` before the first.
+    pub handshake: u64,
+    /// Where the engine sends the peer's packets now.
+    pub endpoint: Option<SocketAddr>,
+}
+
 /// A node's walk through one peer's candidate list.
 ///
-/// It starts on the first candidate. While no packet has come back from the peer, each [`STEP`]
+/// It starts on the first candidate. While nothing has come back from the peer, each [`STEP`]
 /// moves it to the next one, wrapping, for [`ROUNDS`] rounds; then it returns to the first and
-/// stops. The first received packet stops it for good: `WireGuard` has then roamed to the address
-/// that packet came from, which is a working path by definition.
+/// stops. Anything coming back stops it for good: new bytes, a new handshake, or the engine's
+/// address moving away from the walk's (`WireGuard` roams to the source of every authenticated
+/// packet, keepalives included). The engine then already sends to a working address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rotation {
     list: Vec<SocketAddr>,
     index: usize,
     since: std::time::Instant,
-    received: u64,
+    start: Seen,
     steps_left: usize,
     settled: bool,
 }
 
 impl Rotation {
-    /// Start a walk over `list` at `now`, given the peer's received-bytes counter. `None` when
+    /// Start a walk over `list` at `now`, from what the engine reports for the peer. `None` when
     /// there is nothing to walk (fewer than two candidates).
     #[must_use]
-    pub fn new(list: Vec<SocketAddr>, now: std::time::Instant, received: u64) -> Option<Self> {
+    pub fn new(list: Vec<SocketAddr>, now: std::time::Instant, seen: Seen) -> Option<Self> {
         (list.len() >= 2).then(|| Self {
             steps_left: ROUNDS * list.len() - 1,
             list,
             index: 0,
             since: now,
-            received,
+            start: seen,
             settled: false,
         })
     }
@@ -196,14 +209,19 @@ impl Rotation {
         (!self.settled).then(|| self.since + STEP)
     }
 
-    /// Advance the walk at `now` with the peer's received-bytes counter. Returns the address to
-    /// install when the node should switch, else `None`.
-    pub fn tick(&mut self, now: std::time::Instant, received: u64) -> Option<SocketAddr> {
+    /// Advance the walk at `now` with what the engine reports for the peer. Returns the address
+    /// to install when the node should switch, else `None`.
+    pub fn tick(&mut self, now: std::time::Instant, seen: Seen) -> Option<SocketAddr> {
         if self.settled {
             return None;
         }
-        if received != self.received {
-            // Any change, including a reset counter after a rebuild, means packets flowed.
+        // Any change, including a counter reset after a rebuild, means packets flowed. An address
+        // other than the one the walk installed can only come from an authenticated packet.
+        let roamed = seen
+            .endpoint
+            .is_some_and(|endpoint| endpoint != self.list[self.index]);
+        if seen.received != self.start.received || seen.handshake != self.start.handshake || roamed
+        {
             self.settled = true;
             return None;
         }
@@ -318,14 +336,24 @@ mod tests {
     fn a_silent_peer_is_walked_round_then_left_on_the_first_candidate() {
         let start = Instant::now();
         let list = vec![at("10.9.0.3:10254"), at("198.51.100.21:10255")];
-        let mut walk = Rotation::new(list.clone(), start, 7).unwrap();
-        assert_eq!(walk.tick(start + Duration::from_secs(4), 7), None);
+        let quiet = |at: SocketAddr| Seen {
+            received: 7,
+            handshake: 0,
+            endpoint: Some(at),
+        };
+        let mut walk = Rotation::new(list.clone(), start, quiet(list[0])).unwrap();
+        assert_eq!(
+            walk.tick(start + Duration::from_secs(4), quiet(list[0])),
+            None
+        );
         let mut installed = Vec::new();
+        let mut current = list[0];
         let mut now = start;
         for _ in 0..10 {
             now += STEP;
-            if let Some(next) = walk.tick(now, 7) {
+            if let Some(next) = walk.tick(now, quiet(current)) {
                 installed.push(next);
+                current = next;
             }
         }
         assert_eq!(
@@ -336,21 +364,45 @@ mod tests {
         assert_eq!(walk.due(), None);
     }
 
-    /// The first packet back ends the walk where it is.
+    /// Bytes, a handshake or a roamed address coming back each end the walk where it is.
     #[test]
-    fn a_received_packet_stops_the_walk() {
+    fn anything_coming_back_stops_the_walk() {
         let start = Instant::now();
         let list = vec![at("10.9.0.3:10254"), at("198.51.100.21:10255")];
-        let mut walk = Rotation::new(list.clone(), start, 0).unwrap();
-        assert_eq!(walk.tick(start + STEP, 0), Some(list[1]));
-        assert_eq!(walk.tick(start + STEP * 2, 92), None);
-        assert!(walk.settled());
-        assert_eq!(walk.tick(start + STEP * 9, 92), None);
+        let first = Seen {
+            endpoint: Some(list[0]),
+            ..Seen::default()
+        };
+        let second = Seen {
+            endpoint: Some(list[1]),
+            ..Seen::default()
+        };
+        for back in [
+            Seen {
+                received: 92,
+                ..second
+            },
+            Seen {
+                handshake: 1_800_000_000,
+                ..second
+            },
+            Seen {
+                endpoint: Some(at("198.51.100.21:41000")),
+                ..second
+            },
+        ] {
+            let mut walk = Rotation::new(list.clone(), start, first).unwrap();
+            assert_eq!(walk.tick(start + STEP, first), Some(list[1]));
+            assert_eq!(walk.tick(start + STEP * 2, back), None, "{back:?}");
+            assert!(walk.settled());
+            assert_eq!(walk.tick(start + STEP * 9, back), None);
+        }
     }
 
     /// A single candidate needs no walk.
     #[test]
     fn one_candidate_has_nothing_to_walk() {
-        assert!(Rotation::new(vec![at("198.51.100.21:10255")], Instant::now(), 0).is_none());
+        let seen = Seen::default();
+        assert!(Rotation::new(vec![at("198.51.100.21:10255")], Instant::now(), seen).is_none());
     }
 }

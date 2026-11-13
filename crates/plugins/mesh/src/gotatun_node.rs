@@ -729,6 +729,19 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
+/// What a candidate walk needs from one peer's counters; an absent peer reads as silent.
+fn seen(counters: &CounterMap, key: PublicKey) -> crate::candidates::Seen {
+    counters
+        .get(&key)
+        .map_or_else(crate::candidates::Seen::default, |stats| {
+            crate::candidates::Seen {
+                received: stats.received_bytes,
+                handshake: stats.handshake_secs,
+                endpoint: stats.endpoint,
+            }
+        })
+}
+
 /// Wait until the next candidate walk step is due, or forever when no walk is running.
 async fn walk_due(at: Option<Instant>) {
     match at {
@@ -1011,8 +1024,7 @@ impl RuntimeState {
                 .endpoint
                 .into_iter()
                 .chain(peer.candidates.iter().copied());
-            let received = counters.get(&key).map_or(0, |stats| stats.received_bytes);
-            if let Some(walk) = Rotation::new(list.collect(), now, received) {
+            if let Some(walk) = Rotation::new(list.collect(), now, seen(&counters, key)) {
                 self.walks.insert(key, (peer, walk));
             }
         }
@@ -1041,8 +1053,8 @@ impl RuntimeState {
             .walks
             .iter_mut()
             .filter_map(|(key, (_, walk))| {
-                let received = counters.get(key).map_or(0, |stats| stats.received_bytes);
-                walk.tick(now, received).map(|next| (*key, next))
+                walk.tick(now, seen(&counters, *key))
+                    .map(|next| (*key, next))
             })
             .collect();
         for (key, endpoint) in moves {
