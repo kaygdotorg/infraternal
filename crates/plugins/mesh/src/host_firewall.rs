@@ -1856,11 +1856,8 @@ mod tests {
             admin_rules: vec!["*,*,tcp,2222".parse().expect("admin rule")],
             ..Policy::default()
         };
-        let result = super::validate_ssh_connection_on(
-            &policy,
-            "203.0.113.7 50000 198.51.100.2 2222",
-            None,
-        );
+        let result =
+            super::validate_ssh_connection_on(&policy, "203.0.113.7 50000 198.51.100.2 2222", None);
         assert!(result.is_ok(), "{result:?}");
     }
 

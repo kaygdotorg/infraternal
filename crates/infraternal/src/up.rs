@@ -2062,7 +2062,9 @@ mod tests {
     #[cfg(feature = "plugin-mesh")]
     #[test]
     fn review_j555_up_over_ssh_does_not_pin_ssh_to_one_source_address() {
-        use infraternal_plugin_mesh::host_firewall::{AllowRule, Policy, validate_ssh_connection_on};
+        use infraternal_plugin_mesh::host_firewall::{
+            AllowRule, Policy, validate_ssh_connection_on,
+        };
         let rules = super::agent_host_firewall_rules(&[], Some("192.0.2.5 43122 192.0.2.89 22"))
             .expect("an active SSH path supplies the administrator rule");
         let policy = Policy {
@@ -2072,7 +2074,8 @@ mod tests {
                 .collect(),
             ..Policy::default()
         };
-        let next_session = validate_ssh_connection_on(&policy, "192.0.2.6 50000 192.0.2.89 22", None);
+        let next_session =
+            validate_ssh_connection_on(&policy, "192.0.2.6 50000 192.0.2.89 22", None);
         assert!(
             next_session.is_ok(),
             "SSH from another administrator address is dropped; saved rules: {rules:?}"
