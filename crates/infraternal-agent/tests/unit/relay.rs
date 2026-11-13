@@ -119,6 +119,62 @@ fn fragmented_initial_credit_activates_repaint_reserve_without_shrinking_bulk_wi
     assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
 }
 
+/// Accumulate two opening Credit frames without confusing them with returned output credit.
+#[test]
+fn a_split_opening_credit_activates_the_repaint_reserve() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT).unwrap();
+    output.grant(REPAINT_RESERVE).unwrap();
+
+    assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
+    assert_eq!(
+        output.suffix(output.cursor(), BULK_CREDIT as usize),
+        Ok(0..BULK_CREDIT as usize),
+        "the later opening credit must preserve the full 1 MiB raw allowance"
+    );
+}
+
+/// Use only same-stream raw bytes a Snapshot replaces when reserve setup is still pending.
+#[test]
+fn a_pending_reserve_can_fund_a_repaint_from_dropped_raw_credit_once() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const SNAPSHOT: usize = 128 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT).unwrap();
+    output.forward(BULK_CREDIT as usize).unwrap();
+
+    assert_eq!(output.reserved_credit(), 0);
+    assert_eq!(output.repaint_budget(), u64::from(BULK_CREDIT));
+    output
+        .repaint_reserved(u64::from(BULK_CREDIT) + 1, SNAPSHOT)
+        .expect("the client drops these raw bytes when it accepts the Snapshot");
+    assert_eq!(output.repaint_budget(), 0);
+    assert_eq!(
+        output.repaint_reserved(u64::from(BULK_CREDIT) + 2, 1),
+        Err(Error::OutOfRange),
+        "one dropped raw byte cannot fund a second repaint"
+    );
+}
+
+/// Keep frame-valid screen captures payable by the full raw queue they replace.
+#[test]
+fn a_pending_reserve_can_fund_the_largest_valid_snapshot_from_raw_credit() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const MAX_SNAPSHOT: usize = infraternal_shim::frame::MAX_FRAME - 9;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT).unwrap();
+    output.forward(BULK_CREDIT as usize).unwrap();
+    output
+        .repaint_reserved(u64::from(BULK_CREDIT) + 1, MAX_SNAPSHOT)
+        .expect("a frame-valid Snapshot fits the full same-stream raw queue it replaces");
+    assert_eq!(output.repaint_budget(), 0);
+}
+
 /// Keep an early key repaint from taking credit that raw output could still spend.
 #[test]
 fn key_repaint_does_not_reduce_unspent_bulk_credit() {
@@ -222,6 +278,65 @@ fn a_legacy_initial_credit_keeps_its_full_bulk_window() {
     assert_eq!(
         output.repaint_reserved(u64::from(BULK_CREDIT), 1),
         Err(Error::OutOfRange)
+    );
+}
+
+/// Returned credit from a legacy full window must not look like a repaint grant.
+#[test]
+fn a_legacy_credit_return_does_not_activate_the_repaint_reserve() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT).unwrap();
+    output.forward(BULK_CREDIT as usize).unwrap();
+    output.grant(BULK_CREDIT).unwrap();
+
+    assert_eq!(output.reserved_credit(), 0);
+    assert_eq!(
+        output.suffix(output.cursor(), BULK_CREDIT as usize),
+        Ok(0..BULK_CREDIT as usize),
+        "a legacy 1 MiB window must retain its full raw allowance after refund"
+    );
+}
+
+/// Keep the negotiated repaint floor after a trusted remote cursor rebase.
+#[test]
+fn remote_cursor_rebase_preserves_repaint_credit_semantics() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+    const STYLED_SNAPSHOT: usize = 128 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT + REPAINT_RESERVE).unwrap();
+    output.forward(BULK_CREDIT as usize).unwrap();
+    let cursor = output.cursor();
+
+    // The server reissues only currently available credit after this trusted
+    // cursor; rebasing must preserve negotiated and outstanding-byte state.
+    output.reset_cursor(cursor);
+    output.grant(REPAINT_RESERVE).unwrap();
+    assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
+    assert!(
+        output.bulk_starved(),
+        "raw output must not spend the repaint floor"
+    );
+    assert_eq!(
+        output.suffix(cursor, REPAINT_RESERVE as usize),
+        Ok(0..0),
+        "repaint credit stays unavailable to bulk output"
+    );
+    assert!(
+        output.repaint_budget() >= STYLED_SNAPSHOT as u64,
+        "the reserve plus still-replaceable flood bytes can fund the repaint"
+    );
+    output
+        .repaint_reserved(cursor + 1, STYLED_SNAPSHOT)
+        .expect("the cursor rebase preserves enough real credit for a styled repaint");
+    assert_eq!(output.repaint_budget(), 0);
+    assert_eq!(
+        output.repaint_reserved(cursor + 2, 1),
+        Err(Error::OutOfRange),
+        "another cursor reset cannot mint credit for key spam"
     );
 }
 

@@ -141,13 +141,15 @@ def observe_tokens(state, data):
 
 
 def settle_echo(state):
-    """Stamp the pending key once its echo (raw `x` or row-1 token) is visible."""
+    """Stamp and report a pending key once its echo is visible after paint."""
     pending = state.get("pending_echo")
     if not pending or pending[2] is not None:
-        return
+        return False
     seen = state["token"] if state["echo_by_token"] else state["echoes"]
     if seen >= pending[0]:
         pending[2] = time.perf_counter()
+        return True
+    return False
 
 
 def queue_paint_credit(client, stream, state, length):
@@ -159,34 +161,37 @@ def queue_paint_credit(client, stream, state, length):
 
 
 def paint_frame(client, streams):
-    """Paint all visible updates and return their exact wire-byte credit afterward."""
+    """Paint queued updates, return exact wire credit, and report completed echoes."""
+    settled_echo = False
     for stream, state in streams.items():
         pending = state.get("paint_credit_pending", 0)
         if pending > 0:
             state["paint_credit_pending"] = 0
             client.send(stream, 0x14, struct.pack("<I", pending))
-        settle_echo(state)
+        settled_echo = settle_echo(state) or settled_echo
     client.paint_frame_due = None
+    return settled_echo
 
 
 def paint_if_due(client, streams):
-    """Wait at most one frame, batching ready wire frames before paint and credit return."""
+    """Paint due output and report whether that paint completed a pending echo."""
     if not any(state.get("paint_credit_pending", 0) for state in streams.values()):
-        return
+        return False
     sock = getattr(client, "sock", None)
     if sock is None:
-        return
+        return False
     remaining = getattr(client, "paint_frame_due", time.monotonic()) - time.monotonic()
     if remaining > 0:
         readable, _, _ = select.select([sock], [], [], remaining)
         if readable:
-            return
-    paint_frame(client, streams)
+            return False
+    return paint_frame(client, streams)
 
 
 def frame(client, streams):
     """Read one mux frame and update its stream's Ack/Output state."""
-    paint_if_due(client, streams)
+    if paint_if_due(client, streams):
+        return
     stream, kind, body = client.read()
     state = streams.get(stream)
     if state is None:

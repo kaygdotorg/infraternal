@@ -232,6 +232,41 @@ async fn fill_bulk_window(fixture: &mut RelayFixture) {
     .unwrap();
 }
 
+/// Spend the legacy 1 MiB raw window while keeping its opening reserve unconfirmed.
+async fn fill_bulk_window_without_repaint_reserve(fixture: &mut RelayFixture) {
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(BULK_CREDIT))
+        .unwrap();
+    for (seq, length) in [
+        (0, 900_000_usize),
+        (900_000, BULK_CREDIT as usize - 900_000),
+    ] {
+        sessions::send(&mut fixture.peer, &Shim::Output(seq, vec![b'f'; length]))
+            .await
+            .unwrap();
+        let Some(Message::Shim(stream, Shim::Output(received_seq, bytes))) =
+            tokio::time::timeout(EVENT_GUARD, fixture.messages.recv())
+                .await
+                .expect("legacy bulk output was not forwarded")
+        else {
+            panic!("relay did not forward legacy raw output");
+        };
+        assert_eq!(stream, fixture.stream);
+        assert_eq!(received_seq, seq);
+        assert_eq!(bytes.len(), length);
+    }
+
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Output(u64::from(BULK_CREDIT), vec![b'f'; STARVING_OUTPUT]),
+    )
+    .await
+    .unwrap();
+}
+
 /// Leave only a small raw backlog in flight while retaining the rest of the granted bulk window.
 async fn fill_partial_bulk_backlog(fixture: &mut RelayFixture, length: usize) {
     fixture
@@ -350,7 +385,7 @@ async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
 #[tokio::test]
 async fn key_repaint_funds_a_large_styled_snapshot_from_dropped_bulk_credit() {
     let mut fixture = start_relay(2).await;
-    fill_bulk_window(&mut fixture).await;
+    fill_bulk_window_without_repaint_reserve(&mut fixture).await;
     let requested = type_key_and_wait_for_repaint_request(&mut fixture, 0).await;
     let styled = styled_snapshot_at_least(128 * 1024);
     assert!(styled.len() > REPAINT_CREDIT as usize);

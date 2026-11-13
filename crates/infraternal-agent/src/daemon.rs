@@ -1,21 +1,26 @@
 //! Shared inherited and authenticated remote leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
 //!
-//! Each terminal owns one pending output frame. Input/Resize commands have eight slots;
+//! Each terminal owns one credit-waiting shim frame and at most one extra raw frame
+//! already charged to that stream's output credit. Input/Resize commands have eight slots;
 //! shared-stream Credit is accumulated in constant space without occupying that FIFO;
 //! Input/Resize overload retires only that stream; probes may be skipped. Unacknowledged
-//! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots
-//! and awaits capacity. Control replies use a separate eight-slot lane, selected
+//! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots;
+//! raw-output enqueue never awaits capacity. While one raw frame waits for writer capacity, the
+//! shim reader can fill one extra bounded pending slot so `InputAck` and liveness replies still
+//! move; it pauses again once that slot is occupied. Commands and timers stay live throughout.
+//! Control replies use a separate eight-slot lane, selected
 //! first at frame boundaries; reply producers wait for bounded FIFO capacity. Native
 //! terminal dispatch continues on its independent streams. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
 //!
-//! D381 keeps four relay invariants: a repaint spends the separate 64 KiB reserve
-//! or borrows only from this stream's raw output that the client drops for the
-//! replacement; each raw byte backs at most one repaint until its credit returns,
-//! and borrowed bytes become debt. Raw output cannot spend the remaining reserve.
-//! A key-triggered capture
-//! follows that key's shim `InputAck` and leaves one frame for its PTY echo.
+//! D381 keeps four relay invariants: no Snapshot reaches the writer before its full
+//! payload length is approved by this stream's credit ledger; input cannot mint credit.
+//! A repaint spends the separate 64 KiB reserve or borrows only from raw output this
+//! stream drops for the replacement; each raw byte backs at most one repaint until
+//! its credit returns, and borrowed bytes become debt. Raw output cannot spend the
+//! remaining reserve. A key-triggered capture follows that key's shim `InputAck` and
+//! leaves one frame for its PTY echo.
 //! Dropping stalled output affects only its own stream. Coalesced key input
 //! cannot mint credit or create unbounded captures. After the latest coalesced
 //! key is acknowledged, its capture waits one 8 ms terminal frame so the PTY
@@ -664,6 +669,49 @@ async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
     tx.send(message)
         .await
         .map_err(|_| io::ErrorKind::BrokenPipe.into())
+}
+
+/// Queue an already credit-approved raw frame without waiting on the shared writer FIFO.
+///
+/// When the FIFO is full, retain one frame in `staged`; the caller may read one more shim frame
+/// into its bounded `pending` slot so acknowledgments and liveness replies stay live. A key
+/// repaint may discard the staged frame because the relay ledger has already charged its bytes
+/// and the replacement Snapshot covers the same output cursor. No caller may stage a second frame.
+/// # Errors
+/// Returns `WouldBlock` if a frame is already staged, or `BrokenPipe` if the writer is closed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn queue_raw_output(
+    tx: &mpsc::Sender<Message>,
+    staged: &mut Option<Message>,
+    stream: u32,
+    seq: u64,
+    bytes: Vec<u8>,
+) -> io::Result<()> {
+    if staged.is_some() {
+        return Err(io::ErrorKind::WouldBlock.into());
+    }
+    let message = Message::Shim(stream, Shim::Output(seq, bytes));
+    match tx.try_send(message) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(message)) => {
+            *staged = Some(message);
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(io::ErrorKind::BrokenPipe.into()),
+    }
+}
+
+/// Keep the shim reader live while one raw Output waits for the shared writer.
+///
+/// The pending slot is the one-frame read-ahead bound beside `pending_bulk`.
+/// Reading control replies in that slot keeps input acknowledgments and liveness
+/// state moving while writer backpressure holds raw bytes. Once that slot is
+/// occupied, stop reading until the pending frame is sent, retried, or replaced
+/// by a key repaint.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn can_read_shim_frame(pending: Option<&Shim>, pending_bulk: Option<&Message>) -> bool {
+    pending.is_none()
+        && pending_bulk.is_none_or(|message| matches!(message, Message::Shim(_, Shim::Output(..))))
 }
 
 /// Queue a trusted key acknowledgment or repaint on the bounded writer priority lane.
@@ -1811,6 +1859,8 @@ async fn terminal_run(
         replay_until = None;
     }
     let mut pending: Option<Shim> = None;
+    // One credit-charged Output may wait here if the shared writer FIFO is full.
+    let mut pending_bulk: Option<Message> = None;
     let mut deadline = None;
     // The latest input offset a repaint must show, and the offset covered by
     // the one SnapshotRequest already sent to the shim, if any.
@@ -1824,7 +1874,9 @@ async fn terminal_run(
     let mut probe = None;
     let mut reply_unavailable_announced = false;
     loop {
-        if let Some(frame) = pending.take() {
+        if pending_bulk.is_none()
+            && let Some(frame) = pending.take()
+        {
             match frame {
                 Shim::Output(seq, bytes) => {
                     let frame_len = bytes.len();
@@ -1839,11 +1891,13 @@ async fn terminal_run(
                         // Whole frames transfer their payload ownership to the
                         // writer. Only partial credit/overlap needs a suffix copy.
                         if range.start == 0 && end == frame_len {
-                            emit(
+                            queue_raw_output(
                                 &tx,
-                                Message::Shim(stream, Shim::Output(output.cursor(), bytes)),
-                            )
-                            .await?;
+                                &mut pending_bulk,
+                                stream,
+                                output.cursor(),
+                                bytes,
+                            )?;
                             output
                                 .forward(length)
                                 .map_err(|_| sessions::invalid("output credit invariant"))?;
@@ -1854,14 +1908,13 @@ async fn terminal_run(
                             }
                             continue;
                         }
-                        emit(
+                        queue_raw_output(
                             &tx,
-                            Message::Shim(
-                                stream,
-                                Shim::Output(output.cursor(), bytes[range.start..end].to_vec()),
-                            ),
-                        )
-                        .await?;
+                            &mut pending_bulk,
+                            stream,
+                            output.cursor(),
+                            bytes[range.start..end].to_vec(),
+                        )?;
                         output
                             .forward(length)
                             .map_err(|_| sessions::invalid("output credit invariant"))?;
@@ -2066,7 +2119,7 @@ async fn terminal_run(
                         // Reset only this shadow relay, before its ordered Credit;
                         // already queued duplicates remain bounded and are trimmed
                         // by the server rather than charged to browser credit again.
-                        output = relay::Output::attach_with_repaint_reserve(cursor);
+                        output.reset_cursor(cursor);
                         pending = None;
                         deadline = None;
                         key_repaint_target = None;
@@ -2120,9 +2173,10 @@ async fn terminal_run(
                                     // A small prior write is not a blocked flood;
                                     // this also catches a key just before bulk credit runs out.
                                     let unreturned = output.unreturned_output_credit();
-                                    let output_waiting = unreturned > 0
-                                        && (output.bulk_starved()
-                                            || unreturned >= relay::KEY_REPAINT_BACKLOG);
+                                    let output_waiting = pending_bulk.is_some()
+                                        || (unreturned > 0
+                                            && (output.bulk_starved()
+                                                || unreturned >= relay::KEY_REPAINT_BACKLOG));
                                     if key_repaint_target.is_some()
                                         || (output_waiting && output.repaint_budget() > 0)
                                     {
@@ -2134,9 +2188,10 @@ async fn terminal_run(
                                         if output_waiting && key_repaint_target.is_none() {
                                             // This stream is starved even when
                                             // its next frame has not been read.
-                                            // Discard only its pending payload so
-                                            // InputAck can pass the key's echo.
+                                            // Discard only this stream's pending
+                                            // raw payload so the repaint replaces it.
                                             pending = None;
+                                            pending_bulk = None;
                                             deadline = output
                                                 .pending(Instant::now())
                                                 .map(tokio::time::Instant::from_std);
@@ -2182,6 +2237,13 @@ async fn terminal_run(
                     }
                 }
             }
+            permit = tx.clone().reserve_owned(), if pending_bulk.is_some() => {
+                let permit = permit.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                let message = pending_bulk
+                    .take()
+                    .ok_or_else(|| sessions::invalid("missing staged raw output"))?;
+                permit.send(message);
+            }
             () = async {
                 if let Some(ready_at) = key_repaint_ready_at {
                     tokio::time::sleep_until(ready_at).await;
@@ -2219,7 +2281,7 @@ async fn terminal_run(
             frame = async {
                 if let Some(session) = &mut session { session.read().await }
                 else { std::future::pending().await }
-            }, if pending.is_none() => {
+            }, if can_read_shim_frame(pending.as_ref(), pending_bulk.as_ref()) => {
                 match frame? {
                     Shim::Output(..) if key_repaint_target.is_some() => {}
                     Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)

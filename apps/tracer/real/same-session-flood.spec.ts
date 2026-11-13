@@ -40,7 +40,7 @@ const KEYS = 20;
 const QUIET_PAINT_KEYS = Number(process.env.REAL_QUIET_PAINT_KEYS ?? 200);
 /** Flood samples for a meaningful nearest-rank p99. */
 const FLOOD_PAINT_KEYS = 200;
-/** The raw-output window that must be spent before a key belongs to the blocked-flood sample. */
+/** Raw output may spend this full amount while the separate repaint reserve stays protected. */
 const BULK_WINDOW_BYTES = 1024 * 1024;
 /** The browser reserves this part of its opening grant for an input-triggered repaint. */
 const REPAINT_RESERVE_BYTES = 64 * 1024;
@@ -215,12 +215,13 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   await expect(page.locator("#probe-run")).toBeEnabled({ timeout: FREEZE_MS });
   console.log("SAME_SESSION_PAINT_STAGE reset_complete");
 
-  // Priming may split the opening grant, so use the settled outstanding balance
-  // instead of assuming the first Credit frame contains the whole window.
-  await expect.poll(() => serverCreditBalance(bridge, stream), {
+  // The opening grant may be split, and setup output may already have spent
+  // some of it. Check that the full initial window reached the relay without
+  // requiring its outstanding balance to return to the opening value.
+  await expect.poll(() => bridge.creditGrantedByStream?.get(stream) ?? 0, {
     timeout: FREEZE_MS,
     intervals: [10],
-  }).toBe(INITIAL_CREDIT_BYTES);
+  }).toBeGreaterThanOrEqual(INITIAL_CREDIT_BYTES);
   const openingCreditFrames = (bridge.flowTimes ?? [])
     .filter((event) => event.stream === stream && event.direction === "up"
       && event.stage === "backend-send" && event.type === "Credit")
@@ -236,6 +237,7 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   bridge.skipOutputText = true;
   bridge.flowFilter = new Set([
     "up:backend-send:Input",
+    "up:bridge-receive:Credit",
     "down:backend-receive:Ack",
     "down:backend-receive:Snapshot",
     "down:browser-send:Ack",
@@ -244,50 +246,53 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   ]);
   bridge.flowTimes?.splice(0);
   console.log("SAME_SESSION_PAINT_STAGE flood_key_begin");
+  const floodInputCount = (bridge.flowTimes ?? []).filter((event) => event.stream === stream
+    && event.direction === "up" && event.stage === "backend-send" && event.type === "Input").length;
   await page.keyboard.press("F");
   console.log("SAME_SESSION_PAINT_STAGE flood_key_sent");
-  // Observe one full raw window on the selected stream and keep the original
-  // route attached. The browser's outstanding balance cannot prove the relay's
-  // repaint reserve: a Snapshot can spend it and a paint callback can return
-  // credit while the flood immediately spends that credit again.
+  await expect.poll(() => (bridge.flowTimes ?? []).filter((event) => event.stream === stream
+    && event.direction === "up" && event.stage === "backend-send" && event.type === "Input").length,
+  { timeout: FREEZE_MS, intervals: [5, 10, 25] }).toBeGreaterThan(floodInputCount);
+  // Start only after raw flood output has spent the ordinary bulk window and
+  // the same attached route has no bulk credit left. A short delay after F can
+  // accidentally measure ordinary output before the D381 repaint path starts.
   try {
     await expect.poll(() => {
-      const rawSent = (rawOutput.get(stream) ?? 0) - floodStartBytes;
-      return rawSent >= BULK_WINDOW_BYTES
+      const rawBytes = (rawOutput.get(stream) ?? 0) - floodStartBytes;
+      const creditBalance = serverCreditBalance(bridge, stream);
+      return rawBytes >= BULK_WINDOW_BYTES
+        && creditBalance <= REPAINT_RESERVE_BYTES
         && activeTerminalBridge()?.id === bridge.id
         && bridge.attached.has(stream);
-    }, {
-      timeout: FREEZE_MS,
-      intervals: [5],
-    }).toBe(true);
+    }, { timeout: FREEZE_MS, intervals: [5, 10, 25] }).toBe(true);
   } catch (error) {
-    const bridges = server.bridges.slice(-4).map((entry) => ({
-      id: entry.id,
-      closed: entry.closed,
-      closedBy: entry.closedBy,
-      closedReason: entry.closedReason,
-      serverClose: entry.serverClose,
-      attachedStreams: [...entry.attached.keys()],
-      rawOutputBytesSeen: [...(entry.rawOutputBytesSeen ?? new Map())],
-      terminalCloses: entry.terminalCloses,
-      flowTail: entry.flowTimes?.slice(-24),
-    }));
-    console.error("SAME_SESSION_FILL_INCOMPLETE " + JSON.stringify({
-      measuredBridge: bridge.id,
-      measuredStream: stream,
-      measuredRawBytes: (rawOutput.get(stream) ?? 0) - floodStartBytes,
-      browserCreditBalance: serverCreditBalance(bridge, stream),
-      bridges,
-    }));
-    await page.screenshot({ path: test.info().outputPath("same-session-fill-incomplete.png") });
+    const incompleteWindow = {
+      stream,
+      route: bridge.id,
+      activeRoute: activeTerminalBridge()?.id ?? null,
+      attached: bridge.attached.has(stream),
+      rawBytes: (rawOutput.get(stream) ?? 0) - floodStartBytes,
+      creditBalance: serverCreditBalance(bridge, stream),
+      routes: server.bridges.slice(-4).map((entry) => ({
+        id: entry.id,
+        closed: entry.closed,
+        closedBy: entry.closedBy,
+        closedReason: entry.closedReason,
+        serverClose: entry.serverClose,
+        rawOutputBytesSeen: [...(entry.rawOutputBytesSeen ?? new Map())],
+        flowTail: entry.flowTimes?.slice(-24),
+      })),
+    };
+    await page.screenshot({ path: test.info().outputPath("same-session-window-incomplete.png") });
+    await writeFile(test.info().outputPath("same-session-window-incomplete.json"), JSON.stringify(incompleteWindow, null, 2));
+    console.error("SAME_SESSION_WINDOW_INCOMPLETE " + JSON.stringify(incompleteWindow));
     throw error;
   }
-  console.log(`SAME_SESSION_PAINT_STAGE raw_bulk_window_observed stream=${stream} bytes=${(rawOutput.get(stream) ?? 0) - floodStartBytes} route=${bridge.id}`);
-  // Ignore the F command and any flow-control work from filling the window.
-  bridge.flowTimes?.splice(0);
+  console.log(`SAME_SESSION_PAINT_STAGE bulk_credit_exhausted stream=${stream} ` +
+    `raw_bytes=${(rawOutput.get(stream) ?? 0) - floodStartBytes} ` +
+    `credit_balance=${serverCreditBalance(bridge, stream)} route=${bridge.id}`);
 
-  // The focused trace already excludes flood output and starts at the first
-  // measured input.
+  // The focused trace excludes raw Output and retains flood Credits and keys.
   const flowStart = 0;
   const runButton = page.locator("#probe-run");
   await expect(runButton).toBeDisabled();
@@ -295,6 +300,75 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   // its count is already prepared and it sends the first key immediately.
   await runButton.dispatchEvent("click");
   await expect(page.locator("#probe-message")).toHaveText("Sending synthetic keys. They are not followed by Enter.", { timeout: FREEZE_MS });
+  await page.waitForFunction(
+    () => window.__tracerPerformanceProbe?.trace()[0]?.id !== undefined,
+    undefined,
+    { timeout: FREEZE_MS, polling: 10 },
+  );
+  const firstSampleId = await page.evaluate(() => window.__tracerPerformanceProbe?.trace()[0]?.id ?? "");
+  const firstAckSequence = (BigInt(firstSampleId) + 1n).toString();
+  const firstPathObserved = await expect.poll(() => {
+    const events = bridge.flowTimes ?? [];
+    const input = events.find((event) => event.stream === stream && event.direction === "up"
+      && event.stage === "backend-send" && event.type === "Input" && event.sequence === firstSampleId);
+    const ack = input && events.find((event) => event.stream === stream && event.direction === "down"
+      && event.stage === "backend-receive" && event.type === "Ack"
+      && event.sequence === firstAckSequence && event.at >= input.at);
+    return Boolean(ack && events.some((event) => event.stream === stream && event.direction === "down"
+      && event.stage === "backend-receive" && event.type === "Snapshot" && event.at >= ack.at));
+  }, { timeout: 5_000, intervals: [10, 25, 50] }).toBe(true).then(() => true, () => false);
+  const firstKeyEvents = (bridge.flowTimes ?? []).filter((event) => event.stream === stream
+    && ((event.direction === "up" && event.type === "Input" && event.sequence === firstSampleId)
+      || (event.direction === "down" && (event.type === "Ack" || event.type === "Snapshot"))));
+  const routeDiagnostics = server.bridges.slice(-4).map((entry) => ({
+    id: entry.id,
+    closed: entry.closed,
+    closedBy: entry.closedBy,
+    closedReason: entry.closedReason,
+    serverClose: entry.serverClose,
+    activeStreams: [...entry.attached.keys()],
+    replays: entry.replays,
+    terminalCloses: entry.terminalCloses,
+    rawOutputBytesSeen: [...(entry.rawOutputBytesSeen ?? new Map())],
+    flowTail: entry.flowTimes?.slice(-24),
+  }));
+  const firstInputEvent = firstKeyEvents.find((event) => event.direction === "up"
+    && event.type === "Input" && event.sequence === firstSampleId);
+  const firstAckEvent = firstKeyEvents.find((event) => event.direction === "down"
+    && event.type === "Ack" && event.sequence === firstAckSequence
+    && (!firstInputEvent || event.at >= firstInputEvent.at));
+  const firstSnapshotEvent = firstKeyEvents.find((event) => event.direction === "down"
+    && event.type === "Snapshot" && (!firstAckEvent || event.at >= firstAckEvent.at));
+  const firstPathDiagnostic = {
+    firstSampleId,
+    firstInputEvent,
+    firstAckEvent,
+    firstSnapshotEvent,
+    firstPathObserved,
+    originalBridgeId: bridge.id,
+    activeBridgeId: activeTerminalBridge()?.id ?? null,
+    bridgeClosed: bridge.closed,
+    routes: routeDiagnostics,
+  };
+  await writeFile(test.info().outputPath("same-session-first-key.json"), JSON.stringify(firstPathDiagnostic, null, 2));
+  console.log("SAME_SESSION_FIRST_KEY " + JSON.stringify({
+    inputCreditBalance: firstInputEvent?.creditBalance ?? null,
+    inputToAckMs: firstInputEvent && firstAckEvent ? firstAckEvent.at - firstInputEvent.at : null,
+    acked: Boolean(firstAckEvent),
+    snapshot: Boolean(firstSnapshotEvent),
+    route: bridge.id,
+    activeRoute: activeTerminalBridge()?.id ?? null,
+    closed: bridge.closed,
+    serverClose: bridge.serverClose,
+  }));
+  expect(firstInputEvent, "the first paint sample must reach the selected relay bridge").toBeDefined();
+  expect(firstInputEvent?.creditBalance ?? Number.POSITIVE_INFINITY,
+    "the first paint sample must reach the relay with only its repaint reserve remaining")
+    .toBeLessThanOrEqual(REPAINT_RESERVE_BYTES);
+  expect(firstAckEvent, "the relay must acknowledge the first input on its selected route").toBeDefined();
+  expect(firstSnapshotEvent, "the first key at the exhausted-credit boundary must receive its repaint")
+    .toBeDefined();
+  expect(activeTerminalBridge()?.id, "the paint measurement must stay on its original real-browser route").toBe(bridge.id);
   try {
     await waitForPaintedEchoes(page, FLOOD_PAINT_KEYS, FLOOD_PAINT_TIMEOUT_MS);
   } catch (error) {
@@ -369,7 +443,23 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
   expect(tracePaintP99).toBeCloseTo(floodP99, 2);
   const flow = bridge.flowTimes?.slice(flowStart) ?? [];
   const snapshots = flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Snapshot" && event.stage === "backend-receive");
-  const inputs = flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Input" && event.stage === "backend-send");
+  const measuredSequences = new Set(floodProbeTrace.samples.map((sample) => sample.id));
+  const measuredInputFrames = flow.filter((event) => event.stream === stream && event.direction === "up"
+    && event.type === "Input" && event.stage === "backend-send" && measuredSequences.has(event.sequence ?? ""));
+  // Count a painted key once by its wire sequence; retain repeated submissions in the trace for diagnosis.
+  const inputBySequence = new Map<string, typeof measuredInputFrames[number]>();
+  const duplicateInputSequences: string[] = [];
+  for (const input of measuredInputFrames) {
+    const sequence = input.sequence ?? "";
+    if (inputBySequence.has(sequence)) duplicateInputSequences.push(sequence);
+    else inputBySequence.set(sequence, input);
+  }
+  const inputs = [...inputBySequence.values()];
+  console.log("SAME_SESSION_PAINT_INPUT_FRAMES " + JSON.stringify({
+    measured: measuredInputFrames.length,
+    unique: inputs.length,
+    duplicateSequences: duplicateInputSequences,
+  }));
   const acks = flow.filter((event) => event.stream === stream && event.direction === "down" && event.type === "Ack" && event.stage === "backend-receive");
   const credits = flow.filter((event) => event.stream === stream && event.direction === "up" && event.type === "Credit" && event.stage === "backend-send");
   const browserSends = flow.filter((event) => event.stream === stream && event.direction === "down" && event.stage === "browser-send");
@@ -380,8 +470,23 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
     const ack = acks.find((candidate) => candidate.sequence === target && candidate.at >= input.at);
     return ack ? [ack.at - input.at] : [];
   });
+  console.log("SAME_SESSION_PAINT_BOUNDARY " + JSON.stringify({
+    quietP99Ms: quietP99,
+    floodP99Ms: floodP99,
+    growthMs: floodP99 - quietP99,
+    measuredSamples: floodProbeTrace.samples.length,
+    measuredInputs: inputs.length,
+    inputAckSamples: ackSpans.length,
+    inputAckP99Ms: ackSpans.length > 0 ? p(ackSpans, 0.99) : null,
+    firstInputCreditBalance: inputs[0]?.creditBalance ?? null,
+    firstInputSequence: inputs[0]?.sequence ?? null,
+    snapshots: snapshots.length,
+  }));
   expect(inputs.length, "the flood profile must send all 200 measured browser inputs").toBe(FLOOD_PAINT_KEYS);
   expect(ackSpans.length, "the bridge trace must pair measured inputs with their server acknowledgements").toBe(FLOOD_PAINT_KEYS);
+  expect(inputs[0]?.creditBalance ?? Number.POSITIVE_INFINITY,
+    "the first measured input must reach the relay with only its repaint reserve remaining")
+    .toBeLessThanOrEqual(REPAINT_RESERVE_BYTES);
   expect(snapshots.length, "the first measured key must exercise the repaint fast path").toBeGreaterThan(0);
   expect(credits.length, "painted output must return client credit to the relay").toBeGreaterThan(0);
   const inputAckP99 = p(ackSpans, 0.99);
@@ -457,7 +562,7 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
     serverCreditAtInputs,
     flowEventCount: flow.length,
     probe: { quiet: quietReport, flood: floodReport, quietTrace: quietProbeTrace, floodTrace: floodProbeTrace },
-    relay: { inputs, acks, browserSends, credits, snapshots },
+    relay: { inputs, duplicateInputSequences, acks, browserSends, credits, snapshots },
   };
   await writeFile(test.info().outputPath("same-session-paint-trace.json"), JSON.stringify(trace, null, 2));
   await page.screenshot({ path: test.info().outputPath("same-session-paint.png") });
