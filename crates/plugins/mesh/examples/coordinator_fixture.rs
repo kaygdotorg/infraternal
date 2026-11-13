@@ -233,38 +233,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         if request.mode == "port" {
             service.execute("owner", "mesh.grant.create", &serde_json::to_vec(&json!({"name":"proof-port","from":{"Node":members[0].0},"to":{"Node":members[1].0},"both_ways":false,"ports":{"Ports":[{"protocol":"Tcp","number":5211}]}}))?, now).await.map_err(|_|"Access grant refused")?;
-        } else {
-            if matches!(request.mode.as_str(), "allow" | "deny") {
-                let policy = if request.mode == "allow" {
-                    DefaultPolicy::Allow
-                } else {
-                    DefaultPolicy::Deny
-                };
-                let preview = service
-                    .execute(
-                        "owner",
-                        "mesh.default.preview",
-                        &serde_json::to_vec(&json!({"default_policy":policy}))?,
-                        now,
-                    )
-                    .await
-                    .map_err(|_| "preview refused")?;
-                service
-                    .execute(
-                        "owner",
-                        "mesh.default.set",
-                        &serde_json::to_vec(
-                            &json!({"default_policy":policy,"expected_revision":preview["revision"]}),
-                        )?,
-                        now,
-                    )
-                    .await
-                    .map_err(|_| "default refused")?;
-            } else if matches!(request.mode.as_str(), "peer-add" | "peer-remove") {
-                // Peer inventory changes above are compiled into the same ordered snapshot as policy changes.
-            } else if rotation.is_none() {
-                return Err("unknown mode".into());
-            }
+        } else if matches!(request.mode.as_str(), "allow" | "deny") {
+            let policy = if request.mode == "allow" {
+                DefaultPolicy::Allow
+            } else {
+                DefaultPolicy::Deny
+            };
+            let preview = service
+                .execute(
+                    "owner",
+                    "mesh.default.preview",
+                    &serde_json::to_vec(&json!({"default_policy":policy}))?,
+                    now,
+                )
+                .await
+                .map_err(|_| "preview refused")?;
+            service
+                .execute(
+                    "owner",
+                    "mesh.default.set",
+                    &serde_json::to_vec(
+                        &json!({"default_policy":policy,"expected_revision":preview["revision"]}),
+                    )?,
+                    now,
+                )
+                .await
+                .map_err(|_| "default refused")?;
+        } else if matches!(request.mode.as_str(), "peer-add" | "peer-remove") {
+            // Peer inventory changes above are compiled into the same ordered snapshot as policy changes.
+        } else if rotation.is_none() {
+            return Err("unknown mode".into());
         }
         let next = [
             store
