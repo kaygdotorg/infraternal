@@ -676,9 +676,14 @@ export class Wizard {
   private onRunClosed(run: ProvisioningRun): void {
     if (!this.alive || this.closing) return;
     let changed = false;
+    const restarted: Job[] = [];
     for (const job of this.jobs) {
       if (job.run !== run) continue;
       job.run = undefined;
+      // The server went away while this host waited for the person to check its key (a restart). What the page held of
+      // that observation is gone with the run, and Trust could only refuse. Ask the host again on a new run: the key
+      // comes back as a new observation, and the person confirms that one (#510).
+      if (awaitingKey(job.view)) { restarted.push(job); continue; }
       if (job.view.state === "pending" || job.view.state === "running") {
         const message = "The connection to the server ended before setup finished.";
         job.view = { ...job.view, state: "failed", message, failure: { kind: "install", message, log_tail: [] }, leftovers: undefined };
@@ -687,6 +692,7 @@ export class Wizard {
       }
     }
     if (changed) { this.summarise(); this.settle(); }
+    for (const job of restarted) this.retryJob(job);
   }
 
   private enrolledOf(job: Job): EnrolledHost {
