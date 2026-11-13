@@ -215,6 +215,15 @@ const BEGIN_ALLOWED: &str = "FROM remote_hosts h JOIN sessions s ON s.user_id = 
      AND c.role = 'active' AND c.execution_uid = h.execution_uid AND c.revoked_at IS NULL \
      AND c.not_before <= ?6 AND c.not_after > ?6";
 
+/// An earlier promotion of host `h.id` whose root install may still be on
+/// the host: its successor's uninstall is pending and that successor can
+/// still be admitted to run it (J569 P2-2). Once its certificate expires it
+/// can never uninstall through infraternal, so it stops barring the host.
+const UNINSTALL_PENDING: &str = "EXISTS(SELECT 1 FROM remote_host_promotions p \
+     JOIN remote_certificates sc ON sc.fingerprint = p.successor_fingerprint \
+     WHERE p.host_id = h.id AND p.cleanup = 'uninstall' \
+     AND sc.revoked_at IS NULL AND sc.not_after > ?6)";
+
 /// The 2-try wait clause ([`LOCKED`]) for the given host, account and time
 /// expressions, spliced into a statement's WHERE.
 fn locked(host: &str, account: &str, now: &str) -> String {
@@ -254,8 +263,8 @@ impl EnrollmentStore {
     /// infraternal agent can create or advance a promotion.
     ///
     /// # Errors
-    /// [`PromotionError::Busy`] when another promotion of the host is live,
-    /// [`PromotionError::Locked`]
+    /// [`PromotionError::Busy`] when another promotion of the host is live
+    /// or an earlier one's uninstall is pending, [`PromotionError::Locked`]
     /// during the 2-try wait (told only to a caller who may begin),
     /// otherwise `Denied`.
     pub(crate) async fn begin_promotion(
@@ -274,7 +283,7 @@ impl EnrollmentStore {
             "INSERT INTO remote_host_promotions(attempt, host_id, person, method, account, from_uid, \
              from_fingerprint, link_generation, started_at, expires_at) \
              SELECT ?1, h.id, s.user_id, ?2, ?3, h.execution_uid, ?4, ?5, ?6, ?6 + ?7 \
-             {BEGIN_ALLOWED} AND NOT {}",
+             {BEGIN_ALLOWED} AND NOT {} AND NOT {UNINSTALL_PENDING}",
             locked("h.id", "?3", "?6")
         );
         let inserted = sqlx::query(&sql)
@@ -306,6 +315,10 @@ impl EnrollmentStore {
     /// - a caller who may not begin at all is `Denied`, and learns nothing
     ///   about the host's state (J569 P3-3: before, a locked session, one
     ///   outside its admin window or another owner was told the 2-try wait);
+    /// - an earlier promotion's root install that may still be on the host
+    ///   (its uninstall is pending) is `Busy` (J569 P2-2): a new handover
+    ///   would revoke that successor's certificate, and its uninstall could
+    ///   then never be delivered;
     /// - the 2-try wait is `Locked`;
     /// - anything else (a stale binding) is `Denied`.
     async fn refused_begin(
@@ -318,9 +331,9 @@ impl EnrollmentStore {
     ) -> Result<(), PromotionError> {
         // The same numbered parameters as the insert; the ones it doesn't
         // use (`?1`–`?3`, `?5`, `?7`) are bound to NULL.
-        let sql = format!("SELECT 1 {BEGIN_ALLOWED}");
+        let sql = format!("SELECT NOT {UNINSTALL_PENDING} {BEGIN_ALLOWED}");
         let unused = None::<i64>;
-        let allowed: Option<i64> = sqlx::query_scalar(&sql)
+        let allowed: Option<bool> = sqlx::query_scalar(&sql)
             .bind(unused)
             .bind(unused)
             .bind(unused)
@@ -336,7 +349,8 @@ impl EnrollmentStore {
             .await?;
         match allowed {
             None => Err(PromotionError::Denied),
-            Some(_) => match self.retry_after(host, method, now).await? {
+            Some(false) => Err(PromotionError::Busy),
+            Some(true) => match self.retry_after(host, method, now).await? {
                 Some(retry_after) => Err(PromotionError::Locked { retry_after }),
                 None => Err(PromotionError::Denied),
             },
