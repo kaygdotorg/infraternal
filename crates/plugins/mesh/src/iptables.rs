@@ -767,14 +767,17 @@ fn render_guard_only(
     } else {
         let _ = writeln!(script, ":{GUARD} - [0:0]");
     }
+    // Every raw packet walks this chain, so contiguous mesh addresses collapse into exact
+    // aligned prefixes: 1,000 peers cost a few rules, not 1,000, and the batch stays within one
+    // netlink message. The prefixes never cover an address outside the mesh set.
     let addresses = std::iter::once(&config.addresses)
         .chain(aliases)
         .chain(config.peers.values().map(|peer| &peer.peer.addresses))
         .map(|addresses| {
             if ipv6 {
-                addresses.ipv6.to_string()
+                u128::from(addresses.ipv6)
             } else {
-                addresses.ipv4.to_string()
+                u128::from(u32::from(addresses.ipv4))
             }
         })
         .collect::<std::collections::BTreeSet<_>>();
@@ -782,11 +785,13 @@ fn render_guard_only(
         script,
         "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN"
     );
-    for address in addresses {
-        let _ = writeln!(
-            script,
-            "-A {GUARD} ! -i {INTERFACE} -s {address} -m comment --comment infraternal.mesh.v1 -j DROP"
-        );
+    for (start, end) in address_ranges(addresses) {
+        for prefix in prefixes(start, end, ipv6) {
+            let _ = writeln!(
+                script,
+                "-A {GUARD} ! -i {INTERFACE} -s {prefix} -m comment --comment infraternal.mesh.v1 -j DROP"
+            );
+        }
     }
     if !installed.guard() {
         let _ = writeln!(script, "-I PREROUTING 1 -j {GUARD}");
@@ -1048,7 +1053,7 @@ mod tests {
         let rules = render_guard_only(&config, false, GuardOwnership::default(), &[], &ingress);
 
         for rule in [
-            "-s 10.254.0.2 -m comment --comment infraternal.mesh.v1 -j DROP",
+            "-s 10.254.0.2/32 -m comment --comment infraternal.mesh.v1 -j DROP",
             "-A IFM_FWD -m comment --comment infraternal.mesh.v1 -j DROP",
             "--dports 80,443",
         ] {
@@ -1056,6 +1061,49 @@ mod tests {
         }
         for grant in ["IFM_IN", "IFM_OUT", "--ctorigdstport 22"] {
             assert!(!rules.contains(grant), "unexpected {grant}: {rules}");
+        }
+    }
+
+    /// The anti-spoofing guard covers every mesh address with exact prefixes, so 1,000
+    /// contiguous peers cost a handful of raw rules per packet, not one rule per peer, and the
+    /// restore batch stays small enough for one netlink message (#265 J560).
+    #[test]
+    fn guard_anti_spoofing_uses_exact_prefixes_not_one_rule_per_peer() {
+        let config = config(&(2..=1001).collect::<Vec<_>>());
+        for ipv6 in [false, true] {
+            let rules = render_guard_only(
+                &config,
+                ipv6,
+                GuardOwnership::default(),
+                &[],
+                &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            );
+            let drops: Vec<&str> = rules
+                .lines()
+                .filter(|line| line.starts_with("-A IFM_GUARD ! -i"))
+                .collect();
+            assert!(drops.len() <= 16, "{} rules: {drops:?}", drops.len());
+            let covered: u128 = drops
+                .iter()
+                .map(|line| {
+                    let prefix = line
+                        .split_whitespace()
+                        .skip_while(|word| *word != "-s")
+                        .nth(1)
+                        .expect("source prefix");
+                    let bits: u32 = prefix
+                        .rsplit_once('/')
+                        .expect("prefix length")
+                        .1
+                        .parse()
+                        .expect("number");
+                    1_u128 << ((if ipv6 { 128 } else { 32 }) - bits)
+                })
+                .sum();
+            assert_eq!(
+                covered, 1001,
+                "exactly the 1,001 mesh addresses (ipv6={ipv6})"
+            );
         }
     }
 
