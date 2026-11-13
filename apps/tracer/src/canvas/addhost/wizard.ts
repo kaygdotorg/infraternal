@@ -694,7 +694,7 @@ export class Wizard {
       // A new run that closed before it said anything: the server is still coming back. Ask again shortly.
       if (job.reasks !== undefined && job.reasks < REASK_TRIES && (job.view.state === "pending" || job.view.state === "running")) {
         job.reasks++;
-        window.setTimeout(() => { if (this.alive && !this.closing && job.reasks !== undefined && !job.run) this.retryJob(job); }, 1000);
+        window.setTimeout(() => { if (this.alive && !this.closing && this.jobs.includes(job) && job.reasks !== undefined && !job.run) this.retryJob(job); }, 1000);
         continue;
       }
       if (job.view.state === "pending" || job.view.state === "running") {
@@ -1071,8 +1071,11 @@ export class Wizard {
     this.setBusy(true);
     try {
       await this.deps.service.trustHostKey(this.addressText(job.entry), print);
-      this.retryJob(job);
+      // A restart that landed while this awaited has already asked the host again (retryJob left `fixing`): a second
+      // retry here would start a second run for the same host.
+      if (this.fixing === job) this.retryJob(job);
     } catch (error: unknown) {
+      if (this.fixing !== job) return;
       this.showError(error instanceof ServiceError ? error.message : "The key couldn't be trusted. Try again.");
     } finally {
       this.setBusy(false);
