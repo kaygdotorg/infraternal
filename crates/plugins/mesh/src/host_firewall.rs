@@ -1596,17 +1596,24 @@ pub fn discover_nft(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
     #[cfg(not(any(test, feature = "test-support")))]
     let test_path: Option<PathBuf> = None;
     let configured = configured.or(test_path.as_deref());
-    let (candidates, checked) = if let Some(configured) = configured {
-        (vec![configured.to_owned()], vec![configured.to_owned()])
-    } else {
-        let mut candidates = NFT_CANDIDATES.iter().map(PathBuf::from).collect::<Vec<_>>();
-        candidates.extend(nix_store_candidates());
-        let checked = candidates.clone();
-        (candidates, checked)
-    };
+    let candidates = configured.map_or_else(
+        || NFT_CANDIDATES.iter().map(PathBuf::from).collect::<Vec<_>>(),
+        |configured| vec![configured.to_owned()],
+    );
+    let checked = candidates.clone();
     for candidate in &candidates {
         if let Some(resolved) = safe_nft_path(candidate)? {
             return Ok(resolved);
+        }
+    }
+    // The store is scanned only after every fixed path is absent. Its entries
+    // are other packages' outputs, so an unsafe one is skipped rather than
+    // fatal: it cannot be picked, and a later, valid version still can.
+    if configured.is_none() {
+        for candidate in nix_store_candidates() {
+            if let Ok(Some(resolved)) = safe_nft_path(&candidate) {
+                return Ok(resolved);
+            }
         }
     }
     let mut checked = checked
@@ -1622,31 +1629,90 @@ pub fn discover_nft(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
 }
 
 /// Find package-local nft executables only below the fixed Nix store directory.
+///
+/// The store also holds `.drv` files, source tarballs and patches whose names
+/// contain `nftables` (#483, J555). Only directories named
+/// `<32-char hash>-nftables-<digit>…` count, and the newest version comes
+/// first, so the choice does not depend on store hashes. J560's
+/// `firewall_tools` lookup applies the same rules to the mesh table's tools;
+/// once it merges, this scan should delegate to it.
 fn nix_store_candidates() -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir("/nix/store") else {
         return Vec::new();
     };
-    let mut candidates = entries
+    let mut found = entries
         .filter_map(Result::ok)
-        .filter(|entry| {
-            let name = entry.file_name();
-            name.to_string_lossy().contains("-nftables-")
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let version = nix_store_nftables_version(&entry.file_name().to_string_lossy())?;
+            Some((version, entry.path().join("bin/nft")))
         })
-        .map(|entry| entry.path().join("bin/nft"))
         .collect::<Vec<_>>();
-    candidates.sort();
-    candidates.reverse();
-    candidates
+    found.sort_by(|(left, left_path), (right, right_path)| {
+        compare_versions(right, left).then_with(|| left_path.cmp(right_path))
+    });
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Return the version of a `<hash>-nftables-<version>` store name, or `None` for any other name.
+fn nix_store_nftables_version(name: &str) -> Option<String> {
+    let (hash, rest) = name.split_once('-')?;
+    let version = rest.strip_prefix("nftables-")?;
+    (hash.len() == 32
+        && hash.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        && version.starts_with(|c: char| c.is_ascii_digit()))
+    .then(|| version.to_owned())
+}
+
+/// Order two version strings by their digit and text runs, so `1.1.10` sorts above `1.1.7`.
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    /// Split a version into alternating digit and non-digit runs.
+    fn runs(version: &str) -> Vec<&str> {
+        let mut runs = Vec::new();
+        let mut rest = version;
+        while let Some(first) = rest.chars().next() {
+            let digits = first.is_ascii_digit();
+            let end = rest
+                .find(|c: char| c.is_ascii_digit() != digits)
+                .unwrap_or(rest.len());
+            let (run, tail) = rest.split_at(end);
+            runs.push(run);
+            rest = tail;
+        }
+        runs
+    }
+    let (left, right) = (runs(left), runs(right));
+    for (a, b) in left.iter().zip(&right) {
+        let order = match (a.parse::<u64>(), b.parse::<u64>()) {
+            (Ok(a), Ok(b)) => a.cmp(&b),
+            _ => a.cmp(b),
+        };
+        if order.is_ne() {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 /// Resolve and check a candidate without following any path from the environment.
+///
+/// A path that does not exist, or that runs through a regular file
+/// (`NotADirectory`), is simply absent. Anything else that exists must pass
+/// the ownership checks, or the call fails loudly.
 fn safe_nft_path(candidate: &Path) -> Result<Option<PathBuf>, PolicyError> {
     if !candidate.is_absolute() {
         return Err(PolicyError::UnsafeNft(candidate.to_owned()));
     }
     let resolved = match candidate.canonicalize() {
         Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(PolicyError::Io(error)),
     };
     let metadata = fs::metadata(&resolved).map_err(PolicyError::Io)?;
@@ -1823,6 +1889,27 @@ mod tests {
             matches!(result, Ok(None)),
             "a candidate below a regular file must be skipped, got {result:?}"
         );
+    }
+
+    /// Only `<hash>-nftables-<version>` store names are candidates, and the newest version wins.
+    #[test]
+    fn nix_store_names_are_filtered_and_ordered_by_version() {
+        let hash = "a".repeat(32);
+        let version = |name: &str| super::nix_store_nftables_version(name);
+        assert_eq!(
+            version(&format!("{hash}-nftables-1.1.10")).as_deref(),
+            Some("1.1.10")
+        );
+        assert_eq!(
+            version(&format!("{hash}-nftables-1.1.10.drv")).as_deref(),
+            Some("1.1.10.drv")
+        );
+        assert_eq!(version(&format!("{hash}-python3.12-nftables-1.1.1")), None);
+        assert_eq!(version(&format!("{hash}-nftables-docs")), None);
+        assert_eq!(version("short-nftables-1.1.1"), None);
+        assert!(super::compare_versions("1.1.10", "1.1.7").is_gt());
+        assert!(super::compare_versions("1.1", "1.1.1").is_lt());
+        assert!(super::compare_versions("1.0.9", "1.0.9").is_eq());
     }
 
     /// J555 review (P2): a host that gets IPv6 addresses by DHCPv6 must keep
