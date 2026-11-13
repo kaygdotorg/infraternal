@@ -515,6 +515,9 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let files = release.files.clone();
+        // Fired once the server has sent the payload's first MiB to the child.
+        let (sent, body_sent) = tokio::sync::oneshot::channel::<()>();
+        let mut sent = Some(sent);
         let server = tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             for _ in 0..4 {
@@ -539,6 +542,9 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
                     .unwrap();
                 if path.ends_with(payload_name) {
                     socket.write_all(&body[..1024 * 1024]).await.unwrap();
+                    if let Some(sent) = sent.take() {
+                        let _ = sent.send(());
+                    }
                     // The body deliberately remains incomplete until the child
                     // stops; successful verification/publication cannot happen.
                     let mut remaining = Vec::new();
@@ -562,6 +568,21 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        // Starting the child means paging in the whole test executable, which on a
+        // loaded host with the build disk stalled can take far longer than any
+        // fixed bound; that is setup, not behaviour under test. So the child
+        // gets no clock until it has asked for the payload: while it starts, the
+        // only failure is the child dying. The 20 s bound then covers only what
+        // this test is about, the child saving the MiB it was sent (#509).
+        let mut body_sent = body_sent;
+        while let Err(tokio::sync::oneshot::error::TryRecvError::Empty) = body_sent.try_recv() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "download child stopped before it asked for the payload"
+            );
+            // sleep: poll for the child's first payload request; its start has no deadline.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while partial_payload_bytes(&version, arch) < before + 1024 * 1024 {
             assert!(
