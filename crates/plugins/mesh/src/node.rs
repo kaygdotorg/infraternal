@@ -1932,6 +1932,12 @@ impl Node {
         if self.engine_kind == EngineKind::GotaTun {
             rotation_tests::crash_checkpoint("rotation_private_key_saved");
         }
+        if self.engine_kind == EngineKind::GotaTun {
+            self.gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .set_owner(candidate_public)?;
+        }
         // A rotation deliberately changes ownership; replace the worker with a fresh proof.
         self.route_repair.take();
         self.ensure_route_repair()?;

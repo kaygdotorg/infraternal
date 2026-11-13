@@ -18,7 +18,7 @@ use std::{
     fs::File,
     io,
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -49,7 +49,8 @@ const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 pub(crate) struct LinuxTun {
     fd: Arc<AsyncFd<File>>,
     name: Arc<str>,
-    owner: PublicKey,
+    /// Shared with every `GotaTun` clone so a committed key rotation updates each TUN handle.
+    owner: Arc<RwLock<PublicKey>>,
     vnet_header: bool,
     offloads_enabled: bool,
     mtu: MtuWatcher,
@@ -87,7 +88,7 @@ impl LinuxTun {
             writer: TunWriter::spawn(Arc::clone(&fd), vnet_header),
             fd,
             name: Arc::from(name),
-            owner,
+            owner: Arc::new(RwLock::new(owner)),
             vnet_header,
             offloads_enabled,
             mtu,
@@ -111,7 +112,7 @@ impl LinuxTun {
             writer: TunWriter::spawn(Arc::clone(&fd), vnet_header),
             fd,
             name: Arc::from("test-tun"),
-            owner: PublicKey([0; 32]),
+            owner: Arc::new(RwLock::new(PublicKey([0; 32]))),
             vnet_header,
             offloads_enabled: true,
             mtu,
@@ -130,13 +131,24 @@ impl LinuxTun {
         self.offloads_enabled
     }
 
+    /// Update the owner checked by all clones after the mesh link marker commits a rotated key.
+    pub(crate) fn set_owner(&self, owner: PublicKey) {
+        *self
+            .owner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = owner;
+    }
+
     /// Read the interface index only after checking that the shared name still holds our TUN.
     /// # Errors
     /// Reports a missing link or a link whose engine or owner marker changed.
     pub(crate) fn owned_ifindex(&self) -> io::Result<u32> {
+        let owner = *self
+            .owner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let link = crate::wireguard::Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
-        if link.engine != crate::gotatun_node::EngineKind::GotaTun || link.owner != Some(self.owner)
-        {
+        if link.engine != crate::gotatun_node::EngineKind::GotaTun || link.owner != Some(owner) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         Ok(link.ifindex)
