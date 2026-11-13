@@ -97,7 +97,11 @@ def owner_setup(s, origin, out):
     result(s.type_into("#setup-token", secret("setup-token.txt")), "token-typed")
     result(s.click_text("Continue"), "token-continue")
     time.sleep(3)
-    shot(s, out, "owner-identity")
+    # A failed Continue leaves the typed token on screen: take the picture only once the token field is gone.
+    if not s.js("return !!document.querySelector('#setup-token')"):
+        shot(s, out, "owner-identity")
+    else:
+        result(False, "token-field-gone", "token field still on screen; no picture taken")
     result(s.type_into("#setup-username", "mac-owner"), "username")
     result(s.click_text("Continue"), "identity-continue")
     time.sleep(2)
