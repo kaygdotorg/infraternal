@@ -65,8 +65,8 @@ impl LinuxTun {
     ///
     /// The value comes from configured peer endpoint routes before this interface is opened.
     /// The owner key is checked before later MTU writes so a replaced shared name is not changed.
-    /// `endpoint_refresh` wakes the worker only after decrypted packets may have taught it a
-    /// different peer endpoint.
+    /// `endpoint_refresh` wakes the worker when packets cross the link in either direction, so
+    /// it can re-derive peer route budgets from the current endpoints and underlay MTUs.
     /// # Errors
     /// Reports device, ioctl, and async-registration failures. Permission errors name the
     /// `CAP_NET_ADMIN` requirement and the existing rootless own-traffic limit.
@@ -208,7 +208,11 @@ impl LinuxTun {
                 }
                 Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(Ok(length)) => match decode_frame(&buffer[..length], self.vnet_header, pool) {
-                    Ok(packets) => return Ok(packets.into_iter()),
+                    Ok(packets) => {
+                        // Outbound-only flows must re-derive route budgets too (#489 J549 P1).
+                        self.writer.endpoint_refresh.traffic();
+                        return Ok(packets.into_iter());
+                    }
                     Err(_) => {
                         self.refused.fetch_add(1, Ordering::Relaxed);
                     }
@@ -249,7 +253,8 @@ impl IpRecv for LinuxTun {
 #[derive(Clone)]
 struct TunWriter {
     packets: mpsc::Sender<Packet<[u8]>>,
-    /// Coalesced wakeups for route refresh after authenticated packets reach the host stack.
+    /// Coalesced route-refresh wakeups, raised by host-bound writes here and by host reads in
+    /// `recv_packets`.
     endpoint_refresh: Arc<crate::gotatun_node::EndpointRefreshSignal>,
     /// The device error that ended the writer; `GotaTun` stops its send task on it too.
     failure: Arc<OnceLock<Errno>>,
@@ -277,7 +282,7 @@ impl TunWriter {
     /// The queue remains the packet's owner until the TUN writer has written it.
     async fn send(&self, packet: Packet<[u8]>) -> io::Result<()> {
         if self.packets.send(packet).await.is_ok() {
-            self.endpoint_refresh.packet_received();
+            self.endpoint_refresh.traffic();
             return Ok(());
         }
         Err(self

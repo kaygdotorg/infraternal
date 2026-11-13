@@ -259,6 +259,16 @@ fn stable_endpoint_tracks_later_underlay_mtu_shrink() {
     nested_underlay_case(ReviewCase::Shrink);
 }
 
+/// Outbound-only traffic at a stable endpoint must follow carrier shrink and growth (#489 J549 P1).
+///
+/// Only A sends after the endpoint is learned, and B never answers, so no decrypted packet reaches
+/// A's host stack: the refresh has to come from A's own outbound reads.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn stable_endpoint_tracks_underlay_mtu_with_outbound_only_traffic() {
+    nested_underlay_case(ReviewCase::Egress);
+}
+
 /// IPv6 inner streams must remain bidirectional over an authenticated IPv6 nested endpoint.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
@@ -277,6 +287,8 @@ enum ReviewCase {
     Growth,
     /// Lower the carrier MTU at an unchanged endpoint.
     Shrink,
+    /// Shrink, then grow, the carrier while only the route's owner sends.
+    Egress,
     /// Exercise large inner IPv6 packets on the nested IPv6 carrier.
     Ipv6Bulk,
     /// Alternate the authenticated peer between the two carriers.
@@ -354,7 +366,7 @@ fn nested_underlay_case(case: ReviewCase) {
     run("ip", &["-n", NS_A, "link", "set", "j502la", "up"]);
     run("ip", &["-n", NS_B, "link", "set", "j502lb", "up"]);
 
-    if matches!(case, ReviewCase::Shrink) {
+    if matches!(case, ReviewCase::Shrink | ReviewCase::Egress) {
         // A distinct initial budget proves the first live-endpoint refresh has completed before
         // narrowing the same carrier; the configured high path still derives 1360.
         for (ns, link) in [(NS_A, "j502la"), (NS_B, "j502lb")] {
@@ -474,7 +486,7 @@ fn nested_underlay_case(case: ReviewCase) {
         Some(expected_learned),
         "GotaTun did not report the endpoint learned from the low-MTU path"
     );
-    let initial_budget = if matches!(case, ReviewCase::Shrink) {
+    let initial_budget = if matches!(case, ReviewCase::Shrink | ReviewCase::Egress) {
         1408
     } else {
         1200
@@ -524,6 +536,36 @@ fn nested_underlay_case(case: ReviewCase) {
                     Some(expected),
                     "unchanged authenticated endpoint must follow the current carrier budget"
                 );
+            }
+            ReviewCase::Egress => {
+                // B only listens: a bound socket keeps its kernel from answering with ICMP.
+                let sink = in_ns(NS_B, || UdpSocket::bind(("10.254.0.2", 49205)).unwrap());
+                let outbound = in_ns(NS_A, || UdpSocket::bind(("10.254.0.1", 0)).unwrap());
+                for (carrier_mtu, expected) in [("1280", 1200), ("1500", 1408)] {
+                    for (ns, link) in [(NS_A, "j502la"), (NS_B, "j502lb")] {
+                        run("ip", &["-n", ns, "link", "set", link, "mtu", carrier_mtu]);
+                    }
+                    let deadline = Instant::now() + ROUTE_WAIT;
+                    while route_mtu(NS_A, "10.254.0.2") != Some(expected)
+                        && Instant::now() < deadline
+                    {
+                        outbound
+                            .send_to(b"outbound-only route probe", ("10.254.0.2", 49205))
+                            .unwrap();
+                        // sleep: allow the rate-limited refresh between outbound probes.
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    let current = route_mtu(NS_A, "10.254.0.2");
+                    eprintln!(
+                        "REVIEW egress-only carrier={carrier_mtu} route_mtu={current:?} expected={expected}"
+                    );
+                    assert_eq!(
+                        current,
+                        Some(expected),
+                        "outbound-only traffic must re-derive the stable endpoint's budget"
+                    );
+                }
+                drop(sink);
             }
             ReviewCase::Flap => {
                 run(

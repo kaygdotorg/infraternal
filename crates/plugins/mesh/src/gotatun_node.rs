@@ -42,20 +42,32 @@ type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
 pub(crate) type RouteEndpointUpdater =
     Arc<dyn Fn(&[(PublicKey, Option<SocketAddr>)]) -> io::Result<()> + Send + Sync>;
 
-/// Coalesces packet and authenticated-endpoint notifications into bounded route refreshes.
+/// Coalesces traffic and authenticated-endpoint notifications into bounded route refreshes.
 ///
-/// The generation counter lets the worker detect requests that arrived while it was reading
-/// endpoints. Packet delivery uses one atomic signal instead of allocating a message per packet.
+/// Packets in either direction request a refresh: an inbound packet may have taught `GotaTun` a
+/// new endpoint, and an outbound one is about to use a route whose underlay MTU may have changed
+/// since the last refresh (#489 J549 P1). A peer that only receives from this host, with a stable
+/// endpoint, would otherwise keep an oversized route budget and black-hole bulk transfers.
+///
+/// The packet path pays one relaxed load while a refresh is already queued, and one swap plus a
+/// wakeup otherwise; it never allocates. The worker clears `pending` before it reads endpoints
+/// and route MTUs, so traffic that arrives during that read queues exactly one more refresh.
 #[derive(Default)]
 pub(crate) struct EndpointRefreshSignal {
-    generation: AtomicU64,
+    /// Set from the first request until the worker starts the refresh that will observe it.
     pending: AtomicBool,
     notify: Notify,
 }
 
 impl EndpointRefreshSignal {
-    /// Tell the `GotaTun` worker that a decrypted packet may have taught it a new endpoint.
-    pub(crate) fn packet_received(&self) {
+    /// Tell the `GotaTun` worker that a packet crossed the mesh link, in either direction.
+    ///
+    /// Call it after the packet is handed on. It is cheap enough for every packet.
+    pub(crate) fn traffic(&self) {
+        // A queued refresh will read state after this packet, so it already covers it.
+        if self.pending.load(Ordering::Relaxed) {
+            return;
+        }
         self.request_refresh();
     }
 
@@ -64,32 +76,24 @@ impl EndpointRefreshSignal {
         self.request_refresh();
     }
 
-    /// Coalesce one refresh request without allocating a message on the packet path.
+    /// Queue one refresh unless one is already queued.
     fn request_refresh(&self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
         if !self.pending.swap(true, Ordering::AcqRel) {
             self.notify.notify_one();
         }
     }
 
-    /// Wait for the next coalesced decrypted-packet notification.
+    /// Wait for the next coalesced refresh request.
     async fn notified(&self) {
         self.notify.notified().await;
     }
 
-    /// Return the request generation used to validate one endpoint snapshot.
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
-    }
-
-    /// Re-arm the signal, scheduling one more refresh if packets arrived during the snapshot.
-    fn finish_refresh(&self, observed_generation: u64) {
+    /// Re-arm the signal right before the worker reads endpoints and route MTUs.
+    ///
+    /// A request after this point is not covered by the read that follows, so it must queue
+    /// another refresh; clearing the flag first guarantees that it does.
+    fn begin_refresh(&self) {
         self.pending.store(false, Ordering::Release);
-        if self.generation.load(Ordering::Acquire) != observed_generation
-            && !self.pending.swap(true, Ordering::AcqRel)
-        {
-            self.notify.notify_one();
-        }
     }
 }
 
@@ -704,8 +708,8 @@ async fn restart_due(at: Option<Instant>) {
 
 /// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the worker.
 ///
-/// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN deliveries
-/// request re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
+/// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
+/// either direction requests re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
 /// writes run on Tokio's blocking pool.
 async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
@@ -764,12 +768,11 @@ async fn run_worker(
             }
             () = endpoint_refresh_due(endpoint_refresh_at) => {
                 endpoint_refresh_at = None;
-                let generation = endpoint_refresh.generation();
+                endpoint_refresh.begin_refresh();
                 match state.refresh_live_peer_endpoints(&route_endpoint_updater).await {
                     Ok(endpoints) => observed_endpoints = Some(endpoints),
                     Err(error) => tracing::warn!(error = %error, "could not refresh mesh routes from live peer endpoints"),
                 }
-                endpoint_refresh.finish_refresh(generation);
                 last_endpoint_refresh = Some(tokio::time::Instant::now());
             }
             _ = endpoint_scan.tick() => {
@@ -1426,38 +1429,35 @@ mod tests {
             .is_ready()
     }
 
-    /// A packet burst uses one wakeup until its endpoint snapshot is complete.
+    /// A packet burst uses one wakeup until the worker starts its refresh.
     #[test]
     fn review_endpoint_refresh_coalesces_a_packet_burst() {
         let signal = super::EndpointRefreshSignal::default();
         for _ in 0..10_000 {
-            signal.packet_received();
+            signal.traffic();
         }
-        assert_eq!(signal.generation(), 10_000);
         assert!(review_endpoint_refresh_ready(&signal));
         assert!(!review_endpoint_refresh_ready(&signal));
-        signal.finish_refresh(signal.generation());
+        signal.begin_refresh();
         assert!(!signal.pending.load(std::sync::atomic::Ordering::Acquire));
         assert!(!review_endpoint_refresh_ready(&signal));
-        signal.packet_received();
+        signal.traffic();
         assert!(review_endpoint_refresh_ready(&signal));
     }
 
-    /// Packets arriving during a snapshot request exactly one subsequent refresh.
+    /// Packets arriving during a refresh's read request exactly one subsequent refresh.
     #[test]
     fn review_endpoint_refresh_retains_a_burst_during_the_snapshot() {
         let signal = super::EndpointRefreshSignal::default();
-        signal.packet_received();
+        signal.traffic();
         assert!(review_endpoint_refresh_ready(&signal));
-        let observed = signal.generation();
+        signal.begin_refresh();
         for _ in 0..10_000 {
-            signal.packet_received();
+            signal.traffic();
         }
-        assert!(!review_endpoint_refresh_ready(&signal));
-        signal.finish_refresh(observed);
         assert!(review_endpoint_refresh_ready(&signal));
         assert!(!review_endpoint_refresh_ready(&signal));
-        signal.finish_refresh(signal.generation());
+        signal.begin_refresh();
         assert!(!signal.pending.load(std::sync::atomic::Ordering::Acquire));
     }
 
