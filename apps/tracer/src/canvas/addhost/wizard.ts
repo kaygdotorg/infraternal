@@ -701,7 +701,7 @@ export class Wizard {
       // The server went away while this host waited for the person to check its key (a restart). What the page held of
       // that observation is gone with the run, and Trust could only refuse. Ask the host again on a new run: the key
       // comes back as a new observation, and the person confirms that one (#510).
-      if (atKeyCheck(job.view)) { job.seenKey ??= job.view.failure?.fingerprints?.[0]; job.reasks = 0; restarted.push(job); continue; }
+      if (atKeyCheck(job.view)) { const shown = job.view.failure?.fingerprints?.[0]; if (job.seenKey === undefined && shown !== undefined) job.seenKey = shown; job.reasks = 0; restarted.push(job); continue; }
       // A new run that closed before it said anything: the server is still coming back. Ask again shortly.
       if (job.reasks !== undefined && job.reasks < REASK_TRIES && (job.view.state === "pending" || job.view.state === "running")) {
         job.reasks++;
