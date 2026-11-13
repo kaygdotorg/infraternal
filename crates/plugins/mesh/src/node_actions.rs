@@ -766,16 +766,19 @@ fn engine_selection(_node: &Node) -> serde_json::Value {
 }
 
 /// Whether this node's engine walks an ordered candidate list (#515), and so may tell the
-/// coordinator it accepts one. Every engine answers yes for now.
+/// coordinator it accepts one: only `GotaTun`. Kernel `WireGuard` installs just the first
+/// candidate, so it answers like an older node and keeps getting one public address. That node
+/// also reports no LAN addresses; its peers still reach it through the reflexive address.
 #[cfg(target_os = "linux")]
-const fn walks_candidates(_node: &Node) -> bool {
-    true
+fn walks_candidates(node: &Node) -> bool {
+    node.engine_selection().engine == crate::node::EngineKind::GotaTun
 }
 
-/// Whether the Mac node walks an ordered candidate list (#515). It answers yes for now.
+/// The Mac runtime installs just the first candidate and does not walk yet (#515), so it answers
+/// like an older node until its walk lands.
 #[cfg(target_os = "macos")]
 const fn walks_candidates(_node: &Node) -> bool {
-    true
+    false
 }
 
 /// Both node types read the counters of the engine they run.
