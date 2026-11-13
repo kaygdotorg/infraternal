@@ -221,3 +221,113 @@ fn j555_restarted_kernel_link_honours_an_explicit_port_override() {
         String::from_utf8_lossy(&child.stderr)
     );
 }
+
+/// D391 on a retained kernel link, the other two cases J555 F3 implies (J572, #483).
+///
+/// An explicit override whose port is taken fails the restart and leaves the link on its old
+/// port. Removing the override afterwards moves a link that an override had moved back to the
+/// saved default, as a `GotaTun` node does when it binds again on start. Each restart runs in a
+/// child process, because the environment is fixed per process.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn restarted_kernel_link_refuses_a_taken_override_and_returns_to_its_saved_port() {
+    const NAME: &str =
+        "restarted_kernel_link_refuses_a_taken_override_and_returns_to_its_saved_port";
+    const CHILD: &str = "J572_KERNEL_RESTART_STATE";
+    if let Some(state) = std::env::var_os(CHILD) {
+        let restored = Node::restore_with_engine(std::path::Path::new(&state), EngineKind::Kernel);
+        let expected = std::env::var("J572_EXPECT").unwrap();
+        if expected == "taken" {
+            let Err(error) = restored else {
+                panic!("a taken explicit port must fail the restart");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+            assert_eq!(
+                Device::identity().unwrap().1,
+                10_254,
+                "the link moved anyway"
+            );
+        } else {
+            let port = restored.unwrap().listen_port();
+            assert_eq!(port, Some(expected.parse().unwrap()));
+            assert_eq!(
+                Device::identity().unwrap().1,
+                expected.parse::<u16>().unwrap()
+            );
+        }
+        return;
+    }
+    assert!(std::env::var_os("INFRATERNAL_MESH_PORT").is_none());
+    let state = private_state("kernel-restart-ports");
+    let first = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let identity = node.up()?;
+        drop(node);
+        Ok::<_, std::io::Error>(identity.port)
+    })();
+    let restart = |port: Option<&str>, expect: &str| {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "--ignored", NAME, "--nocapture"])
+            .env(CHILD, &state)
+            .env("J572_EXPECT", expect);
+        if let Some(port) = port {
+            child.env("INFRATERNAL_MESH_PORT", port);
+        }
+        child.output().unwrap()
+    };
+    let holder = std::net::UdpSocket::bind("[::]:32003").unwrap();
+    let taken = restart(Some("32003"), "taken");
+    drop(holder);
+    let moved = restart(Some("32002"), "32002");
+    let back = restart(None, "10254");
+    remove_link();
+    fs::remove_dir_all(&state).unwrap();
+    assert_eq!(first.unwrap(), 10_254, "the first start used the default");
+    for (case, output) in [
+        ("taken override", taken),
+        ("override", moved),
+        ("override removed", back),
+    ] {
+        assert!(
+            output.status.success(),
+            "{case}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// An automatic fallback never lands on the reserved 51820 (J555 note, J572, #483).
+///
+/// With the default port taken, the kernel fallback asks for any free port. The namespace's
+/// ephemeral range is narrowed to 51820-51821, so the kernel's first choice is the reserved
+/// port half the time; over eight fresh starts the node must always move off it to 51821. A
+/// start where the kernel picks 51820 on all 17 tries (odds about 1 in 130,000) fails.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn kernel_fallback_never_binds_the_reserved_port() {
+    const RANGE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
+    assert!(std::env::var_os("INFRATERNAL_MESH_PORT").is_none());
+    let original = fs::read_to_string(RANGE).unwrap();
+    fs::write(RANGE, "51820 51821").unwrap();
+    let holder = std::net::UdpSocket::bind("[::]:10254").unwrap();
+    // A fresh state each time: a saved fallback would skip the kernel's choice next time.
+    let ports = (0..8)
+        .map(|run| {
+            let state = private_state(&format!("kernel-fallback-reserved-{run}"));
+            let port = (|| {
+                let mut node = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+                let port = node.up()?.port;
+                node.down()?;
+                Ok::<_, std::io::Error>(port)
+            })();
+            remove_link();
+            fs::remove_dir_all(&state).unwrap();
+            port
+        })
+        .collect::<Result<Vec<_>, _>>();
+    drop(holder);
+    fs::write(RANGE, original).unwrap();
+    assert_eq!(ports.unwrap(), vec![51_821; 8]);
+}
