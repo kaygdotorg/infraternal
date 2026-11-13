@@ -118,13 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .execute(&pool)
                     .await?;
             }
-            extra_member_ids = seed_extra_members(
-                &store,
-                0,
-                extra_members_count,
-                identities[1].port,
-            )
-            .await?;
+            extra_member_ids =
+                seed_extra_members(&store, 0, extra_members_count, identities[1].port).await?;
             next_extra_member = extra_members_count;
         }
         let members = members.ok_or("identities required")?;
@@ -135,9 +130,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("simulated peer limit exceeded".into());
             }
             let endpoint_port = peer_endpoint_port.ok_or("peer endpoint is unavailable")?;
-            extra_member_ids.extend(
-                seed_extra_members(&store, next_extra_member, count, endpoint_port).await?,
-            );
+            extra_member_ids
+                .extend(seed_extra_members(&store, next_extra_member, count, endpoint_port).await?);
             next_extra_member += count;
             service.invalidate_dataplane().await;
         } else if request.mode == "peer-remove" {
@@ -158,17 +152,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             service.invalidate_dataplane().await;
         }
-        if matches!(request.mode.as_str(), "rotation-begin" | "rotation-timer-begin") {
+        if matches!(
+            request.mode.as_str(),
+            "rotation-begin" | "rotation-timer-begin"
+        ) {
             let node_id = i64::try_from(members[1].0)?;
-            let operation_id = request.operation_id.as_deref().ok_or("operation_id required")?;
+            let operation_id = request
+                .operation_id
+                .as_deref()
+                .ok_or("operation_id required")?;
             let timer_expired = request.mode == "rotation-timer-begin";
-            let rotation = begin_fixture_rotation(
-                &pool,
-                node_id,
-                operation_id,
-                timer_expired,
-            )
-            .await?;
+            let rotation =
+                begin_fixture_rotation(&pool, node_id, operation_id, timer_expired).await?;
             println!("{}", json!({"rotation":rotation}));
             io::stdout().flush()?;
             continue;
@@ -179,8 +174,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request.operation_id.as_deref().ok_or("operation_id required")?,
-                    request.candidate_public_key.ok_or("candidate key required")?,
+                    request
+                        .operation_id
+                        .as_deref()
+                        .ok_or("operation_id required")?,
+                    request
+                        .candidate_public_key
+                        .ok_or("candidate key required")?,
                     "overlap",
                 )
                 .await?,
@@ -190,7 +190,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request.operation_id.as_deref().ok_or("operation_id required")?,
+                    request
+                        .operation_id
+                        .as_deref()
+                        .ok_or("operation_id required")?,
                     PublicKey([0; 32]),
                     "retiring",
                 )
@@ -201,7 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request.operation_id.as_deref().ok_or("operation_id required")?,
+                    request
+                        .operation_id
+                        .as_deref()
+                        .ok_or("operation_id required")?,
                     PublicKey([0; 32]),
                     "cleanup",
                 )
@@ -212,7 +218,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request.operation_id.as_deref().ok_or("operation_id required")?,
+                    request
+                        .operation_id
+                        .as_deref()
+                        .ok_or("operation_id required")?,
                 )
                 .await?,
             ),
@@ -284,10 +293,11 @@ async fn begin_fixture_rotation(
     operation_id: &str,
     timer_expired: bool,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let row = sqlx::query("SELECT sequence,rotation_phase FROM mesh_node_key_rotation WHERE node_id=?")
-        .bind(node_id)
-        .fetch_one(pool)
-        .await?;
+    let row =
+        sqlx::query("SELECT sequence,rotation_phase FROM mesh_node_key_rotation WHERE node_id=?")
+            .bind(node_id)
+            .fetch_one(pool)
+            .await?;
     let phase: Option<String> = sqlx::Row::try_get(&row, "rotation_phase")?;
     if phase.is_some() {
         return Err("rotation already open".into());
