@@ -27,8 +27,10 @@
 //! program can render the echo. The 250 ms starvation deadline stays independent
 //! of this repaint grace. A key preempts when raw output is waiting for bulk
 //! credit or has built the backlog threshold, including a pending shim frame
-//! when no earlier raw bytes remain in flight. A small quiet write alone does
-//! not trigger a repaint. The bounded writer
+//! when no earlier raw bytes remain in flight. When bulk credit is exhausted
+//! and repaint credit remains, a key also triggers before its echo is queued;
+//! the key itself supplies the output that would otherwise wait. A small quiet
+//! write alone does not trigger a repaint. The bounded writer
 //! priority lane sends only shim-confirmed key acknowledgments and credit-approved
 //! Snapshots; it drops or trims only same-stream raw bytes covered by the cursor.
 //! A 1 MiB Snapshot may borrow from the bulk output it replaces, while a hostile
@@ -102,6 +104,8 @@ async fn request_key_repaint_if_ready(
 /// A writer-staged raw frame or already-sent backlog shows that output is
 /// waiting. The credit-starved shim frame is also waiting, even when every
 /// earlier raw byte has been returned; its bytes have not been charged yet.
+/// With bulk credit exhausted, the next key's own echo would wait too, so a
+/// still-funded repaint can be requested before another raw frame is staged.
 fn output_waiting_for_key_repaint(
     pending: Option<&Shim>,
     pending_bulk: Option<&Message>,
@@ -110,6 +114,7 @@ fn output_waiting_for_key_repaint(
     let unreturned = output.unreturned_output_credit();
     pending_bulk.is_some()
         || (matches!(pending, Some(Shim::Output(..))) && output.bulk_starved())
+        || (output.bulk_starved() && output.repaint_budget() > 0)
         || (unreturned > 0 && (output.bulk_starved() || unreturned >= relay::KEY_REPAINT_BACKLOG))
 }
 

@@ -42,6 +42,23 @@ fn a_pending_output_frame_triggers_repaint_from_reserved_credit() {
     );
 }
 
+/// Keep the next key's echo visible when only its protected repaint budget remains.
+#[test]
+fn a_repaint_budget_triggers_when_bulk_credit_is_empty_without_a_queued_frame() {
+    let mut output = relay::Output::attach_with_repaint_reserve(0);
+    output.grant(INITIAL_CREDIT).unwrap();
+    output.reset_cursor(0);
+    output.grant(REPAINT_CREDIT).unwrap();
+
+    assert_eq!(output.unreturned_output_credit(), 0);
+    assert!(output.bulk_starved());
+    assert!(output.repaint_budget() >= u64::from(REPAINT_CREDIT));
+    assert!(
+        super::output_waiting_for_key_repaint(None, None, &output),
+        "the key itself will produce output, so a funded repaint must start before its echo waits for bulk credit"
+    );
+}
+
 /// One terminal relay paired with a fake shim data socket.
 struct RelayFixture {
     root: PathBuf,
