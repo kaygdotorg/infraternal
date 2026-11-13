@@ -249,10 +249,12 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// Parse a fixture address.
     fn at(text: &str) -> SocketAddr {
         text.parse().unwrap()
     }
 
+    /// What the coordinator knows about one fixture node.
     fn node(guess: &str, reflexive: Option<&str>, lan: &[&str]) -> NodeCandidates {
         NodeCandidates {
             guess: Some(at(guess)),

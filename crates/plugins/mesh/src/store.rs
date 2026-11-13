@@ -2484,6 +2484,7 @@ mod candidate_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    /// Parse a fixture address.
     fn at(text: &str) -> SocketAddr {
         text.parse().unwrap()
     }
@@ -2521,6 +2522,7 @@ mod candidate_tests {
         (store, ids.try_into().unwrap())
     }
 
+    /// One reflexive observation of `node` at `address`.
     fn seen(node: NodeId, address: &str, proven: bool) -> crate::presence::Reflexive {
         crate::presence::Reflexive {
             node,
@@ -2529,6 +2531,7 @@ mod candidate_tests {
         }
     }
 
+    /// The addresses `config`'s node tries for `peer`, in order.
     fn tries(config: &Config, peer: NodeId) -> Vec<SocketAddr> {
         let peer = &config.peers[&peer].peer;
         peer.endpoint

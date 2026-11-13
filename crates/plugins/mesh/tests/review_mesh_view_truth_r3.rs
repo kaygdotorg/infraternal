@@ -217,6 +217,7 @@ async fn a_node_moved_aside_by_a_person_is_audited_under_that_person() {
     assert_eq!(actors, ["guest"]);
 }
 
+/// One presence row for node 3 with the given handshake time and received bytes, and no address.
 fn row(handshake: u64, received: u64) -> PeerRow {
     PeerRow {
         node: NodeId(3),
