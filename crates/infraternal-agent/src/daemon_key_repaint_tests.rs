@@ -23,6 +23,25 @@ const SPAM_SNAPSHOT: usize = REPAINT_CREDIT as usize / 4;
 /// A generous guard for a missing fixture event, never a performance assertion.
 const EVENT_GUARD: Duration = Duration::from_secs(3);
 
+/// Include a credit-starved shim frame even when returned output left no bytes in flight.
+#[test]
+fn a_pending_output_frame_triggers_repaint_from_reserved_credit() {
+    let mut output = relay::Output::attach_with_repaint_reserve(0);
+    output.grant(INITIAL_CREDIT).unwrap();
+    output.reset_cursor(0);
+    output.grant(REPAINT_CREDIT).unwrap();
+
+    assert_eq!(output.unreturned_output_credit(), 0);
+    assert_eq!(output.reserved_credit(), u64::from(REPAINT_CREDIT));
+    assert!(output.bulk_starved());
+    let pending = Shim::Output(0, vec![b'f'; STARVING_OUTPUT]);
+
+    assert!(
+        super::output_waiting_for_key_repaint(Some(&pending), None, &output),
+        "a raw shim frame parked for bulk credit is flood output even with no older bytes in flight"
+    );
+}
+
 /// One terminal relay paired with a fake shim data socket.
 struct RelayFixture {
     root: PathBuf,

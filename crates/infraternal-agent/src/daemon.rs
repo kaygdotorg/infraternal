@@ -25,8 +25,10 @@
 //! cannot mint credit or create unbounded captures. After the latest coalesced
 //! key is acknowledged, its capture waits one 8 ms terminal frame so the PTY
 //! program can render the echo. The 250 ms starvation deadline stays independent
-//! of this repaint grace. A key preempts only when raw output has spent credit,
-//! so a small quiet write alone does not trigger a repaint. The bounded writer
+//! of this repaint grace. A key preempts when raw output is waiting for bulk
+//! credit or has built the backlog threshold, including a pending shim frame
+//! when no earlier raw bytes remain in flight. A small quiet write alone does
+//! not trigger a repaint. The bounded writer
 //! priority lane sends only shim-confirmed key acknowledgments and credit-approved
 //! Snapshots; it drops or trims only same-stream raw bytes covered by the cursor.
 //! A 1 MiB Snapshot may borrow from the bulk output it replaces, while a hostile
@@ -93,6 +95,22 @@ async fn request_key_repaint_if_ready(
     *requested = Some(target);
     *ready = false;
     Ok(())
+}
+
+/// Decide whether a key should replace output that is waiting for flow-control credit.
+///
+/// A writer-staged raw frame or already-sent backlog shows that output is
+/// waiting. The credit-starved shim frame is also waiting, even when every
+/// earlier raw byte has been returned; its bytes have not been charged yet.
+fn output_waiting_for_key_repaint(
+    pending: Option<&Shim>,
+    pending_bulk: Option<&Message>,
+    output: &relay::Output,
+) -> bool {
+    let unreturned = output.unreturned_output_credit();
+    pending_bulk.is_some()
+        || (matches!(pending, Some(Shim::Output(..))) && output.bulk_starved())
+        || (unreturned > 0 && (output.bulk_starved() || unreturned >= relay::KEY_REPAINT_BACKLOG))
 }
 
 #[path = "session_commands.rs"]
@@ -2172,11 +2190,11 @@ async fn terminal_run(
                                 if !bytes.is_empty() {
                                     // A small prior write is not a blocked flood;
                                     // this also catches a key just before bulk credit runs out.
-                                    let unreturned = output.unreturned_output_credit();
-                                    let output_waiting = pending_bulk.is_some()
-                                        || (unreturned > 0
-                                            && (output.bulk_starved()
-                                                || unreturned >= relay::KEY_REPAINT_BACKLOG));
+                                    let output_waiting = output_waiting_for_key_repaint(
+                                        pending.as_ref(),
+                                        pending_bulk.as_ref(),
+                                        &output,
+                                    );
                                     if key_repaint_target.is_some()
                                         || (output_waiting && output.repaint_budget() > 0)
                                     {
