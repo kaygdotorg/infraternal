@@ -471,8 +471,21 @@ def phase_extras(s, origin, out, tag):
         result(False, "motion-pill-open-duration", "no frames sampled")
 
 
+def open_sidebar(s):
+    """Opens the host sidebar when its toggle still says "Show hosts".
+
+    The tree element exists while the sidebar is closed but then holds only the current view's rows (`mesh-staging`, its
+    shell), so a host that is listed and connected looks missing. On 2026-11-13 the c392 phase read that closed tree and
+    reported a missing host that a sidebar-open read lists; every tree read goes through here first.
+    """
+    if s.js("const b = document.querySelector('#sidebar-toggle'); return !!b && /^show/i.test(b.getAttribute('aria-label') || '')"):
+        s.click("#sidebar-toggle")
+        time.sleep(2)
+
+
 def tree_text(s):
-    """The sidebar's host tree as text (empty when the sidebar is closed)."""
+    """The sidebar's host tree as text, read with the sidebar open (see `open_sidebar`)."""
+    open_sidebar(s)
     # textContent plus every aria-label: the tree's rows are buttons whose text can be hidden from innerText.
     return s.js("""const t = document.querySelector('#tree'); if (!t) return '';
       return (t.textContent.replace(/\\s+/g, ' ') + ' || ' + [...t.querySelectorAll('[aria-label]')].map(e => e.getAttribute('aria-label')).join(' | '));""") or ""
@@ -488,8 +501,6 @@ def phase_c392(s, origin, out, tag):
     signin(s, origin, out, unlock=False)
     time.sleep(8)
     # 1. every host is listed, a locked host says "Unlock to connect"
-    if not s.js("return !!document.querySelector('#tree')"):
-        s.click("#sidebar-toggle"); time.sleep(2)
     locked = tree_text(s)
     print("MAC_METRIC " + json.dumps({"name": "tree-while-locked", "text": locked.replace("\n", " | ")[:300]}))
     shot(s, out, tag + "-tree-locked")

@@ -133,6 +133,15 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
 - A restart while Add host is installing stops that install ("Setup stopped before this host was ready"); re-run it.
 - Safari offers "Save Password?" (with an empty user name field) after the host password form is submitted. It stalls the next
   tap; dismiss it with a tap on "Not Now" by position (`xy~0.315~0.526`).
+- **Read the host tree with the sidebar OPEN (2026-11-13).** With the sidebar closed, `#tree` holds only the current view's
+  rows, so a host that is connected looks missing; the c392 phase reported "tree lacks connected host" for that reason and
+  nothing else. `tree_text` in `real-device-qa-mac-flow.py` now opens the sidebar first ("Show hosts" toggle). The
+  locked-state read ("Unlock to connect") still needs a fresh QA1 restart to be measured with the fixed phase.
+- **Never `shot` a page that can show a setup token.** A failed Continue leaves the typed token on screen; the runner also
+  takes a final picture. Use `labels` and grep instead, and delete every picture of a run that types a token.
+- The Mac has no `timeout` binary; use `lockf -t 0 /tmp/mac-bench.lock` (non-blocking) and retry when it is busy.
+- A restart while the Add host card is open at the host-key step leaves "Check the host key again before trusting it" stuck on
+  every press; only Cancel recovers. The same flow started AFTER the restart shows "Host connections are locked" with Unlock.
 - Never `kill` by pattern on std: its `kayg` user is shared with other lanes (calternal). Kill by exact PID.
 
 ## Known gaps
