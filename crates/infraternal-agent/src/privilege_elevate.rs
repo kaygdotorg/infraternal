@@ -5,7 +5,9 @@
 //! no menu (D274): sudo without a password (consent only), then sudo or doas
 //! with their own password, then su with the root password. This module runs
 //! that one command under a fresh pseudo-terminal, because doas and su only
-//! read a password from a terminal. It types the password once when asked,
+//! read a password from a terminal. That terminal is private
+//! (`infraternal_shim::private_pty`): no other process of this account can
+//! open it, so none can read the line before the command does (J569 P1-2). It types the password once when asked,
 //! and reports exactly one of: the relay started, the password was wrong, the
 //! person may not become root this way, or nothing answered in time.
 //!
@@ -437,7 +439,21 @@ pub async fn elevate(
     let marker = format!("[infraternal-{:032x}] ", uuid::Uuid::new_v4().as_u128());
     let (program, argv) =
         command(way, &marker, words).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-    let pty = nix::pty::openpty(None, None).map_err(io::Error::from)?;
+    // J569 P1-2: a terminal that no other process of this account can open,
+    // so nothing but the elevation command can read the line typed to it.
+    // A terminal someone tried to get into is refused before anything runs,
+    // and nothing is typed: no try is spent.
+    let pty = match infraternal_shim::private_pty::open() {
+        Ok(pty) => pty,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            return Ok(Try {
+                outcome: Outcome::Failed,
+                typed: false,
+                elevated: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let flags =
         nix::fcntl::fcntl(&pty.master, nix::fcntl::FcntlArg::F_GETFL).map_err(io::Error::from)?;
     let flags = nix::fcntl::OFlag::from_bits_retain(flags) | nix::fcntl::OFlag::O_NONBLOCK;
