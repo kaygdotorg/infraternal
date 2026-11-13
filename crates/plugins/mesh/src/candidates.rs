@@ -333,6 +333,22 @@ mod tests {
         assert!(!is_lan("2001:db8::1".parse().unwrap()));
     }
 
+    /// J585 F9b (#515): [`MAX_LAN`] promises one LAN address per address family, so a second
+    /// IPv4 address must not displace the node's IPv6 one.
+    #[test]
+    fn lan_addresses_are_one_per_address_family() {
+        let reported = [
+            at("10.1.0.2:10254"),
+            at("192.168.1.2:10254"),
+            at("[fd00::2]:10254"),
+            at("[fd00::3]:10254"),
+        ];
+        assert_eq!(
+            valid_lan(&reported),
+            [at("10.1.0.2:10254"), at("[fd00::2]:10254")]
+        );
+    }
+
     /// The walk moves every step, wraps, and settles on the first candidate after its rounds.
     #[test]
     fn a_silent_peer_is_walked_round_then_left_on_the_first_candidate() {
