@@ -2653,6 +2653,37 @@ mod candidate_tests {
         );
     }
 
+    /// J585 F1 (#515): an ungranted peer behind the same public address must not learn a node's
+    /// LAN address. The compiler keeps denied peers in every snapshot (so a later grant needs only
+    /// policy), and `order_candidates` adds LAN candidates to them without looking at policy.
+    #[tokio::test]
+    async fn an_ungranted_peer_behind_the_same_public_address_gets_no_lan_candidate() {
+        let (store, [_, a, b, _]) = mesh().await;
+        store
+            .record_candidates(a, Some(&[at("10.9.0.2:10254")]))
+            .await
+            .unwrap();
+        store.record_candidates(b, Some(&[])).await.unwrap();
+        // Deny by default (the enterprise edition's default); nobody grants a and b to each other.
+        sqlx::query("UPDATE mesh_dataplane SET default_policy='deny' WHERE singleton=1")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let view = store.config(b).await.unwrap();
+        let policy = &view.peers[&a];
+        assert_eq!(policy.outbound, TrafficPolicy::None, "fixture: the pair is denied");
+        assert_eq!(policy.inbound, TrafficPolicy::None, "fixture: the pair is denied");
+        assert!(
+            !tries(&view, a).contains(&at("10.9.0.2:10254")),
+            "an ungranted neighbour learned a's LAN address: {:?}",
+            tries(&view, a)
+        );
+    }
+
     /// A node cannot plant a public, loopback or excess LAN address.
     #[tokio::test]
     async fn reported_lan_addresses_are_filtered_and_capped() {
