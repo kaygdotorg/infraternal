@@ -936,8 +936,21 @@ fn watcher_script_with(
 ) -> io::Result<String> {
     let sleep = shell_quote(&fixed_root_binary("sleep")?.to_string_lossy());
     let undo = shell_quote(&files.undo.to_string_lossy());
+    // J569 P3-2: wait on the relay itself, not on its number. A PID can be
+    // reused after the relay dies; root's `kill -0` would then succeed for an
+    // unrelated process and hold the undo back, until the next boot at
+    // worst. The relay's start time (field 22 of /proc/<pid>/stat, in clock
+    // ticks since boot) tells it apart from any later holder of the number.
+    // A relay already gone when this is written gets a birth no process
+    // has, so the undo runs at once; a dead relay nobody reaped yet (state
+    // Z) is gone too.
+    let birth =
+        process_start_ticks(pid).map_or_else(|_| "gone".to_owned(), |ticks| ticks.to_string());
     Ok(format!(
-        "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do {sleep} 1; done\n\
+        "#!/bin/sh\nset -f\n\
+         relay_alive() {{\n  IFS= read -r stat < /proc/{pid}/stat 2>/dev/null || return 1\n  \
+         set -- ${{stat##*) }}\n  [ \"${{1-}}\" != Z ] && [ \"${{20-}}\" = {birth} ]\n}}\n\
+         while relay_alive; do {sleep} 1; done\n\
          # Queue behind an install step the dead relay left holding the setup lock.\n\
          attempt=1\n\
          while :; do\n  /bin/sh {undo}\n  status=$?\n  \
@@ -945,6 +958,21 @@ fn watcher_script_with(
          [ \"$attempt\" -lt {attempts} ] || exit \"$status\"\n  \
          attempt=$((attempt + 1))\n  {sleep} {interval_seconds}\ndone\n"
     ))
+}
+
+/// The start time of process `pid` in clock ticks since boot: field 22 of
+/// `/proc/<pid>/stat`, read after the command name's closing parenthesis
+/// (the name itself may contain spaces and parentheses).
+fn process_start_ticks(pid: u32) -> io::Result<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let (_, fields) = stat
+        .rsplit_once(") ")
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    fields
+        .split_ascii_whitespace()
+        .nth(19)
+        .and_then(|ticks| ticks.parse().ok())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
 }
 
 /// Create or verify an owned directory without following a pre-existing symlink.
@@ -2386,6 +2414,37 @@ mod tests {
             script.contains(&format!("/proc/{pid}/stat")),
             "the watcher trusts a reusable pid: {script}"
         );
+    }
+
+    /// P3-2: another process now holding the relay's PID number does not hold
+    /// the undo back, and the relay itself does.
+    #[test]
+    fn a_reused_relay_pid_does_not_hold_the_undo() {
+        let config = test_guard_config();
+        let files = guard_paths(&config, uuid::Uuid::from_u128(0x10), 100);
+        let mut relay = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let birth = process_start_ticks(relay.id()).unwrap();
+        let script = watcher_script(&files, relay.id()).unwrap();
+        assert!(script.contains(&format!("= {birth} ]")), "{script}");
+        // The same number, another start time: an unrelated process.
+        let reused = script.replace(&format!("= {birth} ]"), &format!("= {} ]", birth + 1));
+        let runs = scripted_undo(&files, &[0]);
+        assert_eq!(run_watcher(&reused, &runs), (0, 1));
+        // The relay itself: the watcher waits until it is gone.
+        std::fs::remove_file(&runs).unwrap();
+        let runs = scripted_undo(&files, &[0]);
+        let killer = std::thread::spawn(move || {
+            // sleep: lets the watcher see the live relay first; the result never depends on timing.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            relay.kill().unwrap();
+            relay.wait().unwrap();
+        });
+        assert_eq!(run_watcher(&script, &runs), (0, 1));
+        killer.join().unwrap();
+        std::fs::remove_dir_all(&config.scratch_root).unwrap();
     }
 
     /// A committed or superseded install makes an old guard inert before rollback runs.
