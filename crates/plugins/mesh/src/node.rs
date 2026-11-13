@@ -1263,6 +1263,8 @@ impl Node {
                 key_rotation: true,
                 authority_epoch: true,
             });
+            // The restored kernel socket's port is what the host input table admits (D386).
+            node.firewall.set_listen_port(Some(port))?;
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
@@ -1847,6 +1849,8 @@ impl Node {
                             authority_epoch: true,
                         };
                         self.identity = Some(identity.clone());
+                        // The host input table admits exactly the port this socket bound (D386).
+                        self.firewall.set_listen_port(Some(identity.port))?;
                         Ok(identity)
                     }
                     Err(error) => {
@@ -1911,6 +1915,8 @@ impl Node {
                     authority_epoch: true,
                 };
                 self.identity = Some(identity.clone());
+                // The host input table admits exactly the port this socket bound (D386).
+                self.firewall.set_listen_port(Some(identity.port))?;
                 Ok(identity)
             }
         }

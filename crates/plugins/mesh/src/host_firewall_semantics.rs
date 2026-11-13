@@ -160,7 +160,7 @@ pub(super) fn from_policy(policy: &Policy) -> HostTable {
         table.push_rule(rule(
             [Selector::DestinationPort {
                 protocol: "udp".to_owned(),
-                port: 10254,
+                port: policy.mesh_udp_port(),
             }],
             "accept",
         ));

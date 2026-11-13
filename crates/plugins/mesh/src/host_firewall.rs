@@ -40,6 +40,8 @@ const NFT_CANDIDATES: &[&str] = &[
 ];
 /// The nftables table whose input chain protects server and agent listeners.
 pub const HOST_TABLE: &str = "infraternal_host";
+/// The standard mesh UDP port (D386), used until a node records its bound port.
+pub const MESH_UDP_DEFAULT_PORT: u16 = 10_254;
 /// Server-owned listener and proxy settings read by the boot service.
 pub const SERVER_POLICY_PATH: &str = "/var/lib/infraternal/host-firewall-server.json";
 /// Agent-owned administrator and mesh settings read by the boot service.
@@ -194,6 +196,23 @@ pub struct Policy {
     pub listeners: Vec<Listener>,
     /// Whether the local mesh node needs TUN and UDP ingress.
     pub mesh_enabled: bool,
+    /// The UDP port the running mesh node actually bound, recorded by the node.
+    ///
+    /// This is the only source for the mesh UDP rule: the node reports the
+    /// port its socket holds (after any automatic fallback), and the policy
+    /// admits exactly that port. `None` comes from policy files written
+    /// before the field existed, and from hosts whose node has not bound a
+    /// socket yet; it renders the standard port, [`MESH_UDP_DEFAULT_PORT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_udp_port: Option<u16>,
+}
+
+impl Policy {
+    /// The UDP port the mesh rule admits when [`Policy::mesh_enabled`] is set.
+    #[must_use]
+    pub fn mesh_udp_port(&self) -> u16 {
+        self.mesh_udp_port.unwrap_or(MESH_UDP_DEFAULT_PORT)
+    }
 }
 
 /// Wrap a role policy with the marker required before the product may remove it.
@@ -229,6 +248,9 @@ pub fn combine(server: Option<Policy>, agent: Option<Policy>) -> Policy {
             }
         }
         combined.mesh_enabled |= policy.mesh_enabled;
+        // Only the agent role runs a mesh node, so at most one layer records a
+        // port; a later layer's recorded port wins over an absent one.
+        combined.mesh_udp_port = policy.mesh_udp_port.or(combined.mesh_udp_port);
     }
     combined
 }
@@ -573,6 +595,9 @@ pub fn validate(policy: &Policy) -> Result<(), PolicyError> {
 
 /// Validate stored rule fields before their role-specific policies are merged.
 fn validate_fields(policy: &Policy) -> Result<(), PolicyError> {
+    if policy.mesh_udp_port == Some(0) {
+        return Err(PolicyError::InvalidRule);
+    }
     for interface in &policy.accept_interfaces {
         validate_interface(Some(interface))?;
     }
@@ -708,7 +733,11 @@ pub fn render(policy: &Policy) -> Result<String, PolicyError> {
         }
     }
     if policy.mesh_enabled {
-        rules.push_str("        iifname \"infraternal0\" accept\n        udp dport 10254 accept\n");
+        let _ = write!(
+            rules,
+            "        iifname \"infraternal0\" accept\n        udp dport {} accept\n",
+            policy.mesh_udp_port()
+        );
     }
     rules.push_str("    }\n}\n");
     let mut unique = String::with_capacity(rules.len());
@@ -1319,44 +1348,70 @@ fn reload_systemd(systemctl: &Path, removed_unit: &Path) -> Result<(), PolicyErr
     Ok(())
 }
 
-/// Change the agent's mesh bit and apply the merged host policy if configured.
+/// Record the mesh node's listener in the agent policy and apply the merged host policy.
 ///
-/// A missing pair of role files is normal on hosts without product-managed
-/// kernel policy; the mesh userspace filter remains active as D384 requires.
+/// Call it with `Some(port)`, the UDP port the node's socket actually bound,
+/// when the mesh comes up or rebinds; and with `None` when the mesh stops.
+/// The host table then admits `infraternal0` and exactly that UDP port, or
+/// neither. A missing pair of role files is normal on hosts without
+/// product-managed kernel policy; the mesh userspace filter remains active as
+/// D384 requires, and nothing is written.
 ///
 /// # Errors
 /// Returns an error when the role files are unsafe or the merged nft update fails.
-pub fn set_mesh_enabled(enabled: bool) -> Result<Option<String>, PolicyError> {
-    let server = read_policy_file(Path::new(SERVER_POLICY_PATH))?;
-    let mut agent = read_policy_file(Path::new(AGENT_POLICY_PATH))?;
+pub fn set_mesh_listener(udp_port: Option<u16>) -> Result<Option<String>, PolicyError> {
+    set_mesh_listener_at(&HostFirewallPaths::system(), None, udp_port)
+}
+
+/// Record the mesh listener below the supplied layout, using the given nft executable.
+///
+/// This is the same lifecycle as [`set_mesh_listener`], with explicit paths so
+/// privileged namespace tests can prove it without touching `/var/lib`.
+///
+/// # Errors
+/// Returns an error when the role files are unsafe or the merged nft update fails.
+pub fn set_mesh_listener_at(
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+    udp_port: Option<u16>,
+) -> Result<Option<String>, PolicyError> {
+    let server = read_policy_file(paths.server_policy_path())?;
+    let mut agent = read_policy_file(paths.agent_policy_path())?;
     if server.is_none() && agent.is_none() {
         return Ok(None);
     }
-    let changed = update_mesh_enabled(&mut agent, enabled);
+    let changed = update_mesh_listener(&mut agent, udp_port);
     let combined = combine(server, agent.clone());
-    let report = apply(&combined, None)?;
+    // Apply first: a rejected nft transaction leaves both the live table and
+    // the saved file at the previous listener, so a retry starts consistent.
+    let report = apply(&combined, nft_path)?;
     if changed {
         let Some(policy) = agent else {
             return Err(PolicyError::Io(io::Error::other(
                 "mesh policy changed without an agent configuration",
             )));
         };
-        write_policy_file(Path::new(AGENT_POLICY_PATH), &policy)?;
+        write_policy_file(paths.agent_policy_path(), &policy)?;
     }
     Ok(Some(report))
 }
 
-/// Change the saved mesh bit only when its value differs from the requested state.
-fn update_mesh_enabled(agent: &mut Option<Policy>, enabled: bool) -> bool {
+/// Change the saved mesh listener only when it differs from the requested one.
+///
+/// A stopped mesh keeps no port, so the next start records whatever it binds.
+fn update_mesh_listener(agent: &mut Option<Policy>, udp_port: Option<u16>) -> bool {
+    let enabled = udp_port.is_some();
     match agent {
-        Some(policy) if policy.mesh_enabled == enabled => false,
+        Some(policy) if policy.mesh_enabled == enabled && policy.mesh_udp_port == udp_port => false,
         Some(policy) => {
             policy.mesh_enabled = enabled;
+            policy.mesh_udp_port = udp_port;
             true
         }
         None if enabled => {
             *agent = Some(Policy {
                 mesh_enabled: true,
+                mesh_udp_port: udp_port,
                 ..Policy::default()
             });
             true
@@ -1672,21 +1727,86 @@ fn run_nft(
 
 /// Host policy state transitions avoid a disk write and nft transaction when unchanged.
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed fixture step should name the step that failed"
+)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{HOST_TABLE, Policy, PolicyError, host_table_removal_failure, update_mesh_enabled};
+    use super::{
+        HOST_TABLE, MESH_UDP_DEFAULT_PORT, Policy, PolicyError, combine,
+        host_table_removal_failure, render, update_mesh_listener,
+    };
 
-    /// Applying the current mesh state again leaves its policy unchanged and reports no work.
+    /// Applying the current mesh listener again leaves its policy unchanged and reports no work.
     #[test]
-    fn repeated_mesh_state_does_not_request_an_update() {
+    fn repeated_mesh_listener_does_not_request_an_update() {
         let mut agent = Some(Policy {
             mesh_enabled: true,
+            mesh_udp_port: Some(10_254),
             ..Policy::default()
         });
 
-        assert!(!update_mesh_enabled(&mut agent, true));
+        assert!(!update_mesh_listener(&mut agent, Some(10_254)));
         assert_eq!(agent.as_ref().map(|policy| policy.mesh_enabled), Some(true));
+    }
+
+    /// A node that bound another port moves the saved rule to that port; stopping clears it.
+    #[test]
+    fn mesh_listener_follows_the_bound_port_and_clears_on_stop() {
+        let mut agent = Some(Policy {
+            mesh_enabled: true,
+            mesh_udp_port: Some(10_254),
+            ..Policy::default()
+        });
+
+        assert!(update_mesh_listener(&mut agent, Some(32_001)));
+        assert_eq!(
+            agent.as_ref().and_then(|policy| policy.mesh_udp_port),
+            Some(32_001)
+        );
+        assert!(update_mesh_listener(&mut agent, None));
+        let stopped = agent.expect("agent policy stays saved");
+        assert!(!stopped.mesh_enabled);
+        assert_eq!(stopped.mesh_udp_port, None);
+    }
+
+    /// The rendered table admits the recorded port, and only the standard port when none is recorded.
+    #[test]
+    fn rendered_mesh_rule_uses_the_recorded_port() {
+        let admin = Policy {
+            admin_rules: vec!["wt0,10.69.69.0/24,tcp,22".parse().expect("admin rule")],
+            ..Policy::default()
+        };
+        let agent = Policy {
+            mesh_enabled: true,
+            mesh_udp_port: Some(32_001),
+            ..Policy::default()
+        };
+        let bound = render(&combine(Some(admin.clone()), Some(agent))).expect("render");
+        assert!(bound.contains("udp dport 32001 accept"), "{bound}");
+        assert!(!bound.contains("udp dport 10254 accept"), "{bound}");
+
+        let legacy = Policy {
+            mesh_enabled: true,
+            ..Policy::default()
+        };
+        let standard = render(&combine(Some(admin), Some(legacy))).expect("render");
+        assert!(
+            standard.contains(&format!("udp dport {MESH_UDP_DEFAULT_PORT} accept")),
+            "{standard}"
+        );
+    }
+
+    /// Policy files written before the port field existed still load.
+    #[test]
+    fn policy_without_a_recorded_port_still_deserializes() {
+        let policy: Policy = serde_json::from_str(
+            r#"{"admin_rules":[],"accept_interfaces":[],"listeners":[],"mesh_enabled":true}"#,
+        )
+        .expect("legacy policy file");
+        assert_eq!(policy.mesh_udp_port(), MESH_UDP_DEFAULT_PORT);
     }
 
     /// A rejected nft delete names the table the user asked infraternal to remove.

@@ -53,6 +53,12 @@ pub struct Firewall {
     // closes the window in which a revoked peer could open a new connection [#281].
     proxy_config: Option<Config>,
     previous_fence: bool,
+    // The UDP port the node's socket actually bound, as reported by the node through
+    // `set_listen_port`. It is the single source of the host table's mesh UDP rule (D386).
+    listen_port: Option<u16>,
+    // The port last written to the host input table by this process. `None` after a
+    // restart, so the first install re-checks the host table once and self-heals it.
+    host_listener: Option<u16>,
 }
 impl Firewall {
     /// Select the declared compatibility backend explicitly for real-engine validation.
@@ -137,9 +143,7 @@ impl Firewall {
     /// remain restrictive on a cleanup error; the caller retries completion.
     pub fn apply(&mut self, config: &Config) -> io::Result<()> {
         self.install_pending(config)?;
-        self.complete(config)?;
-        sync_host_mesh_policy(true)?;
-        Ok(())
+        self.complete(config)
     }
     /// Replace the active proxy route grants after Traefik confirms its dynamic snapshot.
     ///
@@ -303,6 +307,39 @@ impl Firewall {
         };
         self.installed = true;
         self.fallback_complete = self.is_fallback();
+        // Open host ingress only after the grant filter above is in place, so
+        // the newly admitted UDP port and `infraternal0` are already filtered.
+        self.sync_host_listener()
+    }
+    /// Tell the firewall which UDP port the node's socket actually bound.
+    ///
+    /// The node calls this whenever its identity changes: after the data plane
+    /// binds, after a rebind to another port, and with `None` when it stops.
+    /// While the mesh filter is installed, a changed port is written to the
+    /// host input table at once; otherwise the next install writes it.
+    ///
+    /// # Errors
+    /// Returns a failed host policy update; the previous host table stays active.
+    pub(crate) fn set_listen_port(&mut self, port: Option<u16>) -> io::Result<()> {
+        self.listen_port = port;
+        if self.installed {
+            self.sync_host_listener()?;
+        }
+        Ok(())
+    }
+    /// Admit the bound mesh port in the host input table when it differs from the last write.
+    ///
+    /// Skipping unchanged ports keeps ordinary grant updates free of host nft
+    /// transactions. Without a bound port there is nothing to admit yet.
+    fn sync_host_listener(&mut self) -> io::Result<()> {
+        let Some(port) = self.listen_port else {
+            return Ok(());
+        };
+        if self.host_listener == Some(port) {
+            return Ok(());
+        }
+        publish_host_listener(Some(port))?;
+        self.host_listener = Some(port);
         Ok(())
     }
     /// Remove only the owned table, leaving the host firewall intact.
@@ -312,7 +349,8 @@ impl Firewall {
         if self.installed {
             // Close host ingress before retiring the mesh grant filter. If the
             // host transaction fails, leave the mesh filter installed and retry.
-            sync_host_mesh_policy(false)?;
+            publish_host_listener(None)?;
+            self.host_listener = None;
             if self.is_fallback() {
                 crate::iptables::remove()?;
             } else {
@@ -336,9 +374,9 @@ impl Firewall {
     }
 }
 
-/// Keep the host input table aligned with mesh lifecycle while mesh grants stay in userspace.
-fn sync_host_mesh_policy(enabled: bool) -> io::Result<()> {
-    match crate::host_firewall::set_mesh_enabled(enabled) {
+/// Write the mesh listener (or its absence) to the host input table; grants stay in the mesh filter.
+fn publish_host_listener(udp_port: Option<u16>) -> io::Result<()> {
+    match crate::host_firewall::set_mesh_listener(udp_port) {
         Ok(Some(report)) => {
             tracing::info!(report = %report, "host firewall mesh policy updated");
             Ok(())

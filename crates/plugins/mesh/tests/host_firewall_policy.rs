@@ -22,8 +22,8 @@ use serde_json::{Value, json};
 
 use infraternal_plugin_mesh::host_firewall::{
     AllowRule, HostFirewallPaths, Listener, Policy, PolicyRole, Protocol, apply_from_config_at,
-    apply_with_ssh_connection, clear_role_from_config_at, discover_nft, render, validate,
-    validate_ssh_connection_on, write_policy_file,
+    apply_with_ssh_connection, clear_role_from_config_at, discover_nft, read_policy_file, render,
+    set_mesh_listener_at, validate, validate_ssh_connection_on, write_policy_file,
 };
 
 /// Supplies the private nft command and namespace setup used by these policy tests.
@@ -75,6 +75,7 @@ fn prod_policy(mesh_enabled: bool) -> Policy {
             },
         ],
         mesh_enabled,
+        mesh_udp_port: None,
     }
 }
 
@@ -553,6 +554,97 @@ impl Drop for ConfigFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+/// The host table admits exactly the UDP port the mesh node bound, and nothing once it stops.
+///
+/// The node reports its socket's real port (D386); a default, a fallback and a
+/// rebind all reach the host policy only through `set_mesh_listener`. The mesh
+/// table beside it must be left untouched by every step.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn mesh_listener_opens_exactly_the_bound_port_and_closes_on_stop() {
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    let setup = run_nft(
+        &nft,
+        &["-f", "-"],
+        Some(concat!(
+            "add table inet infraternal_mesh\n",
+            "add chain inet infraternal_mesh keep\n",
+            "add rule inet infraternal_mesh keep counter\n",
+        )),
+    );
+    assert!(
+        setup.status.success(),
+        "mesh table fixture was rejected: {}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    write_policy_file(
+        config.paths.server_policy_path(),
+        &Policy {
+            admin_rules: vec![
+                AllowRule::from_str("wt0,10.69.69.0/24,tcp,22").expect("typed administrator rule"),
+            ],
+            ..Policy::default()
+        },
+    )
+    .expect("save marked server policy");
+    apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("install the server host policy");
+    let mesh_before = table_json(&nft, "infraternal_mesh");
+    let admin_ssh = [
+        (meta("iifname"), json!("wt0")),
+        (
+            payload("ip", "saddr"),
+            json!({ "prefix": { "addr": "10.69.69.0", "len": 24 } }),
+        ),
+        (payload("tcp", "dport"), json!(22)),
+    ];
+    let tunnel = [(meta("iifname"), json!("infraternal0"))];
+    let udp = |port: u16| [(payload("udp", "dport"), json!(port))];
+
+    set_mesh_listener_at(&config.paths, Some(&nft), Some(32_001))
+        .expect("record a fallback listener")
+        .expect("role files exist, so the host table is managed");
+    let fallback = table_json(&nft, "infraternal_host");
+    assert!(has_accept_rule(&fallback, &udp(32_001)), "{fallback:?}");
+    assert!(!has_accept_rule(&fallback, &udp(10_254)), "{fallback:?}");
+    assert!(has_accept_rule(&fallback, &tunnel), "{fallback:?}");
+    assert_eq!(
+        read_policy_file(config.paths.agent_policy_path())
+            .expect("read agent policy")
+            .and_then(|policy| policy.mesh_udp_port),
+        Some(32_001),
+        "the agent policy file records the bound port"
+    );
+
+    set_mesh_listener_at(&config.paths, Some(&nft), Some(10_254))
+        .expect("record a rebind to the standard port");
+    let rebound = table_json(&nft, "infraternal_host");
+    assert!(has_accept_rule(&rebound, &udp(10_254)), "{rebound:?}");
+    assert!(!has_accept_rule(&rebound, &udp(32_001)), "{rebound:?}");
+
+    let unchanged = set_mesh_listener_at(&config.paths, Some(&nft), Some(10_254))
+        .expect("repeat the same listener")
+        .expect("managed host table");
+    assert!(unchanged.contains("no rule differences"), "{unchanged}");
+    assert_eq!(rebound, table_json(&nft, "infraternal_host"));
+
+    set_mesh_listener_at(&config.paths, Some(&nft), None).expect("stop the mesh listener");
+    let stopped = table_json(&nft, "infraternal_host");
+    assert!(!has_accept_rule(&stopped, &udp(10_254)), "{stopped:?}");
+    assert!(!has_accept_rule(&stopped, &tunnel), "{stopped:?}");
+    for table in [&fallback, &rebound, &stopped] {
+        assert_eq!(input_chain(table)["policy"], "drop", "{table:?}");
+        assert!(has_accept_rule(table, &admin_ssh), "{table:?}");
+    }
+    assert_eq!(
+        mesh_before,
+        table_json(&nft, "infraternal_mesh"),
+        "host listener updates must leave the mesh table in place"
+    );
 }
 
 /// Take over a hand-made host table without changing unrelated nft state.

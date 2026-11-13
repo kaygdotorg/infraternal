@@ -1437,6 +1437,7 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
         accept_interfaces: args.host_firewall_accept_interfaces.clone(),
         listeners,
         mesh_enabled: false,
+        mesh_udp_port: None,
     };
     host_firewall::validate(&policy).map_err(|_| {
         "host firewall policy needs valid rules and an explicit TCP/22 admin path".to_owned()
