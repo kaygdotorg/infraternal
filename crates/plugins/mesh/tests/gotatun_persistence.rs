@@ -694,6 +694,88 @@ fn peers_punch_through_established_only_input_and_tunnel_input_stays_separate() 
     fs::remove_file(firewall).unwrap();
 }
 
+/// A grant after a deny installs the peer in `GotaTun` (#515): only the Access policy changes, no
+/// peer field does, and `GotaTun` installs only peers with network access, so the node must hand
+/// the access change to the engine as well as to its firewall.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn a_grant_after_a_deny_reaches_the_gotatun_engine() {
+    let (state_a, state_b) = (state("j564-grant-a"), state("j564-grant-b"));
+    run("mkdir", &["-p", "/run/netns"]);
+    run("mount", &["-t", "tmpfs", "netns", "/run/netns"]);
+    cleanup(&[]);
+    for ns in [NS_A, NS_B] {
+        run("ip", &["netns", "add", ns]);
+        run("ip", &["-n", ns, "link", "set", "lo", "up"]);
+    }
+    run(
+        "ip",
+        &[
+            "link", "add", "j564a", "netns", NS_A, "type", "veth", "peer", "j564b", "netns", NS_B,
+        ],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "address", "add", "192.0.2.1/24", "dev", "j564a"],
+    );
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "192.0.2.2/24", "dev", "j564b"],
+    );
+    run("ip", &["-n", NS_A, "link", "set", "j564a", "up"]);
+    run("ip", &["-n", NS_B, "link", "set", "j564b", "up"]);
+    let up = |ns: &str, path: &PathBuf| {
+        in_ns(ns, || {
+            let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+            let identity = node.up().unwrap();
+            (node, identity)
+        })
+    };
+    let (mut node_a, id_a) = up(NS_A, &state_a);
+    let (mut node_b, id_b) = up(NS_B, &state_b);
+    let a = (1, id_a.public_key);
+    let b = (2, id_b.public_key);
+    let endpoint_a = Some(SocketAddr::from(([192, 0, 2, 1], id_a.port)));
+    let endpoint_b = Some(SocketAddr::from(([192, 0, 2, 2], id_b.port)));
+    for (version, allowed) in [(1, false), (2, true)] {
+        in_ns(NS_A, || {
+            assert!(
+                node_a
+                    .chunk(j534_snapshot(a, b, endpoint_b, version, allowed))
+                    .unwrap()
+            );
+        });
+        in_ns(NS_B, || {
+            assert!(
+                node_b
+                    .chunk(j534_snapshot(b, a, endpoint_a, version, allowed))
+                    .unwrap()
+            );
+        });
+    }
+    // The test waits on an external protocol event, not a measured duration.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut handshake = false;
+    while Instant::now() < deadline && !handshake {
+        handshake = node_a
+            .counters()
+            .unwrap()
+            .get(&id_b.public_key)
+            .is_some_and(|counters| counters.handshake_secs != 0);
+        if !handshake {
+            // sleep: allow the GotaTun workers to exchange the first handshake
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert!(
+        handshake,
+        "the granted peer never reached the GotaTun engine, so no handshake happened"
+    );
+    in_ns(NS_A, || node_a.down().unwrap());
+    in_ns(NS_B, || node_b.down().unwrap());
+    cleanup(&[&state_a, &state_b]);
+}
+
 /// Build a peer snapshot with either full directional network access or no access.
 fn j534_snapshot(
     local: (u32, PublicKey),

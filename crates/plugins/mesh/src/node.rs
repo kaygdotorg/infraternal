@@ -3559,12 +3559,41 @@ impl Node {
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
             self.firewall.install_pending(&config)?;
+            // `GotaTun` installs only peers with network access (gotatun_node.rs), so a grant or
+            // a revocation adds or removes engine peers although no peer field changed. Kernel
+            // `WireGuard` keeps every peer and needs only the firewall (#515).
+            let engine_peers_changed = self.engine_kind == EngineKind::GotaTun
+                && self.config.as_ref().is_none_or(|old| {
+                    crate::gotatun_node::peer_keys_with_network_access(old)
+                        != crate::gotatun_node::peer_keys_with_network_access(&config)
+                });
+            let restore_engine = |node: &Self| -> io::Result<()> {
+                if engine_peers_changed {
+                    node.gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(node.config.clone().ok_or(io::ErrorKind::NotConnected)?)?;
+                }
+                Ok(())
+            };
+            if engine_peers_changed
+                && let Err(error) = self
+                    .gotatun
+                    .as_ref()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+                    .and_then(|engine| engine.apply(config.clone()))
+            {
+                self.firewall
+                    .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+                return Err(error);
+            }
             let configured_peers: Vec<_> = config
                 .peers
                 .values()
                 .map(|policy| policy.peer.clone())
                 .collect();
             if let Err(error) = self.install_peer_routes(&configured_peers, false) {
+                restore_engine(self)?;
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3579,6 +3608,7 @@ impl Node {
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
             if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
+                restore_engine(self)?;
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
