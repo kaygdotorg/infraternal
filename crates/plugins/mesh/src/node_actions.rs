@@ -793,7 +793,10 @@ mod tests {
         assert!(status.get("private_key").is_none());
     }
 
-    /// An unenrolled rootless mesh component can be inspected without probing a privileged firewall.
+    /// An inactive rootless mesh can be read without kernel setup or persisted Mesh state.
+    ///
+    /// Opening the store creates only its private writer lock, which lets cleanup serialize with
+    /// migration; no key, public snapshot, or engine record is written.
     #[test]
     fn rootless_owner_can_read_an_inactive_mesh_without_kernel_setup() {
         assert!(
@@ -811,7 +814,15 @@ mod tests {
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("rootless status"))
                 .expect("status JSON");
         assert_eq!(status["state"], "Off");
-        assert_eq!(std::fs::read_dir(&directory.0).expect("state").count(), 0);
+        let entries = std::fs::read_dir(&directory.0)
+            .expect("state")
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("state entries");
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from(".mesh-store-write.lock")]
+        );
     }
 
     /// Inactive rootless inspection must not conceal an unsafe retained ownership record.
