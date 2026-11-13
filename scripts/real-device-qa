@@ -86,6 +86,8 @@ KBD='xy~0.898~0.586'
 cmd_owner_setup() {
   # First-run owner: token, identity, passkey (simulated Face ID), recovery step. The recovery words are shown on
   # screen only for the "stored" tick; no shot is taken there and nothing keeps them.
+  # The token file is removed on every exit path, so a failed run does not leave a live token on the Studio.
+  trap 'std "rm -f $SIM/qa/setup-token.txt" >/dev/null 2>&1 || true' EXIT
   new_setup_token
   local f="/Users/kayg/Developer/infraternal-sim/qa" fresh="open~$QA_URL/?r=$(date +%s)|wait~8"
   runner "./run.sh run owner-1 \"$fresh|field~setup token|typefile~$f/setup-token.txt|$KBD|wait~2|tap~Continue|wait~4|field~username|type~qa-owner|$KBD|wait~1|field~display name|type~QA Owner|$KBD|wait~2|tap~Continue|wait~3|tap~Create passkey|wait~3\""
@@ -178,7 +180,7 @@ cmd_mac() {
 }
 
 cmd_teardown() {
-  ssh "$DEV02" 'sudo -n systemctl stop qa-sshd 2>/dev/null; sudo -n userdel -r qa-device 2>/dev/null; sudo -n rm -f /usr/local/share/ca-certificates/qa-ca.crt; sudo -n update-ca-certificates --fresh >/dev/null 2>&1; echo dev-02 cleaned' || true
+  ssh "$DEV02" 'sudo -n systemctl stop qa-sshd 2>/dev/null; sudo -n userdel -r qa-device 2>/dev/null; sudo -n userdel -r qa-device2 2>/dev/null; sudo -n rm -f /usr/local/share/ca-certificates/qa-ca.crt; sudo -n update-ca-certificates --fresh >/dev/null 2>&1; echo dev-02 cleaned' || true
   ssh "$STAGING" 'sudo systemctl stop infraternal-qa-server infraternal-qa-proxy; echo QA units stopped (data kept in /var/lib/infraternal-qa)' || true
 }
 
