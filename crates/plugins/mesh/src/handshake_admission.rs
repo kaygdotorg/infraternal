@@ -339,6 +339,7 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
     }
 }
 
+/// Checks the guard's verdicts and budgets, plus a hand-run flood cost bench.
 #[cfg(test)]
 mod tests {
     #![expect(
