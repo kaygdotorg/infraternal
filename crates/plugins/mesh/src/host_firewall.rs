@@ -1809,6 +1809,22 @@ mod tests {
         assert_eq!(policy.mesh_udp_port(), MESH_UDP_DEFAULT_PORT);
     }
 
+    /// J555 review (P1): a `/nix/store` entry whose name contains `-nftables-` but
+    /// is a regular file (a `.drv`, a source tarball, a patch) must be skipped
+    /// like a missing candidate. Today `canonicalize` fails with
+    /// `NotADirectory`, which is not `NotFound`, so discovery aborts on the
+    /// first such entry and a Nix-only host gets no host or mesh nft at all.
+    #[test]
+    fn review_j555_a_file_shaped_store_entry_does_not_abort_nft_discovery() {
+        let regular_file = std::env::current_exe().expect("test binary path");
+        let candidate = regular_file.join("bin/nft");
+        let result = super::safe_nft_path(&candidate);
+        assert!(
+            matches!(result, Ok(None)),
+            "a candidate below a regular file must be skipped, got {result:?}"
+        );
+    }
+
     /// A rejected nft delete names the table the user asked infraternal to remove.
     #[test]
     fn table_removal_failure_names_the_product_table() {
