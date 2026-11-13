@@ -2675,8 +2675,16 @@ mod candidate_tests {
             .unwrap();
         let view = store.config(b).await.unwrap();
         let policy = &view.peers[&a];
-        assert_eq!(policy.outbound, TrafficPolicy::None, "fixture: the pair is denied");
-        assert_eq!(policy.inbound, TrafficPolicy::None, "fixture: the pair is denied");
+        assert_eq!(
+            policy.outbound,
+            TrafficPolicy::None,
+            "fixture: the pair is denied"
+        );
+        assert_eq!(
+            policy.inbound,
+            TrafficPolicy::None,
+            "fixture: the pair is denied"
+        );
         assert!(
             !tries(&view, a).contains(&at("10.9.0.2:10254")),
             "an ungranted neighbour learned a's LAN address: {:?}",
