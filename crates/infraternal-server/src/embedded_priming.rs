@@ -658,7 +658,8 @@ fn normalize_notice(
     let Some(a) = attachments.values().find(|a| a.stream_id == stream) else {
         return false;
     };
-    if json.len() > infraternal_plugin_api::MAX_ACTION_BYTES {
+    let json_len = json.len();
+    if json_len > infraternal_plugin_api::MAX_ACTION_BYTES {
         return false;
     }
     let Ok(notice) = serde_json::from_slice::<TerminalNotice>(json) else {
@@ -687,7 +688,9 @@ fn normalize_notice(
         };
         return true;
     }
-    if a.output.capacity() == 0 || a.output.is_closed() {
+    // The same byte bound the ordinary path applies, so the shadow never forwards a notice that
+    // would retire the working stream.
+    if !a.output.admits(json_len) {
         return false;
     }
     seen.retain(|stream, _| attachments.values().any(|a| a.stream_id == *stream));
@@ -750,8 +753,7 @@ fn safe_delivery(incoming: &Incoming, attachments: &HashMap<u64, AttachmentState
     }
     seq.checked_add(bytes.len() as u64).is_some()
         && bytes.len() as u64 <= a.credit
-        && a.output.capacity() > 0
-        && !a.output.is_closed()
+        && a.output.admits(bytes.len())
         && if snapshot {
             seq >= a.last_out_seq
         } else {
@@ -829,7 +831,7 @@ mod tests {
                 replaying: false,
                 route: None,
                 proof_rebind_pending: false,
-                output,
+                output: output.into(),
             },
             receiver,
         )

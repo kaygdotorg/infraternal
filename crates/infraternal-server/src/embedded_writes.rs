@@ -380,7 +380,7 @@ mod tests {
     //! Checks the encoded queue bound and joins owned flights before shutdown returns.
     use super::*;
     fn retained_writer() -> AttachmentState {
-        let (output, _) = mpsc::channel(16);
+        let (output, _) = mpsc::channel::<crate::embedded::TerminalOutput>(16);
         AttachmentState {
             session_id: [7; 16],
             stream_id: 2,
@@ -394,7 +394,7 @@ mod tests {
             replaying: false,
             route: None,
             proof_rebind_pending: false,
-            output,
+            output: output.into(),
         }
     }
 
@@ -656,7 +656,7 @@ mod tests {
         let limit = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
         let mut attachments: HashMap<_, _> = (0..limit)
             .map(|index| {
-                let (output, _) = mpsc::channel(1);
+                let (output, _) = mpsc::channel::<crate::embedded::TerminalOutput>(1);
                 (
                     u64::try_from(index).unwrap(),
                     AttachmentState {
@@ -672,7 +672,7 @@ mod tests {
                         replaying: false,
                         route: None,
                         proof_rebind_pending: false,
-                        output,
+                        output: output.into(),
                     },
                 )
             })
