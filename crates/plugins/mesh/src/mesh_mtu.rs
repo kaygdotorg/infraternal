@@ -69,12 +69,17 @@ pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
 ///
 /// Peers often share an endpoint address, and on macOS every lookup starts two
 /// processes (`route` and `ifconfig`, about 6.5 ms together). The probe remembers the
-/// budget per endpoint IP and, on macOS, each underlay interface's MTU. Create a fresh
-/// probe per snapshot: its answers are only as current as the moment they were read.
-#[derive(Debug, Default)]
+/// budget per endpoint IP and, on macOS, each underlay interface's MTU. On Linux, every lookup
+/// of one probe shares one route-netlink socket, opened on the first lookup (#489 J552 P2-2).
+/// Create a fresh probe per snapshot: its answers are only as current as the moment they were
+/// read.
+#[derive(Default)]
 pub(crate) struct EndpointProbe {
     /// Mesh MTU already derived for an endpoint address.
     endpoints: HashMap<IpAddr, u16>,
+    /// The route-netlink socket this probe's lookups share, once one was needed.
+    #[cfg(target_os = "linux")]
+    socket: Option<crate::netlink::Socket>,
     /// Underlay interface MTUs read with `ifconfig` during this probe (`None` if unreadable).
     #[cfg(target_os = "macos")]
     interfaces: HashMap<String, Option<u32>>,
@@ -100,11 +105,21 @@ impl EndpointProbe {
     /// # Errors
     /// Reports an unreachable endpoint, missing egress link, or malformed route reply.
     #[cfg(target_os = "linux")]
-    #[allow(clippy::unused_self)] // The macOS twin caches interface MTUs in `self`.
     fn route_mtu(&mut self, endpoint: SocketAddr) -> io::Result<u32> {
         #[cfg(test)]
         ROUTE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
-        crate::wireguard::route_mtu(endpoint)
+        let socket = match &mut self.socket {
+            Some(socket) => socket,
+            empty => empty.insert(crate::netlink::Socket::open(
+                nix::sys::socket::SockProtocol::NetlinkRoute,
+            )?),
+        };
+        let result = crate::wireguard::route_mtu_on(socket, endpoint);
+        if result.is_err() {
+            // An error may leave unread replies behind; the next lookup starts on a fresh socket.
+            self.socket = None;
+        }
+        result
     }
 
     /// Query the underlay route MTU toward `endpoint` with macOS routing tools.
