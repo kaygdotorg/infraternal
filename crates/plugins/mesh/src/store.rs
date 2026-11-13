@@ -2747,6 +2747,25 @@ mod candidate_tests {
         );
     }
 
+    /// J585 F9a (#515): a server on the same LAN as a node sees that node's private address. It
+    /// is no server-reflexive address, and publishing it would send a private address to every
+    /// peer on every other site.
+    #[tokio::test]
+    async fn a_private_observed_address_is_not_a_reflexive_address() {
+        let (store, [_, a, _, c]) = mesh().await;
+        store.record_candidates(c, Some(&[])).await.unwrap();
+        for proven in [false, true] {
+            assert!(
+                !store
+                    .record_reflexive(&[seen(a, "10.9.0.2:40000", proven)])
+                    .await
+                    .unwrap(),
+                "a private address was stored as reflexive (proven={proven})"
+            );
+        }
+        assert!(!tries(&store.config(c).await.unwrap(), a).contains(&at("10.9.0.2:40000")));
+    }
+
     /// A node cannot plant a public, loopback or excess LAN address.
     #[tokio::test]
     async fn reported_lan_addresses_are_filtered_and_capped() {
