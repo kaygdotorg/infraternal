@@ -697,3 +697,40 @@ async fn a_pending_uninstall_bars_the_next_promotion() {
         "a new promotion began while the last one's uninstall is pending: {second:?}"
     );
 }
+
+/// J569 F4 (#399): a caller who may not begin is told `denied`, never the
+/// host's lock state.
+///
+/// `begin_promotion` maps every refused insert to `Locked` whenever the
+/// host waits out 2 tries, so a locked session (or one outside its admin
+/// window, or another owner's) learns the wait and its length. The HTTP
+/// `begin` also calls the host first (facts, terminal census, probe) and
+/// writes a `privilege.locked` activity row for that caller.
+#[tokio::test]
+async fn an_unauthorised_begin_is_denied_not_told_the_wait() {
+    let (store, pool, host) = enrolled().await;
+    session(&pool, "s", 150).await;
+    for (attempt, now) in [(1, 200), (2, 205)] {
+        let attempt = Uuid::from_u128(attempt);
+        store
+            .begin_promotion("s", host, attempt, Method::Sudo, bound(), now)
+            .await
+            .unwrap();
+        store.reserve_try("s", attempt, true, now).await.unwrap();
+        store
+            .settle_try(attempt, Settled::Wrong, now + 1)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES ('x','owner','fixture',100000,150,0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = store
+        .begin_promotion("x", host, Uuid::from_u128(3), Method::Sudo, bound(), 210)
+        .await;
+    assert!(
+        matches!(refused, Err(PromotionError::Denied)),
+        "a locked session was told {refused:?}"
+    );
+}
