@@ -1846,6 +1846,24 @@ mod tests {
         );
     }
 
+    /// J555 review (P3): an administrator whose sshd listens on another port,
+    /// and who has an explicit allow rule for it, must be able to install the
+    /// policy. `validate` insists on a literal TCP/22 rule instead of the
+    /// port in `SSH_CONNECTION`, so this host is refused (or must open 22).
+    #[test]
+    fn review_j555_ssh_on_a_non_default_port_is_a_valid_admin_path() {
+        let policy = Policy {
+            admin_rules: vec!["*,*,tcp,2222".parse().expect("admin rule")],
+            ..Policy::default()
+        };
+        let result = super::validate_ssh_connection_on(
+            &policy,
+            "203.0.113.7 50000 198.51.100.2 2222",
+            None,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
     /// A rejected nft delete names the table the user asked infraternal to remove.
     #[test]
     fn table_removal_failure_names_the_product_table() {
