@@ -68,9 +68,13 @@ combined with the node's advertised UDP port. The coordinator sends
 `candidates` only to a node whose identity reply to `{"candidates":true}` said
 it accepts them, because `Peer` refuses unknown fields; any other node gets the
 reflexive address, or the control-IP guess before one is observed, as its one
-`endpoint`. A GotaTun node moves a peer that has not sent a packet back to its
-next candidate every 5 s, for three rounds, then stays on the first; the first
-received packet ends the walk. An endpoint is discovery, never proof of
+`endpoint`, and so does the server's own node, which only answers its nodes
+and reads their reflexive addresses from its device. A GotaTun node moves a
+peer that has sent nothing back (no bytes, no new handshake, no packet from
+another address) to its next candidate every 5 s, for three rounds, then
+stays on the first. A GotaTun node also starts a WireGuard handshake whenever
+a snapshot or a walk step gives an established peer a new address, so the
+first packet through its own NAT leaves at once. An endpoint is discovery, never proof of
 reachability. Handshake counters distinguish a direct path from an unproven
 endpoint.
 
