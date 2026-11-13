@@ -3881,6 +3881,141 @@ mod tests {
         assert_eq!(route_state.route_peer(&peer).endpoint, Some(learned));
     }
 
+    /// J552 review (#489): when a relay ends, the direct-path budget must come from a direct
+    /// endpoint, never from the relay shim's address.
+    ///
+    /// While a relay carries a peer, the relay shim delivers its datagrams to `GotaTun` from a
+    /// loopback socket (`relay_path`, bound to `127.0.0.1:0`). That traffic is authenticated, so
+    /// the fork's `confirmed_endpoint` becomes the shim's loopback address and the live refresh
+    /// records it in `live_endpoints`. When the relay is lost, `update_relay_route_mtu(None)`
+    /// derives the direct budget from `route_peer`, which is that loopback address, so the
+    /// route budget is the loopback MTU (65456) instead of the configured endpoint's (1408 on a
+    /// 1500-byte underlay). The next live refresh keeps writing 65456 until a direct data packet
+    /// moves the confirmed endpoint. Before J502, the fallback used the configured endpoint.
+    #[cfg(feature = "relay")]
+    #[test]
+    #[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+    fn review_j552_relay_fallback_does_not_derive_budget_from_relay_shim() {
+        use crate::policy::model::{Addresses, PublicKey};
+        review_route_command(&["link", "set", "lo", "up"]);
+        // The direct underlay toward the configured endpoint: 1500 bytes, so a 1408 budget.
+        review_route_command(&["link", "add", "under0", "type", "dummy"]);
+        review_route_command(&["link", "set", "under0", "mtu", "1500", "up"]);
+        review_route_command(&["address", "add", "192.0.2.1/24", "dev", "under0"]);
+        let proven = review_marked_tun(PublicKey([9; 32]));
+        let key = PublicKey([7; 32]);
+        let peer = crate::dataplane::Peer {
+            key,
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("IPv4"),
+                ipv6: "fd01::2".parse().expect("IPv6"),
+            },
+            endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        };
+        let state = Mutex::new(PeerRouteState::default());
+        {
+            let mut route_state = lock_route_state(&state);
+            route_state.set_peers(std::slice::from_ref(&peer));
+            route_state.link = Some(proven);
+        }
+        // A relay takes the peer: its budget overrides the direct one.
+        update_relay_route_mtu(&state, key, Some(1392)).expect("install the relay budget");
+        // Relayed data reaches GotaTun from the shim's loopback socket, so that is the
+        // confirmed endpoint the worker reports while the relay carries traffic.
+        let shim: std::net::SocketAddr = "127.0.0.1:40000".parse().expect("relay shim source");
+        update_live_peer_endpoints(&state, &[(key, Some(shim))]).expect("relayed refresh");
+
+        // The relay is lost: fall back to the direct budget.
+        update_relay_route_mtu(&state, key, None).expect("direct-path fallback");
+        let (fallback_v4, fallback_v6) = review_peer_routes();
+        // GotaTun still reports the shim until a direct data packet arrives.
+        let refresh = update_live_peer_endpoints(&state, &[(key, Some(shim))]);
+        let (refresh_v4, refresh_v6) = review_peer_routes();
+        eprintln!(
+            "REVIEW J552 relay fallback: fallback v4={fallback_v4:?} v6={fallback_v6:?}; \
+             refresh={refresh:?} v4={refresh_v4:?} v6={refresh_v6:?}"
+        );
+        for route in [&fallback_v4, &fallback_v6, &refresh_v4, &refresh_v6] {
+            assert!(
+                route.contains("mtu 1408"),
+                "the direct fallback must use the configured endpoint's 1408 budget, not the \
+                 relay shim's loopback budget: {route}"
+            );
+        }
+    }
+
+    /// J552 review (#489): the cost of one steady live refresh at mesh scale, as a receipt.
+    ///
+    /// Under any continuous traffic, the `GotaTun` worker refreshes up to four times a second
+    /// and each refresh probes every installed peer's underlay route (one route and one link
+    /// netlink request, each on a fresh socket) while holding the shared route-state mutex
+    /// that relay callbacks, route repair and configuration also take. This prints the time
+    /// of steady refreshes (no route writes) for 4,096 peers with distinct endpoints. It
+    /// asserts only the write count, never speed (ENGINEERING P3); the numbers are the receipt.
+    #[test]
+    #[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+    fn review_j552_steady_refresh_cost_at_4096_peers() {
+        use crate::policy::model::{Addresses, PublicKey};
+        const PEERS: u16 = 4096;
+        review_route_command(&["link", "set", "lo", "up"]);
+        review_route_command(&["link", "add", "under0", "type", "dummy"]);
+        review_route_command(&["link", "set", "under0", "mtu", "1500", "up"]);
+        review_route_command(&["address", "add", "100.64.0.1/10", "dev", "under0"]);
+        let proven = review_marked_tun(PublicKey([0xee; 32]));
+        let mut peers = Vec::new();
+        let mut learned = Vec::new();
+        for index in 0..PEERS {
+            let [high, low] = index.to_be_bytes();
+            let mut key = [0_u8; 32];
+            key[..2].copy_from_slice(&index.to_be_bytes());
+            key[31] = 1;
+            let key = PublicKey(key);
+            peers.push(crate::dataplane::Peer {
+                key,
+                previous_key: None,
+                previous_active: false,
+                addresses: Addresses {
+                    ipv4: std::net::Ipv4Addr::new(10, 200, high, low),
+                    ipv6: format!("fd02::{:x}", index + 2).parse().expect("IPv6"),
+                },
+                endpoint: Some(std::net::SocketAddr::from(([192, 0, 2, 2], 51820))),
+            });
+            learned.push((
+                key,
+                Some(std::net::SocketAddr::from(([100, 65, high, low], 51820))),
+            ));
+        }
+        let state = Mutex::new(PeerRouteState::default());
+        {
+            let mut route_state = lock_route_state(&state);
+            route_state.set_peers(&peers);
+            route_state.link = Some(proven);
+        }
+        let first = std::time::Instant::now();
+        let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
+        let first = first.elapsed();
+        assert_eq!(written, usize::from(PEERS));
+        let mut steady = Vec::new();
+        for _ in 0..8 {
+            let started = std::time::Instant::now();
+            let written = update_live_peer_endpoints(&state, &learned).expect("steady refresh");
+            steady.push(started.elapsed());
+            assert_eq!(written, 0, "a steady refresh writes nothing");
+        }
+        steady.sort();
+        let median = steady[steady.len() / 2];
+        eprintln!(
+            "METRIC j552_live_refresh peers={PEERS} first_ms={:.1} steady_median_ms={:.1} \
+             steady_max_ms={:.1} lock_held_per_second_at_4hz_ms={:.1}",
+            first.as_secs_f64() * 1e3,
+            median.as_secs_f64() * 1e3,
+            steady[steady.len() - 1].as_secs_f64() * 1e3,
+            median.as_secs_f64() * 4e3,
+        );
+    }
+
     /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
     #[test]
     fn retirement_removes_the_private_key_file() {
