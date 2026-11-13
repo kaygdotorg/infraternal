@@ -1,28 +1,19 @@
 //! Owns one stateful mesh packet filter; nft transactions are atomic and use indexed sets [164,216], #129.
+//!
+//! Every firewall program is found by [`crate::firewall_tools`] at a fixed, root-owned path,
+//! including Nix profile and store paths, and never through `PATH` [D384].
 use crate::{
     dataplane::Config,
+    firewall_tools::{self, Tool},
     policy::rules::{Protocol, TrafficPolicy},
     wireguard::INTERFACE,
 };
 use std::{
     fmt::Write as _,
     io::{self, Write},
-    os::unix::fs::MetadataExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-/// The fixed install-time nft entry used by both the optional guard and D346's kernel engine.
-pub(crate) const NFT: &str = "/usr/sbin/nft";
-/// Test and test-support builds may trust this fixed path only after the privileged runner verifies it on the host.
-#[cfg(any(test, feature = "test-support"))]
-const TEST_ROOT_OWNED_NFT_ENV: &str = "INFRATERNA_TEST_ROOT_OWNED_NFT";
-/// Fixed iptables-nft restore and inspection paths for both address families.
-const IPTABLES_NFT: [&str; 4] = [
-    "/usr/sbin/iptables-nft",
-    "/usr/sbin/iptables-nft-restore",
-    "/usr/sbin/ip6tables-nft",
-    "/usr/sbin/ip6tables-nft-restore",
-];
 const TABLE: &str = "infraternal_mesh";
 /// Kernel-only protections shown when a `GotaTun` guard cannot be installed.
 const MISSING_KERNEL_PROTECTIONS: [&str; 3] = [
@@ -101,76 +92,45 @@ fn optional_backend(nft: bool, iptables_ipv4: bool, iptables_ipv6: bool) -> Opti
     }
 }
 
-/// Name each unavailable root-owned tool path so a missing optional guard is visible.
+/// Name each unavailable tool and every place searched, so a missing optional guard is visible.
 fn missing_guard_tool_detail(nft: bool, iptables_ipv4: bool, iptables_ipv6: bool) -> String {
     let mut missing = Vec::new();
     if !nft {
-        missing.push(format!("nft at {NFT}"));
+        missing.push("nft");
     }
     if !iptables_ipv4 {
-        missing.push(format!(
-            "iptables-nft at {} and iptables-nft-restore at {}",
-            IPTABLES_NFT[0], IPTABLES_NFT[1]
-        ));
+        missing.push("iptables-nft and iptables-nft-restore");
     }
     if !iptables_ipv6 {
-        missing.push(format!(
-            "ip6tables-nft at {} and ip6tables-nft-restore at {}",
-            IPTABLES_NFT[2], IPTABLES_NFT[3]
-        ));
+        missing.push("ip6tables-nft and ip6tables-nft-restore");
     }
     format!(
-        "{} were not found as root-owned executables",
-        missing.join("; ")
+        "{} were not found as root-owned executables in {}",
+        missing.join("; "),
+        firewall_tools::searched_places("{nftables,iptables}")
     )
 }
 
-/// Accept the root-owned install-time path and its executable target.
-fn root_owned_tool(path: &str) -> bool {
-    #[cfg(any(test, feature = "test-support"))]
-    let host_verified_nft_path = std::env::var(TEST_ROOT_OWNED_NFT_ENV).ok();
-    #[cfg(not(any(test, feature = "test-support")))]
-    let host_verified_nft_path: Option<String> = None;
-
-    root_owned_tool_with_host_verified_path(path, host_verified_nft_path.as_deref())
-}
-
-/// Keep the host's root-owner check while accounting for uid remapping in the test sandbox.
+/// Find nft at its fixed, root-owned path.
 ///
-/// The privileged runner checks the fixed nft path before entering its user namespace, where a
-/// host-root file appears owned by the overflow uid. Only that exact checked path may bypass the
-/// in-sandbox owner lookup, and only in `cfg(test)` builds. Shipping builds always pass `None`.
-fn root_owned_tool_with_host_verified_path(
-    path: &str,
-    host_verified_nft_path: Option<&str>,
-) -> bool {
-    if path == NFT && host_verified_nft_path == Some(NFT) {
-        return true;
-    }
-
-    let path = Path::new(path);
-    let Ok(link) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    let Ok(target) = std::fs::metadata(path) else {
-        return false;
-    };
-    link.uid() == 0
-        && target.uid() == 0
-        && target.is_file()
-        && target.mode() & 0o111 != 0
-        && target.mode() & 0o022 == 0
+/// # Errors
+/// The error starts with `nft ` and names every place searched; D346's refusal relies on that.
+pub(crate) fn nft() -> io::Result<PathBuf> {
+    Ok(firewall_tools::find(Tool::Nft)?)
 }
 
-/// Keep command failures readable when the fixed install-time path races or refuses access.
-fn tool_error(path: &str, operation: &str, error: &io::Error) -> io::Error {
-    let name = Path::new(path)
+/// Keep command failures readable when the found tool races or refuses access.
+fn tool_error(path: &Path, operation: &str, error: &io::Error) -> io::Error {
+    let name = path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or("firewall tool");
     io::Error::new(
         error.kind(),
-        format!("{name} at {path} could not {operation}: {error}"),
+        format!(
+            "{name} at {} could not {operation}: {error}",
+            path.display()
+        ),
     )
 }
 
@@ -232,9 +192,11 @@ impl Firewall {
     pub fn backend(&self) -> Option<Backend> {
         self.backend
     }
+    /// Keep the chosen frontend, or pick nft when one is found at a fixed root-owned path and
+    /// the iptables-nft compatibility frontend otherwise.
     fn select(&mut self) {
         self.backend.get_or_insert_with(|| {
-            if std::path::Path::new(NFT).exists() {
+            if firewall_tools::find(Tool::Nft).is_ok() {
                 Backend::Nft
             } else {
                 Backend::NfTables
@@ -271,26 +233,22 @@ impl Firewall {
         self.mode == FirewallMode::RequiredNft
     }
 
-    /// Require the fixed, root-owned nft path for the kernel-WireGuard opt-out.
+    /// Require a fixed, root-owned nft for the kernel-WireGuard opt-out (D346).
     ///
     /// # Errors
-    /// Names `nft` and the exact path when the path is missing, untrusted or not executable.
+    /// Names `nft` and every place searched when none holds a trusted executable.
     pub(crate) fn require_nft(&mut self) -> io::Result<()> {
-        if !root_owned_tool(NFT) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("nft at {NFT} is missing or is not a root-owned executable"),
-            ));
-        }
+        nft()?;
         self.backend = Some(Backend::Nft);
         self.mode = FirewallMode::RequiredNft;
         Ok(())
     }
-    /// Resolve one fixed root-owned tool path without consulting `PATH`.
+    /// Resolve the fixed root-owned tool paths without consulting `PATH`.
     fn select_optional_backend(&mut self) -> bool {
-        let nft = root_owned_tool(NFT);
-        let ipv4 = root_owned_tool(IPTABLES_NFT[0]) && root_owned_tool(IPTABLES_NFT[1]);
-        let ipv6 = root_owned_tool(IPTABLES_NFT[2]) && root_owned_tool(IPTABLES_NFT[3]);
+        let found = |tool| firewall_tools::find(tool).is_ok();
+        let nft = found(Tool::Nft);
+        let ipv4 = found(Tool::IptablesNft) && found(Tool::IptablesNftRestore);
+        let ipv6 = found(Tool::Ip6tablesNft) && found(Tool::Ip6tablesNftRestore);
         self.select_optional_backend_with_tools(nft, ipv4, ipv6)
     }
     /// Record the available fixed-path frontend, or the exact missing-tool state for `GotaTun`.
@@ -331,11 +289,20 @@ impl Firewall {
     /// Report whether the last best-effort guard transaction is active.
     fn refresh_guard_status(&mut self) {
         self.guard_status = if self.installed {
+            let at = |tool| {
+                firewall_tools::find(tool).map_or_else(
+                    |_| "its fixed path".to_owned(),
+                    |path| path.display().to_string(),
+                )
+            };
             let detail = match self.backend {
-                Some(Backend::Nft) => format!("nft at {NFT} installed the kernel-only guard"),
+                Some(Backend::Nft) => {
+                    format!("nft at {} installed the kernel-only guard", at(Tool::Nft))
+                }
                 Some(Backend::NfTables) => format!(
-                    "iptables-nft at {} and ip6tables-nft at {} installed the kernel-only guard",
-                    IPTABLES_NFT[1], IPTABLES_NFT[3]
+                    "iptables-nft-restore at {} and ip6tables-nft-restore at {} installed the kernel-only guard",
+                    at(Tool::IptablesNftRestore),
+                    at(Tool::Ip6tablesNftRestore)
                 ),
                 None => "the kernel-only guard is not installed".to_owned(),
             };
@@ -398,14 +365,15 @@ impl Firewall {
                     .all(crate::iptables::Ownership::complete);
             }
         } else {
-            let tables = Command::new(NFT)
+            let nft = nft()?;
+            let tables = Command::new(&nft)
                 .args(["-j", "list", "tables"])
                 .stderr(Stdio::null())
                 .output()
-                .map_err(|error| tool_error(NFT, "inspect tables", &error))?;
+                .map_err(|error| tool_error(&nft, "inspect tables", &error))?;
             if !tables.status.success() {
                 return Err(tool_error(
-                    NFT,
+                    &nft,
                     "inspect tables",
                     &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
                 ));
@@ -419,14 +387,14 @@ impl Firewall {
             });
             self.installed = false;
             if exists {
-                let output = Command::new(NFT)
+                let output = Command::new(&nft)
                     .args(["-j", "list", "table", "inet", TABLE])
                     .stderr(Stdio::null())
                     .output()
-                    .map_err(|error| tool_error(NFT, "inspect the mesh table", &error))?;
+                    .map_err(|error| tool_error(&nft, "inspect the mesh table", &error))?;
                 if !output.status.success() {
                     return Err(tool_error(
-                        NFT,
+                        &nft,
                         "inspect the mesh table",
                         &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
                     ));
@@ -609,7 +577,7 @@ impl Firewall {
             }
         } else {
             run(
-                NFT,
+                &nft()?,
                 &["-f", "-"],
                 &render_with_aliases(
                     config,
@@ -669,7 +637,7 @@ impl Firewall {
             crate::iptables::apply_guard_only(config, aliases, proxy_ingress)
         } else {
             run(
-                NFT,
+                &nft()?,
                 &["-f", "-"],
                 &render_guard_only(config, self.installed, aliases, proxy_ingress),
             )
@@ -707,7 +675,11 @@ impl Firewall {
                 } else {
                     self.adopt()?;
                     if self.installed {
-                        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n"))?;
+                        run(
+                            &nft()?,
+                            &["-f", "-"],
+                            &format!("delete table inet {TABLE}\n"),
+                        )?;
                     }
                 }
             }
@@ -732,7 +704,11 @@ impl Firewall {
                 // idempotent cleanup; privilege or foreign-table failures stay visible.
                 self.adopt()?;
                 if self.installed {
-                    run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n"))?;
+                    run(
+                        &nft()?,
+                        &["-f", "-"],
+                        &format!("delete table inet {TABLE}\n"),
+                    )?;
                 }
             }
             self.installed = false;
@@ -747,7 +723,7 @@ impl Firewall {
     }
 }
 /// Run one fixed firewall command with a public rule script supplied on standard input.
-fn run(program: &str, args: &[&str], script: &str) -> io::Result<()> {
+fn run(program: &Path, args: &[&str], script: &str) -> io::Result<()> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -1258,27 +1234,40 @@ mod tests {
         assert_eq!(optional_backend(false, true, false), None);
 
         let detail = missing_guard_tool_detail(false, false, false);
-        for path in [
-            "nft at /usr/sbin/nft",
-            "iptables-nft-restore at /usr/sbin/iptables-nft-restore",
-            "ip6tables-nft-restore at /usr/sbin/ip6tables-nft-restore",
+        for part in [
+            "nft; iptables-nft and iptables-nft-restore; ip6tables-nft and ip6tables-nft-restore were not found",
+            "/usr/sbin, /usr/bin, /run/current-system/sw/bin",
+            "/nix/store/*-{nftables,iptables}-<version>/bin",
         ] {
-            assert!(detail.contains(path), "missing {path}: {detail}");
+            assert!(detail.contains(part), "missing {part}: {detail}");
         }
+        assert!(
+            detail.len() <= 512,
+            "the UI shows details up to 512 bytes: {detail}"
+        );
+        assert!(!missing_guard_tool_detail(true, false, true).contains("ip6tables"));
     }
 
-    /// A host-verified nft path stays trusted after a nested user namespace remaps its owner ID.
+    /// D346's refusal for kernel `WireGuard` keeps the `nft ` prefix the plugin maps to its reason.
     #[test]
-    fn host_verified_nft_exception_is_limited_to_the_fixed_path() {
-        assert!(root_owned_tool_with_host_verified_path(NFT, Some(NFT)));
-        assert!(!root_owned_tool_with_host_verified_path(
-            "/tmp/not-nft",
-            Some(NFT)
-        ));
-        assert!(!root_owned_tool_with_host_verified_path(
-            "/tmp/not-nft",
-            None
-        ));
+    fn missing_nft_errors_start_with_the_tool_name() {
+        let error = io::Error::from(firewall_tools::Missing(Tool::Nft));
+        assert!(
+            error.to_string().starts_with("nft was not found"),
+            "{error}"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let error = tool_error(
+            Path::new("/nix/store/a-nftables-1.1.7/bin/nft"),
+            "run",
+            &io::Error::from(io::ErrorKind::PermissionDenied),
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("nft at /nix/store/a-nftables-1.1.7/bin/nft could not run"),
+            "{error}"
+        );
     }
 
     /// A missing optional guard is reported without refusing a userspace mesh node.
@@ -1293,14 +1282,15 @@ mod tests {
             .expect("GotaTun guard status");
         assert_eq!(status.state, "missing");
         assert_eq!(status.missing, MISSING_KERNEL_PROTECTIONS);
-        for path in [
-            "/usr/sbin/nft",
-            "/usr/sbin/iptables-nft-restore",
-            "/usr/sbin/ip6tables-nft-restore",
+        for part in [
+            "nft",
+            "iptables-nft-restore",
+            "ip6tables-nft-restore",
+            "/nix/store",
         ] {
             assert!(
-                status.detail.contains(path),
-                "missing {path}: {}",
+                status.detail.contains(part),
+                "missing {part}: {}",
                 status.detail
             );
         }
@@ -1477,16 +1467,28 @@ mod tests {
         assert!(!open.contains(gate));
     }
 
+    /// Real nft: a foreign table is refused, a broken batch changes nothing, and a large
+    /// policy applies; nft is found through the same fixed-path lookup as the product.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nft_ownership_atomicity_and_scaled_apply() {
-        run(NFT, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("unrelated fixture");
+        run(
+            &nft().expect("nft"),
+            &["-f", "-"],
+            &format!("add table inet {TABLE}\n"),
+        )
+        .expect("unrelated fixture");
         let mut unrelated = Firewall::default();
         assert_eq!(
             unrelated.adopt().expect_err("unowned table").kind(),
             io::ErrorKind::AlreadyExists
         );
-        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("fixture cleanup");
+        run(
+            &nft().expect("nft"),
+            &["-f", "-"],
+            &format!("delete table inet {TABLE}\n"),
+        )
+        .expect("fixture cleanup");
         let mut filter = Firewall::default();
         filter.adopt().expect("empty namespace");
         let mut config = config();
@@ -1494,7 +1496,7 @@ mod tests {
         filter.apply(&config).expect("scaled install");
         let initial = started.elapsed().as_micros();
         let broken = format!("delete table inet {TABLE}\ninvalid syntax\n");
-        assert!(run(NFT, &["-f", "-"], &broken).is_err());
+        assert!(run(&nft().expect("nft"), &["-f", "-"], &broken).is_err());
         let mut recovered = Firewall::default();
         recovered
             .adopt()
@@ -1515,25 +1517,42 @@ mod tests {
         absent.adopt().expect("clean namespace");
         assert!(!absent.installed);
     }
+    /// Removing a table someone already deleted still lets the component finish cleanup.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn already_removed_owned_table_does_not_block_component_cleanup() {
         let mut filter = Firewall::default();
         filter.adopt().expect("empty namespace");
         filter.apply(&config()).expect("install");
-        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("external removal");
+        run(
+            &nft().expect("nft"),
+            &["-f", "-"],
+            &format!("delete table inet {TABLE}\n"),
+        )
+        .expect("external removal");
         filter.remove().expect("already absent owned table");
         assert!(!filter.installed);
     }
+    /// A first apply checks ownership itself and refuses a same-named table it did not create.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn initial_apply_without_adoption_refuses_a_foreign_table() {
-        run(NFT, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("foreign fixture");
+        run(
+            &nft().expect("nft"),
+            &["-f", "-"],
+            &format!("add table inet {TABLE}\n"),
+        )
+        .expect("foreign fixture");
         let mut filter = Firewall::default();
         assert_eq!(
             filter.apply(&config()).expect_err("foreign table").kind(),
             io::ErrorKind::AlreadyExists
         );
-        run(NFT, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("fixture cleanup");
+        run(
+            &nft().expect("nft"),
+            &["-f", "-"],
+            &format!("delete table inet {TABLE}\n"),
+        )
+        .expect("fixture cleanup");
     }
 }

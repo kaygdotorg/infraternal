@@ -78,8 +78,11 @@ TUN_PATHS = ('crates/infraternal-linux-tun/**', 'crates/plugins/mesh/src/gotatun
 # Exit status for "nothing to run": rust_run_gate prints SKIP for it.
 SKIP_EXIT = 77
 
-# The mesh firewall's fixed nft path must be root-owned before a test namespace trusts it.
-NFT_TOOL_PATH = '/usr/sbin/nft'
+# The mesh firewall's fixed tool paths must be root-owned on the host before a test namespace
+# trusts them: inside it, host root appears as the overflow uid. The variable carries a
+# ':'-separated list of exactly the paths that passed (crates/plugins/mesh/src/firewall_tools.rs).
+FIREWALL_TOOL_PATHS = ('/usr/sbin/nft', '/usr/sbin/iptables-nft', '/usr/sbin/iptables-nft-restore',
+                       '/usr/sbin/ip6tables-nft', '/usr/sbin/ip6tables-nft-restore')
 TEST_ROOT_OWNED_NFT_ENV = 'INFRATERNA_TEST_ROOT_OWNED_NFT'
 
 # Path globs that put a change in an area. fnmatch's `*` already crosses
@@ -462,7 +465,7 @@ def root_owned_executable(path):
 
 
 def sandbox_test_environment(root):
-    """Return the minimal test environment, marking nft only after host ownership is verified."""
+    """Return the minimal test environment, marking firewall tools only after host ownership is verified."""
     environment = {
         'PATH': os.environ['PATH'],
         'HOME': '/tmp',
@@ -471,8 +474,9 @@ def sandbox_test_environment(root):
         'INFRATERNAL_TEST_STATE_ROOT': '/tmp/st',
         'INFRATERNA_DNS_TEST_PARENT_NETNS': os.readlink('/proc/self/ns/net'),
     }
-    if root_owned_executable(NFT_TOOL_PATH):
-        environment[TEST_ROOT_OWNED_NFT_ENV] = NFT_TOOL_PATH
+    verified = [path for path in FIREWALL_TOOL_PATHS if root_owned_executable(path)]
+    if verified:
+        environment[TEST_ROOT_OWNED_NFT_ENV] = ':'.join(verified)
     return environment
 
 

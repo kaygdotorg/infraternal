@@ -53,6 +53,10 @@ pub mod iptables;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod firewall;
 
+/// Finds nft and the iptables-nft frontends at fixed, root-owned paths, Nix ones included [D384].
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub(crate) mod firewall_tools;
+
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_state;
 

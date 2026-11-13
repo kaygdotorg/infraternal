@@ -45,13 +45,18 @@ def userns_available():
 class PrivilegedAreas(unittest.TestCase):
     """Trigger the namespace tests only for relevant code paths."""
 
-    def test_namespace_gets_only_a_host_verified_nft_path(self):
-        """The user namespace can trust nft only after the host checks its fixed path."""
+    def test_namespace_gets_only_host_verified_firewall_tool_paths(self):
+        """The user namespace can trust a firewall tool only after the host checks its fixed path."""
         root = Path(__file__).resolve().parents[1]
         with mock.patch.object(p, 'root_owned_executable', return_value=True):
             trusted = p.sandbox_test_environment(root)
         self.assertEqual(trusted['INFRATERNAL_TEST_STATE_ROOT'], '/tmp/st')
-        self.assertEqual(trusted[p.TEST_ROOT_OWNED_NFT_ENV], p.NFT_TOOL_PATH)
+        self.assertEqual(trusted[p.TEST_ROOT_OWNED_NFT_ENV].split(':'), list(p.FIREWALL_TOOL_PATHS))
+
+        # Only the paths that pass are listed; a failing iptables frontend is left out.
+        with mock.patch.object(p, 'root_owned_executable', side_effect=lambda path: path == '/usr/sbin/nft'):
+            nft_only = p.sandbox_test_environment(root)
+        self.assertEqual(nft_only[p.TEST_ROOT_OWNED_NFT_ENV], '/usr/sbin/nft')
 
         with mock.patch.object(p, 'root_owned_executable', return_value=False):
             untrusted = p.sandbox_test_environment(root)

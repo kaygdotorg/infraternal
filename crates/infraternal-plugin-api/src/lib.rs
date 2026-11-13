@@ -1115,20 +1115,20 @@ pub enum PluginError {
     MessageTooLarge,
     /// The plugin rejected a validly routed action.
     Rejected,
-    /// Kernel `WireGuard` refused because its fixed root-owned nft tool is unavailable.
+    /// Kernel `WireGuard` refused because no fixed root-owned nft tool is usable.
     KernelFirewallUnavailable,
 }
 
 impl PluginError {
     /// Return the short, safe reason a local operator can act on.
     ///
-    /// Only the D346 firewall refusal carries a reason. Its install-time path is fixed; all other
-    /// plugin failures keep the existing generic message.
+    /// Only the D346 firewall refusal carries a reason, naming where nft is looked for (D384);
+    /// all other plugin failures keep the existing generic message.
     #[must_use]
     pub const fn control_error_message(self) -> &'static str {
         match self {
             Self::KernelFirewallUnavailable => {
-                "Kernel WireGuard requires a root-owned nft executable at /usr/sbin/nft; the fixed path is missing or could not apply its firewall rules."
+                "Kernel WireGuard requires a root-owned nft executable in /usr/sbin, /usr/bin, a root or system Nix profile, or the Nix store; none was usable or it could not apply its firewall rules."
             }
             _ => "plugin action rejected",
         }

@@ -77,14 +77,14 @@ fn registry_rejects_oversized_json_before_plugin_dispatch() {
     );
 }
 
-/// The D346 refusal body identifies the fixed nft tool path needed by Kernel `WireGuard`.
+/// The D346 refusal body names the fixed places Kernel `WireGuard` looks for nft, Nix included.
 #[test]
 fn kernel_firewall_refusal_names_the_required_tool_path() {
     assert_eq!(
         PluginError::KernelFirewallUnavailable
             .control_error_json()
             .as_slice(),
-        br#"{"error":"Kernel WireGuard requires a root-owned nft executable at /usr/sbin/nft; the fixed path is missing or could not apply its firewall rules."}"#,
+        br#"{"error":"Kernel WireGuard requires a root-owned nft executable in /usr/sbin, /usr/bin, a root or system Nix profile, or the Nix store; none was usable or it could not apply its firewall rules."}"#,
     );
 }
 

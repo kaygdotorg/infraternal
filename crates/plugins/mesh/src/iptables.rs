@@ -1,21 +1,39 @@
 //! Compatibility filter for hosts with only the iptables `nf_tables` frontend [216]; owns only Mesh chains.
+//!
+//! The frontends of both families are found by [`crate::firewall_tools`] at fixed, root-owned
+//! paths, Nix profile and store paths included, and never through `PATH` [D384].
 use crate::{
     dataplane::Config,
+    firewall_tools::{self, Tool},
     policy::rules::{Protocol, TrafficPolicy},
     wireguard::INTERFACE,
 };
 use std::{
     fmt::Write as _,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-const TOOLS: [&str; 2] = [
-    "/usr/sbin/iptables-nft-restore",
-    "/usr/sbin/ip6tables-nft-restore",
-];
-/// Fixed inspection commands used to prove ownership of each nft-backed family.
-const INSPECT_TOOLS: [&str; 2] = ["/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft"];
+/// The atomic restore frontends for IPv4 then IPv6, found at fixed, root-owned paths.
+///
+/// # Errors
+/// Names the missing frontend and every place searched.
+fn restore_tools() -> io::Result<[PathBuf; 2]> {
+    Ok([
+        firewall_tools::find(Tool::IptablesNftRestore)?,
+        firewall_tools::find(Tool::Ip6tablesNftRestore)?,
+    ])
+}
+/// The inspection frontends for IPv4 then IPv6, used to prove ownership of each family.
+///
+/// # Errors
+/// Names the missing frontend and every place searched.
+fn inspect_tools() -> io::Result<[PathBuf; 2]> {
+    Ok([
+        firewall_tools::find(Tool::IptablesNft)?,
+        firewall_tools::find(Tool::Ip6tablesNft)?,
+    ])
+}
 const CHAINS: [&str; 3] = ["IFM_IN", "IFM_OUT", "IFM_FWD"];
 const GUARD: &str = "IFM_GUARD";
 const DELIVERY: &str = "IFM_DELIVERY";
@@ -29,15 +47,18 @@ pub struct Ownership {
     delivery: bool,
 }
 
-/// Keep the fixed command path visible when an inspection or restore fails.
-fn tool_error(tool: &str, operation: &str, error: &io::Error) -> io::Error {
-    let name = Path::new(tool)
+/// Keep the found command path visible when an inspection or restore fails.
+fn tool_error(tool: &Path, operation: &str, error: &io::Error) -> io::Error {
+    let name = tool
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or("iptables-nft");
     io::Error::new(
         error.kind(),
-        format!("{name} at {tool} could not {operation}: {error}"),
+        format!(
+            "{name} at {} could not {operation}: {error}",
+            tool.display()
+        ),
     )
 }
 impl Ownership {
@@ -197,7 +218,7 @@ pub(crate) fn apply_guard_only(
     execute_families(&scripts, false)
 }
 fn execute_families(scripts: &[String; 2], preflight: bool) -> io::Result<()> {
-    for (tool, script) in TOOLS.iter().zip(scripts) {
+    for (tool, script) in restore_tools()?.iter().zip(scripts) {
         execute(tool, script, preflight)?;
     }
     Ok(())
@@ -207,7 +228,7 @@ fn execute_families(scripts: &[String; 2], preflight: bool) -> io::Result<()> {
 /// Returns incomplete cleanup rather than claiming the node component is off.
 pub fn remove() -> io::Result<()> {
     let installed = presence()?;
-    for (index, tool) in TOOLS.iter().enumerate() {
+    for (index, tool) in restore_tools()?.iter().enumerate() {
         let owner = installed[index];
         if !owner.any() {
             continue;
@@ -245,7 +266,7 @@ pub fn remove() -> io::Result<()> {
 /// Refuses untrusted executables, unrelated chains, unavailable tools, or privilege failures.
 pub(crate) fn guard_presence() -> io::Result<[GuardOwnership; 2]> {
     let mut present = [GuardOwnership::default(); 2];
-    for (index, tool) in INSPECT_TOOLS.iter().enumerate() {
+    for (index, tool) in inspect_tools()?.iter().enumerate() {
         let version = Command::new(tool)
             .arg("--version")
             .stderr(Stdio::null())
@@ -300,7 +321,7 @@ pub(crate) fn guard_presence() -> io::Result<[GuardOwnership; 2]> {
 /// Leaves incomplete or foreign chains untouched and names the tool path on failure.
 pub(crate) fn remove_guard_only() -> io::Result<()> {
     let installed = guard_presence()?;
-    for (index, tool) in TOOLS.iter().enumerate() {
+    for (index, tool) in restore_tools()?.iter().enumerate() {
         let owner = installed[index];
         if !owner.any() {
             continue;
@@ -351,7 +372,7 @@ fn hooks() -> [(&'static str, &'static str, &'static str); 4] {
 /// Refuses unrelated chains, unavailable tools and privilege failures.
 pub fn presence() -> io::Result<[Ownership; 2]> {
     let mut present = [Ownership::default(); 2];
-    for (index, tool) in INSPECT_TOOLS.iter().enumerate() {
+    for (index, tool) in inspect_tools()?.iter().enumerate() {
         let version = Command::new(tool)
             .arg("--version")
             .stderr(Stdio::null())
@@ -396,7 +417,7 @@ pub fn presence() -> io::Result<[Ownership; 2]> {
     Ok(present)
 }
 /// Prove ownership from one exact marker rule without adopting foreign chains.
-fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
+fn owned(tool: &Path, table: &str, chain: &str) -> io::Result<bool> {
     let output = Command::new(tool)
         .args(["-t", table, "-S", chain])
         .stderr(Stdio::null())
@@ -441,11 +462,12 @@ fn owned(tool: &str, table: &str, chain: &str) -> io::Result<bool> {
         )),
     }
 }
-fn run(tool: &str, script: &str) -> io::Result<()> {
+/// Apply one restore transaction at the found frontend path.
+fn run(tool: &Path, script: &str) -> io::Result<()> {
     execute(tool, script, false)
 }
 /// Run or preflight an iptables-nft restore transaction at its fixed executable path.
-fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
+fn execute(tool: &Path, script: &str, preflight: bool) -> io::Result<()> {
     let mut command = Command::new(tool);
     command.arg("--noflush");
     if preflight {
@@ -1266,6 +1288,8 @@ mod tests {
         assert!(!rules.contains("-I INPUT"));
         assert!(!rules.contains("-m iprange"));
     }
+    /// Real iptables-nft: foreign chains are refused, interrupted families recover, and a
+    /// 1,000-peer policy applies; both frontends come from the fixed-path lookup.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nf_tables_ownership_partial_family_and_scaled_apply() {
@@ -1275,7 +1299,8 @@ mod tests {
                 .into_iter()
                 .all(|o| !o.any())
         );
-        let tool = "/usr/sbin/iptables-nft";
+        let inspect = inspect_tools().expect("IPv4 inspection frontend");
+        let tool = &inspect[0];
         assert!(
             Command::new(tool)
                 .args(["-N", CHAINS[1]])
@@ -1295,8 +1320,11 @@ mod tests {
                 .success()
         );
         let mut config = config(&(2..=1001).collect::<Vec<_>>());
-        run(TOOLS[0], &render(&config, false, Ownership::default()))
-            .expect("single-family interrupted install");
+        run(
+            &restore_tools().expect("IPv4 restore frontend")[0],
+            &render(&config, false, Ownership::default()),
+        )
+        .expect("single-family interrupted install");
         let partial = presence().expect("partial families");
         assert!(partial[0].complete() && !partial[1].any());
         let started = std::time::Instant::now();
@@ -1324,7 +1352,8 @@ mod tests {
         // interrupted state without treating it as a complete family.
         let batch = render(&config, false, Ownership::default());
         let raw = batch.split("*filter").next().expect("raw transaction");
-        run(TOOLS[0], raw).expect("interrupted raw table");
+        run(&restore_tools().expect("IPv4 restore frontend")[0], raw)
+            .expect("interrupted raw table");
         let partial = presence().expect("partial tables");
         assert!(partial[0].guard && !partial[0].filter);
         apply(&config, false).expect("recover partial tables");

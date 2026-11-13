@@ -265,13 +265,15 @@ fn peer_page(
     )
 }
 
-/// Preserve the fixed nft path in D346 refusals while keeping unrelated local errors generic.
+/// Map D346 nft refusals to their own reason while keeping unrelated local errors generic.
+///
+/// Every nft failure from the firewall starts with `nft ` (a missing tool, or `nft at <path>`
+/// for a found one that failed), so the prefix identifies them wherever nft was found.
 fn node_action_error(error: &std::io::Error) -> PluginError {
     let message = error.to_string();
     #[cfg(target_os = "linux")]
     {
-        let nft_prefix = format!("nft at {} ", crate::firewall::NFT);
-        if message.starts_with(&nft_prefix) {
+        if message.starts_with("nft ") {
             return PluginError::KernelFirewallUnavailable;
         }
     }
@@ -878,18 +880,23 @@ mod tests {
         assert_eq!(std::fs::read(&unrelated).expect("preserved file"), b"keep");
     }
 
-    /// Required nft failures retain their fixed tool path through mesh action mapping.
+    /// Required nft failures keep their own reason through mesh action mapping, whether nft is
+    /// missing everywhere or was found (here in the Nix store) and then failed.
     #[test]
     fn required_nft_failure_is_not_reduced_to_generic_rejection() {
-        let error = std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "nft at /usr/sbin/nft is missing or is not a root-owned executable",
-        );
-
-        assert_eq!(
-            node_action_error(&error),
-            PluginError::KernelFirewallUnavailable
-        );
+        for message in [
+            "nft was not found as a root-owned executable in /usr/sbin, /usr/bin",
+            "nft at /nix/store/aaaa-nftables-1.1.7/bin/nft could not run: denied",
+        ] {
+            let error = std::io::Error::new(std::io::ErrorKind::NotFound, message);
+            assert_eq!(
+                node_action_error(&error),
+                PluginError::KernelFirewallUnavailable,
+                "{message}"
+            );
+        }
+        let other = std::io::Error::other("iptables-nft at /usr/sbin/iptables-nft could not run");
+        assert_eq!(node_action_error(&other), PluginError::Rejected);
     }
 
     /// #382 P2 (J418): after a server rollback (D295) to a release without authority epochs, a
