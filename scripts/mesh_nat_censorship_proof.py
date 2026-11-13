@@ -39,6 +39,18 @@ publishes exactly that pair: the public address of the node's outermost NAT and
 the node's own listen port. Anything that works here works because the product
 and the NAT allow it, not because the harness peeked at a mapping.
 
+The product model (#515)
+------------------------
+`--model product` runs the shipped candidate code instead of publishing anything itself. A
+third real node, the server's own node, sits on the public core. Every node answers the real
+candidate identity probe (its LAN address comes from its own routing table), and every five
+seconds the harness reads the server node's real peer table and hands it to the coordinator
+fixture, which runs the server's observation and republication code. The harness applies
+whatever snapshot results, as the coordinator's workers would. It first lets the server observe
+both nodes while Access still denies the pair (the steady state of a long-lived mesh), then
+opens the pair and measures, so its numbers are comparable with the candidates model. A rebind
+gets no help: the new mapping reaches the peer only through the server's next observation.
+
 NAT model
 ---------
 Every router is described by a `Nat`: how it maps (endpoint-independent with an
@@ -80,6 +92,12 @@ REBIND_TIMEOUT_SECONDS = 90.0
 LOAD_SECONDS = 8.0
 # The documentation prefix that plays the public internet.
 CORE_PREFIX = "198.51.100"
+# Where the server's own node sits on the public core in the product model.
+SERVER_ADDRESS = f"{CORE_PREFIX}.10"
+# The server's presence poll interval (crates/plugins/mesh/src/presence.rs `POLL`).
+PRESENCE_POLL_SECONDS = 5.0
+# How long the server watches both nodes before the pair is opened: one 25 s keepalive plus two polls.
+WARMUP_SECONDS = 35.0
 
 
 @dataclass(frozen=True)
@@ -547,6 +565,17 @@ class Topology:
             for router in self.unique_routers()
         }
 
+    def add_server(self) -> None:
+        """Put the server's own node straight on the public core (product model)."""
+        self.nodes["S"] = "node-s"
+        self.namespace("node-s")
+        self.core_link("node-s", SERVER_ADDRESS)
+        self.node_address["S"] = SERVER_ADDRESS
+        self.public_address["S"] = SERVER_ADDRESS
+        holder = subprocess.Popen(["ip", "netns", "exec", "node-s", "sleep", "900"])
+        self.holders.append(holder)
+        self.node_pid["S"] = holder.pid
+
     def cleanup(self) -> None:
         """Stop the namespace holders; the private world disappears with the process."""
         for holder in self.holders:
@@ -706,10 +735,187 @@ def peer_view(node: object) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
+class Observer:
+    """Stands in for the server's presence poll and the coordinator's workers (product model).
+
+    Every `PRESENCE_POLL_SECONDS` it reads the server node's real `mesh.peers` presence pages,
+    hands them to the coordinator fixture (which runs the product's observation and
+    republication), and applies any resulting snapshot chunks to every node. It records each
+    published candidate list with its time, as evidence of what the product decided.
+    """
+
+    def __init__(self, coordinator: object, nodes: list[object], members: list[str]):
+        """`nodes` and `members` are in identity order, the server's own node first."""
+        self.coordinator = coordinator
+        self.nodes = nodes
+        self.members = members
+        self.next_poll = time.monotonic()
+        self.started = time.monotonic()
+        self.publications: list[dict[str, object]] = []
+
+    def pages(self) -> list[object]:
+        """Every presence page of the server node's current peer table."""
+        pages, cursor = [], None
+        for _ in range(64):
+            page = self.nodes[0].call("mesh.peers", {"cursor": cursor, "presence": True})
+            pages.append(page)
+            cursor = page.get("next_cursor")
+            if cursor is None:
+                return pages
+        return pages
+
+    def apply(self, snapshot: dict[str, object]) -> None:
+        """Send each node its chunks and note every peer whose candidate list changed."""
+        at = round(time.monotonic() - self.started, 3)
+        for index, node in enumerate(self.nodes):
+            for chunk in snapshot["chunks"][index]:
+                node.request(chunk)
+                for peer_id, policy in (chunk.get("upserted") or {}).items():
+                    peer = policy["peer"]
+                    self.publications.append({
+                        "t": at, "viewer": self.members[index], "peer": int(peer_id),
+                        "try": [peer.get("endpoint")] + list(peer.get("candidates") or []),
+                    })
+
+    def request(self, value: dict[str, object]) -> dict[str, object]:
+        """Run one coordinator request and apply its result."""
+        snapshot = self.coordinator.request(value)
+        self.apply(snapshot)
+        return snapshot
+
+    def poll(self) -> None:
+        """One presence poll, exactly as often as the server's."""
+        self.request({"mode": "keep", "observe": self.pages()})
+        self.next_poll = time.monotonic() + PRESENCE_POLL_SECONDS
+
+    def idle(self, seconds: float) -> None:
+        """Let `seconds` pass while the polls keep running."""
+        end = time.monotonic() + seconds
+        while (now := time.monotonic()) < end:
+            if now >= self.next_poll:
+                self.poll()
+                continue
+            # sleep: wait for the next presence poll or the end of the idle period, whichever is first.
+            time.sleep(max(0.0, min(end, self.next_poll) - now))
+
+    def first_after(self, pinger: "Pinger", start: float, timeout: float) -> float | None:
+        """`Pinger.first_after`, with the polls running meanwhile."""
+        deadline = start + timeout
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                return None
+            if now >= self.next_poll:
+                self.poll()
+                continue
+            try:
+                at, _ = pinger.replies.get(timeout=max(0.0, min(deadline, self.next_poll) - now))
+            except queue.Empty:
+                continue
+            if at >= start:
+                return at - start
+
+
+def run_product_profile(scenario: Scenario, binary: str, coordinator_path: str, scratch: str) -> dict[str, object]:
+    """The product model: the shipped candidate code decides every address (module docs)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from mesh_agent_fixture import BinaryNode, CoordinatorFixture
+
+    topology = Topology(scenario)
+    nodes: list[BinaryNode] = []
+    pingers: list[Pinger] = []
+    coordinator = None
+    observer = None
+    row: dict[str, object] = {"scenario": scenario.name, "summary": scenario.summary, "coordinator_model": "product"}
+    try:
+        topology.create()
+        topology.add_server()
+        members = ["S", "A", "B"]
+        for side in members:
+            nodes.append(BinaryNode(binary, scratch, topology.node_pid[side]))
+        identities = [json.loads(node.stdout.readline()) for node in nodes]
+        ports = {side: identity["port"] for side, identity in zip(members, identities)}
+        row["engine"] = (nodes[1].call("mesh.status", {}).get("engine_selection") or {}).get("engine")
+        row["listen_ports"] = ports
+        topology.configure({"A": ports["A"], "B": ports["B"]})
+        probes = [node.call("mesh.identity", {"candidates": True}) for node in nodes]
+        row["candidate_probes"] = probes
+        # What the coordinator sees on each control connection: the outermost public address.
+        guesses = [f"{topology.public_address[side]}:{ports[side]}" for side in members]
+        coordinator = CoordinatorFixture(coordinator_path)
+        observer = Observer(coordinator, nodes, members)
+        warm = observer.request({"mode": "deny", "identities": identities, "endpoints": guesses, "probes": probes})
+        observer.poll()
+        observer.idle(WARMUP_SECONDS)
+        observer.request({"mode": "allow"})
+        applied = time.monotonic()
+        target = warm["addresses"][2]["ipv4"]
+        row["published_at_open"] = [entry for entry in observer.publications if entry["viewer"] in ("A", "B")][-4:]
+        pinger = Pinger(topology.nodes["A"], target)
+        pingers.append(pinger)
+        first = observer.first_after(pinger, applied, FIRST_PACKET_TIMEOUT_SECONDS)
+        row["direct"] = first is not None
+        row["first_packet_ms"] = round(first * 1000) if first is not None else None
+        row["what_the_user_sees"] = peer_view(nodes[1])
+        if first is None:
+            row["conntrack"] = topology.conntrack()
+            return row
+        pinger.take()
+        observer.idle(1.0)
+        rest = pinger.take()
+        row["rtt_p50_ms_rest"] = percentile(rest, 0.5)
+        pinger.stop()
+        loaded = Pinger(topology.nodes["A"], target, interval=0.02)
+        pingers.append(loaded)
+        load = tcp_load(topology.nodes["A"], topology.nodes["B"], target, LOAD_SECONDS)
+        samples = loaded.take()
+        loaded.stop()
+        row["throughput"] = load
+        row["loaded_p99_ms"] = percentile(samples, 0.99)
+        row["loaded_ping_replies"] = len(samples)
+        if scenario.idle_expiry_seconds:
+            observer.idle(scenario.idle_expiry_seconds)
+            after_idle = Pinger(topology.nodes["A"], target)
+            pingers.append(after_idle)
+            recovered = observer.first_after(after_idle, time.monotonic(), REBIND_TIMEOUT_SECONDS)
+            row["after_idle_first_packet_ms"] = round(recovered * 1000) if recovered is not None else None
+            after_idle.stop()
+        # Mid-flow rebind: A's NAT forgets every mapping. Nothing republishes but the product itself.
+        flow = Pinger(topology.nodes["A"], target)
+        pingers.append(flow)
+        if observer.first_after(flow, time.monotonic(), 10) is None:
+            row["rebind_recovery_ms"] = "path lost before rebind"
+        else:
+            started = time.monotonic()
+            topology.rebind("A")
+            settled = time.monotonic() + 0.1
+            recovered = observer.first_after(flow, settled, REBIND_TIMEOUT_SECONDS)
+            row["rebind_recovery_ms"] = round((settled - started + recovered) * 1000) if recovered is not None else None
+        flow.stop()
+        row["after_rebind_user_sees"] = peer_view(nodes[1])
+        return row
+    finally:
+        for pinger in pingers:
+            pinger.stop()
+        if observer is not None:
+            row["publications"] = observer.publications
+        if coordinator is not None:
+            coordinator.child.kill()
+            coordinator.child.wait(timeout=5)
+        for node in nodes:
+            try:
+                node.close()
+            except Exception as error:
+                row.setdefault("cleanup_errors", []).append(str(error))
+        topology.cleanup()
+
+
 def run_profile(
     scenario: Scenario, binary: str, coordinator_path: str, scratch: str, model: str = "production"
 ) -> dict[str, object]:
     """Build the network, start both nodes, connect them as production would, and measure."""
+    if model == "product":
+        return run_product_profile(scenario, binary, coordinator_path, scratch)
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from mesh_agent_fixture import BinaryNode, CoordinatorFixture
 
@@ -886,8 +1092,9 @@ def main() -> None:
     parser.add_argument("--scratch", help="private directory for node state and logs")
     parser.add_argument("--report", help="absolute path for the JSON report")
     parser.add_argument("--scenario", action="append", default=[], help="run only this profile; repeatable")
-    parser.add_argument("--model", choices=("production", "candidates"), default="production",
-                        help="what the coordinator publishes: production's local port, or measured candidates")
+    parser.add_argument("--model", choices=("production", "candidates", "product"), default="production",
+                        help="what the coordinator publishes: production's local port, the measured candidates "
+                             "model, or the shipped candidate code with the server's own node (#515)")
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.list:
