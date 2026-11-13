@@ -18,7 +18,13 @@ TCP 10254 is separate from UDP 10254. For example, ingress-nginx can use TCP 102
 
 The coordinator distributes each node's observed UDP endpoint in its ordinary configuration snapshot; it does not send a synchronized start command. GotaTun configures active peers with a 25-second persistent keepalive, and installing an endpoint starts that peer's outgoing handshake. The snapshots may arrive at different times. If A learns B's endpoint first, A's packet can arrive at B as a new inbound flow and be dropped by B's input policy. A's own firewall has already tracked A's outgoing flow. When B learns A's endpoint and initiates, that packet matches the reverse direction of A's flow and passes A's `established,related` rule. B's outgoing flow then lets A's handshake response pass B's rule as established. The namespace test delivers the endpoints separately and verifies both handshakes without an inbound UDP allow rule.
 
-This direct path depends on both nodes being able to send UDP and on their firewalls admitting replies to those outgoing packets. Some NATs, including symmetric NATs that choose a different public mapping for each destination, cannot use the observed peer endpoint for a direct connection. UDP-blocking networks can also prevent it. Production mesh nodes do not start a relay transport, so peers in those networks cannot connect through the mesh.
+## Which addresses a node tries
+
+A router often changes the UDP port on the way out, so the port a node listens on is not the port its peers must aim at. The server sees the real public address and port of each node's mesh packets, because the server is a mesh peer too, and hands that address to the node's peers. Two nodes behind the same router also get each other's address on the local network, because many routers cannot send a packet from one of their own machines back to another through the public address. A node tries these in order: the local network address (only for a peer behind the same public address), then the address the server saw, then the server's older guess of public address plus listen port. When a router hands out a new port, the server notices at the node's next packet to it, within about half a minute, and its peers switch to the new address.
+
+Local network addresses are never sent to a peer outside that network.
+
+This direct path depends on both nodes being able to send UDP and on their firewalls admitting replies to those outgoing packets. Symmetric NATs, which choose a different public mapping for each destination, give the server a port that no peer can use, so a direct connection needs the other side to accept new senders. UDP-blocking networks can also prevent it. Production mesh nodes do not start a relay transport, so peers in those networks cannot connect through the mesh.
 
 ## New connections arriving through the tunnel
 
@@ -34,4 +40,4 @@ The mesh's own nftables table and userspace filter continue to enforce each peer
 
 ---
 
-Behind this page: D386, #483 and #489 (mesh-owned host firewall behavior and the UDP listener).
+Behind this page: D386, D391, #483, #489 and #515 (mesh-owned host firewall behavior, the UDP listener and direct-path candidates).

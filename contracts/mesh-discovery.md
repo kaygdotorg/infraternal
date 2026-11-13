@@ -52,6 +52,21 @@ new authenticated traffic with the known destination and generation before
 using it as discovery evidence. An old handshake cannot validate a changed
 configured endpoint.
 
+**Direct-path candidates (#515, D391).** The server's own node already reads
+its peer table every 5 s for presence. A peer's current kernel or GotaTun
+endpoint counts as that node's server-reflexive observation only when the
+peer's receive counter grew since the previous reading in the same session:
+both engines move the endpoint to the source of every authenticated data
+packet, so the address is then the one new authenticated traffic came from.
+An unchanged counter, a first reading, or an address these rules refuse is no
+observation. The store writes, and the coordinator republishes, only a changed
+address. A node's LAN candidates are the private (RFC 1918, 100.64.0.0/10,
+fc00::/7) source addresses of its default IPv4 and IPv6 routes, with its mesh
+port, at most two; the coordinator keeps only addresses these rules accept and
+sends them only to peers seen from the same public address. A destination-
+dependent (symmetric) mapping makes the server's observation useless to peers;
+such pairs still need the relay or a full-cone peer.
+
 Discovery supplies candidates and mapping evidence only. Path selection,
 sustained-win hysteresis and connection continuity remain with the existing
 transport controller [128,197,215]. The `PathKind` representation and #201's

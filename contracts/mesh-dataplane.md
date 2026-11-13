@@ -59,9 +59,20 @@ The Linux component uses typed route/generic netlink for kernel WireGuard.
 Peer updates are chunked to the netlink datagram bound. It owns only its
 interface and firewall table; disabling removes them and leaves no poller,
 socket or timer running. Last installed configuration survives server loss.
-Endpoints are server-observed addresses combined with the node's advertised
-WireGuard UDP port. An endpoint is discovery, never proof of reachability.
-Handshake counters distinguish a direct path from an unproven endpoint.
+A peer's `endpoint` is the first underlay address to try. Its optional
+`candidates` list holds further addresses, in order (#515, D391): the peer's
+LAN address when both nodes are seen from one public address, its
+server-reflexive address (the public address and port the server's own mesh
+device last saw its packets come from), and the server-observed control IP
+combined with the node's advertised UDP port. The coordinator sends
+`candidates` only to a node whose identity reply to `{"candidates":true}` said
+it accepts them, because `Peer` refuses unknown fields; any other node gets the
+reflexive address, or the control-IP guess before one is observed, as its one
+`endpoint`. A GotaTun node moves a peer that has not sent a packet back to its
+next candidate every 5 s, for three rounds, then stays on the first; the first
+received packet ends the walk. An endpoint is discovery, never proof of
+reachability. Handshake counters distinguish a direct path from an unproven
+endpoint.
 
 The server's mesh default setting defaults to allow in the open-source
 edition and deny with the enterprise build feature. Explicit network access rules
