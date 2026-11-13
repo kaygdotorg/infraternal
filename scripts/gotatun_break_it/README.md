@@ -18,16 +18,18 @@ export CARGO_TARGET_DIR=/mnt/build/targets/J526
 
 Run the matrix with `tc`, `nft`, `conntrack`, `unshare`, `nsenter`, and `ip`
 available on `PATH`. The Nix shell below supplies those tools without
-installing them on compute01. Choose a new evidence directory for every run;
-the `--output` path must not already exist because the matrix creates and owns
-that directory:
+installing them on compute01. The runner creates private network and mount
+namespaces, with a private `/run/infraternal` directory for the server's
+embedded agent. This keeps its root-owned session state inside the test mount
+namespace. Choose a new evidence directory for every run; the `--output` path
+must not already exist because the matrix creates and owns that directory:
 
 ```sh
 ~/infraternal-ops/build-slot nice -n10 nix shell \
   nixpkgs#iproute2 nixpkgs#nftables nixpkgs#conntrack-tools nixpkgs#util-linux \
   --command bash -c '
     cd /home/claude/worktrees/J526
-    unshare -Urn python3 scripts/gotatun_break_it/linux_matrix.py \
+    scripts/gotatun_break_it/run_linux_matrix.sh \
       --binary /mnt/build/targets/J526/release/infraternal \
       --coordinator /mnt/build/targets/J526/release/examples/coordinator_fixture \
       --output /home/claude/.cache/codex-scratch/J526/evidence/linux-YYYYMMDD-runN

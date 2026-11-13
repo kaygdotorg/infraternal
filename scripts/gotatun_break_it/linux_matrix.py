@@ -356,10 +356,14 @@ class NamespacePair:
         self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             self._create_underlay()
-            if with_server:
-                self.server = ServerProcessFixture(binary, scratch / "server-data")
-            environment = {"INFRATERAL_MESH_ENGINE": "gotatun"}
             self.runtime_root = new_private_agent_runtime_root()
+            if with_server:
+                self.server = ServerProcessFixture(
+                    binary,
+                    self.runtime_root / "server-data",
+                    stderr_path=scratch / "server.stderr.log",
+                )
+            environment = {"INFRATERAL_MESH_ENGINE": "gotatun"}
             log_root = scratch / "agent-state"
             self.left = MeshNode(
                 binary,

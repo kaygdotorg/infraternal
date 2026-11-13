@@ -13,10 +13,9 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from typing import Any, Mapping
 
 
@@ -432,12 +431,22 @@ class ServerProcessFixture:
     # listener for the server process to bind later.
     LISTEN_PORT = 52_602
 
-    def __init__(self, executable: Path, state_root: Path) -> None:
+    def __init__(
+        self,
+        executable: Path,
+        state_root: Path,
+        *,
+        stderr_path: Path | None = None,
+    ) -> None:
         """Start an isolated infraternal server and wait for its health route."""
         self.executable = executable
         self.state_root = state_root
         self.state_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        self.stderr_path = (
+            self.state_root.parent / "server.stderr.log" if stderr_path is None else stderr_path
+        )
         self.process: subprocess.Popen[bytes] | None = None
+        self.stderr: Any = None
         self.health_status: int | None = None
         try:
             self._start_process()
@@ -474,7 +483,12 @@ class ServerProcessFixture:
 
     def _start_process(self) -> None:
         """Launch the product server without retaining its one-time setup token in logs."""
-        command = [
+        unshare = shutil.which("unshare")
+        shell = shutil.which("bash")
+        ip = shutil.which("ip")
+        if unshare is None or shell is None or ip is None:
+            raise RuntimeError("server restart fixture requires unshare, bash and ip")
+        server_command = [
             str(self.executable),
             "server",
             "--data",
@@ -487,13 +501,34 @@ class ServerProcessFixture:
             "--trusted-proxy",
             "127.0.0.1/32",
         ]
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+        command = [
+            unshare,
+            "--net",
+            shell,
+            "-c",
+            'set -e; "$1" link set lo up; shift; exec "$@"',
+            "j526-server-fixture",
+            ip,
+            *server_command,
+        ]
+        stderr_fd = os.open(
+            self.stderr_path,
+            os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+            0o600,
         )
+        self.stderr = os.fdopen(stderr_fd, "ab", buffering=0)
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=self.stderr,
+                start_new_session=True,
+            )
+        except BaseException:
+            self.stderr.close()
+            self.stderr = None
+            raise
         self.health_status = self._wait_for_health()
 
     def _wait_for_health(self) -> int:
@@ -502,16 +537,57 @@ class ServerProcessFixture:
             raise RuntimeError("the infraternal server process was not started")
         url = f"http://127.0.0.1:{self.LISTEN_PORT}/healthz"
         deadline = time.monotonic() + 30
+        nsenter = shutil.which("nsenter")
+        if nsenter is None:
+            raise RuntimeError("server restart fixture requires nsenter for its health check")
+        probe = (
+            "import sys, urllib.request\n"
+            "try:\n"
+            " with urllib.request.urlopen(sys.argv[1], timeout=0.5) as response:\n"
+            "  print(response.status)\n"
+            "except Exception:\n"
+            " raise SystemExit(1)\n"
+        )
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
+                if self.stderr is not None:
+                    self.stderr.flush()
+                try:
+                    stderr_tail = self.stderr_path.read_bytes()[-8_192:].decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+                except OSError:
+                    stderr_tail = "could not read server stderr"
+                detail = f"; stderr_log={self.stderr_path}"
+                if stderr_tail:
+                    detail += f"; stderr_tail={stderr_tail!r}"
                 raise RuntimeError(
-                    f"infraternal server exited before health check: {self.process.returncode}"
+                    f"infraternal server exited before health check: "
+                    f"{self.process.returncode}{detail}"
                 )
             try:
-                with urllib.request.urlopen(url, timeout=0.5) as response:
-                    if response.status == 200:
-                        return response.status
-            except (OSError, urllib.error.URLError):
+                result = subprocess.run(
+                    [
+                        nsenter,
+                        "-t",
+                        str(self.process.pid),
+                        "-n",
+                        "--",
+                        sys.executable,
+                        "-c",
+                        probe,
+                        url,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=1,
+                    text=True,
+                )
+                if result.returncode == 0 and result.stdout.strip() == "200":
+                    return 200
+            except (OSError, subprocess.TimeoutExpired):
                 pass
             # sleep: readiness polling gives the server a short interval to bind its listener.
             time.sleep(0.05)
@@ -536,6 +612,9 @@ class ServerProcessFixture:
                     pass
                 process.wait(timeout=10)
         self.process = None
+        if self.stderr is not None:
+            self.stderr.close()
+            self.stderr = None
 
 
 __all__ = ["CoordinatorFixture", "MeshNode", "ServerProcessFixture"]

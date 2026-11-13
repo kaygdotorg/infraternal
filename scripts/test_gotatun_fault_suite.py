@@ -58,12 +58,13 @@ except ModuleNotFoundError as error:
     transfer_integrity_ok = None
 
 try:
-    from gotatun_break_it.app_fixture import CoordinatorFixture, MeshNode
+    from gotatun_break_it.app_fixture import CoordinatorFixture, MeshNode, ServerProcessFixture
 except ModuleNotFoundError as error:
     if error.name != "gotatun_break_it.app_fixture":
         raise
     CoordinatorFixture = None
     MeshNode = None
+    ServerProcessFixture = None
 
 try:
     from gotatun_break_it.dns_probe import build_a_query, parse_a_answers
@@ -826,6 +827,83 @@ class PathSwitchRecoveryStartTests(unittest.TestCase):
                 assert receiver.stderr is not None
                 self.assertTrue(receiver.stdout.closed)
                 self.assertTrue(receiver.stderr.closed)
+
+
+class ServerProcessFixtureTests(unittest.TestCase):
+    """Keep real server startup failures diagnosable without capturing stdout secrets."""
+
+    def test_failed_server_start_records_stderr_outside_the_removed_data_directory(self):
+        """Preserve bounded server stderr when startup exits before the health probe."""
+        if os.environ.get("J526_NAMESPACE_TEST") != "1":
+            self.skipTest("run inside the suite's private user and mount namespace")
+        self.assertIsNotNone(ServerProcessFixture, "the product server fixture should be available")
+        assert ServerProcessFixture is not None
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "server"
+            executable.write_text(
+                "#!/bin/sh\nprintf '%s\\n' 'fixture startup failed' >&2\nexit 17\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            state_root = root / "server-data"
+            stderr_path = root / "server.stderr.log"
+
+            with self.assertRaisesRegex(RuntimeError, "fixture startup failed") as failure:
+                ServerProcessFixture(executable, state_root)
+
+            self.assertIn(str(stderr_path), str(failure.exception))
+            self.assertEqual(stderr_path.read_text(encoding="utf-8"), "fixture startup failed\n")
+            self.assertFalse(state_root.exists())
+
+    def test_product_server_fixture_uses_a_separate_network_namespace(self):
+        """Keep the fixture server's embedded Mesh link away from both transfer peers."""
+        if os.environ.get("J526_NAMESPACE_TEST") != "1":
+            self.skipTest("run inside the suite's private user and mount namespace")
+        self.assertIsNotNone(ServerProcessFixture, "the product server fixture should be available")
+        assert ServerProcessFixture is not None
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "server"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, socket, sys\n"
+                "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+                "args = sys.argv\n"
+                "data = pathlib.Path(args[args.index('--data') + 1])\n"
+                "socket_path = data / 'setup-token.sock'\n"
+                "try: socket_path.unlink()\n"
+                "except FileNotFoundError: pass\n"
+                "control = socket.socket(socket.AF_UNIX)\n"
+                "control.bind(str(socket_path))\n"
+                "class Handler(BaseHTTPRequestHandler):\n"
+                " def do_GET(self):\n"
+                "  self.send_response(200 if self.path == '/healthz' else 404)\n"
+                "  self.end_headers()\n"
+                " def log_message(self, format, *args): pass\n"
+                "host, port = args[args.index('--listen') + 1].rsplit(':', 1)\n"
+                "HTTPServer((host, int(port)), Handler).serve_forever()\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            evidence = root / "evidence"
+            evidence.mkdir(mode=0o700)
+            fixture = ServerProcessFixture(
+                executable,
+                root / "server-data",
+                stderr_path=evidence / "server.stderr.log",
+            )
+            try:
+                current_namespace = os.readlink("/proc/self/ns/net")
+                server_namespace = os.readlink(f"/proc/{fixture.pid}/ns/net")
+                self.assertNotEqual(server_namespace, current_namespace)
+                self.assertLess(len(str(fixture.state_root / "setup-token.sock")), 108)
+                restart = fixture.restart()
+                self.assertNotEqual(restart["server_pid_before"], restart["server_pid_after"])
+                self.assertEqual(restart["server_health_status"], 200)
+                self.assertTrue(restart["server_data_directory_preserved"])
+            finally:
+                fixture.close()
 
 
 class CoordinatorFixtureTests(unittest.TestCase):
