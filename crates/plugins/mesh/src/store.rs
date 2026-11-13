@@ -2710,6 +2710,35 @@ mod candidate_tests {
         }
     }
 
+    /// J585 F3 (#515): an unproven observation counts only for an address the coordinator never
+    /// published, but the check looks at the current addresses alone. The server device can hold
+    /// an address the coordinator published *earlier* (a stale snapshot applied, or a restored
+    /// device config read before the fresh snapshot), and that must not roll the mapping back.
+    #[tokio::test]
+    async fn an_address_published_earlier_is_not_new_evidence() {
+        let (store, [_, a, _, _]) = mesh().await;
+        assert!(
+            store
+                .record_reflexive(&[seen(a, "198.51.100.21:30254", true)])
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_reflexive(&[seen(a, "198.51.100.21:41000", false)])
+                .await
+                .unwrap(),
+            "fixture: a NAT rebind is taken"
+        );
+        assert!(
+            !store
+                .record_reflexive(&[seen(a, "198.51.100.21:30254", false)])
+                .await
+                .unwrap(),
+            "the coordinator published 198.51.100.21:30254 itself; seeing it again proves nothing"
+        );
+    }
+
     /// A node cannot plant a public, loopback or excess LAN address.
     #[tokio::test]
     async fn reported_lan_addresses_are_filtered_and_capped() {
