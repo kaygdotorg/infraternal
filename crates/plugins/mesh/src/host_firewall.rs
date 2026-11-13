@@ -1825,6 +1825,27 @@ mod tests {
         );
     }
 
+    /// J555 review (P2): a host that gets IPv6 addresses by DHCPv6 must keep
+    /// receiving server replies. The client sends to the `ff02::1:2`
+    /// multicast group, so conntrack cannot match the unicast reply from the
+    /// server's link-local address as established; without an explicit
+    /// `udp dport 546` allowance from `fe80::/10` the default-drop chain
+    /// drops it and the host loses its leased address at renewal.
+    #[test]
+    fn review_j555_rendered_policy_admits_dhcpv6_client_replies() {
+        let policy = Policy {
+            admin_rules: vec!["*,*,tcp,22".parse().expect("admin rule")],
+            ..Policy::default()
+        };
+        let rendered = render(&policy).expect("render");
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.contains("fe80::/10") && line.contains("udp dport 546")),
+            "DHCPv6 client replies are dropped by:\n{rendered}"
+        );
+    }
+
     /// A rejected nft delete names the table the user asked infraternal to remove.
     #[test]
     fn table_removal_failure_names_the_product_table() {
