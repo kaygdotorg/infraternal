@@ -210,6 +210,13 @@ impl Transcript {
             b"is not allowed to execute",
             b"may not run sudo",
             b"Operation not permitted",
+            // P3-5: pam_wheel and similar account checks refuse after the
+            // password ("su: Permission denied"); an expired password needs
+            // a change this flow can't make. Neither is a wrong password.
+            b"Permission denied",
+            b"Authentication token expired",
+            b"password has expired",
+            b"change your password immediately",
         ]
         .iter()
         .any(|phrase| contains(&self.tail, phrase))
@@ -427,6 +434,17 @@ pub async fn elevate(
     words: [&str; 4],
     bound: Duration,
 ) -> io::Result<Try> {
+    // P3-5: the terminal reads a line, and its line editing acts on control
+    // bytes (a newline ends the line early, ^U erases it, ^C interrupts). A
+    // password with such a byte can't arrive intact, so it is refused before
+    // anything runs, instead of being sent mangled and spending a try.
+    if secret.is_some_and(|secret| secret.iter().any(|byte| *byte < 0x20 || *byte == 0x7f)) {
+        return Ok(Try {
+            outcome: Outcome::Failed,
+            typed: false,
+            elevated: None,
+        });
+    }
     if way == Way::Su
         && !root_shell_is_posix(&std::fs::read_to_string("/etc/passwd").unwrap_or_default())
     {
@@ -630,6 +648,47 @@ mod tests {
             ),
             [Step::Type, Step::Done(Outcome::Started)]
         );
+    }
+
+    /// P3-5: an account check that refuses after the password (`pam_wheel`'s
+    /// "Permission denied") or an expired password is not a wrong password.
+    #[test]
+    fn account_refusals_after_the_password_are_denials() {
+        for refusal in [
+            "\r\nsu: Permission denied\r\n",
+            "\r\nsu: Authentication token expired\r\n",
+            "\r\nYou are required to change your password immediately (administrator enforced)\r\n",
+        ] {
+            assert_eq!(
+                steps(Way::Su, &["Password: ", refusal], true),
+                [Step::Type, Step::Done(Outcome::Denied)],
+                "{refusal}"
+            );
+        }
+    }
+
+    /// P3-5: a password the terminal's line editing would split or erase is
+    /// refused before anything runs, so no try is spent.
+    #[tokio::test]
+    async fn a_password_with_control_bytes_spends_no_try() {
+        for secret in [&b"pass\nword"[..], b"pass\x15word", b"pass\x03", b"\x7f"] {
+            let tried = elevate(
+                Way::Sudo,
+                Some(secret),
+                &[0; 32],
+                [
+                    "/nonexistent",
+                    &"0".repeat(64),
+                    "/nonexistent.sock",
+                    "65534",
+                ],
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+            assert_eq!(tried.outcome, Outcome::Failed);
+            assert!(!tried.typed);
+        }
     }
 
     /// A host can't fake our sudo prompt: "Password:" alone is not it.
