@@ -3952,13 +3952,17 @@ mod tests {
     /// and each refresh probes every installed peer's underlay route (one route and one link
     /// netlink request, each on a fresh socket) while holding the shared route-state mutex
     /// that relay callbacks, route repair and configuration also take. This prints the time
-    /// of steady refreshes (no route writes) for 4,096 peers with distinct endpoints. It
-    /// asserts only the write count, never speed (ENGINEERING P3); the numbers are the receipt.
+    /// of steady refreshes (no route writes) for 4,096 peers with distinct endpoints, or for
+    /// `J552_PEERS` peers when that is set. It asserts only the write count, never speed
+    /// (ENGINEERING P3); the numbers are the receipt.
     #[test]
     #[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
     fn review_j552_steady_refresh_cost_at_4096_peers() {
         use crate::policy::model::{Addresses, PublicKey};
-        const PEERS: u16 = 4096;
+        let peer_count: u16 = std::env::var("J552_PEERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4096);
         review_route_command(&["link", "set", "lo", "up"]);
         review_route_command(&["link", "add", "under0", "type", "dummy"]);
         review_route_command(&["link", "set", "under0", "mtu", "1500", "up"]);
@@ -3966,7 +3970,7 @@ mod tests {
         let proven = review_marked_tun(PublicKey([0xee; 32]));
         let mut peers = Vec::new();
         let mut learned = Vec::new();
-        for index in 0..PEERS {
+        for index in 0..peer_count {
             let [high, low] = index.to_be_bytes();
             let mut key = [0_u8; 32];
             key[..2].copy_from_slice(&index.to_be_bytes());
@@ -3996,7 +4000,7 @@ mod tests {
         let first = std::time::Instant::now();
         let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
         let first = first.elapsed();
-        assert_eq!(written, usize::from(PEERS));
+        assert_eq!(written, usize::from(peer_count));
         let mut steady = Vec::new();
         for _ in 0..8 {
             let started = std::time::Instant::now();
@@ -4007,7 +4011,7 @@ mod tests {
         steady.sort();
         let median = steady[steady.len() / 2];
         eprintln!(
-            "METRIC j552_live_refresh peers={PEERS} first_ms={:.1} steady_median_ms={:.1} \
+            "METRIC j552_live_refresh peers={peer_count} first_ms={:.1} steady_median_ms={:.1} \
              steady_max_ms={:.1} lock_held_per_second_at_4hz_ms={:.1}",
             first.as_secs_f64() * 1e3,
             median.as_secs_f64() * 1e3,
