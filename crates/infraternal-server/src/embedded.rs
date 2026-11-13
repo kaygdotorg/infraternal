@@ -41,9 +41,12 @@ const PREPARATION_CALL_BIT: u32 = 1 << 31;
 const RETIREMENT_CALL_BIT: u32 = 1 << 30;
 const BACKGROUND_CALL_BITS: u32 = PREPARATION_CALL_BIT | RETIREMENT_CALL_BIT;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
-// A default 1MiB grant can arrive in 256 bulk PTY frames while forwarding awaits I/O.
+// The opening grant is a 1 MiB bulk window plus a 64 KiB repaint reserve (D381). It can arrive
+// in 272 bulk PTY frames of 4 KiB while forwarding awaits I/O; the extra slots hold the key
+// acknowledgments, repaint and notices that travel beside them. A queue sized exactly to the
+// window retired a healthy viewer under a flood (traced on the production build, #477).
 // Credits bound payload bytes; frame slots separately bound small outputs and notices.
-const OUTPUT_CAPACITY: usize = 256;
+const OUTPUT_CAPACITY: usize = 320;
 const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 // Bounded actor input queues backpressure each attachment forwarding worker.
 const INPUT_CAPACITY: usize = 4;

@@ -1150,6 +1150,41 @@ async fn credited_bulk_output_survives_forwarder_io_pause() {
     }
 }
 
+/// The opening grant now carries a 64 KiB repaint reserve beside the 1 MiB bulk window; a healthy
+/// viewer that is briefly slow must not be retired when that whole grant arrives as 4 KiB frames (#477).
+#[tokio::test]
+async fn full_opening_grant_with_repaint_reserve_survives_forwarder_io_pause() {
+    const GRANT: u64 = 1024 * 1024 + 64 * 1024;
+    let (mut link, _peer) = connection();
+    let (tx, rx) = mpsc::channel(OUTPUT_CAPACITY);
+    let mut state = attachment(tx);
+    state.credit = GRANT;
+    let mut attachments = HashMap::from([(1, state)]);
+    let mut routes = HashMap::from([(2, 1)]);
+    for chunk in 0..GRANT / 4096 {
+        assert!(
+            process_incoming(
+                Incoming::Output {
+                    stream_id: 2,
+                    out_seq: chunk * 4096,
+                    bytes: Bytes::from(vec![120; 4096]),
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new()
+            )
+            .await
+        );
+    }
+    assert!(
+        routes.contains_key(&2),
+        "the full credited grant retired a healthy I/O-paused viewer"
+    );
+    assert_eq!(rx.len() as u64, GRANT / 4096);
+    assert_eq!(attachments[&1].credit, 0);
+}
+
 /// Credit is a byte bound even when the downstream frame queue has spare slots.
 #[tokio::test]
 async fn uncredited_output_or_repaint_is_rejected_before_queueing() {
