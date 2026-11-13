@@ -624,3 +624,40 @@ async fn the_install_transaction_is_recorded_once() {
         Some(transaction)
     );
 }
+
+/// J569 F3 (#399, J559's stale `uninstall`): a promotion whose relay rolled
+/// the install back after the successor joined is over; nothing is left to
+/// uninstall.
+///
+/// Every failure between the successor's join and the commit (`connect`,
+/// `proof`, `terminals`, `link`, `commit`) runs the relay's rollback first,
+/// which removes the successor. `install()` then calls `rolled_back`, which
+/// refuses any row with a successor, and falls back to `abandon_promotion`,
+/// which queues `cleanup='uninstall'` for good. The successor certificate
+/// stays admissible (for Uninstall) for its whole 7 days, and the row reads
+/// the same as a committed root install that may still be running.
+#[tokio::test]
+async fn a_relay_rollback_after_the_successor_joined_ends_the_cleanup() {
+    let (store, pool, host) = enrolled().await;
+    session(&pool, "s", 150).await;
+    let attempt = Uuid::from_u128(0x569_3);
+    enrolled_promotion(&store, host, attempt, 200).await;
+    store
+        .record_install_transaction(attempt, Uuid::from_u128(0xf3))
+        .await
+        .unwrap();
+    // The relay's rollback succeeded before any commit.
+    let recorded = store.rolled_back(attempt, 210).await;
+    let cleanup: String =
+        sqlx::query_scalar("SELECT cleanup FROM remote_host_promotions WHERE attempt=?")
+            .bind(attempt.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        recorded.is_ok(),
+        "a confirmed relay rollback can't be recorded: {recorded:?}"
+    );
+    assert_ne!(cleanup, "uninstall");
+    assert!(store.admit_successor(&[7; 32], 211).await.is_err());
+}
