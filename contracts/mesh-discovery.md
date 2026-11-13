@@ -67,7 +67,11 @@ node's NAT rebind. The store writes, and the coordinator republishes, only a
 changed address. A node's LAN candidates are the private (RFC 1918, 100.64.0.0/10,
 fc00::/7) source addresses of its default IPv4 and IPv6 routes, with its mesh
 port, at most two; the coordinator keeps only addresses these rules accept and
-sends them only to peers seen from the same public address. A destination-
+sends them only to peers whose control connection comes from the same public
+address. That is the TCP source of the control connection, which a member
+cannot forge, not the UDP-observed reflexive address, which one spoofed
+authenticated packet can move. Nodes behind one carrier-grade NAT share that
+address and count as one site, which is accepted inside one mesh. A destination-
 dependent (symmetric) mapping makes the server's observation useless to peers;
 such pairs still need the relay or a full-cone peer.
 

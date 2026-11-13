@@ -8,7 +8,7 @@
 //! Three kinds of candidate fix that, without touching the `WireGuard` handshake:
 //!
 //! - **LAN**: the private address a node's kernel picks for its default route, with its mesh port.
-//!   Only a peer the coordinator sees behind the *same* public address gets it, so private
+//!   Only a peer whose control connection comes from the *same* public address gets it, so private
 //!   addresses never leave the site they belong to.
 //! - **Server-reflexive**: the public address *and port* the server's own mesh device sees the
 //!   node's mesh packets come from (`presence.rs` observes it). For an endpoint-independent NAT that
@@ -46,10 +46,18 @@ pub struct NodeCandidates {
 }
 
 impl NodeCandidates {
-    /// The public address this node is seen from: the reflexive one when known, else the guess.
+    /// The address that places this node on a site: the source IP of its control connection
+    /// (the guess's IP).
+    ///
+    /// That connection is TCP, so its source cannot be forged without completing a handshake
+    /// from that address. The reflexive address comes from UDP: one authenticated mesh packet
+    /// with a spoofed source moves it, so a member could claim another site and read that site's
+    /// LAN addresses (J585 F2). Nodes behind one carrier-grade NAT share this address and count
+    /// as one site; their LAN candidates then fail to answer and the walk moves on, which is
+    /// acceptable inside one mesh.
     #[must_use]
-    pub fn public_ip(&self) -> Option<IpAddr> {
-        self.reflexive.or(self.guess).map(|address| address.ip())
+    pub fn site_ip(&self) -> Option<IpAddr> {
+        self.guess.map(|address| address.ip())
     }
 
     /// The one address an older node gets, which cannot take a list: reflexive first.
@@ -61,13 +69,14 @@ impl NodeCandidates {
 
 /// The addresses `viewer` should try for `peer`, best first, without duplicates.
 ///
-/// LAN addresses come first, and only when both nodes are seen from one public address: a
-/// shared router that does not hairpin can only be crossed on the LAN, and the LAN is the
-/// shortest path anyway. Then the server-reflexive address, then the guess.
+/// LAN addresses come first, and only when both nodes' control connections come from one
+/// public address ([`NodeCandidates::site_ip`]): a shared router that does not hairpin can only
+/// be crossed on the LAN, and the LAN is the shortest path anyway. Then the server-reflexive
+/// address, then the guess.
 #[must_use]
 pub fn order(viewer: &NodeCandidates, peer: &NodeCandidates) -> Vec<SocketAddr> {
     let mut list = Vec::with_capacity(MAX_LAN + 2);
-    let shared = viewer.public_ip().is_some() && viewer.public_ip() == peer.public_ip();
+    let shared = viewer.site_ip().is_some() && viewer.site_ip() == peer.site_ip();
     let lan: &[SocketAddr] = if shared { &peer.lan } else { &[] };
     for address in lan.iter().copied().chain(peer.reflexive).chain(peer.guess) {
         if !list.contains(&address) {

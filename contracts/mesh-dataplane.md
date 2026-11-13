@@ -61,7 +61,7 @@ interface and firewall table; disabling removes them and leaves no poller,
 socket or timer running. Last installed configuration survives server loss.
 A peer's `endpoint` is the first underlay address to try. Its optional
 `candidates` list holds further addresses, in order (#515, D391): the peer's
-LAN address when both nodes are seen from one public address, its
+LAN address when both nodes' control connections come from one public address, its
 server-reflexive address (the public address and port the server's own mesh
 device last saw its packets come from), and the server-observed control IP
 combined with the node's advertised UDP port. The coordinator sends
