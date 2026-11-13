@@ -1114,9 +1114,11 @@ impl RuntimeState {
             })
             .collect();
         for (key, endpoint) in moves {
-            // A failed install leaves the old address in the engine.
             if self.set_endpoint(key, endpoint).await.is_ok() {
                 let _ = self.initiate(key);
+            } else if let Some((_, walk)) = self.walks.get_mut(&key) {
+                // The engine still holds the old address; the walk's next step tries again.
+                walk.install_failed();
             }
         }
     }

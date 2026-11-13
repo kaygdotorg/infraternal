@@ -197,6 +197,8 @@ pub struct Seen {
 pub struct Rotation {
     list: Vec<SocketAddr>,
     index: usize,
+    /// Where the last step moved from, so a failed install can be undone ([`Self::install_failed`]).
+    from: usize,
     since: std::time::Instant,
     start: Seen,
     steps_left: usize,
@@ -219,6 +221,7 @@ impl Rotation {
             steps_left: ROUNDS * list.len() - 1,
             list,
             index: 0,
+            from: 0,
             since: now,
             start: seen,
             settled: established,
@@ -278,6 +281,7 @@ impl Rotation {
             return None;
         }
         self.since = now;
+        self.from = self.index;
         if self.steps_left == 0 {
             self.settled = true;
             return (self.index != 0).then(|| {
@@ -288,6 +292,19 @@ impl Rotation {
         self.steps_left -= 1;
         self.index = (self.index + 1) % self.list.len();
         Some(self.list[self.index])
+    }
+
+    /// The address the last [`Self::tick`] returned could not be installed, so the engine still
+    /// sends to the previous one. Step back, so the walk does not read that as the peer having
+    /// roamed, and the next step after [`STEP`] tries the same address again.
+    pub const fn install_failed(&mut self) {
+        self.index = self.from;
+        if self.settled {
+            // The failed move was the last one, back to the first candidate.
+            self.settled = false;
+        } else {
+            self.steps_left += 1;
+        }
     }
 }
 
@@ -548,6 +565,23 @@ mod tests {
             ..old_session
         };
         assert_eq!(walk.tick(start + STEP, on_first), Some(list[1]));
+    }
+
+    /// J585 F7 (#515): an address that could not be installed is tried again on the next step,
+    /// instead of the old address being read as the peer having roamed.
+    #[test]
+    fn a_failed_install_is_tried_again() {
+        let start = Instant::now();
+        let list = vec![at("10.9.0.3:10254"), at("198.51.100.21:10255")];
+        let on = |address| Seen {
+            endpoint: Some(address),
+            ..Seen::default()
+        };
+        let mut walk = Rotation::new(list.clone(), start, on(list[0])).unwrap();
+        assert_eq!(walk.tick(start + STEP, on(list[0])), Some(list[1]));
+        walk.install_failed();
+        assert_eq!(walk.tick(start + STEP * 2, on(list[0])), Some(list[1]));
+        assert!(!walk.settled());
     }
 
     /// A single candidate needs no walk.
