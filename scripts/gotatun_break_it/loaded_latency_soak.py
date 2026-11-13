@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Mapping, TextIO
 
@@ -59,6 +60,25 @@ def underlay_tbf_command(tc: Path, interface: str, rate_mbit: int) -> list[str]:
         "latency",
         "10ms",
     ]
+
+
+def new_private_soak_scratch_root(
+    evidence_root: Path, *, home: Path | None = None
+) -> Path:
+    """Keep socket-bearing fixture state short and separate from long evidence paths."""
+    private_home = Path.home() if home is None else home
+    scratch = Path(tempfile.mkdtemp(prefix="j526-soak-", dir=private_home))
+    resolved_scratch = scratch.resolve()
+    resolved_evidence = evidence_root.resolve()
+    if resolved_scratch.is_relative_to(resolved_evidence) or resolved_evidence.is_relative_to(
+        resolved_scratch
+    ):
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise ValueError("soak fixture scratch must be separate from its evidence directory")
+    if len(os.fsencode(scratch)) >= 64:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise ValueError("the private home path is too long for GotaTun fixture sockets")
+    return scratch
 
 
 def soak_environment(
@@ -328,8 +348,7 @@ def main() -> None:
     )
     if any(path.exists() for path in outputs):
         parser.error("output already contains window evidence; choose a fresh window directory")
-    scratch = arguments.output / "scratch"
-    scratch.mkdir(exist_ok=True)
+    scratch = new_private_soak_scratch_root(arguments.output)
     counter_start = arguments.output / "counter-start"
     counter_stop = arguments.output / "counter-stop"
     run_record: dict[str, Any] = {
@@ -585,6 +604,7 @@ def main() -> None:
         ):
             if stream is not None:
                 stream.close()
+        shutil.rmtree(scratch, ignore_errors=True)
         run_record.setdefault("end_ns", time.monotonic_ns())
         (arguments.output / "run.json").write_text(
             json.dumps(run_record, indent=2, sort_keys=True) + "\n",

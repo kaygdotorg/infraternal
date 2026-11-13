@@ -150,6 +150,36 @@ class LongSoakPlanTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     plan_soak_windows(total_seconds)
 
+
+class LoadedLatencyScratchTests(unittest.TestCase):
+    """Keep the long evidence directory from lengthening Unix socket paths."""
+
+    def test_soak_agent_scratch_stays_short_when_evidence_path_is_deep(self):
+        """Create agent fixture state under a short private home path, outside evidence."""
+        loaded_soak = importlib.import_module("gotatun_break_it.loaded_latency_soak")
+        scratch_factory = getattr(loaded_soak, "new_private_soak_scratch_root", None)
+        self.assertIsNotNone(scratch_factory, "the soak needs a short private scratch root")
+        assert scratch_factory is not None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            evidence_root = (
+                home
+                / ".cache"
+                / "codex-scratch"
+                / "J526"
+                / "evidence"
+                / "single-flow-loaded-latency-soak-20261112-01"
+                / "continuous-soak"
+            )
+            scratch = scratch_factory(evidence_root, home=home)
+
+            self.assertTrue(scratch.is_relative_to(home))
+            self.assertFalse(scratch.is_relative_to(evidence_root))
+            self.assertLess(len(os.fsencode(scratch)), 64)
+            self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
+
 class ModerateLoadShapeTests(unittest.TestCase):
     """Keep the long one-flow soak below the perf VM's full-rate ceiling."""
 
