@@ -8,5 +8,5 @@
 
 /** Tells `report` (the inventory's `gone`) that the shell of `sessionId` on `host` ended with `status`; a window with no session id has nothing to report. */
 export function reportShellExit(report: ((host: string, sessionId: string, status?: number) => void) | undefined, host: string, sessionId: string | undefined, status: number): void {
-  void report; void host; void sessionId; void status;
+  if (sessionId) report?.(host, sessionId, status);
 }
