@@ -76,7 +76,11 @@ reflexive address, or the control-IP guess before one is observed, as its one
 and reads their reflexive addresses from its device. A GotaTun node moves a
 peer that has sent nothing back (no bytes, no new handshake, no packet from
 another address) to its next candidate every 5 s, for three rounds, then
-stays on the first. A GotaTun node also starts a WireGuard handshake whenever
+stays on the first. A peer with a live session on its first address is not
+walked. A finished walk is kept while the peer's list is unchanged, so a
+later snapshot never moves a working peer. A walk that found its peer runs
+again only once that peer has had no handshake for 180 s, checked when the
+next snapshot is applied, with no timer. A GotaTun node also starts a WireGuard handshake whenever
 a snapshot or a walk step gives an established peer a new address, so the
 first packet through its own NAT leaves at once. An endpoint is discovery, never proof of
 reachability. Handshake counters distinguish a direct path from an unproven
