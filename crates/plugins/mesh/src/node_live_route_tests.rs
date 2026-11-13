@@ -385,7 +385,7 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
     review_route_command(&["link", "add", "under0", "type", "dummy"]);
     review_route_command(&["link", "set", "under0", "mtu", "1500", "up"]);
     review_route_command(&["address", "add", "100.64.0.1/10", "dev", "under0"]);
-    let proven = review_marked_tun(PublicKey([0xee; 32]));
+    review_marked_tun(PublicKey([0xee; 32]));
     let mut peers = Vec::new();
     let mut learned = Vec::new();
     for index in 0..peer_count {
@@ -409,12 +409,11 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
             Some(std::net::SocketAddr::from(([100, 65, high, low], 51820))),
         ));
     }
-    let state = Mutex::new(PeerRouteState::default());
-    {
-        let mut route_state = lock_route_state(&state);
-        route_state.set_peers(&peers);
-        route_state.link = Some(proven);
-    }
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(&peers);
+    // Run the route-repair worker as a node does: it proves and publishes the link, and its
+    // route listener is the one a running node has while refreshes happen (J571).
+    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
     let first = std::time::Instant::now();
     let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
     let first = first.elapsed();
@@ -436,4 +435,5 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
         steady[steady.len() - 1].as_secs_f64() * 1e3,
         median.as_secs_f64() * 4e3,
     );
+    worker.stop();
 }
