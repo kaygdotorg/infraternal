@@ -61,7 +61,10 @@ when new bytes or a newer handshake arrived since the previous reading in the
 same session; the store then takes it as the node's server-reflexive address.
 Otherwise a reading reports it only when it is new to the tracker (a first
 reading, or it moved since the previous one), and the store takes such an
-address only when the coordinator never published it for that node. GotaTun
+address only when the coordinator never published it for that node: not its
+current guess, reflexive or LAN address, and not one of the last eight
+reflexive addresses it replaced (a snapshot compiled earlier can still put one
+back on the server's device). GotaTun
 counts no bytes for a keepalive, so this second rule is what sees an idle
 node's NAT rebind. The store writes, and the coordinator republishes, only a
 changed address. A node's LAN candidates are the private (RFC 1918, 100.64.0.0/10,

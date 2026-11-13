@@ -37,6 +37,8 @@ struct Loaded {
     candidates: std::sync::Arc<BTreeMap<NodeId, crate::candidates::NodeCandidates>>,
     /// Nodes that walk an ordered candidate list; the rest get `endpoints` alone.
     accepts_candidates: std::sync::Arc<BTreeSet<NodeId>>,
+    /// The reflexive addresses published for each node before its current one, oldest first (J585 F3).
+    reflexive_history: std::sync::Arc<BTreeMap<NodeId, Vec<SocketAddr>>>,
     default: DefaultPolicy,
     revision: u64,
     /// The durable authenticated deployment authority for every compiled node snapshot.
@@ -1692,8 +1694,10 @@ impl Store {
     /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs).
     ///
     /// A proven observation replaces a different stored address. An unproven one is accepted only when the
-    /// coordinator never published that address for the node (not its guess, reflexive or LAN address): the
-    /// server's device sets those itself, so only an authenticated packet can have put any other address there.
+    /// coordinator never published that address for the node: not its guess, reflexive or LAN address, and not one
+    /// of the reflexive addresses it published before (J585 F3). The server's device sets those itself, from the
+    /// current snapshot or one compiled earlier, so only an authenticated packet can have put any other address
+    /// there. A replaced reflexive address joins the node's history, which keeps the last [`REFLEXIVE_HISTORY`].
     /// Each address is compared with the cached snapshot first, so a steady mesh costs no database write; only a
     /// changed address is written, all in one transaction with one revision. Returns whether anything changed.
     /// # Errors
@@ -1703,20 +1707,34 @@ impl Store {
         observed: &[crate::presence::Reflexive],
     ) -> Result<bool, &'static str> {
         let loaded = self.load().await.map_err(|_| "Mesh storage unavailable.")?;
+        let no_history = Vec::new();
         let changed: Vec<_> = observed
             .iter()
-            .filter(|seen| {
-                loaded.candidates.get(&seen.node).is_some_and(|known| {
-                    if seen.proven {
-                        known.reflexive != Some(seen.address)
-                    } else {
-                        known.guess != Some(seen.address)
-                            && known.reflexive != Some(seen.address)
-                            && !known.lan.contains(&seen.address)
+            .filter_map(|seen| {
+                let known = loaded.candidates.get(&seen.node)?;
+                let history = loaded
+                    .reflexive_history
+                    .get(&seen.node)
+                    .unwrap_or(&no_history);
+                let new = if seen.proven {
+                    known.reflexive != Some(seen.address)
+                } else {
+                    known.guess != Some(seen.address)
+                        && known.reflexive != Some(seen.address)
+                        && !known.lan.contains(&seen.address)
+                        && !history.contains(&seen.address)
+                };
+                new.then(|| {
+                    let mut history = history.clone();
+                    if let Some(old) = known.reflexive {
+                        history.retain(|earlier| *earlier != old && *earlier != seen.address);
+                        history.push(old);
                     }
+                    let excess = history.len().saturating_sub(REFLEXIVE_HISTORY);
+                    history.drain(..excess);
+                    (seen.node, seen.address, history)
                 })
             })
-            .map(|seen| (seen.node, seen.address))
             .collect();
         if changed.is_empty() {
             return Ok(false);
@@ -1725,13 +1743,19 @@ impl Store {
             .await
             .map_err(|_| "Mesh storage unavailable.")?;
         let mut any = false;
-        for (node, address) in changed {
+        for (node, address, history) in changed {
             let id = i64::try_from(node.0).map_err(|_| "Mesh identity invalid.")?;
             let address = address.to_string();
+            let history = (!history.is_empty())
+                .then(|| serde_json::to_string(&history))
+                .transpose()
+                .map_err(|_| "Mesh identity invalid.")?;
             let updated = sqlx::query(
-                "UPDATE mesh_nodes SET reflexive_endpoint=? WHERE id=? AND reflexive_endpoint IS NOT ?",
+                "UPDATE mesh_nodes SET reflexive_endpoint=?,reflexive_history=? \
+                 WHERE id=? AND reflexive_endpoint IS NOT ?",
             )
             .bind(&address)
+            .bind(&history)
             .bind(id)
             .bind(&address)
             .execute(&mut *tx)
@@ -2038,11 +2062,11 @@ impl Store {
         .flatten();
         #[cfg(feature = "mesh-dns")]
         let nodes_query = sqlx::query(
-            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         #[cfg(not(feature = "mesh-dns"))]
         let nodes_query = sqlx::query(
-            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         let rows = nodes_query
             .fetch_all(&mut *tx)
@@ -2052,6 +2076,7 @@ impl Store {
         let mut endpoints = BTreeMap::new();
         let mut candidates = BTreeMap::new();
         let mut accepts_candidates = BTreeSet::new();
+        let mut reflexive_history = BTreeMap::new();
         #[cfg(feature = "mesh-dns")]
         let mut dns_placeholders = BTreeSet::new();
         let mut server = None;
@@ -2108,6 +2133,10 @@ impl Store {
                 accepts_candidates.insert(id);
             }
             candidates.insert(id, known);
+            let history = stored_addresses(&row, "reflexive_history")?;
+            if !history.is_empty() {
+                reflexive_history.insert(id, history);
+            }
             nodes.push(Node {
                 id,
                 public_key: PublicKey(
@@ -2402,6 +2431,7 @@ impl Store {
             endpoints: std::sync::Arc::new(endpoints),
             candidates: std::sync::Arc::new(candidates),
             accepts_candidates: std::sync::Arc::new(accepts_candidates),
+            reflexive_history: std::sync::Arc::new(reflexive_history),
             default,
             revision: u64::try_from(revision)
                 .map_err(|_| storage_error("Mesh revision invalid."))?,
@@ -2424,19 +2454,28 @@ fn stored_candidates(
             .transpose()
             .map_err(|_| storage_error("Mesh endpoint invalid."))
     };
-    let lan = row
-        .try_get::<Option<String>, _>("lan_endpoints")
+    Ok(crate::candidates::NodeCandidates {
+        guess: address("endpoint")?,
+        reflexive: address("reflexive_endpoint")?,
+        lan: stored_addresses(row, "lan_endpoints")?,
+    })
+}
+/// A JSON array of addresses in `column` of a `mesh_nodes` row; empty when the column is NULL.
+fn stored_addresses(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &str,
+) -> Result<Vec<SocketAddr>, crate::api::MeshApiError> {
+    Ok(row
+        .try_get::<Option<String>, _>(column)
         .map_err(|error| storage_sql_error(error))?
         .map(|text| serde_json::from_str::<Vec<SocketAddr>>(&text))
         .transpose()
         .map_err(|_| storage_error("Mesh endpoint invalid."))?
-        .unwrap_or_default();
-    Ok(crate::candidates::NodeCandidates {
-        guess: address("endpoint")?,
-        reflexive: address("reflexive_endpoint")?,
-        lan,
-    })
+        .unwrap_or_default())
 }
+/// How many earlier reflexive addresses a node's history keeps (J585 F3). A device holds an older one only until
+/// the next snapshot lands, so a few cover every snapshot that can still be in flight.
+const REFLEXIVE_HISTORY: usize = 8;
 fn endpoint(kind: &str, value: &str) -> Result<Endpoint, crate::api::MeshApiError> {
     match kind {
         "node" => Ok(Endpoint::Node(NodeId(
