@@ -895,12 +895,55 @@ fn guard_unit(files: &GuardFiles) -> String {
     )
 }
 
+/// Seconds the watcher waits between undo attempts while the setup lock is busy.
+const WATCHER_BUSY_INTERVAL_SECONDS: u32 = 5;
+
+/// Undo attempts the watcher makes while the setup lock is busy: 180 × 5 s
+/// is 15 minutes, well past the longest single install step (a root unit
+/// start that runs into systemd's start timeout and its restarts).
+const WATCHER_BUSY_ATTEMPTS: u32 = 180;
+
+/// The exit status the install scripts use when another setup command holds
+/// the host's setup lock (`setup_guard.sh`, `setup_lock.sh`).
+const SETUP_LOCK_BUSY: u8 = 73;
+
 /// Render the independent watcher that runs this transaction's undo after relay loss.
+///
+/// A killed relay leaves its in-flight install step running in its own
+/// process group, and that step holds the setup lock until it ends: for
+/// example a `systemctl start` of the root unit that waits out the unit's
+/// start timeout. The undo then exits [`SETUP_LOCK_BUSY`] after its short
+/// lock wait. A single try would leave the half-installed root service in
+/// place until a reboot or the server's abandon reached the host (#399,
+/// J522b p6i), so the watcher queues behind that step: it retries only on
+/// that status, for a bounded time. Any other status ends the watcher at
+/// once; the guard stays armed unless the undo itself retired it.
 fn watcher_script(files: &GuardFiles, pid: u32) -> io::Result<String> {
+    watcher_script_with(
+        files,
+        pid,
+        WATCHER_BUSY_INTERVAL_SECONDS,
+        WATCHER_BUSY_ATTEMPTS,
+    )
+}
+
+/// [`watcher_script`] with an explicit retry spacing and bound, so tests can run it quickly.
+fn watcher_script_with(
+    files: &GuardFiles,
+    pid: u32,
+    interval_seconds: u32,
+    attempts: u32,
+) -> io::Result<String> {
     let sleep = shell_quote(&fixed_root_binary("sleep")?.to_string_lossy());
+    let undo = shell_quote(&files.undo.to_string_lossy());
     Ok(format!(
-        "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do {sleep} 1; done\nexec /bin/sh {}\n",
-        shell_quote(&files.undo.to_string_lossy())
+        "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do {sleep} 1; done\n\
+         # Queue behind an install step the dead relay left holding the setup lock.\n\
+         attempt=1\n\
+         while :; do\n  /bin/sh {undo}\n  status=$?\n  \
+         [ \"$status\" = {SETUP_LOCK_BUSY} ] || exit \"$status\"\n  \
+         [ \"$attempt\" -lt {attempts} ] || exit \"$status\"\n  \
+         attempt=$((attempt + 1))\n  {sleep} {interval_seconds}\ndone\n"
     ))
 }
 
@@ -2239,6 +2282,89 @@ mod tests {
         std::fs::write(&files.directory, b"unexpected file").unwrap();
 
         assert!(disarm_guard_with(&config, &files, &runner).await.is_err());
+    }
+
+    /// A process id that no longer runs, so a rendered watcher skips its relay wait.
+    fn exited_pid() -> u32 {
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    /// Give `files.undo` a stand-in that exits with `statuses` in turn, one per
+    /// run, and counts its runs in `<undo>.runs`. Returns that counter's path.
+    fn scripted_undo(files: &GuardFiles, statuses: &[u8]) -> PathBuf {
+        std::fs::create_dir_all(&files.directory).unwrap();
+        let runs = files.directory.join("undo.runs");
+        let list = statuses
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(
+            &files.undo,
+            format!(
+                "runs=$(cat '{runs}' 2>/dev/null || echo 0)\nruns=$((runs + 1))\necho \"$runs\" > '{runs}'\nset -- {list}\nshift $((runs - 1))\nexit \"$1\"\n",
+                runs = runs.display()
+            ),
+        )
+        .unwrap();
+        runs
+    }
+
+    /// Run a rendered watcher to its end and return its exit status and the undo's run count.
+    fn run_watcher(script: &str, runs: &Path) -> (i32, u32) {
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let count = std::fs::read_to_string(runs)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        (status.code().unwrap(), count)
+    }
+
+    /// A dead relay's install step can still hold the setup lock when the
+    /// watcher first runs the undo (J522b p6i on a fresh SELinux-enforcing guest: the
+    /// undo exited 73 once and the half-installed root service stayed). The
+    /// production watcher queues behind it and runs the undo again.
+    #[test]
+    fn watcher_retries_the_undo_while_the_setup_lock_is_busy() {
+        let config = test_guard_config();
+        let files = guard_paths(&config, uuid::Uuid::from_u128(0xc), 100);
+        let runs = scripted_undo(&files, &[SETUP_LOCK_BUSY, 0]);
+        let script = watcher_script(&files, exited_pid()).unwrap();
+        assert_eq!(run_watcher(&script, &runs), (0, 2));
+        std::fs::remove_dir_all(&config.scratch_root).unwrap();
+    }
+
+    /// Only a busy setup lock is retried: any other undo failure ends the
+    /// watcher at once with that status, leaving the boot guard armed.
+    #[test]
+    fn watcher_does_not_retry_other_undo_failures() {
+        let config = test_guard_config();
+        let files = guard_paths(&config, uuid::Uuid::from_u128(0xd), 100);
+        let runs = scripted_undo(&files, &[72, 0]);
+        let script = watcher_script_with(&files, exited_pid(), 0, 5).unwrap();
+        assert_eq!(run_watcher(&script, &runs), (72, 1));
+        std::fs::remove_dir_all(&config.scratch_root).unwrap();
+    }
+
+    /// The retry is bounded: a lock that stays busy ends the watcher with the
+    /// busy status after the last attempt, and the boot guard takes over.
+    #[test]
+    fn watcher_gives_up_after_its_attempt_bound() {
+        let config = test_guard_config();
+        let files = guard_paths(&config, uuid::Uuid::from_u128(0xe), 100);
+        let runs = scripted_undo(&files, &[SETUP_LOCK_BUSY; 4]);
+        let script = watcher_script_with(&files, exited_pid(), 0, 3).unwrap();
+        assert_eq!(run_watcher(&script, &runs), (i32::from(SETUP_LOCK_BUSY), 3));
+        std::fs::remove_dir_all(&config.scratch_root).unwrap();
     }
 
     /// A committed or superseded install makes an old guard inert before rollback runs.
