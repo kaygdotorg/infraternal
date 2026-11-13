@@ -496,6 +496,28 @@ def rect_of(s, finder_js):
     return s.js("const e = (() => { %s })(); if (!e) return null; const r = e.getBoundingClientRect(); return {l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height, iw: innerWidth, ih: innerHeight};" % finder_js)
 
 
+def phase_lockedlist(s, origin, out, tag):
+    """Host list and "Unlock to connect" right after a server restart, read with the sidebar OPEN, then after Unlock."""
+    signin(s, origin, out, unlock=False)
+    time.sleep(8)
+    toast = s.js("return (document.body.innerText.match(/server restarted[^\\n]*/i) || [null])[0]")
+    print("MAC_METRIC " + json.dumps({"name": "restart-toast", "text": toast}))
+    locked = tree_text(s)
+    print("MAC_METRIC " + json.dumps({"name": "tree-locked-sidebar-open", "text": locked.replace("\n", " | ")[:400]}))
+    shot(s, out, tag + "-locked-tree-open")
+    result(any(k in locked for k in ("10.69.69.117", "qa-device2", "infraternal-dev-02")), "locked-state-host-listed", locked.replace("\n", " | ")[:140])
+    result("unlock to connect" in locked.lower(), "locked-host-shows-unlock-to-connect")
+    s.keys(["\ue03d", "k"]); time.sleep(1.5); type_text(s, "shell"); time.sleep(2)
+    print("MAC_METRIC " + json.dumps({"name": "palette-rows-locked", "rows": (s.js("return [...document.querySelectorAll('#palette-results *')].filter(e => e.children.length === 0 && e.innerText).map(e => e.innerText.trim().slice(0, 70))") or [])[:12]}))
+    shot(s, out, tag + "-locked-palette")
+    s.keys(["\ue00c"]); time.sleep(1)
+    unlock_hosts(s, out); time.sleep(10)
+    unlocked = tree_text(s)
+    print("MAC_METRIC " + json.dumps({"name": "tree-unlocked-sidebar-open", "text": unlocked.replace("\n", " | ")[:400]}))
+    shot(s, out, tag + "-unlocked-tree-open")
+    result("unlock to connect" not in unlocked.lower() and any(k in unlocked for k in ("10.69.69.117", "qa-device2", "infraternal-dev-02")), "host-listed-and-connectable-after-unlock", unlocked.replace("\n", " | ")[:140])
+
+
 def phase_c392(s, origin, out, tag):
     """Checks added for dev c392b16ea: host tree and locked host, Remove question on a phone, panel height, empty state."""
     signin(s, origin, out, unlock=False)
@@ -683,6 +705,8 @@ def main():
             print("after:", s.js("return document.documentElement.dataset.theme"), "| reload:")
             s.get("%s/?r=%d" % (origin, time.time())); time.sleep(8); inject_sw(s, origin)
             print("after reload data-theme:", s.js("return document.documentElement.dataset.theme"))
+        elif cmd == "lockedlist":
+            phase_lockedlist(s, origin, out, sys.argv[4] if len(sys.argv) > 4 else "latte")
         elif cmd == "c392":
             phase_c392(s, origin, out, sys.argv[4] if len(sys.argv) > 4 else "latte")
         elif cmd == "probe":
