@@ -288,6 +288,67 @@ fn gotatun_rotation_down_retires_identity_and_uses_a_fresh_key() {
     restored.down().unwrap();
 }
 
+/// A committed local key must survive the coordinator's complete same-authority config apply.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_rotation_applies_the_complete_key_binding_delta() {
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun)
+        .expect("restore an isolated GotaTun node");
+    let result = (|| {
+        let identity = node.up().map_err(|error| error.to_string())?;
+        let previous = crate::dataplane::Config {
+            authority_epoch: None,
+            local_key: Some(identity.public_key),
+            server: Some(NodeId(1)),
+            node: NodeId(2),
+            #[cfg(feature = "mesh-dns")]
+            name: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            version: 4,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().expect("local IPv4"),
+                ipv6: "fd01::2".parse().expect("local IPv6"),
+            },
+            default_policy: DefaultPolicy::Allow,
+            exposure: None,
+            peers: std::collections::BTreeMap::new(),
+            #[cfg(feature = "mesh-dns")]
+            peer_names: std::collections::BTreeMap::new(),
+        };
+        for chunk in crate::configuration::chunks(None, &previous).map_err(str::to_owned)? {
+            node.chunk(chunk)
+                .map_err(|error| format!("initial config: {error:?}"))?;
+        }
+
+        let operation = "00000000-0000-4000-8000-000000000526";
+        let candidate = node
+            .prepare_rotation(operation, 1)
+            .map_err(|error| error.to_string())?;
+        node.commit_rotation(operation, 1)
+            .map_err(|error| error.to_string())?;
+
+        let mut next = previous.clone();
+        next.local_key = Some(candidate);
+        next.version = 5;
+        for chunk in crate::configuration::chunks(Some(&previous), &next).map_err(str::to_owned)? {
+            node.chunk(chunk)
+                .map_err(|error| format!("committed key binding delta: {error:?}"))?;
+        }
+        if node.config().map(|config| config.version) != Some(5) {
+            return Err(format!(
+                "node kept config version {:?}",
+                node.config().map(|config| config.version)
+            ));
+        }
+        Ok::<_, String>(())
+    })();
+    let shutdown = if node.active() { node.down() } else { Ok(()) };
+    assert!(result.is_ok(), "complete rotation apply failed: {result:?}");
+    shutdown.expect("stop the test node after the assertion data is captured");
+}
+
 /// A `GotaTun` candidate is not an ownership proof until its durable commit intent exists.
 #[test]
 fn gotatun_owner_proof_rejects_a_candidate_before_commit_intent() {
