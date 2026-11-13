@@ -166,3 +166,58 @@ fn our_own_unkeyed_kernel_link_is_still_cleaned_up() {
     assert!(unkeyed, "the unkeyed link was created");
     assert_eq!(after, None, "restore left our own incomplete link behind");
 }
+
+/// J555 F3 (#483, D391): an explicit `INFRATERNAL_MESH_PORT` must bind exactly that port, even
+/// when a restarted kernel node reattaches its retained link.
+///
+/// Kernel links outlive their process (D332), and restore adopts the link with whatever port it
+/// already has. An operator who sets an override and restarts the infraternal agent keeps the old
+/// port: the node neither binds the requested port nor fails, which D391 forbids. The parent
+/// starts the node with the default port and keeps the link; a child process (the environment
+/// is fixed per process) restarts it with an override.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn j555_restarted_kernel_link_honours_an_explicit_port_override() {
+    const CHILD: &str = "J555_KERNEL_OVERRIDE_STATE";
+    if let Some(state) = std::env::var_os(CHILD) {
+        let mut node = Node::restore_with_engine(std::path::Path::new(&state), EngineKind::Kernel)
+            .and_then(|mut node| node.up().map(|_| node))
+            .unwrap();
+        let bound = node.listen_port();
+        node.down().unwrap();
+        assert_eq!(
+            bound,
+            Some(32_002),
+            "the reattached kernel link kept its old port instead of the explicit override"
+        );
+        return;
+    }
+    assert!(std::env::var_os("INFRATERNAL_MESH_PORT").is_none());
+    let state = private_state("kernel-override");
+    let first = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let identity = node.up()?;
+        drop(node);
+        Ok::<_, std::io::Error>(identity.port)
+    })();
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "--ignored",
+            "j555_restarted_kernel_link_honours_an_explicit_port_override",
+            "--nocapture",
+        ])
+        .env(CHILD, &state)
+        .env("INFRATERNAL_MESH_PORT", "32002")
+        .output()
+        .unwrap();
+    remove_link();
+    fs::remove_dir_all(&state).unwrap();
+    assert_eq!(first.unwrap(), 10_254, "the first start used the default");
+    assert!(
+        child.status.success(),
+        "override restart: {}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+}
