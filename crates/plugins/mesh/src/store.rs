@@ -2684,6 +2684,32 @@ mod candidate_tests {
         );
     }
 
+    /// J585 F2 (#515): "same public address" is decided by the UDP-observed reflexive address,
+    /// which a member can steer (one authenticated packet with a spoofed source moves the server
+    /// device's endpoint, and f37c5497b even accepts it unproven). A node whose control connection
+    /// comes from another site must not learn that site's LAN addresses that way.
+    #[tokio::test]
+    async fn a_reflexive_address_alone_does_not_put_a_node_on_another_site() {
+        let (store, [_, a, _, c]) = mesh().await;
+        store
+            .record_candidates(a, Some(&[at("10.9.0.2:10254")]))
+            .await
+            .unwrap();
+        store.record_candidates(c, Some(&[])).await.unwrap();
+        // `c` connects to the coordinator from 203.0.113.9, but one packet "from" a's public
+        // address moved the server device's endpoint for `c` there.
+        for proven in [false, true] {
+            store
+                .record_reflexive(&[seen(c, "198.51.100.21:40000", proven)])
+                .await
+                .unwrap();
+            assert!(
+                !tries(&store.config(c).await.unwrap(), a).contains(&at("10.9.0.2:10254")),
+                "c learned a's LAN address from a UDP source it controls (proven={proven})"
+            );
+        }
+    }
+
     /// A node cannot plant a public, loopback or excess LAN address.
     #[tokio::test]
     async fn reported_lan_addresses_are_filtered_and_capped() {
