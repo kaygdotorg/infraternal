@@ -366,6 +366,8 @@ test("a key that is different after a restart's re-ask is called out as changed,
   // Evidence for the issue: the changed-key page at desktop and phone width.
   for (const width of [1440, 393]) {
     await page.setViewportSize({ width, height: width === 393 ? 852 : 900 });
+    // The page that just left must be gone, or its fading text shows through behind the new one.
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
     await page.screenshot({ path: tracerEvidencePath("addhost-510", `rekeyed-after-restart-${width}.png`) });
   }
 });
