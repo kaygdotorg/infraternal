@@ -120,9 +120,8 @@ const ENDPOINT_REFRESH_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Bound route refreshes and authenticated endpoint scans to four per second.
 const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long a forced relay handshake may wait; `GotaTun`'s own wait has no deadline.
+/// How long a forced handshake may wait; `GotaTun`'s own wait has no deadline.
 /// One `WireGuard` handshake attempt is 5 s, after which the peer timers retry.
-#[cfg(feature = "relay")]
 const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 
 /// Selects the node's data plane. `GotaTun` is the Linux default (D346), so the product runs on
@@ -1059,7 +1058,9 @@ impl RuntimeState {
             .collect();
         for (key, endpoint) in moves {
             // A failed install leaves the old address; the walk's next step tries again.
-            let _ = self.set_endpoint(key, endpoint).await;
+            if self.set_endpoint(key, endpoint).await.is_ok() {
+                let _ = self.initiate(key);
+            }
         }
         self.walks.retain(|_, (_, walk)| !walk.settled());
     }
@@ -1108,6 +1109,17 @@ impl RuntimeState {
     #[cfg(feature = "relay")]
     async fn force_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         self.set_endpoint(key, endpoint).await?;
+        self.initiate(key)
+    }
+
+    /// Send a handshake initiation to `key`'s current address now, without waiting for it.
+    ///
+    /// A new address on a peer that already has a session sends nothing by itself: the engine
+    /// only uses it for the next packet, and an idle peer has none for up to a keepalive
+    /// interval. Behind a filtering NAT that first packet is what opens this side for the
+    /// peer's replies, so a changed or walked address starts a handshake at once (#515). A
+    /// handshake already in flight is waited for instead of duplicated.
+    fn initiate(&mut self, key: PublicKey) -> io::Result<()> {
         let device = Arc::clone(self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?);
         let key = X25519PublicKey::from(key.0);
         // GotaTun sends the initiation, then waits for the session without holding its device
@@ -1220,6 +1232,24 @@ impl RuntimeState {
             .map(|(_, policy)| peer_for_policy(policy))
             .collect::<io::Result<Vec<_>>>()?;
         let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
+        // Peers that keep their access but get a new first address: tell them at once (`initiate`).
+        let readdressed: Vec<PublicKey> = config
+            .peers
+            .iter()
+            .filter(|(id, policy)| {
+                peer_has_network_access(policy)
+                    && policy.peer.endpoint.is_some()
+                    && self
+                        .config
+                        .as_ref()
+                        .and_then(|old| old.peers.get(id))
+                        .is_some_and(|old| {
+                            peer_has_network_access(old)
+                                && old.peer.endpoint != policy.peer.endpoint
+                        })
+            })
+            .map(|(_, policy)| active_peer_key(&policy.peer))
+            .collect();
         let previous_keys = self
             .config
             .as_ref()
@@ -1259,6 +1289,9 @@ impl RuntimeState {
         // The receive guard follows only snapshots the live device accepted.
         admission.write().await.set_peers(admitted_peers);
         self.config = Some(config);
+        for key in readdressed {
+            let _ = self.initiate(key);
+        }
         Ok(self.info.clone())
     }
 
