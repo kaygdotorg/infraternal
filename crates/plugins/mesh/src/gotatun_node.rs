@@ -730,17 +730,41 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// What a candidate walk needs from one peer's counters; an absent peer reads as silent.
-fn seen(counters: &CounterMap, key: PublicKey) -> crate::candidates::Seen {
+/// What a candidate walk needs from one peer's counters at `unix_now`; an absent peer reads as
+/// silent, and so does a handshake older than [`crate::candidates::SILENT`].
+fn seen(counters: &CounterMap, key: PublicKey, unix_now: u64) -> crate::candidates::Seen {
     counters
         .get(&key)
         .map_or_else(crate::candidates::Seen::default, |stats| {
             crate::candidates::Seen {
                 received: stats.received_bytes,
-                handshake: stats.handshake_secs,
+                handshake: crate::candidates::live_handshake(stats.handshake_secs, unix_now),
                 endpoint: stats.endpoint,
             }
         })
+}
+
+/// The wall clock in Unix seconds, the unit of the engine's handshake times.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Each walking peer's first address in the applied configuration, by the key that owns its
+/// endpoint. A walk compares it across an apply to tell whether a session was made on the
+/// address the walk starts on.
+fn first_addresses(config: Option<&Config>) -> BTreeMap<PublicKey, Option<SocketAddr>> {
+    config
+        .map(|config| {
+            config
+                .peers
+                .values()
+                .map(|policy| (active_peer_key(&policy.peer), policy.peer.endpoint))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Wait until the next candidate walk step is due, or forever when no walk is running.
@@ -751,8 +775,8 @@ async fn walk_due(at: Option<Instant>) {
     }
 }
 
-/// The engine worker's loop: serve commands one at a time, reap handshake tasks, rebuild a failed
-/// device, keep mesh routes on the peers' live endpoints, and step candidate walks when one is due.
+/// Serializes device, relay, health-recovery, and shutdown commands on the `GotaTun` worker, and
+/// steps candidate walks when one is due.
 ///
 /// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
 /// either direction requests re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
@@ -769,22 +793,23 @@ async fn run_worker(
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
-    // A restored configuration may already carry candidates.
-    state.refresh_walks().await;
+    // A restored configuration may already carry candidates; no session predates it.
+    state.refresh_walks(&BTreeMap::new()).await;
     loop {
         let next_walk = state.next_walk();
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
+                    let before = first_addresses(state.config.as_ref());
                     let result = state.apply(*config).await;
                     let applied = result.is_ok();
                     if applied {
                         observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
                     }
                     let _ = reply.send(result);
-                    // After the reply: a new walk reads the counters once, off the apply path.
+                    // After the reply: a walk reads the counters once, off the apply path.
                     if applied {
-                        state.refresh_walks().await;
+                        state.refresh_walks(&before).await;
                     }
                 }
                 Some(WorkerCommand::SetMtu { mtu, reply }) => {
@@ -989,13 +1014,19 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("GotaTun peer endpoint could not be installed."))
     }
 
-    /// Start a candidate walk for each peer whose list is new, and drop walks whose peer changed
-    /// or left (#515).
+    /// Bring the candidate walks in line with the applied configuration (#515): drop walks whose
+    /// peer left, start one for each peer that is new or changed, and start again for a peer
+    /// whose walk once found it and whose path has since gone silent.
     ///
-    /// `apply` re-installs a peer, and with it the first candidate, only when the peer itself
-    /// changed. So a walk survives exactly while its peer is unchanged, and an unrelated policy
-    /// edit never sends a peer back to its first candidate.
-    async fn refresh_walks(&mut self) {
+    /// A peer that is unchanged keeps its walk, finished or not (J585 F4). `apply` re-installs a
+    /// peer, and with it the first candidate, only when the peer itself changed, so an unrelated
+    /// snapshot never sends a working peer back through its list. `before` holds each peer's first
+    /// address in the previous configuration: a session made on another address proves nothing
+    /// about a new first candidate, so that walk starts without the engine's address.
+    ///
+    /// Cost: at most one counter read per applied snapshot, and none when no walk can need one.
+    /// No timer runs for a finished walk, so an idle node stays idle (D81).
+    async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
         let Some(config) = self.config.as_ref() else {
             self.walks.clear();
             return;
@@ -1010,25 +1041,47 @@ impl RuntimeState {
             })
             .map(|policy| (active_peer_key(&policy.peer), policy.peer.clone()))
             .collect();
-        self.walks
-            .retain(|key, (peer, _)| wanted.get(key).is_some_and(|wanted| wanted == peer));
-        if wanted.keys().all(|key| self.walks.contains_key(key)) {
+        self.walks.retain(|key, _| wanted.contains_key(key));
+        let changed = wanted
+            .iter()
+            .any(|(key, peer)| self.walks.get(key).is_none_or(|(old, _)| old != peer));
+        // A walk that found its peer must be checked for silence; others need no counters.
+        let watching = self
+            .walks
+            .values()
+            .any(|(_, walk)| walk.went_silent(crate::candidates::Seen::default()));
+        if !changed && !watching {
             return;
         }
         let Ok(counters) = self.counters().await else {
             return;
         };
-        let now = std::time::Instant::now();
+        let (now, unix) = (std::time::Instant::now(), unix_now());
         for (key, peer) in wanted {
-            if self.walks.contains_key(&key) {
-                continue;
+            let mut observed = seen(&counters, key, unix);
+            match self.walks.get(&key) {
+                Some((old, walk)) if *old == peer => {
+                    if !walk.went_silent(observed) {
+                        continue;
+                    }
+                }
+                _ => {
+                    if before.get(&key) != Some(&peer.endpoint) {
+                        observed.endpoint = None;
+                    }
+                }
             }
             let list = peer
                 .endpoint
                 .into_iter()
                 .chain(peer.candidates.iter().copied());
-            if let Some(walk) = Rotation::new(list.collect(), now, seen(&counters, key)) {
-                self.walks.insert(key, (peer, walk));
+            match Rotation::new(list.collect(), now, observed) {
+                Some(walk) => {
+                    self.walks.insert(key, (peer, walk));
+                }
+                None => {
+                    self.walks.remove(&key);
+                }
             }
         }
     }
@@ -1051,22 +1104,21 @@ impl RuntimeState {
         let Ok(counters) = self.counters().await else {
             return;
         };
-        let now = std::time::Instant::now();
+        let (now, unix) = (std::time::Instant::now(), unix_now());
         let moves: Vec<_> = self
             .walks
             .iter_mut()
             .filter_map(|(key, (_, walk))| {
-                walk.tick(now, seen(&counters, *key))
+                walk.tick(now, seen(&counters, *key, unix))
                     .map(|next| (*key, next))
             })
             .collect();
         for (key, endpoint) in moves {
-            // A failed install leaves the old address; the walk's next step tries again.
+            // A failed install leaves the old address in the engine.
             if self.set_endpoint(key, endpoint).await.is_ok() {
                 let _ = self.initiate(key);
             }
         }
-        self.walks.retain(|_, (_, walk)| !walk.settled());
     }
 
     /// Prepare a peer for relayed traffic while preserving any session it already established.

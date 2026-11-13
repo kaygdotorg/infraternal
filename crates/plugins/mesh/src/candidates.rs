@@ -148,14 +148,36 @@ pub const STEP: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many times a walk goes round its list before it settles on the first candidate.
 pub const ROUNDS: usize = 3;
 
+/// How long a session lasts without a new handshake: `WireGuard`'s `REJECT_AFTER_TIME`. An idle
+/// peer with a persistent keepalive handshakes again about every two minutes, so a handshake older
+/// than this means the path carries nothing any more.
+pub const SILENT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// A peer's last handshake time as a walk reads it: `handshake` while it is younger than
+/// [`SILENT`] at `unix_now` (both in Unix seconds), else `0`, the same as no handshake at all.
+///
+/// The engine keeps the time of the last handshake forever, so without this a session that died
+/// minutes ago would look exactly like a live one.
+#[must_use]
+pub const fn live_handshake(handshake: u64, unix_now: u64) -> u64 {
+    if handshake != 0 && unix_now.saturating_sub(handshake) < SILENT.as_secs() {
+        handshake
+    } else {
+        0
+    }
+}
+
 /// What the engine reports for one peer, as far as a walk needs it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Seen {
     /// The received-bytes counter. `GotaTun` counts handshakes and data, not keepalives.
     pub received: u64,
-    /// The last handshake's time, `0` before the first.
+    /// The last handshake's time, `0` before the first. Callers read it through
+    /// [`live_handshake`], so a session that has gone [`SILENT`] reads as none.
     pub handshake: u64,
-    /// Where the engine sends the peer's packets now.
+    /// Where the engine sends the peer's packets now. A caller that knows the session was not
+    /// made on the list's first candidate (the peer was just given a new first address) passes
+    /// `None`, so [`Rotation::new`] does not take that session as proof for the new address.
     pub endpoint: Option<SocketAddr>,
 }
 
@@ -163,9 +185,14 @@ pub struct Seen {
 ///
 /// It starts on the first candidate. While nothing has come back from the peer, each [`STEP`]
 /// moves it to the next one, wrapping, for [`ROUNDS`] rounds; then it returns to the first and
-/// stops. Anything coming back stops it for good: new bytes, a new handshake, or the engine's
-/// address moving away from the walk's (`WireGuard` roams to the source of every authenticated
-/// packet, keepalives included). The engine then already sends to a working address.
+/// stops. Anything coming back stops it: new bytes, a newer handshake, or the engine's address
+/// moving away from the walk's (`WireGuard` roams to the source of every authenticated packet,
+/// keepalives included). The engine then already sends to a working address.
+///
+/// A stopped walk is kept, not dropped (J585 F4, #515). The node starts a new one only when the
+/// peer's list changes, or when a walk that found the peer later sees its path go silent
+/// ([`Self::went_silent`]). So an idle, working peer is never walked off its address, and a
+/// republished mesh does not restart every walk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rotation {
     list: Vec<SocketAddr>,
@@ -174,20 +201,28 @@ pub struct Rotation {
     start: Seen,
     steps_left: usize,
     settled: bool,
+    /// The walk stopped because the peer answered, not because its rounds ran out.
+    found: bool,
 }
 
 impl Rotation {
     /// Start a walk over `list` at `now`, from what the engine reports for the peer. `None` when
     /// there is nothing to walk (fewer than two candidates).
+    ///
+    /// A peer that already has a live session on the first candidate needs no walk: the walk
+    /// starts stopped, as found. Moving such a peer would send an idle peer's next packets to an
+    /// address that may be dead, until its next keepalive roams it back.
     #[must_use]
     pub fn new(list: Vec<SocketAddr>, now: std::time::Instant, seen: Seen) -> Option<Self> {
+        let established = seen.handshake != 0 && seen.endpoint == list.first().copied();
         (list.len() >= 2).then(|| Self {
             steps_left: ROUNDS * list.len() - 1,
             list,
             index: 0,
             since: now,
             start: seen,
-            settled: false,
+            settled: established,
+            found: established,
         })
     }
 
@@ -203,6 +238,15 @@ impl Rotation {
         self.settled
     }
 
+    /// Whether this walk found the peer (or started on a live session) and the peer has since
+    /// gone silent: no handshake within [`SILENT`], read through [`live_handshake`]. The node
+    /// then walks the same list again. A walk that ran out of rounds never restarts this way, so
+    /// an unreachable peer costs nothing until its list changes.
+    #[must_use]
+    pub const fn went_silent(&self, seen: Seen) -> bool {
+        self.settled && self.found && seen.handshake == 0
+    }
+
     /// When the walk next needs a [`Self::tick`], if it has not stopped.
     #[must_use]
     pub fn due(&self) -> Option<std::time::Instant> {
@@ -215,14 +259,19 @@ impl Rotation {
         if self.settled {
             return None;
         }
-        // Any change, including a counter reset after a rebuild, means packets flowed. An address
-        // other than the one the walk installed can only come from an authenticated packet.
+        // Any change of the byte counter, including a reset after a rebuild, means packets
+        // flowed; so does a handshake newer than the one the walk started with. The engine reports
+        // a handshake's time as "now minus its age", which can read one second apart for the same
+        // handshake, so only a later second counts. A handshake that only aged past `SILENT` reads
+        // as 0 and is not news either. An address other than the one the walk installed can only
+        // come from an authenticated packet.
         let roamed = seen
             .endpoint
             .is_some_and(|endpoint| endpoint != self.list[self.index]);
-        if seen.received != self.start.received || seen.handshake != self.start.handshake || roamed
-        {
+        let newer_handshake = seen.handshake > self.start.handshake.saturating_add(1);
+        if seen.received != self.start.received || newer_handshake || roamed {
             self.settled = true;
+            self.found = true;
             return None;
         }
         if now.saturating_duration_since(self.since) < STEP {
@@ -437,6 +486,68 @@ mod tests {
             moved, None,
             "an established session on the first candidate was walked to {moved:?}"
         );
+    }
+
+    /// A walk that found its peer starts again only once that peer goes silent; one that ran out
+    /// of rounds does not, so an unreachable peer is not walked again and again.
+    #[test]
+    fn only_a_found_peer_that_goes_silent_is_walked_again() {
+        let start = Instant::now();
+        let list = vec![at("198.51.100.21:30254"), at("198.51.100.21:10254")];
+        let live = Seen {
+            received: 4_096,
+            handshake: 1_800_000_000,
+            endpoint: Some(list[0]),
+        };
+        let found = Rotation::new(list.clone(), start, live).unwrap();
+        assert!(found.settled());
+        assert!(!found.went_silent(live));
+        assert!(found.went_silent(Seen {
+            handshake: 0,
+            ..live
+        }));
+        // The engine follows every address the walk installs, and nothing ever comes back.
+        let quiet = |address| Seen {
+            endpoint: Some(address),
+            ..Seen::default()
+        };
+        let mut exhausted = Rotation::new(list.clone(), start, quiet(list[0])).unwrap();
+        let (mut now, mut current) = (start, list[0]);
+        while !exhausted.settled() {
+            now += STEP;
+            if let Some(next) = exhausted.tick(now, quiet(current)) {
+                current = next;
+            }
+        }
+        assert!(!exhausted.went_silent(quiet(current)));
+    }
+
+    /// A handshake older than [`SILENT`] reads as none; a fresh one reads as itself.
+    #[test]
+    fn a_stale_handshake_reads_as_none() {
+        assert_eq!(live_handshake(0, 1_000), 0);
+        assert_eq!(live_handshake(1_000, 1_179), 1_000);
+        assert_eq!(live_handshake(1_000, 1_180), 0);
+    }
+
+    /// A session made before the peer got a new first address is no proof for that address:
+    /// the caller passes no endpoint, and the walk runs.
+    #[test]
+    fn a_session_on_an_old_address_does_not_stop_a_new_walk() {
+        let start = Instant::now();
+        let list = vec![at("198.51.100.21:41000"), at("198.51.100.21:10254")];
+        let old_session = Seen {
+            received: 4_096,
+            handshake: 1_800_000_000,
+            endpoint: None,
+        };
+        let mut walk = Rotation::new(list.clone(), start, old_session).unwrap();
+        assert!(!walk.settled());
+        let on_first = Seen {
+            endpoint: Some(list[0]),
+            ..old_session
+        };
+        assert_eq!(walk.tick(start + STEP, on_first), Some(list[1]));
     }
 
     /// A single candidate needs no walk.
