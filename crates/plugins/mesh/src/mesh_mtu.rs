@@ -36,6 +36,13 @@ const RELAY_LINK_ID_OVERHEAD: u32 = 4;
 /// The lowest useful interface MTU and the minimum MTU we accept on an owned peer route.
 pub(crate) const MIN_MESH_MTU: u16 = 68;
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// Underlay route lookups this thread made, so tests can show which refreshes probed the
+    /// underlay without timing them (#489 J552 P2-2).
+    pub(crate) static ROUTE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Derive the shared interface MTU from the largest configured peer route budget.
 ///
 /// A peer whose endpoint cannot be resolved uses [`FALLBACK_MESH_MTU`] only for its
@@ -95,6 +102,8 @@ impl EndpointProbe {
     #[cfg(target_os = "linux")]
     #[allow(clippy::unused_self)] // The macOS twin caches interface MTUs in `self`.
     fn route_mtu(&mut self, endpoint: SocketAddr) -> io::Result<u32> {
+        #[cfg(test)]
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         crate::wireguard::route_mtu(endpoint)
     }
 

@@ -263,6 +263,84 @@ fn live_endpoint_refresh_writes_only_changed_budgets() {
     assert!(route_v6.contains("mtu 8912"), "{route_v6}");
 }
 
+/// A steady refresh looks no underlay route up; an underlay MTU change, announced by the
+/// kernel to the route-repair worker's listener, makes the next refresh re-derive and rewrite
+/// every peer (#489 J552 P2-2). Lookups are counted, never timed (ENGINEERING P3).
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn live_endpoint_refresh_probes_only_after_underlay_changes() {
+    use crate::mesh_mtu::ROUTE_LOOKUPS;
+    use crate::policy::model::{Addresses, PublicKey};
+    review_route_command(&["link", "set", "lo", "up"]);
+    review_marked_tun(PublicKey([9; 32]));
+    let endpoint = review_learned_underlay(1500);
+    let peers: Vec<_> = (2_u8..6)
+        .map(|id| crate::dataplane::Peer {
+            key: PublicKey([id; 32]),
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: std::net::Ipv4Addr::new(10, 254, 0, id),
+                ipv6: format!("fd01::{id}").parse().expect("IPv6"),
+            },
+            endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        })
+        .collect();
+    let learned: Vec<_> = peers
+        .iter()
+        .map(|peer| (peer.key, Some(endpoint)))
+        .collect();
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(&peers);
+    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    // Count lookups and writes of one refresh.
+    let refresh = || {
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
+        let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
+        (ROUTE_LOOKUPS.with(std::cell::Cell::get), written)
+    };
+    let first = refresh();
+    // Our own peer-route writes must not count as underlay changes.
+    let steady: Vec<_> = (0..4).map(|_| refresh()).collect();
+
+    review_route_command(&["link", "set", "under0", "mtu", "9000"]);
+    // The listener sees the kernel's announcement asynchronously: refresh until a refresh
+    // re-derives (an event, not a clock). The deadline only bounds a broken listener.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut idle_refreshes = 0;
+    let after_change = loop {
+        let result = refresh();
+        if result != (0, 0) || std::time::Instant::now() > deadline {
+            break result;
+        }
+        idle_refreshes += 1;
+        std::thread::yield_now();
+    };
+    let after_steady = refresh();
+    let (route_v4, route_v6) = review_peer_routes();
+    worker.stop();
+    eprintln!(
+        "REVIEW underlay watch first={first:?} steady={steady:?} after_change={after_change:?} \
+         (after {idle_refreshes} idle refreshes) after_steady={after_steady:?} \
+         routes={route_v4:?} {route_v6:?}"
+    );
+    // One endpoint shared by four peers: one lookup, four writes.
+    assert_eq!(first, (1, 4));
+    assert_eq!(
+        steady,
+        [(0, 0); 4],
+        "a steady refresh must not probe the underlay"
+    );
+    assert_eq!(
+        after_change,
+        (1, 4),
+        "an underlay change must re-derive every peer"
+    );
+    assert_eq!(after_steady, (0, 0));
+    assert!(route_v4.contains("mtu 8912"), "{route_v4}");
+    assert!(route_v6.contains("mtu 8912"), "{route_v6}");
+}
+
 /// A relay keeps its budget through live refreshes, and endpoints confirmed while it carries
 /// the peer are not recorded: they are the relay shim's, never a direct path (#489 J552 P2-1).
 /// A direct endpoint confirmed after the relay ends is used again.
