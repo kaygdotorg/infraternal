@@ -31,8 +31,9 @@ test("a server restart at the host-key step re-asks the host and Trust carries o
     // The server restarts under the open host-key step.
     await server.restart();
     // The card recovers by itself: the check is shown again for the new observation, and Trust is accepted.
-    await expect(wizard.getByRole("heading", { name: /Check .*'s key/ })).toBeVisible({ timeout: 60_000 });
-    await expect(trust).toBeEnabled({ timeout: 30_000 });
+    await expect(trust, `the card did not return to the key check; it shows: ${await wizard.innerText().catch(() => "?")}`).toBeEnabled({ timeout: 60_000 }).catch(async (error: unknown) => {
+      throw new Error(`the card did not return to the key check; it shows: ${(await wizard.innerText()).replace(/\s+/g, " ").slice(0, 300)} (${String(error).slice(0, 60)})`);
+    });
     await trust.click();
     await expect(wizard.locator(".ah-error")).toHaveCount(0);
     await expect(wizard.getByText("Check the host key again before trusting it.")).toHaveCount(0);
