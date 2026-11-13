@@ -58,7 +58,9 @@ the source of every authenticated packet, so the server's device holds an
 address the coordinator published (its list, or a walk through it) or one an
 authenticated packet came from. A reading reports the address as *proven*
 when new bytes or a newer handshake arrived since the previous reading in the
-same session; the store then takes it as the node's server-reflexive address.
+same session; the store then takes it as the node's server-reflexive address,
+unless it is private (the same ranges as LAN candidates below), which is what
+a server on the node's own LAN sees.
 Otherwise a reading reports it only when it is new to the tracker (a first
 reading, or it moved since the previous one), and the store takes such an
 address only when the coordinator never published it for that node: not its

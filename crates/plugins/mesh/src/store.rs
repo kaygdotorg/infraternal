@@ -1691,7 +1691,8 @@ impl Store {
         self.commit_candidate_change(tx, updated.rows_affected() > 0)
             .await
     }
-    /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs).
+    /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs). Private
+    /// addresses ([`crate::candidates::is_lan`]) are never recorded.
     ///
     /// A proven observation replaces a different stored address. An unproven one is accepted only when the
     /// coordinator never published that address for the node: not its guess, reflexive or LAN address, and not one
@@ -1710,6 +1711,9 @@ impl Store {
         let no_history = Vec::new();
         let changed: Vec<_> = observed
             .iter()
+            // A private address is what a server on the node's own LAN sees: no reflexive address, and it must not
+            // reach peers on other sites (J585 F9a). The node's LAN candidates already cover its own site.
+            .filter(|seen| !crate::candidates::is_lan(seen.address.ip()))
             .filter_map(|seen| {
                 let known = loaded.candidates.get(&seen.node)?;
                 let history = loaded
