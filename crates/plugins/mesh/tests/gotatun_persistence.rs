@@ -1711,7 +1711,7 @@ fn explicit_override_binds_exact_port_and_fails_when_occupied() {
     }
 
     assert!(
-        std::env::var_os("INFRATERAL_MESH_PORT").is_none(),
+        std::env::var_os("INFRATERNAL_MESH_PORT").is_none(),
         "the parent case must not inherit an explicit override"
     );
     assert!(
