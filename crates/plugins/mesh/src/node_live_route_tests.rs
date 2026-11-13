@@ -77,17 +77,12 @@ fn review_live_endpoint_refresh_refuses_foreign_interface() {
     };
     // This inventory can survive a person's deletion/replacement of the live TUN. The
     // replacement has no ownership alias, so its routes are outside this node's authority.
+    let learned = review_learned_underlay(9000);
     let state = Mutex::new(PeerRouteState::default());
     lock_route_state(&state).set_peers(&[peer]);
     let before = review_route_command(&["route", "show", "exact", "10.254.0.2/32"]);
     let before_v6 = review_route_command(&["-6", "route", "show", "exact", "fd01::2/128"]);
-    let result = update_live_peer_endpoints(
-        &state,
-        &[(
-            key,
-            Some("127.0.0.2:51820".parse().expect("learned endpoint")),
-        )],
-    );
+    let result = update_live_peer_endpoints(&state, &[(key, Some(learned))]);
     let after = review_route_command(&["route", "show", "exact", "10.254.0.2/32"]);
     let after_v6 = review_route_command(&["-6", "route", "show", "exact", "fd01::2/128"]);
     eprintln!(
@@ -133,6 +128,18 @@ fn review_marked_tun(owner: crate::policy::model::PublicKey) -> crate::wireguard
         .expect("the marked TUN holds the shared name")
 }
 
+/// Add a dummy underlay `under0` at `mtu` that carries the learned endpoint
+/// `198.51.100.2`, and return that endpoint.
+///
+/// Learned endpoints must be remote addresses: a loopback one never chooses a route budget
+/// (#489 J552 P2-1), so tests change this link's MTU to change the derived budget.
+fn review_learned_underlay(mtu: u32) -> std::net::SocketAddr {
+    review_route_command(&["link", "add", "under0", "type", "dummy"]);
+    review_route_command(&["link", "set", "under0", "mtu", &mtu.to_string(), "up"]);
+    review_route_command(&["address", "add", "198.51.100.1/24", "dev", "under0"]);
+    "198.51.100.2:51820".parse().expect("learned endpoint")
+}
+
 /// Read both peer host routes, IPv4 then IPv6, as `ip` prints them.
 fn review_peer_routes() -> (String, String) {
     (
@@ -168,12 +175,9 @@ fn live_endpoint_refresh_stays_on_the_proven_link() {
         route_state.link = Some(proven);
     }
 
-    // Control: the proven link takes the learned loopback endpoint's much larger budget.
-    update_live_peer_endpoints(
-        &state,
-        &[(key, Some("127.0.0.2:51820".parse().expect("endpoint")))],
-    )
-    .expect("refresh the proven link");
+    // Control: the proven link takes the learned endpoint's much larger budget.
+    let learned = review_learned_underlay(9000);
+    update_live_peer_endpoints(&state, &[(key, Some(learned))]).expect("refresh the proven link");
     let (proven_v4, proven_v6) = review_peer_routes();
     assert!(
         proven_v4.contains("proto 250") && !proven_v4.contains("mtu 1400"),
@@ -190,12 +194,9 @@ fn live_endpoint_refresh_stays_on_the_proven_link() {
     assert_ne!(replacement.ifindex, proven.ifindex);
     assert_eq!(replacement.owner, proven.owner);
     // Change the budget too, so the refresh has something to write and must refuse it.
-    review_route_command(&["link", "set", "lo", "mtu", "9000"]);
+    review_route_command(&["link", "set", "under0", "mtu", "4000"]);
     let before = review_peer_routes();
-    let result = update_live_peer_endpoints(
-        &state,
-        &[(key, Some("127.0.0.3:51820".parse().expect("endpoint")))],
-    );
+    let result = update_live_peer_endpoints(&state, &[(key, Some(learned))]);
     let after = review_peer_routes();
     eprintln!(
         "REVIEW marked replacement proven={} replacement={} result={result:?} before={before:?} after={after:?}",
@@ -219,6 +220,7 @@ fn live_endpoint_refresh_writes_only_changed_budgets() {
     use crate::policy::model::{Addresses, PublicKey};
     review_route_command(&["link", "set", "lo", "up"]);
     let proven = review_marked_tun(PublicKey([9; 32]));
+    let endpoint = review_learned_underlay(1500);
     let peers: Vec<_> = (2_u8..6)
         .map(|id| crate::dataplane::Peer {
             key: PublicKey([id; 32]),
@@ -239,19 +241,14 @@ fn live_endpoint_refresh_writes_only_changed_budgets() {
     }
     let learned: Vec<_> = peers
         .iter()
-        .map(|peer| {
-            (
-                peer.key,
-                Some("127.0.0.2:51820".parse().expect("learned endpoint")),
-            )
-        })
+        .map(|peer| (peer.key, Some(endpoint)))
         .collect();
     let mut writes = Vec::new();
     for _ in 0..4 {
         writes.push(update_live_peer_endpoints(&state, &learned).expect("steady refresh"));
     }
-    // A smaller loopback MTU changes every peer's budget at the same endpoint.
-    review_route_command(&["link", "set", "lo", "mtu", "9000"]);
+    // A larger underlay MTU changes every peer's budget at the same endpoint.
+    review_route_command(&["link", "set", "under0", "mtu", "9000"]);
     for _ in 0..4 {
         writes.push(update_live_peer_endpoints(&state, &learned).expect("refresh after change"));
     }
@@ -266,7 +263,9 @@ fn live_endpoint_refresh_writes_only_changed_budgets() {
     assert!(route_v6.contains("mtu 8912"), "{route_v6}");
 }
 
-/// A direct endpoint update remains available when a relay budget currently owns the route.
+/// A relay keeps its budget through live refreshes, and endpoints confirmed while it carries
+/// the peer are not recorded: they are the relay shim's, never a direct path (#489 J552 P2-1).
+/// A direct endpoint confirmed after the relay ends is used again.
 #[test]
 fn live_endpoint_refresh_preserves_relay_budget_for_direct_fallback() {
     use crate::policy::model::Addresses;
@@ -292,10 +291,29 @@ fn live_endpoint_refresh_preserves_relay_budget_for_direct_fallback() {
     }
 
     update_live_peer_endpoints(&state, &[(key, Some(learned))])
-        .expect("relay owns the route while the live endpoint is recorded");
+        .expect("relay owns the route, so nothing is written");
+    {
+        let route_state = lock_route_state(&state);
+        assert_eq!(route_state.overrides.get(&key), Some(&1392));
+        assert!(route_state.live_endpoints.is_empty());
+        assert_eq!(route_state.route_peer(&peer).endpoint, Some(configured));
+    }
 
-    let route_state = lock_route_state(&state);
-    assert_eq!(route_state.overrides.get(&key), Some(&1392));
+    // Once the relay is gone, a confirmed direct endpoint chooses the budget again. A
+    // loopback one, such as the shim GotaTun may still report, never does.
+    lock_route_state(&state).overrides.remove(&key);
+    let shim: std::net::SocketAddr = "127.0.0.1:40000".parse().expect("relay shim");
+    let mapped_shim: std::net::SocketAddr = "[::ffff:127.0.0.1]:40000"
+        .parse()
+        .expect("mapped relay shim");
+    for local in [shim, mapped_shim] {
+        let mut route_state = lock_route_state(&state);
+        route_state.live_endpoints.insert(key, local);
+        assert_eq!(route_state.route_peer(&peer).endpoint, Some(configured));
+        route_state.live_endpoints.clear();
+    }
+    let mut route_state = lock_route_state(&state);
+    route_state.live_endpoints.insert(key, learned);
     assert_eq!(route_state.route_peer(&peer).endpoint, Some(learned));
 }
 

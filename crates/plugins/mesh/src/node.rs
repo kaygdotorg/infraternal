@@ -32,6 +32,13 @@ struct PeerRouteState {
     /// Active relay budgets; a peer without an entry uses its direct-path budget.
     overrides: BTreeMap<crate::policy::model::PublicKey, u16>,
     /// Live direct endpoints learned after the coordinator's configured endpoint.
+    ///
+    /// Invariant (#489 J552 P2-1): no entry is a loopback address, and no peer with a relay
+    /// override has an entry. While a relay carries a peer, `GotaTun` confirms the relay shim's
+    /// local `127.0.0.1` socket as the peer's endpoint; a direct budget derived from it is the
+    /// loopback MTU (65456), which would outlive the relay. Installing a relay drops the peer's
+    /// entry, so its direct fallback uses the configured endpoint until a direct packet proves
+    /// another one.
     live_endpoints: BTreeMap<crate::policy::model::PublicKey, std::net::SocketAddr>,
     /// Installed peers, refreshed with their routes for repair and relay path updates.
     peers: BTreeMap<crate::policy::model::PublicKey, crate::dataplane::Peer>,
@@ -57,9 +64,16 @@ impl PeerRouteState {
     }
 
     /// Copy a peer with its authenticated live endpoint for route-MTU selection.
+    ///
+    /// A peer a relay carries keeps its configured endpoint, and so does a learned endpoint that
+    /// could not be a direct path; `live_endpoints` never holds either, and this re-checks it so
+    /// a later writer cannot break the invariant by accident.
     fn route_peer(&self, peer: &crate::dataplane::Peer) -> crate::dataplane::Peer {
         let mut route_peer = peer.clone();
-        if let Some(endpoint) = self.live_endpoints.get(&peer.key) {
+        if let Some(endpoint) = self.live_endpoints.get(&peer.key)
+            && !self.overrides.contains_key(&peer.key)
+            && is_direct_learned_endpoint(*endpoint)
+        {
             route_peer.endpoint = Some(*endpoint);
         }
         route_peer
@@ -69,6 +83,17 @@ impl PeerRouteState {
     fn route_peers(&self, peers: &[crate::dataplane::Peer]) -> Vec<crate::dataplane::Peer> {
         peers.iter().map(|peer| self.route_peer(peer)).collect()
     }
+}
+
+/// Whether an authenticated endpoint `GotaTun` reports can be a direct underlay path.
+///
+/// Loopback and unspecified sources are local sockets, not a remote peer's address: the relay
+/// shim delivers relayed datagrams from `127.0.0.1` (#489 J552 P2-1). The loopback route's MTU
+/// (65536) says nothing about the real path, so such an address never chooses a route budget.
+/// IPv4-mapped IPv6 sources are judged as the IPv4 address they carry.
+fn is_direct_learned_endpoint(endpoint: std::net::SocketAddr) -> bool {
+    let address = endpoint.ip().to_canonical();
+    !address.is_loopback() && !address.is_unspecified()
 }
 
 /// Idle delay before another full inventory check becomes due, independent of notifications.
@@ -332,7 +357,13 @@ fn update_live_peer_endpoints(
             continue;
         };
         refreshed.insert(*key);
-        let desired = (*endpoint).filter(|endpoint| Some(*endpoint) != configured);
+        if state.overrides.contains_key(key) {
+            // A relay owns this peer: its confirmed endpoint is the relay shim (#489 J552 P2-1).
+            continue;
+        }
+        let desired = (*endpoint).filter(|endpoint| {
+            Some(*endpoint) != configured && is_direct_learned_endpoint(*endpoint)
+        });
         if state.live_endpoints.get(key).copied() == desired {
             continue;
         }
@@ -409,6 +440,14 @@ fn update_relay_route_mtu(
         Some(mtu) => state.overrides.insert(key, mtu),
         None => state.overrides.remove(&key),
     };
+    // A relay starts because the direct path failed, and while it runs the confirmed endpoint
+    // is its shim. Forget the learned one, so the fallback starts from the configured endpoint
+    // (#489 J552 P2-1).
+    let learned = if relay_mtu.is_some() {
+        state.live_endpoints.remove(&key)
+    } else {
+        None
+    };
     state.written.remove(&key);
     let route_peer = state.route_peer(&peer);
     let result = Device::routes_with_mtu_overrides(
@@ -421,6 +460,11 @@ fn update_relay_route_mtu(
             Some(previous) => state.overrides.insert(key, previous),
             None => state.overrides.remove(&key),
         };
+        if previous.is_none()
+            && let Some(learned) = learned
+        {
+            state.live_endpoints.insert(key, learned);
+        }
     }
     result
 }
