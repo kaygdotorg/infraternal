@@ -4843,7 +4843,7 @@ access (#341 B19).
        `infraternal_*` as its own. It creates, updates and removes them, the
        host input policy included, from its own configuration. Enabling mesh
        (D384) brings in the input it needs, such as traffic on `infraternal0`
-       and the fixed mesh UDP port 10254, with grants still enforced by the
+       and the mesh UDP port (10254 by default; see D391), with grants still enforced by the
        mesh filter.
      - **Fixes are proven in the product, not by hand:** a fix to a host's
        network state ships as product behaviour and is proven on a
@@ -4946,3 +4946,40 @@ access (#341 B19).
      - **`+` with several hosts:** opens the palette filtered to "Open shell
        on …" rows, one per host. With exactly one host it opens that host
        directly.
+
+391. **Mesh relays, disguise, candidates and the mesh port (owner, 2026-11-14, #483, #514; amends D313's order and D386's port wording, extends D316):**
+     - **Context:** J536b's 18-profile NAT and censorship matrix (#483)
+       left four questions, and J511b and J509 left one each. The
+       orchestrator put them to the owner with recommendations; the owner
+       agreed with each one ("agreed").
+     - **Relay transport:** the first relay release is TLS on port 443,
+       with D313's WebSocket upgrade, so UDP-blocked and TCP-only networks
+       work from day one. The QUIC DATAGRAM relay (D313 Q7) follows it, for
+       pairs that can use UDP. Port 443 only for now.
+     - **Disguise:** WireGuard inside the TLS 443 relay is enough for the
+       first release. A self-hosted relay serves on the owner's own domain,
+       so no shared, well-known relay name exists to block. A cheap
+       header scramble for direct WireGuard paths is the next candidate. It
+       changes the GotaTun fork, so it comes back as its own question with
+       measurements.
+     - **Port prediction:** D313 Q4's two-week counter gate stays. The
+       owner: "agreed, good prioritisation".
+     - **Candidates first:** the coordinator publishes each node's
+       server-reflexive address (the public address and port it sees the
+       node's packets come from), plus LAN addresses for peers behind the
+       same public IP. This is built now, as the first slice of D316's path
+       finding. Measured in J536b's model: port-translating CGNAT 127 ms,
+       double NAT 88/132 ms, same NAT without hairpin 54 ms, and rebinds
+       behind filtering NATs recover in about 15 s instead of never. The
+       owner: "this is awesome!"
+     - **Mesh port:** 10254 is the default, not a fixed port. An explicit
+       override binds exactly that port and fails if it is taken. Without
+       one, an occupied default falls back to another port and keeps it.
+       The app-owned firewall (D386) opens the port the node actually
+       bound.
+     - **"Unlock to connect":** dropped as an expectation. Updates keep the
+       CA unlocked through the in-memory handoff (D217). A cold restart
+       still locks it and still needs an administrator's passkey (D168),
+       but only adding new hosts waits on that. Existing hosts reconnect by
+       themselves, so a per-host label has nothing to mark. The restart
+       toast and the locked Add host card cover it.
