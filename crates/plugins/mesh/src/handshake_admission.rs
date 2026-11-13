@@ -321,6 +321,12 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
         Ok(())
     }
 
+    /// Pass `GotaTun`'s idle-time release through to the socket, so an idle node gives its
+    /// batch receive pages back. The trait's default does nothing, which would keep them.
+    fn release_recv_buf(&self, recv_buf: &mut Self::RecvManyBuf) {
+        self.socket.release_recv_buf(recv_buf);
+    }
+
     /// Keep the underlying socket's UDP GRO support available to `GotaTun`.
     fn enable_udp_gro(&self) -> io::Result<()> {
         self.socket.enable_udp_gro()
