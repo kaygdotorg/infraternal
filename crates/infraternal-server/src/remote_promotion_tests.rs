@@ -661,3 +661,39 @@ async fn a_relay_rollback_after_the_successor_joined_ends_the_cleanup() {
     assert_ne!(cleanup, "uninstall");
     assert!(store.admit_successor(&[7; 32], 211).await.is_err());
 }
+
+/// J569 F2 (#399, PLAUSIBLE): a second promotion must not start while an
+/// earlier one's root install may still be on the host.
+///
+/// `begin_promotion` ignores `cleanup`. Promotion B's handover revokes every
+/// other certificate of the host, including A's successor, so A's queued
+/// uninstall can then never be delivered, and A's committed root install
+/// stays. A reconnecting A could also act on B's install while B runs. This
+/// needs F3 first, or every rolled-back try would block the host for 7 days.
+#[tokio::test]
+async fn a_pending_uninstall_bars_the_next_promotion() {
+    let (store, pool, host) = enrolled().await;
+    session(&pool, "s", 150).await;
+    let first = Uuid::from_u128(0x569_a);
+    enrolled_promotion(&store, host, first, 200).await;
+    store
+        .record_install_transaction(first, Uuid::from_u128(0xa))
+        .await
+        .unwrap();
+    // A committed, then its handover was refused: its uninstall is queued.
+    store.abandon_promotion(first, 205).await.unwrap();
+    let second = store
+        .begin_promotion(
+            "s",
+            host,
+            Uuid::from_u128(0x569_b),
+            Method::Sudo,
+            bound(),
+            220,
+        )
+        .await;
+    assert!(
+        matches!(second, Err(PromotionError::Busy)),
+        "a new promotion began while the last one's uninstall is pending: {second:?}"
+    );
+}
