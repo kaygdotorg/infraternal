@@ -82,6 +82,25 @@ impl Drop for Directory {
     }
 }
 
+/// Both private roots disappear after successful tests and after assertion failures.
+#[test]
+fn directory_removes_roots_on_drop_and_unwind() {
+    for unwind in [false, true] {
+        let directory = Directory::new();
+        let images = directory.0.clone();
+        let sockets = directory.state().to_owned();
+        std::fs::write(images.join("image"), b"fixture").unwrap();
+        std::fs::write(sockets.join("state"), b"fixture").unwrap();
+        let result = std::panic::catch_unwind(move || {
+            let _directory = directory;
+            assert!(!unwind, "fixture panic");
+        });
+        assert_eq!(result.is_err(), unwind);
+        assert!(!images.exists());
+        assert!(!sockets.exists());
+    }
+}
+
 /// Own a child launched with `process_group(0)` until its output is collected.
 /// Drop kills that private group and reaps the leader, including on test panic.
 pub(crate) struct ChildGuard(Option<std::process::Child>);
@@ -252,17 +271,27 @@ impl Signed {
 /// private copy. A `source` that already is a stripped image is returned as is.
 /// The cache uses the same trusted home ancestry as signed fixtures, so a
 /// group-writable build directory cannot turn a valid self-reload into refusal.
+/// Last-use timestamps include already stripped child images. Lookup, publication,
+/// renewal and pruning share a short directory lock across test processes.
 pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     /// Serializes building the cached image within this test process.
     static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let cache = image_root().join("stripped");
     if source
         .file_name()
         .is_some_and(|name| name.to_string_lossy().ends_with(".all-stripped"))
     {
+        if source.parent() == Some(cache.as_path()) {
+            let cache_lock = lock_stripped_cache(&cache);
+            File::open(source)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now())
+                .unwrap();
+            cache_lock.unlock().unwrap();
+        }
         return source.to_owned();
     }
-    let cache = image_root().join("stripped");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
     // Include source identity so a rebuilt test executable cannot reuse stale fixture bytes.
@@ -290,13 +319,17 @@ pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
     let _building = BUILDING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache_lock = lock_stripped_cache(&cache);
     if !image.exists() {
+        // Large copies and strip processes must not queue unrelated builds behind this lock.
+        cache_lock.unlock().unwrap();
         let mut staging_name = image_name;
         staging_name.push(format!(".{}", uuid::Uuid::new_v4().simple()));
         let staging = cache.join(staging_name);
         crate::test_executable::copy(source, &staging, 0o700);
         strip_all(&staging);
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+        cache_lock.lock().unwrap();
         match std::fs::hard_link(&staging, &image) {
             Ok(()) => std::fs::remove_file(&staging).unwrap(),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -304,11 +337,149 @@ pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
             }
             Err(error) => panic!("could not retain the stripped test image: {error}"),
         }
+        prune_stripped_images(&cache, &image, std::time::SystemTime::now());
     }
     let metadata = std::fs::symlink_metadata(&image).unwrap();
     assert!(metadata.is_file());
     assert_eq!(metadata.mode() & 0o777, 0o700);
+    // A read-only descriptor renews grace without an inheritable executable writer.
+    File::open(&image)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    cache_lock.unlock().unwrap();
     image
+}
+
+/// Lock the stable cache directory inode for lookup, renewal, publication and pruning.
+/// Cache maintenance never removes this directory. Callers release the lock before
+/// copying or stripping an image, and on return so forked children cannot prolong it.
+fn lock_stripped_cache(cache: &Path) -> File {
+    let directory = File::open(cache).unwrap();
+    directory.lock().unwrap();
+    directory
+}
+
+/// Keep the three newest completed images, plus the caller's image and a six-hour grace
+/// period for concurrent test processes. Sweep only after creating an image, so cache hits
+/// stay cheap. Staging copies, symlinks and directories are never eviction candidates.
+/// Cleanup is best effort: another process can remove an entry between listing and unlink.
+fn prune_stripped_images(cache: &Path, current: &Path, now: std::time::SystemTime) {
+    let mut images: Vec<_> = std::fs::read_dir(cache)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "all-stripped" {
+                return None;
+            }
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            Some((metadata.modified().ok()?, path))
+        })
+        .collect();
+    images.sort_unstable_by(|left, right| right.cmp(left));
+    for (modified, path) in images.into_iter().skip(3) {
+        if path != current
+            && now
+                .duration_since(modified)
+                .is_ok_and(|age| age > Duration::from_hours(6))
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Pruning bounds old builds without touching recent concurrent users or unfinished copies.
+#[test]
+fn stripped_cache_prunes_only_stale_completed_images() {
+    use std::os::unix::fs::symlink;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let directory = Directory::new();
+    let cache = &directory.0;
+    let now = UNIX_EPOCH + Duration::from_secs(100_000);
+    let mut images = Vec::new();
+    for index in 0..7 {
+        let path = cache.join(format!("{index}.all-stripped"));
+        let file = File::create(&path).unwrap();
+        file.set_modified(now - Duration::from_secs(30_000 - index * 1_000))
+            .unwrap();
+        images.push(path);
+    }
+    let recent = cache.join("recent.all-stripped");
+    let file = File::create(&recent).unwrap();
+    file.set_modified(now - Duration::from_secs(6 * 60 * 60 - 1))
+        .unwrap();
+    let future = cache.join("future.all-stripped");
+    File::create(&future)
+        .unwrap()
+        .set_modified(now + Duration::from_secs(1))
+        .unwrap();
+    let staging = cache.join("copy.all-stripped.staging");
+    File::create(&staging)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let link = cache.join("link.all-stripped");
+    symlink(&images[1], &link).unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                barrier.wait();
+                prune_stripped_images(cache, &images[0], now);
+            });
+        }
+    });
+    assert!(images[0].exists(), "the caller's image must survive");
+    for image in &images[1..6] {
+        assert!(!image.exists(), "stale image retained: {}", image.display());
+    }
+    assert!(images[6].exists(), "keep the three newest completed images");
+    assert!(recent.exists());
+    assert!(future.exists());
+    assert!(staging.exists());
+    assert!(std::fs::symlink_metadata(link).unwrap().is_symlink());
+    // More recent images than the count limit must all survive, including the age boundary.
+    let mut active = Vec::new();
+    for index in 0..5 {
+        let path = cache.join(format!("active-{index}.all-stripped"));
+        File::create(&path)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(6 * 60 * 60 - index))
+            .unwrap();
+        active.push(path);
+    }
+    prune_stripped_images(cache, &images[0], now);
+    assert!(active.iter().all(|path| path.exists()));
+}
+
+/// Reusing an old build renews its eviction grace; a tiny system ELF keeps this test cheap.
+#[cfg(target_os = "linux")]
+#[test]
+fn stripped_cache_reuse_renews_grace() {
+    use std::time::UNIX_EPOCH;
+    let directory = Directory::new();
+    let source = directory
+        .0
+        .join(format!("cache-hit-{}", uuid::Uuid::new_v4().simple()));
+    crate::test_executable::copy(Path::new("/bin/true"), &source, 0o700);
+    let image = stripped_test_image(&source);
+    let mut renewed = true;
+    for current in [&source, &image] {
+        File::open(&image)
+            .unwrap()
+            .set_modified(UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(stripped_test_image(current), image);
+        renewed &= std::fs::metadata(&image).unwrap().modified().unwrap() > UNIX_EPOCH;
+    }
+    std::fs::remove_file(image).unwrap();
+    assert!(
+        renewed,
+        "reusing an old image must renew its eviction grace"
+    );
 }
 
 /// Removes all symbols and debug sections from the image at `path`, in place.
