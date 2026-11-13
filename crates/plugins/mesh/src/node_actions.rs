@@ -238,12 +238,23 @@ fn peer_page(
         for (id, peer) in config.peers.range((from, Unbounded)) {
             let stats = counters.get(&peer.peer.key).cloned().unwrap_or_default();
             let value = if presence {
-                json!([
-                    id,
-                    stats.handshake_secs,
-                    stats.received_bytes,
-                    stats.persistent_keepalive_secs
-                ])
+                // The engine's current address for the peer comes last, so the server can read
+                // its nodes' server-reflexive addresses from the same poll (#515, presence.rs).
+                match stats.endpoint {
+                    Some(endpoint) => json!([
+                        id,
+                        stats.handshake_secs,
+                        stats.received_bytes,
+                        stats.persistent_keepalive_secs,
+                        endpoint.to_string()
+                    ]),
+                    None => json!([
+                        id,
+                        stats.handshake_secs,
+                        stats.received_bytes,
+                        stats.persistent_keepalive_secs
+                    ]),
+                }
             } else {
                 json!({"node":id,"peer":peer.peer,"inbound":policy_summary(&peer.inbound),"outbound":policy_summary(&peer.outbound),"counters":stats,"path":if stats.handshake_secs > 0 {"Direct"} else {"Unproven"}})
             };
@@ -381,7 +392,7 @@ pub struct RotationOperation {
 pub struct Page {
     #[serde(default)]
     cursor: Option<Cursor>,
-    /// Rows of counters only, `[node, handshake_secs, received_bytes, persistent_keepalive_secs]`, for the
+    /// Rows of counters only, `[node, handshake_secs, received_bytes, persistent_keepalive_secs, endpoint?]`, for the
     /// server's presence poll (presence.rs). The server asks only its own node, which is always the same build,
     /// so an older node never sees the field. A quarter of the bytes of a full row: fewer pages per poll.
     #[serde(default)]

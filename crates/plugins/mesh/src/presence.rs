@@ -32,6 +32,14 @@
 //!   (`node_actions.rs`). Measured on the perf VM (#236): 0.3 ms of userspace work at 500 peers (2 pages) and
 //!   0.6 ms at 1000 (4 pages), plus one kernel peer dump of a few milliseconds; the full listing it replaced
 //!   was 27 dumps and 15 ms at 500 peers. It never runs on remote nodes and never touches the terminal path.
+//!
+//! **Server-reflexive addresses ride on the same reading (#515, D391).** Each row also carries the address the
+//! server's device currently sends that peer's packets to. `GotaTun` and kernel `WireGuard` move it to the source
+//! of every authenticated data packet, so when a peer's receive counter grew since the previous reading, that
+//! address is where the node's mesh socket was just seen from: its server-reflexive address, port included. A
+//! configured address that no new packet confirmed never counts (contracts/mesh-discovery.md). [`run`] hands each
+//! fresh observation to the store, which writes and republishes only a changed address, so a quiet mesh costs no
+//! write and a NAT rebind reaches the node's peers one poll after its next packet to the server.
 use crate::api::MeshService;
 use infraternal_mesh::model::NodeId;
 use infraternal_plugin_api::node_channel::NodeChannel;
@@ -39,6 +47,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
+    net::SocketAddr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -111,10 +120,12 @@ pub struct PeerRow {
     pub handshake: u64,
     pub received: u64,
     pub keepalive: u64,
+    /// Where the server's device sends this peer's packets now; absent from older rows.
+    pub endpoint: Option<SocketAddr>,
 }
 
 /// Reads one `mesh.peers` page in its presence form (`node_actions.rs` `Page::presence`, rows of
-/// `[node, handshake_secs, received_bytes, persistent_keepalive_secs]`) into `rows`. `None` when the reply is not
+/// `[node, handshake_secs, received_bytes, persistent_keepalive_secs, endpoint]`, the last optional) into `rows`. `None` when the reply is not
 /// such a page, else the next page's cursor, if any.
 #[must_use]
 pub fn read_peers(reply: &[u8], rows: &mut Vec<PeerRow>) -> Option<Option<Value>> {
@@ -128,6 +139,10 @@ pub fn read_peers(reply: &[u8], rows: &mut Vec<PeerRow>) -> Option<Option<Value>
                 handshake,
                 received: field(2)?,
                 keepalive: field(3)?,
+                endpoint: row
+                    .get(4)
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.parse().ok()),
             });
         }
     }
@@ -178,6 +193,8 @@ struct PeerObservation {
     handshake: u64,
     received: u64,
     last_received_at: Option<u64>,
+    /// The device's address for the peer, when this reading proved it with new received data.
+    reflexive: Option<SocketAddr>,
 }
 
 impl Tracker {
@@ -200,21 +217,36 @@ impl Tracker {
             // proves a packet arrived since the last reading. Stamp it now:
             // being late to observe an active relay path must not exempt its
             // peer from the ack barrier.
+            let grew = previous.is_some_and(|previous| row.received > previous.received);
             let last_received_at = match previous {
-                Some(previous) if row.received > previous.received => Some(now),
+                Some(_) if grew => Some(now),
                 Some(previous) if row.received == previous.received => previous.last_received_at,
                 Some(_) | None => None,
             };
+            // Only an address that new authenticated packets came from is an observation.
+            let reflexive = row
+                .endpoint
+                .filter(|_| grew)
+                .and_then(|endpoint| crate::policy::discovery::usable_address(endpoint).ok());
             peers.insert(
                 row.node,
                 PeerObservation {
                     handshake: row.handshake,
                     received: row.received,
                     last_received_at,
+                    reflexive,
                 },
             );
         }
         self.peers = peers;
+    }
+    /// The server-reflexive address of every peer the last reading saw new packets from (#515).
+    #[must_use]
+    pub fn reflexive(&self) -> Vec<(NodeId, SocketAddr)> {
+        self.peers
+            .iter()
+            .filter_map(|(node, peer)| peer.reflexive.map(|address| (*node, address)))
+            .collect()
     }
     /// Who is online at `now`. Nothing once the last good reading is older than [`STALE`].
     #[must_use]
@@ -254,6 +286,25 @@ impl Drop for Clear {
     }
 }
 
+/// Stores the last reading's server-reflexive observations and republishes the mesh when one changed (#515).
+///
+/// The store compares each address with the one it holds and writes only a change, so this costs one in-memory
+/// comparison per active peer per poll. Returns whether anything was republished.
+pub async fn publish_reflexive(service: &MeshService, tracker: &Tracker) -> bool {
+    let observed = tracker.reflexive();
+    if observed.is_empty() {
+        return false;
+    }
+    match service.dataplane().record_reflexive(&observed).await {
+        Ok(true) => {
+            service.invalidate_dataplane().await;
+            true
+        }
+        // A storage failure keeps the last published addresses; the next poll observes again.
+        Ok(false) | Err(_) => false,
+    }
+}
+
 /// Keeps presence current for as long as the server's own node channel is attached. The caller runs it only for
 /// the server's channel (socket.rs), so a remote host's worker never polls.
 pub async fn run(service: MeshService, channel: Arc<dyn NodeChannel>) {
@@ -266,6 +317,7 @@ pub async fn run(service: MeshService, channel: Arc<dyn NodeChannel>) {
         }
         tracker.record(observe(channel.as_ref()).await, unix_now());
         service.set_presence(tracker.live(server, unix_now()));
+        publish_reflexive(&service, &tracker).await;
         // The first poll runs at once, so presence is rebuilt within one poll of a restart.
         tokio::time::sleep(POLL).await;
     }
@@ -290,6 +342,7 @@ mod tests {
             handshake,
             received,
             keepalive,
+            endpoint: None,
         }
     }
 
@@ -571,5 +624,48 @@ mod tests {
             tracker.live(None, NOW + 5).get(&NodeId(3)),
             Some(&Some(NodePath::Relay))
         );
+    }
+
+    /// The address new packets came from is the node's server-reflexive address; an address no new packet
+    /// confirmed, or one that cannot be sent to, is not (#515).
+    #[test]
+    fn only_an_address_proved_by_new_packets_is_reflexive() {
+        let mut rows = Vec::new();
+        let page = json!({"peers":[[3, NOW - 20, 1000, 25, "198.51.100.21:30254"], [4, NOW - 20, 500, 25]],
+            "version":4,"next_cursor":null});
+        assert_eq!(read_peers(&wire(&page), &mut rows), Some(None));
+        assert_eq!(
+            rows[0].endpoint,
+            Some("198.51.100.21:30254".parse().unwrap())
+        );
+        assert_eq!(rows[1].endpoint, None, "older rows have no address");
+
+        let mut tracker = Tracker::default();
+        tracker.record(Some((true, rows.clone())), NOW);
+        assert!(
+            tracker.reflexive().is_empty(),
+            "a first reading proves no new packet"
+        );
+
+        // Unchanged counter: the configured address is not evidence.
+        tracker.record(Some((true, rows.clone())), NOW + 5);
+        assert_eq!(tracker.reflexive(), Vec::<(NodeId, SocketAddr)>::new());
+
+        // New packets from a new port after a NAT rebind.
+        let mut moved = rows.clone();
+        moved[0].received = 1100;
+        moved[0].endpoint = Some("198.51.100.21:30999".parse().unwrap());
+        moved[1].received = 600;
+        tracker.record(Some((true, moved.clone())), NOW + 10);
+        assert_eq!(
+            tracker.reflexive(),
+            [(NodeId(3), "198.51.100.21:30999".parse().unwrap())]
+        );
+
+        // A loopback address (a relay shim) is never published.
+        moved[0].received = 1200;
+        moved[0].endpoint = Some("127.0.0.1:4000".parse().unwrap());
+        tracker.record(Some((true, moved)), NOW + 15);
+        assert_eq!(tracker.reflexive(), Vec::<(NodeId, SocketAddr)>::new());
     }
 }

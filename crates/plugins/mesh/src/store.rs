@@ -31,7 +31,12 @@ struct State {
 #[derive(Clone)]
 struct Loaded {
     coordinator: std::sync::Arc<Coordinator>,
+    /// The one address an older node gets for each peer: reflexive when known, else the guess.
     endpoints: std::sync::Arc<BTreeMap<NodeId, SocketAddr>>,
+    /// Every known direct-path candidate per node (#515); [`crate::candidates::order`] picks per pair.
+    candidates: std::sync::Arc<BTreeMap<NodeId, crate::candidates::NodeCandidates>>,
+    /// Nodes that walk an ordered candidate list; the rest get `endpoints` alone.
+    accepts_candidates: std::sync::Arc<BTreeSet<NodeId>>,
     default: DefaultPolicy,
     revision: u64,
     /// The durable authenticated deployment authority for every compiled node snapshot.
@@ -96,6 +101,26 @@ pub(crate) struct Snapshot {
     control_plane: TrafficPolicy,
 }
 impl Snapshot {
+    /// Give a node that walks candidates each peer's full ordered list (#515, D391): `endpoint` is the first to
+    /// try and `candidates` the rest. LAN addresses appear only for peers behind this node's own public address
+    /// ([`crate::candidates::order`]). An older node keeps the single address the compiler already set.
+    fn order_candidates(&self, node: NodeId, config: &mut Config) {
+        if !self.loaded.accepts_candidates.contains(&node) {
+            return;
+        }
+        let empty = crate::candidates::NodeCandidates::default();
+        let viewer = self.loaded.candidates.get(&node).unwrap_or(&empty);
+        for (peer, policy) in &mut config.peers {
+            let Some(known) = self.loaded.candidates.get(peer) else {
+                continue;
+            };
+            let mut list = crate::candidates::order(viewer, known).into_iter();
+            if let Some(first) = list.next() {
+                policy.peer.endpoint = Some(first);
+                policy.peer.candidates = list.collect();
+            }
+        }
+    }
     /// Whether any node is past preparation, so applied views need durable acknowledgments before the rotation moves on.
     pub(crate) fn acknowledgments_required(&self) -> bool {
         self.loaded
@@ -126,6 +151,7 @@ impl Snapshot {
             _ => storage_error("configuration compilation failed"),
         })?;
         config.authority_epoch = Some(self.loaded.authority_epoch.clone());
+        self.order_candidates(node, &mut config);
         #[cfg(feature = "mesh-dns")]
         {
             if self.loaded.dns_placeholders.contains(&node) {
@@ -1615,6 +1641,105 @@ impl Store {
             true,
         ))
     }
+    /// Record what a node said about direct-path candidates when it attached (#515): whether it walks an ordered
+    /// list, and its LAN addresses, filtered to at most two private, sendable ones. `None` means the node refused
+    /// the probe (an older build), which stores "unsupported" and no LAN addresses.
+    ///
+    /// Writes, and advances the revision, only when something changed. Returns whether it did.
+    /// # Errors
+    /// Returns fixed public errors, not database input.
+    pub async fn record_candidates(
+        &self,
+        node: NodeId,
+        reported: Option<&[SocketAddr]>,
+    ) -> Result<bool, &'static str> {
+        let supported = reported.is_some();
+        let lan = crate::candidates::valid_lan(reported.unwrap_or_default());
+        let stored = (!lan.is_empty())
+            .then(|| serde_json::to_string(&lan))
+            .transpose()
+            .map_err(|_| "Mesh identity invalid.")?;
+        let id = i64::try_from(node.0).map_err(|_| "Mesh identity invalid.")?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let updated = sqlx::query(
+            "UPDATE mesh_nodes SET lan_endpoints=?,candidates_supported=? \
+             WHERE id=? AND (lan_endpoints IS NOT ? OR candidates_supported IS NOT ?)",
+        )
+        .bind(&stored)
+        .bind(supported)
+        .bind(id)
+        .bind(&stored)
+        .bind(supported)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?;
+        self.commit_candidate_change(tx, updated.rows_affected() > 0)
+            .await
+    }
+    /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs).
+    ///
+    /// Each address is compared with the cached snapshot first, so a steady mesh costs no database write; only a
+    /// changed address is written, all in one transaction with one revision. Returns whether anything changed.
+    /// # Errors
+    /// Returns fixed public errors, not database input.
+    pub async fn record_reflexive(
+        &self,
+        observed: &[(NodeId, SocketAddr)],
+    ) -> Result<bool, &'static str> {
+        let loaded = self.load().await.map_err(|_| "Mesh storage unavailable.")?;
+        let changed: Vec<_> = observed
+            .iter()
+            .filter(|(node, address)| {
+                loaded
+                    .candidates
+                    .get(node)
+                    .is_some_and(|known| known.reflexive != Some(*address))
+            })
+            .collect();
+        if changed.is_empty() {
+            return Ok(false);
+        }
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let mut any = false;
+        for (node, address) in changed {
+            let id = i64::try_from(node.0).map_err(|_| "Mesh identity invalid.")?;
+            let address = address.to_string();
+            let updated = sqlx::query(
+                "UPDATE mesh_nodes SET reflexive_endpoint=? WHERE id=? AND reflexive_endpoint IS NOT ?",
+            )
+            .bind(&address)
+            .bind(id)
+            .bind(&address)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+            any |= updated.rows_affected() > 0;
+        }
+        self.commit_candidate_change(tx, any).await
+    }
+    /// Advance the revision with a candidate change and commit, or roll back when nothing changed.
+    async fn commit_candidate_change(
+        &self,
+        mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+        changed: bool,
+    ) -> Result<bool, &'static str> {
+        if !changed {
+            tx.rollback()
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?;
+            return Ok(false);
+        }
+        sqlx::query("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        tx.commit().await.map_err(|_| "Mesh storage unavailable.")?;
+        Ok(true)
+    }
     /// Reconcile an attached node after admitted-host inventory learns a name outside the attach path.
     ///
     /// Returns whether a name change committed. Its audit row and revision are committed together; callers publish
@@ -1893,11 +2018,11 @@ impl Store {
         .flatten();
         #[cfg(feature = "mesh-dns")]
         let nodes_query = sqlx::query(
-            "SELECT id,name,name_source,public_key,dataplane_host,endpoint FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported FROM mesh_nodes ORDER BY id",
         );
         #[cfg(not(feature = "mesh-dns"))]
         let nodes_query = sqlx::query(
-            "SELECT id,name,public_key,dataplane_host,endpoint FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported FROM mesh_nodes ORDER BY id",
         );
         let rows = nodes_query
             .fetch_all(&mut *tx)
@@ -1905,6 +2030,8 @@ impl Store {
             .map_err(|error| storage_sql_error(error))?;
         let mut nodes = Vec::new();
         let mut endpoints = BTreeMap::new();
+        let mut candidates = BTreeMap::new();
+        let mut accepts_candidates = BTreeSet::new();
         #[cfg(feature = "mesh-dns")]
         let mut dns_placeholders = BTreeSet::new();
         let mut server = None;
@@ -1950,17 +2077,17 @@ impl Store {
             if host.as_deref() == Some("server") {
                 server = Some(id);
             }
-            if let Some(endpoint) = row
-                .try_get::<Option<String>, _>("endpoint")
+            let known = stored_candidates(&row)?;
+            if let Some(endpoint) = known.primary() {
+                endpoints.insert(id, endpoint);
+            }
+            if row
+                .try_get::<bool, _>("candidates_supported")
                 .map_err(|error| storage_sql_error(error))?
             {
-                endpoints.insert(
-                    id,
-                    endpoint
-                        .parse()
-                        .map_err(|_| storage_error("Mesh endpoint invalid."))?,
-                );
+                accepts_candidates.insert(id);
             }
+            candidates.insert(id, known);
             nodes.push(Node {
                 id,
                 public_key: PublicKey(
@@ -2253,6 +2380,8 @@ impl Store {
         Ok(Loaded {
             coordinator: std::sync::Arc::new(coordinator),
             endpoints: std::sync::Arc::new(endpoints),
+            candidates: std::sync::Arc::new(candidates),
+            accepts_candidates: std::sync::Arc::new(accepts_candidates),
             default,
             revision: u64::try_from(revision)
                 .map_err(|_| storage_error("Mesh revision invalid."))?,
@@ -2262,6 +2391,31 @@ impl Store {
             dns_placeholders: std::sync::Arc::new(dns_placeholders),
         })
     }
+}
+/// One `mesh_nodes` row's direct-path candidates (#515). A stored address that no longer parses is a storage
+/// error, like the guess has always been.
+fn stored_candidates(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<crate::candidates::NodeCandidates, crate::api::MeshApiError> {
+    let address = |column: &str| -> Result<Option<SocketAddr>, crate::api::MeshApiError> {
+        row.try_get::<Option<String>, _>(column)
+            .map_err(|error| storage_sql_error(error))?
+            .map(|text| text.parse())
+            .transpose()
+            .map_err(|_| storage_error("Mesh endpoint invalid."))
+    };
+    let lan = row
+        .try_get::<Option<String>, _>("lan_endpoints")
+        .map_err(|error| storage_sql_error(error))?
+        .map(|text| serde_json::from_str::<Vec<SocketAddr>>(&text))
+        .transpose()
+        .map_err(|_| storage_error("Mesh endpoint invalid."))?
+        .unwrap_or_default();
+    Ok(crate::candidates::NodeCandidates {
+        guess: address("endpoint")?,
+        reflexive: address("reflexive_endpoint")?,
+        lan,
+    })
 }
 fn endpoint(kind: &str, value: &str) -> Result<Endpoint, crate::api::MeshApiError> {
     match kind {
@@ -2308,5 +2462,152 @@ mod naming_tests {
         ] {
             assert_eq!(machine_name(source), None, "{source}");
         }
+    }
+}
+
+/// Direct-path candidates in compiled snapshots (#515, D391).
+#[cfg(test)]
+mod candidate_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn at(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    /// A store with the server and three nodes: `a` and `b` behind one public address, `c` elsewhere.
+    async fn mesh() -> (Store, [NodeId; 4]) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("../../infraternal-server/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let store = crate::api::MeshService::new(pool).dataplane();
+        let mut ids = Vec::new();
+        for (host, key, guess) in [
+            ("server", 1, "198.51.100.10:10254"),
+            ("a", 2, "198.51.100.21:10254"),
+            ("b", 3, "198.51.100.21:10254"),
+            ("c", 4, "203.0.113.9:10254"),
+        ] {
+            let (id, _) = store
+                .attach(
+                    host,
+                    PublicKey([key; 32]),
+                    Some(at(guess)),
+                    host == "server",
+                )
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        (store, ids.try_into().unwrap())
+    }
+
+    fn tries(config: &Config, peer: NodeId) -> Vec<SocketAddr> {
+        let peer = &config.peers[&peer].peer;
+        peer.endpoint
+            .into_iter()
+            .chain(peer.candidates.iter().copied())
+            .collect()
+    }
+
+    /// A node that takes candidates gets its neighbour's LAN address first, then the reflexive address, then the
+    /// guess; a node elsewhere never sees the LAN address; an older node gets the reflexive address alone.
+    #[tokio::test]
+    async fn snapshots_carry_ordered_candidates_only_to_nodes_that_take_them() {
+        let (store, [server, a, b, c]) = mesh().await;
+        assert!(store.record_candidates(server, Some(&[])).await.unwrap());
+        assert!(
+            store
+                .record_candidates(a, Some(&[at("10.9.0.2:10254")]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_candidates(b, Some(&[at("10.9.0.3:10254")]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store.record_candidates(c, None).await.unwrap(),
+            "an older node changes nothing"
+        );
+        assert!(
+            !store
+                .record_candidates(a, Some(&[at("10.9.0.2:10254")]))
+                .await
+                .unwrap(),
+            "the same report writes nothing"
+        );
+        let before = store.load().await.unwrap().revision;
+        assert!(
+            store
+                .record_reflexive(&[(a, at("198.51.100.21:30254"))])
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_reflexive(&[(a, at("198.51.100.21:30254"))])
+                .await
+                .unwrap(),
+            "an unchanged observation costs no write"
+        );
+        assert_eq!(store.load().await.unwrap().revision, before + 1);
+
+        let neighbour = store.config(b).await.unwrap();
+        assert_eq!(
+            tries(&neighbour, a),
+            [
+                at("10.9.0.2:10254"),
+                at("198.51.100.21:30254"),
+                at("198.51.100.21:10254")
+            ]
+        );
+        let server_view = store.config(server).await.unwrap();
+        assert_eq!(
+            tries(&server_view, a),
+            [at("198.51.100.21:30254"), at("198.51.100.21:10254")],
+            "a node elsewhere never learns the LAN address"
+        );
+        let older = store.config(c).await.unwrap();
+        assert_eq!(tries(&older, a), [at("198.51.100.21:30254")]);
+        assert_eq!(older.peers[&a].peer.candidates, Vec::<SocketAddr>::new());
+        // Unobserved `b` keeps the pre-#515 address for the older node.
+        assert_eq!(tries(&older, b), [at("198.51.100.21:10254")]);
+    }
+
+    /// A node cannot plant a public, loopback or excess LAN address.
+    #[tokio::test]
+    async fn reported_lan_addresses_are_filtered_and_capped() {
+        let (store, [_, a, b, _]) = mesh().await;
+        store
+            .record_candidates(
+                a,
+                Some(&[
+                    at("8.8.8.8:10254"),
+                    at("127.0.0.1:10254"),
+                    at("10.9.0.2:10254"),
+                    at("192.168.1.2:10254"),
+                    at("172.16.0.2:10254"),
+                ]),
+            )
+            .await
+            .unwrap();
+        store.record_candidates(b, Some(&[])).await.unwrap();
+        assert_eq!(
+            tries(&store.config(b).await.unwrap(), a),
+            [
+                at("10.9.0.2:10254"),
+                at("192.168.1.2:10254"),
+                at("198.51.100.21:10254")
+            ]
+        );
     }
 }

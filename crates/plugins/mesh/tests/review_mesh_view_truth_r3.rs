@@ -223,6 +223,7 @@ fn row(handshake: u64, received: u64) -> PeerRow {
         handshake,
         received,
         keepalive: 25,
+        endpoint: None,
     }
 }
 

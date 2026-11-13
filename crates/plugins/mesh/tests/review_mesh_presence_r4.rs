@@ -16,6 +16,7 @@ fn record(tracker: &mut Tracker, at: u64, handshake: u64, received: u64) -> bool
                 handshake,
                 received,
                 keepalive: 25,
+                endpoint: None,
             }],
         )),
         START + at,
