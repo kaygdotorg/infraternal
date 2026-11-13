@@ -328,7 +328,7 @@ impl Promotions {
         &self,
         session_hash: &str,
         attempt: Uuid,
-        mut sealed: Option<String>,
+        sealed: Option<String>,
         now: i64,
     ) -> Result<Value, Refused> {
         // B2: the 2-try check and this try are one write.
@@ -343,6 +343,32 @@ impl Promotions {
             }
             Err(error) => return Err(error.into()),
         };
+        // J569 P2-1: from here on the try is reserved, so the rest must run
+        // to its end even when this request is dropped (the 2-minute request
+        // deadline, a closed tab). It runs as its own task: dropping the
+        // handle detaches it, and it still settles the row and ends the host
+        // side, instead of leaving the row `elevating` (409 Busy for up to 15
+        // minutes) for the sweeper to count as a typed try.
+        let driver = self.clone();
+        tokio::spawn(async move {
+            driver
+                .finish_reserved(host, method, attempt, sealed, now)
+                .await
+        })
+        .await
+        .map_err(|_| Refused::Unavailable)?
+    }
+
+    /// The part of [`Self::finish`] after the try was reserved: become root
+    /// once, then settle the try, record it and end the host side.
+    async fn finish_reserved(
+        &self,
+        host: Uuid,
+        method: Method,
+        attempt: Uuid,
+        mut sealed: Option<String>,
+        now: i64,
+    ) -> Result<Value, Refused> {
         #[cfg(test)]
         {
             let gate = self
