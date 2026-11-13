@@ -620,8 +620,10 @@ impl AgentPlugin for MeshNodePlugin {
                         dns_names,
                         key_rotation,
                         authority_epoch,
-                        candidates,
+                        // Offered only by an engine that walks the list it would receive.
+                        candidates: candidates && walks_candidates(node),
                     };
+                    let candidates = requested.candidates;
                     let identity = node.ensure().map_err(|_| PluginError::Rejected)?;
                     let lan = match (&identity, candidates) {
                         (Some(identity), true) => {
@@ -761,6 +763,19 @@ fn engine_selection(node: &Node) -> serde_json::Value {
 #[cfg(target_os = "macos")]
 fn engine_selection(_node: &Node) -> serde_json::Value {
     json!({"engine":"gotatun","reason":"default"})
+}
+
+/// Whether this node's engine walks an ordered candidate list (#515), and so may tell the
+/// coordinator it accepts one. Every engine answers yes for now.
+#[cfg(target_os = "linux")]
+const fn walks_candidates(_node: &Node) -> bool {
+    true
+}
+
+/// Whether the Mac node walks an ordered candidate list (#515). It answers yes for now.
+#[cfg(target_os = "macos")]
+const fn walks_candidates(_node: &Node) -> bool {
+    true
 }
 
 /// Both node types read the counters of the engine they run.
@@ -1168,6 +1183,18 @@ mod tests {
         assert_eq!(
             engine_selection(&Node::default().with_engine(crate::node::EngineKind::Kernel)),
             serde_json::json!({"engine":"kernel","reason":"chosen"})
+        );
+    }
+
+    /// J585 F5 (#515): only an engine that walks candidates may say it accepts them. A node that
+    /// installs just the first candidate would aim at a LAN address on another network when two
+    /// sites share a public address, and never try the reflexive address an older node gets.
+    #[test]
+    fn only_the_walking_engine_offers_candidates() {
+        assert!(walks_candidates(&Node::default()), "GotaTun walks");
+        assert!(
+            !walks_candidates(&Node::default().with_engine(crate::node::EngineKind::Kernel)),
+            "kernel WireGuard installs only the first candidate"
         );
     }
 
