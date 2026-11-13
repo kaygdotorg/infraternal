@@ -2234,6 +2234,19 @@ async fn terminal_run(
                                     session = None; probe = None;
                                     continue;
                                 }
+                                // A frame held for client credit means this relay is not
+                                // reading the shim, so its state reply could not be read
+                                // until the 250 ms starvation recovery, which can exceed
+                                // the server's route budget under a flood (#477). The
+                                // agent is alive and answering, and a shim that has
+                                // closed still takes the fenced path below.
+                                if pending.is_some()
+                                    && probe.is_none()
+                                    && !peer.read_closed().await?
+                                {
+                                    emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
+                                    continue;
+                                }
                                 if probe.is_none() {
                                     peer.send(&Shim::InputStateRequest).await?;
                                     probe = Some((nonce, sent_us));

@@ -389,6 +389,36 @@ async fn stop_relay(fixture: &mut RelayFixture) {
     let _ = std::fs::remove_dir_all(&fixture.root);
 }
 
+/// A route proof arriving while raw output waits for the client's credit must be answered at once.
+///
+/// The relay stops reading the shim while it holds that frame, so the shim's state reply cannot be
+/// read. Waiting for the 250 ms starvation recovery let a flooded terminal outlast the server's
+/// liveness budget and be closed as unresponsive (#477). The wait here is far below the 250 ms
+/// recovery, a causality bound rather than a speed measurement.
+#[tokio::test]
+async fn route_proof_is_answered_while_output_waits_for_client_credit() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window_without_repaint_reserve(&mut fixture).await;
+    // sleep: the relay holds the starving frame only after it has read it from the shim socket, and
+    // nothing observable marks that moment; the 250 ms recovery timer is the bound this stays under.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Ping(7, 9))
+        .unwrap();
+    let pong = loop {
+        match tokio::time::timeout(Duration::from_millis(100), fixture.messages.recv()).await {
+            Ok(Some(Message::Pong(2, nonce, sent_us))) => break Some((nonce, sent_us)),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break None,
+        }
+    };
+    stop_relay(&mut fixture).await;
+    assert_eq!(pong, Some((7, 9)), "the starved relay must still prove its route");
+}
+
 /// A key must be written and acknowledged before the shim captures its echo.
 #[tokio::test]
 async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
