@@ -678,7 +678,10 @@ impl Promotions {
             self.install_steps(host, attempt, &agent, generation, &admission),
         )
         .await
-        .unwrap_or(Err("deadline"));
+        .unwrap_or(Err(Ended {
+            reason: "deadline",
+            restored: false,
+        }));
         let now = crate::runtime::unix_seconds().unwrap_or(0);
         match outcome {
             Ok(()) => {
@@ -695,11 +698,15 @@ impl Promotions {
                     )
                     .await;
             }
-            Err(reason) => {
-                // One write that bars the handover; a joined successor is
-                // asked to uninstall itself (R5). A row still `installing`
-                // without a successor was rolled back by the relay.
-                if self.store.rolled_back(attempt, now).await.is_err() {
+            Err(Ended { reason, restored }) => {
+                // One write that bars the handover. When the host is known to
+                // be as it was (nothing reached it, or the rollback was
+                // verified), the row ends `rolled_back`, and a successor that
+                // had joined is revoked: the rollback removed it (J569 P3-1).
+                // Otherwise a joined successor is asked to uninstall itself
+                // (R5); without one, the relay's own rollback and guard
+                // put the host back.
+                if !restored || self.store.rolled_back(attempt, now).await.is_err() {
                     let _ = self.store.abandon_promotion(attempt, now).await;
                 }
                 self.set(attempt, generation, Stage::RolledBack);
@@ -721,7 +728,8 @@ impl Promotions {
         host_privilege::end(&agent, attempt).await;
     }
 
-    /// The install's steps; `Err` names the step that failed (a fixed word).
+    /// The install's steps; `Err` names the step that failed (a fixed word)
+    /// and whether the host is known to be back as it was.
     async fn install_steps(
         &self,
         host: Uuid,
@@ -729,12 +737,19 @@ impl Promotions {
         agent: &crate::embedded::EmbeddedAgent,
         generation: Uuid,
         admission: &TerminalPromotionGuard,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), Ended> {
+        // Until the rollback is armed nothing has run on the host; after a
+        // relay that was armed but did nothing yet, closing it rolls back
+        // nothing. Both leave the host as it was.
+        let untouched = |reason| Ended {
+            reason,
+            restored: true,
+        };
         // A short name: Unix socket paths are capped at 108 bytes, and the
         // data directory in front of it can be long (found on the guest rig,
         // where the full attempt id pushed the helper socket past the cap).
         let directory = self.scratch.join(&attempt.simple().to_string()[..8]);
-        std::fs::create_dir(&directory).map_err(|_| "local")?;
+        std::fs::create_dir(&directory).map_err(|_| untouched("local"))?;
         let _cleanup = RemoveDir(directory.clone());
         let session = RelaySession::start(
             Arc::new(AgentPump {
@@ -747,7 +762,7 @@ impl Promotions {
             READY_BOUND,
         )
         .await
-        .map_err(|_| "relay")?;
+        .map_err(|_| untouched("relay"))?;
         let session = Arc::new(session);
         let target = Target {
             id: "promotion".into(),
@@ -756,33 +771,32 @@ impl Promotions {
             mode: InstallMode::Root,
             root_consent: true,
         };
-        let install =
-            Installation::new_pending(session.clone(), &target, host).map_err(|_| "install")?;
+        let install = Installation::new_pending(session.clone(), &target, host)
+            .map_err(|_| untouched("install"))?;
         // R4: before any step, the relay learns how to put the host back.
         if let Err(failure) = session
             .arm_rollback(install.transaction(), install.rollback_script())
             .await
         {
             session.close();
-            return Err(failure.message);
+            return Err(untouched(failure.message));
         }
         // J465 P1: if the relay itself dies later, the uninstall outbox rolls
         // back this exact transaction through the abandoned successor.
         self.store
             .record_install_transaction(attempt, install.transaction())
             .await
-            .map_err(|_| "install")?;
+            .map_err(|_| untouched("install"))?;
         let result = self
             .run_install(
                 host, attempt, agent, generation, &session, &install, admission,
             )
             .await;
-        if result.is_err() && !install.committed() {
-            let _ = install.rollback().await;
-        }
+        // Only this transaction's verified rollback says the host is back.
+        let restored = result.is_err() && !install.committed() && install.rollback().await.is_ok();
         // Without the Commit frame, closing makes the relay roll back too.
         session.close();
-        result
+        result.map_err(|reason| Ended { reason, restored })
     }
 
     /// Stage, join, start, prove, commit, hand over.
@@ -979,6 +993,15 @@ fn logged(step: &'static str, failure: &infraternal_plugin_ssh::model::Failure) 
         "root upgrade install step failed"
     );
     step
+}
+
+/// How a root install ended short of the handover.
+struct Ended {
+    /// The step that failed, as a fixed word for the activity log.
+    reason: &'static str,
+    /// Whether the host is known to be as it was: nothing reached it, or
+    /// this transaction's rollback was verified.
+    restored: bool,
 }
 
 /// Removes a private directory when dropped.

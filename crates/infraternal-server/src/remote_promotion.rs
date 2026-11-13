@@ -706,26 +706,43 @@ impl EnrollmentStore {
             == 1)
     }
 
-    /// Record that the root install was rolled back before any successor
-    /// joined: the host is as it was.
+    /// Record that the root install was put back: the host is as it was.
+    ///
+    /// The driver calls this only when nothing reached the host or the
+    /// install's rollback was verified. A row still `installing` simply
+    /// ends. An `enrolled` row (the successor had joined) ends too, because
+    /// that rollback removed the successor: its certificate is revoked in the
+    /// same transaction and no uninstall is queued for it (J569 P3-1; before,
+    /// such a row was abandoned with an uninstall for a successor that was
+    /// already gone, and the certificate stayed admissible for 7 days).
     ///
     /// # Errors
-    /// `Denied` when the row isn't `installing` without a successor.
+    /// `Denied` when the row is neither `installing` nor `enrolled`.
     pub(crate) async fn rolled_back(&self, attempt: Uuid, now: i64) -> Result<(), PromotionError> {
-        let changed = sqlx::query(
+        let mut transaction = self.0.begin().await?;
+        let successor: Option<Option<Vec<u8>>> = sqlx::query_scalar(
             "UPDATE remote_host_promotions SET state = 'rolled_back', ended_at = ? \
-             WHERE attempt = ? AND state = 'installing' AND successor_fingerprint IS NULL",
+             WHERE attempt = ? AND state IN ('installing', 'enrolled') RETURNING successor_fingerprint",
         )
         .bind(now)
         .bind(attempt.as_bytes().as_slice())
-        .execute(&self.0)
-        .await?
-        .rows_affected();
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(PromotionError::Denied)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(successor) = successor else {
+            return Err(PromotionError::Denied);
+        };
+        if let Some(fingerprint) = successor {
+            sqlx::query(
+                "UPDATE remote_certificates SET revoked_at = COALESCE(revoked_at, ?) \
+                 WHERE fingerprint = ? AND role = 'successor'",
+            )
+            .bind(now)
+            .bind(fingerprint.as_slice())
+            .execute(&mut *transaction)
+            .await?;
         }
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// The sweeper: abandon every live promotion past its deadline, and
