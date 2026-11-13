@@ -44,6 +44,44 @@ fn binary_name(arch: Architecture) -> &'static str {
     }
 }
 
+/// Reads one HTTP request head from `socket`, waiting for as long as the client
+/// takes. Returns `None` only when `stop` is raised first.
+///
+/// The bucket answers one connection at a time, so a client that connects and
+/// is then descheduled (a loaded test host runs many suites at once) must not
+/// fail the bucket: a fixed read deadline here measured the *client's*
+/// scheduling delay, panicked the bucket thread with `WouldBlock`, and the
+/// panic-in-destructor abort took the whole test process down (#509). The
+/// short poll below exists only so a stopped bucket can leave its read.
+fn read_request(
+    socket: &mut std::net::TcpStream,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let mut head = Vec::new();
+    let mut chunk = [0; 4096];
+    while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+        match socket.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(size) => head.extend_from_slice(&chunk[..size]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if stop.load(Ordering::Relaxed) {
+                    return None;
+                }
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    Some(String::from_utf8(head).unwrap())
+}
+
 pub(crate) struct Bucket {
     pub(crate) origin: String,
     pub(crate) files: Arc<StdMutex<HashMap<String, Vec<u8>>>>,
@@ -55,6 +93,7 @@ impl Bucket {
     pub(crate) fn new(files: HashMap<String, Vec<u8>>) -> Self {
         Self::with_response(files, false)
     }
+    /// Starts a bucket serving `files`; with `refused` it answers every request with an error status.
     fn with_response(files: HashMap<String, Vec<u8>>, refused: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -67,12 +106,11 @@ impl Bucket {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
-                        socket
-                            .set_read_timeout(Some(Duration::from_secs(5)))
-                            .unwrap();
-                        let mut request = [0; 4096];
-                        let size = socket.read(&mut request).unwrap();
-                        let request = std::str::from_utf8(&request[..size]).unwrap();
+                        let Some(request) = read_request(&mut socket, &stopping) else {
+                            // Stopped before a client finished its request.
+                            break;
+                        };
+                        let request = request.as_str();
                         let path = request.split_whitespace().nth(1).unwrap();
                         count.fetch_add(1, Ordering::Relaxed);
                         let files = data.lock().unwrap();
@@ -134,6 +172,7 @@ impl Release {
     fn with_sessions(version: &str) -> Self {
         Self::with_artifacts(1024, version, 0, true)
     }
+    /// Builds a release of `size` bytes plus `extra` filler; `sessions` adds the session-capable artifact.
     fn with_artifacts(size: usize, version: &str, extra: usize, sessions: bool) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;
@@ -461,6 +500,7 @@ fn partial_download_restart_child() {
 }
 
 #[tokio::test]
+/// A resolver restarted after the first process stopped mid-download reclaims the partial files and finishes.
 async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
     use std::process::{Command, Stdio};
     let release = Release::new(2 * 1024 * 1024);
@@ -921,4 +961,27 @@ async fn dangling_session_cache_symlink_is_refused_without_publication() {
             .is_symlink()
     );
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 0);
+}
+
+/// A client that connects and is then descheduled for longer than the old
+/// bucket's fixed five-second read deadline is still answered, and the bucket
+/// thread does not panic (#509). On a loaded host such a stall crashed the
+/// bucket and aborted the whole test process; the bucket must wait for the
+/// request for as long as it takes. The stall is real time on purpose: it is the
+/// exact interval that failed before, and nothing asserts how fast the answer is.
+#[test]
+fn a_client_that_connects_then_stalls_is_still_answered() {
+    let bucket = Bucket::new(HashMap::from([("/late".to_string(), b"payload".to_vec())]));
+    let mut client =
+        std::net::TcpStream::connect(bucket.origin.trim_start_matches("http://")).unwrap();
+    // sleep: models a client descheduled between connect and send for longer than the old five-second read deadline.
+    thread::sleep(Duration::from_millis(5_500));
+    client
+        .write_all(b"GET /late HTTP/1.1\r\nHost: bucket\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.ends_with("payload"), "{response}");
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 1);
 }
