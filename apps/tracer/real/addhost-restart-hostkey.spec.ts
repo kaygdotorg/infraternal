@@ -32,7 +32,8 @@ test("a server restart at the host-key step re-asks the host and Trust carries o
     await server.restart();
     // The card recovers by itself: the check is shown again for the new observation, and Trust is accepted.
     await expect(trust, `the card did not return to the key check; it shows: ${await wizard.innerText().catch(() => "?")}`).toBeEnabled({ timeout: 60_000 }).catch(async (error: unknown) => {
-      throw new Error(`the card did not return to the key check; it shows: ${(await wizard.innerText()).replace(/\s+/g, " ").slice(0, 300)} (${String(error).slice(0, 60)})`);
+      await wizard.locator(".ah-details summary").click({ timeout: 3_000 }).catch(() => undefined);
+      throw new Error(`the card did not return to the key check; it shows: ${(await wizard.innerText()).replace(/\s+/g, " ").slice(0, 600)} (${String(error).slice(0, 60)})`);
     });
     await trust.click();
     await expect(wizard.locator(".ah-error")).toHaveCount(0);
