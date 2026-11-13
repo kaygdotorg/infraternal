@@ -808,23 +808,85 @@ pub async fn retire_for_promotion(context: &Context, home: &Path, uid: u32) -> i
     Ok(())
 }
 
+/// Open the install's setup guard file, `<base>.bootstrap-guard`, creating
+/// it when missing; every infraternal setup command and the infraternal
+/// agent's runtime admission `flock` this one file (see the ssh plugin's
+/// `setup_guard.sh`).
+///
+/// The guard must be something no other local account can open: `flock`
+/// needs only a descriptor, so a lock on a world-readable object (the base's
+/// parent, `/var/lib` for a root install, before #399 J569 P1-1) let any
+/// account block every setup step, rollback and uninstall. So:
+/// - the parent must be a real directory owned by this account and not
+///   writable by group or others, so nobody else can plant or swap the name;
+/// - the file is created exclusively with mode 0600 and opened without
+///   following a link;
+/// - the opened file must be a regular file owned by this account, mode
+///   0600, with one link. Anything else is refused, never repaired.
+///
+/// The file is never removed (see `setup_guard.sh` for why).
+pub(crate) fn open_setup_guard(base: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = base.parent().ok_or_else(denied)?;
+    if !private_parent(base) {
+        return Err(denied());
+    }
+    let euid = nix::unistd::Uid::effective().as_raw();
+    let mut name = base.file_name().ok_or_else(denied)?.to_os_string();
+    name.push(".bootstrap-guard");
+    let path = parent.join(name);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != euid
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(denied());
+    }
+    Ok(file)
+}
+
+/// Whether `base`'s parent is a real directory owned by this account and not
+/// writable by group or others: the only kind setup installs under (its guard
+/// refuses any other parent with exit 71), so the only kind with a setup
+/// guard file.
+pub(crate) fn private_parent(base: &Path) -> bool {
+    base.parent()
+        .and_then(|parent| std::fs::symlink_metadata(parent).ok())
+        .is_some_and(|directory| {
+            directory.is_dir()
+                && directory.uid() == nix::unistd::Uid::effective().as_raw()
+                && directory.mode() & 0o022 == 0
+        })
+}
+
 /// Take the lock every infraternal setup command takes first (an exclusive
-/// `flock` on the base's parent directory, see the ssh plugin's
-/// `setup_guard.sh`), waiting a bounded time for a running setup step.
+/// `flock` on the install's guard file, [`open_setup_guard`]), waiting a
+/// bounded time for a running setup step.
 ///
 /// While it is held, setup admits no new attempt on this account (exit 73,
 /// "Setup is already running on this host"). Setup holds it only for one
 /// command, so the wait is short; a longer one refuses with nothing changed.
 async fn setup_guard(base: &Path) -> io::Result<nix::fcntl::Flock<std::fs::File>> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let parent = base.parent().ok_or_else(denied)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let directory = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-            .open(parent)?;
-        match nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+        let guard = open_setup_guard(base)?;
+        match nix::fcntl::Flock::lock(guard, nix::fcntl::FlockArg::LockExclusiveNonblock) {
             Ok(guard) => return Ok(guard),
             Err((_, nix::errno::Errno::EWOULDBLOCK)) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1080,9 +1142,10 @@ mod tests {
         let Some((home, context, uid)) = installation("l", false) else {
             return;
         };
-        let parent = context.data.parent().unwrap().parent().unwrap().to_owned();
+        let base = context.data.parent().unwrap();
+        let guard_file = base.with_file_name("infraternal.bootstrap-guard");
         let held = nix::fcntl::Flock::lock(
-            std::fs::File::open(&parent).unwrap(),
+            open_setup_guard(base).unwrap(),
             nix::fcntl::FlockArg::LockExclusiveNonblock,
         )
         .map_err(|(_, error)| error)
@@ -1095,7 +1158,7 @@ mod tests {
         let guard = setup_guard(context.data.parent().unwrap()).await.unwrap();
         let setup = std::process::Command::new("flock")
             .arg("-n")
-            .arg(&parent)
+            .arg(&guard_file)
             .arg("true")
             .status()
             .unwrap();

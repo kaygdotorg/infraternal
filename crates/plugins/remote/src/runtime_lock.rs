@@ -145,7 +145,7 @@ pub struct AcquireHold {
 pub static ACQUIRE_HOLD: std::sync::Mutex<Option<AcquireHold>> = std::sync::Mutex::new(None);
 
 /// Takes the runtime lifetime lock for `state`, bound to `host` when given,
-/// under the parent directory's shared admission guard. It may block: on
+/// under the install's shared admission guard (its owner-only guard file). It may block: on
 /// filesystem work, and on the kernel socket dump under its hang-only bound.
 /// So async callers run it off their event loop. With `test-support`, a
 /// pending [`AcquireHold`] for `state` first holds the call until it is
@@ -171,12 +171,22 @@ fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    // Cleanup holds the exclusive parent-directory setup guard. This shared
-    // admission guard prevents starting between lock-file unlink and root retirement.
-    let parent = File::open(state.parent().and_then(Path::parent).ok_or_else(refused)?)?;
-    parent.lock_shared()?;
+    // Cleanup holds the exclusive setup guard. This shared admission guard
+    // prevents starting between lock-file unlink and root retirement. It is
+    // the install's owner-only guard file, never the shared parent directory
+    // that any local account could lock (#399, J569 P1-1). Setup installs
+    // only under a private parent (it refuses any other), so a runtime whose
+    // base sits elsewhere (a development or test directory) has no setup to
+    // wait for and takes no admission lock.
+    let base = state.parent().ok_or_else(refused)?;
+    let _admission = if super::uninstall::private_parent(base) {
+        let guard = super::uninstall::open_setup_guard(base)?;
+        guard.lock_shared()?;
+        Some(guard)
+    } else {
+        None
+    };
     if let Some(host) = host {
-        let base = state.parent().ok_or_else(refused)?;
         let _root = directory(base)?;
         if super::uninstall::public_file(
             &base.join(".bootstrap-owner"),
