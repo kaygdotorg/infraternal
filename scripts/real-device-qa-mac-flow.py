@@ -97,7 +97,11 @@ def owner_setup(s, origin, out):
     result(s.type_into("#setup-token", secret("setup-token.txt")), "token-typed")
     result(s.click_text("Continue"), "token-continue")
     time.sleep(3)
-    shot(s, out, "owner-identity")
+    # A failed Continue leaves the typed token on screen: take the picture only once the token field is gone.
+    if not s.js("return !!document.querySelector('#setup-token')"):
+        shot(s, out, "owner-identity")
+    else:
+        result(False, "token-field-gone", "token field still on screen; no picture taken")
     result(s.type_into("#setup-username", "mac-owner"), "username")
     result(s.click_text("Continue"), "identity-continue")
     time.sleep(2)
@@ -111,7 +115,7 @@ def owner_setup(s, origin, out):
     print("MAC_LABELS " + json.dumps(labels(s)))
 
 
-def signin(s, origin, out):
+def signin(s, origin, out, unlock=True):
     """Signs in with the saved throwaway credential (a fresh session has no cookie)."""
     s.get("%s/?r=%d&theme=latte" % (origin, time.time()))
     time.sleep(6)
@@ -122,8 +126,9 @@ def signin(s, origin, out):
     else:
         result(True, "already-signed-in")
     time.sleep(4)
-    result(unlock_hosts(s), "host-connections-unlocked")
-    time.sleep(5)
+    if unlock:
+        result(unlock_hosts(s), "host-connections-unlocked")
+        time.sleep(5)
 
 
 def unlock_hosts(s, out=None):
@@ -145,8 +150,12 @@ def unlock_hosts(s, out=None):
 
 def add_host(s, origin, out):
     """Add host through the desktop UI to the throwaway dev-02 account, down to a live shell."""
-    result(s.click_text("Add host"), "add-host-open")
-    time.sleep(3)
+    # The empty state offers "Open shell" now (J528); Add host is a palette action.
+    if not s.click_text("Add host", timeout=3):
+        s.keys(["\ue03d", "k"]); time.sleep(1.5); type_text(s, "Add hosts"); time.sleep(1.5)
+        s.keys(["\ue007"])
+    result(bool(s.wait("document.querySelector(\"input[aria-label='Hosts to add']\")", 10)), "add-host-open")
+    time.sleep(2)
     result(s.type_into("input[aria-label='Hosts to add']", "qa-device2@10.69.69.117:2222"), "host-typed")
     s.keys(["\ue007"])  # Enter adds the typed host to the list
     time.sleep(1)
@@ -466,6 +475,136 @@ def phase_extras(s, origin, out, tag):
         result(False, "motion-pill-open-duration", "no frames sampled")
 
 
+def open_sidebar(s):
+    """Opens the host sidebar when its toggle still says "Show hosts".
+
+    The tree element exists while the sidebar is closed but then holds only the current view's rows (`mesh-staging`, its
+    shell), so a host that is listed and connected looks missing. On 2026-11-13 the c392 phase read that closed tree and
+    reported a missing host that a sidebar-open read lists; every tree read goes through here first.
+    """
+    if s.js("const b = document.querySelector('#sidebar-toggle'); return !!b && /^show/i.test(b.getAttribute('aria-label') || '')"):
+        s.click("#sidebar-toggle")
+        time.sleep(2)
+
+
+def tree_text(s):
+    """The sidebar's host tree as text, read with the sidebar open (see `open_sidebar`)."""
+    open_sidebar(s)
+    # textContent plus every aria-label: the tree's rows are buttons whose text can be hidden from innerText.
+    return s.js("""const t = document.querySelector('#tree'); if (!t) return '';
+      return (t.textContent.replace(/\\s+/g, ' ') + ' || ' + [...t.querySelectorAll('[aria-label]')].map(e => e.getAttribute('aria-label')).join(' | '));""") or ""
+
+
+def rect_of(s, finder_js):
+    """Bounding rect of the element a JS expression returns, or None."""
+    return s.js("const e = (() => { %s })(); if (!e) return null; const r = e.getBoundingClientRect(); return {l: r.left, t: r.top, r: r.right, b: r.bottom, w: r.width, h: r.height, iw: innerWidth, ih: innerHeight};" % finder_js)
+
+
+def phase_lockedlist(s, origin, out, tag):
+    """Host list and "Unlock to connect" right after a server restart, read with the sidebar OPEN, then after Unlock."""
+    signin(s, origin, out, unlock=False)
+    time.sleep(8)
+    toast = s.js("return (document.body.innerText.match(/server restarted[^\\n]*/i) || [null])[0]")
+    print("MAC_METRIC " + json.dumps({"name": "restart-toast", "text": toast}))
+    locked = tree_text(s)
+    print("MAC_METRIC " + json.dumps({"name": "tree-locked-sidebar-open", "text": locked.replace("\n", " | ")[:400]}))
+    shot(s, out, tag + "-locked-tree-open")
+    result(any(k in locked for k in ("10.69.69.117", "qa-device2", "infraternal-dev-02")), "locked-state-host-listed", locked.replace("\n", " | ")[:140])
+    # Measured 2026-11-13 (#500): an existing host stays connected through a restart and the tree has no "Unlock to connect"
+    # text, so its absence is an observation, not a failure. Recorded as a metric so a product change shows up in the log.
+    print("MAC_METRIC " + json.dumps({"name": "unlock-to-connect-text-in-locked-tree", "present": "unlock to connect" in locked.lower()}))
+    s.keys(["\ue03d", "k"]); time.sleep(1.5); type_text(s, "shell"); time.sleep(2)
+    print("MAC_METRIC " + json.dumps({"name": "palette-rows-locked", "rows": (s.js("return [...document.querySelectorAll('#palette-results *')].filter(e => e.children.length === 0 && e.innerText).map(e => e.innerText.trim().slice(0, 70))") or [])[:12]}))
+    shot(s, out, tag + "-locked-palette")
+    s.keys(["\ue00c"]); time.sleep(1)
+    unlock_hosts(s, out); time.sleep(10)
+    unlocked = tree_text(s)
+    print("MAC_METRIC " + json.dumps({"name": "tree-unlocked-sidebar-open", "text": unlocked.replace("\n", " | ")[:400]}))
+    shot(s, out, tag + "-unlocked-tree-open")
+    result("unlock to connect" not in unlocked.lower() and any(k in unlocked for k in ("10.69.69.117", "qa-device2", "infraternal-dev-02")), "host-listed-and-connectable-after-unlock", unlocked.replace("\n", " | ")[:140])
+
+
+def phase_c392(s, origin, out, tag):
+    """Checks added for dev c392b16ea: host tree and locked host, Remove question on a phone, panel height, empty state."""
+    signin(s, origin, out, unlock=False)
+    time.sleep(8)
+    # 1. every host is listed, a locked host says "Unlock to connect"
+    locked = tree_text(s)
+    print("MAC_METRIC " + json.dumps({"name": "tree-while-locked", "text": locked.replace("\n", " | ")[:300]}))
+    shot(s, out, tag + "-tree-locked")
+    result(any(k in locked for k in ("10.69.69.117", "qa-device2", "infraternal-dev-02")), "tree-lists-host-while-locked", locked.replace("\n", " | ")[:120])
+    result("unlock to connect" in locked.lower(), "locked-host-shows-unlock-to-connect")
+    unlock_hosts(s); time.sleep(10)
+    unlocked = tree_text(s)
+    print("MAC_METRIC " + json.dumps({"name": "tree-after-unlock", "text": unlocked.replace("\n", " | ")[:300]}))
+    shot(s, out, tag + "-tree-unlocked")
+    result("unlock to connect" not in unlocked.lower() and any(k in unlocked for k in ("10.69.69.117", "qa-device2", "infraternal-dev-02")), "host-connects-after-unlock", unlocked.replace("\n", " | ")[:120])
+    result(ensure_window(s, out, tag, origin), "shell-window-open")
+    time.sleep(6)
+    with_window = tree_text(s)
+    print("MAC_METRIC " + json.dumps({"name": "tree-with-window-open", "text": with_window.replace("\n", " | ")[:300]}))
+    result(any(k in with_window for k in ("10.69.69.117", "qa-device2", "infraternal-dev-02")), "tree-lists-host-with-window-open", with_window[:120])
+    # 2. the machine panel opens at its final height (no jump)
+    s.js("""window.__m = []; const end = performance.now() + 3000;
+      (function f() { const d = document.querySelector('section.canvas-popover[role=dialog]'); const now = performance.now();
+        if (d) { const r = d.getBoundingClientRect(); window.__m.push([Math.round(now), Math.round(d.offsetHeight)]); }
+        if (now < end) requestAnimationFrame(f); })();""")
+    time.sleep(0.4)
+    s.click_text("Show details", timeout=5)
+    time.sleep(3.3)
+    hs = [f[1] for f in (s.js("return window.__m") or [])]
+    print("MAC_METRIC " + json.dumps({"name": "panel-heights", "n": len(hs), "first": hs[:3], "last": hs[-3:], "distinct": sorted(set(hs))[:8]}))
+    if hs:
+        jump = max(hs) - min(h for h in hs if h > 50) if any(h > 50 for h in hs) else 0
+        result(jump <= 24, "panel-opens-at-final-height", "heights seen %s (rule: no growth of more than 24 px after it appears)" % sorted(set(hs))[:6])
+    else:
+        result(False, "panel-opens-at-final-height", "no frames")
+    s.keys(["\ue00c"]); time.sleep(1)
+    # 3. Remove question: Keep and Remove inside the panel and the viewport at phone width
+    s.c("POST", "/window/rect", {"width": 402, "height": 840}); time.sleep(3)
+    s.click_text("Show details", timeout=5); time.sleep(2)
+    s.click_text("Connection", tag="button", timeout=5); time.sleep(2)
+    s.js("const r = [...document.querySelectorAll('section.canvas-popover button')].find(b => /remove host/i.test(b.textContent)); if (r) r.scrollIntoView({block: 'nearest'});")
+    time.sleep(1)
+    result(s.click_text("Remove host", tag="button", timeout=6), "remove-row-pressed")
+    time.sleep(2)
+    shot(s, out, tag + "-remove-question-402")
+    pop = rect_of(s, "return document.querySelector('section.canvas-popover[role=dialog]');")
+    keep = rect_of(s, "return [...document.querySelectorAll('section.canvas-popover button')].find(b => b.textContent.trim() === 'Keep');")
+    rem = rect_of(s, "return [...document.querySelectorAll('section.canvas-popover button')].find(b => b.textContent.trim() === 'Remove');")
+    print("MAC_METRIC " + json.dumps({"name": "remove-question-rects-402", "panel": pop, "keep": keep, "remove": rem}))
+    def inside(r, box):
+        return bool(r and box and r["l"] >= box["l"] - 1 and r["r"] <= box["r"] + 1 and r["t"] >= box["t"] - 1 and r["b"] <= box["b"] + 1 and r["b"] <= r["ih"] and r["r"] <= r["iw"])
+    result(inside(keep, pop) and inside(rem, pop), "remove-question-buttons-in-view", "keep=%s remove=%s panel=%s" % (keep and (round(keep["t"]), round(keep["b"])), rem and (round(rem["t"]), round(rem["b"])), pop and (round(pop["t"]), round(pop["b"]))))
+    s.click_text("Keep", tag="button", timeout=4, exact=True); time.sleep(1)
+    s.keys(["\ue00c"]); s.c("POST", "/window/rect", {"width": 1440, "height": 900}); time.sleep(2)
+    # 4. Add host sign-in footer: Back and Sign in on one row, at 1440 and at 402
+    for width in (1440, 402):
+        s.c("POST", "/window/rect", {"width": width, "height": 840 if width == 402 else 900}); time.sleep(2)
+        s.keys(["\ue03d", "k"]); time.sleep(1.5); type_text(s, "Add hosts"); time.sleep(1.5); s.keys(["\ue007"]); time.sleep(2)
+        s.type_into("input[aria-label='Hosts to add']", "qa-device2@infraternal-dev-02-std.vpn.kayg.org:2222"); s.keys(["\ue007"]); time.sleep(1)
+        s.click_text("Continue", timeout=6); time.sleep(8)
+        s.click_text("Trust and continue", timeout=4); time.sleep(4)
+        back = rect_of(s, "return [...document.querySelectorAll('section[aria-label=\"Add hosts\"] button')].find(b => b.textContent.trim() === 'Back');")
+        signin_b = rect_of(s, "return [...document.querySelectorAll('section[aria-label=\"Add hosts\"] button')].find(b => b.textContent.trim() === 'Sign in');")
+        shot(s, out, "%s-addhost-signin-%d" % (tag, width))
+        one_row = bool(back and signin_b and abs(back["t"] - signin_b["t"]) <= 3 and abs(back["b"] - signin_b["b"]) <= 3)
+        print("MAC_METRIC " + json.dumps({"name": "signin-footer-%d" % width, "back": back, "signin": signin_b}))
+        result(one_row, "signin-footer-one-row-%d" % width, "back top=%s sign-in top=%s" % (back and round(back["t"]), signin_b and round(signin_b["t"])))
+        s.click_text("Close", tag="button", timeout=3)
+        s.keys(["\ue00c"]); time.sleep(1)
+    s.c("POST", "/window/rect", {"width": 1440, "height": 900}); time.sleep(2)
+    # 5. empty state after the last window closes: "No windows open" and an Open shell button
+    focus_terminal(s)
+    type_text(s, "exit\n")
+    time.sleep(5)
+    body = page_text(s)
+    shot(s, out, tag + "-no-windows")
+    result("no windows open" in body.lower(), "empty-state-says-no-windows-open", "text has 'No windows open': %s; 'No hosts yet': %s" % ("no windows open" in body.lower(), "no hosts yet" in body.lower()))
+    result(bool(s.js("return [...document.querySelectorAll('button')].some(b => /open shell/i.test(b.textContent + ' ' + (b.getAttribute('aria-label') || '')))")), "empty-state-has-open-shell")
+    print("MAC_LABELS " + json.dumps([l for l in labels(s) if 'Settings' not in l and 'Themes' not in l][:14]))
+
+
 def main():
     origin, out, cmd = sys.argv[1].rstrip("/"), sys.argv[2], sys.argv[3]
     os.makedirs(out, exist_ok=True)
@@ -572,6 +711,10 @@ def main():
             print("after:", s.js("return document.documentElement.dataset.theme"), "| reload:")
             s.get("%s/?r=%d" % (origin, time.time())); time.sleep(8); inject_sw(s, origin)
             print("after reload data-theme:", s.js("return document.documentElement.dataset.theme"))
+        elif cmd == "lockedlist":
+            phase_lockedlist(s, origin, out, sys.argv[4] if len(sys.argv) > 4 else "latte")
+        elif cmd == "c392":
+            phase_c392(s, origin, out, sys.argv[4] if len(sys.argv) > 4 else "latte")
         elif cmd == "probe":
             s.get("%s/?r=%d&theme=latte" % (origin, time.time()))
             time.sleep(8)

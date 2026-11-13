@@ -6,6 +6,7 @@
 # `qa-lines.txt` (every QA_RESULT / QA_FRAME line) in a fresh out/<run>/ directory.
 #
 #   run.sh build
+#   run.sh trust-ca <pem>               # boot the simulator, trust the QA CA in its own keychain
 #   run.sh run <name> '<ACTIONS>'        # env: SIM_UDID (default: look up "infraternal-01"), RUNNER_OUT
 #
 # The lock is /tmp/infraternal-std-sim.lock, never calternal's. Nothing here edits a dotfile or touches the host
@@ -45,6 +46,13 @@ plistlib.dump(data, open(path, "wb"))
 PY
   echo "runner built"
   ;;
+trust-ca)
+  # Boots infraternal-01 and adds the QA server's CA to the SIMULATOR's own keychain (never the Mac's), under the lock.
+  pem=${2:?pem file}
+  [[ "$(xcrun simctl list devices | /usr/bin/grep "$UDID" || true)" == *'(Booted)'* ]] || xcrun simctl boot "$UDID"
+  xcrun simctl bootstatus "$UDID" -b > /dev/null 2>&1
+  xcrun simctl keychain "$UDID" add-root-cert "$pem" && echo ca-trusted-in-simulator
+  ;;
 run)
   name=${2:?name}; actions=${3:?ACTIONS}
   state=$(xcrun simctl list devices | /usr/bin/grep "$UDID" || true)
@@ -52,6 +60,15 @@ run)
   xcrun simctl bootstatus "$UDID" -b > /dev/null 2>&1
   # Face ID enrolment is a notify state that does not survive a simulator restart, and without it Safari refuses to
   # create or use a passkey ("Simulator requires enrolled biometrics"). Enrolling again is harmless, so do it every run.
+  # Reduce Motion on (default): Safari never goes idle while this page animates, and XCUITest then waits a 60 s idle timeout
+  # on every tap, so a run takes minutes instead of seconds. The page honours the setting, so it stops animating. Set
+  # QA_REDUCE_MOTION=0 to test with motion. Safari is restarted once when the setting changes.
+  if [[ "${QA_REDUCE_MOTION:-1}" == 1 ]]; then
+    if [[ "$(xcrun simctl spawn "$UDID" defaults read com.apple.Accessibility ReduceMotionEnabled 2>/dev/null || echo 0)" != 1 ]]; then
+      xcrun simctl spawn "$UDID" defaults write com.apple.Accessibility ReduceMotionEnabled -bool true
+      xcrun simctl terminate "$UDID" com.apple.mobilesafari > /dev/null 2>&1 || true
+    fi
+  fi
   # QA_APPEARANCE=light|dark switches the whole simulator, so a check can be run in both themes.
   [[ -n "${QA_APPEARANCE:-}" ]] && xcrun simctl ui "$UDID" appearance "$QA_APPEARANCE"
   xcrun simctl spawn "$UDID" notifyutil -s com.apple.BiometricKit.enrollmentChanged 1 > /dev/null

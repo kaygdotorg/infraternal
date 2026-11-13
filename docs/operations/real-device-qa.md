@@ -124,6 +124,27 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
   device of the same account shows a light one. Once someone picks a theme (Settings > Themes, or the palette), the account's
   theme wins on every device (D352) and the system setting no longer moves it: a dark run on such an account needs a dark theme
   picked. Before D390 (2026-11-12) every "dark" screenshot of an account whose first load was light stayed light.
+- **Upgrading QA1 (2026-11-12 lesson):** stage the WHOLE release (`share/infraternal` of the Nix result, not just `infraternal`,
+  `web/` and `SOURCE`). The four static `infraternal-*-musl` host binaries must sit beside the server, or Add host ends in "The
+  matching static infraternal binary is unavailable". Copy it with `stage/qa1-upgrade.sh`, which also runs `restorecon -RF`: a
+  `cp -a` from `/tmp` keeps the `tmp_t` SELinux type and systemd then fails the unit with 203/EXEC "Permission denied". Not a
+  product bug: the product labels only binaries it installs on managed hosts (#401); the server release directory is placed by
+  whoever deploys (here this script), so the deploy step owns its labels.
+- A restart while Add host is installing stops that install ("Setup stopped before this host was ready"); re-run it.
+- Safari offers "Save Password?" (with an empty user name field) after the host password form is submitted. It stalls the next
+  tap; dismiss it with a tap on "Not Now" by position (`xy~0.315~0.526`).
+- **Read the host tree with the sidebar OPEN (2026-11-13).** With the sidebar closed, `#tree` holds only the current view's
+  rows, so a host that is connected looks missing; the c392 phase reported "tree lacks connected host" for that reason and
+  nothing else. `tree_text` in `real-device-qa-mac-flow.py` now opens the sidebar first ("Show hosts" toggle). The
+  `lockedlist` command reads the locked-state tree with the sidebar open (measured 2026-11-13: both hosts listed, no
+  "Unlock to connect" text; an existing host stays connected through a restart, only the toast offers Unlock).
+- **Never `shot` a page that can show a setup token.** A failed Continue leaves the typed token on screen; the runner also
+  takes a final picture. Use `labels` and grep instead, and delete every picture of a run that types a token.
+- The Mac has no `timeout` binary; use `lockf -t 0 /tmp/mac-bench.lock` (non-blocking) and retry when it is busy.
+- A restart while the Add host card is open at the host-key step leaves "Check the host key again before trusting it" stuck on
+  every press; only Cancel recovers. The same flow started AFTER the restart shows "Host connections are locked" with Unlock.
+- A host address whose key is already trusted skips the host-key check; use another name for the same host (its DNS name) to
+  get the check again.
 - Never `kill` by pattern on std: its `kayg` user is shared with other lanes (calternal). Kill by exact PID.
 
 ## Known gaps
