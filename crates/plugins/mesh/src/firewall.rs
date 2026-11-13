@@ -1555,4 +1555,47 @@ mod tests {
         )
         .expect("fixture cleanup");
     }
+
+    /// Real kernel, both frontends: the optional `GotaTun` guard installs through the tool the
+    /// fixed-path lookup found, its status names that exact path, and removal leaves no guard.
+    ///
+    /// Run as real root under a systemd unit that hides the distribution tools, it proves the
+    /// Nix store path is the one executed (#265 J560 proof).
+    #[test]
+    #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+    fn real_optional_guard_runs_and_reports_the_found_tool_for_both_frontends() {
+        for (backend, tool) in [
+            (Backend::Nft, Tool::Nft),
+            (Backend::NfTables, Tool::IptablesNftRestore),
+        ] {
+            let path = firewall_tools::find(tool).expect("frontend at a fixed path");
+            let mut firewall =
+                Firewall::for_node(Some(backend), crate::gotatun_node::EngineKind::GotaTun);
+            firewall.apply(&config()).expect("guard install");
+            assert_eq!(firewall.backend(), Some(backend));
+            let status = firewall
+                .kernel_guard_status()
+                .expect("guard status")
+                .clone();
+            assert_eq!(status.state, "installed", "{}", status.detail);
+            assert!(status.missing.is_empty(), "{:?}", status.missing);
+            assert!(
+                status.detail.contains(&path.display().to_string()),
+                "{}",
+                status.detail
+            );
+            println!("GUARD backend={backend:?} detail={}", status.detail);
+            firewall.remove().expect("guard removal");
+            assert_eq!(
+                firewall.kernel_guard_status().expect("status").state,
+                "pending"
+            );
+            let mut probe =
+                Firewall::for_node(Some(backend), crate::gotatun_node::EngineKind::GotaTun);
+            probe.adopt().expect("inspect after removal");
+            let after = probe.kernel_guard_status().expect("status after removal");
+            assert_ne!(after.state, "failed", "{}", after.detail);
+            assert!(!probe.installed(), "{backend:?} guard left behind");
+        }
+    }
 }
