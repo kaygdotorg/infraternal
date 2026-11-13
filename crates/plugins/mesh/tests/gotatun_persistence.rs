@@ -1455,11 +1455,11 @@ fn simultaneous_ipv6_punch_rebinding_and_tunnel_grants() {
         .join()
         .unwrap()
         .expect("A's simultaneous tunnel connection");
-    let mut client_stream_b = client_b
+    let client_stream_b = client_b
         .join()
         .unwrap()
         .expect("B's simultaneous tunnel connection");
-    let (mut server_stream_a, _) = listener_a.accept().unwrap();
+    let (server_stream_a, _) = listener_a.accept().unwrap();
     let (server_stream_b, _) = listener_b.accept().unwrap();
     client_stream_b
         .set_read_timeout(Some(Duration::from_secs(5)))
