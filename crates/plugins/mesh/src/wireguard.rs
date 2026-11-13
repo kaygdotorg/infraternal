@@ -463,6 +463,27 @@ impl Device {
         }
         Err(io::ErrorKind::AddrInUse.into())
     }
+    /// Move the already-proven running link at `ifindex` to exactly `port`, keeping its key,
+    /// peers and sessions.
+    ///
+    /// The kernel opens the new socket before it closes the old one, so a taken port fails and
+    /// leaves the link on its old port. Used when a restarted node adopts a retained link whose
+    /// port differs from the requested one (D391, J555 F3).
+    /// # Errors
+    /// Refuses port 0 and the reserved 51820; reports `AddrInUse` for a taken port, other
+    /// kernel errors, or `InvalidData` when the link did not end up on `port`.
+    pub fn set_listen_port(ifindex: u32, port: u16) -> io::Result<()> {
+        if port == 0 || port == 51820 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut payload = header_at(ifindex);
+        attribute(&mut payload, 6, &port.to_ne_bytes())?;
+        send(&payload)?;
+        if identity_at(ifindex)?.1 != port {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(())
+    }
     /// Refuse host-route overlap on another interface before touching addresses or packet policy [165].
     /// # Errors
     /// Reports malformed route dumps or an existing route covering a proposed address.

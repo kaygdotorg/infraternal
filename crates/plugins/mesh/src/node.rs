@@ -738,6 +738,49 @@ fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof
         && link.owner.is_some_and(|owner| proof.accepts(owner))
 }
 
+/// Choose the port a restarted kernel node keeps on the link it adopted, and save it.
+///
+/// Kernel links outlive their process (D332), so restore finds the old port already bound.
+/// D391 still applies: an explicit `INFRATERNAL_MESH_PORT` binds exactly that port and fails if it
+/// is taken (J555 F3). Without an override, the node moves back to its saved or default port when
+/// that is free, the same as `GotaTun`, which binds on every start, and otherwise keeps the port it
+/// has as its fallback. A retained link from an older daemon may sit on the reserved 51820; it
+/// moves to a fresh port. The saved port follows `up`'s rule: a fallback is saved, an override
+/// saves the default, so removing the override later moves the node back.
+/// # Errors
+/// Reports a malformed override, a taken explicit port, kernel errors, or a failed state write.
+fn restore_kernel_listen_port(node: &Node, ifindex: u32, current: u16) -> io::Result<u16> {
+    let saved = node
+        .store
+        .as_ref()
+        .map(crate::node_state::Store::recorded_listen_port)
+        .transpose()?
+        .flatten();
+    let request = crate::listen_port::from_environment(saved)?;
+    let mut port = current;
+    if request.port != current {
+        match Device::set_listen_port(ifindex, request.port) {
+            Ok(()) => port = request.port,
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if port == 51820 {
+        port = Device::allocate_port(ifindex)?;
+    }
+    if let Some(store) = &node.store {
+        let keep = if request.allow_fallback {
+            port
+        } else {
+            crate::listen_port::DEFAULT_PORT
+        };
+        if saved != Some(keep) {
+            store.record_listen_port(keep)?;
+        }
+    }
+    Ok(port)
+}
+
 /// Recreate the `GotaTun` private-key file only from the durable rotation journal.
 ///
 /// A clean stop removes that file after stopping the userspace engine. During an open commit, a
@@ -1248,11 +1291,7 @@ impl Node {
             if public_key.0 == [0; 32] || port == 0 {
                 return Err(io::ErrorKind::NotConnected.into());
             }
-            // A retained interface from an older daemon may have selected the
-            // reserved port. Rebind its socket while preserving its private key.
-            if port == 51820 {
-                port = Device::allocate_port(link.ifindex)?;
-            }
+            port = restore_kernel_listen_port(&node, link.ifindex, port)?;
             node.identity = Some(Identity {
                 public_key,
                 port,
