@@ -307,7 +307,8 @@ test("a server that stays down is asked 15 times, then the host fails as an ordi
   const total = opened();
   expect(total).toBe(16);
   await expect(wizard(page).locator(".ah-error")).toHaveCount(0);
-  await page.waitForTimeout(3_000); // sleep: a count that is still growing after the limit would show here
+  // sleep: a count that is still growing after the limit would show here
+  await page.waitForTimeout(3_000);
   expect(opened()).toBe(total);
 });
 
@@ -325,7 +326,8 @@ test("closing the card while a host is being asked again stops the asking (#510)
   await inWizard(page, "Stop installing").click();
   await gone(page);
   const after = opened();
-  await page.waitForTimeout(3_500); // sleep: any timer left behind by the closed card would open another socket in this time
+  // sleep: any timer left behind by the closed card would open another socket in this time
+  await page.waitForTimeout(3_500);
   expect(opened()).toBe(after);
 });
 

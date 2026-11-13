@@ -1069,6 +1069,7 @@ export class Wizard {
     }
   }
 
+  /** Confirms the host key the card shows and, if the card is still on this host, starts it again; a restart that landed meanwhile has already done that. */
   private async trustKey(): Promise<void> {
     const job = this.fixing;
     const print = job?.view.failure?.fingerprints?.[0];
