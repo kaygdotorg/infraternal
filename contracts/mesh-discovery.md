@@ -59,8 +59,9 @@ address the coordinator published (its list, or a walk through it) or one an
 authenticated packet came from. A reading reports the address as *proven*
 when new bytes or a newer handshake arrived since the previous reading in the
 same session; the store then takes it as the node's server-reflexive address,
-unless it is private (the same ranges as LAN candidates below), which is what
-a server on the node's own LAN sees.
+unless it is private-scope (the LAN ranges below, plus link-local, loopback
+and unspecified, with IPv4-mapped addresses judged as IPv4), which is what a
+server on the node's own LAN sees.
 Otherwise a reading reports it only when it is new to the tracker (a first
 reading, or it moved since the previous one), and the store takes such an
 address only when the coordinator never published it for that node: not its
@@ -72,11 +73,16 @@ node's NAT rebind. The store writes, and the coordinator republishes, only a
 changed address. A node's LAN candidates are the private (RFC 1918, 100.64.0.0/10,
 fc00::/7) source addresses of its default IPv4 and IPv6 routes, with its mesh
 port, at most one per address family; the coordinator keeps only addresses these rules accept and
-sends them only to peers whose control connection comes from the same public
-address. That is the TCP source of the control connection, which a member
+sends them only to peers with network access in either direction whose
+control connection comes from the same public address. That is the TCP source of the control connection, which a member
 cannot forge, not the UDP-observed reflexive address, which one spoofed
 authenticated packet can move. Nodes behind one carrier-grade NAT share that
-address and count as one site, which is accepted inside one mesh. A destination-
+address and count as one site, and so do IPv6 nodes in one /64; both are
+accepted inside one mesh. A node's guess (its control connection's source IP
+with its mesh port) goes to every peer when it is public, so a later grant
+finds the peer at once, but only to peers with network access when it is
+private-scope (J699 P2-1, D164): a node that reaches the server over a LAN or a
+VPN range would otherwise tell the whole mesh where it sits. A destination-
 dependent (symmetric) mapping makes the server's observation useless to peers;
 such pairs still need the relay or a full-cone peer.
 
