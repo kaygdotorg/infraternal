@@ -1,4 +1,18 @@
 //! Checks every packet at the GotaTun TUN boundary against one complete mesh policy snapshot [D164,D384].
+//!
+//! # State and memory (J675, #265)
+//!
+//! Each peer gets a fixed table, allocated when a policy is compiled and never grown while
+//! packets are checked:
+//! - **Flows:** 256 per direction ([`FLOWS_PER_DIRECTION`]), 512 slots of 104 bytes. A full
+//!   direction reclaims expired entries, then evicts its own least recently seen flow that is
+//!   not an established TCP connection; an established connection is never evicted.
+//! - **Timeouts** follow Linux conntrack's defaults: established TCP 5 days, opening 60 s,
+//!   closing 120 s, closed 10 s; UDP 30 s unreplied and 120 s replied; other protocols 60 s.
+//!   Revoked grants end their flows at publish, whatever the timeout.
+//! - **Memory:** about 68 KB per peer, under a 72 KiB budget ([`PER_PEER_MEMORY_BUDGET`],
+//!   checked at build time): 72 MiB at D393's 1,000 peers, 288 MiB at its 4,096-peer test
+//!   scale, and twice that for a moment while a policy is published.
 
 use crate::{
     dataplane::{Config, PeerPolicy},
@@ -110,19 +124,46 @@ const OTHER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The most flows one peer pair may track in each direction: opened by this host towards the
 /// peer, and opened by the peer towards this host.
 ///
+/// 256 (J675, #265; was 128): an established connection is never evicted and now lives for
+/// days, so the quota is what a busy process on the peer must exhaust before other users of
+/// that peer are refused new connections from the same side. 256 per side doubles that
+/// headroom at no memory cost; see [`PER_PEER_MEMORY_BUDGET`].
+///
 /// Each direction has its own quota, so connections opened from one side can never use up the
-/// other side's slots: a process on the peer that holds 128 connections to this host does not
+/// other side's slots: a process on the peer that holds 256 connections to this host does not
 /// stop this host connecting to the peer, nor the owner's mesh SSH arriving from elsewhere on
 /// the mesh (J617 P2, #265). When a direction's quota is full, a new flow in that direction
 /// first reclaims expired entries and then evicts that direction's least recently seen flow
 /// that is not an established TCP connection (see [`FlowShard::evict_idle`]), so closed
 /// connections and finished UDP exchanges never cut a peer off (J592 P1-3).
-const FLOWS_PER_DIRECTION: usize = 128;
+const FLOWS_PER_DIRECTION: usize = 256;
 /// Slots in each peer's fixed table: room for both directions' full quotas at once, so a
 /// direction under its quota always finds a free slot.
 const FLOW_SLOTS_PER_PEER: usize = 2 * FLOWS_PER_DIRECTION;
-/// `FLOW_SLOTS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
-const FLOW_SLOTS_PER_PEER_HASH: u64 = 256;
+/// `FLOW_SLOTS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts. A test
+/// checks that the two agree.
+const FLOW_SLOTS_PER_PEER_HASH: u64 = 512;
+/// The memory budget for one peer's fixed filter tables: 72 KiB, so 72 MiB at D393's design
+/// scale of 1,000 peers and 288 MiB at its 4,096-peer test scale.
+///
+/// Why this number: it is the footprint already reviewed and measured for D394 (J618: 68,144
+/// bytes per peer, 68.1 MB at 1,000 peers) with a little room, so raising the flow quota does
+/// not grow the filter. Measured at J675 (`flow_table_memory_per_peer_times_one_thousand_peers`
+/// prints it): a flow slot is 104 bytes, so the 512 flow slots take 53,248 bytes; the 64
+/// fragment associations with their 32-range coverage records take about 15 KiB. Each policy
+/// publish briefly holds a second copy of every table until `reuse_flow_tables` drops it, so
+/// the peak during a publish is twice the steady figure (J592 #6, a known follow-up).
+const PER_PEER_MEMORY_BUDGET: usize = 72 * 1024;
+// The build fails when the fixed tables outgrow the budget, so a change to an entry's layout or
+// a table size cannot grow per-peer memory unnoticed.
+const _: () = assert!(
+    std::mem::size_of::<FlowSlot>() * FLOW_SLOTS_PER_PEER
+        + (std::mem::size_of::<FragmentSlot>() + std::mem::size_of::<FragmentCoverage>())
+            * FRAGMENTS_PER_PEER
+        + std::mem::size_of::<FlowShard>()
+        + std::mem::size_of::<PeerAccess>()
+        <= PER_PEER_MEMORY_BUDGET
+);
 /// Expire a fragment association before the IP reassembly window can become stale.
 const FRAGMENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound the number of fragmented datagrams each peer can have in flight.
@@ -130,7 +171,13 @@ const FRAGMENTS_PER_PEER: usize = 64;
 /// `FRAGMENTS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
 const FRAGMENTS_PER_PEER_HASH: u64 = 64;
 /// Bound the number of disjoint fragment ranges tracked for one datagram without allocating.
-const FRAGMENT_RANGES_PER_DATAGRAM: usize = 128;
+///
+/// 32 gaps is far more than real reordering produces: a 64 KiB datagram in 1,280-byte
+/// fragments has 52 fragments, and in-order arrival keeps a single range. A datagram that needs
+/// more is still delivered; its association just stays until [`FRAGMENT_IDLE_TIMEOUT`] instead
+/// of retiring when complete. Each range is 4 bytes, so 32 instead of 128 saves 24 KiB per
+/// peer and pays for the doubled flow quota (J675, see [`PER_PEER_MEMORY_BUDGET`]).
+const FRAGMENT_RANGES_PER_DATAGRAM: usize = 32;
 /// IP protocol number for TCP packets.
 const TCP: u8 = 6;
 /// Length of a TCP header without options, the least every judged TCP packet must carry.
@@ -2039,9 +2086,10 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        Direction, FLOW_SLOTS_PER_PEER, FLOWS_PER_DIRECTION, FRAGMENT_IDLE_TIMEOUT,
-        FRAGMENTS_PER_PEER, FlowShard, FlowSlot, FragmentCoverage, FragmentSlot, PacketFilter,
-        PeerAccess, TCP_CLOSED_TIMEOUT, TCP_ESTABLISHED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
+        Direction, FLOW_SLOTS_PER_PEER, FLOW_SLOTS_PER_PEER_HASH, FLOWS_PER_DIRECTION,
+        FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, FlowShard, FlowSlot, FragmentCoverage,
+        FragmentSlot, PER_PEER_MEMORY_BUDGET, PacketFilter, PeerAccess, TCP_CLOSED_TIMEOUT,
+        TCP_ESTABLISHED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -2356,7 +2404,7 @@ mod tests {
     /// A busy peer reaches its per-caller flow bound without exhausting another peer's budget.
     #[test]
     fn flow_state_is_bounded_per_peer() {
-        const PER_PEER_LIMIT: usize = 128;
+        const PER_PEER_LIMIT: usize = FLOWS_PER_DIRECTION;
         let mut policy = config(TrafficPolicy::All, TrafficPolicy::All);
         policy.peers.insert(
             NodeId(3),
@@ -2406,7 +2454,7 @@ mod tests {
     /// Four peers filling a former shared shard cannot consume a fifth peer's independent quota.
     #[test]
     fn colliding_peers_keep_independent_flow_quotas() {
-        const PER_PEER_LIMIT: usize = 128;
+        const PER_PEER_LIMIT: usize = FLOWS_PER_DIRECTION;
         let target_shard = legacy_shard(NodeId(2));
         let colliders: Vec<_> = (3_u64..=100_000)
             .filter(|id| legacy_shard(NodeId(*id)) == target_shard)
@@ -2470,7 +2518,7 @@ mod tests {
     /// One peer cannot double its conntrack allowance by alternating IPv4 and IPv6.
     #[test]
     fn flow_state_limit_is_shared_across_address_families() {
-        const PER_PEER_LIMIT: usize = 128;
+        const PER_PEER_LIMIT: usize = FLOWS_PER_DIRECTION;
         let filter = PacketFilter::new(
             &config(TrafficPolicy::All, TrafficPolicy::All),
             MeshProxyIngress::default(),
@@ -2495,7 +2543,7 @@ mod tests {
     /// A policy replacement immediately releases tuple quota for flows it revokes.
     #[test]
     fn policy_replacement_reclaims_revoked_flow_quota() {
-        const PER_PEER_LIMIT: usize = 128;
+        const PER_PEER_LIMIT: usize = FLOWS_PER_DIRECTION;
         let mut policy = config(TrafficPolicy::All, TrafficPolicy::All);
         let filter = PacketFilter::new(&policy, MeshProxyIngress::default())
             .expect("compile initial policy");
@@ -3378,10 +3426,12 @@ mod tests {
         )
         .expect("compile policy");
         let start = Instant::now();
-        for index in 0..64_u16 {
+        let half =
+            u16::try_from(FLOWS_PER_DIRECTION / 2).expect("half the quota fits a port count");
+        for index in 0..half {
             assert!(establish4(&filter, PEER4, 10_000 + index, start));
         }
-        for index in 0..64_u16 {
+        for index in 0..half {
             let mut syn = tcp4(LOCAL4, PEER4, 20_000 + index, 443, SYN);
             let at = start + Duration::from_millis(u64::from(index) + 1);
             assert!(filter.check_at(&mut syn, Direction::HostToMesh, at));
@@ -3399,7 +3449,7 @@ mod tests {
         );
         let mut kept = tcp4(PEER4, LOCAL4, 443, 20_001, SYN_ACK);
         assert!(filter.check_at(&mut kept, Direction::MeshToHost, later));
-        for index in 0..64_u16 {
+        for index in 0..half {
             let mut data = tcp4(PEER4, LOCAL4, 443, 10_000 + index, ACK);
             assert!(
                 filter.check_at(&mut data, Direction::MeshToHost, later),
@@ -3523,7 +3573,14 @@ mod tests {
             per_peer * 1000,
             per_peer * 4096
         );
-        assert!(per_peer <= 160 * 1024, "{per_peer} bytes per peer");
+        assert_eq!(
+            usize::try_from(FLOW_SLOTS_PER_PEER_HASH).ok(),
+            Some(FLOW_SLOTS_PER_PEER)
+        );
+        assert!(
+            per_peer <= PER_PEER_MEMORY_BUDGET,
+            "{per_peer} bytes per peer exceeds the {PER_PEER_MEMORY_BUDGET}-byte budget"
+        );
     }
 
     /// Each direction has its own quota: this host holding a full quota of established
@@ -3899,5 +3956,31 @@ mod tests {
                 .all(|slot| !matches!(slot, FlowSlot::Occupied(_))),
             "a stateless ICMP message created a flow"
         );
+    }
+
+    /// J672 owner question (a), green: a peer holding a full direction of established inbound
+    /// connections does not stop this host opening its own full quota of outbound ones.
+    #[test]
+    fn held_inbound_quota_does_not_block_outbound() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::All, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let quota = u16::try_from(FLOWS_PER_DIRECTION).expect("quota fits a port count");
+        for port in 0..quota {
+            let mut syn = tcp4(PEER4, LOCAL4, 20_000 + port, 22_000, SYN);
+            let mut syn_ack = tcp4(LOCAL4, PEER4, 22_000, 20_000 + port, SYN_ACK);
+            let mut ack = tcp4(PEER4, LOCAL4, 20_000 + port, 22_000, ACK);
+            assert!(filter.check_at(&mut syn, Direction::MeshToHost, now));
+            assert!(filter.check_at(&mut syn_ack, Direction::HostToMesh, now));
+            assert!(filter.check_at(&mut ack, Direction::MeshToHost, now));
+        }
+        let mut extra = tcp4(PEER4, LOCAL4, 30_000, 22_000, SYN);
+        assert!(!filter.check_at(&mut extra, Direction::MeshToHost, now));
+        for port in 0..quota {
+            assert!(establish4(&filter, PEER4, 40_000 + port, now));
+        }
     }
 }
