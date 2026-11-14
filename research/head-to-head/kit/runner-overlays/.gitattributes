@@ -1,0 +1,2 @@
+# Unified-diff context lines use a required leading space for blank source lines.
+J88-overlay.patch whitespace=-blank-at-eol

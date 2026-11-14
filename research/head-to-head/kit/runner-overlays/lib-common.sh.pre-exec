@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Shared helpers for the head-to-head kit (#260). Sourced by run.sh and the
+# case scripts; never run directly.
+#
+# Invariants every case relies on:
+# - Nothing outside $H2H_RUN (a private tmpfs directory under /dev/shm) and
+#   the results directory is written by kit code. Third-party daemons run in
+#   `sandboxed`, where writes to /etc, /var and /run land in throwaway
+#   overlays, so a daemon that edits resolv.conf or its state directory cannot
+#   change the machine.
+# - Every network namespace, interface and process a case creates is
+#   registered for cleanup the moment it exists; `cleanup` runs on every exit.
+# - No secret is ever placed in argv or printed: keys and tokens live in 0600
+#   files under $H2H_RUN and are read by the programs that need them.
+
+set -euo pipefail
+
+H2H_KIT=${H2H_KIT:?}
+H2H_BIN=$H2H_KIT/bin
+H2H=$H2H_BIN/h2h
+H=$H2H
+
+log() { printf '%s [%s] %s\n' "$(date +%H:%M:%S)" "${H2H_CASE:-kit}" "$*" >&2; }
+die() { log "FAIL: $*"; exit 1; }
+
+# Durations shrink in smoke mode; full values are the perf-VM method.
+dur() { if [[ ${H2H_SMOKE:-0} == 1 ]]; then echo "$2"; else echo "$1"; fi; }
+
+# --- cleanup registry -------------------------------------------------------
+H2H_CLEAN_PIDS=()
+H2H_CLEAN_NETNS=()
+H2H_CLEAN_CMDS=()
+register_pid() { H2H_CLEAN_PIDS+=("$1"); }
+register_netns() { H2H_CLEAN_NETNS+=("$1"); }
+register_cmd() { H2H_CLEAN_CMDS+=("$1"); }
+# A TERM from run.sh's timeout must still reach the EXIT trap (cleanup).
+trap 'exit 143' TERM INT
+
+stop_pid() {
+    local pid=$1
+    kill -0 "$pid" 2>/dev/null || return 0
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+    kill -KILL "$pid" 2>/dev/null || true
+}
+
+cleanup() {
+    local rc=$?
+    set +e
+    # A daemon that already exited must not turn our goodbye into SIGPIPE.
+    trap '' PIPE
+    local i
+    for ((i = ${#H2H_CLEAN_CMDS[@]} - 1; i >= 0; i--)); do eval "${H2H_CLEAN_CMDS[$i]}" >/dev/null 2>&1; done
+    for ((i = ${#H2H_CLEAN_PIDS[@]} - 1; i >= 0; i--)); do stop_pid "${H2H_CLEAN_PIDS[$i]}"; done
+    # Anything still running inside our namespaces belongs to this case.
+    for ns in "${H2H_CLEAN_NETNS[@]}"; do
+        for pid in $(ip netns pids "$ns" 2>/dev/null); do kill -KILL "$pid" 2>/dev/null; done
+        ip netns del "$ns" 2>/dev/null
+    done
+    return $rc
+}
+
+# --- namespaces ---------------------------------------------------------------
+netns_add() {
+    ip netns add "$1"
+    register_netns "$1"
+    ip -n "$1" link set lo up
+}
+in_ns() { local ns=$1; shift; ip netns exec "$ns" "$@"; }
+
+# ns_holder <var> <ns>: a long-lived process inside a namespace, so namespace
+# entry by PID works after a sandbox hides /run/netns. Sets <var> to its PID
+# (no command substitution: that would wait for the process's stdout).
+ns_holder() {
+    ip netns exec "$2" sleep infinity > /dev/null 2>&1 &
+    register_pid $!
+    printf -v "$1" '%s' $!
+}
+
+# netem on one interface: netem_set <ns> <dev> <args...>; limit sized for
+# multi-gigabit flows at 100 ms+ so the qdisc is never the bottleneck.
+netem_set() {
+    local ns=$1 dev=$2; shift 2
+    ip -n "$ns" link set dev "$dev" txqueuelen 10000
+    tc -n "$ns" qdisc replace dev "$dev" root netem limit 200000 "$@"
+}
+netem_clear() { tc -n "$1" qdisc del dev "$2" root 2>/dev/null || true; }
+
+# --- sandbox --------------------------------------------------------------------
+# sandboxed <ns-pid> <cmd...>: run in the namespace's network stack, in a
+# private mount namespace with throwaway overlays on /etc and /var, a fresh
+# /run (no D-Bus, no host resolver control socket) and /sys of that netns.
+sandboxed() {
+    local nspid=$1; shift
+    local sb
+    sb=$(mktemp -d "$H2H_RUN/sb.XXXXXX")
+    nsenter -t "$nspid" -n unshare --mount --propagation private -- /bin/sh -c '
+        set -e
+        sb=$1; shift
+        for d in etc var; do
+            mkdir -p "$sb/$d.u" "$sb/$d.w"
+            mount -t overlay overlay -o "lowerdir=/$d,upperdir=$sb/$d.u,workdir=$sb/$d.w" "/$d"
+        done
+        mount -t tmpfs -o mode=0755 tmpfs /run
+        mkdir -p /run/lock /run/sshd /run/user
+        mount -t sysfs sysfs /sys 2>/dev/null || true
+        exec "$@"
+    ' sandbox "$sb" "$@"
+}
+
+# --- accounts -----------------------------------------------------------------
+# Terminal sessions run as one unprivileged person: the user who invoked sudo,
+# else root. tmux, Zellij and infraternal all start that account's login shell.
+h2h_user() { echo "${H2H_USER:-${SUDO_USER:-root}}"; }
+# ns_user <ns> <cmd…>: run as that person inside a namespace, with a clean
+# login-like environment (the shell from the account, nothing inherited).
+ns_user() {
+    local ns=$1; shift
+    local user home shell
+    user=$(h2h_user)
+    home=$(getent passwd "$user" | cut -d: -f6)
+    shell=$(getent passwd "$user" | cut -d: -f7)
+    ip netns exec "$ns" setpriv --reuid="$user" --regid="$(id -g "$user")" --init-groups \
+        env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" \
+        PATH=/usr/local/bin:/usr/bin:/bin TERM=xterm-256color LANG="${LANG:-C.UTF-8}" "$@"
+}
+
+# --- results --------------------------------------------------------------------
+# measure <name> <cmd...>: run a measurement, keep its JSON under the case's
+# results directory, and echo it to the log.
+measure() {
+    local name=$1; shift
+    local out="$H2H_RESULTS/$H2H_CASE/$name.json"
+    mkdir -p "$(dirname "$out")"
+    if "$@" > "$out.tmp" 2> "$out.err"; then
+        mv "$out.tmp" "$out"
+        rm -f "$out.err"
+        log "$name: $(head -c 400 "$out")"
+    else
+        log "$name failed: $(tail -c 400 "$out.err")"
+        mv "$out.tmp" "$out.failed" 2>/dev/null || true
+        return 1
+    fi
+}
+
+# note <name> <json>: record a fact (versions, labels, path type).
+note() {
+    mkdir -p "$H2H_RESULTS/$H2H_CASE"
+    printf '%s\n' "$2" > "$H2H_RESULTS/$H2H_CASE/$1.json"
+}
+
+wait_for() { # wait_for <seconds> <cmd...>
+    local deadline=$((SECONDS + $1)); shift
+    until "$@" >/dev/null 2>&1; do
+        ((SECONDS < deadline)) || return 1
+        sleep 0.2
+    done
+}

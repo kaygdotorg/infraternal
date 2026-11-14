@@ -1,0 +1,191 @@
+--- a/cases/mesh.sh
++++ b/cases/mesh.sh
+@@ -4,6 +4,8 @@
+ # namespaces on this machine, then the same probes for every system.
+ #
+ #   mesh.sh <underlay|infraternal|gotatun|boringtun|tailscale|netbird|netbird-userspace>
++#   mesh.sh <infraternal-before|infraternal-after|wireguard-go-before|wireguard-go-after>
++#   mesh.sh <gotatun-before|gotatun-after|gotatun-mixed>
+ #
+ # Topology (all inside private namespaces; the root namespace is untouched):
+ #
+@@ -125,15 +127,35 @@
+ }
+ 
+ start_gotatun() {
+-    local gotatun_version
++    local gotatun_version gotatun_a_bin gotatun_b_bin source_a source_b
++    case $SYSTEM in
++        gotatun-after)
++            gotatun_a_bin=$H2H_BIN/gotatun-after-8c17cb1
++            gotatun_b_bin=$H2H_BIN/gotatun-after-8c17cb1
++            source_a=8c17cb1abe9b4cd8b7661dcce7d62d6d47552e38
++            source_b=8c17cb1abe9b4cd8b7661dcce7d62d6d47552e38
++            ;;
++        gotatun-mixed)
++            gotatun_a_bin=$H2H_BIN/gotatun
++            gotatun_b_bin=$H2H_BIN/gotatun-after-8c17cb1
++            source_a=1d46b779f5e0743f30a13cc2c325b8114b901fb9
++            source_b=8c17cb1abe9b4cd8b7661dcce7d62d6d47552e38
++            ;;
++        *)
++            gotatun_a_bin=$H2H_BIN/gotatun
++            gotatun_b_bin=$H2H_BIN/gotatun
++            source_a=1d46b779f5e0743f30a13cc2c325b8114b901fb9
++            source_b=1d46b779f5e0743f30a13cc2c325b8114b901fb9
++            ;;
++    esac
+     mkdir -p "$D/a" "$D/b" "$D/keys"
+     command -v openssl >/dev/null || die "GotaTun key setup requires OpenSSL"
+     python3 -I "$H2H_KIT/lib/gotatun_uapi.py" keys "$D/keys"
+     START=$("$H" now)
+-    sandboxed "$A_PID" env WG_SUDO=1 WG_LOG_LEVEL=error "$H2H_BIN/gotatun" --foreground wgA \
++    sandboxed "$A_PID" env WG_SUDO=1 WG_LOG_LEVEL=error "$gotatun_a_bin" --foreground wgA \
+         > "$D/a/daemon.log" 2>&1 &
+     GOTA_A_PID=$!; register_pid "$GOTA_A_PID"
+-    sandboxed "$B_PID" env WG_SUDO=1 WG_LOG_LEVEL=error "$H2H_BIN/gotatun" --foreground wgB \
++    sandboxed "$B_PID" env WG_SUDO=1 WG_LOG_LEVEL=error "$gotatun_b_bin" --foreground wgB \
+         > "$D/b/daemon.log" 2>&1 &
+     GOTA_B_PID=$!; register_pid "$GOTA_B_PID"
+     wait_for 20 nsenter -t "$GOTA_A_PID" -m -- test -S /var/run/wireguard/wgA.sock \
+@@ -154,8 +176,10 @@
+     rm -f "$D/keys/"*.private
+     WATCH="$GOTA_A_PID,$GOTA_B_PID"
+     PEER=10.66.0.2
+-    gotatun_version=$("$H2H_BIN/gotatun" --version | head -1)
+-    note version "{\"gotatun\":\"$gotatun_version\",\"source\":\"1d46b779f5e0743f30a13cc2c325b8114b901fb9\"}"
++    gotatun_version=$("$gotatun_a_bin" --version | head -1)
++    local gotatun_b_version
++    gotatun_b_version=$("$gotatun_b_bin" --version | head -1)
++    note version "{\"gotatun_a\":\"$gotatun_version\",\"gotatun_b\":\"$gotatun_b_version\",\"source_a\":\"$source_a\",\"source_b\":\"$source_b\"}"
+ }
+ 
+ start_wireguard_go() {
+@@ -275,10 +299,10 @@
+ 
+ case $SYSTEM in
+     underlay) START=$("$H" now); PEER=10.220.0.2 ;;
+-    infraternal) start_infraternal ;;
+-    gotatun) start_gotatun ;;
++    infraternal|infraternal-before|infraternal-after) start_infraternal ;;
++    gotatun|gotatun-before|gotatun-after|gotatun-mixed) start_gotatun ;;
+     boringtun) start_boringtun ;;
+-    wireguard-go) start_wireguard_go ;;
++    wireguard-go|wireguard-go-before|wireguard-go-after) start_wireguard_go ;;
+     tailscale) start_tailscale ;;
+     netbird) start_netbird kernel ;;
+     netbird-userspace) start_netbird userspace ;;
+@@ -319,9 +343,18 @@
+ netem_clear h2h-a a0
+ netem_clear h2h-b b0
+ 
++if [[ ${H2H_REORDER_CHECK:-0} == 1 && $SYSTEM == gotatun* ]]; then
++    netem_set h2h-a a0 delay 99ms reorder 25% 50%
++    netem_set h2h-b b0 delay 99ms reorder 25% 50%
++    sleep 2
++    profile de-in-reorder "$WAN_LAT_COUNT" 10000 "$WAN_TPUT_S"
++    netem_clear h2h-a a0
++    netem_clear h2h-b b0
++fi
++
+ if [[ $SYSTEM == tailscale ]]; then
+     note peer-scale '{"configured_peers_per_endpoint":1,"at_1000":"not supported by the two-node testcontrol fixture"}'
+-elif [[ $SYSTEM == infraternal ]]; then
++elif [[ $SYSTEM == infraternal* ]]; then
+     for x in a b; do
+         nspid=$A_PID
+         [[ $x == b ]] && nspid=$B_PID
+@@ -335,11 +368,11 @@
+     measure mem-1000 "$H" proc-mem --pids "$WATCH"
+     record_memcg 1000
+     note peer-scale '{"configured_peers_per_endpoint":1000,"method":"wg setconf"}'
+-elif [[ $SYSTEM == gotatun || $SYSTEM == boringtun || $SYSTEM == wireguard-go ]]; then
++elif [[ $SYSTEM == gotatun* || $SYSTEM == boringtun || $SYSTEM == wireguard-go* ]]; then
+     case $SYSTEM in
+-        gotatun) peer_a=$GOTA_A_PID; peer_b=$GOTA_B_PID; iface_a=wgA; iface_b=wgB ;;
++        gotatun*) peer_a=$GOTA_A_PID; peer_b=$GOTA_B_PID; iface_a=wgA; iface_b=wgB ;;
+         boringtun) peer_a=$BORING_A_PID; peer_b=$BORING_B_PID; iface_a=wgA; iface_b=wgB ;;
+-        wireguard-go) peer_a=$WG_A_PID; peer_b=$WG_B_PID; iface_a=wgA; iface_b=wgB ;;
++        wireguard-go*) peer_a=$WG_A_PID; peer_b=$WG_B_PID; iface_a=wgA; iface_b=wgB ;;
+     esac
+     nsenter -t "$peer_a" -n -m -- python3 -I "$H2H_KIT/lib/peer_scale.py" add-uapi --interface "$iface_a" --count 999 --start 1 > "$D/peers-a.json"
+     nsenter -t "$peer_b" -n -m -- python3 -I "$H2H_KIT/lib/peer_scale.py" add-uapi --interface "$iface_b" --count 999 --start 1 > "$D/peers-b.json"
+--- a/lib/report.py
++++ b/lib/report.py
+@@ -61,7 +61,21 @@
+     for failure in failures:
+         print(f"- `{failure.relative_to(root)}`")
+ 
+-systems = ["underlay", "infraternal", "tailscale", "gotatun", "boringtun", "wireguard-go", "netbird", "netbird-userspace"]
++systems = [
++    "underlay",
++    "infraternal-before", "infraternal-after",
++    "wireguard-go-before", "wireguard-go-after",
++    "gotatun-before", "gotatun-after", "gotatun-mixed",
++]
++display_names = {
++    "infraternal-before": "kernel WireGuard before",
++    "infraternal-after": "kernel WireGuard after",
++    "wireguard-go-before": "wireguard-go before",
++    "wireguard-go-after": "wireguard-go after",
++    "gotatun-before": "GotaTun before",
++    "gotatun-after": "GotaTun after",
++    "gotatun-mixed": "GotaTun mixed peers",
++}
+ mesh = [s for s in systems if (root / f"mesh-{s}").is_dir()]
+ if mesh:
+     print("\n## Mesh data plane (a → b, two namespaces, one machine)\n")
+@@ -72,23 +86,25 @@
+         t1, t8, idle = load(c, "tput-lan-1"), load(c, "tput-lan-8"), load(c, "idle")
+         rss_idle = get(idle, "mem", "rss_kb")
+         peak = max(get(t1, "watched_rss_kb_peak") or 0, get(t8, "watched_rss_kb_peak") or 0)
+-        print(f"| {s} | {fmt(get(load(c, 'first-packet'), 'elapsed_ms'), 0)} | {fmt(get(t1, 'gbit_per_s'))} | "
++        print(f"| {display_names.get(s, s)} | {fmt(get(load(c, 'first-packet'), 'elapsed_ms'), 0)} | {fmt(get(t1, 'gbit_per_s'))} | "
+               f"{fmt(get(t8, 'gbit_per_s'))} | {fmt(get(t1, 'machine_cpu_s_per_gbit'))} / {fmt(get(t8, 'machine_cpu_s_per_gbit'))} | "
+               f"{fmt(get(idle, 'cpu_percent_of_one_core'), 3)} | {fmt(rss_idle / 1024 if rss_idle else None, 1)} | "
+               f"{fmt(peak / 1024 if peak else None, 1)} |")
+     print("\n## Peer-state memory (RSS is summed across both endpoints)\n")
+     print("| system | RSS at 1 peer per endpoint MiB | RSS at 1,000 peers per endpoint MiB |")
+     print("|---|---:|---:|")
+-    for s in ("infraternal", "tailscale", "gotatun", "boringtun", "wireguard-go"):
++    for s in ("infraternal-before", "infraternal-after", "wireguard-go-before", "wireguard-go-after",
++              "gotatun-before", "gotatun-after", "gotatun-mixed"):
+         if s not in mesh:
+             continue
+         c = f"mesh-{s}"
+         one = get(load(c, "idle"), "mem", "rss_kb")
+         thousand = get(load(c, "mem-1000"), "rss_kb")
+-        print(f"| {s} | {fmt(one / 1024 if one else None, 1)} | {fmt(thousand / 1024 if thousand else None, 1)} |")
++        print(f"| {display_names.get(s, s)} | {fmt(one / 1024 if one else None, 1)} | {fmt(thousand / 1024 if thousand else None, 1)} |")
+ 
+     for tag, title in (("lan", "LAN"), ("de-in", "DE↔IN, 198 ms RTT netem"),
+-                       ("de-in-loss", "198 ms RTT, independent 2% loss per direction")):
++                       ("de-in-loss", "198 ms RTT, independent 2% loss per direction"),
++                       ("de-in-reorder", "198 ms RTT, 25% correlated packet reordering")):
+         print(f"\n### Latency, {title}: p50 / p99 ms\n")
+         print("| system | RTT 64 B | RTT 512 B | RTT 1400 B | one-way 64 B | one-way 1400 B | loss (64/512/1400) |")
+         print("|---|---|---|---|---|---|---|")
+@@ -96,7 +112,7 @@
+             c = f"mesh-{s}"
+             l = {size: load(c, f"lat-{tag}-{size}") for size in (64, 512, 1400)}
+             lost = "/".join(fmt((v or {}).get("sent", 0) - (v or {}).get("received", 0)) if v else "–" for v in l.values())
+-            print(f"| {s} | {pair(get(l[64], 'rtt_ms'), digits=3)} | {pair(get(l[512], 'rtt_ms'), digits=3)} | "
++            print(f"| {display_names.get(s, s)} | {pair(get(l[64], 'rtt_ms'), digits=3)} | {pair(get(l[512], 'rtt_ms'), digits=3)} | "
+                   f"{pair(get(l[1400], 'rtt_ms'), digits=3)} | {pair(get(l[64], 'one_way_fwd_ms'), digits=3)} | "
+                   f"{pair(get(l[1400], 'one_way_fwd_ms'), digits=3)} | {lost} |")
+         print("\n| system | RTT 64 B under 1 flow p50 / p99 ms | RTT 64 B under 8 flows p50 / p99 ms |")
+@@ -105,12 +121,12 @@
+             c = f"mesh-{s}"
+             l1 = load(c, f"lat-load-{tag}-64-1")
+             l8 = load(c, f"lat-load-{tag}-64-8")
+-            print(f"| {s} | {pair(get(l1, 'rtt_ms'), digits=3)} | {pair(get(l8, 'rtt_ms'), digits=3)} |")
++            print(f"| {display_names.get(s, s)} | {pair(get(l1, 'rtt_ms'), digits=3)} | {pair(get(l8, 'rtt_ms'), digits=3)} |")
+         if tag != "lan":
+             print("\n| system | 1 flow Gbit/s | 8 flows Gbit/s |\n|---|---|---|")
+             for s in mesh:
+                 c = f"mesh-{s}"
+-                print(f"| {s} | {fmt(get(load(c, f'tput-{tag}-1'), 'gbit_per_s'), 3)} | {fmt(get(load(c, f'tput-{tag}-8'), 'gbit_per_s'), 3)} |")
++                print(f"| {display_names.get(s, s)} | {fmt(get(load(c, f'tput-{tag}-1'), 'gbit_per_s'), 3)} | {fmt(get(load(c, f'tput-{tag}-8'), 'gbit_per_s'), 3)} |")
+ 
+ viewers = ["ix", "tmux", "zellij", "tmux-ssh", "zellij-ssh", "ssh"]
+ names = {"ix": "infraternal", "tmux": "tmux", "zellij": "Zellij", "tmux-ssh": "tmux over SSH",
