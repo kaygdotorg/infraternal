@@ -761,9 +761,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
           }
           const text = document.createElement("span");
           text.className = "result-text";
-          text.append(label, line);
+          // The page's name sits beside the heading when both fit, and wraps under it when they do not: a name is never cut off (TASTE).
+          const head = document.createElement("span");
+          head.className = "result-head";
+          head.append(label, hint);
+          text.append(head, line);
           result.classList.add("has-snippet");
-          result.append(icon, text, hint);
+          result.append(icon, text);
         } else result.append(icon, label, hint);
         rowCache.set(entry, result);
       }

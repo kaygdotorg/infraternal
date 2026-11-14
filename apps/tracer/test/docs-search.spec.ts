@@ -75,6 +75,20 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       expect(Math.abs(metrics.label - metrics.snippet), "title and snippet share a left edge").toBeLessThanOrEqual(0.5);
       expect(Math.abs(metrics.iconMid - metrics.labelMid), "icon and title share a centre line").toBeLessThanOrEqual(0.5);
       expect(metrics.overflow, "the list does not scroll sideways").toBeLessThanOrEqual(0);
+      // A name is never truncated (TASTE): the page's name ("Keys and how long they last") shows whole, wrapping under the heading on a phone.
+      const hintBox = await page.evaluate(() => {
+        const row = document.querySelector<HTMLElement>('.palette .result[data-action="canvas:docs:reference/keys#recovery-words"]')!;
+        const hint = row.querySelector<HTMLElement>(".result-hint")!;
+        const label = row.querySelector<HTMLElement>(".result-label")!;
+        const range = document.createRange();
+        range.selectNodeContents(hint);
+        const text = range.getBoundingClientRect();
+        const rowBox = row.getBoundingClientRect();
+        return { clipped: hint.scrollWidth - hint.clientWidth, textRight: text.right, rowRight: rowBox.right, hintLeft: hint.getBoundingClientRect().left, labelLeft: label.getBoundingClientRect().left, ellipsis: getComputedStyle(hint).textOverflow };
+      });
+      expect(hintBox.clipped, "the page name is not clipped").toBeLessThanOrEqual(0);
+      expect(hintBox.ellipsis, "the page name has no ellipsis").not.toBe("ellipsis");
+      expect(hintBox.textRight, "the page name stays inside its row").toBeLessThanOrEqual(hintBox.rowRight + 0.5);
       // sleep: the screenshot waits for the list's fonts and layout to settle; no event marks the end.
       await page.waitForTimeout(300);
       await shot("app-palette-body");
