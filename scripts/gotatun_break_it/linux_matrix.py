@@ -912,6 +912,27 @@ def _record_nat_stage(pair: NamespacePair, evidence: Path, stage: str) -> None:
         output.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def _send_from_b(pair: NamespacePair) -> None:
+    """Send one datagram from B over the mesh so that B's NAT opens its new mapping.
+
+    A NAT creates a mapping only for an outbound packet. A receiver like B, with every ACK
+    already sent, can stay silent for up to its keepalive interval while A's packets to the
+    old port are refused, so A has nothing to learn the new port from (#517, J634 run 7).
+    In real life the rebind coincides with B's next outbound packet; this makes it happen
+    now. The payload goes to the discard port on A's mesh address and is never answered.
+    """
+    _run(
+        _in_namespace(
+            pair.peer_pid,
+            sys.executable,
+            "-c",
+            "import socket, sys; "
+            "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'rebind', (sys.argv[1], 9))",
+            pair.left_ipv4,
+        )
+    )
+
+
 def _peer_endpoint(node: MeshNode) -> str | None:
     """Return where a two-node fixture's agent currently sends its only peer's packets."""
     rows = node.peers()
@@ -944,6 +965,7 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
         _record_nat_stage(pair, evidence, "before")
         _rebind_nat_port(pair.peer_pid, old_port, new_port)
         details["recovery_started_ns"] = time.monotonic_ns()
+        _send_from_b(pair)
         _record_nat_stage(pair, evidence, "after-delete")
         _wait_for_duration(3)
         # The new mapping stays for the rest of the case, as a router's would. Prove that the

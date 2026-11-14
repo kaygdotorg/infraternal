@@ -676,6 +676,7 @@ class NatPortRebindFaultTests(unittest.TestCase):
             left=SimpleNamespace(identity={"port": 51820}, peers=peers),
             right=SimpleNamespace(identity={"port": 51821}, peers=lambda: []),
             peer_pid=4321,
+            left_ipv4="10.254.0.1",
             scratch=self.case_dir / "fixture",
             captures=[],
         )
@@ -727,6 +728,13 @@ class NatPortRebindFaultTests(unittest.TestCase):
             commands[deletes[1]],
         )
         self.assertLess(max(snat, refuse), deletes[0])
+        # B's next outbound datagram is what creates a NAT mapping. Send one over the mesh at
+        # once: a B with nothing in flight would otherwise stay silent until its keepalive and
+        # A, refused at the old port, could not learn the new one (#517, J634 run 7).
+        trigger = next(
+            i for i, c in enumerate(commands) if "nsenter -t 4321 -n --" in c and "10.254.0.1" in c
+        )
+        self.assertLess(deletes[-1], trigger)
 
         kinds = [kind for kind, _ in events]
         last_delete = max(
