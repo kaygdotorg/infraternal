@@ -61,7 +61,7 @@ interface and firewall table; disabling removes them and leaves no poller,
 socket or timer running. Last installed configuration survives server loss.
 A peer's `endpoint` is the first underlay address to try. Its optional
 `candidates` list holds further addresses, in order (#515, D391): the peer's
-LAN address when both nodes' control connections come from one public address, its
+LAN address when both nodes sit behind one public address, its
 server-reflexive address (the public address and port the server's own mesh
 device last saw its packets come from), and the server-observed control IP
 combined with the node's advertised UDP port. The coordinator sends
@@ -73,16 +73,28 @@ report no LAN addresses. A peer the Access policy gives no network access
 gets no list either. Any other node gets the
 reflexive address, or the control-IP guess before one is observed, as its one
 `endpoint`, and so does the server's own node, which only answers its nodes
-and reads their reflexive addresses from its device. A GotaTun node moves a
-peer that has sent nothing back (no bytes, no new handshake, no packet from
-another address) to its next candidate every 5 s, for three rounds, then
-stays on the first. A peer with a live session on its first address is not
-walked. A finished walk is kept while the peer's list is unchanged, so a
-later snapshot never moves a working peer. A walk that found its peer runs
-again only once that peer has had no handshake for 180 s, checked when the
-next snapshot is applied, with no timer. A GotaTun node also starts a WireGuard handshake whenever
-a snapshot or a walk step gives an established peer a new address, so the
-first packet through its own NAT leaves at once. An endpoint is discovery, never proof of
+and reads their reflexive addresses from its device. Two nodes sit behind one
+public address only when their control connections come from one IP (one
+/64 for IPv6) and, when the server has observed both, their reflexive IPs
+match too: the control source cannot be forged, and the reflexive IP keeps
+nodes behind one TCP proxy apart. A GotaTun node moves a
+peer that has sent nothing back (no bytes, a handshake more than one second
+newer, no packet from another address) to its next candidate every 5 s, for
+three rounds, then stays on the first. A walk starts on the engine's current
+address when that is on the list, else on the first candidate. A peer is not
+walked when the engine already sent to its first address, with a live
+session, before the snapshot was applied; a session that a re-install has
+just moved onto the first address proves nothing. A finished walk is kept
+while the peer's list is unchanged, so a later snapshot never moves a
+working peer. A walk that found its peer runs again only once that peer has
+had no handshake for 180 s, checked when the next snapshot is applied, with
+no timer. A GotaTun node sends a new WireGuard handshake initiation when a
+walk starts, at each walk step, and when a snapshot gives a peer without
+candidates a new first address, so the first packet through its own NAT
+leaves at once. It is sent even while the old session is live (GotaTun's
+`rehandshake`), and that session keeps carrying data until the new one
+completes, so no working session is dropped. An unanswered initiation is
+retried by the engine's own rekey timer. An endpoint is discovery, never proof of
 reachability. Handshake counters distinguish a direct path from an unproven
 endpoint.
 
