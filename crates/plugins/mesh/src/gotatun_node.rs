@@ -1853,7 +1853,10 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
 #[cfg(test)]
 mod keep_tests {
     use super::{kept_address, on_relay};
-    use crate::dataplane::{Addresses, Peer, PublicKey};
+    use crate::{
+        dataplane::Peer,
+        policy::model::{Addresses, PublicKey},
+    };
     use std::net::SocketAddr;
 
     fn at(address: &str) -> SocketAddr {
