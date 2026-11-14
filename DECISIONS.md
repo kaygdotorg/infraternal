@@ -4983,3 +4983,31 @@ access (#341 B19).
        but only adding new hosts waits on that. Existing hosts reconnect by
        themselves, so a per-host label has nothing to mark. The restart
        toast and the locked Add host card cover it.
+
+392. **Host firewall scope, the su path, the mesh keepalive and the mesh key's host binding (owner, 2026-11-14, #483, #399, #515, #489; extends D386, D391, D376):**
+     - **Context:** the night of 2026-11-13/14, reviews of J511b (app-owned host
+       firewall), D376 (root upgrade), J564 (mesh candidates) and J501b (mesh
+       key persistence) left four questions. The owner agreed with each
+       recommendation.
+     - **Default-drop only on the server (amends D386's scope).** Only the
+       server role gets the app's explicit default-drop host input policy.
+       Every other joined machine gets an accept-by-default `infraternal_*`
+       table that adds only what the mesh needs (`infraternal0` and the bound
+       mesh UDP port), so `infraternal up` can never lock other admins out.
+       The owner, verbatim: "agreed but we were planning to make things work
+       even without opening ports right?" Yes: per D391, direct paths form by
+       hole punching (outbound UDP opens the NAT mapping), and the TLS 443
+       relay needs no inbound port. The app's own table only keeps infraternal
+       from dropping its own mesh traffic on that host; it never asks anyone
+       to open a router port.
+     - **The su path (D376).** The password typed for elevation must not be
+       readable by other processes of the same account. A private terminal
+       when that is proven, otherwise refusing `su` from an account that is not
+       the admin's own. Owner: "agreed".
+     - **Mesh keepalive stays 25 s (D81).** Faster rebind recovery comes from
+       fixing the handshake that was silently skipped (J587/J602, #515), not
+       from a shorter keepalive. Owner: "don't know the context so i agree".
+     - **The server's mesh key is tied to its host.** A hashed host binding
+       is stored next to the key, a mismatch refuses to start, and an explicit
+       command handles real host moves, so a copied or restored data directory
+       cannot clone the mesh identity. Owner: "agreed".
