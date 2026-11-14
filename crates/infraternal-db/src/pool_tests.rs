@@ -693,3 +693,28 @@ async fn closure_that_commits_itself_then_fails_applies_nothing() {
     );
 }
 
+/// J632 review, finding 2 (#473): a read closure cannot write, not even after
+/// it switches `query_only` off on its own connection. Today the pragma is an
+/// ordinary per-connection flag, so the closure writes (taking the write lock
+/// next to the one writer), and the reader stays writable for every later
+/// read job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_closure_cannot_switch_query_only_off() {
+    let (_dir, db) = setup(
+        "query-only-off",
+        Options {
+            readers: 1,
+            ..Options::default()
+        },
+    )
+    .await;
+    let outcome = db
+        .read(|tx| {
+            tx.execute_batch("PRAGMA query_only = OFF")?;
+            tx.execute("INSERT INTO t (v) VALUES (1)", [])?;
+            Ok::<_, Error>(())
+        })
+        .await;
+    assert!(outcome.is_err(), "a read closure wrote: {outcome:?}");
+    assert_eq!(values(&db).await, Vec::<i64>::new());
+}
