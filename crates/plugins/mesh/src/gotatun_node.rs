@@ -1053,9 +1053,13 @@ impl RuntimeState {
     /// Each walk that starts running begins with a real handshake on its address
     /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
     ///
-    /// Cost: at most one counter read per applied snapshot, and none when no walk can need one;
+    /// Cost: at most one counter read per applied snapshot, on the worker after the apply reply;
     /// [`Self::engine_addresses`] adds one before the apply only when the snapshot changes a
-    /// walking peer. No timer runs for a finished walk, so an idle node stays idle (D81).
+    /// walking or relayed peer. No timer runs for a finished walk, so an idle node stays idle
+    /// (D81). Known follow-up (J699 P3-2, D393): once any walk has found its peer, `watching` is
+    /// true, so every applied snapshot reads every peer's counters, an O(peers) read not yet
+    /// measured at 1,000 and 4,096 peers. #515 holds the measurement plan; a per-walk "earliest
+    /// silent deadline" would skip the read until a found walk can actually have gone silent.
     async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
         let Some(config) = self.config.as_ref() else {
             self.walks.clear();
