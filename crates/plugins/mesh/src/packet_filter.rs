@@ -77,19 +77,33 @@ pub(crate) enum Direction {
     MeshToHost,
 }
 
-/// Expire idle established TCP state so a stale reverse tuple cannot keep a removed grant alive.
-const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+// Idle timeouts per flow state (J672 P1, #265). They follow the Linux conntrack defaults the
+// `GotaTun` path relied on before D384 (`tcp_timeouts[]` in
+// `net/netfilter/nf_conntrack_proto_tcp.c` and `nf_conntrack_proto_udp.c`), so a connection that
+// lived under the kernel firewall lives the same way under this filter. A long timeout cannot
+// keep a revoked grant alive: [`PacketFilter::publish_policy`] retires every flow the new
+// snapshot no longer permits, whatever its age. Table pressure is handled by
+// [`FlowShard::evict_idle`], which never evicts an established connection.
+
+/// Keep an established TCP connection through long idle periods: 5 days, conntrack's
+/// `ESTABLISHED` timeout. An idle SSH session, a database pool or a keep-alive HTTP connection
+/// with no keep-alive traffic must still carry its next packet hours later.
+const TCP_ESTABLISHED_TIMEOUT: Duration = Duration::from_hours(120);
 /// Expire a TCP flow whose three-way handshake has not finished: its SYN is unanswered, or its
-/// SYN-ACK has not been acknowledged yet (half-open). Kernel conntrack uses 60 s for `SYN_RECV`.
+/// SYN-ACK has not been acknowledged yet (half-open). Conntrack's `SYN_RECV` timeout, 60 s. (Its
+/// `SYN_SENT` is 120 s; a SYN retransmitted after this expiry simply opens the flow again.)
 const TCP_OPENING_TIMEOUT: Duration = Duration::from_secs(60);
-/// Expire a half-closed TCP flow (FIN seen in one direction) that has gone quiet.
+/// Expire a half-closed TCP flow (FIN seen in one direction) that has gone quiet: conntrack's
+/// `FIN_WAIT` and `TIME_WAIT` timeout, 120 s.
 const TCP_CLOSING_TIMEOUT: Duration = Duration::from_secs(120);
 /// Keep a closed TCP flow (FIN both ways, or RST) just long enough for the last ACK and any
-/// retransmitted FIN, then free its slot.
+/// retransmitted FIN, then free its slot: conntrack's `CLOSE` timeout, 10 s.
 const TCP_CLOSED_TIMEOUT: Duration = Duration::from_secs(10);
-/// Expire idle UDP state while allowing short request/response exchanges.
-const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Expire a UDP flow that never saw a reply sooner, as kernel conntrack does.
+/// Keep a UDP flow that has seen a reply for 120 s of silence: conntrack's
+/// `nf_conntrack_udp_timeout_stream` in current kernels (older kernels used 180 s). Long enough
+/// for request/response protocols with slow keep-alives.
+const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Expire a UDP flow that never saw a reply sooner: conntrack's `nf_conntrack_udp_timeout`, 30 s.
 const UDP_UNREPLIED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound the work a peer can make the filter retain for non-TCP and non-UDP flows.
 const OTHER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -965,7 +979,7 @@ impl FlowEntry {
                 TCP_CLOSING_TIMEOUT
             }
             TCP if self.state & FlowState::HANDSHAKE_DONE == 0 => TCP_OPENING_TIMEOUT,
-            TCP => TCP_IDLE_TIMEOUT,
+            TCP => TCP_ESTABLISHED_TIMEOUT,
             UDP if self.state & FlowState::REPLIED == 0 => UDP_UNREPLIED_TIMEOUT,
             UDP => UDP_IDLE_TIMEOUT,
             _ => OTHER_IDLE_TIMEOUT,
@@ -2012,7 +2026,7 @@ mod tests {
     use super::{
         Direction, FLOW_SLOTS_PER_PEER, FLOWS_PER_DIRECTION, FRAGMENT_IDLE_TIMEOUT,
         FRAGMENTS_PER_PEER, FlowShard, FlowSlot, FragmentCoverage, FragmentSlot, PacketFilter,
-        PeerAccess, TCP_CLOSED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
+        PeerAccess, TCP_CLOSED_TIMEOUT, TCP_ESTABLISHED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -2583,7 +2597,7 @@ mod tests {
         assert!(!filter.check_at(
             &mut reply,
             Direction::HostToMesh,
-            started + super::TCP_IDLE_TIMEOUT + Duration::from_secs(1)
+            started + super::TCP_OPENING_TIMEOUT + Duration::from_secs(1)
         ));
     }
 
@@ -3721,5 +3735,46 @@ mod tests {
             ),
             "a half-open connection (SYN, SYN-ACK, no ACK) was treated as established and never evicted"
         );
+    }
+
+    /// J672 P1 (#265): an established connection that stays quiet for six minutes still
+    /// carries its next packet in both directions. Kernel conntrack, which the `GotaTun` path
+    /// used before D384, keeps an established TCP entry for 5 days.
+    #[test]
+    fn an_idle_established_connection_survives_six_quiet_minutes() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        assert!(establish4(&filter, PEER4, 40_000, now));
+        let later = now + Duration::from_secs(360);
+        let mut data = tcp4(LOCAL4, PEER4, 40_000, 443, ACK);
+        assert!(
+            filter.check_at(&mut data, Direction::HostToMesh, later),
+            "an established connection idle for 6 minutes was cut: its next ACK was dropped"
+        );
+        let mut answer = tcp4(PEER4, LOCAL4, 443, 40_000, ACK);
+        assert!(filter.check_at(&mut answer, Direction::MeshToHost, later));
+    }
+
+    /// An established connection still ends at conntrack's 5-day limit: after it, a
+    /// continuation cannot reopen the tuple.
+    #[test]
+    fn an_established_connection_expires_after_five_idle_days() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        assert!(establish4(&filter, PEER4, 40_000, now));
+        let just_before = now + TCP_ESTABLISHED_TIMEOUT;
+        let mut data = tcp4(LOCAL4, PEER4, 40_000, 443, ACK);
+        assert!(filter.check_at(&mut data, Direction::HostToMesh, just_before));
+        let past = just_before + TCP_ESTABLISHED_TIMEOUT + Duration::from_secs(1);
+        let mut stale = tcp4(LOCAL4, PEER4, 40_000, 443, ACK);
+        assert!(!filter.check_at(&mut stale, Direction::HostToMesh, past));
     }
 }
