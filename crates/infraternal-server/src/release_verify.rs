@@ -1,5 +1,11 @@
 //! Verifies bounded OpenSSH release signatures and hashes an already-open payload [184,224].
 //!
+//! The one signed release format is what the release-signer Worker writes (#211 S1):
+//! `SHA256SUMS`, its OpenSSH signature `SHA256SUMS.sig` (namespace `infraternal-release`),
+//! and a `VERSION` file listed in `SHA256SUMS`. The signature therefore covers the
+//! version, and the channel comes from that version [226]. Add-host payloads, the update
+//! check and `restart --binary` all verify this same format.
+//!
 //! Trust is compiled in. Parsing consumes every byte, and positional file reads preserve
 //! the caller's descriptor offset for the authenticated update handoff (#154).
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -33,6 +39,9 @@ pub enum ReleaseError {
     Digest,
     #[error("the binary could not be read")]
     Read,
+    /// The signed `VERSION` is not exactly one stable or edge version and a newline.
+    #[error("the signed release version is malformed")]
+    Version,
 }
 
 /// Verify the signed manifest, then the named payload through this exact descriptor.
@@ -60,8 +69,69 @@ pub(crate) fn verify_with_trust(
     verify_digest_expected(fd, expected)
 }
 
-pub(crate) fn verify_digest(fd: &File, name: &str, sums: &[u8]) -> Result<(), ReleaseError> {
-    verify_digest_expected(fd, checksum(name, sums)?)
+/// Verify one release image and its signed identity, as `restart --binary` admits it.
+///
+/// `sums` and `sig` are the release's `SHA256SUMS` and `SHA256SUMS.sig`. `version` is
+/// the release's `VERSION` file and `image` the executable, both already open (callers
+/// pass sealed copies so the bytes cannot change after the check). `name` is the
+/// artifact name `image` must match in `SHA256SUMS`, for example `infraternal-x86_64-musl`.
+/// Returns the signed version, for example `edge-20261114T000000Z`.
+/// # Errors
+/// Refuses an untrusted or malformed signature, a list that does not name both `VERSION`
+/// and `name`, a changed `VERSION` or image, and a `VERSION` that is not exactly one
+/// stable or edge version followed by a newline.
+pub fn verify_release_identity(
+    version: &File,
+    image: &File,
+    name: &str,
+    sums: &[u8],
+    sig: &[u8],
+) -> Result<String, ReleaseError> {
+    verify_identity_with_trust(version, image, name, sums, sig, TRUST)
+}
+
+/// [`verify_release_identity`] with an explicit trust set instead of the compiled-in
+/// release keys. Production code uses the wrapper; tests pass a throwaway key here.
+/// # Errors
+/// The same refusals as [`verify_release_identity`].
+pub fn verify_identity_with_trust(
+    version: &File,
+    image: &File,
+    name: &str,
+    sums: &[u8],
+    sig: &[u8],
+    trust: &str,
+) -> Result<String, ReleaseError> {
+    let version_digest = checksum("VERSION", sums)?;
+    let image_digest = checksum(name, sums)?;
+    verify_signature(sums, sig, trust)?;
+    verify_digest_expected(version, version_digest)?;
+    let declared = signed_version(version)?;
+    verify_digest_expected(image, image_digest)?;
+    Ok(declared)
+}
+
+/// Reads an already authenticated `VERSION` through its descriptor without moving the
+/// offset. Accepts exactly one valid stable or edge version and one trailing newline.
+fn signed_version(version: &File) -> Result<String, ReleaseError> {
+    let mut bytes = [0; 129];
+    let mut length = 0;
+    loop {
+        let offset = u64::try_from(length).map_err(|_| ReleaseError::Read)?;
+        match version.read_at(&mut bytes[length..], offset) {
+            Ok(0) => break,
+            Ok(count) => length += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ReleaseError::Read),
+        }
+        if length == bytes.len() {
+            return Err(ReleaseError::Version);
+        }
+    }
+    let text = std::str::from_utf8(&bytes[..length]).map_err(|_| ReleaseError::Version)?;
+    let declared = text.strip_suffix('\n').ok_or(ReleaseError::Version)?;
+    infraternal_plugin_api::release_version::channel(declared).ok_or(ReleaseError::Version)?;
+    Ok(declared.to_owned())
 }
 
 fn verify_digest_expected(fd: &File, expected: [u8; 32]) -> Result<(), ReleaseError> {
