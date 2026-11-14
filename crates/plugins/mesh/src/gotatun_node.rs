@@ -38,7 +38,7 @@ use tokio::{
 use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 use crate::{
-    candidates::Rotation,
+    candidate_walks::{Observed, Walks, active_peer_key, kept_address},
     dataplane::Config,
     gotatun_tun::LinuxTun,
     policy::{model::PublicKey, rules::TrafficPolicy},
@@ -383,7 +383,7 @@ impl Engine {
                     info,
                     health: worker_health,
                     restart_at: None,
-                    walks: BTreeMap::new(),
+                    walks: Walks::default(),
                     relayed: BTreeMap::new(),
                 };
                 runtime.block_on(run_worker(
@@ -706,7 +706,7 @@ struct RuntimeState {
     restart_at: Option<Instant>,
     /// Each peer's walk through its direct-path candidates (#515), by the key that owns its
     /// endpoint, with the peer it was started for: a re-installed peer starts a new walk.
-    walks: BTreeMap<PublicKey, (crate::dataplane::Peer, Rotation)>,
+    walks: Walks,
     /// The relay address each relayed peer was last pointed at, by device key (J699 P3-1).
     /// While the engine sends a peer's packets there (or nowhere, mid-preparation), no walk runs
     /// for it and a re-install keeps it there ([`on_relay`], [`kept_address`]): D391 makes the
@@ -720,27 +720,6 @@ struct RuntimeState {
 /// sends there, or nowhere because the relay is preparing its handshake (J699 P3-1).
 fn on_relay(engine_at: Option<SocketAddr>, relay: Option<SocketAddr>) -> bool {
     relay.is_some() && (engine_at.is_none() || engine_at == relay)
-}
-
-/// The address a re-installed peer keeps instead of its new first candidate, if any.
-///
-/// `apply` re-installs a peer whose snapshot changed, and a fresh install aims at the first
-/// candidate. Two cases keep where the engine already sends (`engine_at`):
-/// - a relayed peer stays on its `relay` (J699 P3-1, see [`RuntimeState::relayed`]);
-/// - a walking peer stays on an address its new list still holds (J699 P3-3): its walk may have
-///   found the peer there, and the new walk starts on the engine's address anyway (J602 F2), so
-///   moving away first would cost a working session up to one walk step.
-///
-/// A peer with a single address, or an engine address the list dropped, takes the snapshot's.
-fn kept_address(
-    peer: &crate::dataplane::Peer,
-    engine_at: Option<SocketAddr>,
-    relay: Option<SocketAddr>,
-) -> Option<SocketAddr> {
-    let at = engine_at?;
-    let listed =
-        !peer.candidates.is_empty() && (peer.endpoint == Some(at) || peer.candidates.contains(&at));
-    (relay == Some(at) || listed).then_some(at)
 }
 
 struct PendingDevice {
@@ -765,34 +744,21 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// What a candidate walk needs from one peer's counters at `unix_now`; an absent peer reads as
-/// silent, and so does a handshake older than [`crate::candidates::SILENT`].
-fn seen(counters: &CounterMap, key: PublicKey, unix_now: u64) -> crate::candidates::Seen {
+/// What the candidate walks need from the engine's counters ([`crate::candidate_walks::observe`]).
+fn observed(counters: &CounterMap) -> Observed {
+    let unix = crate::candidate_walks::unix_now();
     counters
-        .get(&key)
-        .map_or_else(crate::candidates::Seen::default, |stats| {
-            crate::candidates::Seen {
-                received: stats.received_bytes,
-                handshake: crate::candidates::live_handshake(stats.handshake_secs, unix_now),
-                endpoint: stats.endpoint,
-            }
+        .iter()
+        .map(|(key, stats)| {
+            let seen = crate::candidate_walks::observe(
+                stats.received_bytes,
+                stats.handshake_secs,
+                stats.endpoint,
+                unix,
+            );
+            (*key, seen)
         })
-}
-
-/// The wall clock in Unix seconds, the unit of the engine's handshake times.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-/// Wait until the next candidate walk step is due, or forever when no walk is running.
-async fn walk_due(at: Option<Instant>) {
-    match at {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
+        .collect()
 }
 
 /// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the `GotaTun`
@@ -817,7 +783,7 @@ async fn run_worker(
     // A restored configuration may already carry candidates; no session predates it.
     state.refresh_walks(&BTreeMap::new()).await;
     loop {
-        let next_walk = state.next_walk();
+        let next_walk = state.walks.next_due();
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
@@ -897,7 +863,7 @@ async fn run_worker(
             () = restart_due(state.restart_at), if state.restart_at.is_some() => {
                 state.restart().await;
             }
-            () = walk_due(next_walk), if next_walk.is_some() => {
+            () = crate::candidate_walks::walk_due(next_walk), if next_walk.is_some() => {
                 state.step_walks().await;
             }
         }
@@ -1072,82 +1038,44 @@ impl RuntimeState {
             .map(|policy| active_peer_key(&policy.peer))
             .collect();
         self.relayed.retain(|key, _| members.contains(key));
-        let wanted: BTreeMap<PublicKey, crate::dataplane::Peer> = config
-            .peers
-            .values()
-            .filter(|policy| {
-                peer_has_network_access(policy)
-                    && policy.peer.endpoint.is_some()
-                    && !policy.peer.candidates.is_empty()
-            })
-            .map(|policy| (active_peer_key(&policy.peer), policy.peer.clone()))
-            .collect();
-        self.walks.retain(|key, _| wanted.contains_key(key));
-        let changed = wanted
-            .iter()
-            .any(|(key, peer)| self.walks.get(key).is_none_or(|(old, _)| old != peer));
-        // A walk that found its peer must be checked for silence; others need no counters.
-        let watching = self
-            .walks
-            .values()
-            .any(|(_, walk)| walk.went_silent(crate::candidates::Seen::default()));
-        if !changed && !watching {
+        let mut wanted = crate::candidate_walks::walking_peers(
+            config
+                .peers
+                .values()
+                .filter(|policy| peer_has_network_access(policy)),
+        );
+        if !self.walks.prepare(&wanted) {
             return;
         }
         let Ok(counters) = self.counters().await else {
             return;
         };
-        let (now, unix) = (std::time::Instant::now(), unix_now());
-        // Walks that start running, with where the engine sends that peer's packets now.
-        let mut started = Vec::new();
-        for (key, peer) in wanted {
-            let mut observed = seen(&counters, key, unix);
-            let engine_at = observed.endpoint;
-            // A relayed peer is not walked off its relay (J699 P3-1).
-            if on_relay(engine_at, self.relayed.get(&key).copied()) {
-                self.walks.remove(&key);
-                continue;
+        let observed = observed(&counters);
+        // A relayed peer is not walked off its relay (J699 P3-1).
+        wanted.retain(|key, _| {
+            let engine_at = observed.get(key).and_then(|seen| seen.endpoint);
+            let relayed = on_relay(engine_at, self.relayed.get(key).copied());
+            if relayed {
+                self.walks.abandon(*key);
             }
-            match self.walks.get(&key) {
-                Some((old, walk)) if *old == peer => {
-                    if !walk.went_silent(observed) {
-                        continue;
-                    }
-                }
-                _ => {
-                    // The apply moved the engine here, so its live session was made elsewhere.
-                    if before.get(&key) != Some(&engine_at) {
-                        observed.endpoint = None;
-                    }
-                }
-            }
-            let list = peer
-                .endpoint
-                .into_iter()
-                .chain(peer.candidates.iter().copied());
-            match Rotation::new(list.collect(), now, observed) {
-                Some(walk) => {
-                    if !walk.settled() {
-                        started.push((key, walk.current(), engine_at));
-                    }
-                    self.walks.insert(key, (peer, walk));
-                }
-                None => {
-                    self.walks.remove(&key);
-                }
-            }
-        }
+            !relayed
+        });
+        let started = self
+            .walks
+            .start(wanted, &observed, before, std::time::Instant::now());
         // A walk starts on the engine's address when that is on the list (J602 F2), else on the
         // first candidate, which a re-installed peer already has. Anything else is moved there,
         // or the walk's first tick would read the engine's address as the peer having roamed.
         // Then the walk's address gets a real handshake, so a working one answers at once.
-        for (key, address, engine_at) in started {
-            if engine_at != Some(address) && self.set_endpoint(key, address).await.is_err() {
+        for walk in started {
+            if walk.engine_at != Some(walk.address)
+                && self.set_endpoint(walk.key, walk.address).await.is_err()
+            {
                 // The engine could not be moved; the next applied snapshot starts the walk again.
-                self.walks.remove(&key);
+                self.walks.abandon(walk.key);
                 continue;
             }
-            let _ = self.rehandshake(key);
+            let _ = self.rehandshake(walk.key);
         }
     }
 
@@ -1158,18 +1086,10 @@ impl RuntimeState {
     /// `apply` keep a re-installed peer's address ([`kept_address`]). Every other snapshot reads
     /// nothing here.
     async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, Option<SocketAddr>> {
-        let Some(applied) = self.config.as_ref() else {
-            return BTreeMap::new();
+        let watched = |peer: &crate::dataplane::Peer| {
+            !peer.candidates.is_empty() || self.relayed.contains_key(&active_peer_key(peer))
         };
-        let reinstalls = next.peers.iter().any(|(id, policy)| {
-            (!policy.peer.candidates.is_empty()
-                || self.relayed.contains_key(&active_peer_key(&policy.peer)))
-                && applied
-                    .peers
-                    .get(id)
-                    .is_some_and(|previous| previous.peer != policy.peer)
-        });
-        if !reinstalls {
+        if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, watched) {
             return BTreeMap::new();
         }
         self.counters()
@@ -1183,17 +1103,8 @@ impl RuntimeState {
             .unwrap_or_default()
     }
 
-    /// When the earliest running walk needs its next step.
-    fn next_walk(&self) -> Option<Instant> {
-        self.walks
-            .values()
-            .filter_map(|(_, walk)| walk.due())
-            .min()
-            .map(Instant::from_std)
-    }
-
-    /// Step every due walk with the peers' received counters and install the addresses they
-    /// move to. A stopped device has no counters to judge by, so nothing moves until it is back.
+    /// Step every due walk with the peers' counters and install the addresses they move to. A
+    /// stopped device has no counters to judge by, so nothing moves until it is back.
     async fn step_walks(&mut self) {
         if self.device.is_none() {
             return;
@@ -1201,21 +1112,15 @@ impl RuntimeState {
         let Ok(counters) = self.counters().await else {
             return;
         };
-        let (now, unix) = (std::time::Instant::now(), unix_now());
-        let moves: Vec<_> = self
+        let moves = self
             .walks
-            .iter_mut()
-            .filter_map(|(key, (_, walk))| {
-                walk.tick(now, seen(&counters, *key, unix))
-                    .map(|next| (*key, next))
-            })
-            .collect();
+            .step(std::time::Instant::now(), &observed(&counters));
         for (key, endpoint) in moves {
             if self.set_endpoint(key, endpoint).await.is_ok() {
                 let _ = self.rehandshake(key);
-            } else if let Some((_, walk)) = self.walks.get_mut(&key) {
+            } else {
                 // The engine still holds the old address; the walk's next step tries again.
-                walk.install_failed();
+                self.walks.install_failed(key);
             }
         }
     }
@@ -1224,7 +1129,7 @@ impl RuntimeState {
     #[cfg(feature = "relay")]
     async fn prepare_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         // From here the relay owns this peer's address: no walk moves it (J699 P3-1).
-        self.walks.remove(&key);
+        self.walks.abandon(key);
         self.relayed.insert(key, endpoint);
         // GotaTun records a handshake as soon as either side derives a session, including a
         // responder that has just answered a relayed initiation. Keep that session.
@@ -1267,7 +1172,7 @@ impl RuntimeState {
     /// Point `key` at a relay `endpoint` and start a handshake through it at once.
     #[cfg(feature = "relay")]
     async fn force_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
-        self.walks.remove(&key);
+        self.walks.abandon(key);
         self.relayed.insert(key, endpoint);
         self.set_endpoint(key, endpoint).await?;
         self.initiate(key)
@@ -1795,15 +1700,6 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
     Ok(vec![previous_peer, current_peer])
 }
 
-/// Select the identity that currently owns this peer's host routes.
-fn active_peer_key(peer: &crate::dataplane::Peer) -> PublicKey {
-    if peer.previous_active {
-        peer.previous_key.unwrap_or(peer.key)
-    } else {
-        peer.key
-    }
-}
-
 /// Include every configured identity so cleanup removes only keys no longer in overlap.
 fn policy_keys(policy: &crate::dataplane::PeerPolicy) -> impl Iterator<Item = PublicKey> {
     std::iter::once(policy.peer.key).chain(policy.peer.previous_key)
@@ -2151,7 +2047,7 @@ mod tests {
             },
             health: Arc::clone(&health),
             restart_at: None,
-            walks: BTreeMap::new(),
+            walks: crate::candidate_walks::Walks::default(),
             relayed: BTreeMap::new(),
         };
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();

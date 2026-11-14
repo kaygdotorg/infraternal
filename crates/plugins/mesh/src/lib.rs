@@ -25,6 +25,10 @@ mod listen_port;
 /// Direct-path candidates and the order nodes try them in (#515, D391).
 pub mod candidates;
 
+/// The per-peer candidate walks both `GotaTun` engines drive, Linux and macOS alike (#515).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+mod candidate_walks;
+
 pub mod configuration;
 
 pub mod access_updates;
