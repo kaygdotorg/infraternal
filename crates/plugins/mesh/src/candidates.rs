@@ -639,4 +639,35 @@ mod tests {
             walk.settled()
         );
     }
+
+    /// J602 F3 (#515): one control-connection source is no proof of one site when the server
+    /// sees every node from the same address.
+    ///
+    /// A server behind a TCP proxy (an L4 or SNI router, a container port proxy, a trusted proxy
+    /// that sends no forwarding header) sees every control connection come from the proxy. Every
+    /// node's guess then has the same IP, and `site_ip` puts the whole mesh on one site: each
+    /// granted peer learns every other node's LAN addresses and walks them first. Before J587 the
+    /// reflexive address decided, and two nodes on different sites have different ones. Using the
+    /// control source alone closes the spoofing hole (J585 F3) but opens this one; requiring the
+    /// reflexive IPs to agree as well, when both are known, closes both.
+    #[test]
+    fn nodes_seen_through_one_proxy_are_not_one_site() {
+        for proxy in ["172.17.0.1", "203.0.113.9"] {
+            let viewer = node(
+                &format!("{proxy}:10254"),
+                Some("198.51.100.22:41000"),
+                &["192.168.1.5:10254"],
+            );
+            let peer = node(
+                &format!("{proxy}:10254"),
+                Some("198.51.100.21:30254"),
+                &["10.9.0.3:10254"],
+            );
+            assert!(
+                !order(&viewer, &peer).contains(&at("10.9.0.3:10254")),
+                "a LAN address crossed sites through proxy {proxy}: {:?}",
+                order(&viewer, &peer)
+            );
+        }
+    }
 }
