@@ -38,7 +38,7 @@ use tokio::{
 use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 use crate::{
-    candidate_walks::{Observed, Walks, active_peer_key, kept_address},
+    candidate_walks::{HANDSHAKE_WAIT, Observed, Walks, active_peer_key, kept_address},
     dataplane::Config,
     gotatun_tun::LinuxTun,
     policy::{model::PublicKey, rules::TrafficPolicy},
@@ -119,10 +119,6 @@ async fn endpoint_refresh_due(at: Option<tokio::time::Instant>) {
 const ENDPOINT_REFRESH_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Bound route refreshes and authenticated endpoint scans to four per second.
 const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
-
-/// How long a forced handshake may wait; `GotaTun`'s own wait has no deadline.
-/// One `WireGuard` handshake attempt is 5 s, after which the peer timers retry.
-const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 
 /// Selects the node's data plane. `GotaTun` is the Linux default (D346), so the product runs on
 /// it and its bugs surface; kernel `WireGuard` stays an explicit per-machine opt-out. Reaching

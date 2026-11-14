@@ -126,6 +126,10 @@ pub(crate) fn kept_address(
     (relay == Some(at) || listed).then_some(at)
 }
 
+/// How long a worker's handshake task waits for the session it asked for; `GotaTun`'s own wait
+/// has no deadline. One `WireGuard` handshake attempt is 5 s, after which the peer's timers retry.
+pub(crate) const HANDSHAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The wall clock in Unix seconds, the unit of the engine's handshake times.
 #[must_use]
 pub(crate) fn unix_now() -> u64 {
