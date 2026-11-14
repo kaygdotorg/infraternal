@@ -358,6 +358,7 @@ run_row() {
     local case_name row_dir row_label
     case $engine in
         gotatun) case_name=mesh-gotatun ;;
+        infraternal) case_name=mesh-infraternal ;;
         kernel) case_name=mesh-netbird ;;
         kernel-plain) case_name=mesh-kernel-plain ;;
         wireguard-go) case_name=mesh-wireguard-go ;;
@@ -390,9 +391,11 @@ run_row() {
     )
     if [[ $mode == soak ]]; then
         taskset -c "$housekeeping" env "${matrix_env[@]}" H2H_RESULTS="$row_dir" H2H_GOTATUN_BIN="$binary" H2H_GOTATUN_SOURCE="$source_sha" \
+            H2H_INFRATERNAL_BIN="$binary" H2H_INFRATERNAL_SOURCE="$source_sha" \
             H2H_SOAK_SECONDS=3600 bash "$kit/run.sh" "${args[@]}"
     else
         taskset -c "$housekeeping" env "${matrix_env[@]}" H2H_RESULTS="$row_dir" H2H_GOTATUN_BIN="$binary" H2H_GOTATUN_SOURCE="$source_sha" \
+            H2H_INFRATERNAL_BIN="$binary" H2H_INFRATERNAL_SOURCE="$source_sha" \
             bash "$kit/run.sh" "${args[@]}"
     fi
 }
