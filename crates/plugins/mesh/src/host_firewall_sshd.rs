@@ -764,9 +764,8 @@ fn service_ports(unit: &ServiceUnit) -> Result<Vec<SshdPort>, String> {
                 .skip(1)
                 .flat_map(|word| expand_word(word, &environment))
                 .collect::<Vec<_>>();
-            let sshd = match safe_nft_path(Path::new(&path)) {
-                Ok(Some(sshd)) => sshd,
-                _ => return Err(format!("{path} is not a root-controlled executable")),
+            let Ok(Some(sshd)) = safe_nft_path(Path::new(&path)) else {
+                return Err(format!("{path} is not a root-controlled executable"));
             };
             ports.extend(sshd_effective_ports(&sshd, &listener_arguments(&words)?)?);
         }
@@ -1071,6 +1070,10 @@ pub fn proc_net_address(hex: &str) -> Option<IpAddr> {
 
 /// Unit tests for the sshd port sources, their parsers and the admission check.
 #[cfg(all(test, target_os = "linux"))]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed fixture step should name the step that failed"
+)]
 mod tests {
     use super::{
         AllowRule, SshdPort, SshdPortSource, SshdPorts, admits_sshd, check_sshd_admission,
