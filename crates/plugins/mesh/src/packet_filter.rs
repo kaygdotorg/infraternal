@@ -79,7 +79,8 @@ pub(crate) enum Direction {
 
 /// Expire idle established TCP state so a stale reverse tuple cannot keep a removed grant alive.
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-/// Expire a TCP flow whose opening SYN has not been answered yet.
+/// Expire a TCP flow whose three-way handshake has not finished: its SYN is unanswered, or its
+/// SYN-ACK has not been acknowledged yet (half-open). Kernel conntrack uses 60 s for `SYN_RECV`.
 const TCP_OPENING_TIMEOUT: Duration = Duration::from_secs(60);
 /// Expire a half-closed TCP flow (FIN seen in one direction) that has gone quiet.
 const TCP_CLOSING_TIMEOUT: Duration = Duration::from_secs(120);
@@ -923,6 +924,10 @@ impl FlowState {
     const FIN_REPLY: u8 = 4;
     /// Either side sent RST.
     const RESET: u8 = 8;
+    /// The initiator acknowledged the reply, so the TCP three-way handshake is complete. Until
+    /// then a connection is half-open: it keeps the short opening timeout and a full table may
+    /// evict it (J617 P3, #265).
+    const HANDSHAKE_DONE: u8 = 16;
 }
 
 impl FlowEntry {
@@ -933,7 +938,7 @@ impl FlowEntry {
             TCP if self.state & (FlowState::FIN_ORIGINAL | FlowState::FIN_REPLY) != 0 => {
                 TCP_CLOSING_TIMEOUT
             }
-            TCP if self.state & FlowState::REPLIED == 0 => TCP_OPENING_TIMEOUT,
+            TCP if self.state & FlowState::HANDSHAKE_DONE == 0 => TCP_OPENING_TIMEOUT,
             TCP => TCP_IDLE_TIMEOUT,
             UDP if self.state & FlowState::REPLIED == 0 => UDP_UNREPLIED_TIMEOUT,
             UDP => UDP_IDLE_TIMEOUT,
@@ -948,22 +953,28 @@ impl FlowEntry {
                 == FlowState::FIN_ORIGINAL | FlowState::FIN_REPLY
     }
 
-    /// Whether this is a live TCP connection that a full table must never evict: answered,
-    /// and neither reset nor closing.
+    /// Whether this is a live TCP connection that a full table must never evict: its three-way
+    /// handshake finished, and it is neither reset nor closing. A half-open connection (SYN
+    /// answered, final ACK missing) is not established.
     fn established(self) -> bool {
         self.key.protocol == TCP
-            && self.state & FlowState::REPLIED != 0
+            && self.state & FlowState::HANDSHAKE_DONE != 0
             && self.state & (FlowState::FIN_ORIGINAL | FlowState::FIN_REPLY | FlowState::RESET) == 0
     }
 
     /// Record what one admitted packet says about the flow. `same_direction` is true when the
     /// packet travels the way the flow was opened.
     fn observe(&mut self, same_direction: bool, tcp_flags: Option<u8>) {
-        if !same_direction {
-            self.state |= FlowState::REPLIED;
-        }
         if self.key.protocol == TCP {
             let flags = tcp_flags.unwrap_or(0);
+            // The initiator's ACK after the reply completes the handshake. A SYN or RST from
+            // the initiator does not, and neither does anything before the reply.
+            if same_direction
+                && self.state & FlowState::REPLIED != 0
+                && flags & (TCP_ACK | TCP_SYN | TCP_RST) == TCP_ACK
+            {
+                self.state |= FlowState::HANDSHAKE_DONE;
+            }
             if flags & TCP_RST != 0 {
                 self.state |= FlowState::RESET;
             }
@@ -974,6 +985,9 @@ impl FlowEntry {
                     FlowState::FIN_REPLY
                 };
             }
+        }
+        if !same_direction {
+            self.state |= FlowState::REPLIED;
         }
     }
 
@@ -1296,7 +1310,8 @@ impl FlowShard {
     /// Free the slot of the least recently seen flow that is not an established TCP connection,
     /// when a full table refuses a new flow.
     ///
-    /// Closed and half-closed connections, unanswered SYNs and UDP or ICMP exchanges are all
+    /// Closed and half-closed connections, unanswered SYNs, half-open connections (SYN-ACK
+    /// without the final ACK) and UDP or ICMP exchanges are all
     /// candidates; recency protects active ones. An established connection is never evicted,
     /// so a peer that fills its table with them can only stop itself opening more (the cap is
     /// per peer). Returns whether a slot was freed. The scan is O(slots) and runs only when the
