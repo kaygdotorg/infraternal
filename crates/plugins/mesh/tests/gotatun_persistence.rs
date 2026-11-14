@@ -868,6 +868,109 @@ fn a_settled_walk_survives_a_later_snapshot() {
     );
 }
 
+/// J602 F1 (#515): a list change that keeps the first address must not pin a found peer to it.
+///
+/// Node A's list for B is a dead first address and B's working address second, the shape of a
+/// LAN candidate from another site under one shared public address. A finds B on the second
+/// one. Then only the tail of the list changes, as when B's NAT rebinds and the coordinator
+/// republishes B's reflexive address while the LAN address stays first. `apply` re-installs the
+/// changed peer, which moves the engine back to the dead first address while keeping the session.
+/// `refresh_walks` sees the first address unchanged and the engine on it with a live handshake,
+/// so the new walk starts finished ("live on its first address"). Nothing moves A off the dead
+/// address; only a packet from B could, and behind a filtering NAT none gets through.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn a_changed_tail_does_not_pin_a_found_peer_to_a_dead_first_address() {
+    let (state_a, state_b) = (state("j602-tail-a"), state("j602-tail-b"));
+    run("mkdir", &["-p", "/run/netns"]);
+    run("mount", &["-t", "tmpfs", "netns", "/run/netns"]);
+    cleanup(&[]);
+    for ns in [NS_A, NS_B] {
+        run("ip", &["netns", "add", ns]);
+        run("ip", &["-n", ns, "link", "set", "lo", "up"]);
+    }
+    run(
+        "ip",
+        &[
+            "link", "add", "j602a", "netns", NS_A, "type", "veth", "peer", "j602b", "netns", NS_B,
+        ],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "address", "add", "192.0.2.1/24", "dev", "j602a"],
+    );
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "192.0.2.2/24", "dev", "j602b"],
+    );
+    run("ip", &["-n", NS_A, "link", "set", "j602a", "up"]);
+    run("ip", &["-n", NS_B, "link", "set", "j602b", "up"]);
+    let up = |ns: &str, path: &PathBuf| {
+        in_ns(ns, || {
+            let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+            let identity = node.up().unwrap();
+            (node, identity)
+        })
+    };
+    let (mut node_a, id_a) = up(NS_A, &state_a);
+    let (mut node_b, id_b) = up(NS_B, &state_b);
+    let a = (1, id_a.public_key);
+    let b = (2, id_b.public_key);
+    let working = SocketAddr::from(([192, 0, 2, 2], id_b.port));
+    // Nothing listens on either: a node sending there has lost its peer.
+    let dead = SocketAddr::from(([192, 0, 2, 2], id_b.port.wrapping_add(1)));
+    let other_dead = SocketAddr::from(([192, 0, 2, 2], id_b.port.wrapping_add(2)));
+    let for_a = |version, tail: Vec<SocketAddr>| {
+        let mut chunk = j534_snapshot(a, b, Some(dead), version, true);
+        for policy in chunk.upserted.values_mut() {
+            policy.peer.candidates.clone_from(&tail);
+        }
+        chunk
+    };
+    in_ns(NS_A, || {
+        assert!(node_a.chunk(for_a(1, vec![working])).unwrap());
+    });
+    in_ns(NS_B, || {
+        let endpoint_a = Some(SocketAddr::from(([192, 0, 2, 1], id_a.port)));
+        assert!(
+            node_b
+                .chunk(j534_snapshot(b, a, endpoint_a, 1, true))
+                .unwrap()
+        );
+    });
+    let seen = |node: &Node| node.counters().unwrap().get(&id_b.public_key).cloned();
+    // The test waits on an external protocol event, not a measured duration: B's initiation
+    // reaches A, and A's engine follows it to the working address.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline
+        && seen(&node_a).is_none_or(|c| c.handshake_secs == 0 || c.endpoint != Some(working))
+    {
+        // sleep: allow the GotaTun workers to exchange the first handshake
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        seen(&node_a).is_some_and(|c| c.handshake_secs != 0 && c.endpoint == Some(working)),
+        "fixture: A never reached B on the working address"
+    );
+    // sleep: one walk step (5 s) and margin, so A's first walk sees the peer and settles
+    thread::sleep(Duration::from_millis(5_500));
+    // Only the tail changes; the dead first address stays first.
+    in_ns(NS_A, || {
+        assert!(node_a.chunk(for_a(2, vec![working, other_dead])).unwrap());
+    });
+    // sleep: one walk step (5 s) and margin, still before B's first 25 s keepalive
+    thread::sleep(Duration::from_millis(6_500));
+    let endpoint = seen(&node_a).and_then(|c| c.endpoint);
+    in_ns(NS_A, || node_a.down().unwrap());
+    in_ns(NS_B, || node_b.down().unwrap());
+    cleanup(&[&state_a, &state_b]);
+    assert_ne!(
+        endpoint,
+        Some(dead),
+        "a found peer was pinned to its dead first address after a tail-only list change"
+    );
+}
+
 /// Build a peer snapshot with either full directional network access or no access.
 fn j534_snapshot(
     local: (u32, PublicKey),
