@@ -1,23 +1,54 @@
-//! Where an install keeps its files, following each operating system's standard [D395, #516].
+//! Where `server init` puts the server's folders, following each operating system's standard [D395, #516].
 //!
-//! Every path here is absolute and is derived only from the environment values in
-//! [`Environment`], never from the current directory: a service is installed once and
-//! must find the same folders forever. Only `server init` uses this module today; a
-//! follow-up moves the agents onto it, so keep it small and free of install logic.
+//! Every default here is absolute and comes only from the values in
+//! [`Environment`], never from the current directory: a service is installed
+//! once and must find the same folders forever.
 //!
-//! Layout for the server's state and database:
-//! - Linux, per user: `$XDG_STATE_HOME/infraternal/server`, else
-//!   `~/.local/state/infraternal/server`.
-//! - Linux, system-wide: `/var/lib/infraternal` (D229, D395).
-//! - macOS, per user: `~/Library/Application Support/infraternal/server`.
-//! - macOS, system-wide: `/Library/Application Support/infraternal/server`.
+//! # The server's data folder
+//!
+//! The server keeps one folder (`--data`). It holds the database
+//! (`infraternal.sqlite`), sockets, the identity and trust files: databases and
+//! state, in D395's words. It cannot be split yet, so the whole folder maps to
+//! D395's *state* location, with no extra suffix, matching the Linux system
+//! path that already exists:
+//!
+//! | Platform        | Data folder                                          |
+//! |-----------------|------------------------------------------------------|
+//! | Linux, per user | `$XDG_STATE_HOME/infraternal`, else `~/.local/state/infraternal` |
+//! | Linux, system   | `/var/lib/infraternal` (D229)                        |
+//! | macOS, per user | `~/Library/Application Support/infraternal`          |
+//! | macOS, system   | `/Library/Application Support/infraternal`           |
+//!
+//! D395 puts binaries and data in `$XDG_DATA_HOME/infraternal` on Linux per user,
+//! which is where the server's remote CA already defaults
+//! (`infraternal-server`'s `remote_startup::default_ca_dir`). macOS has a single
+//! Application Support folder for both, as D395 says.
+//!
+//! # Existing installs are never moved here
+//!
+//! The new defaults apply only to a fresh install. [`resolve_server_init`] keeps
+//! the folders recorded in the unit it would overwrite, so re-running init
+//! leaves the unit byte-for-byte unchanged and never orphans a custom folder.
+//! Moving old locations is the updater's job (D395, "moved on the next update").
+//!
+//! # Not routed through here (yet)
+//!
+//! - `remote_startup::default_ca_dir` applies the same XDG rule to
+//!   `$XDG_DATA_HOME`, but it lives in the `infraternal-server` crate, which this
+//!   binary crate depends on, not the other way round. Sharing it needs a small
+//!   common crate; that belongs to the follow-up that moves the infraternal
+//!   agents onto D395 paths.
+//! - `exec_label`'s `/var/lib/infraternal/bin/` is not a default to resolve but
+//!   the fixed system install prefix whose files get an executable `SELinux`
+//!   label (D17). It is a policy match, so it stays a constant there.
 
 use std::{
     env,
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
-/// Why a folder could not be chosen; the text says which flag to pass instead.
+/// Why a folder could not be chosen; the text says what to pass instead.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct PathError(String);
@@ -40,34 +71,60 @@ pub enum Os {
     MacOs,
 }
 
-/// The facts the defaults come from, as plain values so tests never read the real environment.
+/// The facts the defaults come from, as plain values so tests never depend on the real environment.
 #[derive(Debug, Clone)]
 pub struct Environment {
     /// Which convention to follow.
     pub os: Os,
-    /// `$XDG_STATE_HOME`, when set (Linux only).
+    /// Whether the process runs as root (effective user id 0).
+    pub is_root: bool,
+    /// `$XDG_STATE_HOME`, only when it is set, non-empty and absolute.
     pub xdg_state_home: Option<PathBuf>,
-    /// `$HOME`, when set.
+    /// `$HOME`, when set and non-empty.
     pub home: Option<PathBuf>,
     /// The folder holding the running binary, where a release bundle keeps `web/`.
     pub binary_dir: Option<PathBuf>,
 }
 
 impl Environment {
-    /// Read the real process environment and the running binary's location.
+    /// Read the real process environment, the effective user and the running binary's location.
     #[must_use]
     pub fn detect() -> Self {
-        Self {
-            os: if cfg!(target_os = "macos") {
+        Self::from_lookup(
+            if cfg!(target_os = "macos") {
                 Os::MacOs
             } else {
                 Os::Linux
             },
-            xdg_state_home: env::var_os("XDG_STATE_HOME").map(PathBuf::from),
-            home: env::var_os("HOME").map(PathBuf::from),
-            binary_dir: env::current_exe()
+            nix::unistd::Uid::effective().is_root(),
+            |name| env::var_os(name),
+            env::current_exe()
                 .ok()
                 .and_then(|exe| exe.parent().map(Path::to_owned)),
+        )
+    }
+
+    /// Build an environment from a variable lookup, applying the XDG rules once.
+    ///
+    /// The XDG Base Directory specification says a relative path in an `XDG_*`
+    /// variable is invalid and must be ignored, and an empty one counts as
+    /// unset, so both fall back to the `$HOME` default.
+    pub fn from_lookup(
+        os: Os,
+        is_root: bool,
+        lookup: impl Fn(&str) -> Option<OsString>,
+        binary_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            os,
+            is_root,
+            xdg_state_home: lookup("XDG_STATE_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
+            home: lookup("HOME")
+                .filter(|home| !home.is_empty())
+                .map(PathBuf::from),
+            binary_dir,
         }
     }
 
@@ -85,197 +142,370 @@ impl Environment {
     }
 }
 
-/// The server's default state and database folder for this scope and operating system.
+/// Refuse a machine-wide install from a non-root process before anything is planned.
 ///
-/// A relative or empty `$XDG_STATE_HOME` is ignored, as the XDG specification requires.
-pub fn server_state_dir(scope: Scope, environment: &Environment) -> Result<PathBuf, PathError> {
+/// A dry run only prints the plan, so it is allowed without root. Root without
+/// `--system` keeps the existing behaviour: a per-user service for root.
+pub fn check_scope(scope: Scope, dry_run: bool, environment: &Environment) -> Result<(), PathError> {
+    if scope == Scope::System && !dry_run && !environment.is_root {
+        return Err(PathError(
+            "--system installs a machine-wide service and needs root; run it with sudo, \
+             or leave out --system for a per-user service (--dry-run previews without root)"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// The server's default data folder for a fresh install in this scope (see the module table).
+pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBuf, PathError> {
     match (environment.os, scope) {
         (Os::Linux, Scope::System) => Ok(PathBuf::from("/var/lib/infraternal")),
-        (Os::Linux, Scope::User) => {
-            let base = match &environment.xdg_state_home {
-                Some(path) if path.is_absolute() => path.clone(),
-                _ => environment.absolute_home()?.join(".local/state"),
-            };
-            Ok(base.join("infraternal/server"))
+        (Os::Linux, Scope::User) => Ok(match &environment.xdg_state_home {
+            Some(state) => state.join("infraternal"),
+            None => environment
+                .absolute_home()?
+                .join(".local/state/infraternal"),
+        }),
+        (Os::MacOs, Scope::System) => {
+            Ok(PathBuf::from("/Library/Application Support/infraternal"))
         }
-        (Os::MacOs, Scope::System) => Ok(PathBuf::from(
-            "/Library/Application Support/infraternal/server",
-        )),
         (Os::MacOs, Scope::User) => Ok(environment
             .absolute_home()?
-            .join("Library/Application Support/infraternal/server")),
+            .join("Library/Application Support/infraternal")),
     }
 }
 
 /// The release bundle's `web/` folder beside the running binary, when it exists.
-pub fn bundled_web_root(environment: &Environment) -> Result<PathBuf, PathError> {
+#[must_use]
+pub fn bundled_web_root(environment: &Environment) -> Option<PathBuf> {
     environment
         .binary_dir
         .as_ref()
         .map(|dir| dir.join("web"))
         .filter(|dir| dir.is_dir())
-        .ok_or_else(|| {
-            PathError(
-                "no web/ folder beside the infraternal binary; pass --web-root <absolute path>"
-                    .to_owned(),
-            )
-        })
 }
 
-/// Resolve `server init`'s data and web folders, as absolute paths.
+/// What `server init` found already installed, read before it chooses folders.
+#[derive(Debug, Clone, Default)]
+pub struct Installed {
+    /// The unit init would overwrite (same scope and name), when one exists.
+    pub unit: Option<infraternal_status::RecordedServer>,
+    /// The data folder of any installed system server unit, the readers' rule
+    /// (`infraternal_status::server_data_directory`). Only used for `--system`.
+    pub system_data: Option<PathBuf>,
+}
+
+/// The folders `server init` will write into the unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerFolders {
+    /// The absolute `--data` folder.
+    pub data: PathBuf,
+    /// The absolute `--web-root` folder, or `None` to leave the flag out of the unit.
+    pub web_root: Option<PathBuf>,
+}
+
+/// Choose `server init`'s data and web folders, in this order:
 ///
-/// An explicit `--data` or `--web-root` must itself be absolute. A relative one is
-/// REFUSED rather than resolved against the cwd: the unit would silently freeze
-/// whichever directory the shell was in, and refusing costs one retry with a full
-/// path. Printing the cwd-resolved path was rejected because an unattended `--yes`
-/// run never reads it.
+/// 1. an explicit `--data` / `--web-root`, which must be absolute;
+/// 2. what the existing unit records, so a re-run writes the same unit text and
+///    a custom folder is never orphaned, even with `--force`;
+/// 3. for `--system` data only, the folder an installed system server records
+///    under another name (what init used before #516);
+/// 4. the fresh-install defaults: [`server_data_dir`], and the bundled `web/`
+///    beside the binary.
+///
+/// An existing unit without `--web-root` keeps that shape: adding the flag
+/// would change the unit text and turn a no-op re-run into a conflict. With no
+/// bundle and no flag the unit has no `--web-root`, as before.
 pub fn resolve_server_init(
     scope: Scope,
     data: Option<&Path>,
     web_root: Option<&Path>,
+    installed: &Installed,
     environment: &Environment,
-) -> Result<(PathBuf, PathBuf), PathError> {
+) -> Result<ServerFolders, PathError> {
+    let recorded = installed.unit.as_ref();
     let data = match explicit_absolute("--data", data)? {
         Some(path) => path,
-        None => server_state_dir(scope, environment)?,
+        None => match (recorded.and_then(|unit| unit.data.clone()), scope) {
+            (Some(path), _) => path,
+            (None, Scope::System) => match &installed.system_data {
+                Some(path) => path.clone(),
+                None => server_data_dir(scope, environment)?,
+            },
+            (None, Scope::User) => server_data_dir(scope, environment)?,
+        },
     };
     let web_root = match explicit_absolute("--web-root", web_root)? {
-        Some(path) => path,
-        None => bundled_web_root(environment)?,
+        Some(path) => Some(path),
+        None => match recorded {
+            Some(unit) => unit.web_root.clone(),
+            None => bundled_web_root(environment),
+        },
     };
-    Ok((data, web_root))
+    Ok(ServerFolders { data, web_root })
 }
 
 /// Pass an explicit absolute flag value through; refuse a relative one.
+///
+/// A relative value is REFUSED rather than resolved against the cwd: the unit
+/// would silently freeze whichever directory the shell was in (#516). The
+/// error names the absolute path the user most likely meant, so the retry is a
+/// copy and paste. Printing the resolved path and carrying on was rejected
+/// because an unattended `--yes` run never reads it.
 fn explicit_absolute(flag: &str, value: Option<&Path>) -> Result<Option<PathBuf>, PathError> {
     match value {
         None => Ok(None),
         Some(path) if path.is_absolute() => Ok(Some(path.to_owned())),
-        Some(path) => Err(PathError(format!(
-            "{flag} {} is relative; pass an absolute path so the service does not depend on the current directory",
-            path.display()
-        ))),
+        Some(path) => Err(PathError(match env::current_dir() {
+            Ok(cwd) => format!(
+                "{flag} {} is relative; pass an absolute path, for example {flag} {}",
+                path.display(),
+                cwd.join(path).display()
+            ),
+            Err(_) => format!(
+                "{flag} {} is relative; pass an absolute path",
+                path.display()
+            ),
+        })),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! One test per default, so each rule has its own failure.
+    //! One test per rule, so each has its own failure. Paths are plain values;
+    //! only the bundle test touches the disk, under the temp dir.
 
     use super::*;
+    use infraternal_status::RecordedServer;
 
-    /// A Linux environment whose binary sits in `dir`.
-    fn linux(dir: &Path) -> Environment {
+    /// A non-root Linux environment with no bundle beside the binary.
+    fn linux() -> Environment {
         Environment {
             os: Os::Linux,
+            is_root: false,
             xdg_state_home: None,
             home: Some(PathBuf::from("/home/someone")),
-            binary_dir: Some(dir.to_owned()),
+            binary_dir: None,
         }
     }
 
-    /// A temporary release bundle that contains a `web/` folder.
-    fn bundle() -> PathBuf {
-        let dir = env::temp_dir().join(format!("init-bundle-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(dir.join("web")).unwrap();
-        dir
+    /// The same machine following macOS conventions.
+    fn macos() -> Environment {
+        Environment {
+            os: Os::MacOs,
+            ..linux()
+        }
     }
 
-    /// Without `XDG_STATE_HOME`, user state goes under `~/.local/state`.
+    /// Resolve with nothing installed and no flags.
+    fn fresh(scope: Scope, environment: &Environment) -> ServerFolders {
+        resolve_server_init(scope, None, None, &Installed::default(), environment).unwrap()
+    }
+
+    /// A unique scratch folder under the temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        env::temp_dir().join(format!("init-{tag}-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// The four D395 defaults, with no `/server` suffix anywhere.
     #[test]
-    fn linux_user_state_defaults_under_home_when_xdg_is_unset() {
-        let dir = bundle();
-        let (data, _) = resolve_server_init(Scope::User, None, None, &linux(&dir)).unwrap();
+    fn fresh_defaults_follow_d395_on_every_platform() {
         assert_eq!(
-            data,
-            PathBuf::from("/home/someone/.local/state/infraternal/server")
+            fresh(Scope::User, &linux()).data,
+            PathBuf::from("/home/someone/.local/state/infraternal")
         );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// An absolute `XDG_STATE_HOME` is honoured; a relative one is ignored.
-    #[test]
-    fn linux_user_state_follows_an_absolute_xdg_state_home_only() {
-        let dir = bundle();
-        let mut env = linux(&dir);
-        env.xdg_state_home = Some(PathBuf::from("/srv/xdg"));
-        let (data, _) = resolve_server_init(Scope::User, None, None, &env).unwrap();
-        assert_eq!(data, PathBuf::from("/srv/xdg/infraternal/server"));
-        env.xdg_state_home = Some(PathBuf::from("relative"));
-        let (data, _) = resolve_server_init(Scope::User, None, None, &env).unwrap();
-        assert!(data.starts_with("/home/someone/.local/state"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// System state stays at the documented service folder (D229).
-    #[test]
-    fn linux_system_state_is_the_documented_service_folder() {
-        let dir = bundle();
-        let (data, _) = resolve_server_init(Scope::System, None, None, &linux(&dir)).unwrap();
-        assert_eq!(data, PathBuf::from("/var/lib/infraternal"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// macOS state lives under Application Support, per user and system-wide.
-    #[test]
-    fn macos_state_lives_under_application_support() {
-        let dir = bundle();
-        let mut env = linux(&dir);
-        env.os = Os::MacOs;
-        let (user, _) = resolve_server_init(Scope::User, None, None, &env).unwrap();
         assert_eq!(
-            user,
-            PathBuf::from("/home/someone/Library/Application Support/infraternal/server")
+            fresh(Scope::System, &linux()).data,
+            PathBuf::from("/var/lib/infraternal")
         );
-        let (system, _) = resolve_server_init(Scope::System, None, None, &env).unwrap();
         assert_eq!(
-            system,
-            PathBuf::from("/Library/Application Support/infraternal/server")
+            fresh(Scope::User, &macos()).data,
+            PathBuf::from("/home/someone/Library/Application Support/infraternal")
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            fresh(Scope::System, &macos()).data,
+            PathBuf::from("/Library/Application Support/infraternal")
+        );
+    }
+
+    /// An absolute `XDG_STATE_HOME` is honoured; empty or relative ones are ignored (XDG spec).
+    #[test]
+    fn xdg_state_home_is_honoured_only_when_absolute() {
+        let lookup = |value: &'static str| {
+            move |name: &str| match name {
+                "XDG_STATE_HOME" => Some(OsString::from(value)),
+                "HOME" => Some(OsString::from("/home/someone")),
+                _ => None,
+            }
+        };
+        let env = Environment::from_lookup(Os::Linux, false, lookup("/srv/xdg"), None);
+        assert_eq!(
+            fresh(Scope::User, &env).data,
+            PathBuf::from("/srv/xdg/infraternal")
+        );
+        for ignored in ["", "relative/state"] {
+            let env = Environment::from_lookup(Os::Linux, false, lookup(ignored), None);
+            assert_eq!(env.xdg_state_home, None, "{ignored:?}");
+            assert_eq!(
+                fresh(Scope::User, &env).data,
+                PathBuf::from("/home/someone/.local/state/infraternal"),
+                "{ignored:?}"
+            );
+        }
+    }
+
+    /// `detect` reads this process: its OS, its effective user and its `HOME`.
+    #[test]
+    fn detect_reads_the_running_process() {
+        let env = Environment::detect();
+        assert_eq!(env.os == Os::MacOs, cfg!(target_os = "macos"));
+        assert_eq!(env.is_root, nix::unistd::Uid::effective().is_root());
+        assert_eq!(
+            env.home,
+            env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(PathBuf::from)
+        );
+        assert_eq!(
+            env.binary_dir,
+            env::current_exe().unwrap().parent().map(Path::to_owned)
+        );
+        assert!(env.xdg_state_home.as_ref().is_none_or(|p| p.is_absolute()));
     }
 
     /// No usable home means a refusal that names `--data`.
     #[test]
-    fn missing_or_relative_home_is_refused_for_user_state() {
-        let dir = bundle();
-        let mut env = linux(&dir);
-        env.home = Some(PathBuf::from("rel"));
-        let error = resolve_server_init(Scope::User, None, None, &env).unwrap_err();
-        assert!(error.to_string().contains("--data"));
-        std::fs::remove_dir_all(dir).unwrap();
+    fn missing_empty_or_relative_home_is_refused_for_user_data() {
+        for home in [None, Some(""), Some("rel")] {
+            let env = Environment::from_lookup(
+                Os::Linux,
+                false,
+                |name| (name == "HOME").then_some(home.map(OsString::from)).flatten(),
+                None,
+            );
+            let error = resolve_server_init(Scope::User, None, None, &Installed::default(), &env)
+                .unwrap_err();
+            assert!(error.to_string().contains("--data"), "{home:?}");
+        }
     }
 
-    /// The web root defaults to `web/` beside the binary.
+    /// The web root defaults to the bundle's `web/`, and is left out when there is none.
     #[test]
-    fn web_root_defaults_to_the_folder_beside_the_binary() {
-        let dir = bundle();
-        let (_, web) = resolve_server_init(Scope::User, None, None, &linux(&dir)).unwrap();
-        assert_eq!(web, dir.join("web"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// Without a bundled `web/`, init refuses and names `--web-root`.
-    #[test]
-    fn missing_bundle_web_folder_is_refused_with_the_flag_to_use() {
-        let dir = env::temp_dir().join(format!("init-empty-{}", uuid::Uuid::new_v4()));
+    fn web_root_is_the_bundle_when_present_and_absent_otherwise() {
+        let dir = scratch("bundle");
         std::fs::create_dir_all(&dir).unwrap();
-        let error = resolve_server_init(Scope::User, None, None, &linux(&dir)).unwrap_err();
-        assert!(error.to_string().contains("--web-root"));
+        let mut env = linux();
+        env.binary_dir = Some(dir.clone());
+        assert_eq!(fresh(Scope::User, &env).web_root, None);
+        std::fs::create_dir(dir.join("web")).unwrap();
+        assert_eq!(fresh(Scope::User, &env).web_root, Some(dir.join("web")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Relative flag values are refused, never resolved against the cwd.
+    /// A re-run keeps the unit's recorded folders and its shape, even with a bundle present.
     #[test]
-    fn relative_data_and_web_root_are_refused_not_resolved_against_the_cwd() {
-        let dir = bundle();
-        let env = linux(&dir);
-        let error =
-            resolve_server_init(Scope::User, Some(Path::new("data")), None, &env).unwrap_err();
-        assert!(error.to_string().contains("--data data is relative"));
-        let error =
-            resolve_server_init(Scope::User, None, Some(Path::new("./web")), &env).unwrap_err();
-        assert!(error.to_string().contains("--web-root ./web is relative"));
+    fn an_existing_unit_keeps_its_folders_and_shape() {
+        let dir = scratch("keep");
+        std::fs::create_dir_all(dir.join("web")).unwrap();
+        let mut env = linux();
+        env.binary_dir = Some(dir.clone());
+        let installed = Installed {
+            unit: Some(RecordedServer {
+                data: Some("/srv/custom".into()),
+                web_root: None,
+            }),
+            system_data: Some("/srv/elsewhere".into()),
+        };
+        for scope in [Scope::User, Scope::System] {
+            let folders = resolve_server_init(scope, None, None, &installed, &env).unwrap();
+            assert_eq!(
+                folders,
+                ServerFolders {
+                    data: "/srv/custom".into(),
+                    web_root: None
+                }
+            );
+        }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `--system` falls back to another system server's folder, as before #516; `--user` does not.
+    #[test]
+    fn system_scope_reuses_an_installed_system_servers_folder() {
+        let installed = Installed {
+            unit: None,
+            system_data: Some("/srv/state".into()),
+        };
+        let system = resolve_server_init(Scope::System, None, None, &installed, &linux()).unwrap();
+        assert_eq!(system.data, PathBuf::from("/srv/state"));
+        let user = resolve_server_init(Scope::User, None, None, &installed, &linux()).unwrap();
+        assert_eq!(
+            user.data,
+            PathBuf::from("/home/someone/.local/state/infraternal")
+        );
+    }
+
+    /// Explicit flags win over everything recorded.
+    #[test]
+    fn explicit_flags_win_over_the_recorded_unit() {
+        let installed = Installed {
+            unit: Some(RecordedServer {
+                data: Some("/srv/old".into()),
+                web_root: Some("/srv/oldweb".into()),
+            }),
+            system_data: None,
+        };
+        let folders = resolve_server_init(
+            Scope::User,
+            Some(Path::new("/srv/new")),
+            Some(Path::new("/srv/newweb")),
+            &installed,
+            &linux(),
+        )
+        .unwrap();
+        assert_eq!(folders.data, PathBuf::from("/srv/new"));
+        assert_eq!(folders.web_root, Some(PathBuf::from("/srv/newweb")));
+    }
+
+    /// Relative flag values are refused, and the error names the absolute path to use.
+    #[test]
+    fn relative_flags_are_refused_with_the_absolute_path_to_use() {
+        let cwd = env::current_dir().unwrap();
+        let none = Installed::default();
+        let error =
+            resolve_server_init(Scope::User, Some(Path::new("data")), None, &none, &linux())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains(&format!("--data {}", cwd.join("data").display())),
+            "{error}"
+        );
+        let error =
+            resolve_server_init(Scope::User, None, Some(Path::new("./web")), &none, &linux())
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("--web-root ./web is relative"), "{error}");
+        assert!(
+            error.contains(&format!("--web-root {}", cwd.join("./web").display())),
+            "{error}"
+        );
+    }
+
+    /// `--system` needs root unless it is a dry run; root without `--system` stays per user.
+    #[test]
+    fn system_scope_needs_root_except_for_a_dry_run() {
+        let user = linux();
+        let error = check_scope(Scope::System, false, &user).unwrap_err();
+        assert!(error.to_string().contains("needs root"));
+        check_scope(Scope::System, true, &user).unwrap();
+        check_scope(Scope::User, false, &user).unwrap();
+        let root = Environment {
+            is_root: true,
+            ..linux()
+        };
+        check_scope(Scope::System, false, &root).unwrap();
+        check_scope(Scope::User, false, &root).unwrap();
     }
 }

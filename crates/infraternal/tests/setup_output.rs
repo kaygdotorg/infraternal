@@ -220,10 +220,8 @@ fn setup_token_discovers_a_service_installed_through_a_versioned_binary_symlink(
         .join(format!("r-{}", std::process::id()));
     let data = root.join("d");
     let units = root.join("u");
-    let web = root.join("w");
     fs::create_dir_all(&data).expect("create data fixture");
     fs::create_dir_all(&units).expect("create unit fixture");
-    fs::create_dir_all(&web).expect("create web fixture");
     let versioned = root.join("infraternal-versioned");
     fs::hard_link(env!("CARGO_BIN_EXE_infraternal"), &versioned)
         .or_else(|_| fs::copy(env!("CARGO_BIN_EXE_infraternal"), &versioned).map(|_| ()))
@@ -240,9 +238,6 @@ fn setup_token_discovers_a_service_installed_through_a_versioned_binary_symlink(
             "--data",
         ])
         .arg(&data)
-        // `server init` refuses to guess a web folder (#516), and no bundle sits beside this binary.
-        .arg("--web-root")
-        .arg(&web)
         .current_dir(&root)
         .env_clear()
         .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &units)

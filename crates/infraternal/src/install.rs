@@ -25,9 +25,6 @@ pub enum InstallError {
     /// systemd rejected the requested reload or enable operation.
     #[error("systemctl failed")]
     Systemctl,
-    /// A data or web folder could not be chosen safely; the text says what to pass instead.
-    #[error(transparent)]
-    Paths(#[from] super::install_paths::PathError),
 }
 
 /// Install the unit and enable it, or print the exact operations in dry-run mode.

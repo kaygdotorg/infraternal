@@ -1247,20 +1247,43 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
         }
     };
-    // Init, unlike the readers, never falls back to `./data` or the cwd [D345, D229].
-    match install_paths::resolve_server_init(
-        if matches.get_flag("system") {
-            install_paths::Scope::System
-        } else {
-            install_paths::Scope::User
-        },
-        matches.get_one::<String>("data").map(Path::new),
-        matches.get_one::<String>("web_root").map(Path::new),
-        &install_paths::Environment::detect(),
-    ) {
-        Ok((data, web_root)) => {
-            args.data = data;
-            args.web_root = Some(web_root);
+    let dry_run = matches.get_flag("dry_run");
+    let scope = if matches.get_flag("system") {
+        install_paths::Scope::System
+    } else {
+        install_paths::Scope::User
+    };
+    let environment = install_paths::Environment::detect();
+    let name = matches
+        .get_one::<String>("name")
+        .map_or("infraternal-server", String::as_str);
+    // Init, unlike the readers, never falls back to `./data` or the cwd, and a
+    // re-run keeps what the installed unit records [#516, D395].
+    let roots = infraternal_status::Roots::detect();
+    let installed = install_paths::Installed {
+        unit: infraternal_status::recorded_server_unit(
+            &roots,
+            match scope {
+                install_paths::Scope::System => infraternal_status::Scope::System,
+                install_paths::Scope::User => infraternal_status::Scope::User,
+            },
+            name,
+        ),
+        system_data: infraternal_status::server_data_directory(&roots),
+    };
+    let folders = install_paths::check_scope(scope, dry_run, &environment).and_then(|()| {
+        install_paths::resolve_server_init(
+            scope,
+            matches.get_one::<String>("data").map(Path::new),
+            matches.get_one::<String>("web_root").map(Path::new),
+            &installed,
+            &environment,
+        )
+    });
+    match folders {
+        Ok(folders) => {
+            args.data = folders.data;
+            args.web_root = folders.web_root;
         }
         Err(error) => {
             return report_failure(
@@ -1271,7 +1294,6 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
         }
     }
-    let dry_run = matches.get_flag("dry_run");
     let yes = matches.get_flag("yes");
     if let Err(error) = confirm_server_setup(
         yes,
@@ -1291,10 +1313,6 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             json_output,
         );
     }
-    let name = matches
-        .get_one::<String>("name")
-        .cloned()
-        .unwrap_or_else(|| "infraternal-server".to_owned());
     if matches.get_flag("system") && matches.get_flag("user") {
         return report_failure(
             "server init",
@@ -1308,7 +1326,7 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         user: !matches.get_flag("system"),
         dry_run,
         force: matches.get_flag("force"),
-        name: name.clone(),
+        name: name.to_owned(),
     };
     install_server("server init", &args, &install_args, json_output)
 }
