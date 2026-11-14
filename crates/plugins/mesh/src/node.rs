@@ -282,6 +282,28 @@ pub static BEFORE_KERNEL_KEY: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>
 #[cfg(feature = "test-support")]
 pub static BEFORE_SETTLE_SAVE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
+/// A one-shot, fallible test step: set it to a closure, and the transaction runs (and clears) it
+/// at its seam; an `Err` fails the step the seam stands in front of.
+#[cfg(feature = "test-support")]
+pub type TransactionSeam = std::sync::Mutex<Option<Box<dyn FnOnce() -> io::Result<()> + Send>>>;
+/// Test seam (#265 J618): runs once in a full mesh transaction right before its disk save. An
+/// `Err` fails that save, so a namespace test can drive the rollback of a transaction that has
+/// already changed the engine's peers.
+#[cfg(feature = "test-support")]
+pub static BEFORE_TRANSACTION_SAVE: TransactionSeam = std::sync::Mutex::new(None);
+/// Test seam (#265 J618): runs once in a failed full transaction's rollback right before the
+/// `GotaTun` engine gets its old peers back. An `Err` fails that step, leaving the state a
+/// failed rollback leaves behind for the test to inspect.
+#[cfg(feature = "test-support")]
+pub static BEFORE_ROLLBACK_ENGINE_APPLY: TransactionSeam = std::sync::Mutex::new(None);
+/// Run and clear one of the fallible transaction test seams above; `Ok` when none is set.
+#[cfg(feature = "test-support")]
+fn run_transaction_seam(seam: &TransactionSeam) -> io::Result<()> {
+    seam.lock()
+        .ok()
+        .and_then(|mut hook| hook.take())
+        .map_or(Ok(()), |hook| hook())
+}
 /// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
 /// shared-filter decision, so a namespace test can start another installation in that window.
 #[cfg(feature = "test-support")]
@@ -3255,6 +3277,10 @@ impl Node {
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
+            #[cfg(feature = "test-support")]
+            let saved = run_transaction_seam(&BEFORE_TRANSACTION_SAVE)
+                .and_then(|()| self.save_with_snapshot_base(Some(&config), true, snapshot_base));
+            #[cfg(not(feature = "test-support"))]
             let saved = self.save_with_snapshot_base(Some(&config), true, snapshot_base);
             if saved.is_err() {
                 self.routes = recorded;
@@ -3296,6 +3322,8 @@ impl Node {
                                 .collect::<Vec<_>>(),
                         )?;
                 } else {
+                    #[cfg(feature = "test-support")]
+                    run_transaction_seam(&BEFORE_ROLLBACK_ENGINE_APPLY)?;
                     self.gotatun
                         .as_ref()
                         .ok_or(io::ErrorKind::NotConnected)?
