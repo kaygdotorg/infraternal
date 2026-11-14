@@ -1394,6 +1394,27 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
             })?,
         );
     }
+    // From a console nothing proves the default-drop table keeps an SSH
+    // path, so a rule for sshd's port (as seen now, else 22) is required
+    // (J589 P3). Over SSH the live session's port is checked at install.
+    if std::env::var_os("SSH_CONNECTION").is_none() {
+        let sshd_ports = host_firewall::sshd_listening_ports();
+        if !host_firewall::admits_sshd(&admin_rules, &sshd_ports) {
+            let ports = if sshd_ports.is_empty() {
+                "22 (no sshd listener was seen)".to_owned()
+            } else {
+                sshd_ports
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(format!(
+                "no --host-firewall-allow rule admits sshd's port {ports}; add one such as \
+                 '*,*,tcp,<port>' so the default-drop host table keeps an SSH path"
+            ));
+        }
+    }
     if args.host_firewall_remote_interface.is_some() && args.remote.remote_listen.is_none()
         || !args.host_firewall_remote_sources.is_empty() && args.remote.remote_listen.is_none()
     {

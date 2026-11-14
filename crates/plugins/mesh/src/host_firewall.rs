@@ -1608,6 +1608,93 @@ pub fn admin_rule_for_ssh_session(value: &str) -> Result<AllowRule, PolicyError>
     })
 }
 
+/// Whether `rules` keep an SSH path when there is no live session to check.
+///
+/// A console install has no `SSH_CONNECTION`, so [`validate_ssh_connection`]
+/// cannot prove the saved default-drop table keeps sshd reachable, and
+/// [`validate`] accepts any TCP rule (sshd may not listen on 22). This
+/// requires a TCP rule for one of `sshd_ports`, or for 22 when that list is
+/// empty (no sshd seen, or the caller cannot see root's sockets).
+#[must_use]
+pub fn admits_sshd(rules: &[AllowRule], sshd_ports: &[u16]) -> bool {
+    let default_port = [22];
+    let ports = if sshd_ports.is_empty() {
+        &default_port[..]
+    } else {
+        sshd_ports
+    };
+    rules
+        .iter()
+        .any(|rule| rule.protocol == Protocol::Tcp && ports.contains(&rule.port))
+}
+
+/// The TCP ports processes named `sshd` are listening on, sorted; empty when none can be seen.
+///
+/// Reads `/proc/net/tcp{,6}` for listening sockets and maps their inodes to
+/// `sshd` processes through `/proc/<pid>/fd`, which only root can read for
+/// root's processes. Used only by a console `server init`, never at boot
+/// (sshd may not have started yet) and never as the only proof: the saved
+/// policy still needs an explicit rule ([`admits_sshd`]). A socket-activated
+/// sshd's listener belongs to the service manager, so it is not seen and the
+/// check falls back to port 22.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn sshd_listening_ports() -> Vec<u16> {
+    /// Map listening-socket inodes to their local ports from one `/proc/net` table.
+    fn listeners(table: &str, into: &mut std::collections::HashMap<u64, u16>) {
+        let Ok(text) = fs::read_to_string(table) else {
+            return;
+        };
+        for line in text.lines().skip(1) {
+            let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+            // sl local rem st tx:rx tr:when retrnsmt uid timeout inode
+            let (Some(local), Some(&"0A"), Some(inode)) =
+                (fields.get(1), fields.get(3), fields.get(9))
+            else {
+                continue;
+            };
+            let port = local
+                .rsplit_once(':')
+                .and_then(|(_, port)| u16::from_str_radix(port, 16).ok());
+            if let (Some(port), Ok(inode)) = (port, inode.parse::<u64>()) {
+                into.insert(inode, port);
+            }
+        }
+    }
+    let mut sockets = std::collections::HashMap::new();
+    listeners("/proc/net/tcp", &mut sockets);
+    listeners("/proc/net/tcp6", &mut sockets);
+    let mut ports = Vec::new();
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return ports;
+    };
+    for process in processes.filter_map(Result::ok) {
+        let path = process.path();
+        if fs::read_to_string(path.join("comm")).map_or(true, |name| name.trim_end() != "sshd") {
+            continue;
+        }
+        let Ok(descriptors) = fs::read_dir(path.join("fd")) else {
+            continue;
+        };
+        for descriptor in descriptors.filter_map(Result::ok) {
+            let Ok(target) = fs::read_link(descriptor.path()) else {
+                continue;
+            };
+            let inode = target
+                .to_str()
+                .and_then(|text| text.strip_prefix("socket:["))
+                .and_then(|text| text.strip_suffix(']'))
+                .and_then(|text| text.parse::<u64>().ok());
+            if let Some(port) = inode.and_then(|inode| sockets.get(&inode)) {
+                ports.push(*port);
+            }
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
 /// Check every directory component against root writes up to a fixed safe anchor.
 fn validate_policy_directories(parent: &Path, policy: &Path) -> Result<(), PolicyError> {
     for directory in parent.ancestors() {
@@ -2170,6 +2257,24 @@ mod tests {
         );
     }
 
+    /// A console install needs a TCP rule on a seen sshd port, or on 22 when none is seen.
+    #[test]
+    fn console_install_needs_a_rule_for_sshd() {
+        let rules = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.parse().expect("rule"))
+                .collect::<Vec<super::AllowRule>>()
+        };
+        assert!(!super::admits_sshd(&rules(&["*,*,tcp,443"]), &[]));
+        assert!(super::admits_sshd(
+            &rules(&["*,*,tcp,443", "*,*,tcp,22"]),
+            &[]
+        ));
+        assert!(!super::admits_sshd(&rules(&["*,*,udp,22"]), &[]));
+        assert!(super::admits_sshd(&rules(&["*,*,tcp,2222"]), &[22, 2222]));
+        assert!(!super::admits_sshd(&rules(&["*,*,tcp,22"]), &[2222]));
+    }
 
     /// Only a server policy makes the host table drop by default (J555, #483).
     #[test]
