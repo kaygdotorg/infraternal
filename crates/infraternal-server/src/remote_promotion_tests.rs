@@ -640,7 +640,7 @@ async fn the_install_transaction_is_recorded_once() {
 async fn a_relay_rollback_after_the_successor_joined_ends_the_cleanup() {
     let (store, pool, host) = enrolled().await;
     session(&pool, "s", 150).await;
-    let attempt = Uuid::from_u128(0x569_3);
+    let attempt = Uuid::from_u128(0x5693);
     enrolled_promotion(&store, host, attempt, 200).await;
     store
         .record_install_transaction(attempt, Uuid::from_u128(0xf3))
@@ -674,7 +674,7 @@ async fn a_relay_rollback_after_the_successor_joined_ends_the_cleanup() {
 async fn a_pending_uninstall_bars_the_next_promotion() {
     let (store, pool, host) = enrolled().await;
     session(&pool, "s", 150).await;
-    let first = Uuid::from_u128(0x569_a);
+    let first = Uuid::from_u128(0x569a);
     enrolled_promotion(&store, host, first, 200).await;
     store
         .record_install_transaction(first, Uuid::from_u128(0xa))
@@ -686,7 +686,7 @@ async fn a_pending_uninstall_bars_the_next_promotion() {
         .begin_promotion(
             "s",
             host,
-            Uuid::from_u128(0x569_b),
+            Uuid::from_u128(0x569b),
             Method::Sudo,
             bound(),
             220,
