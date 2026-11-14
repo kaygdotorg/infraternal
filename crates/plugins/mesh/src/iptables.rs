@@ -1,7 +1,7 @@
 //! Compatibility filter for hosts with only the iptables `nf_tables` frontend [216]; owns only Mesh chains.
 //!
 //! The frontends of both families are found by [`crate::firewall_tools`] at fixed, root-owned
-//! paths, Nix profile and store paths included, and never through `PATH` [D384].
+//! paths, Nix profile entry points included, and never through `PATH` or a Nix store scan [D384].
 use crate::{
     dataplane::Config,
     firewall_tools::{self, Tool},

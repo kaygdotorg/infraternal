@@ -1,7 +1,7 @@
 //! Owns one stateful mesh packet filter; nft transactions are atomic and use indexed sets [164,216], #129.
 //!
 //! Every firewall program is found by [`crate::firewall_tools`] at a fixed, root-owned path,
-//! including Nix profile and store paths, and never through `PATH` [D384].
+//! including Nix profile entry points, and never through `PATH` or a Nix store scan [D384].
 use crate::{
     dataplane::Config,
     firewall_tools::{self, Tool},
@@ -108,7 +108,7 @@ fn missing_guard_tool_detail(nft: bool, iptables_ipv4: bool, iptables_ipv6: bool
     format!(
         "{} were not found as root-owned executables in {}",
         missing.join("; "),
-        firewall_tools::searched_places("{nftables,iptables}")
+        firewall_tools::searched_places()
     )
 }
 
@@ -1274,11 +1274,12 @@ mod tests {
         let detail = missing_guard_tool_detail(false, false, false);
         for part in [
             "nft; iptables-nft and iptables-nft-restore; ip6tables-nft and ip6tables-nft-restore were not found",
-            "/usr/sbin, /usr/bin, /run/current-system/sw/bin",
-            "/nix/store/*-{nftables,iptables}-<version>/bin",
+            "/usr/sbin, /usr/bin, /sbin, /bin, /run/current-system/sw/bin",
+            "/nix/var/nix/profiles/default/bin",
         ] {
             assert!(detail.contains(part), "missing {part}: {detail}");
         }
+        assert!(!detail.contains("/nix/store"), "no store scan: {detail}");
         assert!(
             detail.len() <= 512,
             "the UI shows details up to 512 bytes: {detail}"
@@ -1324,7 +1325,7 @@ mod tests {
             "nft",
             "iptables-nft-restore",
             "ip6tables-nft-restore",
-            "/nix/store",
+            "/nix/var/nix/profiles/default/bin",
         ] {
             assert!(
                 status.detail.contains(part),
@@ -1597,8 +1598,8 @@ mod tests {
     /// Real kernel, both frontends: the optional `GotaTun` guard installs through the tool the
     /// fixed-path lookup found, its status names that exact path, and removal leaves no guard.
     ///
-    /// Run as real root under a systemd unit that hides the distribution tools, it proves the
-    /// Nix store path is the one executed (#265 J560 proof).
+    /// Run as real root under a systemd unit that hides the distribution tools, it proves a Nix
+    /// profile entry point is the one executed (#265 J560 proof).
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_optional_guard_runs_and_reports_the_found_tool_for_both_frontends() {
