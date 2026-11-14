@@ -93,15 +93,22 @@ const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const UDP_UNREPLIED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound the work a peer can make the filter retain for non-TCP and non-UDP flows.
 const OTHER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Bound each peer's conntrack memory and avoid allocations as packets arrive.
+/// The most flows one peer pair may track in each direction: opened by this host towards the
+/// peer, and opened by the peer towards this host.
 ///
-/// The table never grows. When it is full, a new flow first reclaims expired entries and then
-/// evicts the least recently seen flow that is not an established TCP connection (see
-/// [`FlowShard::evict_idle`]), so closed connections and finished UDP exchanges never cut a
-/// peer off (J592 P1-3, #265).
-const FLOWS_PER_PEER: usize = 128;
-/// `FLOWS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
-const FLOWS_PER_PEER_HASH: u64 = 128;
+/// Each direction has its own quota, so connections opened from one side can never use up the
+/// other side's slots: a process on the peer that holds 128 connections to this host does not
+/// stop this host connecting to the peer, nor the owner's mesh SSH arriving from elsewhere on
+/// the mesh (J617 P2, #265). When a direction's quota is full, a new flow in that direction
+/// first reclaims expired entries and then evicts that direction's least recently seen flow
+/// that is not an established TCP connection (see [`FlowShard::evict_idle`]), so closed
+/// connections and finished UDP exchanges never cut a peer off (J592 P1-3).
+const FLOWS_PER_DIRECTION: usize = 128;
+/// Slots in each peer's fixed table: room for both directions' full quotas at once, so a
+/// direction under its quota always finds a free slot.
+const FLOW_SLOTS_PER_PEER: usize = 2 * FLOWS_PER_DIRECTION;
+/// `FLOW_SLOTS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
+const FLOW_SLOTS_PER_PEER_HASH: u64 = 256;
 /// Expire a fragment association before the IP reassembly window can become stale.
 const FRAGMENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound the number of fragmented datagrams each peer can have in flight.
@@ -548,7 +555,7 @@ impl PacketFilter {
         if !shard.insert(entry, slot_start) {
             shard.reclaim_expired(now);
             let inserted = shard.insert(entry, slot_start)
-                || (shard.evict_idle() && shard.insert(entry, slot_start));
+                || (shard.evict_idle(direction) && shard.insert(entry, slot_start));
             if !inserted {
                 return false;
             }
@@ -1209,10 +1216,25 @@ enum FragmentSlot {
 }
 
 /// One fixed-size conntrack and fragment shard protected independently from other peers.
+///
+/// Invariant: `initiated[d]` is the number of occupied slots whose flow was opened in direction
+/// `d` (see [`direction_slot`]), and never exceeds [`FLOWS_PER_DIRECTION`]. Every change to
+/// `slots` that adds, removes or replaces an entry goes through [`FlowShard::insert`],
+/// [`FlowShard::remove`] or [`FlowShard::evict_idle`], which keep the counts in step; refreshing
+/// an entry in place keeps its direction and so needs no update.
 struct FlowShard {
     slots: Vec<FlowSlot>,
+    initiated: [usize; 2],
     fragments: Vec<FragmentSlot>,
     fragment_coverage: Vec<FragmentCoverage>,
+}
+
+/// The index of a direction's flow count in [`FlowShard::initiated`].
+fn direction_slot(direction: Direction) -> usize {
+    match direction {
+        Direction::HostToMesh => 0,
+        Direction::MeshToHost => 1,
+    }
 }
 
 impl FlowShard {
@@ -1220,9 +1242,9 @@ impl FlowShard {
     fn new() -> io::Result<Self> {
         let mut slots = Vec::new();
         slots
-            .try_reserve_exact(FLOWS_PER_PEER)
+            .try_reserve_exact(FLOW_SLOTS_PER_PEER)
             .map_err(|_| io::Error::other("mesh conntrack slots could not be allocated"))?;
-        slots.resize(FLOWS_PER_PEER, FlowSlot::Empty);
+        slots.resize(FLOW_SLOTS_PER_PEER, FlowSlot::Empty);
         let mut fragments = Vec::new();
         fragments
             .try_reserve_exact(FRAGMENTS_PER_PEER)
@@ -1235,6 +1257,7 @@ impl FlowShard {
         fragment_coverage.resize(FRAGMENTS_PER_PEER, FragmentCoverage::empty());
         Ok(Self {
             slots,
+            initiated: [0; 2],
             fragments,
             fragment_coverage,
         })
@@ -1257,13 +1280,22 @@ impl FlowShard {
     }
 
     /// Insert a flow without growing the slot array or allocating on the packet path.
+    ///
+    /// Refuses (returns false) when the flow's direction already holds [`FLOWS_PER_DIRECTION`]
+    /// flows, whatever the other direction holds.
     fn insert(&mut self, entry: FlowEntry, start: usize) -> bool {
+        let direction = direction_slot(entry.initiated);
+        let full = self.initiated[direction] >= FLOWS_PER_DIRECTION;
         let mut removed = None;
         for offset in 0..self.slots.len() {
             let index = (start + offset) % self.slots.len();
             match self.slots[index] {
                 FlowSlot::Empty => {
+                    if full {
+                        return false;
+                    }
                     self.slots[removed.unwrap_or(index)] = FlowSlot::Occupied(entry);
+                    self.initiated[direction] += 1;
                     return true;
                 }
                 FlowSlot::Removed => {
@@ -1272,17 +1304,25 @@ impl FlowShard {
                 FlowSlot::Occupied(existing)
                     if existing.key == entry.key || existing.key == entry.key.reverse() =>
                 {
+                    let previous = direction_slot(existing.initiated);
+                    if previous != direction && full {
+                        return false;
+                    }
+                    self.initiated[previous] -= 1;
                     self.slots[index] = FlowSlot::Occupied(entry);
+                    self.initiated[direction] += 1;
                     return true;
                 }
                 FlowSlot::Occupied(_) => {}
             }
         }
-        if let Some(index) = removed {
-            self.slots[index] = FlowSlot::Occupied(entry);
-            true
-        } else {
-            false
+        match removed {
+            Some(index) if !full => {
+                self.slots[index] = FlowSlot::Occupied(entry);
+                self.initiated[direction] += 1;
+                true
+            }
+            Some(_) | None => false,
         }
     }
 
@@ -1293,6 +1333,9 @@ impl FlowShard {
     /// seen churn has no empty slot left and every miss probes all slots.
     fn remove(&mut self, index: usize) {
         let len = self.slots.len();
+        if let FlowSlot::Occupied(entry) = self.slots[index] {
+            self.initiated[direction_slot(entry.initiated)] -= 1;
+        }
         self.slots[index] = FlowSlot::Removed;
         if !matches!(self.slots[(index + 1) % len], FlowSlot::Empty) {
             return;
@@ -1307,30 +1350,36 @@ impl FlowShard {
         }
     }
 
-    /// Free the slot of the least recently seen flow that is not an established TCP connection,
-    /// when a full table refuses a new flow.
+    /// Free the slot of `direction`'s least recently seen flow that is not an established TCP
+    /// connection, when that direction's full quota refuses a new flow.
     ///
     /// Closed and half-closed connections, unanswered SYNs, half-open connections (SYN-ACK
-    /// without the final ACK) and UDP or ICMP exchanges are all
-    /// candidates; recency protects active ones. An established connection is never evicted,
-    /// so a peer that fills its table with them can only stop itself opening more (the cap is
-    /// per peer). Returns whether a slot was freed. The scan is O(slots) and runs only when the
-    /// table is full.
-    fn evict_idle(&mut self) -> bool {
+    /// without the final ACK) and UDP or ICMP exchanges are all candidates; recency protects
+    /// active ones. Only flows opened in the same direction are candidates, so one side's new
+    /// flows never evict the other side's. An established connection is never evicted: whoever
+    /// holds [`FLOWS_PER_DIRECTION`] of them in one direction stops only new flows opened from
+    /// that same side of this peer pair. The other direction keeps its own quota, so this host
+    /// can still connect to the peer and the peer's held inbound connections cannot lock this
+    /// host out (J617 P2, #265). Returns whether a slot was freed. The scan is O(slots) and runs
+    /// only when the quota is full.
+    fn evict_idle(&mut self, direction: Direction) -> bool {
         let victim = self
             .slots
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| match slot {
-                FlowSlot::Occupied(entry) if !entry.established() => Some((entry.last_seen, index)),
+                FlowSlot::Occupied(entry)
+                    if entry.initiated == direction && !entry.established() =>
+                {
+                    Some((entry.last_seen, index))
+                }
                 FlowSlot::Empty | FlowSlot::Removed | FlowSlot::Occupied(_) => None,
             })
             .min();
         let Some((_, index)) = victim else {
             return false;
         };
-        // The table is full, so a tombstone here keeps every other probe chain intact.
-        self.slots[index] = FlowSlot::Removed;
+        self.remove(index);
         true
     }
 
@@ -1435,7 +1484,7 @@ fn flow_start(key: FlowKey) -> usize {
     let mut tuple_hasher = DefaultHasher::new();
     key.canonical().hash(&mut tuple_hasher);
     let tuple_hash = tuple_hasher.finish();
-    usize::try_from(tuple_hash % FLOWS_PER_PEER_HASH).unwrap_or_default()
+    usize::try_from(tuple_hash % FLOW_SLOTS_PER_PEER_HASH).unwrap_or_default()
 }
 
 /// Index one fragment identity inside its peer's fixed-size table.
@@ -1942,9 +1991,9 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        Direction, FLOWS_PER_PEER, FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, FlowShard, FlowSlot,
-        FragmentCoverage, FragmentSlot, PacketFilter, PeerAccess, TCP_CLOSED_TIMEOUT, UDP,
-        UDP_IDLE_TIMEOUT,
+        Direction, FLOW_SLOTS_PER_PEER, FLOWS_PER_DIRECTION, FRAGMENT_IDLE_TIMEOUT,
+        FRAGMENTS_PER_PEER, FlowShard, FlowSlot, FragmentCoverage, FragmentSlot, PacketFilter,
+        PeerAccess, TCP_CLOSED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -3449,27 +3498,81 @@ mod tests {
         );
     }
 
-    /// Memory per peer for the fixed conntrack and fragment tables, times 1,000 peers (PROCESS
-    /// §1: memory per unit times the expected count). Printed for the issue; the bound keeps a
-    /// later change from growing it unnoticed.
+    /// Memory per peer for the fixed conntrack and fragment tables, times D393's 1,000-peer
+    /// design scale and 4,096-peer test scale (PROCESS §1: memory per unit times the expected
+    /// count). Printed for the issue; the bound keeps a later change from growing it unnoticed.
     #[test]
     fn flow_table_memory_per_peer_times_one_thousand_peers() {
-        let per_peer = std::mem::size_of::<FlowSlot>() * FLOWS_PER_PEER
+        let per_peer = std::mem::size_of::<FlowSlot>() * FLOW_SLOTS_PER_PEER
             + (std::mem::size_of::<FragmentSlot>() + std::mem::size_of::<FragmentCoverage>())
                 * FRAGMENTS_PER_PEER
             + std::mem::size_of::<FlowShard>()
             + std::mem::size_of::<PeerAccess>();
         println!(
-            "FLOW_TABLE_MEMORY flow_slot={} flows={} fragment_slot={} coverage={} fragments={} \
-             per_peer={per_peer} x1000={}",
+            "FLOW_TABLE_MEMORY flow_slot={} flow_slots={} per_direction={} fragment_slot={} \
+             coverage={} fragments={} per_peer={per_peer} x1000={} x4096={}",
             std::mem::size_of::<FlowSlot>(),
-            FLOWS_PER_PEER,
+            FLOW_SLOTS_PER_PEER,
+            FLOWS_PER_DIRECTION,
             std::mem::size_of::<FragmentSlot>(),
             std::mem::size_of::<FragmentCoverage>(),
             FRAGMENTS_PER_PEER,
-            per_peer * 1000
+            per_peer * 1000,
+            per_peer * 4096
         );
         assert!(per_peer <= 160 * 1024, "{per_peer} bytes per peer");
+    }
+
+    /// Each direction has its own quota: this host holding a full quota of established
+    /// outbound connections still admits the peer's new inbound connection, and a full
+    /// direction makes room by evicting its own oldest unestablished flow, never one the other
+    /// side opened (J617 P2, #265).
+    #[test]
+    fn each_direction_keeps_its_own_quota_and_evicts_only_its_own_flows() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::All, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let start = Instant::now();
+        let mut inbound_syn = tcp4(PEER4, LOCAL4, 30_000, 443, SYN);
+        assert!(filter.check_at(&mut inbound_syn, Direction::MeshToHost, start));
+        let quota = u16::try_from(FLOWS_PER_DIRECTION).expect("quota fits a port count");
+        for index in 0..quota {
+            let mut syn = tcp4(LOCAL4, PEER4, 20_000 + index, 443, SYN);
+            let at = start + Duration::from_millis(u64::from(index) + 1);
+            assert!(filter.check_at(&mut syn, Direction::HostToMesh, at));
+        }
+        let later = start + Duration::from_secs(1);
+        let mut extra = tcp4(LOCAL4, PEER4, 21_000, 443, SYN);
+        assert!(
+            filter.check_at(&mut extra, Direction::HostToMesh, later),
+            "a full outbound quota makes room among its own flows"
+        );
+        let mut evicted = tcp4(PEER4, LOCAL4, 443, 20_000, SYN_ACK);
+        assert!(
+            !filter.check_at(&mut evicted, Direction::MeshToHost, later),
+            "the oldest outbound SYN is the one evicted"
+        );
+        let mut accept = tcp4(LOCAL4, PEER4, 443, 30_000, SYN_ACK);
+        assert!(
+            filter.check_at(&mut accept, Direction::HostToMesh, later),
+            "the older inbound SYN belongs to the other quota and must survive"
+        );
+
+        let held = PacketFilter::new(
+            &config(grant(Protocol::Tcp, 8443), TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        for index in 0..quota {
+            assert!(establish4(&held, PEER4, 20_000 + index, start));
+        }
+        let mut inbound = tcp4(PEER4, LOCAL4, 40_000, 8443, SYN);
+        assert!(
+            held.check_at(&mut inbound, Direction::MeshToHost, later),
+            "this host's {quota} held outbound connections locked the peer out of its inbound grant"
+        );
     }
 
     /// Withdrawn peers lose their address at once: the old owner's open flows and grants stop
@@ -3539,7 +3642,7 @@ mod tests {
         )
         .expect("compile policy");
         let now = Instant::now();
-        let held = u16::try_from(FLOWS_PER_PEER).expect("cap fits a port count");
+        let held = u16::try_from(FLOWS_PER_DIRECTION).expect("cap fits a port count");
         for index in 0..held {
             let port = 40_000 + index;
             let mut syn = tcp4(PEER4, LOCAL4, port, 443, SYN);
@@ -3576,7 +3679,7 @@ mod tests {
         )
         .expect("compile policy");
         let now = Instant::now();
-        let complete = u16::try_from(FLOWS_PER_PEER - 1).expect("cap fits a port count");
+        let complete = u16::try_from(FLOWS_PER_DIRECTION - 1).expect("cap fits a port count");
         for index in 0..complete {
             let port = 40_000 + index;
             let mut syn = tcp4(PEER4, LOCAL4, port, 443, SYN);
