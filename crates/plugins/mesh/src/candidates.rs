@@ -46,18 +46,36 @@ pub struct NodeCandidates {
 }
 
 impl NodeCandidates {
-    /// The address that places this node on a site: the source IP of its control connection
-    /// (the guess's IP).
+    /// Whether this node and `other` sit behind one public address, so each may learn the
+    /// other's LAN addresses ([`order`]).
     ///
-    /// That connection is TCP, so its source cannot be forged without completing a handshake
-    /// from that address. The reflexive address comes from UDP: one authenticated mesh packet
-    /// with a spoofed source moves it, so a member could claim another site and read that site's
-    /// LAN addresses (J585 F2). Nodes behind one carrier-grade NAT share this address and count
-    /// as one site; their LAN candidates then fail to answer and the walk moves on, which is
-    /// acceptable inside one mesh.
+    /// Two signals must agree:
+    /// - **The control connection's source** (the guess's IP), which must be known for both and
+    ///   match. That connection is TCP, so its source cannot be forged without completing a
+    ///   handshake from that address. On its own it is not enough: behind a TCP proxy that sends
+    ///   no forwarding header (an L4 or SNI router, a container port proxy) every node shows the
+    ///   proxy's address, and the whole mesh would be one site (J602 F3).
+    /// - **The server-reflexive IP**, when both nodes have one: it comes from the mesh UDP path,
+    ///   which no TCP proxy touches. It only ever narrows the rule. On its own it would be
+    ///   spoofable: one authenticated mesh packet with a forged source moves it, so a member could
+    ///   claim another site and read its LAN addresses (J585 F2).
+    ///
+    /// IPv6 addresses match on their /64: a dual-stack home whose nodes reach the server over
+    /// IPv6 shows one global address per host but one prefix per LAN. Nodes behind one
+    /// carrier-grade NAT share both signals and count as one site; their LAN candidates then fail
+    /// to answer and the walk moves on, which is acceptable inside one mesh. Before the server
+    /// has observed both nodes, the control source decides alone.
     #[must_use]
-    pub fn site_ip(&self) -> Option<IpAddr> {
-        self.guess.map(|address| address.ip())
+    pub fn same_site(&self, other: &Self) -> bool {
+        let control = match (self.guess, other.guess) {
+            (Some(own), Some(theirs)) => same_network(own.ip(), theirs.ip()),
+            _ => false,
+        };
+        let reflexive = match (self.reflexive, other.reflexive) {
+            (Some(own), Some(theirs)) => same_network(own.ip(), theirs.ip()),
+            _ => true,
+        };
+        control && reflexive
     }
 
     /// The one address an older node gets, which cannot take a list: reflexive first.
@@ -67,17 +85,30 @@ impl NodeCandidates {
     }
 }
 
+/// Whether two public addresses belong to one network: equal IPv4 addresses, or IPv6 addresses
+/// in one /64. An IPv4-mapped IPv6 address counts as its IPv4 address.
+fn same_network(own: IpAddr, theirs: IpAddr) -> bool {
+    match (own.to_canonical(), theirs.to_canonical()) {
+        (IpAddr::V4(own), IpAddr::V4(theirs)) => own == theirs,
+        (IpAddr::V6(own), IpAddr::V6(theirs)) => own.segments()[..4] == theirs.segments()[..4],
+        _ => false,
+    }
+}
+
 /// The addresses `viewer` should try for `peer`, best first, without duplicates.
 ///
-/// LAN addresses come first, and only when both nodes' control connections come from one
-/// public address ([`NodeCandidates::site_ip`]): a shared router that does not hairpin can only
-/// be crossed on the LAN, and the LAN is the shortest path anyway. Then the server-reflexive
-/// address, then the guess.
+/// LAN addresses come first, and only when both nodes sit behind one public address
+/// ([`NodeCandidates::same_site`]): a shared router that does not hairpin can only be crossed on
+/// the LAN, and the LAN is the shortest path anyway. Then the server-reflexive address, then the
+/// guess.
 #[must_use]
 pub fn order(viewer: &NodeCandidates, peer: &NodeCandidates) -> Vec<SocketAddr> {
     let mut list = Vec::with_capacity(MAX_LAN + 2);
-    let shared = viewer.site_ip().is_some() && viewer.site_ip() == peer.site_ip();
-    let lan: &[SocketAddr] = if shared { &peer.lan } else { &[] };
+    let lan: &[SocketAddr] = if viewer.same_site(peer) {
+        &peer.lan
+    } else {
+        &[]
+    };
     for address in lan.iter().copied().chain(peer.reflexive).chain(peer.guess) {
         if !list.contains(&address) {
             list.push(address);
@@ -389,6 +420,25 @@ mod tests {
             !order(&stranger, &peer).contains(&at("10.9.0.3:10254")),
             "a private address must not leave its site"
         );
+    }
+
+    /// J602 F3's P3 (#515): nodes that reach the server over IPv6 from one LAN show different
+    /// host addresses in one /64, and that is one site; another /64 is not. Two nodes behind one
+    /// proxy that share their reflexive IP too are one site.
+    #[test]
+    fn ipv6_control_connections_match_on_their_prefix() {
+        let peer = node("[2001:db8:1:2::b]:10254", None, &["192.168.1.7:10254"]);
+        let neighbour = node("[2001:db8:1:2::a]:10254", None, &[]);
+        assert_eq!(order(&neighbour, &peer)[0], at("192.168.1.7:10254"));
+        let elsewhere = node("[2001:db8:1:3::a]:10254", None, &[]);
+        assert!(!order(&elsewhere, &peer).contains(&at("192.168.1.7:10254")));
+        let mixed = node("198.51.100.21:10254", None, &[]);
+        assert!(!order(&mixed, &peer).contains(&at("192.168.1.7:10254")));
+
+        let proxied = |reflexive, lan: &[&str]| node("172.17.0.1:10254", Some(reflexive), lan);
+        let peer = proxied("198.51.100.21:30254", &["10.9.0.3:10254"]);
+        let same_lan = proxied("198.51.100.21:41000", &[]);
+        assert_eq!(order(&same_lan, &peer)[0], at("10.9.0.3:10254"));
     }
 
     /// Before any observation the list is the guess alone, exactly the pre-#515 address.
