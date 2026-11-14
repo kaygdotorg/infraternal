@@ -65,6 +65,12 @@ struct PeerRouteState {
     checked_generation: Option<u64>,
     /// Peers whose learned endpoint or written budget changed since their last derivation.
     recheck: BTreeSet<crate::policy::model::PublicKey>,
+    /// Peers whose last underlay lookup failed, with the retries already queued for them at this
+    /// underlay generation (#489 J609 P3). A failed lookup writes the safe fallback, but the
+    /// peer goes back to `recheck` up to [`FAILED_LOOKUP_RETRIES`] times so a transient error
+    /// does not hold the fallback until the 30 s inventory check. Cleared by every full
+    /// re-derivation, so each underlay change earns the peer new retries.
+    failed_lookups: BTreeMap<crate::policy::model::PublicKey, u8>,
     /// The running route-repair worker's underlay watch, published with `link`. Without one, no
     /// change can be trusted to be announced, so every refresh re-derives every peer.
     underlay: Option<Arc<crate::wireguard::UnderlayWatch>>,
@@ -93,6 +99,24 @@ impl PeerRouteState {
     fn forget_written_for(&mut self, key: crate::policy::model::PublicKey) {
         self.written.remove(&key);
         self.recheck.insert(key);
+    }
+
+    /// Record the outcome of one peer's underlay lookup: a failure queues the peer for the next
+    /// refresh until its retries at this generation run out, and a success resets them.
+    ///
+    /// The bound keeps a path that keeps failing (an unreachable endpoint, a `prohibit` rule)
+    /// from costing one netlink request per refresh under steady traffic. Once the retries are
+    /// spent, the fallback stays until the underlay watch moves or the inventory check runs.
+    fn note_lookup(&mut self, key: crate::policy::model::PublicKey, failed: bool) {
+        if !failed {
+            self.failed_lookups.remove(&key);
+            return;
+        }
+        let retries = self.failed_lookups.entry(key).or_insert(0);
+        if *retries < FAILED_LOOKUP_RETRIES {
+            *retries += 1;
+            self.recheck.insert(key);
+        }
     }
 
     /// Copy a peer with its authenticated live endpoint for route-MTU selection.
@@ -133,6 +157,11 @@ fn is_direct_learned_endpoint(endpoint: std::net::SocketAddr) -> bool {
 /// and mutex waits, and a successful kernel reconciliation pass. This is not a real-time promise
 /// when the kernel rejects writes or the process cannot run; failures retry on the next check.
 const ROUTE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many refreshes in a row look a peer's underlay up again after a failed lookup, per
+/// underlay generation (#489 J609 P3). Two covers a transient socket error (`EINTR`, `ENOMEM`)
+/// and a lookup racing a change; more would only repeat a lookup that keeps failing.
+const FAILED_LOOKUP_RETRIES: u8 = 2;
 
 /// Repairs accepted routes using notifications plus a low-frequency complete inventory check.
 /// The proven link identity is fixed for the worker's lifetime. Exclusive additions preserve
@@ -420,7 +449,7 @@ fn update_live_peer_endpoints(
     let mut probe = crate::mesh_mtu::EndpointProbe::default();
     let derived: Vec<_> = candidates
         .into_iter()
-        .map(|(key, endpoint)| (key, endpoint, probe.mesh_mtu(endpoint)))
+        .map(|(key, endpoint)| (key, endpoint, probe.route_budget(endpoint)))
         .collect();
     drop(probe);
     write_live_route_budgets(&mut lock_route_state(state), &derived)
@@ -468,6 +497,7 @@ fn claim_live_route_rechecks(
             state.all_current = true;
             state.checked_generation = generation;
             state.recheck.clear();
+            state.failed_lookups.clear();
             state.peers.keys().copied().collect()
         } else {
             std::mem::take(&mut state.recheck).into_iter().collect()
@@ -482,17 +512,18 @@ fn claim_live_route_rechecks(
 /// Step 3 of [`update_live_peer_endpoints`]: write the derived budgets that changed.
 ///
 /// A peer whose route endpoint or relay state moved while its underlay was looked up is not
-/// written: whoever moved it scheduled it again, or owns its route now.
+/// written: whoever moved it scheduled it again, or owns its route now. A peer whose lookup
+/// failed gets the fallback written and is queued again, within its bounded retries.
 fn write_live_route_budgets(
     state: &mut PeerRouteState,
     derived: &[(
         crate::policy::model::PublicKey,
         Option<std::net::SocketAddr>,
-        u16,
+        crate::mesh_mtu::RouteBudget,
     )],
 ) -> io::Result<usize> {
     let mut route_peers = Vec::new();
-    for (key, endpoint, mtu) in derived {
+    for (key, endpoint, budget) in derived {
         if state.overrides.contains_key(key) {
             continue;
         }
@@ -504,8 +535,9 @@ fn write_live_route_budgets(
             state.recheck.insert(*key);
             continue;
         }
-        if state.written.get(key) != Some(mtu) {
-            route_peers.push((route_peer, *mtu));
+        state.note_lookup(*key, budget.lookup_failed);
+        if state.written.get(key) != Some(&budget.mtu) {
+            route_peers.push((route_peer, budget.mtu));
         }
     }
     if route_peers.is_empty() {

@@ -68,6 +68,17 @@ pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
     EndpointProbe::default().mesh_mtu(endpoint)
 }
 
+/// One peer's derived route budget, and whether it is the path's answer or a stand-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RouteBudget {
+    /// The budget to write on the peer's host routes.
+    pub(crate) mtu: u16,
+    /// The underlay lookup failed, so `mtu` is [`FALLBACK_MESH_MTU`]: safe to write for now, but
+    /// not known to be the path's budget, so the caller should look the path up again
+    /// (#489 J609 P3). A peer with no endpoint has nothing to look up and is never marked.
+    pub(crate) lookup_failed: bool,
+}
+
 /// Derives route MTUs for many peers of one snapshot, looking each underlay path up once.
 ///
 /// Peers often share an endpoint address, and on macOS every lookup starts two
@@ -78,8 +89,9 @@ pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
 /// read.
 #[derive(Default)]
 pub(crate) struct EndpointProbe {
-    /// Mesh MTU already derived for an endpoint address.
-    endpoints: HashMap<IpAddr, u16>,
+    /// Budget already derived for an endpoint address, failed lookups included, so peers that
+    /// share a dead path cost one failed request per probe, not one each.
+    endpoints: HashMap<IpAddr, RouteBudget>,
     /// The route-netlink socket this probe's lookups share, once one was needed.
     #[cfg(target_os = "linux")]
     socket: Option<crate::netlink::Socket>,
@@ -91,17 +103,33 @@ pub(crate) struct EndpointProbe {
 impl EndpointProbe {
     /// Return the mesh route MTU for `endpoint`, or the safe fallback when it is unknown.
     pub(crate) fn mesh_mtu(&mut self, endpoint: Option<SocketAddr>) -> u16 {
+        self.route_budget(endpoint).mtu
+    }
+
+    /// Return the mesh route budget for `endpoint`, marking a fallback that stands in for a
+    /// failed lookup so a caller that keeps budgets current can retry it.
+    pub(crate) fn route_budget(&mut self, endpoint: Option<SocketAddr>) -> RouteBudget {
         let Some(endpoint) = endpoint else {
-            return FALLBACK_MESH_MTU;
+            return RouteBudget {
+                mtu: FALLBACK_MESH_MTU,
+                lookup_failed: false,
+            };
         };
-        if let Some(mtu) = self.endpoints.get(&endpoint.ip()) {
-            return *mtu;
+        if let Some(budget) = self.endpoints.get(&endpoint.ip()) {
+            return *budget;
         }
-        let mtu = self
-            .route_mtu(endpoint)
-            .map_or(FALLBACK_MESH_MTU, mtu_for_route);
-        self.endpoints.insert(endpoint.ip(), mtu);
-        mtu
+        let budget = self.route_mtu(endpoint).map_or(
+            RouteBudget {
+                mtu: FALLBACK_MESH_MTU,
+                lookup_failed: true,
+            },
+            |route| RouteBudget {
+                mtu: mtu_for_route(route),
+                lookup_failed: false,
+            },
+        );
+        self.endpoints.insert(endpoint.ip(), budget);
+        budget
     }
 
     /// Query the underlay route MTU toward `endpoint` through Linux route netlink.
