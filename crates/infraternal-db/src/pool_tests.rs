@@ -900,3 +900,67 @@ fn checkpoint_failures_are_rate_limited() {
         "logs again after the window"
     );
 }
+
+/// `close` runs what was already queued, then stops every thread, empties
+/// the WAL into the main file, and turns later calls on every clone into
+/// [`Error::Closed`] instead of hanging (J632 finding 5, #473).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_finishes_queued_work_checkpoints_and_stops() {
+    let (dir, db) = setup("close", Options::default()).await;
+    for v in 0..50_i64 {
+        db.write(move |tx| {
+            tx.execute("INSERT INTO t (v) VALUES (?1)", [v])?;
+            Ok::<_, Error>(())
+        })
+        .await
+        .unwrap();
+    }
+    assert!(
+        file_len(&wal_of(&dir.db())) > 0,
+        "the writes should be in the WAL"
+    );
+
+    // A write queued behind a busy writer still runs when close is called.
+    let (release, gate) = gate_writer(&db).await;
+    let queued_db = db.clone();
+    let queued = tokio::spawn(async move {
+        queued_db
+            .write(|tx| {
+                tx.execute("INSERT INTO t (v) VALUES (50)", [])?;
+                Ok::<_, Error>(())
+            })
+            .await
+    });
+    while db.queued_writes() == 0 {
+        // sleep: waiting for the spawned task to enqueue; no event to wait on.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let closing_db = db.clone();
+    let closing = tokio::spawn(async move { closing_db.close().await });
+    release.send(()).unwrap();
+    gate.await.unwrap();
+    queued.await.unwrap().unwrap();
+    tokio::time::timeout(PATIENCE, closing)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let other = db.clone();
+    let write = other.write(|_| Ok::<_, Error>(())).await;
+    assert!(matches!(write, Err(Error::Closed)), "{write:?}");
+    let read = db.read(|_| Ok::<_, Error>(())).await;
+    assert!(matches!(read, Err(Error::Closed)), "{read:?}");
+    // A second close has nothing left to do.
+    tokio::time::timeout(PATIENCE, db.close()).await.unwrap();
+
+    assert_eq!(
+        file_len(&wal_of(&dir.db())),
+        0,
+        "close left WAL frames behind"
+    );
+    let reopened = rusqlite::Connection::open(dir.db()).unwrap();
+    let count: i64 = reopened
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 51);
+}

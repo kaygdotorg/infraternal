@@ -198,8 +198,9 @@ pub enum Error {
     /// the panic payload when it was a string.
     #[error("database closure panicked: {0}")]
     Panicked(String),
-    /// The worker thread is gone, so the job could not run. This only happens
-    /// when a worker died outside a closure, which is a bug.
+    /// The worker thread is gone, so the job could not run: the pool was shut
+    /// down with [`Database::close`], or a worker died outside a closure,
+    /// which is a bug.
     #[error("database worker stopped")]
     Closed,
     /// The database refused WAL mode (for example an in-memory database or a
@@ -225,6 +226,30 @@ pub enum Error {
 /// reports its own result through a channel it captured.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
+/// What a worker thread's queue carries.
+enum Msg {
+    /// Run this job on the worker's connection.
+    Run(Job),
+    /// Finish: sent by [`Database::close`] behind every job already queued.
+    Stop,
+}
+
+/// A receiver that resolves when one pool thread has exited: its sender lives
+/// on the thread's stack and drops when the thread ends, panics included.
+type Exited = oneshot::Receiver<()>;
+
+/// The exit signals of every pool thread, taken by the first
+/// [`Database::close`].
+#[derive(Debug)]
+struct Threads {
+    /// One per reader thread.
+    readers: Vec<Exited>,
+    /// The writer thread.
+    writer: Exited,
+    /// The background checkpointer thread.
+    checkpointer: Exited,
+}
+
 /// Which kind of connection a worker thread owns.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -235,13 +260,21 @@ enum Role {
 }
 
 /// A handle to the database. Cheap to clone; every clone talks to the same
-/// threads. When the last clone is dropped, the worker threads finish the
-/// jobs already queued (skipping ones whose caller is gone), close their
-/// connections and exit.
+/// threads.
+///
+/// Shut it down with [`Database::close`], which waits for the threads and
+/// checkpoints the WAL into the main file. Dropping the last clone without
+/// `close` also stops the threads, in the background: they finish the jobs
+/// already queued (skipping ones whose caller is gone), close their
+/// connections and exit, but nobody waits for them.
 #[derive(Clone, Debug)]
 pub struct Database {
-    writer: mpsc::Sender<Job>,
-    readers: mpsc::Sender<Job>,
+    /// The writer thread's queue.
+    writer: mpsc::Sender<Msg>,
+    /// The queue every reader thread takes jobs from.
+    readers: mpsc::Sender<Msg>,
+    /// Shared by every clone; `None` once [`Database::close`] has started.
+    threads: Arc<Mutex<Option<Threads>>>,
 }
 
 impl Database {
@@ -280,8 +313,8 @@ impl Database {
         // committed before it starts, so kicks that arrive while one is
         // queued would only repeat it.
         let (kick, kicks) = sync_channel::<()>(1);
-        let (writer, writer_jobs) = mpsc::channel::<Job>(options.write_queue);
-        let ready = spawn_worker(
+        let (writer, writer_jobs) = mpsc::channel::<Msg>(options.write_queue);
+        let (ready, writer_exited) = spawn_worker(
             "db-writer".to_owned(),
             Role::Writer,
             path.clone(),
@@ -291,28 +324,81 @@ impl Database {
         )?;
         ready.await.map_err(|_| Error::Closed)??;
         // After the writer, so the file exists and is already in WAL mode.
-        spawn_checkpointer(path.clone(), options.clone(), kicks)?
-            .await
-            .map_err(|_| Error::Closed)??;
+        let (ready, checkpointer_exited) =
+            spawn_checkpointer(path.clone(), options.clone(), kicks)?;
+        ready.await.map_err(|_| Error::Closed)??;
 
         // Readers share one queue; whichever reader is free takes the next job.
-        let (readers, reader_jobs) = mpsc::channel::<Job>(options.read_queue);
+        let (readers, reader_jobs) = mpsc::channel::<Msg>(options.read_queue);
         let reader_jobs = Arc::new(Mutex::new(reader_jobs));
         let mut pending = Vec::with_capacity(options.readers);
+        let mut readers_exited = Vec::with_capacity(options.readers);
         for index in 0..options.readers {
-            pending.push(spawn_worker(
+            let (ready, exited) = spawn_worker(
                 format!("db-reader-{index}"),
                 Role::Reader,
                 path.clone(),
                 options.clone(),
                 reader_jobs.clone(),
                 None,
-            )?);
+            )?;
+            pending.push(ready);
+            readers_exited.push(exited);
         }
         for ready in pending {
             ready.await.map_err(|_| Error::Closed)??;
         }
-        Ok(Self { writer, readers })
+        let threads = Threads {
+            readers: readers_exited,
+            writer: writer_exited,
+            checkpointer: checkpointer_exited,
+        };
+        Ok(Self {
+            writer,
+            readers,
+            threads: Arc::new(Mutex::new(Some(threads))),
+        })
+    }
+
+    /// Shut the pool down and wait until every thread has exited.
+    ///
+    /// Jobs already queued still run, in order. Then the readers stop, then
+    /// the writer runs a final `wal_checkpoint(TRUNCATE)`: it copies the whole
+    /// WAL into the main file and empties it, so the file on disk is complete
+    /// without its `-wal`. Then the writer and checkpointer connections close.
+    /// From the moment a worker stops, every call on any clone of this handle
+    /// returns [`Error::Closed`]. A call that raced with `close` and was queued
+    /// behind the stop also gets `Closed`, never a hang.
+    ///
+    /// Only the first call does the work and waits. A later or concurrent call
+    /// returns at once. Don't cancel a `close` half-way: the threads still stop
+    /// on their own, but nobody waits for them.
+    ///
+    /// A failed final checkpoint is logged, not returned. The commits are
+    /// already durable in the WAL, and the next open replays them.
+    pub async fn close(&self) {
+        let threads = self
+            .threads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(threads) = threads else { return };
+        // Readers first, so the writer's final TRUNCATE checkpoint doesn't
+        // wait for this pool's own readers. Each reader takes one Stop and
+        // exits, so one Stop per reader stops them all.
+        for _ in 0..threads.readers.len() {
+            if self.readers.send(Msg::Stop).await.is_err() {
+                break;
+            }
+        }
+        for exited in threads.readers {
+            let _ = exited.await;
+        }
+        let _ = self.writer.send(Msg::Stop).await;
+        let _ = threads.writer.await;
+        // The checkpointer stops once the writer's connection, which owns its
+        // wake-up channel, is gone.
+        let _ = threads.checkpointer.await;
     }
 
     /// Run `f` as one write transaction on the writer thread and return its result.
@@ -470,7 +556,7 @@ fn install_transaction_guard(conn: &mut Connection) -> Result<(), Error> {
 /// while the queue is full, nothing was queued. Once queued, the job checks
 /// whether this future still exists right before it starts and skips itself
 /// if not. Panics inside `run` are caught and returned as [`Error::Panicked`].
-async fn submit<T, R>(queue: &mpsc::Sender<Job>, run: R) -> Result<T, Error>
+async fn submit<T, R>(queue: &mpsc::Sender<Msg>, run: R) -> Result<T, Error>
 where
     R: FnOnce(&mut Connection) -> T + Send + 'static,
     T: Send + 'static,
@@ -487,7 +573,7 @@ where
         // already finished either way, so a closed channel is fine.
         let _ = reply.send(outcome);
     });
-    queue.send(job).await.map_err(|_| Error::Closed)?;
+    queue.send(Msg::Run(job)).await.map_err(|_| Error::Closed)?;
     match result.await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(payload)) => Err(Error::Panicked(panic_message(payload.as_ref()))),
@@ -508,7 +594,13 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 }
 
 /// Start one worker thread that opens its connection, reports readiness on
-/// the returned channel, then runs jobs from `jobs` until every sender is gone.
+/// the first returned channel, then runs jobs from `jobs` until it receives
+/// [`Msg::Stop`] or every sender is gone. The second returned channel
+/// resolves when the thread has exited.
+///
+/// The writer runs a final TRUNCATE checkpoint when it is stopped (see
+/// [`Database::close`]). When the last handle is dropped without `close`, it
+/// doesn't: SQLite then checkpoints when the last connection closes.
 ///
 /// Reader threads share one receiver behind a mutex: the reader holding the
 /// lock waits for the next job, takes it, and releases the lock before it
@@ -521,13 +613,16 @@ fn spawn_worker(
     role: Role,
     path: PathBuf,
     options: Arc<Options>,
-    jobs: Arc<Mutex<mpsc::Receiver<Job>>>,
+    jobs: Arc<Mutex<mpsc::Receiver<Msg>>>,
     kick: Option<SyncSender<()>>,
-) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+) -> Result<(oneshot::Receiver<Result<(), Error>>, Exited), Error> {
     let (ready, opened) = oneshot::channel();
+    let (exited, on_exit) = oneshot::channel::<()>();
     thread::Builder::new()
         .name(name)
         .spawn(move || {
+            // Dropped when this closure ends, on every path: `on_exit` resolves.
+            let _exited = exited;
             let opened = open_connection(&path, &options, role).and_then(|mut conn| {
                 install_transaction_guard(&mut conn)?;
                 if let Some(kick) = kick {
@@ -547,11 +642,21 @@ fn spawn_worker(
             }
             loop {
                 // The guard lives only for this statement, never while a job runs.
-                let job = jobs
+                let message = jobs
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .blocking_recv();
-                let Some(job) = job else { break };
+                let job = match message {
+                    Some(Msg::Run(job)) => job,
+                    Some(Msg::Stop) => {
+                        if role == Role::Writer {
+                            final_checkpoint(&conn);
+                        }
+                        break;
+                    }
+                    // Every handle was dropped without `close`.
+                    None => break,
+                };
                 job(&mut conn);
                 if !conn.is_autocommit() {
                     // Defence in depth: the transaction guard already stops a
@@ -563,7 +668,20 @@ fn spawn_worker(
             }
         })
         .map_err(Error::Spawn)?;
-    Ok(opened)
+    Ok((opened, on_exit))
+}
+
+/// The writer's last act on [`Database::close`]: copy the whole WAL into the
+/// main file and truncate the WAL to zero bytes.
+///
+/// TRUNCATE waits, through the busy timeout, for readers in other processes
+/// and for a background pass still running. This pool's readers have already
+/// exited. A failure is only logged: every commit is already durable in the
+/// WAL, and the next open replays it.
+fn final_checkpoint(conn: &Connection) {
+    if let Err(error) = conn.wal_checkpoint_v2(None::<&str>, CheckpointMode::TRUNCATE) {
+        tracing::warn!(%error, "final database checkpoint on close failed");
+    }
 }
 
 /// Replace SQLite's auto-checkpoint on the writer with a hook that hands the
@@ -688,11 +806,14 @@ fn spawn_checkpointer(
     path: PathBuf,
     options: Arc<Options>,
     kicks: Receiver<()>,
-) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+) -> Result<(oneshot::Receiver<Result<(), Error>>, Exited), Error> {
     let (ready, opened) = oneshot::channel();
+    let (exited, on_exit) = oneshot::channel::<()>();
     thread::Builder::new()
         .name("db-checkpoint".to_owned())
         .spawn(move || {
+            // Dropped when this closure ends, on every path: `on_exit` resolves.
+            let _exited = exited;
             let conn = match open_connection(&path, &options, Role::Checkpointer) {
                 Ok(conn) => conn,
                 Err(error) => {
@@ -710,7 +831,7 @@ fn spawn_checkpointer(
             }
         })
         .map_err(Error::Spawn)?;
-    Ok(opened)
+    Ok((opened, on_exit))
 }
 
 /// Open one connection to `path` and configure it for `role`.
