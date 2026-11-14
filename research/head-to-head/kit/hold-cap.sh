@@ -14,7 +14,8 @@
 # descendant shares that session. A stop sends TERM to the whole group, waits up to
 # H2H_CAP_GRACE_S seconds (default 30), then sends KILL to the group and to any session member
 # that left the group. Processes are found by group and session id, never by name. If something
-# is still alive after that, the script says so and exits 125.
+# is still alive after that, the script says so and exits 125. Parts that start their own session
+# (`setsid`) are found through the parent chain and an environment tag, see `members`.
 #
 # Exit status: COMMAND's own status when it finishes in time; 124 when the cap stopped it; 143
 # when this script was told to stop; 125 when processes were left running (a leak is a failure
@@ -33,9 +34,31 @@ case ${BASH_REMATCH[2]} in
 esac
 grace=${H2H_CAP_GRACE_S:-30}
 
-# Pids of the hold's live processes: its process group and its session. Zombies are not alive.
+# Pids of the hold's live processes (zombies are not alive). A process belongs to the hold when
+# any of these is true: it is in the hold's process group or session; it descends from the hold
+# by parent pid (this finds a part that started its own session or group); or its environment
+# carries this hold's tag (this finds one whose parent already exited and that also left the
+# session). Reading other processes' environments needs root, which a measured hold has: without
+# root the tag check finds nothing and the first two rules still apply.
 members() {
-    ps -eo pid=,pgid=,sid=,stat= | awk -v g="$1" '($2 == g || $3 == g) && $4 !~ /^Z/ {print $1}'
+    local group=$1 pid state
+    {
+        ps -eo pid=,ppid=,pgid=,sid=,stat= | awk -v g="$group" '
+            $5 ~ /^Z/ {next}
+            {ppid[$1] = $2; live[$1] = 1; if ($3 == g || $4 == g) hit[$1] = 1}
+            END {
+                for (p in live) {
+                    for (q = p; q in ppid && q != 0 && q != 1; q = ppid[q]) if (q == g) { hit[p] = 1; break }
+                }
+                for (p in hit) print p
+            }'
+        for pid in /proc/[0-9]*; do
+            pid=${pid#/proc/}
+            tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "H2H_HOLD_TAG=$tag" && echo "$pid"
+        done
+    } | sort -un | while read -r pid; do
+        state=$(ps -o stat= -p "$pid" 2>/dev/null) && [[ -n $state && $state != Z* ]] && echo "$pid"
+    done
 }
 
 # Stop everything of the hold; sets `left` to what could not be stopped.
@@ -56,9 +79,11 @@ stop_hold() {
 }
 
 signalled=0
+tag="$$-$(date +%s%N)"
 trap 'signalled=143' TERM INT HUP
 
-setsid "$@" &
+# The tag goes only to the hold, never to this script, so a tag search cannot find ourselves.
+env "H2H_HOLD_TAG=$tag" setsid "$@" &
 hold=$!
 # setsid makes the child its own session leader a moment after the fork: wait for it, or a stop
 # that arrives right away would signal a group that does not exist yet.

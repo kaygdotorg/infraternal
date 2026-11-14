@@ -24,8 +24,15 @@ stubborn = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); 
 kids = [
     subprocess.Popen([sys.executable, "-c", sleeper]),
     subprocess.Popen([sys.executable, "-c", stubborn]),
-    subprocess.Popen([sys.executable, "-c", sleeper], start_new_session=False, process_group=0),
+    subprocess.Popen([sys.executable, "-c", sleeper], process_group=0),
+    # Its own session and group: only the parent chain or the hold's environment tag finds it.
+    subprocess.Popen([sys.executable, "-c", sleeper], start_new_session=True),
+    # Same, but its parent exits at once, so it is re-parented to init before the stop.
+    subprocess.Popen(["bash", "-c", f"setsid {sys.executable} -c '{sleeper}' >/dev/null 2>&1 & echo $! > {pids}.orphan"]),
 ]
+kids[-1].wait()
+time.sleep(0.5)
+kids.append(type("P", (), {"pid": int(open(pids + ".orphan").read())}))
 with open(pids, "w") as out:
     out.write("\n".join(str(k.pid) for k in kids) + "\n")
 time.sleep(600)
@@ -43,7 +50,7 @@ def alive(pid: int) -> bool:
 
 def wait_for_file(path: Path) -> None:
     for _ in range(100):
-        if path.exists() and path.read_text().count("\n") >= 3:
+        if path.exists() and path.read_text().count("\n") >= 5:
             return
         time.sleep(0.1)  # sleep: the child writes the file a moment after it starts
     raise AssertionError(f"{path} was never written")
