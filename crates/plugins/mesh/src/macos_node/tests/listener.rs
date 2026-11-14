@@ -1,4 +1,5 @@
-//! Proves the Mac UDP listener keeps its prebound socket and drops ungranted handshakes.
+//! Proves the Mac UDP listener keeps its prebound socket, drops ungranted handshakes and passes
+//! installed ones.
 
 use super::super::{
     BoundUdpFactory, PeerAdmission, RwLock, StaticSecret, UdpSocketFactory,
@@ -97,5 +98,75 @@ async fn j555_mac_listener_drops_initiations_from_unknown_keys() {
     assert!(
         received.is_err(),
         "the Mac listener passed an unknown key's initiation to GotaTun's cookie path"
+    );
+}
+
+/// J648 (#483): the Mac guard admits an installed key, so J555's drop test above cannot pass by
+/// dropping everything.
+///
+/// The worker installs its peers into the listener's guard (`set_peers`) before the device
+/// starts and after every accepted apply. This installs one key the same way and requires its
+/// MAC1-valid initiation to reach the receive half that `GotaTun` reads.
+#[tokio::test]
+async fn mac_listener_passes_initiations_from_installed_keys() {
+    use gotatun::{
+        noise::{Tunn, index_table::IndexTable, rate_limiter::RateLimiter},
+        packet::PacketBufPool,
+        udp::UdpRecv as _,
+        x25519::PublicKey as X25519PublicKey,
+    };
+    let (mut factory, port) = super::super::bind_udp(
+        crate::listen_port::Request {
+            port: 0,
+            allow_fallback: true,
+        },
+        StaticSecret::from([0x31; 32]),
+    )
+    .await
+    .expect("listener");
+    let peer = StaticSecret::from([0x66; 32]);
+    let peer_public = X25519PublicKey::from(&peer);
+    factory
+        .admission
+        .write()
+        .await
+        .set_peers([crate::policy::model::PublicKey(*peer_public.as_bytes())]);
+    let (_send, mut receive) = factory
+        .bind(&UdpTransportFactoryParams { addr: None, port })
+        .await
+        .expect("bound listener");
+    let node_public = X25519PublicKey::from(&StaticSecret::from([0x31; 32]));
+    let mut initiator = Tunn::new(
+        peer,
+        node_public,
+        None,
+        None,
+        IndexTable::from_os_rng(),
+        Arc::new(RateLimiter::new(&peer_public, 100)),
+    );
+    let initiation = initiator
+        .format_handshake_initiation(false)
+        .expect("a MAC1-valid initiation from an installed key")
+        .into_bytes()
+        .as_ref()
+        .to_vec();
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender");
+    sender
+        .send_to(&initiation, SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        .expect("send initiation");
+    let mut pool = PacketBufPool::new(4);
+    let (packet, from) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        receive.recv_from(&mut pool),
+    )
+    .await
+    .expect("the Mac listener dropped an installed key's initiation")
+    .expect("receive");
+    assert_eq!(packet.as_ref(), initiation.as_slice());
+    // A dual-stack listener reports an IPv4 sender as IPv4-mapped IPv6.
+    assert_eq!(from.ip().to_canonical(), Ipv4Addr::LOCALHOST);
+    assert_eq!(
+        from.port(),
+        sender.local_addr().expect("sender address").port()
     );
 }
