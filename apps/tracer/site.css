@@ -31,17 +31,16 @@
 .bar-menu summary svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .bar-sheet { position: absolute; top: calc(var(--pill-h) + 0.5rem); right: 0; flex-direction: column; align-items: stretch; height: auto; min-width: 11rem; padding: 0.375rem; border-radius: var(--r-lg); background: var(--overlay-solid); }
 .bar-sheet a { height: var(--row); padding: 0 0.875rem; border-radius: var(--r-md); }
-/* Under 60rem the three tracks no longer fit side by side (the capsule's 22rem minimum ran under the links pill and hid the search button): the links fold into the menu button and the capsule takes its own row. */
-@media (max-width: 60rem) {
+/* Under 80rem the three tracks no longer fit side by side: the links pill is about 25rem and the capsule's 22rem minimum is centred between two equal side tracks, so it ran under the pill and hid the search button: the links fold into the menu button and the capsule takes its own row. */
+@media (max-width: 80rem) {
   /* Two rows: the name and the menu above, the capsule full width below, so a page title fits. The bar scrolls away on a phone, where height is dear. */
-  .bar { position: static; }
   .bar-in { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.5rem; }
   .bar-capsule { grid-row: 2; grid-column: 1 / -1; min-width: 0; width: 100%; }
   .bar-links { display: none; }
   .bar-menu { display: block; }
 }
-/* A phone: no key hint, and the section name is dropped from the place name. */
-@media (max-width: 40rem) { .bar-kbd kbd { display: none; } .bar-area { display: none; } }
+/* A phone: the bar scrolls away (height is dear), there is no key hint, and the section name is dropped from the place name. */
+@media (max-width: 40rem) { .bar { position: static; } .bar-kbd kbd { display: none; } .bar-area { display: none; } }
 @media (prefers-reduced-motion: reduce) { .bar-brand, .bar-links a, .bar-sheet a { transition: none; } .bar-brand:active { transform: none; } }
 
 /* ---- The search palette (site-search.ts) -------------------------------------------------------------------------------------------

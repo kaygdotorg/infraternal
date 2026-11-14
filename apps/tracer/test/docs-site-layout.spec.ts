@@ -10,7 +10,7 @@ import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
 const OUT = tracerEvidencePath("docs-site-layout");
-const WIDTHS = [320, 360, 375, 393, 430, 600, 641, 700, 768, 800, 900, 960, 1024, 1280, 1600];
+const WIDTHS = [320, 360, 375, 393, 430, 600, 641, 700, 768, 800, 900, 960, 1024, 1100, 1200, 1279, 1280, 1600];
 
 test("the docs header and search dialog fit at every width", async ({ browser }) => {
   mkdirSync(OUT, { recursive: true });
