@@ -41,10 +41,11 @@ struct Fixture {
     file: File,
 }
 impl Fixture {
+    /// Writes the release fixture for `namespace` with the given payload `hash` under the private TMPDIR.
     fn new(namespace: &str, hash: &str) -> Self {
-        let root =
-            PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
-                .join(format!("release-fixture-{}", uuid::Uuid::new_v4()));
+        // Release fixtures are written, fsynced and read back by the code under test, which bounds
+        // each step; keep them on the private TMPDIR, not the slow build disk (#509).
+        let root = std::env::temp_dir().join(format!("release-fixture-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let key = root.join("key");
         assert!(

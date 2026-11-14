@@ -44,6 +44,44 @@ fn binary_name(arch: Architecture) -> &'static str {
     }
 }
 
+/// Reads one HTTP request head from `socket`, waiting for as long as the client
+/// takes. Returns `None` only when `stop` is raised first.
+///
+/// The bucket answers one connection at a time, so a client that connects and
+/// is then descheduled (a loaded test host runs many suites at once) must not
+/// fail the bucket: a fixed read deadline here measured the *client's*
+/// scheduling delay, panicked the bucket thread with `WouldBlock`, and the
+/// panic-in-destructor abort took the whole test process down (#509). The
+/// short poll below exists only so a stopped bucket can leave its read.
+fn read_request(
+    socket: &mut std::net::TcpStream,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let mut head = Vec::new();
+    let mut chunk = [0; 4096];
+    while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+        match socket.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(size) => head.extend_from_slice(&chunk[..size]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if stop.load(Ordering::Relaxed) {
+                    return None;
+                }
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+    Some(String::from_utf8(head).unwrap())
+}
+
 pub(crate) struct Bucket {
     pub(crate) origin: String,
     pub(crate) files: Arc<StdMutex<HashMap<String, Vec<u8>>>>,
@@ -55,6 +93,7 @@ impl Bucket {
     pub(crate) fn new(files: HashMap<String, Vec<u8>>) -> Self {
         Self::with_response(files, false)
     }
+    /// Starts a bucket serving `files`; with `refused` it answers every request with an error status.
     fn with_response(files: HashMap<String, Vec<u8>>, refused: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -67,12 +106,11 @@ impl Bucket {
             while !stopping.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut socket, _)) => {
-                        socket
-                            .set_read_timeout(Some(Duration::from_secs(5)))
-                            .unwrap();
-                        let mut request = [0; 4096];
-                        let size = socket.read(&mut request).unwrap();
-                        let request = std::str::from_utf8(&request[..size]).unwrap();
+                        let Some(request) = read_request(&mut socket, &stopping) else {
+                            // Stopped before a client finished its request.
+                            break;
+                        };
+                        let request = request.as_str();
                         let path = request.split_whitespace().nth(1).unwrap();
                         count.fetch_add(1, Ordering::Relaxed);
                         let files = data.lock().unwrap();
@@ -134,12 +172,13 @@ impl Release {
     fn with_sessions(version: &str) -> Self {
         Self::with_artifacts(1024, version, 0, true)
     }
+    /// Builds a release of `size` bytes plus `extra` filler; `sessions` adds the session-capable artifact.
     fn with_artifacts(size: usize, version: &str, extra: usize, sessions: bool) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;
-        let root =
-            PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
-                .join(format!("bucket-{}", uuid::Uuid::new_v4()));
+        // The downloader bounds every write and fsync at 30 s; the slow build disk's
+        // fsync stalls exceed that, so the fixture lives on the private TMPDIR (#509).
+        let root = std::env::temp_dir().join(format!("bucket-{}", uuid::Uuid::new_v4()));
         // The same fixture root owns latest-check staging and the payload cache.
         super::private_directory(&root).unwrap();
         let key = root.join("fixture-key");
@@ -461,6 +500,7 @@ fn partial_download_restart_child() {
 }
 
 #[tokio::test]
+/// A resolver restarted after the first process stopped mid-download reclaims the partial files and finishes.
 async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
     use std::process::{Command, Stdio};
     let release = Release::new(2 * 1024 * 1024);
@@ -475,6 +515,9 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let files = release.files.clone();
+        // Fired once the server has sent the payload's first MiB to the child.
+        let (sent, body_sent) = tokio::sync::oneshot::channel::<()>();
+        let mut sent = Some(sent);
         let server = tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             for _ in 0..4 {
@@ -499,6 +542,9 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
                     .unwrap();
                 if path.ends_with(payload_name) {
                     socket.write_all(&body[..1024 * 1024]).await.unwrap();
+                    if let Some(sent) = sent.take() {
+                        let _ = sent.send(());
+                    }
                     // The body deliberately remains incomplete until the child
                     // stops; successful verification/publication cannot happen.
                     let mut remaining = Vec::new();
@@ -522,6 +568,29 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        // Starting the child means paging in the whole test executable, which on a
+        // loaded host with the build disk stalled can take far longer than any
+        // fixed bound; that is setup, not behaviour under test. So the child
+        // gets no clock until it has asked for the payload: while it starts, the
+        // only failure is the child dying. The 20 s bound then covers only what
+        // this test is about, the child saving the MiB it was sent (#509). One
+        // generous outer bound still turns a child that hangs before asking (for
+        // example a resolver deadlock) into a failure instead of a hung gate (J611).
+        let mut body_sent = body_sent;
+        let start_bound = std::time::Instant::now() + Duration::from_secs(300);
+        while let Err(tokio::sync::oneshot::error::TryRecvError::Empty) = body_sent.try_recv() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "download child stopped before it asked for the payload"
+            );
+            if std::time::Instant::now() >= start_bound {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("download child never asked for the payload within 300 s");
+            }
+            // sleep: poll for the child's first payload request; its start has no deadline.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while partial_payload_bytes(&version, arch) < before + 1024 * 1024 {
             assert!(
@@ -921,4 +990,27 @@ async fn dangling_session_cache_symlink_is_refused_without_publication() {
             .is_symlink()
     );
     assert_eq!(bucket.requests.load(Ordering::Relaxed), 0);
+}
+
+/// A client that connects and is then descheduled for longer than the old
+/// bucket's fixed five-second read deadline is still answered, and the bucket
+/// thread does not panic (#509). On a loaded host such a stall crashed the
+/// bucket and aborted the whole test process; the bucket must wait for the
+/// request for as long as it takes. The stall is real time on purpose: it is the
+/// exact interval that failed before, and nothing asserts how fast the answer is.
+#[test]
+fn a_client_that_connects_then_stalls_is_still_answered() {
+    let bucket = Bucket::new(HashMap::from([("/late".to_string(), b"payload".to_vec())]));
+    let mut client =
+        std::net::TcpStream::connect(bucket.origin.trim_start_matches("http://")).unwrap();
+    // sleep: models a client descheduled between connect and send for longer than the old five-second read deadline.
+    thread::sleep(Duration::from_millis(5_500));
+    client
+        .write_all(b"GET /late HTTP/1.1\r\nHost: bucket\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.ends_with("payload"), "{response}");
+    assert_eq!(bucket.requests.load(Ordering::Relaxed), 1);
 }
