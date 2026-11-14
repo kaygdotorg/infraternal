@@ -92,6 +92,29 @@ test("recovery clears only its own indicator, and a real reconnect still owns th
   expect(readiness).toEqual([false]);
 });
 
+test("a live approximate repaint never claims a reconnect; one that completes a reattach does (#477)", () => {
+  // A key during a flood (D381) or a credit catch-up repaints a confirmed, live
+  // attachment: nothing reconnected, so the status must stay quiet.
+  const live = confirmedClient();
+  const liveHook: string[] = [];
+  (live.client.config as unknown as { hooks: Record<string, () => void> }).hooks.onApproximate = () => liveHook.push("approximate");
+  live.notice("terminal.snapshot", { seq: 4096, approximate: true });
+  expect(live.client.config.status.textContent).toBe("");
+  expect(live.client.config.status.hidden).toBe(true);
+  expect(liveHook).toEqual([]);
+  expect(live.failures).toEqual([]);
+
+  // After a real reconnect the window waits for its replay: the approximate
+  // screen that completes it is announced as such.
+  const resumed = confirmedClient();
+  const resumedHook: string[] = [];
+  (resumed.client.config as unknown as { hooks: Record<string, () => void> }).hooks.onApproximate = () => resumedHook.push("approximate");
+  resumed.notice("terminal.reconnecting");
+  resumed.notice("terminal.snapshot", { seq: 4096, approximate: true });
+  expect(resumed.client.config.status.textContent).toBe("Reconnected. The screen may be slightly out of date.");
+  expect(resumedHook).toEqual(["approximate"]);
+});
+
 test("a notice type from a newer server is ignored, not a protocol failure", () => {
   const { client, failures, notice } = confirmedClient();
   notice("terminal.some_future_notice", { detail: 1 });
