@@ -1598,4 +1598,230 @@ mod tests {
             assert!(!probe.installed(), "{backend:?} guard left behind");
         }
     }
+
+    /// Run one fixture command and fail with its stderr.
+    fn review_j592_run(program: &str, args: &[&str]) {
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .expect("fixture command");
+        assert!(
+            output.status.success(),
+            "{program} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Connect from `source` to `destination` inside the neighbour namespace `pid`; true when
+    /// the TCP handshake completes within 1.5 s.
+    fn review_j592_open(pid: &str, source: &str, destination: std::net::SocketAddr) -> bool {
+        const PROBE: &str = "import socket, sys
+family = socket.AF_INET6 if ':' in sys.argv[2] else socket.AF_INET
+s = socket.socket(family); s.bind((sys.argv[1], 0)); s.settimeout(1.5)
+try:
+    s.connect((sys.argv[2], int(sys.argv[3]))); print('OPEN')
+except OSError:
+    print('BLOCKED')";
+        let output = Command::new("nsenter")
+            .args(["-t", pid, "-n", "python3", "-c", PROBE, source])
+            .arg(destination.ip().to_string())
+            .arg(destination.port().to_string())
+            .output()
+            .expect("probe");
+        String::from_utf8_lossy(&output.stdout).trim() == "OPEN"
+    }
+
+    /// J592 review (P1, security, D384 vs [231], #265): the `GotaTun` kernel-only guard dropped
+    /// the underlay delivery fence the full policy has. Linux accepts a packet for any local
+    /// address on any interface, so a neighbour on a non-mesh link only has to route the node's
+    /// mesh address via the node's LAN address: its packets reach services bound to the mesh
+    /// address without ever passing the `GotaTun` packet filter, so no grant is checked. The full
+    /// policy refuses this with `iifname != { infraternal0, lo } ip daddr <own mesh address>
+    /// drop` ("an underlay packet has no mesh identity"); both guard renderings must as well.
+    ///
+    /// Controls in the same run: plain LAN traffic to the node's LAN address still passes (no
+    /// over-blocking) and a neighbour spoofing a peer's mesh source is dropped (anti-spoofing).
+    #[test]
+    #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+    fn review_j592_guard_refuses_underlay_delivery_to_the_node_mesh_address() {
+        use std::net::{SocketAddr, TcpListener};
+        let neighbour = Command::new("unshare")
+            .args(["-n", "sleep", "120"])
+            .spawn()
+            .expect("neighbour namespace");
+        // sleep: let the child enter its own network namespace before it is configured.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let pid = neighbour.id().to_string();
+        let inside = |args: &[&str]| {
+            let mut full = vec!["-t", pid.as_str(), "-n"];
+            full.extend_from_slice(args);
+            review_j592_run("nsenter", &full);
+        };
+        // The mesh interface holds the node's mesh addresses; its far end stays here unused.
+        for args in [
+            &["link", "set", "lo", "up"][..],
+            &[
+                "link", "add", INTERFACE, "type", "veth", "peer", "name", "j592mesh",
+            ],
+            &["addr", "add", "10.254.0.1/16", "dev", INTERFACE],
+            &["-6", "addr", "add", "fd01::1/64", "dev", INTERFACE, "nodad"],
+            &["link", "set", INTERFACE, "up"],
+            &["link", "set", "j592mesh", "up"],
+            // The underlay link to the neighbour.
+            &[
+                "link", "add", "j592lan", "type", "veth", "peer", "name", "j592nbr",
+            ],
+            &["link", "set", "j592nbr", "netns", pid.as_str()],
+            &["addr", "add", "192.0.2.1/24", "dev", "j592lan"],
+            &[
+                "-6",
+                "addr",
+                "add",
+                "2001:db8:592::1/64",
+                "dev",
+                "j592lan",
+                "nodad",
+            ],
+            &["link", "set", "j592lan", "up"],
+            // Replies to the spoofed peer address go back over the LAN, so only the guard
+            // can stop that handshake.
+            &["route", "add", "10.254.0.2/32", "via", "192.0.2.2"],
+            &[
+                "-6",
+                "route",
+                "add",
+                "fd01::2/128",
+                "via",
+                "2001:db8:592::2",
+            ],
+        ] {
+            review_j592_run("ip", args);
+        }
+        for args in [
+            &["ip", "link", "set", "lo", "up"][..],
+            &["ip", "addr", "add", "192.0.2.2/24", "dev", "j592nbr"],
+            &["ip", "addr", "add", "10.254.0.2/32", "dev", "j592nbr"],
+            &[
+                "ip",
+                "-6",
+                "addr",
+                "add",
+                "2001:db8:592::2/64",
+                "dev",
+                "j592nbr",
+                "nodad",
+            ],
+            &[
+                "ip",
+                "-6",
+                "addr",
+                "add",
+                "fd01::2/128",
+                "dev",
+                "j592nbr",
+                "nodad",
+            ],
+            &["ip", "link", "set", "j592nbr", "up"],
+            &["ip", "route", "add", "10.254.0.1/32", "via", "192.0.2.1"],
+            &[
+                "ip",
+                "-6",
+                "route",
+                "add",
+                "fd01::1/128",
+                "via",
+                "2001:db8:592::1",
+            ],
+        ] {
+            inside(args);
+        }
+        // Listening sockets complete the handshake from the kernel backlog; nobody accepts.
+        let listen = |address: &str| {
+            let listener = TcpListener::bind((address, 0)).expect("listener");
+            let bound = listener.local_addr().expect("bound address");
+            (listener, bound)
+        };
+        let (_mesh4, mesh4) = listen("10.254.0.1");
+        let (_mesh6, mesh6) = listen("fd01::1");
+        let (_lan4, lan4) = listen("192.0.2.1");
+        let (_lan6, lan6) = listen("2001:db8:592::1");
+        // Expected handshakes per probe: with no rules at all, under the full kernel policy
+        // (the pre-D384 reference, which keeps its [231] fence), and under the GotaTun guard.
+        // `None` means "not asserted": the full policy has no source anti-spoofing chain.
+        let probes: [(&str, &str, SocketAddr, [Option<bool>; 3]); 6] = [
+            (
+                "LAN to LAN address (control)",
+                "192.0.2.2",
+                lan4,
+                [Some(true); 3],
+            ),
+            (
+                "LAN to LAN address (control)",
+                "2001:db8:592::2",
+                lan6,
+                [Some(true); 3],
+            ),
+            (
+                "spoofed peer source (control)",
+                "10.254.0.2",
+                lan4,
+                [Some(true), None, Some(false)],
+            ),
+            (
+                "spoofed peer source (control)",
+                "fd01::2",
+                lan6,
+                [Some(true), None, Some(false)],
+            ),
+            (
+                "LAN to the node's mesh address",
+                "192.0.2.2",
+                mesh4,
+                [Some(true), Some(false), Some(false)],
+            ),
+            (
+                "LAN to the node's mesh address",
+                "2001:db8:592::2",
+                mesh6,
+                [Some(true), Some(false), Some(false)],
+            ),
+        ];
+        let mut wrong = Vec::new();
+        let mut check = |label: &str, column: usize| {
+            for (what, source, destination, expected) in probes {
+                let open = review_j592_open(&pid, source, destination);
+                println!("J592 {label}: {what}: {source} -> {destination} open={open}");
+                if expected[column].is_some_and(|expected| expected != open) {
+                    wrong.push(format!(
+                        "{label}: {what}: {source} -> {destination} open={open}, expected {:?}",
+                        expected[column]
+                    ));
+                }
+            }
+        };
+        check("no rules (baseline)", 0);
+        for backend in [Backend::Nft, Backend::NfTables] {
+            let mut full = Firewall::for_backend(backend);
+            full.apply(&config()).expect("full policy install");
+            check(&format!("{backend:?} full policy (reference)"), 1);
+            full.remove().expect("full policy removal");
+
+            let mut guard =
+                Firewall::for_node(Some(backend), crate::gotatun_node::EngineKind::GotaTun);
+            guard.apply(&config()).expect("guard install");
+            let state = guard.kernel_guard_status().expect("status").state;
+            check(&format!("{backend:?} GotaTun guard ({state})"), 2);
+            guard.remove().expect("guard removal");
+        }
+        let _ = Command::new("ip")
+            .args(["link", "delete", "j592lan"])
+            .status();
+        let _ = Command::new("ip")
+            .args(["link", "delete", INTERFACE])
+            .status();
+        let mut neighbour = neighbour;
+        let _ = neighbour.kill();
+        let _ = neighbour.wait();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 }
