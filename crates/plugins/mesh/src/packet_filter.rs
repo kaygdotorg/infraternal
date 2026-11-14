@@ -142,6 +142,17 @@ pub(crate) struct PacketFilter {
 /// One fully compiled snapshot that can be published after its related routes and peers succeed.
 pub(crate) struct PreparedPolicy(CompiledPolicy);
 
+impl PreparedPolicy {
+    /// Leave these peers out of the snapshot before it is published, so their addresses admit
+    /// nothing; see [`PacketFilter::withdraw_peers`]. Publishing the result also retires their
+    /// open flows, because [`CompiledPolicy::allows_flow`] resolves a flow's peer by address.
+    #[must_use]
+    pub(crate) fn without_peers(mut self, withdrawn: &std::collections::BTreeSet<NodeId>) -> Self {
+        self.0.withdraw(withdrawn);
+        self
+    }
+}
+
 impl PacketFilter {
     /// Build an empty, deny-by-default filter for a node that has not received its first snapshot.
     ///
@@ -203,16 +214,10 @@ impl PacketFilter {
         if withdrawn.is_empty() {
             return;
         }
-        let mut current = self
-            .policy
+        self.policy
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let CompiledPolicy {
-            peer_addresses,
-            peers,
-            ..
-        } = &mut *current;
-        peer_addresses.retain(|_, index| !withdrawn.contains(&peers[*index].node));
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .withdraw(withdrawn);
     }
 
     /// Publish a prepared snapshot and retire tuples the replacement no longer permits.
@@ -683,6 +688,20 @@ impl CompiledPolicy {
             peers,
             proxy_ingress,
         })
+    }
+
+    /// Drop these peers' addresses from the index, so packets from or to them match no peer.
+    /// Only removes entries, so it never allocates and cannot fail.
+    fn withdraw(&mut self, withdrawn: &std::collections::BTreeSet<NodeId>) {
+        if withdrawn.is_empty() {
+            return;
+        }
+        let Self {
+            peer_addresses,
+            peers,
+            ..
+        } = self;
+        peer_addresses.retain(|_, index| !withdrawn.contains(&peers[*index].node));
     }
 
     /// Reuse each surviving peer's fixed conntrack table across an atomic policy replacement.

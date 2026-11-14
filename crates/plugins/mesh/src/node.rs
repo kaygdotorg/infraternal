@@ -3147,7 +3147,7 @@ impl Node {
             // grants.
             self.publish_gotatun_policy(packet_policy.take());
             if let Err(error) = self.firewall.install_pending(&config) {
-                self.restore_gotatun_policy();
+                self.restore_gotatun_policy(&BTreeSet::new());
                 return Err(error);
             }
             let configured_peers: Vec<_> = config
@@ -3156,7 +3156,7 @@ impl Node {
                 .map(|policy| policy.peer.clone())
                 .collect();
             if let Err(error) = self.install_peer_routes(&configured_peers, false) {
-                self.restore_gotatun_policy();
+                self.restore_gotatun_policy(&BTreeSet::new());
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3171,7 +3171,7 @@ impl Node {
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
             if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
-                self.restore_gotatun_policy();
+                self.restore_gotatun_policy(&BTreeSet::new());
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3230,8 +3230,12 @@ impl Node {
         // The engine starts delivering a reused or moved address's packets for its new owner as
         // soon as the peers change below. Withdraw the old owners from the packet path first,
         // then publish the new policy right after the peer change, before routes, the firewall
-        // and the disk save (J592 P2-5).
-        self.withdraw_moved_gotatun_peers(&config);
+        // and the disk save (J592 P2-5). A failed transaction keeps them withdrawn until the
+        // engine has its old peers back (J617 P2).
+        let moved = self.moved_gotatun_peers(&config);
+        if let Some(engine) = self.gotatun.as_ref() {
+            engine.withdraw_peers(&moved);
+        }
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
         let mut previous_route_overrides = None;
@@ -3298,8 +3302,11 @@ impl Node {
             // Saving can fail after the permissive policy transaction. Reinstall
             // the fence before rollback so any later error still denies NEW traffic.
             // The packet path goes back to the accepted grants (or denies everything when there
-            // are none), whether or not the new policy was already published.
-            self.restore_gotatun_policy();
+            // are none), whether or not the new policy was already published. The engine may
+            // still hold the new peer set, where a moved peer's old address can belong to
+            // another node, so the moved peers stay withdrawn until `apply(old)` below has
+            // succeeded. If any rollback step fails, they stay withdrawn (J617 P2).
+            self.restore_gotatun_policy(&moved);
             self.apply_fence(&fence, &config)?;
             if let Some(old) = &self.config {
                 if old.addresses != config.addresses {
@@ -3328,6 +3335,9 @@ impl Node {
                         .as_ref()
                         .ok_or(io::ErrorKind::NotConnected)?
                         .apply(old.clone())?;
+                    // The engine has the accepted peers again, so their addresses mean what the
+                    // accepted grants say: give the moved peers their grants back.
+                    self.restore_gotatun_policy(&BTreeSet::new());
                 }
                 self.set_mesh_mtu(
                     mesh_mtu.0,
@@ -3389,11 +3399,15 @@ impl Node {
         }
     }
 
-    /// Put the accepted config's grants back on the packet path after a failed transaction.
+    /// Put the accepted config's grants back on the packet path after a failed transaction,
+    /// leaving out the `withheld` peers.
     ///
     /// `self.config` is still the accepted config here. When it cannot be compiled again, or
     /// there is none, the filter denies everything rather than keep a half-applied snapshot.
-    fn restore_gotatun_policy(&self) {
+    /// `withheld` holds the accepted peers whose addresses the engine may currently give to
+    /// another node (see [`Self::moved_gotatun_peers`]); they are left out in the same atomic
+    /// publish, so there is no moment when their old grants match those addresses.
+    fn restore_gotatun_policy(&self, withheld: &BTreeSet<crate::policy::model::NodeId>) {
         let Some(engine) = self.gotatun.as_ref() else {
             return;
         };
@@ -3403,18 +3417,22 @@ impl Node {
             .and_then(|old| {
                 crate::gotatun_node::Engine::prepare_policy(old, self.proxy_ingress.clone()).ok()
             })
-            .unwrap_or_else(crate::packet_filter::PacketFilter::deny_all_policy);
+            .map_or_else(
+                crate::packet_filter::PacketFilter::deny_all_policy,
+                |policy| policy.without_peers(withheld),
+            );
         engine.publish_policy(restored);
     }
 
-    /// Withdraw, before the peer change, every accepted peer that the new config removes or
-    /// moves to other addresses, so no other node's packets can use its grants.
-    fn withdraw_moved_gotatun_peers(&self, config: &Config) {
-        let (Some(engine), Some(old)) = (self.gotatun.as_ref(), self.config.as_ref()) else {
-            return;
+    /// The accepted peers that `config` removes or moves to other addresses: once the engine
+    /// takes `config`'s peers, another node's packets may arrive from their old addresses, so
+    /// their grants must not be on the packet path. Empty without an accepted config or a
+    /// `GotaTun` engine.
+    fn moved_gotatun_peers(&self, config: &Config) -> BTreeSet<crate::policy::model::NodeId> {
+        let (Some(_), Some(old)) = (self.gotatun.as_ref(), self.config.as_ref()) else {
+            return BTreeSet::new();
         };
-        let withdrawn = old
-            .peers
+        old.peers
             .iter()
             .filter(|(node, previous)| {
                 config
@@ -3423,8 +3441,7 @@ impl Node {
                     .is_none_or(|next| next.peer.addresses != previous.peer.addresses)
             })
             .map(|(node, _)| *node)
-            .collect::<BTreeSet<_>>();
-        engine.withdraw_peers(&withdrawn);
+            .collect()
     }
 
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
