@@ -56,6 +56,9 @@ const BULK_WINDOW: u64 = 1024 * 1024;
 const RESERVE_WAITING_FOR_INITIAL_CREDIT: u8 = 1;
 /// Reserve setup state after a grant proves the repaint budget is available.
 const RESERVE_ACTIVE: u8 = 2;
+/// Reserve setup ended without a reserve: the client returned credit before
+/// offering more than the bulk window, so it keeps exact raw delivery.
+const RESERVE_LEGACY: u8 = 3;
 
 /// Invalid sequence arithmetic, ordering, or credit consumption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,8 +220,9 @@ impl Output {
     /// Shadow priming may split the browser's opening grant around early raw
     /// output. Count grantable credit together with unreturned raw bytes so the
     /// full reserve is recognized only after the complete 1 MiB + 64 KiB window
-    /// arrives. Returned credit from a legacy 1 MiB window preserves that same
-    /// total and cannot activate the reserve by itself.
+    /// arrives. The first grant that returns raw credit ends setup: a client
+    /// that has not offered the reserve by then is a legacy window for the
+    /// rest of the attachment, however much fresh credit it grants later.
     /// # Errors
     /// Rejects a credit counter overflow without mutating state.
     pub fn grant(&mut self, bytes: u32) -> Result<(), Error> {
@@ -250,7 +254,14 @@ impl Output {
         let already_replaced = self.raw_in_flight - self.raw_replacement_credit;
         self.raw_replacement_credit -= raw_repaid.saturating_sub(already_replaced);
         self.raw_in_flight -= raw_repaid;
-        if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT
+        if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT && raw_repaid > 0 {
+            // Returned credit means the client is past its opening grant
+            // without having offered the reserve: it is a legacy window. A
+            // later fresh grant from it must not look like an opening
+            // remainder, or the relay would withhold granted bytes as a reserve
+            // the client never set aside and repaint over its exact output.
+            self.reserve_mode = RESERVE_LEGACY;
+        } else if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT
             && self.credit.saturating_add(u64::from(self.raw_in_flight))
                 >= BULK_WINDOW + u64::from(REPAINT_RESERVE)
         {
