@@ -4,6 +4,11 @@
 set -euo pipefail
 
 kit=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# The engine that --ab and --calibration rows run: the GotaTun CLI (default) or the
+# product binary (`infraternal`, case mesh-infraternal). One engine per run, so a
+# calibration always bounds the same code path its A/B holds measure (#260, J610).
+ab_engine=${H2H_AB_ENGINE:-gotatun}
+[[ $ab_engine == gotatun || $ab_engine == infraternal ]] || { echo 'H2H_AB_ENGINE must be gotatun or infraternal' >&2; exit 2; }
 [[ $(id -un) == claude ]] || { echo 'run as claude on the perf VM' >&2; exit 2; }
 housekeeping=${H2H_CPUSET_HOUSEKEEPING:-0,5}
 taskset -pc "$housekeeping" "$$" >/dev/null
@@ -96,7 +101,7 @@ while (($#)); do
             (($# >= 2)) || { echo '--row needs a value' >&2; exit 2; }
             parse_pair "$2" tag engine
             [[ $tag =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid row tag: $tag" >&2; exit 2; }
-            [[ $engine == gotatun || $engine == kernel || $engine == kernel-plain || $engine == wireguard-go || $engine == underlay ]] || {
+            [[ $engine == gotatun || $engine == infraternal || $engine == kernel || $engine == kernel-plain || $engine == wireguard-go || $engine == underlay ]] || {
                 echo "invalid engine for row $tag: $engine" >&2; exit 2;
             }
             for existing in "${rows[@]}"; do
@@ -167,14 +172,14 @@ case $mode in
         # runs the same binary and is never read by the spread report.
         offset=0
         if ((${#rows[@]} == 4)); then
-            check_row 0 warmup gotatun
+            check_row 0 warmup "$ab_engine"
             offset=1
         elif ((${#rows[@]} != 3)); then
             echo '--calibration takes three control rows, optionally after one warmup row' >&2; exit 2
         fi
         declare -A seen_control=()
         for ((i = offset; i < ${#rows[@]}; i++)); do
-            [[ ${rows[$i]#*=} == gotatun ]] || { echo "row $((i + 1)) must be a gotatun control" >&2; exit 2; }
+            [[ ${rows[$i]#*=} == "$ab_engine" ]] || { echo "row $((i + 1)) must be a $ab_engine control" >&2; exit 2; }
             seen_control[${rows[$i]%%=*}]=1
         done
         [[ ${#seen_control[@]} == 3 && -n ${seen_control[control-a]:-} && \
@@ -268,10 +273,10 @@ case $mode in
         # One ABBA round of calibration-shaped LAN windows in a single hold: the
         # order cancels linear drift, and each repeated binary must be identical.
         ((${#rows[@]} == 4)) || { echo '--ab takes exactly four rows' >&2; exit 2; }
-        check_row 0 control-a gotatun
-        check_row 1 candidate-a gotatun
-        check_row 2 candidate-b gotatun
-        check_row 3 control-b gotatun
+        check_row 0 control-a "$ab_engine"
+        check_row 1 candidate-a "$ab_engine"
+        check_row 2 candidate-b "$ab_engine"
+        check_row 3 control-b "$ab_engine"
         [[ -n $label ]] || { echo '--ab requires --label' >&2; exit 2; }
         [[ -n ${binaries[control-a]:-} && ${binaries[control-a]} == "${binaries[control-b]:-}" ]] || {
             echo 'control-a and control-b must use the same binary' >&2; exit 2;
@@ -301,7 +306,7 @@ esac
 for row in "${rows[@]}"; do
     tag=${row%%=*}
     engine=${row#*=}
-    if [[ $engine == gotatun && $mode != smoke && -z ${binaries[$tag]:-} ]]; then
+    if [[ ( $engine == gotatun || $engine == infraternal ) && $mode != smoke && -z ${binaries[$tag]:-} ]]; then
         echo "row $tag needs --binary $tag=PATH" >&2
         exit 2
     fi
@@ -414,7 +419,7 @@ if [[ $mode == calibration ]]; then
     spread_report="$out/calibration-spread.json"
     spread_status=0
     set +e
-    python3 -I "$kit/lib/calibration_spread.py" "$out" --expected-probes "${H2H_LAN_PING_COUNT:-8000}" --output "$spread_report"
+    python3 -I "$kit/lib/calibration_spread.py" "$out" --case "mesh-$ab_engine" --expected-probes "${H2H_LAN_PING_COUNT:-8000}" --output "$spread_report"
     spread_status=$?
     set -e
     if ((spread_status != 0)); then

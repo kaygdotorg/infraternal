@@ -668,8 +668,15 @@ impl Device {
         overrides: &BTreeMap<PublicKey, u16>,
         remove: bool,
     ) -> io::Result<()> {
+        if peers.is_empty() {
+            return Ok(());
+        }
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
-        let index = index()?;
+        // Resolve the marked link and keep its ifindex for the whole batch. A name-only lookup
+        // could route through an unrelated interface substituted under `infraternal0`.
+        let index = Self::active_link()?
+            .ok_or(io::ErrorKind::NotConnected)?
+            .ifindex;
         for peer in peers {
             let mtu = (!remove).then(|| {
                 overrides
@@ -701,6 +708,37 @@ impl Device {
                         return Err(error);
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace peer host routes on one proven link with explicit packet budgets.
+    ///
+    /// Unlike [`Device::routes_with_mtu_overrides`], which resolves whichever marked link holds the
+    /// shared name at write time, this writes only to `link`, the identity the route-repair worker
+    /// captured (J485). Its index, engine and owner are checked again right before the batch, and
+    /// every write uses that index, so a replacement link, even one carrying this node's marker,
+    /// is never written (#489 J549 P2).
+    /// # Errors
+    /// Refuses a missing or changed link before any write; returns route-netlink errors.
+    pub(crate) fn replace_peer_routes_on(
+        link: &ActiveLink,
+        routes: &[(&Peer, u16)],
+    ) -> io::Result<()> {
+        if routes.is_empty() {
+            return Ok(());
+        }
+        Self::verify_repair_link(link)?;
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        for (peer, mtu) in routes {
+            for (family, prefix, address) in [
+                (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
+                (10, 128, peer.addresses.ipv6.octets().to_vec()),
+            ] {
+                let payload =
+                    peer_route_payload(family, prefix, &address, link.ifindex, Some(*mtu))?;
+                socket.request(24, 4 | 0x100 | 0x400, &payload)?;
             }
         }
         Ok(())
@@ -739,11 +777,17 @@ impl Device {
     }
 
     /// Open a passive listener for route deletions on the current mesh interface.
+    ///
+    /// The same listener reports every other link and route change to `underlay`, so peer route
+    /// budgets are re-derived only after the underlay can have changed (#489 J552 P2-2).
     /// # Errors
     /// Returns socket, binding, or interface lookup errors before the worker starts.
-    pub(crate) fn route_monitor(link: &ActiveLink) -> io::Result<RouteMonitor> {
+    pub(crate) fn route_monitor(
+        link: &ActiveLink,
+        underlay: std::sync::Arc<UnderlayWatch>,
+    ) -> io::Result<RouteMonitor> {
         Self::verify_repair_link(link)?;
-        RouteMonitor::open(link.ifindex)
+        RouteMonitor::open(link.ifindex, underlay)
     }
     /// Refuse repair if the shared name, original index, engine, or public ownership changed.
     /// Writes still use the original index, so a name replacement cannot redirect them.
@@ -1068,8 +1112,59 @@ pub(crate) enum RouteWake {
     Cancelled,
 }
 
+/// Tells peer-route refreshes whether the underlay may have changed since they last looked.
+///
+/// Deriving a peer's route budget costs two route-netlink requests, so a refresh that re-derived
+/// every peer cost about 70 µs per peer, under the shared route-state lock, up to four times a
+/// second (#489 J552 P2-2: 288 ms at 4,096 peers). The underlay only changes when a link or route
+/// does, and the kernel announces both. The route listener bumps `generation` on every such
+/// announcement that is not about our own mesh link or its peer routes, and a refresh re-derives
+/// all peers only when the generation moved.
+///
+/// `watched` is false while no listener runs (it failed, or never started). Then no change can
+/// be trusted to arrive, and every refresh re-derives every peer, as before this watch existed.
+/// A lost notification (`ENOBUFS`) bumps the generation too, and so does the route-repair worker's
+/// periodic inventory check, which bounds how long an unannounced change (a cached path-MTU
+/// exception) can go unseen.
+#[derive(Debug, Default)]
+pub(crate) struct UnderlayWatch {
+    /// Counts underlay announcements; only equality with an earlier reading matters.
+    generation: std::sync::atomic::AtomicU64,
+    /// Whether a listener is subscribed and will bump `generation` on the next change.
+    watched: std::sync::atomic::AtomicBool,
+}
+
+impl UnderlayWatch {
+    /// Record that the underlay may have changed.
+    pub(crate) fn changed(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Mark whether a listener now reports changes. Starting to watch also counts as a change,
+    /// since nothing reported what happened while no listener ran.
+    pub(crate) fn set_watched(&self, watched: bool) {
+        if watched {
+            self.changed();
+        }
+        self.watched
+            .store(watched, std::sync::atomic::Ordering::Release);
+        if !watched {
+            self.changed();
+        }
+    }
+
+    /// The current generation, or `None` while no listener runs and nothing can be trusted.
+    pub(crate) fn generation(&self) -> Option<u64> {
+        self.watched
+            .load(std::sync::atomic::Ordering::Acquire)
+            .then(|| self.generation.load(std::sync::atomic::Ordering::Acquire))
+    }
+}
+
 /// Listens for kernel route deletions while a node is up, so only a known mesh peer route is
-/// offered back to the kernel after an interface manager reconfigures the link.
+/// offered back to the kernel after an interface manager reconfigures the link. It also reports
+/// other link and route changes to an [`UnderlayWatch`].
 pub(crate) struct RouteMonitor {
     /// The route multicast socket subscribed in the node's network namespace.
     fd: OwnedFd,
@@ -1077,13 +1172,23 @@ pub(crate) struct RouteMonitor {
     interface_index: u32,
     /// Reused storage for kernel notifications; route messages contain no private key material.
     buffer: Vec<u8>,
+    /// Bumped for every link, route, policy-rule or nexthop change that is not our own link or
+    /// peer route.
+    underlay: std::sync::Arc<UnderlayWatch>,
 }
 
 impl RouteMonitor {
-    /// Subscribe to IPv4 and IPv6 route notifications for the current mesh interface.
+    /// Subscribe to the notifications that can move a peer endpoint's underlay path: links, IPv4
+    /// and IPv6 routes, IPv4 and IPv6 policy rules, and nexthop objects.
+    ///
+    /// Rules and nexthops have their own groups (#489 J609): a VPN or interface manager that adds
+    /// its table routes first and the `ip rule` that selects them second moves endpoints with
+    /// no route announcement at all, and so does replacing a nexthop object routes refer to
+    /// while `net.ipv4.nexthop_compat_mode` is off. The mesh writes neither, so these groups
+    /// carry no echo of our own writes.
     /// # Errors
     /// Returns socket, bind, or interface lookup errors before the node becomes active.
-    fn open(interface_index: u32) -> io::Result<Self> {
+    fn open(interface_index: u32, underlay: std::sync::Arc<UnderlayWatch>) -> io::Result<Self> {
         let fd = socket(
             AddressFamily::Netlink,
             SockType::Raw,
@@ -1092,19 +1197,30 @@ impl RouteMonitor {
         )?;
         bind(
             fd.as_raw_fd(),
-            &NetlinkAddr::new(0, RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE),
+            &NetlinkAddr::new(
+                0,
+                RTMGRP_LINK
+                    | RTMGRP_IPV4_ROUTE
+                    | RTMGRP_IPV6_ROUTE
+                    | RTMGRP_IPV4_RULE
+                    | RTMGRP_IPV6_RULE
+                    | RTMGRP_NEXTHOP,
+            ),
         )?;
         Ok(Self {
             fd,
             interface_index,
             buffer: vec![0; netlink::DATAGRAM_BYTES],
+            underlay,
         })
     }
 
     /// Wait until a deletion, cancellation, or the full-inventory reconciliation deadline.
     ///
     /// Only unicast `/32` and `/128` routes in the main table, with this interface and protocol
-    /// 250, are reported. Other route changes pass through untouched.
+    /// 250, are reported. Every other link, route, rule or nexthop change bumps the underlay watch
+    /// and is not reported. A notification overflow (`ENOBUFS`) may have dropped a deletion, so it bumps the
+    /// watch and asks for a full inventory check.
     /// # Errors
     /// Returns poll, receive, or malformed-netlink-message errors.
     pub(crate) fn wait_for_deleted_peer_route(
@@ -1140,15 +1256,31 @@ impl RouteMonitor {
                 return Err(io::Error::other("route notification socket disconnected"));
             }
             if route_events.contains(PollFlags::POLLIN) {
-                let length = recv(self.fd.as_raw_fd(), &mut self.buffer, MsgFlags::empty())?;
+                let length = match recv(self.fd.as_raw_fd(), &mut self.buffer, MsgFlags::empty()) {
+                    Ok(length) => length,
+                    Err(nix::errno::Errno::ENOBUFS) => {
+                        self.underlay.changed();
+                        return Ok(RouteWake::Reconcile);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 if length == 0 || length == self.buffer.len() {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
+                let mut deleted = None;
+                let mut underlay_changed = false;
                 for message in netlink::messages(&self.buffer[..length])? {
-                    if let Some(address) = deleted_mesh_peer_route(&message, self.interface_index)?
-                    {
-                        return Ok(RouteWake::Deleted(address));
+                    if deleted.is_none() {
+                        deleted = deleted_mesh_peer_route(&message, self.interface_index)?;
                     }
+                    underlay_changed |= is_underlay_change(&message, self.interface_index)?;
+                }
+                // Bump before waking the repair, so no refresh misses a change in this datagram.
+                if underlay_changed {
+                    self.underlay.changed();
+                }
+                if let Some(address) = deleted {
+                    return Ok(RouteWake::Deleted(address));
                 }
             }
         }
@@ -1196,6 +1328,42 @@ fn peer_route_payload(
         attribute(&mut payload, RTA_METRICS | NLA_F_NESTED, &metrics)?;
     }
     Ok(payload)
+}
+
+/// Whether one link, route, policy-rule or nexthop notification may change a peer endpoint's
+/// underlay MTU.
+///
+/// Our own link's announcements (its MTU follows the peer budgets) and routes out of our own link
+/// (our peer host routes, whatever flags the kernel reports on them, such as `linkdown`) are the
+/// results of a refresh, not inputs to it: counting them would make each refresh that writes
+/// schedule a full re-derivation. A route out of the mesh link cannot carry the underlay to a
+/// peer endpoint either. Everything else counts, because any other link or route can sit on the
+/// path to some peer's endpoint. Every rule and nexthop change counts too (#489 J609): a rule
+/// can send an endpoint to another table, and a nexthop replacement re-points every route that
+/// refers to it; the mesh writes neither, so no refresh can feed back into the watch.
+/// # Errors
+/// Returns `InvalidData` for a truncated link or route message.
+fn is_underlay_change(message: &netlink::Message<'_>, interface_index: u32) -> io::Result<bool> {
+    match message.kind {
+        // RTM_NEWLINK, RTM_DELLINK: `ifinfomsg` holds the link index at bytes 4..8.
+        16 | 17 => Ok(netlink::u32_at(message.payload, 4)? != interface_index),
+        // RTM_NEWROUTE, RTM_DELROUTE: `rtmsg` is 12 bytes, then attributes; RTA_OIF is type 4.
+        24 | 25 => {
+            let attributes = message
+                .payload
+                .get(12..)
+                .ok_or(io::ErrorKind::InvalidData)?;
+            for field in netlink::attributes(attributes)? {
+                if field.kind == 4 && netlink::u32_at(field.payload, 0)? == interface_index {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        // RTM_NEWRULE, RTM_DELRULE, RTM_NEWNEXTHOP, RTM_DELNEXTHOP.
+        32 | 33 | 104 | 105 => Ok(true),
+        _ => Ok(false),
+    }
 }
 
 /// Returns the destination from a protocol-250 host-route deletion on the active mesh interface.
@@ -1292,10 +1460,20 @@ fn mesh_route_metrics_are_owned(field: netlink::Attribute<'_>) -> bool {
 const RTPROT_INFRATERNAL: u8 = 250;
 /// Identifies generic static routes written by earlier mesh versions during upgrade cleanup.
 const RTPROT_LEGACY_STATIC: u8 = 4;
+/// Subscribes to link creation, removal and attribute changes, including MTU.
+const RTMGRP_LINK: u32 = 0x1;
 /// Subscribes to IPv4 unicast route changes in the main route table.
 const RTMGRP_IPV4_ROUTE: u32 = 0x40;
 /// Subscribes to IPv6 unicast route changes in the main route table.
 const RTMGRP_IPV6_ROUTE: u32 = 0x400;
+/// Subscribes to IPv4 policy-rule changes: `RTNLGRP_IPV4_RULE` (group 8), bit `1 << 7`.
+const RTMGRP_IPV4_RULE: u32 = 0x80;
+/// Subscribes to IPv6 policy-rule changes: `RTNLGRP_IPV6_RULE` (group 19), bit `1 << 18`. The
+/// legacy `RTMGRP_*` macros stop before it, so it is derived from the group number.
+const RTMGRP_IPV6_RULE: u32 = 1 << (19 - 1);
+/// Subscribes to nexthop object changes: `RTNLGRP_NEXTHOP` (group 32), the last group the
+/// 32-bit bind mask can still express, bit `1 << 31`.
+const RTMGRP_NEXTHOP: u32 = 1 << (32 - 1);
 /// `RTA_METRICS`: nested per-route metrics accepted by rtnetlink.
 const RTA_METRICS: u16 = 8;
 /// `RTAX_MTU`: the per-peer inner packet limit stored on a mesh host route.
@@ -1415,17 +1593,18 @@ fn set_link_mtu(index: u32, mtu: u32) -> io::Result<()> {
 ///
 /// An explicit route MTU may be smaller than the interface, so use the lower value. A larger
 /// metric is not a usable packet budget because the egress link cannot carry it. `RTM_GETROUTE`
-/// and `RTM_GETLINK` are acknowledged requests and each uses one short-lived route-netlink socket.
+/// and `RTM_GETLINK` are acknowledged requests on `socket`, so a batch of lookups shares one
+/// route-netlink socket instead of opening two per peer (#489 J552 P2-2).
 /// # Errors
 /// Reports an unreachable endpoint, a missing egress link, or malformed kernel replies.
-pub(crate) fn route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
+pub(crate) fn route_mtu_on(socket: &mut Socket, endpoint: SocketAddr) -> io::Result<u32> {
     let (family, prefix, address) = match endpoint.ip() {
         IpAddr::V4(address) => (2_u8, 32_u8, address.octets().to_vec()),
         IpAddr::V6(address) => (10_u8, 128_u8, address.octets().to_vec()),
     };
     let mut request = vec![family, prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     attribute(&mut request, 1, &address)?;
-    let replies = Socket::open(SockProtocol::NetlinkRoute)?.request(26, 4, &request)?;
+    let replies = socket.request(26, 4, &request)?;
     let reply = replies.first().ok_or(io::ErrorKind::NotFound)?;
     let mut output_index = None;
     let mut route_mtu = None;
@@ -1442,17 +1621,22 @@ pub(crate) fn route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
             _ => {}
         }
     }
-    let link_mtu = link_mtu(output_index.ok_or(io::ErrorKind::NotFound)?)?;
+    let link_mtu = link_mtu_on(socket, output_index.ok_or(io::ErrorKind::NotFound)?)?;
     Ok(route_mtu
         .filter(|mtu| *mtu > 0)
         .map_or(link_mtu, |mtu| mtu.min(link_mtu)))
 }
 
-/// Read one egress link's MTU when the route has no explicit MTU metric.
+/// Read one link's MTU on a fresh route-netlink socket.
 fn link_mtu(index: u32) -> io::Result<u32> {
+    link_mtu_on(&mut Socket::open(SockProtocol::NetlinkRoute)?, index)
+}
+
+/// Read one egress link's MTU on `socket`, for a route that has no explicit MTU metric.
+fn link_mtu_on(socket: &mut Socket, index: u32) -> io::Result<u32> {
     let mut request = vec![0; 16];
     request[4..8].copy_from_slice(&index.to_ne_bytes());
-    let replies = Socket::open(SockProtocol::NetlinkRoute)?.request(18, 4, &request)?;
+    let replies = socket.request(18, 4, &request)?;
     let reply = replies.first().ok_or(io::ErrorKind::NotFound)?;
     netlink::attributes(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)?
         .into_iter()
@@ -1848,5 +2032,53 @@ mod route_metric_tests {
         ] {
             assert!(!owns_encoded_metrics(&foreign));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod underlay_change_tests {
+    //! Which route-netlink notifications move the underlay watch (#489 J552 P2-2, J609).
+    use super::*;
+
+    /// Wrap `payload` as one received notification of `kind`.
+    fn message(kind: u16, payload: &[u8]) -> netlink::Message<'_> {
+        netlink::Message {
+            kind,
+            flags: 0,
+            sequence: 0,
+            payload,
+        }
+    }
+
+    /// Policy-rule and nexthop announcements can move a peer endpoint to another path, so each
+    /// one moves the watch, whatever it says: the mesh writes neither (#489 J609).
+    #[test]
+    fn policy_rule_and_nexthop_changes_move_the_underlay_watch() {
+        // RTM_NEWRULE / RTM_DELRULE carry a 12-byte `fib_rule_hdr`; RTM_NEWNEXTHOP /
+        // RTM_DELNEXTHOP an 8-byte `nhmsg`.
+        let rule = [0_u8; 12];
+        let nexthop = [0_u8; 8];
+        for (kind, payload) in [
+            (32, rule.as_slice()),
+            (33, rule.as_slice()),
+            (104, nexthop.as_slice()),
+            (105, nexthop.as_slice()),
+        ] {
+            assert!(
+                is_underlay_change(&message(kind, payload), 7).unwrap(),
+                "message type {kind} must move the underlay watch"
+            );
+        }
+    }
+
+    /// Our own link's announcements follow our writes and never count; any other link does.
+    #[test]
+    fn only_foreign_links_move_the_underlay_watch() {
+        // `ifinfomsg` is 16 bytes with the link index at bytes 4..8.
+        let mut link = [0_u8; 16];
+        link[4..8].copy_from_slice(&7_u32.to_ne_bytes());
+        assert!(!is_underlay_change(&message(16, &link), 7).unwrap());
+        assert!(is_underlay_change(&message(16, &link), 8).unwrap());
     }
 }

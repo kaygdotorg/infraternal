@@ -47,7 +47,7 @@ def read_probe_count(path: Path, pingstat: Any) -> int:
     return int(match.group(1))
 
 
-def read_calibration_rows(results_root: Path, expected_probes: int = 3600) -> tuple[
+def read_calibration_rows(results_root: Path, expected_probes: int = 3600, case: str = "mesh-gotatun") -> tuple[
     dict[str, dict[str, dict[str, float]]], dict[str, dict[str, dict[str, int]]]
 ]:
     """Read three harness rows into comparable per-flow metrics and probe counts."""
@@ -55,7 +55,7 @@ def read_calibration_rows(results_root: Path, expected_probes: int = 3600) -> tu
     rows: dict[str, dict[str, dict[str, float]]] = {}
     probes: dict[str, dict[str, dict[str, int]]] = {}
     for row in CONTROL_ROWS:
-        case_dir = results_root / row / "mesh-gotatun"
+        case_dir = results_root / row / case
         metrics: dict[str, dict[str, float]] = {
             "throughput_gbit_s": {},
             "cpu_s_per_gbit": {},
@@ -152,12 +152,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_root", type=Path, help="root created by perf-all.sh --calibration")
     parser.add_argument("--expected-probes", type=int, default=3600)
+    parser.add_argument("--case", default="mesh-gotatun", help="case directory each row wrote (mesh-infraternal for the in-app engine)")
     parser.add_argument("--output", type=Path, help="optional JSON report path")
     arguments = parser.parse_args()
     if arguments.expected_probes < 1:
         parser.error("--expected-probes must be positive")
     try:
-        rows, probes = read_calibration_rows(arguments.results_root, arguments.expected_probes)
+        rows, probes = read_calibration_rows(arguments.results_root, arguments.expected_probes, arguments.case)
         summary = summarize_rows(rows)
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
         print(f"calibration summary failed: {error}", file=sys.stderr)

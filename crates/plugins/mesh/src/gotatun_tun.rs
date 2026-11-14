@@ -65,6 +65,8 @@ impl LinuxTun {
     ///
     /// The value comes from configured peer endpoint routes before this interface is opened.
     /// The owner key is checked before later MTU writes so a replaced shared name is not changed.
+    /// `endpoint_refresh` wakes the worker when packets cross the link in either direction, so
+    /// it can re-derive peer route budgets from the current endpoints and underlay MTUs.
     /// # Errors
     /// Reports device, ioctl, and async-registration failures. Permission errors name the
     /// `CAP_NET_ADMIN` requirement and the existing rootless own-traffic limit.
@@ -73,6 +75,7 @@ impl LinuxTun {
         mtu: u16,
         owner: PublicKey,
         refused: Arc<AtomicU64>,
+        endpoint_refresh: Arc<crate::gotatun_node::EndpointRefreshSignal>,
     ) -> io::Result<Self> {
         let device = TunDevice::open(name).map_err(rootless_tun_error)?;
         let name = device.name().to_owned();
@@ -84,7 +87,7 @@ impl LinuxTun {
         #[allow(deprecated)]
         let fd = Arc::new(AsyncFd::new(device.into_file())?);
         Ok(Self {
-            writer: TunWriter::spawn(Arc::clone(&fd), vnet_header),
+            writer: TunWriter::spawn(Arc::clone(&fd), vnet_header, endpoint_refresh),
             fd,
             name: Arc::from(name),
             owner,
@@ -108,7 +111,11 @@ impl LinuxTun {
         let fd = Arc::new(AsyncFd::new(File::from(device))?);
         let (mtu_updates, mtu) = crate::mesh_mtu::watcher(crate::mesh_mtu::IPV6_MINIMUM_MTU);
         Ok(Self {
-            writer: TunWriter::spawn(Arc::clone(&fd), vnet_header),
+            writer: TunWriter::spawn(
+                Arc::clone(&fd),
+                vnet_header,
+                Arc::new(crate::gotatun_node::EndpointRefreshSignal::default()),
+            ),
             fd,
             name: Arc::from("test-tun"),
             owner: PublicKey([0; 32]),
@@ -201,7 +208,11 @@ impl LinuxTun {
                 }
                 Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(Ok(length)) => match decode_frame(&buffer[..length], self.vnet_header, pool) {
-                    Ok(packets) => return Ok(packets.into_iter()),
+                    Ok(packets) => {
+                        // Outbound-only flows must re-derive route budgets too (#489 J549 P1).
+                        self.writer.endpoint_refresh.traffic();
+                        return Ok(packets.into_iter());
+                    }
                     Err(_) => {
                         self.refused.fetch_add(1, Ordering::Relaxed);
                     }
@@ -242,22 +253,36 @@ impl IpRecv for LinuxTun {
 #[derive(Clone)]
 struct TunWriter {
     packets: mpsc::Sender<Packet<[u8]>>,
+    /// Coalesced route-refresh wakeups, raised by host-bound writes here and by host reads in
+    /// `recv_packets`.
+    endpoint_refresh: Arc<crate::gotatun_node::EndpointRefreshSignal>,
     /// The device error that ended the writer; `GotaTun` stops its send task on it too.
     failure: Arc<OnceLock<Errno>>,
 }
 
 impl TunWriter {
-    /// Spawn the writer on the current Tokio runtime.
-    fn spawn(fd: Arc<AsyncFd<File>>, vnet_header: bool) -> Self {
+    /// Spawn the writer on the current Tokio runtime and retain its coalesced route-refresh signal.
+    fn spawn(
+        fd: Arc<AsyncFd<File>>,
+        vnet_header: bool,
+        endpoint_refresh: Arc<crate::gotatun_node::EndpointRefreshSignal>,
+    ) -> Self {
         let (packets, queue) = mpsc::channel(WRITE_QUEUE);
         let failure = Arc::new(OnceLock::new());
         tokio::spawn(write_queued(fd, vnet_header, queue, Arc::clone(&failure)));
-        Self { packets, failure }
+        Self {
+            packets,
+            endpoint_refresh,
+            failure,
+        }
     }
 
-    /// Queue one packet; its pool buffer returns once the writer has written it.
+    /// Queue one packet and signal a possible endpoint change after the queue accepts it.
+    ///
+    /// The queue remains the packet's owner until the TUN writer has written it.
     async fn send(&self, packet: Packet<[u8]>) -> io::Result<()> {
         if self.packets.send(packet).await.is_ok() {
+            self.endpoint_refresh.traffic();
             return Ok(());
         }
         Err(self
@@ -1005,6 +1030,7 @@ fn invalid_tun_owned(message: String) -> io::Error {
 }
 
 #[cfg(test)]
+/// Tests for TUN packet framing, checksums and queued writes.
 mod tests {
     #![allow(clippy::unwrap_used)]
 
@@ -1350,6 +1376,7 @@ mod tests {
         }
     }
 
+    /// Verify that queued GSO segments merge while a standalone packet stays unchanged.
     #[tokio::test]
     async fn writer_merges_queued_segments_and_writes_a_lone_packet_unchanged() {
         let (reader, writer) = UnixDatagram::pair().unwrap();
@@ -1357,7 +1384,11 @@ mod tests {
         let writer: OwnedFd = writer.into();
         #[allow(deprecated)]
         let fd = Arc::new(AsyncFd::new(File::from(writer)).unwrap());
-        let tun_writer = TunWriter::spawn(Arc::clone(&fd), true);
+        let tun_writer = TunWriter::spawn(
+            Arc::clone(&fd),
+            true,
+            Arc::new(crate::gotatun_node::EndpointRefreshSignal::default()),
+        );
         let segments = flow(true, 3);
         let lone = tcp_segment(true, 90_000, 10, TCP_ACK | TCP_PSH, 9);
         // The writer runs only once this task waits, so it finds all four queued.

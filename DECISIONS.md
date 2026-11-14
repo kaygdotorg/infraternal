@@ -5044,3 +5044,37 @@ access (#341 B19).
      - **Follow-up:** a measured job optimises the filter's per-packet path
        right after the merge, using the calibrated kit (J579's pooled
        method), with the target of bringing the cost back under the 3% gate.
+
+395. **Install paths follow each operating system's standard (owner, 2026-11-14; amends D17's paths, keeps its update rules):**
+     - **Context:** a user-level server install on hd02 showed `server init --user`
+       put data relative to the current directory. A survey found rootless
+       paths hard-coded from `$HOME` (ignoring the XDG variables), the database
+       and logs mixed into the data folder, and the macOS root agent's data
+       under `/var/lib`, a Linux path. The owner, verbatim: "yeah let's just
+       follow standards relative to the operating system."
+     - **Linux, per user (XDG Base Directory, honouring the variables):**
+       binaries and data in `$XDG_DATA_HOME/infraternal`, databases, logs and
+       other state in `$XDG_STATE_HOME/infraternal`, caches in
+       `$XDG_CACHE_HOME/infraternal`, sockets in `$XDG_RUNTIME_DIR/infraternal`,
+       config in `$XDG_CONFIG_HOME/infraternal`.
+     - **Linux, system-wide (FHS):** state in `/var/lib/infraternal` (binaries stay
+       in `/var/lib/infraternal/bin`, never `/usr`, as D17 says), caches in
+       `/var/cache/infraternal`, sockets in `/run/infraternal`, config in
+       `/etc/infraternal`.
+     - **macOS:** system data in `/Library/Application Support/infraternal`, logs in
+       `/Library/Logs/infraternal`, caches in `/Library/Caches/infraternal`; per
+       user the same under `~/Library/...`. LaunchDaemons and LaunchAgents stay in
+       their standard folders.
+     - **The command on PATH:** one link to the newest installed release,
+       for agent and server alike (one binary): `~/.local/bin/infraternal` per
+       user on Linux, `/usr/local/bin/infraternal` system-wide. On macOS a
+       per-user install prints the PATH line to add. A link or file that
+       points elsewhere is never overwritten; the install says so. Uninstall
+       removes the link only if it still points at our binary.
+     - **Existing installs** keep working: the old locations are read and moved
+       on the next update, never broken in place.
+396. **Deploys lock the CA until auto-update ships; no interim signed-deploy path (owner, 2026-11-14, #211, #514; amends D217's deploy rule for now, keeps D251):**
+     - **Context:** `deploy.sh` replaces production by a plain stop/start, a cold start that locks the CA (D168) until an admin unlocks it with a passkey. The warm restart that keeps the CA unlocked already exists (`infraternal server … restart --binary`), but it only accepts a signed release (D184). The orchestrator asked for either (a) about 2 days to sign deploy builds through the edge release channel, which needs Cloudflare and release credentials, or (b) building the server's own auto-update first, 1.5–2.5 weeks.
+     - **The owner chose (b), verbatim:** "lock on restart, build auto-update directly".
+     - **Until D251's auto-update reaches production,** each orchestrator deploy is a stop/start and the owner unlocks the CA afterwards. This is accepted, not a bug.
+     - **No interim signing of hand deploys.** The effort goes into finishing D251 (#211): edge publication, quiet-window handoff and rollback. Once production updates itself, D217's rule ("deploys use the in-memory handoff") applies in full again.
