@@ -5030,3 +5030,17 @@ access (#341 B19).
        runners live on `dev` with their own tests in the gate. Hand-copied or
        stale-branch tools are not used. The owner, verbatim: "i don't know
        why this is even a question. always use latest code."
+
+394. **D384's userspace filter ships with its measured cost, then gets faster (owner, 2026-11-14, #265, #260; extends D384, amends PROCESS §1's 3% gate for this change only):**
+     - **Context:** J593 measured the D384 userspace mesh filter on backup01
+       (16 counterbalanced holds): at 8 flows, −3.59% goodput, +3.27% CPU
+       per Gbit and +3.68% loaded p99 against dev, consistent in all 8
+       dev-vs-head holds. That is over the 3% performance gate. The filter is
+       what lets a Nix-only host like prod enforce grants without depending
+       on the kernel firewall path. Memory is about 55 MB per 1,000 peers.
+     - **Decision:** the owner chose, by quoting it, "Ship D384 now, then make
+       the filter's hot path faster as a measured follow-up. Grants are
+       enforced everywhere, and these security fixes land."
+     - **Follow-up:** a measured job optimises the filter's per-packet path
+       right after the merge, using the calibrated kit (J579's pooled
+       method), with the target of bringing the cost back under the 3% gate.

@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Assemble the head-to-head relay archive for one architecture (#260).
+#
+#   research/head-to-head/build-kit <x86_64|aarch64> <out-dir>
+#
+# Run it on the build VM through the build slot. It builds the infraternal
+# dev binary and the production mesh coordinator fixture with the pinned
+# static recipe (scripts/static-cargo), the kit's own tools (h2h in Rust,
+# tscontrol in Go, tmux from source with the pinned Zig), downloads every
+# pinned third-party file into $H2H_DL and refuses any SHA-256 mismatch, then
+# writes h2h-kit-<arch>-<commit>.tar.gz (sorted, fixed mtime and owners) and
+# its .sha256. Needs: cargo/rustup (repo toolchain), go, curl, python3, a yacc
+# (YACC, default "bison -y").
+set -euo pipefail
+arch=$1 out=$2
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+repo=$(cd -- "$here/../.." && pwd -P)
+case $arch in
+    x86_64) goarch=amd64 ;;
+    aarch64) goarch=arm64 ;;
+    *) echo "arch must be x86_64 or aarch64" >&2; exit 2 ;;
+esac
+target=$arch-unknown-linux-musl
+commit=$(git -C "$repo" rev-parse --short=12 HEAD)
+dl=${H2H_DL:-$HOME/.cache/codex-scratch/head-to-head/dl}
+work=${H2H_WORK:-$HOME/.cache/codex-scratch/head-to-head/work-$arch}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$HOME/.cache/codex-scratch/head-to-head/target}
+mkdir -p "$dl" "$out"
+rm -rf "$work"
+kit=$work/h2h-kit-$arch
+mkdir -p "$kit/bin" "$kit/lib" "$kit/cases"
+
+pin() { awk -v n="$1" -v a="$2" '$1 == n && ($2 == a || $2 == "any") {print $3, $4}' "$here/pins.txt"; }
+fetch() { # fetch <name> <arch> → path of the verified download
+    local url sha file
+    read -r url sha < <(pin "$1" "$2")
+    [[ -n $url ]] || { echo "no pin for $1/$2" >&2; exit 1; }
+    if [[ $url == docker://* ]]; then
+        local ref=${url#docker://} member
+        member=${ref#*#}; ref=${ref%%#*}
+        file=$dl/$1-$2.bin
+        [[ -f $file ]] && echo "$sha  $file" | sha256sum --check --status \
+            || python3 -I "$here/tools/pull-image-file.py" "${ref%@*}" "${ref#*@}" "$member" "$file" "$sha"
+    else
+        file=$dl/${url##*/}
+        [[ -f $file ]] || curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$file"
+    fi
+    echo "$sha  $file" | sha256sum --check --status || { echo "SHA-256 mismatch: $file" >&2; exit 1; }
+    echo "$file"
+}
+
+# infraternal (dev build, as it ships) and the production coordinator fixture.
+(cd "$repo" && scripts/auth-toolchain >/dev/null &&
+    scripts/static-cargo build --locked --release --package infraternal --target "$target" &&
+    scripts/static-cargo build --locked --release -p infraternal-plugin-mesh --example coordinator_fixture --target "$target")
+install -m 755 "$CARGO_TARGET_DIR/$target/release/infraternal" "$kit/bin/infraternal"
+install -m 755 "$CARGO_TARGET_DIR/$target/release/examples/coordinator_fixture" "$kit/bin/coordinator_fixture"
+
+# The kit's measurement tool and the local Tailscale control stack.
+(cd "$here/tools/h2h" && CARGO_TARGET_DIR=$CARGO_TARGET_DIR/h2h cargo build --locked --release --target "$target")
+install -m 755 "$CARGO_TARGET_DIR/h2h/$target/release/h2h" "$kit/bin/h2h"
+(cd "$here/tools/tscontrol" && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch \
+    GOMAXPROCS=${CARGO_BUILD_JOBS:-4} go build -p "${CARGO_BUILD_JOBS:-4}" \
+    -trimpath -buildvcs=false -ldflags='-s -w' -o "$kit/bin/tscontrol" .)
+
+# tmux from pinned sources with the pinned Zig.
+for src in tmux-src libevent-src ncurses-src; do fetch "$src" any > /dev/null; done
+"$here/build/tmux-static.sh" "$CARGO_TARGET_DIR/auth-tools/zig/zig" "$arch" "$dl" "$work/tmux" "$kit/bin/tmux"
+
+# Official release binaries.
+tar -xzf "$(fetch tailscale "$arch")" -C "$work" --wildcards '*/tailscale' '*/tailscaled'
+install -m 755 "$work"/tailscale_*/tailscale "$work"/tailscale_*/tailscaled "$kit/bin/"
+tar -xzf "$(fetch netbird "$arch")" -C "$work" netbird
+install -m 755 "$work/netbird" "$kit/bin/netbird"
+install -m 755 "$(fetch netbird-server "$arch")" "$kit/bin/netbird-server"
+tar -xzf "$(fetch zellij "$arch")" -C "$work" zellij
+install -m 755 "$work/zellij" "$kit/bin/zellij"
+
+# Scripts: the kit's own and the repo's mesh fixtures, unchanged.
+install -m 755 "$here/kit/run.sh" "$kit/run.sh"
+install -m 755 "$here/kit/perf-all.sh" "$kit/perf-all.sh"
+install -m 755 "$here/kit/cases/"*.sh "$kit/cases/"
+install -m 644 "$here/kit/lib/"*.py "$kit/lib/"
+install -m 755 "$here/kit/lib/"*.sh "$kit/lib/"
+install -m 644 "$repo/scripts/agent_fixture.py" "$repo/scripts/latency_proxy.py" "$repo/scripts/mesh_agent_fixture.py" "$kit/lib/"
+install -m 755 "$here/kit/cpuset-harness-smoke.sh" "$kit/cpuset-harness-smoke.sh"
+mkdir -p "$kit/runner-overlays"
+install -m 755 "$here/kit/runner-overlays/J88i-pinned-run.sh" "$kit/runner-overlays/"
+install -m 755 "$here/kit/runner-overlays/J88i-verify-restored.sh" "$kit/runner-overlays/"
+install -m 644 "$here/kit/runner-overlays/J88i-cpuset-state.sh" "$kit/runner-overlays/"
+install -m 644 "$here/kit/D348.md" "$here/kit/R4B_EXTENSION.md" \
+    "$here/kit/R4B_REFERENCE_MANIFEST.txt" "$kit/"
+install -m 644 "$here/README.md" "$kit/README.md"
+echo "$arch" > "$kit/ARCH"
+git -C "$repo" rev-parse HEAD > "$kit/SOURCE_COMMIT"
+{
+    git -C "$repo" diff --binary -- research/head-to-head
+    # Preserve newly added WIP research tools alongside the tracked diff.
+    while IFS= read -r -d '' file; do
+        (cd "$repo"; git diff --no-index --binary -- /dev/null "$file") || [[ $? == 1 ]]
+    done < <(git -C "$repo" ls-files --others --exclude-standard -z -- research/head-to-head)
+} > "$kit/SOURCE_DIFF.patch"
+{
+    echo "head-to-head kit $arch, source $(cat "$kit/SOURCE_COMMIT")"
+    echo "infraternal $("$kit/bin/infraternal" --version 2>/dev/null || echo "(cross-built; run on $arch)") built here, scripts/static-cargo"
+    echo "coordinator_fixture built here from crates/plugins/mesh/examples"
+    echo "h2h built here from research/head-to-head/tools/h2h"
+    echo "tscontrol built here from research/head-to-head/tools/tscontrol (tailscale.com v1.104.4, BSD-3-Clause)"
+    echo "tmux 3.8 built here from pinned sources (ISC), libevent 2.1.13 (BSD-3-Clause), ncurses 6.5 (MIT-X11)"
+    grep -E "^(tailscale|netbird|netbird-server|zellij) +$arch " "$here/pins.txt" | awk '{print "download", $1, $3, "sha256", $4}'
+    echo "licences: tailscale BSD-3-Clause; netbird client BSD-3-Clause, netbird-server AGPL-3.0; zellij MIT"
+    echo "sha256 of every file:"
+    (cd "$kit" && find . -type f ! -name MANIFEST -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
+} > "$kit/MANIFEST"
+name=h2h-kit-$arch-$commit.tar.gz
+tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C "$work" -czf "$out/$name" "h2h-kit-$arch"
+(cd "$out" && sha256sum "$name" > "$name.sha256" && cat "$name.sha256")

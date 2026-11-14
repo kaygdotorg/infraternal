@@ -1,0 +1,15 @@
+# Pinned third-party inputs of the head-to-head kit (#260). Each line:
+#   <name> <kit-arch> <url> <sha256 of the downloaded file>
+# Docker image entries name the platform manifest digest and the SHA-256 of
+# the one file taken from it. The kit build refuses any mismatch.
+tailscale        x86_64  https://pkgs.tailscale.com/stable/tailscale_1.104.4_amd64.tgz  624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
+tailscale        aarch64 https://pkgs.tailscale.com/stable/tailscale_1.104.4_arm64.tgz  a1c249ce6bdebef62e1ae3b997595555bce2ae4709bf95a718e9ca7a129dad7e
+netbird          x86_64  https://github.com/netbirdio/netbird/releases/download/v0.82.0/netbird_0.82.0_linux_amd64.tar.gz  b569f65de303d21317bc716f3116002e2cf175ae22a9f6d2bed91200a2f5000b
+netbird          aarch64 https://github.com/netbirdio/netbird/releases/download/v0.82.0/netbird_0.82.0_linux_arm64.tar.gz  c2e5ccb5824cb29fe008a5a54854fd5926b89d3aaff7ab8721f77abf8e8b3e62
+netbird-server   x86_64  docker://netbirdio/netbird-server@sha256:a3f620738a83bc98a1cd4508178f82d51f18bb6ad85311767546bac0b6a9c808#go/bin/netbird-server  95d18ff1727d1edb76a4b645ecada34f0537d5f514b2dc4cb090b1bd976288b7
+netbird-server   aarch64 docker://netbirdio/netbird-server@sha256:bfe87ac71c7a4d60afa05056c5c9849f353a6cc6d5fd63a6482ce3dce586000b#go/bin/netbird-server  daa1fdcf1051ede644b56544dfc8b1a55debe59ee12e4272ef1628daa28fed8c
+zellij           x86_64  https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-x86_64-unknown-linux-musl.tar.gz  40bcc2e03f5d5ae8e054e39f676081fe12ab70871506996ba595834c3718eefc
+zellij           aarch64 https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-aarch64-unknown-linux-musl.tar.gz  05f0802afadd53f8db9514e7cae53c9ae8432fed1b35b8294aa816ee3044a16b
+tmux-src         any     https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz  e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
+libevent-src     any     https://github.com/libevent/libevent/releases/download/release-2.1.13-stable/libevent-2.1.13-stable.tar.gz  f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c
+ncurses-src      any     https://ftp.gnu.org/gnu/ncurses/ncurses-6.5.tar.gz  136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6
