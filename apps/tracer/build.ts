@@ -72,6 +72,9 @@ await Promise.all([
   cp("../../packages/ui/styles.css", `${dist}/ui.css`),
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
   cp("licenses", `${dist}/licenses`, { recursive: true }),
+  // The app icons (favicon, home-screen icon) and the manifest that names them for browsers that install web apps.
+  cp("icons", `${dist}/icons`, { recursive: true }),
+  cp("manifest.webmanifest", `${dist}/manifest.webmanifest`),
   cp("../../THIRD_PARTY_NOTICES.md", `${dist}/THIRD_PARTY_NOTICES.md`),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", `${dist}/fonts/Geist-Variable.woff2`),
 ]);
