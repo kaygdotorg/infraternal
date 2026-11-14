@@ -26,6 +26,18 @@ use infraternal_plugin_mesh::host_firewall::{
     set_mesh_listener_at, validate, validate_ssh_connection_on, write_policy_file,
 };
 
+/// sshd as these namespace tests model it: listening on 22 in both families.
+///
+/// The namespaces have no sshd of their own and cannot read the host's, so
+/// each test states the sshd its default-drop table must keep reachable;
+/// the J671 check still runs on every apply (`check_sshd_admission`).
+#[cfg(feature = "test-support")]
+fn sshd_on_22() -> infraternal_plugin_mesh::host_firewall::SshdPortsTestOverride {
+    infraternal_plugin_mesh::host_firewall::SshdPortsTestOverride::install(&[
+        infraternal_plugin_mesh::host_firewall::SshdPort::dual_stack(22),
+    ])
+}
+
 /// Supplies the private nft command and namespace setup used by these policy tests.
 #[path = "support/nft_fixture.rs"]
 mod nft_fixture;
@@ -275,6 +287,8 @@ fn missing_nft_error_reports_the_path_it_checked() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn writing_host_policy_refuses_an_unmarked_role_file() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let config = ConfigFixture::new();
     let path = config.paths.server_policy_path();
     let foreign = br#"{"marker":"operator-owned","policy":{"admin_rules":[],"accept_interfaces":[],"listeners":[],"mesh_enabled":false}}"#;
@@ -306,6 +320,8 @@ fn writing_host_policy_refuses_an_unmarked_role_file() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn clearing_host_policy_removes_its_table_config_and_loader() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let config = ConfigFixture::new();
@@ -370,6 +386,8 @@ fn clearing_host_policy_removes_its_table_config_and_loader() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn clearing_an_already_removed_host_policy_is_a_noop() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let config = ConfigFixture::new();
@@ -416,6 +434,8 @@ fn clearing_an_already_removed_host_policy_is_a_noop() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn empty_config_removes_only_the_product_table_and_marked_loader() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let config = ConfigFixture::new();
@@ -567,6 +587,8 @@ impl Drop for ConfigFixture {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn mesh_listener_opens_exactly_the_bound_port_and_closes_on_stop() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let config = ConfigFixture::new();
@@ -659,6 +681,8 @@ fn mesh_listener_opens_exactly_the_bound_port_and_closes_on_stop() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn agent_only_host_gets_mesh_input_without_default_drop() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let config = ConfigFixture::new();
@@ -728,6 +752,8 @@ fn agent_only_host_gets_mesh_input_without_default_drop() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let setup = run_nft(
@@ -856,6 +882,8 @@ fn real_takeover_is_atomic_preserves_admin_and_leaves_other_tables_alone() {
 #[test]
 #[ignore = "Run in disposable network namespaces with CAP_NET_ADMIN."]
 fn host_table_takeover_keeps_ssh_and_bidirectional_mesh_but_drops_other_ingress() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let suffix = std::process::id().to_string();
@@ -1022,6 +1050,9 @@ fn start_policy_host(
 ) -> thread::JoinHandle<HostSockets> {
     thread::spawn(move || {
         enter_network_namespace(&namespace);
+        // The sshd override is per thread, so this host thread states its own.
+        #[cfg(feature = "test-support")]
+        let _sshd = sshd_on_22();
         let fixture = run_nft(
             &nft,
             &["-f", "-"],
