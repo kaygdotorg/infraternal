@@ -5,6 +5,7 @@
 //! ```text
 //!  async callers ──write(closure)──▶ [bounded queue] ──▶ writer thread ── read-write connection
 //!               └──read(closure)───▶ [bounded queue] ──▶ reader threads ─ query_only connections (WAL)
+//!                                    writer's WAL hook ──kick──▶ checkpointer thread ── its own connection
 //! ```
 //!
 //! - **One writer.** Every write runs on one OS thread that owns the only
@@ -18,6 +19,26 @@
 //! - **A whole transaction per call.** The closure you pass runs inside one
 //!   transaction on the worker thread and returns once. There is no
 //!   statement-by-statement round trip between your task and the connection.
+//! - **Checkpoints off the write path.** A WAL database has to copy the
+//!   log back into the main file now and then (a *checkpoint*), or the log
+//!   grows without end. SQLite's built-in auto-checkpoint does this inside the
+//!   commit that pushes the log past 1,000 pages, on the committing thread,
+//!   including an fsync. Here that thread is the one writer, so every write
+//!   queued behind it waited: J449 measured a 1-task session-slide p999 of
+//!   25.5 ms against 96 µs on sqlx, and J619 split the slow ops into 3.6–6.3 ms
+//!   inside the job, recurring every ~1,000 slides (#473). So the writer
+//!   replaces the auto-checkpoint with a WAL hook that only *kicks* a
+//!   dedicated checkpointer thread, which checkpoints on its own connection
+//!   while the writer keeps committing (WAL allows a checkpoint and a writer at
+//!   the same time). See [`Options::checkpoint_pages`].
+//!
+//!   Why not autocommit for single statements, which measured just as fast:
+//!   SQLite only runs the WAL hook when an autocommit statement is stepped to
+//!   its end, and `UPDATE … RETURNING` read with `query_row` is reset after
+//!   its first row. That path never checkpoints at all, so its speed came from
+//!   skipping the work: the WAL reached 99 MB after 20k slides (and today's
+//!   sqlx path does the same, 98.7 MB). Every write here is a transaction
+//!   whose `COMMIT` always reaches the hook.
 //!
 //! # Guarantees
 //!
@@ -40,7 +61,9 @@
 //!   `.await` (backpressure) instead of growing a buffer. A caller waiting for
 //!   queue space that gives up leaves nothing behind in the queue. Per
 //!   connection, SQLite's page cache is capped by [`Options::cache_kib`] and
-//!   the prepared-statement cache by [`Options::statement_cache`].
+//!   the prepared-statement cache by [`Options::statement_cache`]. The WAL
+//!   stays below about [`Options::checkpoint_limit_pages`] pages, even when
+//!   writes never pause.
 //! - **FIFO writes.** Writes run in the order their `write` calls entered the
 //!   queue. Reads have no order between each other.
 //!
@@ -55,12 +78,18 @@
 //! - Do not call back into the same [`Database`] from inside a closure and
 //!   wait for it: a write that waits for another write deadlocks the writer.
 use crate::migrate::{self, Migration, Report};
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{
+    Connection, OpenFlags, Transaction, TransactionBehavior, hooks::Wal, wal::CheckpointMode,
+};
 use std::{
     any::Any,
+    ffi::c_int,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        mpsc::{Receiver, SyncSender, sync_channel},
+    },
     thread,
     time::Duration,
 };
@@ -91,6 +120,23 @@ pub struct Options {
     pub cache_kib: u32,
     /// Create the database file when it does not exist yet.
     pub create_if_missing: bool,
+    /// WAL size, in pages, at which a commit asks the checkpointer thread for
+    /// a pass. 1,000 is SQLite's own auto-checkpoint threshold. The commit
+    /// itself only sends a wake-up and never waits for the checkpoint.
+    /// At least 1.
+    pub checkpoint_pages: u32,
+    /// WAL size, in pages, at which the writer checkpoints inline, on the
+    /// commit path, the way SQLite's auto-checkpoint always would.
+    ///
+    /// This is a backstop. A checkpoint running next to a busy writer copies
+    /// everything up to the moment it started, but SQLite only rewinds the
+    /// WAL to its start when *every* frame has been copied. A writer that
+    /// never pauses keeps adding frames during each pass, so the WAL could
+    /// grow without end. At this limit the writer catches the log up itself,
+    /// and its next write rewinds it. At the default 8,000 pages (about
+    /// 32 MiB with 4 KiB pages) that happens only under sustained write load.
+    /// At least 1.
+    pub checkpoint_limit_pages: u32,
 }
 
 impl Default for Options {
@@ -103,6 +149,8 @@ impl Default for Options {
             statement_cache: 100,
             cache_kib: 2000,
             create_if_missing: true,
+            checkpoint_pages: 1000,
+            checkpoint_limit_pages: 8000,
         }
     }
 }
@@ -151,6 +199,8 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 enum Role {
     Writer,
     Reader,
+    /// The connection that runs background checkpoints for the writer.
+    Checkpointer,
 }
 
 /// A handle to the database. Cheap to clone; every clone talks to the same
@@ -182,9 +232,18 @@ impl Database {
         if options.write_queue == 0 || options.read_queue == 0 {
             return Err(Error::InvalidOptions("queues must hold at least 1 job"));
         }
+        if options.checkpoint_pages == 0 || options.checkpoint_limit_pages == 0 {
+            return Err(Error::InvalidOptions(
+                "checkpoint thresholds must be at least 1 page",
+            ));
+        }
         let path: PathBuf = path.as_ref().to_path_buf();
         let options = Arc::new(options);
 
+        // One pending kick is enough: a checkpoint pass copies everything
+        // committed before it starts, so kicks that arrive while one is
+        // queued would only repeat it.
+        let (kick, kicks) = sync_channel::<()>(1);
         let (writer, writer_jobs) = mpsc::channel::<Job>(options.write_queue);
         let ready = spawn_worker(
             "db-writer".to_owned(),
@@ -192,8 +251,13 @@ impl Database {
             path.clone(),
             options.clone(),
             Arc::new(Mutex::new(writer_jobs)),
+            Some(kick),
         )?;
         ready.await.map_err(|_| Error::Closed)??;
+        // After the writer, so the file exists and is already in WAL mode.
+        spawn_checkpointer(path.clone(), options.clone(), kicks)?
+            .await
+            .map_err(|_| Error::Closed)??;
 
         // Readers share one queue; whichever reader is free takes the next job.
         let (readers, reader_jobs) = mpsc::channel::<Job>(options.read_queue);
@@ -206,6 +270,7 @@ impl Database {
                 path.clone(),
                 options.clone(),
                 reader_jobs.clone(),
+                None,
             )?);
         }
         for ready in pending {
@@ -356,18 +421,28 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// Reader threads share one receiver behind a mutex: the reader holding the
 /// lock waits for the next job, takes it, and releases the lock before it
 /// runs the job, so the other readers can pick up the following ones.
+///
+/// The writer gets `kick`, the checkpointer's wake-up channel, for its WAL
+/// hook (see [`install_checkpoint_hook`]); readers get `None`.
 fn spawn_worker(
     name: String,
     role: Role,
     path: PathBuf,
     options: Arc<Options>,
     jobs: Arc<Mutex<mpsc::Receiver<Job>>>,
+    kick: Option<SyncSender<()>>,
 ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
     let (ready, opened) = oneshot::channel();
     thread::Builder::new()
         .name(name)
         .spawn(move || {
-            let mut conn = match open_connection(&path, &options, role) {
+            let opened = open_connection(&path, &options, role).and_then(|mut conn| {
+                if let Some(kick) = kick {
+                    install_checkpoint_hook(&mut conn, &options, kick)?;
+                }
+                Ok(conn)
+            });
+            let mut conn = match opened {
                 Ok(conn) => conn,
                 Err(error) => {
                     let _ = ready.send(Err(error));
@@ -390,6 +465,77 @@ fn spawn_worker(
                     // SAVEPOINT itself). Roll it back so the next job starts clean.
                     let _ = conn.execute_batch("ROLLBACK");
                 }
+            }
+        })
+        .map_err(Error::Spawn)?;
+    Ok(opened)
+}
+
+/// Replace SQLite's auto-checkpoint on the writer with a hook that hands the
+/// work to the checkpointer thread (see the module docs, "Checkpoints off the
+/// write path").
+///
+/// SQLite calls the hook after every commit with the WAL's size in pages.
+/// Below [`Options::checkpoint_pages`] it does nothing. From there it sends a
+/// wake-up without blocking (a full channel means a pass is already pending).
+/// At [`Options::checkpoint_limit_pages`] it checkpoints inline as the
+/// backstop. Installing a hook switches SQLite's own auto-checkpoint off,
+/// because both use the same slot; `PRAGMA wal_autocheckpoint` then reads 0.
+///
+/// The hook always reports success. Its result would become the result of
+/// the `COMMIT` that triggered it, and that commit has already happened, so
+/// a failed checkpoint must not turn it into an error. SQLite's own
+/// auto-checkpoint ignores checkpoint errors the same way. A checkpoint that
+/// fails is simply retried after the next commit.
+fn install_checkpoint_hook(
+    conn: &mut Connection,
+    options: &Options,
+    kick: SyncSender<()>,
+) -> Result<(), Error> {
+    let soft = c_int::try_from(options.checkpoint_pages).unwrap_or(c_int::MAX);
+    let hard = c_int::try_from(options.checkpoint_limit_pages).unwrap_or(c_int::MAX);
+    conn.wal_hook(Some(move |wal: &mut Wal, pages: c_int| {
+        if pages >= hard {
+            let _ = wal.checkpoint_v2(CheckpointMode::PASSIVE);
+        } else if pages >= soft {
+            let _ = kick.try_send(());
+        }
+        Ok(())
+    }))?;
+    Ok(())
+}
+
+/// Start the checkpointer thread: it opens its own connection, reports
+/// readiness, then runs one PASSIVE checkpoint per kick from the writer's WAL
+/// hook until the writer's connection (which owns the sending side) is gone.
+///
+/// A PASSIVE checkpoint never waits for locks: it copies every WAL frame that
+/// no reader still needs and leaves the rest for the next pass. It runs at the
+/// same time as the writer's commits, so its fsync is no longer on the write
+/// path. Errors are ignored for the reason given in
+/// [`install_checkpoint_hook`]; the inline backstop still bounds the WAL if
+/// this thread keeps failing.
+fn spawn_checkpointer(
+    path: PathBuf,
+    options: Arc<Options>,
+    kicks: Receiver<()>,
+) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+    let (ready, opened) = oneshot::channel();
+    thread::Builder::new()
+        .name("db-checkpoint".to_owned())
+        .spawn(move || {
+            let conn = match open_connection(&path, &options, Role::Checkpointer) {
+                Ok(conn) => conn,
+                Err(error) => {
+                    let _ = ready.send(Err(error));
+                    return;
+                }
+            };
+            if ready.send(Ok(())).is_err() {
+                return;
+            }
+            while kicks.recv().is_ok() {
+                let _ = conn.wal_checkpoint_v2(None::<&str>, CheckpointMode::PASSIVE);
             }
         })
         .map_err(Error::Spawn)?;

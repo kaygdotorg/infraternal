@@ -527,6 +527,14 @@ async fn empty_options_are_refused() {
             read_queue: 0,
             ..Options::default()
         },
+        Options {
+            checkpoint_pages: 0,
+            ..Options::default()
+        },
+        Options {
+            checkpoint_limit_pages: 0,
+            ..Options::default()
+        },
     ] {
         let outcome = Database::open(dir.db(), options).await;
         assert!(
@@ -558,4 +566,105 @@ async fn transaction_left_open_by_a_closure_is_rolled_back() {
     .await
     .unwrap();
     assert_eq!(values(&db).await, vec![2]);
+}
+
+/// Commits never checkpoint inline below the hard limit: the writer's
+/// SQLite auto-checkpoint is replaced by the hook that kicks the checkpointer
+/// thread, so `wal_autocheckpoint` reads 0 there (#473: the inline checkpoint
+/// was the 1-task session-slide p999 stall). Readers never commit, so theirs
+/// stays at SQLite's default and does nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn writer_hands_checkpoints_to_the_checkpointer() {
+    fn auto_checkpoint(tx: &rusqlite::Transaction<'_>) -> Result<i64, Error> {
+        Ok(tx.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))?)
+    }
+    let (_dir, db) = setup("ckpt-hook", Options::default()).await;
+    assert_eq!(db.write(auto_checkpoint).await.unwrap(), 0);
+}
+
+/// Size of the file at `path`, or 0 when it does not exist.
+fn file_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |meta| meta.len())
+}
+
+/// The WAL file next to the database file `db`.
+fn wal_of(db: &std::path::Path) -> PathBuf {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    PathBuf::from(wal)
+}
+
+/// The checkpointer thread copies committed pages back into the main file
+/// while the pool stays open, with no inline checkpoint and nobody else
+/// checkpointing. Without it the main file would stay at its first size
+/// until the last connection closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpointer_copies_the_wal_back_while_the_pool_is_open() {
+    let (dir, db) = setup(
+        "ckpt-bg",
+        Options {
+            checkpoint_pages: 4,
+            ..Options::default()
+        },
+    )
+    .await;
+    let before = file_len(&dir.db());
+    for v in 0..64_i64 {
+        db.write(move |tx| {
+            tx.execute("INSERT INTO t (v) VALUES (?1)", [v])?;
+            tx.execute("CREATE TABLE IF NOT EXISTS blobs (b BLOB NOT NULL)", [])?;
+            tx.execute("INSERT INTO blobs (b) VALUES (zeroblob(8192))", [])?;
+            Ok::<_, Error>(())
+        })
+        .await
+        .unwrap();
+    }
+    // 64 × 8 KiB of blobs have been committed; the main file must catch up.
+    let want = before + 64 * 8192;
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while file_len(&dir.db()) < want {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "main file stayed at {} bytes (want ≥ {want}) with the pool open",
+            file_len(&dir.db())
+        );
+        // sleep: polling another thread's checkpoint; no event to wait on.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(values(&db).await, (0..64).collect::<Vec<_>>());
+}
+
+/// The WAL stays bounded even when background checkpoints never run: at
+/// [`Options::checkpoint_limit_pages`] the writer catches the log up inline,
+/// and its next write rewinds the WAL to the start. Here the checkpointer is
+/// never kicked (threshold out of reach) and 400 one-page writes go through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_stays_bounded_when_background_checkpoints_fall_behind() {
+    const LIMIT: u32 = 32;
+    let (dir, db) = setup(
+        "ckpt-limit",
+        Options {
+            checkpoint_pages: u32::MAX,
+            checkpoint_limit_pages: LIMIT,
+            ..Options::default()
+        },
+    )
+    .await;
+    for v in 0..400_i64 {
+        db.write(move |tx| {
+            tx.execute("CREATE TABLE IF NOT EXISTS blobs (b BLOB NOT NULL)", [])?;
+            tx.execute("INSERT INTO blobs (b) VALUES (zeroblob(3000))", [])?;
+            tx.execute("INSERT INTO t (v) VALUES (?1)", [v])?;
+            Ok::<_, Error>(())
+        })
+        .await
+        .unwrap();
+    }
+    // WAL header (32 B) + frames of (24 B header + 4 KiB page). One write adds
+    // a handful of frames, so allow the limit plus one write's worth.
+    let frame = 24 + 4096;
+    let bound = 32 + u64::from(LIMIT + 16) * frame;
+    let wal = file_len(&wal_of(&dir.db()));
+    assert!(wal <= bound, "WAL grew to {wal} bytes, bound {bound}");
+    assert_eq!(values(&db).await.len(), 400);
 }

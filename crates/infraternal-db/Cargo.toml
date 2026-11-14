@@ -11,7 +11,8 @@ workspace = true
 
 [dependencies]
 # Bundled SQLite: the same `libsqlite3-sys` build the static release already links (D213, D379).
-rusqlite.workspace = true
+# `hooks` for the writer's WAL hook that moves checkpoints off the write path (#473).
+rusqlite = { workspace = true, features = ["hooks"] }
 thiserror.workspace = true
 # Only the channel types: the pool's threads are plain OS threads, never runtime workers.
 tokio = { workspace = true, features = ["sync"] }
