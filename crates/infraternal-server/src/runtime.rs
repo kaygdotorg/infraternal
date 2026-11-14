@@ -272,6 +272,10 @@ pub(crate) async fn serve_with_key_setup(
     serve_inner(config, None, None, factory, key_setup, None).await
 }
 
+/// The server's whole life: open the database and auth, build the router,
+/// serve until a shutdown signal or a listener error, then flush the recovery
+/// clock and close the D379 pool. `serve` and the remote-enabled entry points
+/// call it with the services their build has.
 async fn serve_inner(
     config: ServerConfig,
     enrollment: Option<EnrollmentService>,
@@ -349,6 +353,9 @@ async fn serve_inner(
     auth.checkpoint_recovery_clock()
         .await
         .map_err(ServerError::Auth)?;
+    // Last, after every request has ended: finish the D379 pool's queued
+    // writes and fold its WAL into the main file (#473).
+    auth.close_database().await;
     result
 }
 

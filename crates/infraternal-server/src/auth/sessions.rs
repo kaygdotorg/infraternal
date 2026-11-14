@@ -1,6 +1,97 @@
 //! Sliding sessions, the admin window, provider diagnostics and transaction authority rechecks
 //! [28]. Per-action taps are bound to one action in `action_tap` (D336).
+//!
+//! # The D379 pool (#473, slice 2)
+//!
+//! The session slide is a write on every authenticated request, the server's
+//! hottest SQLite path. It is the first to move from sqlx to the rusqlite pool
+//! (`infraternal-db`): the slide, its denial cleanup, the socket renewal, and
+//! the two indexed session reads (`cookie_state`, `live_expiry`). On the pool:
+//!
+//! - The slide and its cleanup run as **one** closure on the pool's single
+//!   writer thread: one hop instead of sqlx's two pool checkouts, and the
+//!   `UPDATE … RETURNING` no longer races sqlx's other writers for SQLite's
+//!   write lock with busy sleeps inside this process's pool.
+//! - Every write commits through `COMMIT`, so the pool's WAL hook always runs
+//!   and the WAL is checkpointed off the request path. sqlx's
+//!   `fetch_optional` on `UPDATE … RETURNING` never reached SQLite's
+//!   auto-checkpoint, so this path used to grow the WAL without bound (J619).
+//! - The two reads run on the pool's read-only reader threads.
+//!
+//! The SQL text is unchanged. When `Auth` has no pool (in-memory test
+//! databases, see `open_session_database`), the same statements run on sqlx.
+//! Everything else in this file, and every transaction that takes a sqlx
+//! `Transaction` (`require_live_session_tx`, `insert_session`), stays on sqlx
+//! until its callers move.
 use super::{Auth, Error, Result, Row, SESSION, Serialize, hash};
+use infraternal_db::rusqlite::{OptionalExtension, Transaction, params};
+
+/// The session slide: extend a live, unlocked session by `SESSION` (or only
+/// confirm a pending one) and return what the `Session` needs, in one
+/// statement. Binds: new expiry, token hash, now, whether pending is allowed.
+const SQL_SLIDE: &str = "UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT aaguid FROM passkeys WHERE id=sessions.passkey_id AND user_id=sessions.user_id) AS aaguid,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready,(SELECT recovery_version=1 OR recovery_wrap_version=1 FROM users WHERE id=sessions.user_id) AS recovery_words_need_replacing,(SELECT owner FROM users WHERE id=sessions.user_id) AS owner";
+/// Cleanup after a refused slide: drop the token's expired pending login.
+/// Binds: token hash, now.
+const SQL_DROP_EXPIRED_PENDING: &str =
+    "DELETE FROM sessions WHERE token_hash=? AND unlocked=0 AND expires<=?";
+/// The socket renewal: slide by `SESSION` from SQLite's own clock, only while
+/// still live. Binds: `SESSION`, token hash, user.
+const SQL_RENEW: &str = "UPDATE sessions SET expires=unixepoch()+? WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch()";
+/// A live row's cookie ordering and deadline. Binds: token hash, now.
+const SQL_COOKIE_STATE: &str =
+    "SELECT login_sequence,expires FROM sessions WHERE token_hash=? AND expires>?";
+/// A socket's live deadline. Binds: token hash, user, now.
+const SQL_LIVE_EXPIRY: &str =
+    "SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?";
+
+/// The row `SQL_SLIDE` returns, read the same way from either driver.
+struct Slid {
+    user_id: String,
+    device: String,
+    fresh: i64,
+    username: String,
+    display_name: String,
+    aaguid: Option<String>,
+    recovery_ready: Option<i64>,
+    recovery_words_need_replacing: bool,
+    owner: bool,
+}
+
+/// Slide the session on the pool's writer: the `UPDATE … RETURNING`, and when
+/// it matched nothing, the expired-pending cleanup, in one transaction.
+///
+/// The token hash is unique, so the `RETURNING` yields at most one row, and
+/// inside the pool's `BEGIN IMMEDIATE` the update is fully applied on the
+/// first step. The cleanup only runs on denial, as before: a successful slide
+/// stays one statement.
+fn slide_on_pool(
+    tx: &Transaction<'_>,
+    token_hash: &str,
+    now: i64,
+    pending: bool,
+) -> std::result::Result<Option<Slid>, infraternal_db::Error> {
+    let row = tx
+        .prepare_cached(SQL_SLIDE)?
+        .query_row(params![now + SESSION, token_hash, now, pending], |row| {
+            Ok(Slid {
+                user_id: row.get("user_id")?,
+                device: row.get("device")?,
+                fresh: row.get("fresh")?,
+                username: row.get("username")?,
+                display_name: row.get("display_name")?,
+                aaguid: row.get("aaguid")?,
+                recovery_ready: row.get("recovery_ready")?,
+                recovery_words_need_replacing: row.get("recovery_words_need_replacing")?,
+                owner: row.get("owner")?,
+            })
+        })
+        .optional()?;
+    if row.is_none() {
+        tx.prepare_cached(SQL_DROP_EXPIRED_PENDING)?
+            .execute(params![token_hash, now])?;
+    }
+    Ok(row)
+}
 
 /// Authenticated browser device, including the last successful passkey verification.
 #[derive(Serialize)]
@@ -66,23 +157,27 @@ impl Auth {
         self.read_session(token, now, true).await
     }
 
+    /// The shared body of `session` and `unlock_session`: slide the session
+    /// (or, with `pending`, only confirm a still-live pending login), then
+    /// build the `Session` from the row the slide returned. A refused slide
+    /// deletes the token's expired pending login and returns `Denied`. Runs on
+    /// the D379 pool when `Auth` has one, else on sqlx (see the module docs).
     async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
         // Keep the diagnostic lookup in the existing write/returning query. The
         // indexed credential ID and user binding identify this session's passkey.
-        let row = sqlx::query("UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT aaguid FROM passkeys WHERE id=sessions.passkey_id AND user_id=sessions.user_id) AS aaguid,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready,(SELECT recovery_version=1 OR recovery_wrap_version=1 FROM users WHERE id=sessions.user_id) AS recovery_words_need_replacing,(SELECT owner FROM users WHERE id=sessions.user_id) AS owner")
-            .bind(now + SESSION).bind(hash(token)).bind(now).bind(pending).fetch_optional(&self.pool).await?;
-        let Some(row) = row else {
-            // Successful sessions keep the original single write; cleanup runs only on denial.
-            sqlx::query("DELETE FROM sessions WHERE token_hash=? AND unlocked=0 AND expires<=?")
-                .bind(hash(token))
-                .bind(now)
-                .execute(&self.pool)
-                .await?;
+        let token_hash = hash(token);
+        let slid = match &self.db {
+            Some(db) => {
+                db.write(move |tx| slide_on_pool(tx, &token_hash, now, pending))
+                    .await?
+            }
+            None => self.slide_on_sqlx(&token_hash, now, pending).await?,
+        };
+        let Some(row) = slid else {
             return Err(Error::Denied);
         };
-        let user_id: String = row.get("user_id");
-        let recovery_pending = if row.get::<Option<i64>, _>("recovery_ready").is_some() {
-            self.pending_recovery(&user_id, now)
+        let recovery_pending = if row.recovery_ready.is_some() {
+            self.pending_recovery(&row.user_id, now)
                 .await?
                 .map(|ready_at| RecoveryPending { ready_at })
         } else {
@@ -90,29 +185,80 @@ impl Auth {
         };
         Ok(Session {
             session_incarnation: super::session_incarnation(token),
-            recovery_words_need_replacing: row.get("recovery_words_need_replacing"),
+            recovery_words_need_replacing: row.recovery_words_need_replacing,
             recovery_pending,
-            user_id,
-            username: row.get("username"),
-            display_name: row.get("display_name"),
+            user_id: row.user_id,
+            username: row.username,
+            display_name: row.display_name,
+            device: row.device,
+            fresh: row.fresh,
+            passkey_provider: provider_name(row.aaguid.as_deref()),
+            owner: row.owner,
+        })
+    }
+
+    /// `slide_on_pool` on sqlx, for an `Auth` without the pool (in-memory
+    /// test databases). Two statements on two checkouts, as before the port.
+    async fn slide_on_sqlx(
+        &self,
+        token_hash: &str,
+        now: i64,
+        pending: bool,
+    ) -> Result<Option<Slid>> {
+        let row = sqlx::query(SQL_SLIDE)
+            .bind(now + SESSION)
+            .bind(token_hash)
+            .bind(now)
+            .bind(pending)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            // Successful sessions keep the original single write; cleanup runs only on denial.
+            sqlx::query(SQL_DROP_EXPIRED_PENDING)
+                .bind(token_hash)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            return Ok(None);
+        };
+        Ok(Some(Slid {
+            user_id: row.get("user_id"),
             device: row.get("device"),
             fresh: row.get("fresh"),
-            passkey_provider: provider_name(row.get::<Option<&str>, _>("aaguid")),
+            username: row.get("username"),
+            display_name: row.get("display_name"),
+            aaguid: row.get("aaguid"),
+            recovery_ready: row.get("recovery_ready"),
+            recovery_words_need_replacing: row.get("recovery_words_need_replacing"),
             owner: row.get("owner"),
-        })
+        }))
     }
 
     /// Read the live row's cookie deadline after an authenticated action has succeeded.
     /// The session read remains the only expiry write; this indexed lookup only returns the
     /// committed deadline needed for the persistent cookie's absolute Expires attribute.
     pub(super) async fn cookie_state(&self, token: &str, now: i64) -> Result<Option<CookieState>> {
-        let row = sqlx::query(
-            "SELECT login_sequence,expires FROM sessions WHERE token_hash=? AND expires>?",
-        )
-        .bind(hash(token))
-        .bind(now)
-        .fetch_optional(&self.pool)
-        .await?;
+        let token_hash = hash(token);
+        if let Some(db) = &self.db {
+            return Ok(db
+                .read(move |tx| {
+                    tx.prepare_cached(SQL_COOKIE_STATE)?
+                        .query_row(params![token_hash, now], |row| {
+                            Ok(CookieState {
+                                login_sequence: row.get("login_sequence")?,
+                                expires: row.get("expires")?,
+                            })
+                        })
+                        .optional()
+                        .map_err(infraternal_db::Error::from)
+                })
+                .await?);
+        }
+        let row = sqlx::query(SQL_COOKIE_STATE)
+            .bind(token_hash)
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|row| CookieState {
             login_sequence: row.get("login_sequence"),
             expires: row.get("expires"),
@@ -271,14 +417,29 @@ impl Auth {
         hold: impl Send + 'static,
     ) -> infraternal_plugin_api::Operation<'static, ()> {
         let pool = self.pool.clone();
+        let db = self.db.clone();
         let token_hash = hash(token);
         let user = user.to_owned();
         Box::pin(async move {
             let _hold = hold;
             // SQLite's own clock, read when the statement runs: a renewal that
             // waited behind a writer judges the session at that moment.
-            let _ = sqlx::query("UPDATE sessions SET expires=unixepoch()+? WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch()")
-                .bind(SESSION).bind(token_hash).bind(user).execute(&pool).await;
+            if let Some(db) = db {
+                let _ = db
+                    .write(move |tx| {
+                        tx.prepare_cached(SQL_RENEW)?
+                            .execute(params![SESSION, token_hash, user])?;
+                        Ok::<_, infraternal_db::Error>(())
+                    })
+                    .await;
+                return;
+            }
+            let _ = sqlx::query(SQL_RENEW)
+                .bind(SESSION)
+                .bind(token_hash)
+                .bind(user)
+                .execute(&pool)
+                .await;
         })
     }
 
@@ -293,6 +454,7 @@ impl Auth {
         hold: impl Send + 'static,
     ) -> impl std::future::Future<Output = Result<i64>> + Send + 'static {
         let pool = self.pool.clone();
+        let db = self.db.clone();
         let token_hash = hash(token);
         let user = user.to_owned();
         #[cfg(test)]
@@ -303,8 +465,23 @@ impl Auth {
                 *reads.lock().unwrap().entry(user.clone()).or_default() += 1;
             }
             let _hold = hold;
-            sqlx::query_scalar("SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?")
-                .bind(token_hash).bind(user).bind(now).fetch_optional(&pool).await?.ok_or(Error::Denied)
+            let expires: Option<i64> = if let Some(db) = db {
+                db.read(move |tx| {
+                    tx.prepare_cached(SQL_LIVE_EXPIRY)?
+                        .query_row(params![token_hash, user, now], |row| row.get(0))
+                        .optional()
+                        .map_err(infraternal_db::Error::from)
+                })
+                .await?
+            } else {
+                sqlx::query_scalar(SQL_LIVE_EXPIRY)
+                    .bind(token_hash)
+                    .bind(user)
+                    .bind(now)
+                    .fetch_optional(&pool)
+                    .await?
+            };
+            expires.ok_or(Error::Denied)
         }
     }
 }
