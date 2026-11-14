@@ -215,6 +215,8 @@ test("keys typed into a terminal that its own program floods keep showing on scr
   const flood: number[] = [];
   for (let i = 0; i < KEYS; i++) flood.push(await typeKey(++typed));
 
+  console.log(`SAME_SESSION_FLOOD keys=${KEYS} quiet_p50_ms=${p(quiet, 0.5).toFixed(1)} quiet_max_ms=${p(quiet, 1).toFixed(1)} ` +
+    `flood_p50_ms=${p(flood, 0.5).toFixed(1)} flood_max_ms=${p(flood, 1).toFixed(1)} (bridge-observed, 150 ms each way)`);
   // The keys reached the bridge; now the person must see them. The newest token is drawn on row 1 of the rendered
   // terminal, on the route the flood started on, with no reconnect status (#477: these used to pass on a blank screen).
   const tokenWidth = await expect.poll(firstRowInkWidth, { timeout: 5_000, intervals: [50, 100, 250] })
@@ -226,8 +228,6 @@ test("keys typed into a terminal that its own program floods keep showing on scr
   expect(activeTerminalBridge()?.id, "typing during the flood must not cost the browser its route").toBe(route);
   await expect(page.locator("#connection-status")).not.toHaveText(RECONNECT_STATUS);
   console.log(`SAME_SESSION_FLOOD_SCREEN token_row_ink_px=${tokenWidth.toFixed(1)} route=${route}`);
-  console.log(`SAME_SESSION_FLOOD keys=${KEYS} quiet_p50_ms=${p(quiet, 0.5).toFixed(1)} quiet_max_ms=${p(quiet, 1).toFixed(1)} ` +
-    `flood_p50_ms=${p(flood, 0.5).toFixed(1)} flood_max_ms=${p(flood, 1).toFixed(1)} (bridge-observed, 150 ms each way)`);
   const bridge = terminalBridge();
   const beforeStop = bridge.outputBytesSeen ?? 0;
   await page.keyboard.press("S");
