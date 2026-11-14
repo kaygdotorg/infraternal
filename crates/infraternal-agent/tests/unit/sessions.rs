@@ -958,8 +958,8 @@ fn person_records(locks: &std::path::Path) -> usize {
 
 /// Fail a launch whose launcher never binds, drop its runtime with the cleanup queued and never polled, and
 /// report whether the owned launcher was left running. With `fail_thread` the shutdown cleanup thread cannot
-/// start either.
-fn launcher_left_running_after_shutdown(fail_thread: bool) -> bool {
+/// start either. With `slow_start` the launcher takes a second to start, as one does on a loaded host.
+fn launcher_left_running_after_shutdown(fail_thread: bool, slow_start: bool) -> bool {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
@@ -968,8 +968,9 @@ fn launcher_left_running_after_shutdown(fail_thread: bool) -> bool {
     fs::write(
         &exe,
         format!(
-            "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
-            pid_file.display()
+            "#!/bin/sh\n{}echo $$ > '{p}.tmp' && mv '{p}.tmp' '{p}'\nexec sleep 300\n",
+            if slow_start { "sleep 1\n" } else { "" },
+            p = pid_file.display()
         ),
     )
     .unwrap();
@@ -978,9 +979,13 @@ fn launcher_left_running_after_shutdown(fail_thread: bool) -> bool {
         .enable_all()
         .build()
         .unwrap();
+    // The 300 ms bound starts once the launcher has published its pid (renamed into place whole), so a loaded
+    // host that is slow to start `sh` cannot end the launch before there is a pid to read (#509).
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(pid_file.clone())));
     let result = runtime.block_on(launch_detached(&exe, &state, None));
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     assert!(result.is_err(), "a shim that never binds fails the launch");
     // The cleanup task was spawned by the failing launch, and block_on returned without polling it.
     FAIL_CLEANUP_THREAD.with(|fail| fail.set(fail_thread));
@@ -1014,7 +1019,7 @@ fn launcher_left_running_after_shutdown(fail_thread: bool) -> bool {
 #[test]
 fn runtime_shutdown_with_a_queued_cleanup_still_stops_the_owned_launcher() {
     assert!(
-        !launcher_left_running_after_shutdown(false),
+        !launcher_left_running_after_shutdown(false, false),
         "runtime shutdown discarded the cleanup and left the launcher running"
     );
 }
@@ -1024,8 +1029,19 @@ fn runtime_shutdown_with_a_queued_cleanup_still_stops_the_owned_launcher() {
 #[test]
 fn a_cleanup_thread_that_cannot_start_still_stops_the_owned_launcher() {
     assert!(
-        !launcher_left_running_after_shutdown(true),
+        !launcher_left_running_after_shutdown(true, false),
         "a failed cleanup thread left the owned launcher running"
+    );
+}
+
+/// #509: a launcher that is slow to start must not decide the test. The launch gives up after its short
+/// bound, whether or not the launcher has written its pid yet; the test has to wait for the pid, because
+/// the launcher is alive and owned until the runtime is dropped.
+#[test]
+fn a_slow_to_start_launcher_is_still_stopped_at_runtime_shutdown() {
+    assert!(
+        !launcher_left_running_after_shutdown(false, true),
+        "a slow launcher was left running after runtime shutdown"
     );
 }
 
@@ -1191,8 +1207,15 @@ async fn cancelled_lineage_outcome(
     let launcher_pid = root.join("launcher.pid");
     let descendant_pid = root.join("descendant.pid");
     let body = body(&launcher_pid, &descendant_pid, &ready);
+    // The stand-in shim binds only once the launcher has reached its post-fork state. Bound at once, it answered
+    // the launch within the 2 s Hello bound while a loaded host was still starting the launcher's interpreter,
+    // and the launch ended before `ready` existed (#509).
+    let bind_when_ready = {
+        let ready = ready.clone();
+        async move { file_appears(&ready).await }
+    };
     let (exe, shim, closed) =
-        detached_fixture(&state, &root, std::time::Duration::ZERO, 1, false, &body);
+        detached_fixture_gated(&state, &root, bind_when_ready, 1, false, &body);
     let launch = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4()));
     tokio::select! {
         _ = launch => {}
@@ -1271,41 +1294,62 @@ async fn a_launcher_that_has_reaped_its_child_is_not_proof_no_shim_exists() {
     assert_live_lineage_kept(&outcome, "post-reap window");
 }
 
+/// The launcher script for the auto-reaping cases: a Python launcher that ignores SIGCHLD, forks an
+/// intermediate that forks the lineage and exits, then marks `ready` and waits.
+fn auto_reaping_launcher_body(
+    launcher_pid: &std::path::Path,
+    descendant_pid: &std::path::Path,
+    ready: &std::path::Path,
+) -> String {
+    let script = [
+        "import os, signal, time".to_owned(),
+        "signal.signal(signal.SIGCHLD, signal.SIG_IGN)".to_owned(),
+        format!(
+            "open('{}', 'w').write(str(os.getpid()))",
+            launcher_pid.display()
+        ),
+        "middle = os.fork()".to_owned(),
+        "if middle == 0:".to_owned(),
+        "    shim = os.fork()".to_owned(),
+        "    if shim == 0:".to_owned(),
+        format!(
+            "        open('{}', 'w').write(str(os.getpid()))",
+            descendant_pid.display()
+        ),
+        "        os.execvp('sleep', ['sleep', '300'])".to_owned(),
+        "    os._exit(0)".to_owned(),
+        "try:".to_owned(),
+        "    os.waitpid(middle, 0)".to_owned(),
+        "except ChildProcessError:".to_owned(),
+        "    pass".to_owned(),
+        format!("open('{}', 'w').write('x')", ready.display()),
+        "time.sleep(300)".to_owned(),
+    ]
+    .join("\n");
+    format!("exec python3 -c \"{script}\"")
+}
+
 /// J230 P2-A: a launcher that ignores SIGCHLD has its children reaped by the kernel, which adds nothing to its
 /// wait statistics, so any proof built on them fails open. The lifeline does not care how a child went away.
 /// Here the launcher forks an intermediate that forks the lineage and exits, and `waitpid` finds nothing.
 #[tokio::test(flavor = "current_thread")]
 async fn an_auto_reaping_launcher_is_not_proof_no_shim_exists() {
+    let outcome = cancelled_lineage_outcome(auto_reaping_launcher_body).await;
+    assert_live_lineage_kept(&outcome, "SIGCHLD ignored");
+}
+
+/// #509: the same case with a launcher whose interpreter takes three seconds to start, longer than the
+/// 2 s Hello bound. The launch must still be cancelled at the launcher's post-fork state, not before it.
+#[tokio::test(flavor = "current_thread")]
+async fn an_auto_reaping_launcher_that_starts_slowly_is_still_cancelled_after_its_fork() {
     let outcome = cancelled_lineage_outcome(|launcher_pid, descendant_pid, ready| {
-        let script = [
-            "import os, signal, time".to_owned(),
-            "signal.signal(signal.SIGCHLD, signal.SIG_IGN)".to_owned(),
-            format!(
-                "open('{}', 'w').write(str(os.getpid()))",
-                launcher_pid.display()
-            ),
-            "middle = os.fork()".to_owned(),
-            "if middle == 0:".to_owned(),
-            "    shim = os.fork()".to_owned(),
-            "    if shim == 0:".to_owned(),
-            format!(
-                "        open('{}', 'w').write(str(os.getpid()))",
-                descendant_pid.display()
-            ),
-            "        os.execvp('sleep', ['sleep', '300'])".to_owned(),
-            "    os._exit(0)".to_owned(),
-            "try:".to_owned(),
-            "    os.waitpid(middle, 0)".to_owned(),
-            "except ChildProcessError:".to_owned(),
-            "    pass".to_owned(),
-            format!("open('{}', 'w').write('x')", ready.display()),
-            "time.sleep(300)".to_owned(),
-        ]
-        .join("\n");
-        format!("exec python3 -c \"{script}\"")
+        format!(
+            "sleep 3\n{}",
+            auto_reaping_launcher_body(launcher_pid, descendant_pid, ready)
+        )
     })
     .await;
-    assert_live_lineage_kept(&outcome, "SIGCHLD ignored");
+    assert_live_lineage_kept(&outcome, "slow start");
 }
 
 /// J230: when the lifeline closes, the dead shim's own leftovers go with its record: a killed shim cannot
