@@ -2742,6 +2742,41 @@ mod candidate_tests {
         );
     }
 
+    /// J699 (#515): a node that reaches the server over its LAN or a private overlay (a server on
+    /// the same network, or a VPN in 100.64.0.0/10) has a private control-connection source, so
+    /// its guess is a private address. The store drops a private *reflexive* address, but the
+    /// guess is published as every peer's endpoint, granted or not (`configuration.rs` puts
+    /// `endpoints` on every member). The user guide says local network addresses never leave
+    /// their network, so an ungranted peer elsewhere must not learn this one.
+    #[tokio::test]
+    async fn an_ungranted_peer_never_learns_a_private_guess() {
+        let (store, [_, _, _, c]) = mesh().await;
+        let (d, _) = store
+            .attach("d", PublicKey([5; 32]), Some(at("100.100.7.9:10254")), false)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mesh_dataplane SET default_policy='deny' WHERE singleton=1")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let view = store.config(c).await.unwrap();
+        let policy = &view.peers[&d];
+        assert_eq!(policy.outbound, TrafficPolicy::None, "fixture: the pair is denied");
+        assert_eq!(policy.inbound, TrafficPolicy::None, "fixture: the pair is denied");
+        let private: Vec<SocketAddr> = tries(&view, d)
+            .into_iter()
+            .filter(|address| crate::candidates::is_lan(address.ip()))
+            .collect();
+        assert!(
+            private.is_empty(),
+            "an ungranted peer on another network learned d's private address: {private:?}"
+        );
+    }
+
     /// J585 F2 (#515): "same public address" is decided by the UDP-observed reflexive address,
     /// which a member can steer (one authenticated packet with a spoofed source moves the server
     /// device's endpoint, and f37c5497b even accepts it unproven). A node whose control connection
