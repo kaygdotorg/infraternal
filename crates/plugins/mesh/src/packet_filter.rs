@@ -3500,4 +3500,84 @@ mod tests {
             Vec::<String>::new()
         );
     }
+
+    /// J617 review (P2, #265, D384): one peer's held inbound connections must not stop this
+    /// host from opening its own connections to that peer.
+    ///
+    /// The 128 slots are shared by both directions and established connections are never
+    /// evicted. Any process on the peer, an unprivileged account or an ordinary connection pool
+    /// included, that holds 128 connections to a granted port therefore refuses every new
+    /// connection in both directions for as long as it holds them: this host can no longer
+    /// reach the peer, and nobody else on the peer can reach this host (mesh SSH included). The
+    /// kernel conntrack this replaces had no per-peer cap. The fix commit's doc says such a peer
+    /// "can only stop itself"; this test shows the host is stopped too.
+    #[test]
+    fn review_j617_a_peers_inbound_connections_cannot_lock_this_host_out_of_it() {
+        let filter = PacketFilter::new(
+            &config(grant(Protocol::Tcp, 443), TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let held = u16::try_from(FLOWS_PER_PEER).expect("cap fits a port count");
+        for index in 0..held {
+            let port = 40_000 + index;
+            let mut syn = tcp4(PEER4, LOCAL4, port, 443, SYN);
+            let mut syn_ack = tcp4(LOCAL4, PEER4, 443, port, SYN_ACK);
+            let mut ack = tcp4(PEER4, LOCAL4, port, 443, ACK);
+            assert!(filter.check_at(&mut syn, Direction::MeshToHost, now));
+            assert!(filter.check_at(&mut syn_ack, Direction::HostToMesh, now));
+            assert!(filter.check_at(&mut ack, Direction::MeshToHost, now));
+        }
+        let mut outbound = tcp4(LOCAL4, PEER4, 50_000, 22, SYN);
+        assert!(
+            filter.check_at(
+                &mut outbound,
+                Direction::HostToMesh,
+                now + Duration::from_secs(1)
+            ),
+            "the peer's {held} inbound connections locked this host out of its own outbound grant"
+        );
+    }
+
+    /// J617 review (P3, #265, D384): an answered SYN that never gets its final ACK is a
+    /// half-open connection, not an established one.
+    ///
+    /// `observe` marks a flow replied on the SYN-ACK, so `established()` is true before the
+    /// handshake completes: a half-open connection keeps the 300 s established timeout and can
+    /// never be evicted. Kernel conntrack keeps it in `SYN_RECV` (60 s) and may drop it under
+    /// pressure. Here 127 complete connections plus one half-open fill the table; a new SYN
+    /// must evict the half-open one.
+    #[test]
+    fn review_j617_a_half_open_connection_is_not_established() {
+        let filter = PacketFilter::new(
+            &config(grant(Protocol::Tcp, 443), TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let complete = u16::try_from(FLOWS_PER_PEER - 1).expect("cap fits a port count");
+        for index in 0..complete {
+            let port = 40_000 + index;
+            let mut syn = tcp4(PEER4, LOCAL4, port, 443, SYN);
+            let mut syn_ack = tcp4(LOCAL4, PEER4, 443, port, SYN_ACK);
+            let mut ack = tcp4(PEER4, LOCAL4, port, 443, ACK);
+            assert!(filter.check_at(&mut syn, Direction::MeshToHost, now));
+            assert!(filter.check_at(&mut syn_ack, Direction::HostToMesh, now));
+            assert!(filter.check_at(&mut ack, Direction::MeshToHost, now));
+        }
+        let mut half_syn = tcp4(PEER4, LOCAL4, 45_000, 443, SYN);
+        let mut half_syn_ack = tcp4(LOCAL4, PEER4, 443, 45_000, SYN_ACK);
+        assert!(filter.check_at(&mut half_syn, Direction::MeshToHost, now));
+        assert!(filter.check_at(&mut half_syn_ack, Direction::HostToMesh, now));
+        let mut fresh = tcp4(PEER4, LOCAL4, 46_000, 443, SYN);
+        assert!(
+            filter.check_at(
+                &mut fresh,
+                Direction::MeshToHost,
+                now + Duration::from_secs(1)
+            ),
+            "a half-open connection (SYN, SYN-ACK, no ACK) was treated as established and never evicted"
+        );
+    }
 }
