@@ -255,6 +255,12 @@ h2h_cpu_audit_stop() {
         status=$?
     fi
     unset H2H_CPUSET_AUDIT_PID
+    # Busy cores per D348 group for this window. Kernel crypto can run on the
+    # housekeeping CPUs, so per-core figures divide by what was really used (J638).
+    local audit_dir=${H2H_CPUSET_AUDIT_SUMMARY:+$(dirname "$H2H_CPUSET_AUDIT_SUMMARY")}
+    if ((status == 0)) && [[ -n $audit_dir && -s $audit_dir/proc-stat.after.txt ]]; then
+        python3 -I "$H2H_KIT/lib/cpu_split.py" "$audit_dir" || status=1
+    fi
     if ((status == 0)) && [[ ${H2H_CPUSET_AUDIT_REQUIRE_CLEAN:-0} == 1 ]]; then
         if ! python3 -I - "${H2H_CPUSET_AUDIT_SUMMARY:-}" <<'PY'
 import json
