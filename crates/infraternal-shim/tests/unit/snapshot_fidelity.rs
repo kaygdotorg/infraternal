@@ -653,7 +653,11 @@ fn approximate_repaint_keeps_the_scroll_region_for_later_output() {
     let repaint = host.approximate_snapshot();
     let mut viewer = reset_terminal(80, 24).unwrap();
     viewer.process(&repaint);
-    assert_eq!(host.engine.difference(&viewer.engine), 0, "the repaint shows the host's screen");
+    assert_eq!(
+        host.engine.difference(&viewer.engine),
+        0,
+        "the repaint shows the host's screen"
+    );
     for _ in 0..30 {
         host.process(b"y\r\n");
         viewer.process(b"y\r\n");
