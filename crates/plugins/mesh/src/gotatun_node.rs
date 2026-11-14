@@ -208,21 +208,43 @@ impl UnderlayAnnounce {
 }
 
 /// The worker's side of [`UnderlayAnnounce`]: yields once per announcement that is due.
+///
+/// Announcements use the endpoint refresh's coalescing ([`CoalescedSchedule`]): 25 ms after the
+/// first change, and at most one per 250 ms (#483 J633 P1). One kernel change is several
+/// notifications (an address, its connected and local routes), and a container host or routing
+/// daemon can change routes many times a second; each announcement costs one keepalive per live
+/// session, so the rate must not follow the churn. The last change is always announced: a
+/// change after an announcement starts schedules the next one, which is how the announcement
+/// after IPv6 duplicate address detection, or after a late connected route, still goes out.
 struct AnnouncementWaiter {
     announce: Arc<UnderlayAnnounce>,
+    schedule: CoalescedSchedule,
 }
 
 impl AnnouncementWaiter {
     /// Wait on `announce` for the worker that owns this waiter.
     fn new(announce: Arc<UnderlayAnnounce>) -> Self {
-        Self { announce }
+        Self {
+            announce,
+            schedule: CoalescedSchedule::default(),
+        }
     }
 
     /// Wait until an announcement is due, then re-arm the signal so a later change queues the
     /// next one.
+    ///
+    /// Cancel-safe, so it can sit in a `select!`: the schedule keeps its deadline across a
+    /// dropped call, and a dropped wait for a change consumes nothing. The floor counts from
+    /// when the announcement starts; the keepalive request itself takes microseconds per peer.
     async fn next(&mut self) {
-        self.announce.wake.notified().await;
+        if !self.schedule.is_armed() {
+            self.announce.wake.notified().await;
+            self.schedule.arm(Instant::now());
+        }
+        self.schedule.wait().await;
+        self.schedule.start();
         self.announce.wake.begin();
+        self.schedule.finish(Instant::now());
     }
 }
 
