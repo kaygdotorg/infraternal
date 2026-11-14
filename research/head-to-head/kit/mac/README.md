@@ -12,7 +12,7 @@ Run from a fresh checkout of dev; never from a hand-edited copy (owner rule: lat
 | `mac-window.sh` | one window, run as `lume` under `lockf -k /tmp/mac-bench.lock` |
 | `mac-run.sh` | the counterbalanced run: one window per Williams order, lock per window, then the report |
 | `mac_pool.py` | `orders` (Williams design) and `report` (pooled, per-window ratios to the baseline) |
-| `build-harness.sh` | builds the product Mac harness at a commit, and `j421net` from `../../tools/j421net` |
+| `build-harness.sh` | builds the pin and candidate Mac harness from this checkout (`harness <name> [<gotatun-rev>]`), and `j421net` from `../../tools/j421net` |
 | `lnx-side.sh` | the Linux peer's helper; copy it to `/opt/j461c/lnx-side.sh` on the peer after a change |
 
 ## Prerequisites
@@ -20,8 +20,12 @@ Run from a fresh checkout of dev; never from a hand-edited copy (owner rule: lat
 - `$KIT_HOME` (default `/Users/Shared/h2h-mac`) with `bin/`: `j421net`, the harness binaries
   (`mesh-bench-pin`, `mesh-bench-cand`; override with `PIN_BIN`/`CAND_BIN`), `tailscale`,
   `tailscaled`, `netbird` (pinned versions in `../../pins.txt`).
-- The harness test `macos_node::tests::mac_bench_device` is **not on dev**: build from a bench
-  commit that carries it (`build-harness.sh harness <sha> <name>`). Record the sha in the issue.
+- The harness test `macos_node::tests::mac_bench_device` is in `macos_node.rs` of this checkout.
+  Build both binaries from the checkout itself, under the Mac lock (the Mac disk is small: one
+  build at a time, the script deletes its target): `build-harness.sh harness mesh-bench-pin`
+  (the GotaTun in Cargo.lock, `--locked`) and `build-harness.sh harness mesh-bench-cand <gotatun-rev>`
+  (the same checkout with only the GotaTun rev replaced). Record the printed `BUILD_KIT_COMMIT`
+  and lock line in the issue. Never run a binary built from another tree.
 - The Linux peer has `/opt/j461c/{lnx-side.sh,bin/*}` (gotatun, headscale, netbird-server,
   tailscale(d), netbird, j421net).
 

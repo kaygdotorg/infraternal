@@ -49,5 +49,34 @@ class WindowScriptTest(unittest.TestCase):
         self.assertNotIn("--private-key", text)
 
 
+class BuildHarnessTest(unittest.TestCase):
+    """`build-harness.sh` builds pin and candidate from the checkout, never from hand-built files."""
+
+    ROOT = Path(__file__).resolve().parents[3]
+    SCRIPT = MAC / "build-harness.sh"
+
+    def test_candidate_rev_edit_hits_exactly_the_gotatun_line(self) -> None:
+        """The script's `sed` swaps the rev on the one `gotatun = ` line and nothing else."""
+        toml = (self.ROOT / "crates/plugins/mesh/Cargo.toml").read_text()
+        match = re.search(r"^gotatun = .*$", toml, re.M)
+        self.assertIsNotNone(match, "mesh Cargo.toml has no gotatun dependency line")
+        self.assertEqual(len(re.findall(r'^gotatun = .*\brev = "[0-9a-f]+"', toml, re.M)), 1)
+        sed = re.search(r"sed -E -i '' \"(/\^gotatun = /s/[^\"]*)\"", self.SCRIPT.read_text())
+        self.assertIsNotNone(sed, "the rev edit moved: update this test")
+        sample = re.sub(r'rev = "[0-9a-f]+"', 'rev = "abcdef1"', match.group(0))
+        self.assertIn('rev = "abcdef1"', sample)
+
+    def test_harness_test_is_in_the_checkout(self) -> None:
+        """The ignored `mac_bench_device` test the windows run is on this branch, not elsewhere."""
+        source = (self.ROOT / "crates/plugins/mesh/src/macos_node.rs").read_text()
+        self.assertIn("fn mac_bench_device()", source)
+
+    def test_builds_only_from_the_checkout(self) -> None:
+        """No git worktree of another commit, and the pin build uses the lock file as committed."""
+        text = self.SCRIPT.read_text()
+        self.assertNotIn("worktree add", text)
+        self.assertIn("LOCKED=--locked", text)
+
+
 if __name__ == "__main__":
     unittest.main()
