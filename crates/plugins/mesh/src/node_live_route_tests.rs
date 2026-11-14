@@ -823,3 +823,105 @@ fn live_endpoint_refresh_retries_a_failed_lookup() {
         "a lookup that keeps failing is retried twice, then waits for the underlay to change"
     );
 }
+
+/// An IPv6 policy rule alone must move the watch (#489 J630). J609's test adds the IPv4 and
+/// IPv6 rules back to back, so the IPv4 announcement alone forces a full re-derivation that
+/// also re-reads the IPv6 path: nothing there pins the `RTNLGRP_IPV6_RULE` subscription. Here
+/// only an IPv6 rule changes, so the refresh re-derives only if that group is bound.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
+    use crate::mesh_mtu::ROUTE_LOOKUPS;
+    use crate::policy::model::{Addresses, PublicKey};
+    review_route_command(&["link", "set", "lo", "up"]);
+    review_marked_tun(PublicKey([9; 32]));
+    let _ = review_learned_underlay(1500);
+    review_route_command(&[
+        "-6",
+        "address",
+        "add",
+        "2001:db8:1::1/64",
+        "dev",
+        "under0",
+        "nodad",
+    ]);
+    let endpoint: std::net::SocketAddr = "[2001:db8:1::2]:51820".parse().expect("IPv6 endpoint");
+    // The smaller underlay and its table exist before the worker starts, so their link and
+    // route announcements cannot move the watch during the measured step.
+    // No link-local address on it either: a late IPv6 autoconf route announcement would move
+    // the watch by itself and hide a missing rule subscription.
+    review_route_command(&["link", "add", "under1", "type", "dummy"]);
+    review_route_command(&["link", "set", "under1", "addrgenmode", "none"]);
+    review_route_command(&["link", "set", "under1", "mtu", "1300", "up"]);
+    review_route_command(&[
+        "-6",
+        "route",
+        "add",
+        "2001:db8:1::/64",
+        "dev",
+        "under1",
+        "table",
+        "100",
+    ]);
+    let peer = crate::dataplane::Peer {
+        key: PublicKey([2; 32]),
+        previous_key: None,
+        previous_active: false,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().expect("IPv4"),
+            ipv6: "fd01::2".parse().expect("IPv6"),
+        },
+        endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+    };
+    let learned = [(peer.key, Some(endpoint))];
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
+    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let refresh = || {
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
+        let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
+        (ROUTE_LOOKUPS.with(std::cell::Cell::get), written)
+    };
+    let first = refresh();
+    let before = review_peer_routes();
+    let steady = refresh();
+
+    review_route_command(&[
+        "-6",
+        "rule",
+        "add",
+        "to",
+        "2001:db8:1::2",
+        "lookup",
+        "100",
+        "pref",
+        "100",
+    ]);
+    let path = review_route_command(&["-6", "route", "get", "2001:db8:1::2"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let rule_added = loop {
+        let result = refresh();
+        if result.0 > 0 || std::time::Instant::now() > deadline {
+            break result;
+        }
+        // The rule announcement reaches the listener thread asynchronously, and the test can
+        // observe it only through a refresh.
+        // sleep: paces the polling refreshes; there is no event to wait on.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let after = review_peer_routes();
+    worker.stop();
+    eprintln!(
+        "REVIEW J630 ipv6 rule: first={first:?} before={before:?} steady={steady:?} \
+         path={path:?} rule_added={rule_added:?} after={after:?}"
+    );
+    assert!(before.0.contains("mtu 1408"), "{before:?}");
+    assert_eq!(steady, (0, 0), "nothing changed, so nothing is looked up");
+    assert!(path.contains("dev under1"), "{path}");
+    assert_eq!(
+        rule_added,
+        (1, 1),
+        "an IPv6 rule that moves the endpoint must re-derive at the next refresh"
+    );
+    assert!(after.0.contains("mtu 1216"), "{after:?}");
+}
