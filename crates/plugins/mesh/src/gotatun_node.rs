@@ -760,13 +760,14 @@ async fn walk_due(at: Option<Instant>) {
     }
 }
 
-/// Serializes device, relay, health-recovery, and shutdown commands on the `GotaTun` worker, and
-/// steps candidate walks when one is due.
+/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the `GotaTun`
+/// worker, and steps candidate walks when one is due.
 ///
 /// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
 /// either direction requests re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
-/// writes run on Tokio's blocking pool. A walk step that moves a peer's address shows up in that
-/// scan too, so the routes follow the walk.
+/// writes run on Tokio's blocking pool. The scan reads each peer's *confirmed* endpoint, so a walk
+/// step that only moves where this node sends does not move a route. The route follows once an
+/// authenticated packet arrives from the walked address, which is exactly when the walk finds it.
 async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
     mut state: RuntimeState,
