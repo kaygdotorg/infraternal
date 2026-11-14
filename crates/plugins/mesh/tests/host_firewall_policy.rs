@@ -672,6 +672,80 @@ fn mesh_listener_opens_exactly_the_bound_port_and_closes_on_stop() {
     );
 }
 
+/// J671 (#483): a default-drop table that would drop sshd is never applied, and the boot loader fails open.
+///
+/// The saved policy admits only tcp/22. sshd moves to 2222 (an edited
+/// `sshd_config`, a `-p` in `SSHD_OPTS`, a socket drop-in). A later policy
+/// change (the mesh listener) must refuse and leave the old table; the boot
+/// loader must not enforce the saved table and must leave input open with
+/// the mesh port, saying why. Once the policy admits 2222 the loader enforces
+/// again.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+#[cfg(feature = "test-support")]
+fn review_j671_boot_loader_fails_open_when_sshd_moved() {
+    use infraternal_plugin_mesh::host_firewall::{
+        PolicyError, SshdPort, SshdPortsTestOverride, boot_apply_from_config_at,
+    };
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    let server = |rules: &[&str]| Policy {
+        admin_rules: rules
+            .iter()
+            .map(|rule| AllowRule::from_str(rule).expect("admin rule"))
+            .collect(),
+        ..Policy::default()
+    };
+    write_policy_file(config.paths.server_policy_path(), &server(&["*,*,tcp,22"]))
+        .expect("save marked server policy");
+    {
+        let _sshd = SshdPortsTestOverride::install(&[SshdPort::dual_stack(22)]);
+        boot_apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+            .expect("sshd on 22: the saved table is enforced");
+    }
+    let enforced = table_json(&nft, "infraternal_host");
+    assert_eq!(input_chain(&enforced)["policy"], "drop", "{enforced:?}");
+
+    let _sshd = SshdPortsTestOverride::install(&[SshdPort::dual_stack(2222)]);
+    // A later policy change refuses and leaves the live table alone.
+    let refused = set_mesh_listener_at(&config.paths, Some(&nft), Some(10_254))
+        .expect_err("the mesh listener must not re-apply a table that drops sshd");
+    assert!(
+        matches!(refused, PolicyError::SshdNotAdmitted { ref missing, .. } if missing == "2222"),
+        "{refused}"
+    );
+    assert_eq!(enforced, table_json(&nft, "infraternal_host"));
+    assert_eq!(
+        read_policy_file(config.paths.agent_policy_path()).expect("read agent policy"),
+        None,
+        "a refused change saves nothing"
+    );
+    // The boot loader fails open: no default drop, the reason is loud.
+    let error = boot_apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect_err("the loader must not enforce a table that drops sshd");
+    let text = error.to_string();
+    assert!(
+        matches!(error, PolicyError::FailedOpen { .. })
+            && text.contains("NOT enforced")
+            && text.contains("sshd's port 2222")
+            && text.contains("open mesh-only table is live"),
+        "{text}"
+    );
+    let open = table_json(&nft, "infraternal_host");
+    assert_eq!(input_chain(&open)["policy"], "accept", "{open:?}");
+    // Once the policy admits sshd's new port, the loader enforces again.
+    write_policy_file(
+        config.paths.server_policy_path(),
+        &server(&["*,*,tcp,22", "*,*,tcp,2222"]),
+    )
+    .expect("save the corrected policy");
+    boot_apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("the corrected policy is enforced");
+    let again = table_json(&nft, "infraternal_host");
+    assert_eq!(input_chain(&again)["policy"], "drop", "{again:?}");
+}
+
 /// A machine with only an agent policy gets mesh input and no default drop (J555, #483).
 ///
 /// The agent policy saved by `infraternal up` carries the SSH port it ran

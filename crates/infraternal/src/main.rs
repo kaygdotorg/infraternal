@@ -266,11 +266,17 @@ fn run_internal_host_firewall_command() -> Option<ExitCode> {
         eprintln!("infraternal host firewall apply: unexpected argument");
         return Some(ExitCode::FAILURE);
     }
-    let result = host_firewall::apply_from_config();
+    // Fails open: a saved table that would drop sshd's current ports is not
+    // enforced, and the unit fails so the journal says why (J671, #483).
+    let result = host_firewall::boot_apply_from_config();
     match result {
         Ok(report) => {
             print!("{report}");
             Some(ExitCode::SUCCESS)
+        }
+        Err(error @ host_firewall::PolicyError::FailedOpen { .. }) => {
+            eprintln!("<2>infraternal host firewall: {error}");
+            Some(ExitCode::FAILURE)
         }
         Err(error) => {
             eprintln!("infraternal host firewall apply failed: {error}");

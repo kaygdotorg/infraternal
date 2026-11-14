@@ -615,6 +615,18 @@ pub enum PolicyError {
         /// The ports the other sources named, or `none`.
         seen: String,
     },
+    /// The boot loader refused to enforce a table that would drop sshd and left input open instead.
+    #[error(
+        "host firewall NOT enforced, host input left open so sshd stays reachable: {reason}; \
+         {opened}; fix the saved policy or sshd, then run `systemctl restart \
+         infraternal-firewall.service`"
+    )]
+    FailedOpen {
+        /// Why the default-drop table was not applied.
+        reason: Box<PolicyError>,
+        /// What the loader did instead.
+        opened: String,
+    },
     /// A host policy file is not a root-owned, non-writable regular file.
     #[error("host firewall policy file at {0} is not a safe root-owned file")]
     UnsafePolicy(PathBuf),
@@ -1125,6 +1137,63 @@ pub fn apply_from_config_at(
         return Ok(report);
     }
     apply_roles(server, agent, nft_path)
+}
+
+/// What `infraternal-firewall.service` runs at boot: apply the saved policy, or fail open.
+///
+/// When the saved default-drop table would drop a port sshd uses on this
+/// host now (its configuration, service or socket changed since the policy
+/// was saved, or a source cannot be read), the table is **not** enforced:
+/// the mesh-only accept shape is applied instead, which replaces any
+/// enforcing table and keeps the mesh port, and a loud
+/// [`PolicyError::FailedOpen`] is returned so the unit fails and the
+/// journal says why. An open host is recoverable from anywhere; a host that
+/// drops sshd is not (J671, #483).
+///
+/// # Errors
+/// [`PolicyError::FailedOpen`] after failing open; otherwise as [`apply_from_config_at`].
+pub fn boot_apply_from_config() -> Result<String, PolicyError> {
+    boot_apply_from_config_at(&HostFirewallPaths::system(), None, None)
+}
+
+/// [`boot_apply_from_config`] below the supplied layout, for namespace tests.
+///
+/// # Errors
+/// As [`boot_apply_from_config`].
+pub fn boot_apply_from_config_at(
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+    systemctl_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    match apply_from_config_at(paths, nft_path, systemctl_path) {
+        Err(
+            reason @ (PolicyError::SshdNotAdmitted { .. } | PolicyError::SshdPortsUnknown { .. }),
+        ) => {
+            let opened = read_policy_file(paths.server_policy_path())
+                .and_then(|server| {
+                    let agent = read_policy_file(paths.agent_policy_path())?;
+                    apply_mode_with_ssh_connection(
+                        &combine(server, agent),
+                        InputMode::MeshOnly,
+                        nft_path,
+                        None,
+                    )
+                })
+                .map_or_else(
+                    |error| {
+                        format!(
+                            "replacing the table with the open mesh-only one also failed: {error}"
+                        )
+                    },
+                    |_| "the open mesh-only table is live instead".to_owned(),
+                );
+            Err(PolicyError::FailedOpen {
+                reason: Box::new(reason),
+                opened,
+            })
+        }
+        other => other,
+    }
 }
 
 /// Clear one role's policy and reconcile the remaining host input configuration.
