@@ -3,9 +3,9 @@
  * The frame around every standalone page of the site: the docs, the landing page, `/install`, the releases and the changelog (#339, D388).
  *
  * One function, `sitePage`, writes the whole document, so a page's head, top bar and footer cannot drift apart. The top bar is the app's
- * capsule in miniature: the product's name on the left, a capsule in the middle that says where you are and shows the ⌘K hint, and the
+ * capsule in miniature: the product's name on the left, a capsule in the middle that says where you are and holds the search button (⌘K), and the
  * site's links on the right. It is plain HTML and CSS (`site.css`). The only script is `doc.js`, which also copies a code block when
- * it is clicked; the page loads nothing from a third party and sets no cookie (D46).
+ * it is clicked and opens the docs search on ⌘K; the page loads nothing from a third party and sets no cookie (D46).
  *
  * The docs have three audiences (D388): `/docs/user`, `/docs/admin` and `/docs/dev`. A page of the docs also gets a left column that lists
  * the pages of its audience (`sideNav`); on a narrow screen that column is one folded row, like the contents.
@@ -49,6 +49,8 @@ export interface Chrome {
   main: "docs" | "site";
   /** The left column of a docs page (from `sideNav`), written inside the page's grid. */
   side?: string;
+  /** The docs roots the page's search covers (site-search.ts). Defaults to the three audiences; an instance's own flat docs pass `["/docs"]`. */
+  searchRoots?: readonly string[];
 }
 
 /** The site's links, in the order of the top bar and the footer. The `href`s are the addresses D388 names. */
@@ -72,14 +74,14 @@ function placeName(here: string): string {
 
 /**
  * The top bar. Three tracks like the app's: the name, the capsule, the links. On a phone the links fold into one button
- * (`<details>`, so it needs no script) and the capsule keeps the place name and the ⌘K hint. The hint is a label, not a button: nothing
- * would happen when it is pressed yet, and a control that does nothing is not shown (TASTE, "No dead buttons").
+ * (`<details>`, so it needs no script) and the capsule keeps the place name and the search button, which opens the docs search
+ * (site-search.ts, in `doc.js`).
  */
-function topBar(here: string, area: Area): string {
+function topBar(here: string, area: Area, searchRoots: readonly string[]): string {
   const link = (entry: (typeof LINKS)[number]): string => `<a href="${entry.href}"${entry.area === area ? ' aria-current="page"' : ""}>${entry.label}</a>`;
   return `<header class="bar"><div class="bar-in">
 <a class="pill bar-brand" href="/">infraternal</a>
-<div class="pill bar-capsule"><span class="bar-here">${placeName(here)}</span><span class="bar-kbd" aria-label="Search is opened with Command K">${SEARCH_ICON}<kbd>⌘K</kbd></span></div>
+<div class="pill bar-capsule"><span class="bar-here">${placeName(here)}</span><button class="bar-kbd" type="button" data-search="${searchRoots.join(" ")}" aria-label="Search the docs" aria-keyshortcuts="Meta+K Control+K">${SEARCH_ICON}<kbd>⌘K</kbd></button></div>
 <nav class="bar-end" aria-label="Site"><div class="pill bar-links">${LINKS.map(link).join("")}</div><details class="bar-menu"><summary class="pill" aria-label="Menu">${MENU_ICON}</summary><div class="pill bar-sheet">${LINKS.map(link).join("")}</div></details></nav>
 </div></header>`;
 }
@@ -110,7 +112,7 @@ export function sitePage(chrome: Chrome): string {
 <link rel="stylesheet" href="/docs/site.css">
 <script src="/docs/doc.js" defer></script>
 </head><body>
-${topBar(here, chrome.area)}
+${topBar(here, chrome.area, chrome.searchRoots ?? (Object.keys(AUDIENCES) as Audience[]).map((id) => `/docs/${id}`))}
 <main class="${chrome.main}">
 ${chrome.side ? `<div class="docs-grid">\n${chrome.side}\n<div class="docs-col">\n${chrome.body}</div>\n</div>` : chrome.body}</main>
 ${footer()}
