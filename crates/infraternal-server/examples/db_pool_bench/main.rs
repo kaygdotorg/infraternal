@@ -14,7 +14,10 @@
 //!
 //! Usage (every command takes the database path last):
 //! - `db_pool_bench prepare <db>`: migrate a new file with today's sqlx path and seed it.
-//! - `db_pool_bench bench <sqlx|pool> <workload> <tasks> <db>`: one measured run;
+//! - `db_pool_bench bench <sqlx|pool> <workload> <tasks> [pace_us] <db>`: one measured run;
+//!   `pace_us` makes each task wait that long between operations, to model a
+//!   real request rate instead of a saturating loop (the WAL only rewinds when
+//!   a background checkpoint finds a quiet moment, see infraternal-db);
 //!   workloads are `session`, `hosts`, `events`, `apply` and `mixed`. Run it on a
 //!   fresh copy of the prepared file each time.
 //! - `db_pool_bench mem <sqlx|pool> <db>`: resident memory and threads, opened and warm.
@@ -409,7 +412,7 @@ fn pool_apply(tx: &Transaction<'_>, draw: &Draw) -> Result<(), infraternal_db::E
 
 /// Warm every connection and statement cache, then measure `workload` with
 /// `tasks` concurrent callers and print one JSON line.
-async fn bench(kind: &str, workload: &'static str, tasks: usize, path: &Path) {
+async fn bench(kind: &str, workload: &'static str, tasks: usize, pace: Duration, path: &Path) {
     let front = Arc::new(Front::open(kind, path).await);
     let mut warm = Vec::new();
     for task in 0..16_u64 {
@@ -443,6 +446,10 @@ async fn bench(kind: &str, workload: &'static str, tasks: usize, path: &Path) {
                 let started = Instant::now();
                 front.run(op, input).await;
                 samples.push(started.elapsed().as_nanos() as u64);
+                if !pace.is_zero() {
+                    // sleep: pacing models a request rate; there is no event to wait for.
+                    tokio::time::sleep(pace).await;
+                }
             }
             samples
         }));
@@ -582,7 +589,21 @@ async fn main() {
         Some("prepare") => prepare(path).await,
         Some("bench") => {
             let workload = workload::parse_workload(&args[3]).expect("workload");
-            bench(&args[2], workload, args[4].parse().expect("tasks"), path).await;
+            // An optional fifth argument paces each task: microseconds to
+            // wait between its operations (0, the default, runs flat out).
+            let pace = if args.len() > 6 {
+                Duration::from_micros(args[5].parse().expect("pace in µs"))
+            } else {
+                Duration::ZERO
+            };
+            bench(
+                &args[2],
+                workload,
+                args[4].parse().expect("tasks"),
+                pace,
+                path,
+            )
+            .await;
         }
         Some("mem") => mem(&args[2], path).await,
         Some("startup") => startup(&args[2], path).await,

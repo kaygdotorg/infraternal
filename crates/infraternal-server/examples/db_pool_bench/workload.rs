@@ -210,7 +210,7 @@ pub fn io_mark() {
     *IO_MARK.lock().unwrap() = io_counts();
 }
 
-/// Print one run's JSON line: latency percentiles, throughput, syscalls per op
+/// Print one run's JSON line: latency percentiles and maximum, throughput, syscalls per op
 /// and `wal_bytes`, the WAL file's size at the end of the run with the pool
 /// still open.
 pub fn report(
@@ -228,12 +228,13 @@ pub fn report(
     let (r0, w0) = *IO_MARK.lock().unwrap();
     let (r1, w1) = io_counts();
     println!(
-        "{{\"read_syscalls_per_op\":{:.2},\"write_syscalls_per_op\":{:.2},\"variant\":\"{variant}\",\"workload\":\"{workload}\",\"conc\":{concurrency},\"n\":{n},\"p50_us\":{:.1},\"p99_us\":{:.1},\"p999_us\":{:.1},\"mean_us\":{mean:.1},\"ops_per_s\":{:.0},\"elapsed_s\":{:.3},\"wal_bytes\":{wal_bytes}}}",
+        "{{\"read_syscalls_per_op\":{:.2},\"write_syscalls_per_op\":{:.2},\"variant\":\"{variant}\",\"workload\":\"{workload}\",\"conc\":{concurrency},\"n\":{n},\"p50_us\":{:.1},\"p99_us\":{:.1},\"p999_us\":{:.1},\"max_us\":{:.1},\"mean_us\":{mean:.1},\"ops_per_s\":{:.0},\"elapsed_s\":{:.3},\"wal_bytes\":{wal_bytes}}}",
         (r1 - r0) as f64 / n as f64,
         (w1 - w0) as f64 / n as f64,
         q(0.5),
         q(0.99),
         q(0.999),
+        q(1.0),
         n as f64 / elapsed.as_secs_f64(),
         elapsed.as_secs_f64()
     );
