@@ -34,6 +34,10 @@ const LEGACY_MIGRATION_MARKER: &[u8] = b"J501 mesh state migration\n";
 const MIRROR_RECORD: &str = ".mesh-runtime-mirror";
 /// Versioned header of [`MIRROR_RECORD`]; the second line is the hex public key.
 const MIRROR_RECORD_HEADER: &str = "J598 mesh runtime mirror v1";
+/// Longest wait for a live mesh store to release its directory before start fails.
+const LOCK_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Retry interval while waiting for that lock; short against a 30 s limit, cheap in CPU.
+const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 /// A source replaced repeatedly by an uncooperative writer is left intact and retried next start.
 const MAX_SOURCE_RETRIES: usize = 16;
 
@@ -580,15 +584,66 @@ fn hex_key(key: &[u8; 32]) -> String {
 }
 
 /// Open the mesh directory and take the same exclusive flock that guards mesh-store writes.
+///
+/// A live mesh store holds a shared lease on its directory for its whole life. If an embedded
+/// child survived its server (for example under `KillMode=process`), an unbounded wait would hang
+/// server start with no sign why. The wait logs once, then gives up after
+/// [`LOCK_WAIT_LIMIT`] so the service manager reports a failed start instead (J595 P3-3).
 /// # Errors
-/// Returns path validation, open, or lock failures.
+/// Returns path validation or open failures, a lock failure, or `TimedOut` after the limit.
 fn lock_mesh_directory(path: &Path) -> io::Result<nix::fcntl::Flock<File>> {
-    let directory = OpenOptions::new()
+    lock_mesh_directory_within(path, LOCK_WAIT_LIMIT)
+}
+
+/// Take the mesh directory lock, waiting at most `limit`; tests pass a short limit.
+/// # Errors
+/// Returns path validation or open failures, a lock failure, or `TimedOut` after `limit`.
+fn lock_mesh_directory_within(
+    path: &Path,
+    limit: std::time::Duration,
+) -> io::Result<nix::fcntl::Flock<File>> {
+    let mut directory = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
         .open(path)?;
-    nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-        .map_err(|(_, error)| error.into())
+    let started = std::time::Instant::now();
+    let mut logged = false;
+    loop {
+        match nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => {
+                if logged {
+                    tracing::info!(
+                        mesh_state = %path.display(),
+                        waited_ms = started.elapsed().as_millis(),
+                        "Mesh state lock acquired"
+                    );
+                }
+                return Ok(lock);
+            }
+            Err((file, nix::errno::Errno::EWOULDBLOCK | nix::errno::Errno::EINTR)) => {
+                directory = file;
+            }
+            Err((_, error)) => return Err(error.into()),
+        }
+        if !logged {
+            tracing::warn!(
+                mesh_state = %path.display(),
+                limit_ms = limit.as_millis(),
+                "waiting for a running Mesh store to release its state directory"
+            );
+            logged = true;
+        }
+        if started.elapsed() >= limit {
+            tracing::error!(
+                mesh_state = %path.display(),
+                "a Mesh store still holds its state directory; stop the leftover infraternal \
+                 agent process using it, then start the server again"
+            );
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        // sleep: polling a non-blocking flock is the only way to bound the wait portably.
+        std::thread::sleep(LOCK_POLL_INTERVAL);
+    }
 }
 
 /// Write a non-secret, versioned manifest before moving files so recovery knows what must exist.
@@ -2272,6 +2327,34 @@ mod tests {
             "a foreign runtime key must refuse the handoff"
         );
         assert_eq!(runtime_key.as_deref(), Some([0x62; 32].as_slice()));
+    }
+
+    /// A lock held past the limit fails start with `TimedOut` instead of hanging it (J595 P3-3).
+    #[test]
+    fn a_lock_held_past_the_limit_times_out() {
+        use std::{os::unix::fs::OpenOptionsExt, time::Duration};
+
+        let root = fixture_root();
+        let (_volatile, durable) = private_directories(&root);
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(&durable)
+            .expect("open the mesh store directory");
+        let lease = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockShared)
+            .expect("hold a live store's shared lease");
+
+        let started = std::time::Instant::now();
+        let result = super::lock_mesh_directory_within(&durable, Duration::from_millis(200));
+        let waited = started.elapsed();
+        drop(lease);
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::TimedOut)
+        );
+        assert!(waited >= Duration::from_millis(200), "waited {waited:?}");
     }
 
     /// J595 P2: every file the mesh Store keeps must be moved by migration and rollback.
