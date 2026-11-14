@@ -437,7 +437,7 @@ case $mode in
     smoke)
         run_plan 1
         ;;
-    calibration|hold|matrix|ab)
+    calibration|hold|matrix|ab|mixed)
         run_plan 0
         ;;
     soak)

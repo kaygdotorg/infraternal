@@ -51,6 +51,10 @@ usage:
     --row candidate-b=gotatun --row control-b=gotatun --binary TAG=PATH --source TAG=SHA [--out DIR]
     (one ABBA round in a single hold: four calibration-shaped LAN windows, no kernel or
      wireguard-go rows, so the round fits in under 17 minutes)
+  perf-all.sh --mixed --label HOLD --row TAG=ENGINE ... [--binary TAG=PATH --source TAG=SHA] [--out DIR]
+    (one cross-engine hold: two to four different engines, each once, run in the given
+     order as calibration-shaped LAN windows; take the orders from lib/latin_square.py
+     and pool the holds with lib/head_to_head.py)
   perf-all.sh --soak --label CUT --row control=gotatun --row candidate=gotatun \
     --binary TAG=PATH [--source TAG=SHA] [--out DIR]
 
@@ -84,6 +88,7 @@ while (($#)); do
         --hold) set_mode hold ;;
         --ab) set_mode ab ;;
         --soak) set_mode soak ;;
+        --mixed) set_mode mixed ;;
         --label) (($# >= 2)) || { echo '--label needs a value' >&2; exit 2; }; label=$2; shift ;;
         --scenario) (($# >= 2)) || { echo '--scenario needs a value' >&2; exit 2; }; scenario=$2; shift ;;
         --tcp-flow)
@@ -291,6 +296,23 @@ case $mode in
             echo 'each repeated binary needs one matching source SHA' >&2; exit 2;
         }
         ;;
+    mixed)
+        # One cross-engine hold (J638): at most four windows keep it under the 17-minute
+        # hold cap (J629's four took 13m15s). Each engine once, so a Latin square over
+        # the holds balances position and carryover (lib/latin_square.py).
+        ((${#rows[@]} >= 2 && ${#rows[@]} <= 4)) || { echo '--mixed takes two to four rows' >&2; exit 2; }
+        [[ -n $label ]] || { echo '--mixed requires --label' >&2; exit 2; }
+        declare -A mixed_seen=()
+        for row in "${rows[@]}"; do
+            engine=${row#*=}
+            [[ -z ${mixed_seen[$engine]:-} ]] || { echo "--mixed runs each engine at most once; $engine repeats" >&2; exit 2; }
+            mixed_seen[$engine]=1
+            tag=${row%%=*}
+            if [[ $engine == gotatun || $engine == infraternal ]] && [[ -z ${sources[$tag]:-} ]]; then
+                echo "row $tag needs --source $tag=SHA" >&2; exit 2
+            fi
+        done
+        ;;
     soak)
         ((${#rows[@]} == 2)) || { echo '--soak takes exactly two rows' >&2; exit 2; }
         check_row 0 control gotatun
@@ -355,7 +377,7 @@ if [[ $mode == matrix ]]; then
     run_env+=("H2H_MATRIX_SCENARIO=$scenario" "H2H_MATRIX_CALIBRATION_STATUS=$calibration_status" \
         "H2H_MATRIX_CONFIG=$out/scenario.json" "H2H_WG_BIN=$wg_bin" "H2H_WIREGUARD_GO_BIN=$wireguard_go_bin")
 fi
-if [[ $mode == calibration || $mode == ab ]]; then
+if [[ $mode == calibration || $mode == ab || $mode == mixed ]]; then
     run_env+=(H2H_CALIBRATION_ONLY=1)
 fi
 if [[ -n ${H2H_MATRIX_RPS_POLICY:-} ]]; then
@@ -367,7 +389,7 @@ fi
 # Longer sampling stays opt-in: H2H_LAN_PING_COUNT=15000 with H2H_LAN_TPUT_SECONDS=85
 # leaves about 150 samples above p99, but a three-control batch with it failed two
 # gates. The mesh case fails the window if the probes outlive the load (D345).
-if [[ $mode == calibration || $mode == ab ]] && [[ -z ${H2H_LAN_PING_COUNT:-} ]]; then
+if [[ $mode == calibration || $mode == ab || $mode == mixed ]] && [[ -z ${H2H_LAN_PING_COUNT:-} ]]; then
     H2H_LAN_PING_COUNT=8000
 fi
 if [[ -n ${H2H_LAN_PING_COUNT:-} ]]; then
