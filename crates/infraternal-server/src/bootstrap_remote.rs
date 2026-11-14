@@ -2096,6 +2096,44 @@ mod tests {
             })
         }
     }
+    /// The file add-host fixtures upload in place of the infraternal agent binary.
+    ///
+    /// The scripted transports never run it, and no check compares its bytes, so a small
+    /// tracked file stands in. Using the test executable instead (about 400 MB) made every
+    /// fixture hash and copy that much under the product's 30 s command bounds, which is
+    /// what failed these tests on a loaded host (#509).
+    fn fixture_payload() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")
+    }
+    /// No add-host fixture may upload the test executable as its payload (#509).
+    ///
+    /// Cost, not behaviour, is what this guards: a fixture that names the running test binary
+    /// makes the runner hash and copy hundreds of megabytes per test, so a handful of parallel
+    /// tests miss the runner's command bounds on a busy host. Every payload comes from
+    /// `fixture_payload`.
+    #[test]
+    fn fixtures_never_upload_the_test_executable_as_the_payload() {
+        // Split so this guard does not match its own text.
+        let needle = concat!("current", "_exe()");
+        for (name, source) in [
+            ("bootstrap_remote.rs", include_str!("bootstrap_remote.rs")),
+            (
+                "bootstrap_stuck_restore_tests.rs",
+                include_str!("bootstrap_stuck_restore_tests.rs"),
+            ),
+            (
+                "bootstrap_takeover_tests.rs",
+                include_str!("bootstrap_takeover_tests.rs"),
+            ),
+        ] {
+            assert!(
+                !source
+                    .lines()
+                    .any(|line| line.contains(needle) && line.contains("let binary")),
+                "{name} uploads the test executable; use fixture_payload()"
+            );
+        }
+    }
     struct Fixture {
         backend: Arc<RemoteBackend>,
         pool: sqlx::SqlitePool,
@@ -2184,7 +2222,7 @@ mod tests {
         refuse_key_payload_upload: bool,
         invitation_gate: Option<(Arc<InvitationGate>, usize)>,
     ) -> Batch {
-        let fixture_payload = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let fixture_payload = fixture_payload();
         let sniff = Sniff {
             opens: f.opens.clone(),
             refuse_key_payload_upload,
@@ -2673,6 +2711,8 @@ mod tests {
         assert!(!revoked, "a running setup must keep its host");
     }
 
+    /// Replacing an old install that left a journal re-issues that host's identity instead of
+    /// adding a second host record for the same machine.
     #[tokio::test]
     async fn replacing_a_journaled_old_install_reissues_its_identity_without_a_duplicate_host() {
         let f = fixture(true).await;
@@ -2702,7 +2742,7 @@ mod tests {
             digest,
             scripts: scripts.clone(),
         });
-        let binary = std::env::current_exe().unwrap();
+        let binary = fixture_payload();
         let runner = Bootstrap::new(
             transport,
             f.backend.clone(),
@@ -2808,7 +2848,7 @@ mod tests {
     /// Run add-host against a scripted stuck upgrade, confirming any offered action.
     async fn run_stuck(f: &Fixture, check: Vec<u8>) -> (Vec<Event>, Vec<String>) {
         let scripts = Arc::new(Mutex::new(Vec::new()));
-        let binary = std::env::current_exe().unwrap();
+        let binary = fixture_payload();
         let runner = Bootstrap::new(
             Arc::new(RejoinSession {
                 check,

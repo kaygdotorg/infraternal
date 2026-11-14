@@ -89,7 +89,7 @@ impl Run {
     fn start(f: &Fixture, check: Vec<u8>, mode: InstallMode, takeover_exit: Option<u8>) -> Self {
         let scripts = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::new(Mutex::new(None));
-        let binary = std::env::current_exe().unwrap();
+        let binary = fixture_payload();
         let runner = Bootstrap::new(
             Arc::new(TakeoverHost {
                 check,
