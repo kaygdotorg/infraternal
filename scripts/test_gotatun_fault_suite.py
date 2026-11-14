@@ -524,6 +524,55 @@ class FaultReportStallTests(unittest.TestCase):
         self.assertEqual(report["recovered_probe_sequence"], 3)
         self.assertEqual(report["outcome"], "FAIL")
 
+    def test_probe_relapse_after_recovery_fails_the_case(self):
+        """Fail a tunnel that recovers once and then dies, as #517's NAT row did."""
+        # Two answered probes right after the switch, then every probe lost to the end.
+        probes = [Probe(1, 1_050_000_000, 0.9), Probe(2, 1_100_000_000, 0.8)]
+        probes += [
+            Probe(3 + index, 1_150_000_000 + index * 50_000_000, None) for index in range(60)
+        ]
+        report = report_case(
+            case="nat-port-rebind",
+            platform="linux",
+            fault_started_ns=1_000_000_000,
+            fault_cleared_ns=4_000_000_000,
+            recovery_started_ns=1_000_000_000,
+            recovery_budget_ms=300,
+            probes=probes,
+            bytes_sent=65_536,
+            bytes_verified=65_536,
+            integrity_ok=True,
+        )
+
+        self.assertTrue(report["recovery_budget_met"])
+        self.assertEqual(report["recovery_probe_loss_count"], 0)
+        self.assertEqual(report["post_recovery_probe_loss_count"], 60)
+        self.assertEqual(report["post_recovery_longest_outage_ms"], 2_950.0)
+        self.assertEqual(report["outcome"], "FAIL")
+
+    def test_single_lost_probe_after_recovery_is_not_a_relapse(self):
+        """Keep one dropped probe under load from failing an otherwise healthy row."""
+        probes = [
+            Probe(1, 1_050_000_000, 0.9),
+            Probe(2, 1_100_000_000, None),
+            Probe(3, 1_150_000_000, 0.7),
+            Probe(4, 1_200_000_000, None),
+        ]
+        report = report_case(
+            case="loss-1pct",
+            platform="linux",
+            fault_started_ns=1_000_000_000,
+            fault_cleared_ns=1_000_000_000,
+            probes=probes,
+            bytes_sent=4096,
+            bytes_verified=4096,
+            integrity_ok=True,
+        )
+
+        self.assertEqual(report["post_recovery_probe_loss_count"], 2)
+        self.assertEqual(report["post_recovery_longest_outage_ms"], 50.0)
+        self.assertEqual(report["outcome"], "PASS")
+
     def test_failed_case_report_preserves_partial_transfer_progress(self):
         """Keep useful byte and recovery evidence when the traffic join fails."""
         self.assertIsNotNone(failed_case_report, "the failure report helper should be available")

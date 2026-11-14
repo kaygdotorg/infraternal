@@ -49,6 +49,8 @@ active; link recovery starts when the link is restored. Those three rows apply
 D41's 300 ms reconnect budget from that reference, even when an injected NAT
 mapping remains active after reconvergence. Reports include the recovery
 reference and whether the budget was met.
+After recovery, a run of lost probes longer than one probe timeout (1 s) is a
+relapse and fails the row; `post_recovery_*` fields report it.
 Before injecting a fault, the runner requires at least 1 MiB to be sent and
 received. A flow that cannot establish that sustained payload fails setup and
 its probe and payload processes are stopped.

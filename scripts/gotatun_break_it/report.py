@@ -11,6 +11,10 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+# A run of lost probes after recovery that lasts longer than this is a relapse, not jitter. It
+# matches the matrix's 1 s probe timeout: a single late or dropped probe stays below it.
+RELAPSE_LIMIT_MS = 1_000.0
+
 
 @dataclass(frozen=True, slots=True)
 class Probe:
@@ -121,6 +125,12 @@ def report_case(
     ]
     lost = sum(probe.rtt_ms is None for probe in window)
     p99_ms = _nearest_rank_latency(window)
+    after = (
+        [probe for probe in ordered if probe.sent_ns > recovered_at_ns]
+        if recovered_at_ns is not None
+        else []
+    )
+    relapse_ms = _longest_outage_ms(after)
     manual = list(manual_fixes)
     recovery_ms_from_reference = (
         _elapsed_ms(recovery_reference_ns, recovered_at_ns)
@@ -139,6 +149,7 @@ def report_case(
         and integrity_ok
         and not manual
         and recovery_budget_met is not False
+        and relapse_ms <= RELAPSE_LIMIT_MS
         else "FAIL"
     )
 
@@ -177,6 +188,9 @@ def report_case(
         "manual_fix": bool(manual),
         "manual_fix_actions": manual,
         "recovered_probe_sequence": recovery_probe.sequence if recovery_probe else None,
+        "post_recovery_probe_count": len(after),
+        "post_recovery_probe_loss_count": sum(probe.rtt_ms is None for probe in after),
+        "post_recovery_longest_outage_ms": relapse_ms,
     }
 
 
@@ -235,6 +249,28 @@ def _elapsed_ms(started_ns: int, ended_ns: int | None) -> float | None:
     if ended_ns is None:
         return None
     return round((ended_ns - started_ns) / 1_000_000, 4)
+
+
+def _longest_outage_ms(probes: Sequence[Probe]) -> float:
+    """Return the longest stretch of consecutive lost probes, in milliseconds.
+
+    A stretch runs from its first lost probe to the next answered one, or to the last probe
+    sent when nothing answered again. The recovery window above stops at the first answered
+    probe, so without this a tunnel that recovers once and then dies stays invisible to the
+    probe metrics (#517: 2 probes in the window, 736 of 800 lost afterwards).
+    """
+    longest = 0
+    first_lost_ns: int | None = None
+    for probe in probes:
+        if probe.rtt_ms is None:
+            if first_lost_ns is None:
+                first_lost_ns = probe.sent_ns
+        elif first_lost_ns is not None:
+            longest = max(longest, probe.sent_ns - first_lost_ns)
+            first_lost_ns = None
+    if first_lost_ns is not None:
+        longest = max(longest, probes[-1].sent_ns - first_lost_ns)
+    return round(longest / 1_000_000, 4)
 
 
 def _nearest_rank_latency(probes: Sequence[Probe]) -> float | None:
