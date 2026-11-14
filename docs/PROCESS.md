@@ -51,7 +51,9 @@ Definition of Done (it is in every job prompt):
    reports.
    It does not cover dependents of a changed crate, integration tests, the
    static builds, cargo-deny or the repository checks, so it never replaces
-   `iterate` or `fast` and is never quoted as the gate. Set
+   `iterate` or `fast` and is never quoted as the gate. The `test` row of
+   `fast` and `iterate` runs `cargo test --no-fail-fast` and lists every
+   failing test at its end, so one flaky test cannot hide the others (#509). Set
    `VERIFY_QUICK_BASE` to compare against another ref. Between commits,
    iterate with `scripts/verify iterate` (#204): the
    same fmt, VT fmt, clippy, tests, cargo-deny, plugin compile-out,

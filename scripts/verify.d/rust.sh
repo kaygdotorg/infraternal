@@ -309,6 +309,26 @@ rust_static_build_check() {
 # "iterate" (scripts/verify iterate) runs every check except the static
 # release builds and what only they can check (linkage, D244 key heap, D243
 # size), which dominate the time and are rechecked by the final mode.
+# The `test` row (D345, #509). Runs every workspace test binary even after one
+# fails: plain `cargo test` stops at the first failing binary, so a flake in an
+# early package hid the results of every later package. `--no-fail-fast` keeps
+# the exit code non-zero when anything failed. Because the log is then huge, the
+# failing test names and binaries are repeated at the end. The row's exit code is
+# cargo's own, unchanged.
+rust_test_workspace() {
+    local log status
+    log="$(mktemp)" || return 1
+    cargo test --workspace --locked --no-fail-fast 2>&1 | tee "$log"
+    status="${PIPESTATUS[0]}"
+    if ((status != 0)); then
+        printf '\n--- failing tests (#509) ---\n'
+        { grep -E '^test .+ \.\.\. FAILED$|^error: test failed' "$log" | sort -u; } || :
+        printf -- '--- end of failing tests ---\n'
+    fi
+    rm -f "$log"
+    return "$status"
+}
+
 rust_verify_fast() {
     local mode="${1:-final}"
 
@@ -328,7 +348,7 @@ rust_verify_fast() {
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
     rust_run_gate "Traefik component manifest" python3 -m unittest discover -s scripts/release -p traefik_component_test.py
     rust_run_gate "release component publication" python3 scripts/release/test.py
-    rust_run_gate "test" cargo test --workspace --locked
+    rust_run_gate "test" rust_test_workspace
     rust_run_gate "tracer unit suite" ts_verify_units
     rust_run_gate "SSH inode reuse fixture" scripts/test-ssh-inode-reuse
     # The shared host (#205) patches the native engine and its allocator;
