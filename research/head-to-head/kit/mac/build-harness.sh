@@ -16,7 +16,7 @@ BIN=$J/bin; mkdir -p "$BIN"
 here=$(cd "$(dirname "$0")" && pwd)
 case ${1:?harness|j421net} in
   j421net)
-    cd "$here/../tools/j421net" && CGO_ENABLED=0 go build -trimpath -o "$BIN/j421net" . && shasum -a 256 "$BIN/j421net" ;;
+    cd "$here/../../tools/j421net" && CGO_ENABLED=0 go build -trimpath -o "$BIN/j421net" . && shasum -a 256 "$BIN/j421net" ;;
   harness)
     REV=${2:?full sha}; NAME=${3:?binary name}
     WT=$HOME/worktrees/h2h-mac; TARGET=$HOME/worktrees/h2h-mac-target
