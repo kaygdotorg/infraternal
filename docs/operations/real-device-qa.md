@@ -173,4 +173,7 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
 server. Use `scripts/real-device-qa mac-shot [--url URL] [--out FILE.png]`, which takes the picture from a one-shot
 launchd agent in the console user's session. Run `scripts/real-device-qa mac-shot-setup` once per Mac VM first: it adds
 a Screen Recording grant for `/usr/sbin/screencapture` to the VM's own privacy database (the VM is ours; std's keychain
-is never touched). A stale system dialog on the VM's screen (for example a disk-unlock prompt) shows up in the picture.
+is never touched). Writing that database directly works only because System Integrity Protection is off on the Mac
+VM; with SIP on, give the grant once by hand in System Settings → Privacy & Security → Screen Recording. Both commands
+refuse to run unless the target's host name is `infraternal-macos-01-std`, so a `QA_MAC` pointed at std itself is never
+touched. A stale system dialog on the VM's screen (for example a disk-unlock prompt) shows up in the picture.

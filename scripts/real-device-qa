@@ -186,7 +186,17 @@ cmd_mac() {
 # that asked for the picture needs a Screen Recording grant. So the picture is taken by a one-shot launchd agent in
 # the console user's session (`gui/<uid>`), run by /usr/sbin/screencapture itself, and the grant is a path entry for
 # that binary in the Mac VM's system privacy database. Both are VM-local; std's own keychain is never touched.
+# Both Mac-shot commands touch only our own Mac VM. The TCC grant edits that machine's system privacy database, so the
+# target must prove it is infraternal-macos-01-std before anything runs: a QA_MAC pointed at std itself (the Mac Studio,
+# whose privacy settings and keychain are the owner's) is refused (J680 P1).
+MAC_VM_HOST="infraternal-macos-01-std"
+mac_guard() {
+  local h; h="$(mac 'scutil --get LocalHostName 2>/dev/null || hostname -s')" || die "cannot reach $MAC"
+  [ "$h" = "$MAC_VM_HOST" ] || die "refusing: $MAC is '$h', not our Mac VM $MAC_VM_HOST"
+}
+
 cmd_mac_shot_setup() {
+  mac_guard
   mac 'D="/Library/Application Support/com.apple.TCC/TCC.db"
     n=$(sudo -n sqlite3 "$D" "select count(*) from access where service=\"kTCCServiceScreenCapture\" and client=\"/usr/sbin/screencapture\" and auth_value=2")
     if [ "$n" = 0 ]; then
@@ -200,13 +210,18 @@ cmd_mac_shot() {
   local url="" out=""
   while [ $# -gt 0 ]; do case "$1" in --url) url="$2"; shift 2;; --out) out="$2"; shift 2;; *) die "unknown option $1";; esac; done
   out="${out:-$HOME/.cache/codex-scratch/real-device-qa/mac-shot-$(date -u +%Y%m%dT%H%M%SZ).png}"; mkdir -p "$(dirname "$out")"
-  if [ -n "$url" ]; then mac "open -a Safari '$url' && sleep 8"; fi
+  mac_guard
+  if [ -n "$url" ]; then
+    case "$url" in https://*|http://*) ;; *) die "--url must start with http:// or https://";; esac
+    # The URL travels as a %q-quoted word, so quotes or ; in it can never become shell on the VM (J680 P3).
+    mac "open -a Safari $(printf '%q' "$url") && sleep 8"
+  fi
   mac 'rm -f /tmp/qa-shot.png; L=org.kayg.qa.shot; P=/tmp/$L.plist; U=$(id -u)
     printf "%s" "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Label</key><string>$L</string><key>ProgramArguments</key><array><string>/usr/sbin/screencapture</string><string>-x</string><string>/tmp/qa-shot.png</string></array><key>RunAtLoad</key><true/></dict></plist>" > $P
     launchctl bootout gui/$U/$L 2>/dev/null; launchctl bootstrap gui/$U $P
     for i in $(seq 1 20); do [ -s /tmp/qa-shot.png ] && break; sleep 1; done
     launchctl bootout gui/$U/$L 2>/dev/null; rm -f $P; test -s /tmp/qa-shot.png' || die "no screenshot: run mac-shot-setup first"
-  mac 'cat /tmp/qa-shot.png' > "$out"
+  mac 'cat /tmp/qa-shot.png && rm -f /tmp/qa-shot.png' > "$out"
   echo "screenshot: $out"
 }
 
