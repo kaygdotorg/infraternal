@@ -534,7 +534,8 @@ impl Drop for ClosureRunning {
     }
 }
 
-/// Make transaction control unpreparable while a closure runs (J632, #473).
+/// Make transaction control and connection settings unpreparable while a
+/// closure runs (J632, J681, #473).
 ///
 /// The pool's guarantee is "a write commits only if its closure returns
 /// `Ok`". A closure that could run `COMMIT` itself would break it: whatever it
@@ -542,6 +543,15 @@ impl Drop for ClosureRunning {
 /// worker connection gets an authorizer that denies `BEGIN`, `COMMIT`,
 /// `ROLLBACK`, `SAVEPOINT` and `RELEASE` while [`IN_CLOSURE`] is set; the
 /// statement then fails to prepare with an authorization error.
+///
+/// The same authorizer refuses `PRAGMA name = value` (any pragma that sets
+/// something), `ATTACH` and `DETACH` while a closure runs. Worker connections
+/// are shared by every later job, so a closure that ran
+/// `PRAGMA wal_autocheckpoint = 0` would silently drop the checkpoint hook and
+/// let the WAL grow without bound, and `PRAGMA query_only = 1` would make every
+/// later write fail until a restart (J681). Pragmas that only read
+/// (`PRAGMA wal_autocheckpoint`, `PRAGMA table_info(t)`) stay allowed. The
+/// pool sets its own pragmas when it opens a connection, outside any closure.
 ///
 /// The authorizer stays installed for the connection's life and checks the
 /// flag, instead of being installed around each closure: setting an authorizer
@@ -551,7 +561,14 @@ impl Drop for ClosureRunning {
 /// nothing.
 fn install_transaction_guard(conn: &mut Connection) -> Result<(), Error> {
     conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
-        AuthAction::Transaction { .. } | AuthAction::Savepoint { .. }
+        AuthAction::Transaction { .. }
+        | AuthAction::Savepoint { .. }
+        | AuthAction::Pragma {
+            pragma_value: Some(_),
+            ..
+        }
+        | AuthAction::Attach { .. }
+        | AuthAction::Detach { .. }
             if IN_CLOSURE.with(std::cell::Cell::get) =>
         {
             Authorization::Deny

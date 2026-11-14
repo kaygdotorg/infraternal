@@ -605,6 +605,57 @@ async fn transaction_control_is_refused_inside_closures() {
     assert_eq!(values(&db).await, vec![1, 2]);
 }
 
+/// Connection settings are refused inside closures (J681, #473). Worker
+/// connections outlive the job, so a closure that set `wal_autocheckpoint = 0`
+/// would drop the pool's checkpoint hook for every later write, and
+/// `query_only = 1` would turn every later write into "readonly database".
+/// Reading a pragma stays allowed, and the writer keeps its own settings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_settings_are_refused_inside_closures() {
+    const SETTINGS: [&str; 6] = [
+        "PRAGMA wal_autocheckpoint = 0",
+        "PRAGMA query_only = 1",
+        "PRAGMA busy_timeout = 0",
+        "PRAGMA foreign_keys = OFF",
+        "ATTACH DATABASE ':memory:' AS stray",
+        "DETACH DATABASE stray",
+    ];
+    /// Whether `error` is SQLite's "not authorized" refusal.
+    fn denied(error: &rusqlite::Error) -> bool {
+        error.sqlite_error_code() == Some(rusqlite::ErrorCode::AuthorizationForStatementDenied)
+    }
+    let (_dir, db) = setup("settings", Options::default()).await;
+    db.write(|tx| {
+        for sql in SETTINGS {
+            let error = tx.execute_batch(sql).unwrap_err();
+            assert!(denied(&error), "{sql}: {error:?}");
+        }
+        let auto: i64 = tx.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))?;
+        assert_eq!(auto, 0, "reading a pragma must still work");
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+    db.read(|tx| {
+        for sql in SETTINGS {
+            let error = tx.execute_batch(sql).unwrap_err();
+            assert!(denied(&error), "reader, {sql}: {error:?}");
+        }
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+    // The writer is unchanged: it can still write, and still hands
+    // checkpoints to the checkpointer.
+    db.write(|tx| {
+        tx.execute("INSERT INTO t (v) VALUES (7)", [])?;
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(values(&db).await, vec![7]);
+}
+
 /// Commits never checkpoint inline below the hard limit: the writer's
 /// SQLite auto-checkpoint is replaced by the hook that kicks the checkpointer
 /// thread, so `wal_autocheckpoint` reads 0 there (#473: the inline checkpoint
