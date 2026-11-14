@@ -42,6 +42,97 @@ type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
 pub(crate) type RouteEndpointUpdater =
     Arc<dyn Fn(&[(PublicKey, Option<SocketAddr>)]) -> io::Result<()> + Send + Sync>;
 
+/// A wakeup that coalesces requests: any number of requests made while one is pending are
+/// covered by that one wakeup.
+///
+/// A request costs one relaxed load while a wakeup is already pending, and one swap plus a
+/// `Notify` otherwise; it never allocates, so the packet path can call it. The waiter calls
+/// [`CoalescedWake::begin`] right before it reads the state the requests are about, so a request
+/// that arrives during that read queues exactly one more wakeup and is never lost.
+#[derive(Default)]
+struct CoalescedWake {
+    /// Set from the first request until the waiter starts the work that will observe it.
+    pending: AtomicBool,
+    notify: Notify,
+}
+
+impl CoalescedWake {
+    /// Whether a wakeup is already queued and not yet begun.
+    fn is_pending(&self) -> bool {
+        self.pending.load(Ordering::Relaxed)
+    }
+
+    /// Queue one wakeup unless one is already queued.
+    fn request(&self) {
+        if !self.pending.swap(true, Ordering::AcqRel) {
+            self.notify.notify_one();
+        }
+    }
+
+    /// Wait for the next coalesced wakeup. Cancel-safe: a dropped wait consumes nothing.
+    async fn notified(&self) {
+        self.notify.notified().await;
+    }
+
+    /// Re-arm right before the waiter reads the state the requests are about.
+    ///
+    /// A request after this point is not covered by the read that follows, so it must queue
+    /// another wakeup; clearing the flag first guarantees that it does.
+    fn begin(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
+/// When the next coalesced piece of work runs: a short debounce after the first request, and
+/// never sooner than a floor after the previous run.
+///
+/// The debounce gathers a burst (one kernel change is often several notifications, and traffic
+/// arrives in batches) into one run; the floor bounds the rate however long the burst lasts.
+/// Requests that arrive while a run is scheduled are covered by it, and a request after the run
+/// starts schedules the next one, so the last request in any sequence is always followed by a
+/// run (the trailing edge is kept).
+#[derive(Default)]
+struct CoalescedSchedule {
+    /// When the scheduled run is due; `None` while nothing is scheduled.
+    due: Option<Instant>,
+    /// When the previous run started.
+    last: Option<Instant>,
+}
+
+impl CoalescedSchedule {
+    /// Whether a run is scheduled. Callers stop listening for requests while it is.
+    fn is_armed(&self) -> bool {
+        self.due.is_some()
+    }
+
+    /// Schedule a run for a request seen at `now`: after the debounce, and no sooner than the
+    /// floor after the previous run.
+    fn arm(&mut self, now: Instant) {
+        let debounce = now + COALESCE_DEBOUNCE;
+        let minimum = self.last.map_or(now, |last| last + COALESCE_MIN_INTERVAL);
+        self.due = Some(debounce.max(minimum));
+    }
+
+    /// Sleep until the scheduled run is due, or forever while none is scheduled.
+    async fn wait(&self) {
+        if let Some(at) = self.due {
+            tokio::time::sleep_until(at).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// The run starts: nothing is scheduled any more.
+    fn start(&mut self) {
+        self.due = None;
+    }
+
+    /// The run finished at `now`; the floor counts from here.
+    fn finish(&mut self, now: Instant) {
+        self.last = Some(now);
+    }
+}
+
 /// Coalesces traffic and authenticated-endpoint notifications into bounded route refreshes.
 ///
 /// Packets in either direction request a refresh: an inbound packet may have taught `GotaTun` a
@@ -49,14 +140,11 @@ pub(crate) type RouteEndpointUpdater =
 /// since the last refresh (#489 J549 P1). A peer that only receives from this host, with a stable
 /// endpoint, would otherwise keep an oversized route budget and black-hole bulk transfers.
 ///
-/// The packet path pays one relaxed load while a refresh is already queued, and one swap plus a
-/// wakeup otherwise; it never allocates. The worker clears `pending` before it reads endpoints
-/// and route MTUs, so traffic that arrives during that read queues exactly one more refresh.
+/// The worker clears the request before it reads endpoints and route MTUs, so traffic that
+/// arrives during that read queues exactly one more refresh (see [`CoalescedWake`]).
 #[derive(Default)]
 pub(crate) struct EndpointRefreshSignal {
-    /// Set from the first request until the worker starts the refresh that will observe it.
-    pending: AtomicBool,
-    notify: Notify,
+    wake: CoalescedWake,
 }
 
 impl EndpointRefreshSignal {
@@ -65,51 +153,34 @@ impl EndpointRefreshSignal {
     /// Call it after the packet is handed on. It is cheap enough for every packet.
     pub(crate) fn traffic(&self) {
         // A queued refresh will read state after this packet, so it already covers it.
-        if self.pending.load(Ordering::Relaxed) {
+        if self.wake.is_pending() {
             return;
         }
-        self.request_refresh();
+        self.wake.request();
     }
 
     /// Tell the worker that its authenticated endpoint snapshot changed.
     pub(crate) fn endpoint_changed(&self) {
-        self.request_refresh();
-    }
-
-    /// Queue one refresh unless one is already queued.
-    fn request_refresh(&self) {
-        if !self.pending.swap(true, Ordering::AcqRel) {
-            self.notify.notify_one();
-        }
+        self.wake.request();
     }
 
     /// Wait for the next coalesced refresh request.
     async fn notified(&self) {
-        self.notify.notified().await;
+        self.wake.notified().await;
     }
 
     /// Re-arm the signal right before the worker reads endpoints and route MTUs.
-    ///
-    /// A request after this point is not covered by the read that follows, so it must queue
-    /// another refresh; clearing the flag first guarantees that it does.
     fn begin_refresh(&self) {
-        self.pending.store(false, Ordering::Release);
+        self.wake.begin();
     }
 }
 
-/// Wait for a scheduled route refresh, or stay asleep until traffic requests one.
-async fn endpoint_refresh_due(at: Option<tokio::time::Instant>) {
-    if let Some(at) = at {
-        tokio::time::sleep_until(at).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
-}
-
-/// Coalesce closely spaced packet deliveries before reading all live peer endpoints.
-const ENDPOINT_REFRESH_DEBOUNCE: Duration = Duration::from_millis(25);
-/// Bound route refreshes and authenticated endpoint scans to four per second.
-const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
+/// Coalesce closely spaced requests (packet deliveries, kernel notifications) into one run.
+const COALESCE_DEBOUNCE: Duration = Duration::from_millis(25);
+/// Bound each coalesced kind of work (route refreshes and endpoint scans) to four runs a second.
+const COALESCE_MIN_INTERVAL: Duration = Duration::from_millis(250);
+/// The endpoint scan's period; it shares the coalesced work's floor.
+const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = COALESCE_MIN_INTERVAL;
 
 /// How long a forced relay handshake may wait; `GotaTun`'s own wait has no deadline.
 /// One `WireGuard` handshake attempt is 5 s, after which the peer timers retry.
@@ -733,8 +804,7 @@ async fn run_worker(
     endpoint_refresh: Arc<EndpointRefreshSignal>,
     route_endpoint_updater: RouteEndpointUpdater,
 ) {
-    let mut endpoint_refresh_at = None;
-    let mut last_endpoint_refresh = None;
+    let mut endpoint_refresh_schedule = CoalescedSchedule::default();
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
@@ -778,21 +848,17 @@ async fn run_worker(
                     return;
                 }
             },
-            () = endpoint_refresh.notified(), if endpoint_refresh_at.is_none() => {
-                let now = tokio::time::Instant::now();
-                let debounce = now + ENDPOINT_REFRESH_DEBOUNCE;
-                let minimum = last_endpoint_refresh
-                    .map_or(now, |last| last + ENDPOINT_REFRESH_MIN_INTERVAL);
-                endpoint_refresh_at = Some(debounce.max(minimum));
+            () = endpoint_refresh.notified(), if !endpoint_refresh_schedule.is_armed() => {
+                endpoint_refresh_schedule.arm(Instant::now());
             }
-            () = endpoint_refresh_due(endpoint_refresh_at) => {
-                endpoint_refresh_at = None;
+            () = endpoint_refresh_schedule.wait() => {
+                endpoint_refresh_schedule.start();
                 endpoint_refresh.begin_refresh();
                 match state.refresh_live_peer_endpoints(&route_endpoint_updater).await {
                     Ok(endpoints) => observed_endpoints = Some(endpoints),
                     Err(error) => tracing::warn!(error = %error, "could not refresh mesh routes from live peer endpoints"),
                 }
-                last_endpoint_refresh = Some(tokio::time::Instant::now());
+                endpoint_refresh_schedule.finish(Instant::now());
             }
             _ = endpoint_scan.tick() => {
                 let endpoints = state.live_peer_endpoint_snapshot().await;
@@ -1486,7 +1552,7 @@ mod tests {
         assert!(review_endpoint_refresh_ready(&signal));
         assert!(!review_endpoint_refresh_ready(&signal));
         signal.begin_refresh();
-        assert!(!signal.pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!signal.wake.pending.load(std::sync::atomic::Ordering::Acquire));
         assert!(!review_endpoint_refresh_ready(&signal));
         signal.traffic();
         assert!(review_endpoint_refresh_ready(&signal));
@@ -1505,7 +1571,7 @@ mod tests {
         assert!(review_endpoint_refresh_ready(&signal));
         assert!(!review_endpoint_refresh_ready(&signal));
         signal.begin_refresh();
-        assert!(!signal.pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!signal.wake.pending.load(std::sync::atomic::Ordering::Acquire));
     }
 
     /// The worker rebuilds a device whose packet task ended on a fatal error, and `mesh status`
