@@ -34,9 +34,16 @@ s = socket.socket(socket.AF_INET6)
 s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
 s.bind(("::", 2222)); s.listen(4)
 time.sleep(60)' "$HOLDER" & HOLDER_PID=$!
-# sleep: let the holder bind its listener before server init reads /proc.
-sleep 0.5
-echo "HOLDER=$HOLDER comm=$(cat /proc/$HOLDER_PID/comm) listening=$(grep -c ' 0A ' /proc/net/tcp6)"
+for _ in $(seq 1 50); do
+    [ "$(cat /proc/$HOLDER_PID/comm)" = "$HOLDER" ] && grep -q ':08AE .* 0A ' /proc/net/tcp6 && break
+    # sleep: poll until the holder has renamed itself and bound 2222 (0x08AE).
+    sleep 0.1
+done
+echo "HOLDER=$HOLDER comm=$(cat /proc/$HOLDER_PID/comm) listening_2222=$(grep -c ':08AE .* 0A ' /proc/net/tcp6)"
+if ! grep -q ':08AE .* 0A ' /proc/net/tcp6 || [ "$(cat /proc/$HOLDER_PID/comm)" != "$HOLDER" ]; then
+    echo "SETUP_FAILED: the holder never listened on 2222 as $HOLDER"
+    kill "$HOLDER_PID"; rm -rf "$SCRATCH"; exit 2
+fi
 env -i PATH=/usr/bin:/bin HOME="$SCRATCH" \
     INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR="$SCRATCH/u" \
     "$BIN" --json server init --system --dry-run --data "$SCRATCH/d" \
@@ -49,6 +56,6 @@ if [ "$STATUS" -eq 0 ] && grep -q 'host-firewall-server.json' "$SCRATCH/out"; th
     rm -rf "$SCRATCH"
     exit 1
 fi
-echo "CONSOLE_INIT=refused (status $STATUS): $(tr '\n' ' ' < "$SCRATCH/err" | head -c 400)"
+echo "CONSOLE_INIT=refused (status $STATUS): $(cat "$SCRATCH/err" "$SCRATCH/out" | tr '\n' ' ' | head -c 400)"
 rm -rf "$SCRATCH"
 exit 0
