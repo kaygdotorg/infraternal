@@ -1614,32 +1614,46 @@ pub fn admin_rule_for_ssh_session(value: &str) -> Result<AllowRule, PolicyError>
     })
 }
 
-/// Whether `rules` keep an SSH path when there is no live session to check.
+/// Whether `rules` keep an SSH path to every port sshd uses when there is no live session to check.
 ///
 /// A console install has no `SSH_CONNECTION`, so [`validate_ssh_connection`]
 /// cannot prove the saved default-drop table keeps sshd reachable, and
 /// [`validate`] accepts any TCP rule (sshd may not listen on 22). This
-/// requires a TCP rule for one of `sshd_ports`, the ports [`sshd_ports`]
-/// learned. An empty list never passes: guessing 22 let a console install
-/// lock out an sshd configured on 2222 (J608, #483).
+/// requires a counting rule for **every** port in `sshd_ports`, the union
+/// [`sshd_ports`] learned: a rule for the configured port alone dropped an
+/// sshd running on another one (J658, #483). An empty list never passes:
+/// guessing 22 let a console install lock out an sshd on 2222 (J608).
 ///
-/// A rule limited to the loopback interface, to a single source address
-/// (/32 or /128), or to a loopback source network (`127.0.0.0/8`,
-/// `::1/127`, J658) does not count: it admits only local logins or one
-/// machine, which proves nothing about the administrators' way in (J608
-/// P3). A real interface or a real source network is a deliberate admin
-/// path and counts.
+/// See [`uncovered_sshd_ports`] for which rules count.
 #[must_use]
 pub fn admits_sshd(rules: &[AllowRule], sshd_ports: &[u16]) -> bool {
-    rules.iter().any(|rule| {
+    !sshd_ports.is_empty() && uncovered_sshd_ports(rules, sshd_ports).is_empty()
+}
+
+/// The ports in `sshd_ports` that no rule in `rules` admits as an SSH path, in order.
+///
+/// A rule counts for a port when it is TCP on that port and is not limited
+/// to the loopback interface, to a single source address (/32 or /128), or
+/// to a loopback source network (`127.0.0.0/8`, `::1/127`, ...): those admit
+/// only local logins or one machine, which proves nothing about the
+/// administrators' way in (J608, J658). A real interface or a real source
+/// network is a deliberate admin path and counts.
+#[must_use]
+pub fn uncovered_sshd_ports(rules: &[AllowRule], sshd_ports: &[u16]) -> Vec<u16> {
+    let counts = |rule: &AllowRule, port: u16| {
         rule.protocol == Protocol::Tcp
-            && sshd_ports.contains(&rule.port)
+            && rule.port == port
             && rule.interface.as_deref() != Some("lo")
             && rule.source.as_ref().is_none_or(|source| {
                 source.prefix() < if source.address().is_ipv4() { 32 } else { 128 }
                     && !loopback_only(source)
             })
-    })
+    };
+    sshd_ports
+        .iter()
+        .copied()
+        .filter(|port| !rules.iter().any(|rule| counts(rule, *port)))
+        .collect()
 }
 
 /// Whether every address in `source` is a loopback address.
@@ -1661,18 +1675,91 @@ fn loopback_only(source: &IpPrefix) -> bool {
     }
 }
 
+/// One place sshd's ports were learned from, for a console install.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SshdPortSource {
+    /// A short name for the source, for messages ("sshd -G", ...).
+    pub source: &'static str,
+    /// The TCP ports this source names, sorted and without duplicates; never empty.
+    pub ports: Vec<u16>,
+}
+
 /// sshd's TCP ports as learned for a console install, or why none could be.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SshdPorts {
-    /// The ports sshd accepts connections on, sorted, and where they came from.
-    Known {
-        /// The TCP ports, sorted and without duplicates; never empty.
-        ports: Vec<u16>,
-        /// A short name for the source, for messages ("sshd -G", ...).
-        source: &'static str,
-    },
+    /// Every source that named ports; never empty. The saved table must
+    /// admit all of their ports ([`SshdPorts::required`]).
+    Known(Vec<SshdPortSource>),
     /// No source named a port; the text lists what was tried and why it failed.
     Unknown(String),
+}
+
+impl SshdPorts {
+    /// Combine what each source answered: every port any source named is required.
+    ///
+    /// Sources that failed or named nothing add their reason to the text an
+    /// [`SshdPorts::Unknown`] carries when no source answered at all.
+    #[must_use]
+    pub fn combine(answers: Vec<(&'static str, Result<Vec<u16>, String>)>) -> Self {
+        let mut known = Vec::new();
+        let mut tried = Vec::new();
+        for (source, answer) in answers {
+            match answer {
+                Ok(mut ports) => {
+                    ports.retain(|port| *port != 0);
+                    ports.sort_unstable();
+                    ports.dedup();
+                    if ports.is_empty() {
+                        tried.push(format!("{source}: no port"));
+                    } else {
+                        known.push(SshdPortSource { source, ports });
+                    }
+                }
+                Err(reason) => tried.push(format!("{source}: {reason}")),
+            }
+        }
+        if known.is_empty() {
+            Self::Unknown(tried.join("; "))
+        } else {
+            Self::Known(known)
+        }
+    }
+
+    /// The union of all known ports, sorted and without duplicates; empty when unknown.
+    #[must_use]
+    pub fn required(&self) -> Vec<u16> {
+        let Self::Known(sources) = self else {
+            return Vec::new();
+        };
+        let mut ports = sources
+            .iter()
+            .flat_map(|source| source.ports.iter().copied())
+            .collect::<Vec<_>>();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
+    /// Each source and its ports, for a refusal: `22 (sshd -G), 2222 (running sshd processes)`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Known(sources) => sources
+                .iter()
+                .map(|source| {
+                    let ports = source
+                        .ports
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{ports} (from {})", source.source)
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+            Self::Unknown(tried) => tried.clone(),
+        }
+    }
 }
 
 /// The fixed places sshd is looked for, never through `PATH` (the same rule as nft, D386).
@@ -1688,17 +1775,23 @@ const SSHD_CANDIDATES: &[&str] = &[
     "/root/.nix-profile/bin/sshd",
 ];
 
-/// Learn the TCP ports sshd accepts on, for a console `server init`.
+/// Learn every TCP port sshd accepts on, or will after a restart, for a console `server init`.
 ///
-/// The saved table outlives this boot, so configuration wins over what
-/// happens to be listening now. Sources, first answer wins:
+/// The saved table must keep both the sshd running now and the one the
+/// next boot or restart starts, so every source is asked and the answers
+/// are combined ([`SshdPorts::combine`]); none of them wins over another.
+/// Taking the first answer let `sshd -G`'s configured 22 hide a running
+/// sshd started with `-p 2222` (`SSHD_OPTS`, `OPTIONS`, an ExecStart
+/// drop-in, or a `Port` edit not yet restarted), and the table dropped it
+/// (J658, #483). The sources:
 /// 1. An `ssh.socket` or `sshd.socket` unit that is active or enabled: the
 ///    service manager owns the listener (socket activation, the default on
 ///    current Ubuntu), and sshd's own `Port` lines are ignored for it.
-/// 2. sshd's effective configuration, `sshd -G` (no host keys needed), then
+/// 2. sshd's effective configuration, `sshd -G` (no host keys needed), else
 ///    `sshd -T` for older releases. Both work when sshd is stopped, but only
 ///    as root, because the configuration files are root-only.
-/// 3. Sockets held by running processes named `sshd` ([`sshd_listening_ports`]).
+/// 3. Listening sockets held by running `sshd` processes owned by root or by
+///    the ssh service's own account ([`sshd_listening_ports`]).
 ///
 /// systemctl and sshd are run only from fixed, root-owned paths, with a
 /// clean environment. When nothing answers the result is
@@ -1706,31 +1799,44 @@ const SSHD_CANDIDATES: &[&str] = &[
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn sshd_ports() -> SshdPorts {
-    let mut tried = Vec::new();
+    let mut answers = Vec::new();
+    let mut owners = vec![0];
     match discover_systemctl(None) {
-        Ok(systemctl) => match capture(
-            &systemctl,
-            &[
-                "show",
-                "--property=Listen,ActiveState,UnitFileState",
-                "ssh.socket",
-                "sshd.socket",
-            ],
-        ) {
-            Ok(text) => {
-                let ports = socket_unit_ports(&text);
-                if !ports.is_empty() {
-                    return SshdPorts::Known {
-                        ports,
-                        source: "sshd's systemd socket unit",
-                    };
-                }
-                tried.push("no active or enabled ssh.socket or sshd.socket".to_owned());
+        Ok(systemctl) => {
+            answers.push((
+                "sshd's systemd socket unit",
+                capture(
+                    &systemctl,
+                    &[
+                        "show",
+                        "--property=Listen,ActiveState,UnitFileState",
+                        "ssh.socket",
+                        "sshd.socket",
+                    ],
+                )
+                .map(|text| socket_unit_ports(&text)),
+            ));
+            if let Ok(text) = capture(
+                &systemctl,
+                &["show", "--property=UID", "ssh.service", "sshd.service"],
+            ) {
+                owners.extend(service_uids(&text));
             }
-            Err(reason) => tried.push(format!("systemctl show: {reason}")),
-        },
-        Err(error) => tried.push(error.to_string()),
+        }
+        Err(error) => answers.push(("systemctl", Err(error.to_string()))),
     }
+    answers.push(("sshd's configuration", sshd_config_answer()));
+    answers.push((
+        "running sshd processes",
+        Ok(sshd_listening_ports(&owners)),
+    ));
+    SshdPorts::combine(answers)
+}
+
+/// Ask sshd at a fixed, root-owned path for its effective ports: `sshd -G`, else `sshd -T`.
+#[cfg(target_os = "linux")]
+fn sshd_config_answer() -> Result<Vec<u16>, String> {
+    let mut tried = Vec::new();
     let mut sshd = None;
     for candidate in SSHD_CANDIDATES {
         match safe_nft_path(Path::new(candidate)) {
@@ -1742,32 +1848,36 @@ pub fn sshd_ports() -> SshdPorts {
             Err(_) => tried.push(format!("{candidate} is not root-controlled")),
         }
     }
-    match sshd {
-        Some(sshd) => {
-            for (flag, source) in [("-G", "sshd -G"), ("-T", "sshd -T")] {
-                match capture(&sshd, &[flag]) {
-                    Ok(text) => {
-                        let ports = sshd_config_ports(&text);
-                        if !ports.is_empty() {
-                            return SshdPorts::Known { ports, source };
-                        }
-                        tried.push(format!("{source} printed no port"));
-                    }
-                    Err(reason) => tried.push(format!("{source}: {reason}")),
+    let Some(sshd) = sshd else {
+        tried.push("no sshd at the fixed paths".to_owned());
+        return Err(tried.join("; "));
+    };
+    for (flag, source) in [("-G", "sshd -G"), ("-T", "sshd -T")] {
+        match capture(&sshd, &[flag]) {
+            Ok(text) => {
+                let ports = sshd_config_ports(&text);
+                if !ports.is_empty() {
+                    return Ok(ports);
                 }
+                tried.push(format!("{source} printed no port"));
             }
+            Err(reason) => tried.push(format!("{source}: {reason}")),
         }
-        None => tried.push("no sshd at the fixed paths".to_owned()),
     }
-    let ports = sshd_listening_ports();
-    if !ports.is_empty() {
-        return SshdPorts::Known {
-            ports,
-            source: "running sshd processes",
-        };
-    }
-    tried.push("no listening sshd process was seen".to_owned());
-    SshdPorts::Unknown(tried.join("; "))
+    Err(tried.join("; "))
+}
+
+/// The numeric `UID=` values in `systemctl show --property=UID` output.
+///
+/// A service running as root, or not running, prints `UID=[not set]`, which
+/// adds nothing; a service with `User=` or `DynamicUser=` prints its
+/// account's uid while it runs.
+#[must_use]
+pub fn service_uids(text: &str) -> Vec<u32> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("UID="))
+        .filter_map(|value| value.trim().parse::<u32>().ok())
+        .collect()
 }
 
 /// Run a fixed, already trusted program with a clean environment and return its stdout.
@@ -1861,18 +1971,27 @@ pub fn socket_unit_ports(text: &str) -> Vec<u16> {
     ports
 }
 
-/// The TCP ports processes named `sshd` are listening on, sorted; empty when none can be seen.
+/// The TCP ports `sshd` processes owned by one of `owners` listen on, sorted; empty when none.
 ///
 /// Reads `/proc/net/tcp{,6}` for listening sockets and maps their inodes to
 /// `sshd` processes through `/proc/<pid>/fd`, which only root can read for
-/// root's processes. Used only by a console `server init`, never at boot
-/// (sshd may not have started yet) and never as the only proof: the saved
-/// policy still needs an explicit rule ([`admits_sshd`]). A socket-activated
-/// sshd's listener belongs to the service manager, so it is not seen here;
-/// [`sshd_ports`] asks the socket unit and sshd's configuration first.
+/// root's processes. A process counts only when its real and effective uids
+/// (from `/proc/<pid>/status`) are both in `owners`: any user can start a
+/// program named `sshd`, and its port must not become "sshd's port"
+/// (J658). The owner of `/proc/<pid>` is not used, because a process that
+/// marks itself non-dumpable shows as root there.
+///
+/// Listeners bound only to a loopback address are skipped: the network
+/// cannot reach them, so they need no rule.
+///
+/// Used only by a console `server init`, never at boot (sshd may not have
+/// started yet) and never as the only proof: the saved policy still needs
+/// an explicit rule ([`admits_sshd`]). A socket-activated sshd's listener
+/// belongs to the service manager, so it is not seen here; [`sshd_ports`]
+/// asks the socket unit too.
 #[cfg(target_os = "linux")]
 #[must_use]
-pub fn sshd_listening_ports() -> Vec<u16> {
+pub fn sshd_listening_ports(owners: &[u32]) -> Vec<u16> {
     /// Map listening-socket inodes to their local ports from one `/proc/net` table.
     fn listeners(table: &str, into: &mut std::collections::HashMap<u64, u16>) {
         let Ok(text) = fs::read_to_string(table) else {
@@ -1886,10 +2005,13 @@ pub fn sshd_listening_ports() -> Vec<u16> {
             else {
                 continue;
             };
-            let port = local
-                .rsplit_once(':')
-                .and_then(|(_, port)| u16::from_str_radix(port, 16).ok());
-            if let (Some(port), Ok(inode)) = (port, inode.parse::<u64>()) {
+            let Some((address, port)) = local.rsplit_once(':') else {
+                continue;
+            };
+            if proc_net_address_is_loopback(address) {
+                continue;
+            }
+            if let (Ok(port), Ok(inode)) = (u16::from_str_radix(port, 16), inode.parse::<u64>()) {
                 into.insert(inode, port);
             }
         }
@@ -1904,6 +2026,22 @@ pub fn sshd_listening_ports() -> Vec<u16> {
     for process in processes.filter_map(Result::ok) {
         let path = process.path();
         if fs::read_to_string(path.join("comm")).map_or(true, |name| name.trim_end() != "sshd") {
+            continue;
+        }
+        let owned = fs::read_to_string(path.join("status")).is_ok_and(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Uid:"))
+                .is_some_and(|uids| {
+                    let mut uids = uids.split_ascii_whitespace().map(str::parse::<u32>);
+                    matches!(
+                        (uids.next(), uids.next()),
+                        (Some(Ok(real)), Some(Ok(effective)))
+                            if owners.contains(&real) && owners.contains(&effective)
+                    )
+                })
+        });
+        if !owned {
             continue;
         }
         let Ok(descriptors) = fs::read_dir(path.join("fd")) else {
@@ -1926,6 +2064,40 @@ pub fn sshd_listening_ports() -> Vec<u16> {
     ports.sort_unstable();
     ports.dedup();
     ports
+}
+
+/// Whether a `/proc/net/tcp{,6}` local address (hex) is a loopback address.
+///
+/// The kernel prints each 32-bit word of the network-order address as a
+/// native-endian hex number, so the bytes come back with `to_ne_bytes`.
+/// IPv4-mapped loopback (`::ffff:127.x.y.z`) counts as loopback too. An
+/// unparsable address is not loopback, so its listener is kept.
+#[must_use]
+pub fn proc_net_address_is_loopback(hex: &str) -> bool {
+    let words = hex
+        .as_bytes()
+        .chunks(8)
+        .map(|word| {
+            std::str::from_utf8(word)
+                .ok()
+                .and_then(|word| u32::from_str_radix(word, 16).ok())
+        })
+        .collect::<Option<Vec<_>>>();
+    match words.as_deref() {
+        Some([word]) if hex.len() == 8 => Ipv4Addr::from(word.to_ne_bytes()).is_loopback(),
+        Some(words) if hex.len() == 32 && words.len() == 4 => {
+            let mut bytes = [0_u8; 16];
+            for (chunk, word) in bytes.chunks_mut(4).zip(words) {
+                chunk.copy_from_slice(&word.to_ne_bytes());
+            }
+            let address = Ipv6Addr::from(bytes);
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| mapped.is_loopback())
+        }
+        _ => false,
+    }
 }
 
 /// Check every directory component against root writes up to a fixed safe anchor.
@@ -2494,7 +2666,12 @@ mod tests {
             &[22]
         ));
         assert!(!super::admits_sshd(&rules(&["*,*,udp,22"]), &[22]));
-        assert!(super::admits_sshd(&rules(&["*,*,tcp,2222"]), &[22, 2222]));
+        // J658: every port sshd uses needs a rule, not just one of them.
+        assert!(!super::admits_sshd(&rules(&["*,*,tcp,2222"]), &[22, 2222]));
+        assert!(super::admits_sshd(
+            &rules(&["*,*,tcp,2222", "eth0,*,tcp,22"]),
+            &[22, 2222]
+        ));
         assert!(!super::admits_sshd(&rules(&["*,*,tcp,22"]), &[2222]));
         // J608 (P2): with no port learned, 22 is not assumed.
         assert!(!super::admits_sshd(&rules(&["*,*,tcp,22"]), &[]));
@@ -2536,6 +2713,85 @@ mod tests {
             &rules(&["lo,*,tcp,22", "*,*,tcp,22"]),
             &[22]
         ));
+    }
+
+    /// J658 (P2): every source's ports are required; the configuration never hides a live listener.
+    ///
+    /// sshd_config says 22 while the running sshd listens on 2222 (started
+    /// with `-p 2222`). Taking the first answer kept only 22, and the saved
+    /// table dropped the running sshd. Combined, both are required, and a
+    /// refusal names each port with its source.
+    #[test]
+    fn review_j658_sshd_sources_are_combined_not_first_wins() {
+        use super::{SshdPortSource, SshdPorts};
+        let combined = SshdPorts::combine(vec![
+            ("sshd's systemd socket unit", Ok(Vec::new())),
+            ("sshd's configuration", Ok(vec![22])),
+            ("running sshd processes", Ok(vec![2222, 2222, 0])),
+        ]);
+        assert_eq!(
+            combined,
+            SshdPorts::Known(vec![
+                SshdPortSource {
+                    source: "sshd's configuration",
+                    ports: vec![22],
+                },
+                SshdPortSource {
+                    source: "running sshd processes",
+                    ports: vec![2222],
+                },
+            ])
+        );
+        assert_eq!(combined.required(), vec![22, 2222]);
+        assert_eq!(
+            combined.describe(),
+            "22 (from sshd's configuration); 2222 (from running sshd processes)"
+        );
+        let rule = |value: &str| vec![value.parse::<super::AllowRule>().expect("rule")];
+        assert_eq!(
+            super::uncovered_sshd_ports(&rule("*,*,tcp,22"), &combined.required()),
+            vec![2222]
+        );
+        // Nothing answered: unknown, with every reason kept.
+        let unknown = SshdPorts::combine(vec![
+            ("systemctl", Err("no systemctl at the fixed paths".to_owned())),
+            ("sshd's configuration", Err("sshd -G: Permission denied".to_owned())),
+            ("running sshd processes", Ok(Vec::new())),
+        ]);
+        assert!(unknown.required().is_empty());
+        let SshdPorts::Unknown(tried) = unknown else {
+            panic!("no port must be unknown");
+        };
+        assert!(tried.contains("Permission denied") && tried.contains("running sshd processes: no port"));
+        assert_eq!(
+            super::service_uids("UID=[not set]\n\nUID=105\n"),
+            vec![105]
+        );
+    }
+
+    /// A listener bound only to loopback needs no rule; wildcard and real addresses do.
+    #[test]
+    fn proc_net_loopback_listeners_are_recognised() {
+        let v4 = |address: [u8; 4]| format!("{:08X}", u32::from_ne_bytes(address));
+        let v6 = |address: std::net::Ipv6Addr| {
+            address
+                .octets()
+                .chunks(4)
+                .map(|word| format!("{:08X}", u32::from_ne_bytes(word.try_into().expect("word"))))
+                .collect::<String>()
+        };
+        assert!(super::proc_net_address_is_loopback(&v4([127, 0, 0, 1])));
+        assert!(super::proc_net_address_is_loopback(&v4([127, 9, 9, 9])));
+        assert!(!super::proc_net_address_is_loopback(&v4([0, 0, 0, 0])));
+        assert!(!super::proc_net_address_is_loopback(&v4([10, 0, 0, 1])));
+        assert!(super::proc_net_address_is_loopback(&v6(std::net::Ipv6Addr::LOCALHOST)));
+        assert!(super::proc_net_address_is_loopback(&v6(
+            "::ffff:127.0.0.1".parse().expect("mapped")
+        )));
+        assert!(!super::proc_net_address_is_loopback(&v6(
+            std::net::Ipv6Addr::UNSPECIFIED
+        )));
+        assert!(!super::proc_net_address_is_loopback("zz"));
     }
 
     /// J658 (P3): a loopback source network is no SSH path, whatever its prefix length.
@@ -2760,7 +3016,8 @@ mod tests {
         std::fs::create_dir_all(&scratch).expect("scratch");
         let fake = scratch.join("sshd");
         std::fs::copy(&shell, &fake).expect("copy the shell as sshd");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        // Wildcard, not loopback: loopback-only listeners are skipped by design.
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("listener");
         let port = listener.local_addr().expect("address").port();
         let mut holder = Command::new(&fake)
             .args(["-c", "read line"])
@@ -2779,7 +3036,10 @@ mod tests {
         }
         let alive = holder.try_wait().expect("holder state").is_none();
         let named = std::fs::read_to_string(&comm).unwrap_or_default();
-        let ports = super::sshd_listening_ports();
+        let own = std::fs::metadata("/proc/self").expect("proc").uid();
+        // Control: counted as its own account, the holder's port is seen.
+        let as_service_account = super::sshd_listening_ports(&[0, own]);
+        let ports = super::sshd_listening_ports(&[0]);
         let _ = holder.kill();
         let _ = holder.wait();
         let _ = std::fs::remove_dir_all(&scratch);
@@ -2787,6 +3047,11 @@ mod tests {
             alive && named.trim_end() == "sshd",
             "the holder is not a live process named sshd (alive {alive}, comm {named:?}); \
              the check below would prove nothing"
+        );
+        assert!(
+            as_service_account.contains(&port),
+            "the holder's port {port} was not seen even for its own account \
+             ({as_service_account:?}); the check below would prove nothing"
         );
         assert!(
             !ports.contains(&port),

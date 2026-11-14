@@ -259,40 +259,43 @@ fn console_sshd_ports() -> host_firewall::SshdPorts {
 /// `review_j608_socket_sshd_console.sh`.
 #[cfg(all(target_os = "linux", test))]
 fn console_sshd_ports() -> host_firewall::SshdPorts {
-    host_firewall::SshdPorts::Known {
-        ports: vec![22],
+    host_firewall::SshdPorts::Known(vec![host_firewall::SshdPortSource {
         source: "unit test",
-    }
+        ports: vec![22],
+    }])
 }
 
-/// From a console, require an admin rule for a port sshd really accepts on (J589 P3, J608).
+/// From a console, require an admin rule for every port sshd uses (J589 P3, J608, J658).
 ///
 /// Over SSH the live session's port is checked by
 /// `validate_ssh_connection`. From a console nothing proves the saved
-/// default-drop table keeps an SSH path, so the rules must admit one of the
-/// ports [`host_firewall::sshd_ports`] learned. When no port can be learned
-/// the install is refused: guessing 22 locked out an sshd configured on 2222.
+/// default-drop table keeps an SSH path, so the rules must admit every port
+/// [`host_firewall::sshd_ports`] learned: the configured ones, the socket
+/// unit's and the running sshd's. A rule for the configured port alone
+/// dropped an sshd running with `-p 2222` (J658). When no port can be
+/// learned the install is refused: guessing 22 locked out an sshd on 2222.
 #[cfg(target_os = "linux")]
 fn console_admin_path(
     rules: &[host_firewall::AllowRule],
     sshd: &host_firewall::SshdPorts,
 ) -> Result<(), String> {
     match sshd {
-        host_firewall::SshdPorts::Known { ports, .. }
-            if host_firewall::admits_sshd(rules, ports) =>
-        {
-            Ok(())
-        }
-        host_firewall::SshdPorts::Known { ports, source } => {
-            let ports = ports
+        host_firewall::SshdPorts::Known(_) => {
+            let missing = host_firewall::uncovered_sshd_ports(rules, &sshd.required());
+            if missing.is_empty() {
+                return Ok(());
+            }
+            let missing = missing
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(format!(
-                "no --host-firewall-allow rule admits sshd's port {ports} (from {source}); rules \
-                 limited to lo or to one source address do not count; add one such as \
-                 '*,*,tcp,<port>' so the default-drop host table keeps an SSH path"
+                "no --host-firewall-allow rule admits sshd's port {missing}; sshd uses {}; \
+                 every one needs a rule; rules limited to lo, to one source address or to a \
+                 loopback network do not count; add one such as '*,*,tcp,<port>' so the \
+                 default-drop host table keeps an SSH path",
+                sshd.describe()
             ))
         }
         host_firewall::SshdPorts::Unknown(tried) => Err(format!(
@@ -607,7 +610,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn console_install_never_guesses_sshd_port() {
-        use super::host_firewall::SshdPorts;
+        use super::host_firewall::{SshdPortSource, SshdPorts};
         let rules = |values: &[&str]| {
             values
                 .iter()
@@ -618,15 +621,41 @@ mod tests {
         let refused = super::console_admin_path(&rules(&["*,*,tcp,22"]), &unknown)
             .expect_err("an unknown sshd port must not pass as 22");
         assert!(refused.contains("could not be determined"), "{refused}");
-        let on_2222 = SshdPorts::Known {
+        let on_2222 = SshdPorts::Known(vec![SshdPortSource {
+            source: "sshd's configuration",
             ports: vec![2222],
-            source: "sshd -G",
-        };
+        }]);
         let refused = super::console_admin_path(&rules(&["*,*,tcp,22"]), &on_2222)
             .expect_err("tcp/22 does not reach an sshd on 2222");
-        assert!(refused.contains("2222 (from sshd -G)"), "{refused}");
+        assert!(
+            refused.contains("2222 (from sshd's configuration)"),
+            "{refused}"
+        );
         assert_eq!(
             super::console_admin_path(&rules(&["*,*,tcp,2222"]), &on_2222),
+            Ok(())
+        );
+        // J658: configured 22, running on 2222; both need a rule.
+        let split = SshdPorts::Known(vec![
+            SshdPortSource {
+                source: "sshd's configuration",
+                ports: vec![22],
+            },
+            SshdPortSource {
+                source: "running sshd processes",
+                ports: vec![2222],
+            },
+        ]);
+        let refused = super::console_admin_path(&rules(&["*,*,tcp,22"]), &split)
+            .expect_err("tcp/22 alone drops the sshd running on 2222");
+        assert!(
+            refused.contains("admits sshd's port 2222;")
+                && refused.contains("22 (from sshd's configuration)")
+                && refused.contains("2222 (from running sshd processes)"),
+            "{refused}"
+        );
+        assert_eq!(
+            super::console_admin_path(&rules(&["*,*,tcp,22", "*,*,tcp,2222"]), &split),
             Ok(())
         );
     }
