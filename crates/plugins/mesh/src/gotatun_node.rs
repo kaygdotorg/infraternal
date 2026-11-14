@@ -1924,4 +1924,18 @@ mod tests {
             "the change after the burst needs its own announcement"
         );
     }
+
+    /// D81: while the underlay is quiet, the announce path never yields and arms no timer, so an
+    /// idle node gains no wakeups from it (an hour on the paused clock).
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_underlay_never_announces() {
+        let announce = Arc::new(super::UnderlayAnnounce::default());
+        let mut waiter = super::AnnouncementWaiter::new(Arc::clone(&announce));
+        let until = tokio::time::Instant::now() + Duration::from_secs(3_600);
+        assert_eq!(announcements_until(&mut waiter, until).await, Vec::new());
+        assert!(
+            !waiter.schedule.is_armed(),
+            "no timer may be armed while nothing changed"
+        );
+    }
 }
