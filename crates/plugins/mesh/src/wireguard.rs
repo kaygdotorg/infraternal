@@ -779,15 +779,17 @@ impl Device {
     /// Open a passive listener for route deletions on the current mesh interface.
     ///
     /// The same listener reports every other link and route change to `underlay`, so peer route
-    /// budgets are re-derived only after the underlay can have changed (#489 J552 P2-2).
+    /// budgets are re-derived only after the underlay can have changed (#489 J552 P2-2), and
+    /// every change that can move our own endpoint to `announce` (#483).
     /// # Errors
     /// Returns socket, binding, or interface lookup errors before the worker starts.
     pub(crate) fn route_monitor(
         link: &ActiveLink,
         underlay: std::sync::Arc<UnderlayWatch>,
+        announce: std::sync::Arc<crate::gotatun_node::UnderlayAnnounce>,
     ) -> io::Result<RouteMonitor> {
         Self::verify_repair_link(link)?;
-        RouteMonitor::open(link.ifindex, underlay)
+        RouteMonitor::open(link.ifindex, underlay, announce)
     }
     /// Refuse repair if the shared name, original index, engine, or public ownership changed.
     /// Writes still use the original index, so a name replacement cannot redirect them.
@@ -1164,7 +1166,12 @@ impl UnderlayWatch {
 
 /// Listens for kernel route deletions while a node is up, so only a known mesh peer route is
 /// offered back to the kernel after an interface manager reconfigures the link. It also reports
-/// other link and route changes to an [`UnderlayWatch`].
+/// other link and route changes to an [`UnderlayWatch`], and every change that can move our own
+/// endpoint to an [`UnderlayAnnounce`](crate::gotatun_node::UnderlayAnnounce).
+///
+/// This is the node's only route-netlink subscription (#483 J633 P1): the endpoint announce
+/// reads the same notifications as the route repair and the MTU watch, so the kernel copies
+/// each notification once, including the echo of our own peer-route writes.
 pub(crate) struct RouteMonitor {
     /// The route multicast socket subscribed in the node's network namespace.
     fd: OwnedFd,
@@ -1175,20 +1182,31 @@ pub(crate) struct RouteMonitor {
     /// Bumped for every link, route, policy-rule or nexthop change that is not our own link or
     /// peer route.
     underlay: std::sync::Arc<UnderlayWatch>,
+    /// Woken for every change that can move our own endpoint as peers see it.
+    announce: std::sync::Arc<crate::gotatun_node::UnderlayAnnounce>,
+    /// The host's addresses outside the mesh link, to tell a real address change from a refresh.
+    addresses: AddressBook,
 }
 
 impl RouteMonitor {
-    /// Subscribe to the notifications that can move a peer endpoint's underlay path: links, IPv4
-    /// and IPv6 routes, IPv4 and IPv6 policy rules, and nexthop objects.
+    /// Subscribe to the notifications that can move a peer endpoint's underlay path or our own
+    /// endpoint: links, IPv4 and IPv6 addresses, routes and policy rules, and nexthop objects.
     ///
     /// Rules and nexthops have their own groups (#489 J609): a VPN or interface manager that adds
     /// its table routes first and the `ip rule` that selects them second moves endpoints with
     /// no route announcement at all, and so does replacing a nexthop object routes refer to
     /// while `net.ipv4.nexthop_compat_mode` is off. The mesh writes neither, so these groups
-    /// carry no echo of our own writes.
+    /// carry no echo of our own writes. Addresses are the endpoint itself (#483): a new source
+    /// address must reach peers before they can send to it.
+    ///
+    /// Opening wakes `announce` once: nothing reported what changed while no listener ran.
     /// # Errors
     /// Returns socket, bind, or interface lookup errors before the node becomes active.
-    fn open(interface_index: u32, underlay: std::sync::Arc<UnderlayWatch>) -> io::Result<Self> {
+    fn open(
+        interface_index: u32,
+        underlay: std::sync::Arc<UnderlayWatch>,
+        announce: std::sync::Arc<crate::gotatun_node::UnderlayAnnounce>,
+    ) -> io::Result<Self> {
         let fd = socket(
             AddressFamily::Netlink,
             SockType::Raw,
@@ -1200,6 +1218,8 @@ impl RouteMonitor {
             &NetlinkAddr::new(
                 0,
                 RTMGRP_LINK
+                    | RTMGRP_IPV4_IFADDR
+                    | RTMGRP_IPV6_IFADDR
                     | RTMGRP_IPV4_ROUTE
                     | RTMGRP_IPV6_ROUTE
                     | RTMGRP_IPV4_RULE
@@ -1207,11 +1227,14 @@ impl RouteMonitor {
                     | RTMGRP_NEXTHOP,
             ),
         )?;
+        announce.changed();
         Ok(Self {
             fd,
             interface_index,
             buffer: vec![0; netlink::DATAGRAM_BYTES],
             underlay,
+            announce,
+            addresses: AddressBook::default(),
         })
     }
 
@@ -1219,8 +1242,9 @@ impl RouteMonitor {
     ///
     /// Only unicast `/32` and `/128` routes in the main table, with this interface and protocol
     /// 250, are reported. Every other link, route, rule or nexthop change bumps the underlay watch
-    /// and is not reported. A notification overflow (`ENOBUFS`) may have dropped a deletion, so it bumps the
-    /// watch and asks for a full inventory check.
+    /// and is not reported. Those changes, and address changes, also wake the announce. A
+    /// notification overflow (`ENOBUFS`) may have dropped a deletion or an address change, so it
+    /// bumps the watch, wakes the announce and asks for a full inventory check.
     /// # Errors
     /// Returns poll, receive, or malformed-netlink-message errors.
     pub(crate) fn wait_for_deleted_peer_route(
@@ -1259,7 +1283,9 @@ impl RouteMonitor {
                 let length = match recv(self.fd.as_raw_fd(), &mut self.buffer, MsgFlags::empty()) {
                     Ok(length) => length,
                     Err(nix::errno::Errno::ENOBUFS) => {
+                        self.addresses.lost_notifications(self.interface_index);
                         self.underlay.changed();
+                        self.announce.changed();
                         return Ok(RouteWake::Reconcile);
                     }
                     Err(error) => return Err(error.into()),
@@ -1268,16 +1294,23 @@ impl RouteMonitor {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 let mut deleted = None;
-                let mut underlay_changed = false;
+                let mut change = UnderlayChange::default();
                 for message in netlink::messages(&self.buffer[..length])? {
                     if deleted.is_none() {
                         deleted = deleted_mesh_peer_route(&message, self.interface_index)?;
                     }
-                    underlay_changed |= is_underlay_change(&message, self.interface_index)?;
+                    change |= classify_underlay_change(
+                        &mut self.addresses,
+                        &message,
+                        self.interface_index,
+                    )?;
                 }
                 // Bump before waking the repair, so no refresh misses a change in this datagram.
-                if underlay_changed {
+                if change.route_budgets {
                     self.underlay.changed();
+                }
+                if change.endpoint {
+                    self.announce.changed();
                 }
                 if let Some(address) = deleted {
                     return Ok(RouteWake::Deleted(address));
@@ -1285,6 +1318,69 @@ impl RouteMonitor {
             }
         }
     }
+}
+
+/// What one or more kernel notifications mean for the mesh.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UnderlayChange {
+    /// A link, route, rule or nexthop moved: peer route budgets may need re-deriving.
+    route_budgets: bool,
+    /// Our own endpoint may have moved as peers see it: live sessions should hear from us.
+    endpoint: bool,
+}
+
+impl std::ops::BitOrAssign for UnderlayChange {
+    fn bitor_assign(&mut self, other: Self) {
+        self.route_budgets |= other.route_budgets;
+        self.endpoint |= other.endpoint;
+    }
+}
+
+/// Classify one notification: whether it moves peer route budgets, our own endpoint, or both.
+///
+/// Everything that moves a route budget can also move our endpoint: a new route or rule can pick
+/// another source address or interface, and Linux installs an address's connected route only
+/// after it announces the address (J561 measured a keepalive sent on the address notice alone
+/// failing with `ENETUNREACH`), so the route notice must announce again. An address change moves
+/// the endpoint only; route budgets follow the routes it brings. Our own link never counts.
+/// # Errors
+/// Returns `InvalidData` for a truncated link, address or route message.
+fn classify_underlay_change(
+    addresses: &mut AddressBook,
+    message: &netlink::Message<'_>,
+    interface_index: u32,
+) -> io::Result<UnderlayChange> {
+    let route_budgets = is_underlay_change(message, interface_index)?;
+    let address = addresses.observe(message, interface_index)?;
+    Ok(UnderlayChange {
+        route_budgets,
+        endpoint: route_budgets || address,
+    })
+}
+
+/// The host's interface addresses outside the mesh link, as the kernel last reported them.
+///
+/// Only a real change moves our endpoint. (This first version counts every address notice.)
+#[derive(Debug, Default)]
+struct AddressBook;
+
+impl AddressBook {
+    /// Record one notification and say whether it changed an address outside the mesh link.
+    /// # Errors
+    /// Returns `InvalidData` for a truncated address message.
+    fn observe(
+        &mut self,
+        message: &netlink::Message<'_>,
+        interface_index: u32,
+    ) -> io::Result<bool> {
+        if !matches!(message.kind, RTM_NEWADDR | RTM_DELADDR) {
+            return Ok(false);
+        }
+        Ok(netlink::u32_at(message.payload, 4)? != interface_index)
+    }
+
+    /// Notifications were lost; nothing recorded can be trusted any more.
+    fn lost_notifications(&mut self, _interface_index: u32) {}
 }
 
 /// Builds the exact host-route payload used for installing, removing, or repairing a peer route.
@@ -1462,6 +1558,14 @@ const RTPROT_INFRATERNAL: u8 = 250;
 const RTPROT_LEGACY_STATIC: u8 = 4;
 /// Subscribes to link creation, removal and attribute changes, including MTU.
 const RTMGRP_LINK: u32 = 0x1;
+/// Subscribes to IPv4 address changes: `RTNLGRP_IPV4_IFADDR` (group 5).
+const RTMGRP_IPV4_IFADDR: u32 = 0x10;
+/// Subscribes to IPv6 address changes: `RTNLGRP_IPV6_IFADDR` (group 9).
+const RTMGRP_IPV6_IFADDR: u32 = 0x100;
+/// `RTM_NEWADDR`: an address was added, or its flags or lifetimes changed.
+const RTM_NEWADDR: u16 = 20;
+/// `RTM_DELADDR`: an address was removed.
+const RTM_DELADDR: u16 = 21;
 /// Subscribes to IPv4 unicast route changes in the main route table.
 const RTMGRP_IPV4_ROUTE: u32 = 0x40;
 /// Subscribes to IPv6 unicast route changes in the main route table.
@@ -2080,5 +2184,308 @@ mod underlay_change_tests {
         link[4..8].copy_from_slice(&7_u32.to_ne_bytes());
         assert!(!is_underlay_change(&message(16, &link), 7).unwrap());
         assert!(is_underlay_change(&message(16, &link), 8).unwrap());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod endpoint_announce_tests {
+    //! Which route-netlink notifications announce our endpoint to peers (#483, J633's findings
+    //! on J561's address watch, ported onto the node's one route subscription).
+    use super::*;
+    use std::sync::Arc;
+
+    /// Wrap `payload` as one received notification of `kind`.
+    fn message(kind: u16, payload: &[u8]) -> netlink::Message<'_> {
+        netlink::Message {
+            kind,
+            flags: 0,
+            sequence: 0,
+            payload,
+        }
+    }
+
+    /// `IFA_F_TENTATIVE`: IPv6 duplicate address detection has not finished.
+    const TENTATIVE: u32 = 0x40;
+
+    /// An `ifaddrmsg` notification payload for `address/prefix` on link `index`, with `flags`
+    /// and a `valid` lifetime in seconds, laid out as the kernel sends it.
+    fn address(index: u32, address: IpAddr, prefix: u8, flags: u32, valid: u32) -> Vec<u8> {
+        let (family, bytes) = match address {
+            IpAddr::V4(address) => (2, address.octets().to_vec()),
+            IpAddr::V6(address) => (10, address.octets().to_vec()),
+        };
+        let mut payload = vec![family, prefix, u8::try_from(flags & 0xff).unwrap(), 0];
+        payload.extend(index.to_ne_bytes());
+        netlink::attribute(&mut payload, 1, &bytes).unwrap();
+        if family == 2 {
+            netlink::attribute(&mut payload, 2, &bytes).unwrap();
+        }
+        // IFA_CACHEINFO: preferred, valid, created and updated stamps.
+        let mut cache = Vec::new();
+        for value in [valid, valid, 100, valid.saturating_add(200)] {
+            cache.extend(value.to_ne_bytes());
+        }
+        netlink::attribute(&mut payload, 6, &cache).unwrap();
+        netlink::attribute(&mut payload, 8, &flags.to_ne_bytes()).unwrap();
+        payload
+    }
+
+    /// Classify one notification for a node whose mesh link is index 7.
+    fn endpoint(book: &mut AddressBook, kind: u16, payload: &[u8]) -> bool {
+        classify_underlay_change(book, &message(kind, payload), 7)
+            .unwrap()
+            .endpoint
+    }
+
+    /// J633 P1/P2: a policy rule or nexthop swap that moves our source address must announce
+    /// it. Under J561's separate watch these changes woke nothing, so the 15 s stall stayed for
+    /// the #489 J609 VPN case.
+    #[test]
+    fn rule_and_nexthop_changes_announce() {
+        let mut book = AddressBook::default();
+        for (kind, payload) in [
+            (32, [0_u8; 12].as_slice()),
+            (33, [0_u8; 12].as_slice()),
+            (104, [0_u8; 8].as_slice()),
+            (105, [0_u8; 8].as_slice()),
+        ] {
+            assert!(
+                endpoint(&mut book, kind, payload),
+                "message type {kind} must announce our endpoint"
+            );
+        }
+    }
+
+    /// Our own link's addresses and peer routes follow our writes; they never announce, or each
+    /// apply at 1,000 peers would wake every live session.
+    #[test]
+    fn own_link_changes_never_announce() {
+        let mut book = AddressBook::default();
+        let mesh_address = address(7, IpAddr::from([100, 64, 0, 1]), 32, 0x80, u32::MAX);
+        assert!(!endpoint(&mut book, RTM_NEWADDR, &mesh_address));
+        assert!(!endpoint(&mut book, RTM_DELADDR, &mesh_address));
+        let mut route = vec![2, 32, 0, 0, 254, RTPROT_INFRATERNAL, 253, 1, 0, 0, 0, 0];
+        netlink::attribute(&mut route, 4, &7_u32.to_ne_bytes()).unwrap();
+        assert!(!endpoint(&mut book, 24, &route));
+        let mut link = [0_u8; 16];
+        link[4..8].copy_from_slice(&7_u32.to_ne_bytes());
+        assert!(!endpoint(&mut book, 16, &link));
+    }
+
+    /// J633 P1 (D81, D393): a DHCP renewal or IPv6 router advertisement refreshes an address's
+    /// lifetimes, and the kernel reports each refresh as `RTM_NEWADDR`. Nothing moved, so
+    /// nothing is announced. A new address, a flag change such as the end of duplicate address
+    /// detection, and a removal are real changes.
+    #[test]
+    fn an_address_lifetime_refresh_is_not_a_change() {
+        let mut book = AddressBook::default();
+        let v4 = IpAddr::from([10, 9, 0, 2]);
+        let v6: IpAddr = "2001:db8::2".parse().unwrap();
+        assert!(endpoint(
+            &mut book,
+            RTM_NEWADDR,
+            &address(3, v4, 24, 0, 300)
+        ));
+        assert!(
+            !endpoint(&mut book, RTM_NEWADDR, &address(3, v4, 24, 0, 200)),
+            "an IPv4 lease renewal must not wake every live session"
+        );
+        assert!(endpoint(
+            &mut book,
+            RTM_NEWADDR,
+            &address(3, v6, 64, TENTATIVE, 300)
+        ));
+        assert!(!endpoint(
+            &mut book,
+            RTM_NEWADDR,
+            &address(3, v6, 64, TENTATIVE, 250)
+        ));
+        assert!(
+            endpoint(&mut book, RTM_NEWADDR, &address(3, v6, 64, 0, 250)),
+            "the end of duplicate address detection makes the address usable"
+        );
+        assert!(
+            !endpoint(&mut book, RTM_NEWADDR, &address(3, v6, 64, 0, 200)),
+            "a router advertisement's refresh must not wake every live session"
+        );
+        assert!(endpoint(
+            &mut book,
+            RTM_DELADDR,
+            &address(3, v4, 24, 0, 200)
+        ));
+        assert!(endpoint(
+            &mut book,
+            RTM_NEWADDR,
+            &address(3, v4, 24, 0, 300)
+        ));
+        assert!(
+            endpoint(&mut book, RTM_NEWADDR, &address(4, v4, 24, 0, 300)),
+            "the same address on another link is a change"
+        );
+    }
+
+    /// Run `ip` with `args` in the test's namespace and fail the test if it fails.
+    fn ip(args: &[&str]) {
+        let status = std::process::Command::new("ip")
+            .args(args)
+            .status()
+            .expect("ip runs");
+        assert!(status.success(), "ip {args:?} failed: {status}");
+    }
+
+    /// A listener for a dummy mesh link, the announce it wakes, and the cancellation pair its
+    /// waits poll (both ends stay open, so a wait ends only at its deadline).
+    struct Listener {
+        monitor: RouteMonitor,
+        announce: Arc<crate::gotatun_node::UnderlayAnnounce>,
+        cancel: std::os::unix::net::UnixStream,
+        _cancel_peer: std::os::unix::net::UnixStream,
+    }
+
+    impl Listener {
+        /// Let the listener read everything the kernel sends within 300 ms.
+        fn pump(&mut self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while !matches!(
+                self.monitor
+                    .wait_for_deleted_peer_route(self.cancel.as_fd(), deadline),
+                Ok(RouteWake::Reconcile | RouteWake::Cancelled)
+            ) {}
+        }
+    }
+
+    /// A private namespace with an up dummy underlay `d0` (`10.9.0.2/24` and `2001:db8::2/64`,
+    /// with finite lifetimes as a DHCP or SLAAC client sets them) and an up dummy `m0` that plays
+    /// the mesh link, plus a listener for `m0` drained of the setup's notifications.
+    ///
+    /// The calling test thread enters a fresh network namespace first, so each test starts from
+    /// an empty one even when the harness runs several tests in one process (the `ip` children
+    /// inherit the thread's namespace). Neither link gets an IPv6 link-local address: its
+    /// duplicate address detection would end about a second later, a real flag change that
+    /// would announce in the middle of a test that expects silence.
+    fn namespace() -> Listener {
+        nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNET)
+            .expect("a fresh network namespace");
+        ip(&["link", "add", "d0", "type", "dummy"]);
+        ip(&["link", "set", "d0", "addrgenmode", "none"]);
+        ip(&["link", "set", "d0", "up"]);
+        ip(&[
+            "addr",
+            "add",
+            "10.9.0.2/24",
+            "dev",
+            "d0",
+            "valid_lft",
+            "300",
+            "preferred_lft",
+            "300",
+        ]);
+        ip(&[
+            "-6",
+            "addr",
+            "add",
+            "2001:db8::2/64",
+            "dev",
+            "d0",
+            "nodad",
+            "valid_lft",
+            "300",
+            "preferred_lft",
+            "300",
+        ]);
+        ip(&["link", "add", "m0", "type", "dummy"]);
+        ip(&["link", "set", "m0", "addrgenmode", "none"]);
+        ip(&["link", "set", "m0", "up"]);
+        let mesh = nix::net::if_::if_nametoindex("m0").unwrap();
+        let announce = Arc::new(crate::gotatun_node::UnderlayAnnounce::default());
+        let monitor = RouteMonitor::open(mesh, Arc::default(), Arc::clone(&announce)).unwrap();
+        let (cancel, cancel_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut listener = Listener {
+            monitor,
+            announce,
+            cancel,
+            _cancel_peer: cancel_peer,
+        };
+        listener.pump();
+        listener.announce.take_for_test();
+        listener
+    }
+
+    /// Apply `change` in the namespace and report whether the listener woke the announce.
+    fn announces(change: impl FnOnce()) -> bool {
+        let mut listener = namespace();
+        change();
+        listener.pump();
+        listener.announce.take_for_test()
+    }
+
+    /// J633 P2, end to end: an `ip rule` that moves our source wakes the announce.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_rule_change_announces() {
+        assert!(announces(|| ip(&[
+            "rule", "add", "from", "10.9.0.2", "table", "100", "priority", "100"
+        ])));
+    }
+
+    /// A new underlay address is announced.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_new_address_announces() {
+        assert!(announces(|| ip(&[
+            "addr",
+            "add",
+            "10.9.1.2/24",
+            "dev",
+            "d0"
+        ])));
+    }
+
+    /// J633 P1, end to end: lifetime refreshes of both families announce nothing. The IPv6
+    /// refresh repeats `nodad`: `ip addr change` replaces the address flags, and dropping
+    /// `IFA_F_NODAD` is a real flag change, which a router advertisement's refresh never makes.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_lifetime_refresh_does_not_announce() {
+        assert!(!announces(|| {
+            ip(&[
+                "addr",
+                "change",
+                "10.9.0.2/24",
+                "dev",
+                "d0",
+                "valid_lft",
+                "200",
+                "preferred_lft",
+                "200",
+            ]);
+            ip(&[
+                "-6",
+                "addr",
+                "change",
+                "2001:db8::2/64",
+                "dev",
+                "d0",
+                "nodad",
+                "valid_lft",
+                "200",
+                "preferred_lft",
+                "200",
+            ]);
+        }));
+    }
+
+    /// Routes out of the mesh link are our own writes and announce nothing.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_mesh_link_route_does_not_announce() {
+        assert!(!announces(|| ip(&[
+            "route",
+            "add",
+            "10.88.0.0/24",
+            "dev",
+            "m0"
+        ])));
     }
 }

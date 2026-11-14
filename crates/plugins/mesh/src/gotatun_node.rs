@@ -49,7 +49,7 @@ pub(crate) type RouteEndpointUpdater =
 /// `Notify` otherwise; it never allocates, so the packet path can call it. The waiter calls
 /// [`CoalescedWake::begin`] right before it reads the state the requests are about, so a request
 /// that arrives during that read queues exactly one more wakeup and is never lost.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CoalescedWake {
     /// Set from the first request until the waiter starts the work that will observe it.
     pending: AtomicBool,
@@ -172,6 +172,57 @@ impl EndpointRefreshSignal {
     /// Re-arm the signal right before the worker reads endpoints and route MTUs.
     fn begin_refresh(&self) {
         self.wake.begin();
+    }
+}
+
+/// Tells the `GotaTun` worker that the host's underlay changed in a way that can move our own
+/// endpoint, so every peer with a live session should hear from us now (#260 J561, #483).
+///
+/// A peer learns our endpoint only from an authenticated packet. A node that is only receiving
+/// sends nothing until `WireGuard`'s keepalive-plus-rekey timeout, so after an address change the
+/// peer kept sending to the old address for 15.2 s (J561's break-it matrix, against D41's 300 ms).
+/// The node's route listener ([`crate::wireguard::RouteMonitor`]) calls [`Self::changed`]; the
+/// worker asks `GotaTun` for one keepalive per live session. Peers without a session get nothing
+/// (the fork's `request_keepalives`), so the cost per change is the number of live sessions.
+///
+/// It lives as long as the node, across route-listener restarts and engine rebuilds. With the
+/// kernel engine nobody waits on it, and a change costs one atomic swap.
+#[derive(Debug, Default)]
+pub(crate) struct UnderlayAnnounce {
+    wake: CoalescedWake,
+}
+
+impl UnderlayAnnounce {
+    /// Record that the underlay changed. Cheap and non-blocking; safe from any thread.
+    pub(crate) fn changed(&self) {
+        self.wake.request();
+    }
+
+    /// Whether an announcement was requested since the last call; clears the request.
+    #[cfg(test)]
+    pub(crate) fn take_for_test(&self) -> bool {
+        let pending = self.wake.pending.load(Ordering::Acquire);
+        self.wake.begin();
+        pending
+    }
+}
+
+/// The worker's side of [`UnderlayAnnounce`]: yields once per announcement that is due.
+struct AnnouncementWaiter {
+    announce: Arc<UnderlayAnnounce>,
+}
+
+impl AnnouncementWaiter {
+    /// Wait on `announce` for the worker that owns this waiter.
+    fn new(announce: Arc<UnderlayAnnounce>) -> Self {
+        Self { announce }
+    }
+
+    /// Wait until an announcement is due, then re-arm the signal so a later change queues the
+    /// next one.
+    async fn next(&mut self) {
+        self.announce.wake.notified().await;
+        self.announce.wake.begin();
     }
 }
 
@@ -366,6 +417,8 @@ impl Engine {
     /// The worker thread disables THP before constructing the runtime or engine state.
     /// `route_endpoint_updater` applies authenticated endpoint budgets only to routes the node
     /// owns. TUN deliveries and the bounded peer snapshot scan can request a refresh.
+    /// `underlay_announce` is woken by the node's route listener; each announcement sends one
+    /// keepalive to every peer with a live session (#483).
     ///
     /// The TUN is persistent (D332): it outlives this process, as a kernel `WireGuard` link does,
     /// so the addresses, the routes a person added and open flows survive an infraternal agent
@@ -383,6 +436,7 @@ impl Engine {
         config: Option<Config>,
         adopt: Option<u32>,
         route_endpoint_updater: RouteEndpointUpdater,
+        underlay_announce: Arc<UnderlayAnnounce>,
     ) -> io::Result<Self> {
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (commands, receiver) = mpsc::unbounded_channel();
@@ -449,6 +503,7 @@ impl Engine {
                     state,
                     worker_refresh,
                     route_endpoint_updater,
+                    underlay_announce,
                 ));
             })?;
         let info = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
@@ -793,17 +848,21 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the worker.
+/// Serializes device, relay, endpoint-refresh, endpoint-announce, health-recovery, and shutdown
+/// work on the worker.
 ///
 /// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
-/// either direction requests re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
-/// writes run on Tokio's blocking pool.
+/// either direction requests re-derivation after underlay changes. Both use one coalesced signal,
+/// and route-netlink writes run on Tokio's blocking pool. Underlay changes that can move our own
+/// endpoint arrive through `underlay_announce` and send live sessions one keepalive each.
 async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
     mut state: RuntimeState,
     endpoint_refresh: Arc<EndpointRefreshSignal>,
     route_endpoint_updater: RouteEndpointUpdater,
+    underlay_announce: Arc<UnderlayAnnounce>,
 ) {
+    let mut announcements = AnnouncementWaiter::new(underlay_announce);
     let mut endpoint_refresh_schedule = CoalescedSchedule::default();
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -869,6 +928,12 @@ async fn run_worker(
                     endpoint_refresh.endpoint_changed();
                 } else if observed_endpoints.is_none() {
                     observed_endpoints = Some(endpoints);
+                }
+            }
+            () = announcements.next() => {
+                if let Some(device) = &state.device {
+                    let sessions = device.request_keepalives().await;
+                    tracing::debug!(sessions, "underlay changed; live sessions announce our endpoint");
                 }
             }
             // Reap finished handshake tasks; their result is visible in the peer counters.
@@ -1469,7 +1534,7 @@ mod tests {
             rules::TrafficPolicy,
         },
     };
-    use std::{collections::BTreeMap, net::SocketAddr};
+    use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 
     /// D346: `GotaTun` is the Linux default; kernel `WireGuard` stays selectable per machine.
     #[test]
@@ -1552,7 +1617,12 @@ mod tests {
         assert!(review_endpoint_refresh_ready(&signal));
         assert!(!review_endpoint_refresh_ready(&signal));
         signal.begin_refresh();
-        assert!(!signal.wake.pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            !signal
+                .wake
+                .pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
         assert!(!review_endpoint_refresh_ready(&signal));
         signal.traffic();
         assert!(review_endpoint_refresh_ready(&signal));
@@ -1571,7 +1641,12 @@ mod tests {
         assert!(review_endpoint_refresh_ready(&signal));
         assert!(!review_endpoint_refresh_ready(&signal));
         signal.begin_refresh();
-        assert!(!signal.wake.pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            !signal
+                .wake
+                .pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 
     /// The worker rebuilds a device whose packet task ended on a fatal error, and `mesh status`
@@ -1632,7 +1707,13 @@ mod tests {
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
         let endpoint_refresh = Arc::new(EndpointRefreshSignal::default());
         let updater: RouteEndpointUpdater = Arc::new(|_| Ok(()));
-        let worker = tokio::spawn(run_worker(receiver, state, endpoint_refresh, updater));
+        let worker = tokio::spawn(run_worker(
+            receiver,
+            state,
+            endpoint_refresh,
+            updater,
+            Arc::default(),
+        ));
         let initial = health.snapshot();
         assert!(!initial.stopped && initial.restarts == 0 && initial.refused_frames == 0);
 
@@ -1751,5 +1832,74 @@ mod tests {
                 .any(|ip| ip.to_string() == "10.254.0.1/32")
         );
         assert_eq!(previous.endpoint, Some(endpoint));
+    }
+
+    /// Count the announcements `waiter` yields until `until`.
+    async fn announcements_until(
+        waiter: &mut super::AnnouncementWaiter,
+        until: tokio::time::Instant,
+    ) -> Vec<tokio::time::Instant> {
+        let mut runs = Vec::new();
+        while tokio::time::timeout_at(until, waiter.next()).await.is_ok() {
+            runs.push(tokio::time::Instant::now());
+        }
+        runs
+    }
+
+    /// J633 P1 (D81, D393): route churn on an unrelated link (a container host starting pods,
+    /// a routing daemon) is coalesced like the endpoint refresh: a 25 ms debounce and at most
+    /// one announcement per 250 ms, however long the churn lasts. Each announcement costs one
+    /// keepalive per live session, so without the bound 40 routes cost 40 rounds.
+    #[tokio::test(start_paused = true)]
+    async fn route_churn_announcements_are_rate_limited() {
+        let announce = Arc::new(super::UnderlayAnnounce::default());
+        let mut waiter = super::AnnouncementWaiter::new(Arc::clone(&announce));
+        let started = tokio::time::Instant::now();
+        let churn = {
+            let announce = Arc::clone(&announce);
+            tokio::spawn(async move {
+                for _ in 0..40 {
+                    announce.changed();
+                    // sleep: paused clock; spaces the changes as a container host spaces routes.
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+        };
+        let runs = announcements_until(&mut waiter, started + Duration::from_secs(2)).await;
+        churn.await.expect("the churn task finishes");
+        assert!(
+            runs.len() <= 6,
+            "40 changes over 1 s caused {} announcements; the budget is one per 250 ms",
+            runs.len()
+        );
+        let last_change = started + Duration::from_millis(39 * 25);
+        assert!(
+            runs.last().is_some_and(|run| *run >= last_change),
+            "the last change must still be announced (trailing edge)"
+        );
+    }
+
+    /// The announce after IPv6 duplicate address detection still goes out: a change that
+    /// arrives after a burst was announced gets its own announcement, because the address only
+    /// becomes usable as a source then.
+    #[tokio::test(start_paused = true)]
+    async fn a_change_after_the_burst_is_announced_too() {
+        let announce = Arc::new(super::UnderlayAnnounce::default());
+        let mut waiter = super::AnnouncementWaiter::new(Arc::clone(&announce));
+        let started = tokio::time::Instant::now();
+        // The tentative address and its routes arrive together.
+        for _ in 0..3 {
+            announce.changed();
+        }
+        let burst = announcements_until(&mut waiter, started + Duration::from_millis(500)).await;
+        assert_eq!(burst.len(), 1, "one burst is one announcement");
+        // Duplicate address detection completes a second later.
+        announce.changed();
+        let late = announcements_until(&mut waiter, started + Duration::from_millis(1_000)).await;
+        assert_eq!(
+            late.len(),
+            1,
+            "the change after the burst needs its own announcement"
+        );
     }
 }

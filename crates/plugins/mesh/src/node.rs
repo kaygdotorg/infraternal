@@ -181,13 +181,23 @@ struct RouteRepairWorker {
 
 impl RouteRepairWorker {
     /// Start recovery bound to the current owner-marked link, never just its shared name.
+    ///
+    /// The listener also wakes `announce` on every underlay change that can move our own
+    /// endpoint as peers see it (#483); the node's `GotaTun` worker turns that into keepalives.
     /// # Errors
     /// Returns ownership, listener, cancellation-stream, or thread creation errors.
-    fn start(state: Arc<Mutex<PeerRouteState>>) -> io::Result<Self> {
+    fn start(
+        state: Arc<Mutex<PeerRouteState>>,
+        announce: Arc<crate::gotatun_node::UnderlayAnnounce>,
+    ) -> io::Result<Self> {
         let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
         let underlay = Arc::new(crate::wireguard::UnderlayWatch::default());
-        let monitor = Some(Device::route_monitor(&link, Arc::clone(&underlay))?);
-        Self::start_for_link(state, link, monitor, underlay)
+        let monitor = Some(Device::route_monitor(
+            &link,
+            Arc::clone(&underlay),
+            Arc::clone(&announce),
+        )?);
+        Self::start_for_link(state, link, monitor, underlay, announce)
     }
 
     /// Spawn the worker with a proven identity and an optional listener; absence uses the fallback.
@@ -201,6 +211,7 @@ impl RouteRepairWorker {
         link: crate::wireguard::ActiveLink,
         mut monitor: Option<crate::wireguard::RouteMonitor>,
         underlay: Arc<crate::wireguard::UnderlayWatch>,
+        announce: Arc<crate::gotatun_node::UnderlayAnnounce>,
     ) -> io::Result<Self> {
         let shared = Arc::clone(&state);
         let worker_underlay = Arc::clone(&underlay);
@@ -240,8 +251,12 @@ impl RouteRepairWorker {
                         worker_underlay.changed();
                         deadline = std::time::Instant::now() + ROUTE_RECHECK_INTERVAL;
                         if monitor.is_none() {
-                            monitor =
-                                Device::route_monitor(&link, Arc::clone(&worker_underlay)).ok();
+                            monitor = Device::route_monitor(
+                                &link,
+                                Arc::clone(&worker_underlay),
+                                Arc::clone(&announce),
+                            )
+                            .ok();
                             worker_underlay.set_watched(monitor.is_some());
                         }
                     }
@@ -1020,6 +1035,10 @@ pub struct Node {
     peer_route_state: Arc<Mutex<PeerRouteState>>,
     /// Passively restores deleted owned peer routes until this node goes down.
     route_repair: Option<RouteRepairWorker>,
+    /// Shared by every route-repair worker's listener and the `GotaTun` worker for this node's
+    /// life, so peers hear our new endpoint after an underlay change whichever worker heard it
+    /// (#483). A field of its own, because the route state is replaced wholesale on rollback.
+    underlay_announce: Arc<crate::gotatun_node::UnderlayAnnounce>,
     firewall: Firewall,
     proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
@@ -1052,6 +1071,7 @@ impl Default for Node {
             routes: BTreeSet::new(),
             peer_route_state: Arc::default(),
             route_repair: None,
+            underlay_announce: Arc::default(),
             firewall: Firewall::default(),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
@@ -1081,9 +1101,10 @@ impl Node {
             self.route_repair.take();
         }
         if self.route_repair.is_none() {
-            self.route_repair = Some(RouteRepairWorker::start(Arc::clone(
-                &self.peer_route_state,
-            ))?);
+            self.route_repair = Some(RouteRepairWorker::start(
+                Arc::clone(&self.peer_route_state),
+                Arc::clone(&self.underlay_announce),
+            )?);
         }
         Ok(())
     }
@@ -1826,8 +1847,10 @@ impl Node {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
                     let client = Client::new()?;
-                    let route_repair =
-                        RouteRepairWorker::start(Arc::clone(&self.peer_route_state))?;
+                    let route_repair = RouteRepairWorker::start(
+                        Arc::clone(&self.peer_route_state),
+                        Arc::clone(&self.underlay_announce),
+                    )?;
                     self.routes.clear();
                     self.save(None, true)?;
                     Ok((port, client, route_repair))
@@ -1868,6 +1891,7 @@ impl Node {
                     None,
                     adopt,
                     route_endpoint_updater,
+                    Arc::clone(&self.underlay_announce),
                 )?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
@@ -1879,15 +1903,17 @@ impl Node {
                     let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
                 }
-                let route_repair =
-                    match RouteRepairWorker::start(Arc::clone(&self.peer_route_state)) {
-                        Ok(worker) => worker,
-                        Err(error) => {
-                            let mut engine = engine;
-                            let _ = engine.stop();
-                            return Err(error);
-                        }
-                    };
+                let route_repair = match RouteRepairWorker::start(
+                    Arc::clone(&self.peer_route_state),
+                    Arc::clone(&self.underlay_announce),
+                ) {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        let mut engine = engine;
+                        let _ = engine.stop();
+                        return Err(error);
+                    }
+                };
                 self.owned = true;
                 self.gotatun = Some(engine);
                 if let Err(error) = self.save(self.config.as_ref(), true) {
