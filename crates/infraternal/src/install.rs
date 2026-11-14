@@ -728,4 +728,170 @@ mod tests {
         assert!(output.contains("systemctl enable --now infraternal-server.service"));
         assert!(!output.contains("Would replace the hand-installed"));
     }
+
+    /// A scratch policy/unit pair plus a recording, scriptable systemctl for publish tests.
+    #[cfg(target_os = "linux")]
+    struct PublishFixture {
+        /// Private scratch directory, removed by [`Drop`].
+        root: PathBuf,
+        /// The firewall install the test publishes.
+        firewall: FirewallInstall,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl PublishFixture {
+        /// A fresh scratch directory and a server policy admitting tcp/22.
+        fn new(name: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("j662-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).expect("scratch");
+            let args = ServerArgs {
+                remote: super::super::remote_server::Options::default(),
+                listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
+                data: PathBuf::from("./state"),
+                public_origin: Some("https://localhost:47361".to_owned()),
+                web_root: None,
+                tls_cert: None,
+                tls_key: None,
+                behind_proxy: false,
+                trusted_proxies: Vec::new(),
+                host_firewall_listen_interface: None,
+                host_firewall_remote_interface: None,
+                host_firewall_remote_sources: Vec::new(),
+                host_firewall_accept_interfaces: Vec::new(),
+                host_firewall_allow: vec!["*,*,tcp,22".to_owned()],
+                host_firewall_off: false,
+            };
+            let policy = super::super::host_firewall_policy(&args).expect("policy");
+            let firewall = FirewallInstall {
+                unit: render_firewall_unit().expect("unit"),
+                policy_json: String::new(),
+                policy,
+            };
+            Self { root, firewall }
+        }
+
+        /// Publish into the scratch paths; `fails` names the systemctl verb that fails.
+        fn publish(
+            &self,
+            enabled_before: bool,
+            fails: &str,
+        ) -> (Result<(), InstallError>, Vec<String>) {
+            let mut calls = Vec::new();
+            let result = publish_firewall(
+                &self.firewall,
+                &FirewallTargets {
+                    policy: &self.policy(),
+                    unit: &self.unit(),
+                },
+                &|path, _policy| {
+                    fs::write(path, b"NEW POLICY").map_err(InstallError::Io)
+                },
+                &mut |arguments| {
+                    calls.push(arguments.join(" "));
+                    Ok(match arguments.first() {
+                        Some(&"is-enabled") => enabled_before,
+                        Some(verb) => *verb != fails,
+                        None => false,
+                    })
+                },
+            );
+            (result, calls)
+        }
+
+        /// The scratch policy path.
+        fn policy(&self) -> PathBuf {
+            self.root.join("host-firewall-server.json")
+        }
+
+        /// The scratch loader unit path.
+        fn unit(&self) -> PathBuf {
+            self.root.join("infraternal-firewall.service")
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for PublishFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// J658 (P3): a failed loader restart on a fresh host leaves no saved policy and no enabled loader.
+    ///
+    /// The policy and unit used to be written and the loader enabled before
+    /// `restart` proved the table loads; a rejected table returned an error
+    /// but left a policy the next boot applied.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn review_j658_failed_firewall_restart_rolls_back_a_fresh_install() {
+        let fixture = PublishFixture::new("fresh");
+        let (result, calls) = fixture.publish(false, "restart");
+        assert!(result.is_err(), "a failed restart must fail the install");
+        assert!(
+            !fixture.policy().exists(),
+            "the policy stayed saved for the next boot: {calls:?}"
+        );
+        assert!(!fixture.unit().exists(), "the loader unit stayed: {calls:?}");
+        assert!(
+            calls.iter().any(|call| call == "disable infraternal-firewall.service"),
+            "the loader was left enabled: {calls:?}"
+        );
+    }
+
+    /// J658 (P3): a failed restart over an earlier install restores its policy, unit and enablement.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn review_j658_failed_firewall_restart_restores_the_previous_install() {
+        let fixture = PublishFixture::new("previous");
+        fs::write(fixture.policy(), b"OLD POLICY").expect("old policy");
+        let old_unit = format!(
+            "{}\n[Service]\nExecStart=/old/infraternal __host-firewall-apply\n",
+            host_firewall::HOST_FIREWALL_UNIT_MARKER
+        );
+        fs::write(fixture.unit(), &old_unit).expect("old unit");
+        let (result, calls) = fixture.publish(true, "restart");
+        assert!(result.is_err(), "a failed restart must fail the install");
+        assert_eq!(fs::read(fixture.policy()).expect("policy"), b"OLD POLICY");
+        assert_eq!(fs::read_to_string(fixture.unit()).expect("unit"), old_unit);
+        assert!(
+            !calls.iter().any(|call| call.starts_with("disable")),
+            "a loader that was enabled before stays enabled: {calls:?}"
+        );
+    }
+
+    /// J658 (P3): `server init` never overwrites a firewall unit that is neither ours nor the known hand loader.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn review_j658_a_foreign_firewall_unit_is_never_overwritten() {
+        let fixture = PublishFixture::new("foreign");
+        let foreign = "[Service]\nExecStart=/usr/sbin/iptables-restore /etc/iptables/rules\n";
+        fs::write(fixture.unit(), foreign).expect("foreign unit");
+        let (result, calls) = fixture.publish(false, "");
+        assert!(result.is_err(), "a foreign unit must be refused");
+        assert_eq!(fs::read_to_string(fixture.unit()).expect("unit"), foreign);
+        assert!(!fixture.policy().exists(), "a policy was saved anyway");
+        assert!(calls.is_empty(), "systemctl ran: {calls:?}");
+        // The known hand loader (#274) is still taken over.
+        let hand = "[Service]\nExecStart=/usr/sbin/nft -f /etc/nftables/infraternal-host.nft\n";
+        fs::write(fixture.unit(), hand).expect("hand unit");
+        let (result, _) = fixture.publish(false, "");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.unit()).expect("unit"),
+            fixture.firewall.unit
+        );
+    }
+
+    /// J658 (P3): root `systemctl` calls use the fixed, root-owned path, never a `PATH` lookup (D384, D386).
+    #[test]
+    fn review_j658_systemctl_is_never_found_through_path() {
+        let source = include_str!("install.rs");
+        let path_lookup = concat!("Command::new(", "\"systemctl\")");
+        assert!(
+            !source.contains(path_lookup),
+            "install.rs runs systemctl through PATH"
+        );
+    }
 }
