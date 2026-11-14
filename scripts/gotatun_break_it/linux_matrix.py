@@ -749,6 +749,111 @@ def _apply_rotation(pair: NamespacePair, *, timer_expired: bool) -> dict[str, An
     }
 
 
+def _rebind_nat_port(namespace: int, old_port: int, new_port: int) -> None:
+    """Make B's namespace behave like a NAT that has moved B's mapping to a new public port.
+
+    The table is never removed during the case: the namespace teardown discards it. Deleting a
+    namespace's only nat chain unregisters the kernel NAT hooks, so the live flow silently loses
+    its translation and leaves the old port again, while the stale reverse mapping still owns
+    `A -> B:old`. Every datagram A then sends to the old port clashes with it in conntrack and
+    is dropped, and B's own traffic keeps that entry alive: a permanent one-way black hole that
+    no real router produces and no endpoint can recover from (#517, J634).
+
+    Inbound packets that would open a new flow to the old port are dropped, as a real NAT drops
+    traffic for a mapping it no longer has. Without that, A's next datagram can win the race
+    against B's and create an untranslated inbound entry, and the row passes without any rebind.
+    """
+    nft = _tool("nft")
+    conntrack = _tool("conntrack")
+    rules = [
+        ("add", "table", "ip", "j526"),
+        (
+            "add",
+            "chain",
+            "ip",
+            "j526",
+            "postrouting",
+            "{ type nat hook postrouting priority srcnat; policy accept; }",
+        ),
+        (
+            "add",
+            "rule",
+            "ip",
+            "j526",
+            "postrouting",
+            "ip",
+            "daddr",
+            "10.220.0.1",
+            "udp",
+            "sport",
+            str(old_port),
+            "snat",
+            "to",
+            f"10.220.0.2:{new_port}",
+        ),
+        # Filter priority runs after conntrack, so `ct state new` means no mapping matched.
+        (
+            "add",
+            "chain",
+            "ip",
+            "j526",
+            "prerouting",
+            "{ type filter hook prerouting priority filter; policy accept; }",
+        ),
+        (
+            "add",
+            "rule",
+            "ip",
+            "j526",
+            "prerouting",
+            "ip",
+            "saddr",
+            "10.220.0.1",
+            "udp",
+            "dport",
+            str(old_port),
+            "ct",
+            "state",
+            "new",
+            "counter",
+            "drop",
+        ),
+    ]
+    for rule in rules:
+        _run(_in_namespace(namespace, nft, *rule))
+    # Drop only the underlay UDP mapping so the next datagram gets the new source port.
+    # A full `conntrack -F` also wiped the namespace's state for the inner TCP flow, and
+    # the product firewall rightly drops mid-stream TCP that looks new without a SYN (#260,
+    # J561). The mapping's original direction depends on which side sent first at setup, so
+    # both are tried; `conntrack -D` exits 1 when nothing matched.
+    deleted = 0
+    for selector in (
+        ("--orig-src", "10.220.0.2", "--orig-dst", "10.220.0.1", "--orig-port-src"),
+        ("--orig-src", "10.220.0.1", "--orig-dst", "10.220.0.2", "--orig-port-dst"),
+    ):
+        result = subprocess.run(
+            _in_namespace(namespace, conntrack, "-D", "-p", "udp", *selector, str(old_port)),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15.0,
+        )
+        if result.returncode not in (0, 1):
+            raise RuntimeError(f"conntrack exited {result.returncode}: {result.stderr.strip()}")
+        deleted += result.returncode == 0
+    if deleted == 0:
+        raise RuntimeError("no underlay UDP mapping existed to rebind")
+
+
+def _peer_endpoint(node: MeshNode) -> str | None:
+    """Return where a two-node fixture's agent currently sends its only peer's packets."""
+    rows = node.peers()
+    if len(rows) != 1:
+        raise RuntimeError(f"expected one mesh peer, found {len(rows)}")
+    endpoint = rows[0].get("counters", {}).get("endpoint")
+    return endpoint if isinstance(endpoint, str) else None
+
+
 def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
     """Inject and clear one repeatable fault while the TCP and UDP workloads stay live."""
     if pair.coordinator is None or pair.left is None or pair.right is None:
@@ -763,74 +868,27 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
         details["new_underlay_endpoint"] = "10.220.0.3"
         details["recovery_started_ns"] = time.monotonic_ns()
     elif case.kind == "nat-port":
-        nft = _tool("nft")
-        conntrack = _tool("conntrack")
         old_port = int(pair.right.identity["port"])
         new_port = old_port + 7000 if old_port <= 58_535 else old_port - 10_000
         if new_port <= 1024 or new_port == old_port:
             raise RuntimeError("could not choose a distinct NAT source port")
-        namespace = pair.peer_pid
-        _run(_in_namespace(namespace, nft, "add", "table", "ip", "j526"))
-        try:
-            _run(
-                _in_namespace(
-                    namespace,
-                    nft,
-                    "add",
-                    "chain",
-                    "ip",
-                    "j526",
-                    "postrouting",
-                    "{ type nat hook postrouting priority srcnat; policy accept; }",
-                )
+        _rebind_nat_port(pair.peer_pid, old_port, new_port)
+        details["recovery_started_ns"] = time.monotonic_ns()
+        _wait_for_duration(3)
+        # The new mapping stays for the rest of the case, as a router's would. Prove that the
+        # row really exercised a rebind: the peer must now address B at the translated port.
+        endpoint = _peer_endpoint(pair.left)
+        details.update(
+            {
+                "old_source_port": old_port,
+                "new_source_port": new_port,
+                "peer_endpoint_after_rebind": endpoint,
+            }
+        )
+        if endpoint != f"10.220.0.2:{new_port}":
+            raise RuntimeError(
+                f"NAT rebind did not take effect: A still addresses B at {endpoint}"
             )
-            _run(
-                _in_namespace(
-                    namespace,
-                    nft,
-                    "add",
-                    "rule",
-                    "ip",
-                    "j526",
-                    "postrouting",
-                    "ip",
-                    "daddr",
-                    "10.220.0.1",
-                    "udp",
-                    "sport",
-                    str(old_port),
-                    "snat",
-                    "to",
-                    f"10.220.0.2:{new_port}",
-                )
-            )
-            # Drop only the underlay UDP mapping so the next datagram gets the new source port.
-            # A full `conntrack -F` also wiped the namespace's state for the inner TCP flow, and
-            # the product firewall rightly drops mid-stream TCP that looks new without a SYN, so
-            # the row failed on the injector rather than on rebind recovery (#260, J561). A real
-            # NAT rebind happens on a router and leaves the endpoint's own conntrack alone.
-            _run(
-                _in_namespace(
-                    namespace,
-                    conntrack,
-                    "-D",
-                    "-p",
-                    "udp",
-                    "--orig-src",
-                    "10.220.0.2",
-                    "--orig-dst",
-                    "10.220.0.1",
-                    "--orig-port-src",
-                    str(old_port),
-                )
-            )
-            details["recovery_started_ns"] = time.monotonic_ns()
-            _wait_for_duration(3)
-        finally:
-            # Remove the temporary rule but keep established conntrack entries: they hold the new
-            # translated port for this live UDP flow after the rule is gone.
-            _run(_in_namespace(namespace, nft, "delete", "table", "ip", "j526"))
-        details.update({"old_source_port": old_port, "new_source_port": new_port})
     elif case.kind in {"loss", "reorder", "duplicate"}:
         if case.kind == "loss":
             commands = build_bidirectional_netem_commands(Path(tc), loss_pct=int(case.value))

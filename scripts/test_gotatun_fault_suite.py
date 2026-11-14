@@ -620,21 +620,30 @@ class FaultReportStallTests(unittest.TestCase):
 
 
 class NatPortRebindFaultTests(unittest.TestCase):
-    """Keep the changed NAT mapping active after its temporary rule is removed."""
+    """Rebind B's NAT mapping the way a router does, and prove the rebind took effect."""
 
-    def test_nat_rebind_removes_rule_without_flushing_the_active_mapping(self):
-        """Preserve conntrack's changed source port while traffic continues after recovery."""
+    def _run_fault(self, *, endpoint="10.220.0.2:58821", deleted=(0, 1)):
+        """Apply the NAT row against recorded commands; return the event and command log.
+
+        `deleted` gives the exit codes of the two `conntrack -D` directions (1 = no match).
+        """
         matrix = importlib.import_module("gotatun_break_it.linux_matrix")
         events = []
         clock_value = 0
+        exit_codes = iter(deleted)
 
         def record_run(command):
             """Remember one namespace command without changing the test host."""
             events.append(("run", tuple(command)))
             return ""
 
+        def record_subprocess(command, **_):
+            """Answer `conntrack -D` with the scripted exit code for its direction."""
+            events.append(("run", tuple(command)))
+            return SimpleNamespace(returncode=next(exit_codes), stdout="", stderr="")
+
         def record_wait(seconds):
-            """Record the bounded time that the changed NAT mapping stays active."""
+            """Record the bounded time before the rebind is checked."""
             events.append(("wait", seconds))
 
         def monotonic_ns():
@@ -644,9 +653,14 @@ class NatPortRebindFaultTests(unittest.TestCase):
             events.append(("clock", clock_value))
             return clock_value
 
+        def peers():
+            """Report where A addresses B once the mapping has moved."""
+            events.append(("peers", None))
+            return [{"node": 2, "counters": {"endpoint": endpoint}}]
+
         pair = SimpleNamespace(
             coordinator=object(),
-            left=SimpleNamespace(identity={"port": 51820}),
+            left=SimpleNamespace(identity={"port": 51820}, peers=peers),
             right=SimpleNamespace(identity={"port": 51821}),
             peer_pid=4321,
         )
@@ -654,62 +668,69 @@ class NatPortRebindFaultTests(unittest.TestCase):
         with (
             patch.object(matrix, "_tool", side_effect=lambda name: f"/nix/bin/{name}"),
             patch.object(matrix, "_run", side_effect=record_run),
+            patch.object(matrix.subprocess, "run", side_effect=record_subprocess),
             patch.object(matrix, "_wait_for_duration", side_effect=record_wait),
             patch.object(matrix.time, "monotonic_ns", side_effect=monotonic_ns),
         ):
             event = matrix._apply_fault(case, pair)
+        return event, events
 
-        self.assertIn(("wait", 3), events)
-        delete_index = next(
-            index
-            for index, (kind, command) in enumerate(events)
-            if kind == "run"
-            and command[-5].rsplit("/", 1)[-1] == "nft"
-            and command[-4:] == ("delete", "table", "ip", "j526")
-        )
-        conntrack_commands = [
-            command
+    def test_nat_rebind_keeps_the_mapping_and_refuses_the_old_port(self):
+        """Keep the NAT for the whole case and drop new flows to the abandoned mapping.
+
+        Deleting the only nat chain un-NATs the live flow while its stale reverse mapping keeps
+        black-holing A's packets to the old port: the permanent stall in #517.
+        """
+        event, events = self._run_fault()
+        commands = [
+            " ".join(part.rsplit("/", 1)[-1] for part in command)
             for kind, command in events
             if kind == "run"
-            and any(part.rsplit("/", 1)[-1] == "conntrack" for part in command)
         ]
-        # Only the underlay UDP mapping goes; a full flush would also wipe the inner TCP
-        # flow's state, which the product firewall then drops as a non-SYN new flow.
-        self.assertTrue(all("-F" not in command for command in conntrack_commands))
-        flush_indices = [
-            index
-            for index, (kind, command) in enumerate(events)
-            if kind == "run"
-            and "conntrack" in " ".join(command)
-            and command[-9:]
-            == (
-                "-D",
-                "-p",
-                "udp",
-                "--orig-src",
-                "10.220.0.2",
-                "--orig-dst",
-                "10.220.0.1",
-                "--orig-port-src",
-                "51821",
-            )
-        ]
-        self.assertEqual(len(flush_indices), 1)
-        recovery_clock_index = next(
-            index
-            for index, (kind, _) in enumerate(events)
-            if kind == "clock" and index > flush_indices[0]
+
+        self.assertFalse(any("delete table" in command for command in commands))
+        snat = next(i for i, c in enumerate(commands) if "snat to 10.220.0.2:58821" in c)
+        refuse = next(
+            i
+            for i, c in enumerate(commands)
+            if "ip saddr 10.220.0.1 udp dport 51821 ct state new counter drop" in c
         )
-        clear_clock_index = max(
-            index for index, (kind, _) in enumerate(events) if kind == "clock"
+        deletes = [i for i, c in enumerate(commands) if "conntrack -D" in c]
+        # Only the underlay UDP mapping goes, in either original direction; a full flush would
+        # also wipe the inner TCP flow's state, which the product firewall drops as non-SYN.
+        self.assertFalse(any("conntrack -F" in command for command in commands))
+        self.assertEqual(len(deletes), 2)
+        self.assertIn(
+            "--orig-src 10.220.0.2 --orig-dst 10.220.0.1 --orig-port-src 51821",
+            commands[deletes[0]],
         )
-        wait_index = next(index for index, (kind, _) in enumerate(events) if kind == "wait")
-        self.assertLess(flush_indices[0], recovery_clock_index)
-        self.assertLess(recovery_clock_index, wait_index)
-        self.assertLess(wait_index, delete_index)
-        self.assertLess(delete_index, clear_clock_index)
-        self.assertEqual(event["recovery_started_ns"], events[recovery_clock_index][1])
-        self.assertEqual(event["fault_cleared_ns"], events[clear_clock_index][1])
+        self.assertIn(
+            "--orig-src 10.220.0.1 --orig-dst 10.220.0.2 --orig-port-dst 51821",
+            commands[deletes[1]],
+        )
+        self.assertLess(max(snat, refuse), deletes[0])
+
+        kinds = [kind for kind, _ in events]
+        recovery_clock = next(
+            i
+            for i, (kind, _) in enumerate(events)
+            if kind == "clock" and i > kinds.index("run")
+        )
+        self.assertLess(recovery_clock, kinds.index("wait"))
+        self.assertLess(kinds.index("wait"), kinds.index("peers"))
+        self.assertEqual(event["recovery_started_ns"], events[recovery_clock][1])
+        self.assertEqual(event["peer_endpoint_after_rebind"], "10.220.0.2:58821")
+        self.assertEqual(event["new_source_port"], 58821)
+
+    def test_nat_rebind_fails_when_the_peer_never_saw_the_new_port(self):
+        """Refuse to report a rebind row that did not rebind anything."""
+        with self.assertRaisesRegex(RuntimeError, "did not take effect"):
+            self._run_fault(endpoint="10.220.0.2:51821")
+
+    def test_nat_rebind_fails_when_no_mapping_existed(self):
+        """Refuse a rebind when neither conntrack direction matched the underlay flow."""
+        with self.assertRaisesRegex(RuntimeError, "no underlay UDP mapping"):
+            self._run_fault(deleted=(1, 1))
 
 
 class PathSwitchRecoveryStartTests(unittest.TestCase):

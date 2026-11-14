@@ -49,6 +49,12 @@ active; link recovery starts when the link is restored. Those three rows apply
 D41's 300 ms reconnect budget from that reference, even when an injected NAT
 mapping remains active after reconvergence. Reports include the recovery
 reference and whether the budget was met.
+The NAT rebind row behaves like a router that has moved B's mapping: the
+translated port and a drop for new flows to the old port stay in place until
+the case's namespace is torn down, and the row fails unless A ends up
+addressing B at the new port. Never delete that nat table mid-flow: it is the
+namespace's only nat chain, so removing it un-translates the live flow while a
+stale reverse mapping keeps dropping A's packets for good (#517).
 After recovery, a run of lost probes longer than one probe timeout (1 s) is a
 relapse and fails the row; `post_recovery_*` fields report it.
 Before injecting a fault, the runner requires at least 1 MiB to be sent and
