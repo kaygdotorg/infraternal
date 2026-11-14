@@ -69,9 +69,13 @@
 //!
 //! # Rules for closures
 //!
-//! - Never issue `BEGIN`, `COMMIT`, `ROLLBACK` or `SAVEPOINT` yourself: the pool
-//!   owns the transaction. (If a closure does anyway, the worker notices that a
-//!   transaction is still open after the job and rolls it back.)
+//! - Never issue `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT` or `RELEASE`
+//!   yourself: the pool owns the transaction. SQLite refuses to prepare them
+//!   while a closure runs (an authorizer on every worker connection, see
+//!   [`install_transaction_guard`]), so the statement fails with an
+//!   authorization error and the transaction stays the pool's. Without that
+//!   guard, a closure that ran `COMMIT; BEGIN;` and then returned `Err` would
+//!   make the rows it wrote before the `COMMIT` durable (J632, #473).
 //! - Never block on anything but the database inside a closure (network, other
 //!   locks, `.await` via a runtime handle). The writer is shared by every
 //!   write in the process; a slow closure delays all of them.
@@ -79,7 +83,9 @@
 //!   wait for it: a write that waits for another write deadlocks the writer.
 use crate::migrate::{self, Migration, Report};
 use rusqlite::{
-    Connection, OpenFlags, Transaction, TransactionBehavior, hooks::Wal, wal::CheckpointMode,
+    Connection, OpenFlags, Transaction, TransactionBehavior,
+    hooks::{AuthAction, AuthContext, Authorization, Wal},
+    wal::CheckpointMode,
 };
 use std::{
     any::Any,
@@ -367,9 +373,65 @@ where
     let tx = conn
         .transaction_with_behavior(behavior)
         .map_err(|error| E::from(Error::Sqlite(error)))?;
+    // Declared after `tx`, so it drops first on every exit path (`Err` and
+    // unwinding included): the pool's own COMMIT or ROLLBACK runs with the
+    // guard lowered.
+    let guard = ClosureRunning::enter();
     let value = f(&tx)?;
+    drop(guard);
     tx.commit().map_err(|error| E::from(Error::Sqlite(error)))?;
     Ok(value)
+}
+
+thread_local! {
+    /// Whether a user closure is running on this worker thread right now.
+    /// [`install_transaction_guard`]'s authorizer reads it. A thread-local
+    /// is enough because each connection is used by exactly one thread.
+    static IN_CLOSURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks this thread as running a user closure until dropped.
+struct ClosureRunning;
+
+impl ClosureRunning {
+    /// Raise the flag; it is lowered again when the returned guard drops.
+    fn enter() -> Self {
+        IN_CLOSURE.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+impl Drop for ClosureRunning {
+    fn drop(&mut self) {
+        IN_CLOSURE.with(|flag| flag.set(false));
+    }
+}
+
+/// Make transaction control unpreparable while a closure runs (J632, #473).
+///
+/// The pool's guarantee is "a write commits only if its closure returns
+/// `Ok`". A closure that could run `COMMIT` itself would break it: whatever it
+/// wrote before the `COMMIT` is durable even if it then returns `Err`. So every
+/// worker connection gets an authorizer that denies `BEGIN`, `COMMIT`,
+/// `ROLLBACK`, `SAVEPOINT` and `RELEASE` while [`IN_CLOSURE`] is set; the
+/// statement then fails to prepare with an authorization error.
+///
+/// The authorizer stays installed for the connection's life and checks the
+/// flag, instead of being installed around each closure: setting an authorizer
+/// expires every prepared statement on the connection, which would empty the
+/// statement cache on every job. SQLite calls the authorizer only while it
+/// prepares a statement, never while it runs one, so cached statements pay
+/// nothing.
+fn install_transaction_guard(conn: &mut Connection) -> Result<(), Error> {
+    conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Transaction { .. } | AuthAction::Savepoint { .. }
+            if IN_CLOSURE.with(std::cell::Cell::get) =>
+        {
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }))?;
+    Ok(())
 }
 
 /// Queue `run` for a worker and wait for its result.
@@ -437,6 +499,7 @@ fn spawn_worker(
         .name(name)
         .spawn(move || {
             let opened = open_connection(&path, &options, role).and_then(|mut conn| {
+                install_transaction_guard(&mut conn)?;
                 if let Some(kick) = kick {
                     install_checkpoint_hook(&mut conn, &options, kick)?;
                 }
@@ -461,8 +524,10 @@ fn spawn_worker(
                 let Some(job) = job else { break };
                 job(&mut conn);
                 if !conn.is_autocommit() {
-                    // A closure left a transaction open (it issued BEGIN or
-                    // SAVEPOINT itself). Roll it back so the next job starts clean.
+                    // Defence in depth: the transaction guard already stops a
+                    // closure from opening its own transaction, but if one is
+                    // still open here (a SQLite path the authorizer does not
+                    // see), roll it back so the next job starts clean.
                     let _ = conn.execute_batch("ROLLBACK");
                 }
             }

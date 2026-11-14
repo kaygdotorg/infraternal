@@ -544,28 +544,58 @@ async fn empty_options_are_refused() {
     }
 }
 
-/// A closure that leaves its own transaction open does not leak it into the
-/// next job: the worker rolls it back.
+/// Transaction control is refused inside closures, on the writer and on the
+/// readers: every statement below fails to prepare with an authorization
+/// error and leaves the pool's transaction as it was. So the writes around
+/// the refused statements commit together when the closure returns `Ok`, and
+/// the pool's own BEGIN/COMMIT/ROLLBACK keep working for the next job.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn transaction_left_open_by_a_closure_is_rolled_back() {
-    let (_dir, db) = setup("left-open", Options::default()).await;
-    // COMMIT ends the pool's transaction early and BEGIN opens one the pool
-    // does not know about; the closure then fails.
-    let outcome = db
-        .write(|tx| {
-            tx.execute_batch("COMMIT; BEGIN; INSERT INTO t (v) VALUES (1); SAVEPOINT stray;")?;
-            Err::<(), _>(TestError::Refused)
-        })
-        .await;
-    assert!(matches!(outcome, Err(TestError::Refused)), "{outcome:?}");
-    // The next write starts in a clean transaction and the stray insert is gone.
+async fn transaction_control_is_refused_inside_closures() {
+    const CONTROL: [&str; 8] = [
+        "COMMIT",
+        "END",
+        "ROLLBACK",
+        "BEGIN",
+        "BEGIN IMMEDIATE",
+        "SAVEPOINT stray",
+        "RELEASE stray",
+        "ROLLBACK TO stray",
+    ];
+    /// Whether `error` is SQLite's "not authorized" refusal.
+    fn denied(error: &rusqlite::Error) -> bool {
+        error.sqlite_error_code() == Some(rusqlite::ErrorCode::AuthorizationForStatementDenied)
+    }
+    let (_dir, db) = setup("tx-control", Options::default()).await;
     db.write(|tx| {
+        tx.execute("INSERT INTO t (v) VALUES (1)", [])?;
+        for sql in CONTROL {
+            let error = tx.execute_batch(sql).unwrap_err();
+            assert!(denied(&error), "{sql}: {error:?}");
+        }
+        assert!(!tx.is_autocommit(), "the pool's transaction ended early");
         tx.execute("INSERT INTO t (v) VALUES (2)", [])?;
         Ok::<_, Error>(())
     })
     .await
     .unwrap();
-    assert_eq!(values(&db).await, vec![2]);
+    db.read(|tx| {
+        for sql in CONTROL {
+            let error = tx.execute_batch(sql).unwrap_err();
+            assert!(denied(&error), "reader, {sql}: {error:?}");
+        }
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+    // A failed write still rolls back through the pool's own ROLLBACK.
+    let outcome = db
+        .write(|tx| {
+            tx.execute("INSERT INTO t (v) VALUES (3)", [])?;
+            Err::<(), _>(TestError::Refused)
+        })
+        .await;
+    assert!(matches!(outcome, Err(TestError::Refused)), "{outcome:?}");
+    assert_eq!(values(&db).await, vec![1, 2]);
 }
 
 /// Commits never checkpoint inline below the hard limit: the writer's
