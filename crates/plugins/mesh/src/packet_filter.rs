@@ -2999,4 +2999,38 @@ mod tests {
             "a peer with no inbound grant opened a connection to this host's port 40000"
         );
     }
+
+    /// J592 review (P3, security, D384, #265): IPv6 next-header values 135, 139 and 140 are
+    /// parsed as extension headers, but Linux delivers them as upper-layer protocols (raw
+    /// sockets, MIP6). A peer granted only TCP/443 wraps a TCP/443 segment behind next header
+    /// 139: the filter checks TCP/443 while the kernel hands protocol 139 to whatever listens
+    /// for it. The filter and the kernel must agree on the protocol; protocols outside a
+    /// port grant need an `All` grant.
+    #[test]
+    fn review_j592_ipv6_upper_layer_protocols_are_not_skipped_as_extension_headers() {
+        let filter = PacketFilter::new(
+            &config(grant(Protocol::Tcp, 443), TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        // An 8-byte header claiming next header TCP, then the unchanged TCP segment.
+        let wrap = |next_header: u8, source_port: u16| {
+            let plain = tcp6(PEER6, LOCAL6, source_port, 443, SYN);
+            let mut wrapped = plain[..40].to_vec();
+            wrapped.extend_from_slice(&[6, 0, 0, 0, 0, 0, 0, 0]);
+            wrapped.extend_from_slice(&plain[40..]);
+            wrapped[6] = next_header;
+            wrapped[4..6].copy_from_slice(&28_u16.to_be_bytes());
+            wrapped
+        };
+        // Control: a real Destination Options header (60) in front of TCP/443 is admitted, so
+        // the refusal below is about the protocol number, not the packet shape.
+        let mut options = wrap(60, 40_001);
+        assert!(filter.check_at(&mut options, Direction::MeshToHost, Instant::now()));
+        let mut wrapped = wrap(139, 40_000);
+        assert!(
+            !filter.check_at(&mut wrapped, Direction::MeshToHost, Instant::now()),
+            "a TCP/443 grant admitted an IPv6 packet whose upper-layer protocol is 139"
+        );
+    }
 }
