@@ -1254,6 +1254,7 @@ mod tests {
             status["kernel_guard"]["missing"],
             serde_json::json!([
                 "mesh-address anti-spoofing on non-mesh interfaces",
+                "underlay delivery to mesh addresses",
                 "forwarding drops",
                 "public TCP/80 and TCP/443 gate"
             ])

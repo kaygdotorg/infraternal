@@ -88,7 +88,7 @@ pub(crate) struct GuardOwnership {
 struct KernelProtectionOwnership {
     /// The raw ingress source anti-spoof chain exists.
     guard: bool,
-    /// The public listener gate exists.
+    /// The delivery chain (underlay fence for own mesh addresses and the public gate) exists.
     delivery: bool,
     /// The forwarding drop chain exists.
     forward: bool,
@@ -112,7 +112,7 @@ impl GuardOwnership {
         self.protections.guard
     }
 
-    /// Whether this family owns its public listener gate.
+    /// Whether this family owns its delivery chain (own-address fence and public gate).
     fn delivery(self) -> bool {
         self.protections.delivery
     }
@@ -505,6 +505,25 @@ fn execute(tool: &Path, script: &str, preflight: bool) -> io::Result<()> {
         ))
     }
 }
+/// This node's own mesh addresses in one family, the current one first and then any rotation
+/// aliases; the delivery fences of both the full policy and the guard use exactly these.
+fn own_addresses(
+    config: &Config,
+    aliases: &[crate::policy::model::Addresses],
+    ipv6: bool,
+) -> Vec<String> {
+    std::iter::once(&config.addresses)
+        .chain(aliases)
+        .map(|addresses| {
+            if ipv6 {
+                addresses.ipv6.to_string()
+            } else {
+                addresses.ipv4.to_string()
+            }
+        })
+        .collect()
+}
+
 // Keep the complete per-family atomic restore batch visible together.
 #[cfg(test)]
 fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
@@ -518,7 +537,13 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
         &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
     )
 }
-// A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
+/// Render one family's full compatibility policy as one atomic `iptables-nft-restore` batch:
+/// the raw ingress fence, the delivery chain and the peer grant chains.
+///
+/// A rotation temporarily owns both local addresses (`aliases`); their delivery fences go in the
+/// same batch. With `fence`, grants come from `config` while connection checks use
+/// `connections`. `installed` says which owned chains already exist, so they are flushed rather
+/// than created.
 fn render_with_aliases(
     config: &Config,
     ipv6: bool,
@@ -535,16 +560,7 @@ fn render_with_aliases(
     } else {
         let _ = writeln!(script, ":{GUARD} - [0:0]");
     }
-    let addresses: Vec<_> = std::iter::once(&config.addresses)
-        .chain(aliases)
-        .map(|addresses| {
-            if ipv6 {
-                addresses.ipv6.to_string()
-            } else {
-                addresses.ipv4.to_string()
-            }
-        })
-        .collect();
+    let addresses = own_addresses(config, aliases, ipv6);
     let _ = writeln!(
         script,
         "-A {GUARD} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {GUARD} -i lo -j RETURN"
@@ -753,7 +769,8 @@ fn render_with_aliases(
     script
 }
 
-/// Render just spoof protection, no forwarding through the host, and the public 80/443 gate.
+/// Render just spoof protection, the underlay delivery fence for this node's own mesh
+/// addresses, no forwarding through the host, and the public 80/443 gate.
 fn render_guard_only(
     config: &Config,
     ipv6: bool,
@@ -792,6 +809,13 @@ fn render_guard_only(
                 "-A {GUARD} ! -i {INTERFACE} -s {prefix} -m comment --comment infraternal.mesh.v1 -j DROP"
             );
         }
+    }
+    // Linux delivers a packet for any local address on any interface, so an underlay packet
+    // for this node's own mesh address is refused before routing and again at delivery, as the
+    // full policy does [231] (J592 P1, #265). Peers' addresses are not local and stay routable.
+    let own = own_addresses(config, aliases, ipv6);
+    for address in &own {
+        let _ = writeln!(script, "-A {GUARD} -d {address} -j DROP");
     }
     if !installed.guard() {
         let _ = writeln!(script, "-I PREROUTING 1 -j {GUARD}");
@@ -839,6 +863,9 @@ fn render_guard_only(
         script,
         "{public_gate}-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
     );
+    for address in &own {
+        let _ = writeln!(script, "-A {DELIVERY} -d {address} -j DROP");
+    }
     let _ = writeln!(
         script,
         "-A {} -m comment --comment infraternal.mesh.v1 -j DROP",
@@ -1056,9 +1083,14 @@ mod tests {
             "-s 10.254.0.2/32 -m comment --comment infraternal.mesh.v1 -j DROP",
             "-A IFM_FWD -m comment --comment infraternal.mesh.v1 -j DROP",
             "--dports 80,443",
+            // Underlay delivery to this node's own mesh address is refused before routing and
+            // at delivery (J592 P1); a peer's address is never fenced as a destination.
+            "-A IFM_GUARD -d 10.254.0.1 -j DROP",
+            "-A IFM_DELIVERY -d 10.254.0.1 -j DROP",
         ] {
             assert!(rules.contains(rule), "missing {rule}: {rules}");
         }
+        assert!(!rules.contains("-d 10.254.0.2 "), "{rules}");
         for grant in ["IFM_IN", "IFM_OUT", "--ctorigdstport 22"] {
             assert!(!rules.contains(grant), "unexpected {grant}: {rules}");
         }

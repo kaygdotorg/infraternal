@@ -16,8 +16,9 @@ use std::{
 };
 const TABLE: &str = "infraternal_mesh";
 /// Kernel-only protections shown when a `GotaTun` guard cannot be installed.
-const MISSING_KERNEL_PROTECTIONS: [&str; 3] = [
+const MISSING_KERNEL_PROTECTIONS: [&str; 4] = [
     "mesh-address anti-spoofing on non-mesh interfaces",
+    "underlay delivery to mesh addresses",
     "forwarding drops",
     "public TCP/80 and TCP/443 gate",
 ];
@@ -760,7 +761,13 @@ pub fn render(config: &Config, replace: bool) -> String {
         &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
     )
 }
-// Keep the complete owned inet transaction visible as one atomic batch.
+/// Render the full kernel policy (grants, connection checks, delivery fence, forwarding drops
+/// and the public gate) as one atomic `nft -f` batch.
+///
+/// `aliases` are extra local addresses a rotation still owns; they get the same delivery fence
+/// as `config.addresses`. With `fence`, peer access comes from `config` (a deny-new fence) while
+/// open connections are checked against `connections`. Keep the complete owned inet transaction
+/// visible as one batch.
 fn render_with_aliases(
     config: &Config,
     replace: bool,
@@ -905,14 +912,7 @@ fn render_with_aliases(
     // policy or conntrack acceptance: an underlay packet has no mesh identity.
     // Loopback delivery is node-local. Translation never turns an underlay
     // incoming interface into lo, so this preserves the ingress refusal [231].
-    let mut delivery = String::new();
-    for addresses in std::iter::once(&config.addresses).chain(aliases) {
-        let _ = write!(
-            delivery,
-            "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
-            addresses.ipv4, addresses.ipv6
-        );
-    }
+    let delivery = delivery_fence(config, aliases);
     for (name, hook, interface, direction) in [
         ("input", "input", "iifname", "incoming"),
         ("output", "output", "oifname", "outgoing"),
@@ -962,11 +962,29 @@ fn render_with_aliases(
     script
 }
 
+/// Rules that drop packets for this node's own mesh addresses unless they came in on the mesh
+/// interface or loopback.
+///
+/// An underlay packet has no mesh identity, so it must never be delivered to a mesh address
+/// [231]. Both the full policy and the `GotaTun` guard use this one rendering, so the two can
+/// never drift apart (J592 P1, #265).
+fn delivery_fence(config: &Config, aliases: &[crate::policy::model::Addresses]) -> String {
+    let mut delivery = String::new();
+    for addresses in std::iter::once(&config.addresses).chain(aliases) {
+        let _ = write!(
+            delivery,
+            "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
+            addresses.ipv4, addresses.ipv6
+        );
+    }
+    delivery
+}
+
 /// Render only the protections the `GotaTun` packet filter cannot see.
 ///
 /// Access grants stay in userspace. This table rejects mesh-address spoofing on other
-/// interfaces, stops forwarding through the host, and closes the public listener pair until
-/// a public route is active.
+/// interfaces, refuses underlay delivery to this node's mesh addresses, stops forwarding
+/// through the host, and closes the public listener pair until a public route is active.
 fn render_guard_only(
     config: &Config,
     replace: bool,
@@ -1015,13 +1033,18 @@ fn render_guard_only(
         script,
         " set mesh6 {{ type ipv6_addr; elements = {{ {ipv6_entries} }}; }}"
     );
+    // Linux accepts a packet for any local address on any interface (the weak host model), so a
+    // LAN neighbour that routes this node's mesh address via its LAN address would reach
+    // mesh-bound services without passing the `GotaTun` filter. Only the node's own addresses are
+    // fenced, so LAN-to-LAN traffic is untouched (J592 P1, the full policy's [231] fence).
+    let delivery = delivery_fence(config, aliases);
     let _ = writeln!(
         script,
-        " chain ingress {{ type filter hook prerouting priority -310; policy accept; iifname != \"{INTERFACE}\" ip saddr @mesh4 drop; iifname != \"{INTERFACE}\" ip6 saddr @mesh6 drop; }}"
+        " chain ingress {{ type filter hook prerouting priority -310; policy accept; iifname != \"{INTERFACE}\" ip saddr @mesh4 drop; iifname != \"{INTERFACE}\" ip6 saddr @mesh6 drop; {delivery} }}"
     );
     let _ = writeln!(
         script,
-        " chain forward {{ type filter hook forward priority -10; policy accept; iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
+        " chain forward {{ type filter hook forward priority -10; policy accept; {delivery} iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
     );
     let public_gate = if proxy_ingress.public_route_active {
         String::new()
@@ -1046,7 +1069,7 @@ fn render_guard_only(
     };
     let _ = writeln!(
         script,
-        " chain input {{ type filter hook input priority -10; policy accept; {public_gate} }}"
+        " chain input {{ type filter hook input priority -10; policy accept; {delivery} {public_gate} }}"
     );
     script.push_str("}\n");
     script
@@ -1205,6 +1228,21 @@ mod tests {
         ] {
             assert!(rules.contains(rule), "missing {rule}: {rules}");
         }
+        // The underlay delivery fence covers this node's own addresses in prerouting, input and
+        // forward, and never a peer's (J592 P1): LAN traffic to other addresses is untouched.
+        for fence in [
+            "iifname != { \"infraternal0\", \"lo\" } ip daddr 10.254.0.1 drop;",
+            "iifname != { \"infraternal0\", \"lo\" } ip6 daddr fd01::1 drop;",
+        ] {
+            for chain in ["chain ingress", "chain input", "chain forward"] {
+                let line = rules
+                    .lines()
+                    .find(|line| line.contains(chain))
+                    .expect("guard chain");
+                assert!(line.contains(fence), "{chain} lacks {fence}: {line}");
+            }
+        }
+        assert!(!rules.contains("daddr 10.254.0.2 "), "{rules}");
         for policy_rule in ["incoming4_", "outgoing4_", "ct state", "ct original"] {
             assert!(
                 !rules.contains(policy_rule),

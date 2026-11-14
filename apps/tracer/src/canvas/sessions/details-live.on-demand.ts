@@ -214,6 +214,7 @@ function decodeMeshProtection(value: Record<string, unknown>): MeshProtectionSna
   const guardState = guard.state;
   const allowedProtections = [
     "mesh-address anti-spoofing on non-mesh interfaces",
+    "underlay delivery to mesh addresses",
     "forwarding drops",
     "public TCP/80 and TCP/443 gate",
   ];
