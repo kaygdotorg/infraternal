@@ -517,3 +517,74 @@ fn output_payload_move_measurement() {
         );
     }
 }
+
+/// A plain 1 MiB window stays legacy when a Snapshot refund rides with raw refunds (#477, J693).
+///
+/// The attach Snapshot and 128 KiB of flood are charged, then one Credit
+/// returns the Snapshot and part of the flood together (a client that batches
+/// refunds, or two Credits summed in the command queue). That Credit crosses
+/// the full opening window if read as fresh credit, but every byte of it can be
+/// a refund, so it proves no reserve.
+#[test]
+fn a_legacy_window_stays_legacy_when_a_snapshot_refund_rides_with_raw_refunds() {
+    const K: u32 = 1024;
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(1024 * K).unwrap();
+    output.repaint(4096, (100 * K) as usize).unwrap();
+    output.forward((128 * K) as usize).unwrap();
+    output.grant(180 * K).unwrap();
+    assert_eq!(
+        output.repaint_budget(),
+        0,
+        "legacy window latched ACTIVE: reserved={} unreturned={}",
+        output.reserved_credit(),
+        output.unreturned_output_credit()
+    );
+    assert_eq!(output.reserved_credit(), 0);
+}
+
+/// An opening remainder that arrives merged with a refund leaves no phantom raw bytes (#477, J693).
+///
+/// The excess over the opening shortfall is returned output, so the raw bytes
+/// it repays must leave the in-flight count; otherwise the repaint budget
+/// overstates what the client can accept.
+#[test]
+fn a_coalesced_opening_remainder_and_refund_leave_no_phantom_raw_bytes() {
+    const K: u32 = 1024;
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(512 * K).unwrap();
+    output.forward((100 * K) as usize).unwrap();
+    output.grant(576 * K + 100 * K).unwrap();
+    assert_eq!(output.reserved_credit(), u64::from(64 * K), "reserve should be ACTIVE");
+    assert_eq!(
+        output.unreturned_output_credit(),
+        0,
+        "phantom raw bytes inflate repaint_budget={} beyond the client's window",
+        output.repaint_budget()
+    );
+}
+
+/// A large first Credit followed by output and a top-up cannot prove a reserve, so it stays legacy (#477).
+///
+/// After 256 KiB of a 256 KiB first Credit has been sent, a following Credit
+/// may be that much refund. Counting it as fresh window could put a client
+/// with a smaller window into reserve mode, so setup ends without one. The
+/// server's real split uses a 16 KiB first Credit (see the test above).
+#[test]
+fn an_unprovable_split_opening_keeps_exact_raw_delivery() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+    const EARLY: u32 = 256 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(EARLY).unwrap();
+    output.forward(EARLY as usize).unwrap();
+    output.grant(BULK_CREDIT + REPAINT_RESERVE - EARLY).unwrap();
+    assert_eq!(output.reserved_credit(), 0);
+    assert_eq!(output.repaint_budget(), 0);
+    assert_eq!(
+        output.suffix(output.cursor(), BULK_CREDIT as usize),
+        Ok(0..(BULK_CREDIT + REPAINT_RESERVE - EARLY) as usize),
+        "every granted byte stays available to raw output"
+    );
+}
