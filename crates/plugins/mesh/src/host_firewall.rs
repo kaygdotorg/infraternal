@@ -1841,7 +1841,7 @@ const SSHD_CANDIDATES: &[&str] = &[
 /// next boot or restart starts, so every source is asked and the answers
 /// are combined ([`SshdPorts::combine`]); none of them wins over another.
 /// Taking the first answer let `sshd -G`'s configured 22 hide a running
-/// sshd started with `-p 2222` (`SSHD_OPTS`, `OPTIONS`, an ExecStart
+/// sshd started with `-p 2222` (`SSHD_OPTS`, `OPTIONS`, an `ExecStart`
 /// drop-in, or a `Port` edit not yet restarted), and the table dropped it
 /// (J658, #483). The sources:
 /// 1. An `ssh.socket` or `sshd.socket` unit that is active or enabled: the
@@ -2777,7 +2777,7 @@ mod tests {
 
     /// J658 (P2): every source's ports are required; the configuration never hides a live listener.
     ///
-    /// sshd_config says 22 while the running sshd listens on 2222 (started
+    /// `sshd_config` says 22 while the running sshd listens on 2222 (started
     /// with `-p 2222`). Taking the first answer kept only 22, and the saved
     /// table dropped the running sshd. Combined, both are required, and a
     /// refusal names each port with its source.

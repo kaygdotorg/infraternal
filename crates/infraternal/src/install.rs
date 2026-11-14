@@ -335,10 +335,10 @@ fn systemctl_program() -> Result<PathBuf, InstallError> {
         .map_err(|error| InstallError::HostFirewall(error.to_string()))
 }
 
-/// Elsewhere there is no systemd; the fixed path fails plainly when the commands run.
+/// Elsewhere there is no systemd, so a real install stops here with [`InstallError::Systemctl`].
 #[cfg(not(target_os = "linux"))]
 fn systemctl_program() -> Result<PathBuf, InstallError> {
-    Ok(PathBuf::from("/usr/bin/systemctl"))
+    Err(InstallError::Systemctl)
 }
 
 /// A `systemctl` command with the child hygiene every install command gets and no stdin.
@@ -929,6 +929,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     impl Drop for PublishFixture {
+        /// Remove the scratch directory, even when the test panicked.
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
