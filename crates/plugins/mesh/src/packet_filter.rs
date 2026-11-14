@@ -314,6 +314,10 @@ impl PacketFilter {
             );
         }
 
+        if parsed.icmp == IcmpKind::Stateless {
+            return Self::allow_stateless(parsed, direction, peer, &policy);
+        }
+
         let mut lookup_key = parsed.key;
         let mut ssh_reply_candidate = false;
         if direction == Direction::HostToMesh
@@ -337,6 +341,14 @@ impl PacketFilter {
                 FlowSlot::Occupied(entry) => entry,
                 FlowSlot::Empty | FlowSlot::Removed => return false,
             };
+            // An echo flow carries only echoes the way it was opened and their replies back.
+            // The tuple alone cannot tell them apart: a request and a reply with identifier 0
+            // share one key (J672 P3, #265). Any other ICMP message is judged on its own.
+            if matches!(parsed.icmp, IcmpKind::EchoRequest | IcmpKind::EchoReply)
+                && (parsed.icmp == entry.opened_by()) != same_direction
+            {
+                return Self::allow_stateless(parsed, direction, peer, &policy);
+            }
             let expired = now.saturating_duration_since(entry.last_seen) > entry.idle_timeout();
             // A bare SYN never rides existing state. Against the opening direction it would let
             // a peer open a connection to this host through this host's own outbound tuple,
@@ -535,7 +547,11 @@ impl PacketFilter {
             grant,
             last_seen: now,
             ssh_redirect_port: grant.ssh_redirect_port,
-            state: 0,
+            state: if parsed.icmp == IcmpKind::EchoReply {
+                FlowState::OPENED_BY_ECHO_REPLY
+            } else {
+                0
+            },
         };
         let slot_start = flow_start(entry.key);
         if !shard.insert(entry, slot_start) {
@@ -559,6 +575,23 @@ impl PacketFilter {
             return false;
         }
         true
+    }
+
+    /// Judge one ICMP message that keeps no flow state against the grant alone.
+    ///
+    /// Used for ICMP that is neither an echo nor an error (timestamps, router messages and the
+    /// like) and for an echo whose role does not fit the flow its tuple names. Such a message
+    /// passes only when its direction's grant is `All`, the same rule that admits a new
+    /// non-TCP, non-UDP flow, and it never creates or refreshes state, so it can neither ride
+    /// nor open an echo flow (J672 P3, #265). A fragmented one is refused: no later fragment
+    /// could follow it without state, and real ICMP of this kind is never that large.
+    fn allow_stateless(
+        parsed: ParsedPacket,
+        direction: Direction,
+        peer: &PeerAccess,
+        policy: &CompiledPolicy,
+    ) -> bool {
+        parsed.fragment.is_none() && policy.new_grant(peer, parsed.key, direction).is_some()
     }
 
     /// Admit only an ICMP error that quotes a still-authorized flow to this exact peer.
@@ -928,6 +961,10 @@ impl FlowState {
     /// then a connection is half-open: it keeps the short opening timeout and a full table may
     /// evict it (J617 P3, #265).
     const HANDSHAKE_DONE: u8 = 16;
+    /// An ICMP echo reply opened this flow (only an `All` grant allows that), so the replies
+    /// that may travel back are echo requests. Unset on every other flow, including echo flows
+    /// opened by a request.
+    const OPENED_BY_ECHO_REPLY: u8 = 32;
 }
 
 impl FlowEntry {
@@ -943,6 +980,16 @@ impl FlowEntry {
             UDP if self.state & FlowState::REPLIED == 0 => UDP_UNREPLIED_TIMEOUT,
             UDP => UDP_IDLE_TIMEOUT,
             _ => OTHER_IDLE_TIMEOUT,
+        }
+    }
+
+    /// The echo role of the packet that opened this ICMP echo flow. Only meaningful for echo
+    /// flows; see [`FlowState::OPENED_BY_ECHO_REPLY`].
+    fn opened_by(self) -> IcmpKind {
+        if self.state & FlowState::OPENED_BY_ECHO_REPLY == 0 {
+            IcmpKind::EchoRequest
+        } else {
+            IcmpKind::EchoReply
         }
     }
 
@@ -1486,6 +1533,20 @@ struct ParsedPacket {
     related: Option<FlowKey>,
     version: u8,
     fragment: Option<PacketFragment>,
+    icmp: IcmpKind,
+}
+
+/// What an ICMP or `ICMPv6` message means for flow state (J672 P3, #265).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IcmpKind {
+    /// Not ICMP, or an ICMP error, which follows its quoted flow as related traffic.
+    NotIcmp,
+    /// An echo request (IPv4 type 8, IPv6 type 128), keyed by its identifier as source port.
+    EchoRequest,
+    /// An echo reply (IPv4 type 0, IPv6 type 129), keyed by its identifier as destination port.
+    EchoReply,
+    /// Any other ICMP message: judged alone, see [`PacketFilter::allow_stateless`].
+    Stateless,
 }
 
 /// One validated first or later fragment with its address-and-ID association key.
@@ -1666,10 +1727,11 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
             related: None,
             version,
             fragment: Some(fragment),
+            icmp: IcmpKind::NotIcmp,
         });
     }
 
-    let (source_port, destination_port, tcp_flags, related) = match protocol {
+    let (source_port, destination_port, tcp_flags, related, icmp) = match protocol {
         TCP => {
             // Every TCP packet the filter judges carries its whole TCP header, options
             // included, a first fragment too. A first fragment cut short of the flags would
@@ -1689,6 +1751,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                 read_u16(packet, offset + 2)?,
                 Some(packet[offset + 13]),
                 None,
+                IcmpKind::NotIcmp,
             )
         }
         UDP => {
@@ -1705,6 +1768,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                 read_u16(packet, offset + 2)?,
                 None,
                 None,
+                IcmpKind::NotIcmp,
             )
         }
         ICMP | ICMPV6 => {
@@ -1721,26 +1785,38 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                 || (protocol == ICMPV6 && matches!(kind, 1..=4))
             {
                 let related = parse_quoted_flow(packet, offset + 8, packet_end)?;
-                (0, 0, None, Some(related))
+                (0, 0, None, Some(related), IcmpKind::NotIcmp)
             } else if (protocol == ICMP && kind == 8 && code == 0)
                 || (protocol == ICMPV6 && kind == 128 && code == 0)
             {
                 if offset + 8 > packet_end {
                     return None;
                 }
-                (read_u16(packet, offset + 4)?, 0, None, None)
+                (
+                    read_u16(packet, offset + 4)?,
+                    0,
+                    None,
+                    None,
+                    IcmpKind::EchoRequest,
+                )
             } else if (protocol == ICMP && kind == 0 && code == 0)
                 || (protocol == ICMPV6 && kind == 129 && code == 0)
             {
                 if offset + 8 > packet_end {
                     return None;
                 }
-                (0, read_u16(packet, offset + 4)?, None, None)
+                (
+                    0,
+                    read_u16(packet, offset + 4)?,
+                    None,
+                    None,
+                    IcmpKind::EchoReply,
+                )
             } else {
-                (0, 0, None, None)
+                (0, 0, None, None, IcmpKind::Stateless)
             }
         }
-        _ => (0, 0, None, None),
+        _ => (0, 0, None, None, IcmpKind::NotIcmp),
     };
 
     Some(ParsedPacket {
@@ -1757,6 +1833,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
         related,
         version,
         fragment,
+        icmp,
     })
 }
 
@@ -3754,5 +3831,73 @@ mod tests {
         assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
         assert!(!filter.check_at(&mut overlap, Direction::HostToMesh, now));
         assert!(filter.check_at(&mut rest, Direction::HostToMesh, now));
+    }
+
+    /// Build an `ICMPv4` message of `kind` (code 0) with identifier `identifier`.
+    fn icmp4(source: Ipv4Addr, destination: Ipv4Addr, kind: u8, identifier: u16) -> Vec<u8> {
+        let mut packet = vec![0_u8; 40];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        packet[20] = kind;
+        packet[24..26].copy_from_slice(&identifier.to_be_bytes());
+        packet
+    }
+
+    /// J672 P3 (#265): an outbound ping with identifier 0 lets back only its echo reply, not
+    /// the peer's other ICMP types (here a timestamp request) and not the peer's own echo
+    /// request, which shares the reply's tuple.
+    #[test]
+    fn an_outbound_ping_admits_only_its_echo_reply() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut ping = icmp4(LOCAL4, PEER4, 8, 0);
+        assert!(filter.check_at(&mut ping, Direction::HostToMesh, now));
+        let mut timestamp = icmp4(PEER4, LOCAL4, 13, 0);
+        assert!(
+            !filter.check_at(&mut timestamp, Direction::MeshToHost, now),
+            "the peer's ICMP timestamp request rode this host's echo flow"
+        );
+        let mut request = icmp4(PEER4, LOCAL4, 8, 0);
+        assert!(
+            !filter.check_at(&mut request, Direction::MeshToHost, now),
+            "the peer's echo request rode this host's echo flow"
+        );
+        let mut reply = icmp4(PEER4, LOCAL4, 0, 0);
+        assert!(filter.check_at(&mut reply, Direction::MeshToHost, now));
+        let mut other_id = icmp4(PEER4, LOCAL4, 0, 7);
+        assert!(!filter.check_at(&mut other_id, Direction::MeshToHost, now));
+    }
+
+    /// ICMP that is neither an echo nor an error passes only under an `All` grant in its own
+    /// direction and leaves no state behind for the other direction.
+    #[test]
+    fn other_icmp_is_judged_alone_and_leaves_no_state() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut outbound = icmp4(LOCAL4, PEER4, 13, 0);
+        assert!(filter.check_at(&mut outbound, Direction::HostToMesh, now));
+        let mut back = icmp4(PEER4, LOCAL4, 14, 0);
+        assert!(!filter.check_at(&mut back, Direction::MeshToHost, now));
+        let current = filter.policy.read().expect("policy");
+        let shard = current.peers[0].flows.lock().expect("flows");
+        assert!(
+            shard
+                .slots
+                .iter()
+                .all(|slot| !matches!(slot, FlowSlot::Occupied(_))),
+            "a stateless ICMP message created a flow"
+        );
     }
 }
