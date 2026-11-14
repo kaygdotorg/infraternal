@@ -1318,7 +1318,11 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
             let mut offset = 40;
             let mut headers = 0;
             let mut fragment = None;
-            while matches!(protocol, 0 | 43 | 44 | 51 | 60 | 135 | 139 | 140) {
+            // Only the headers Linux itself skips before the upper-layer protocol: hop-by-hop
+            // (0), routing (43), fragment (44), authentication (51) and destination options
+            // (60). Mobility (135), HIP (139) and Shim6 (140) are delivered to sockets as
+            // protocols of their own, so the filter must judge them as such (J592 P3, #265).
+            while matches!(protocol, 0 | 43 | 44 | 51 | 60) {
                 if protocol == 44 {
                     headers += 1;
                     if headers > 8 || fragment.is_some() || offset + 8 > end {
@@ -1444,8 +1448,12 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
             }
             let kind = packet[offset];
             let code = packet[offset + 1];
-            if (protocol == ICMP && matches!(kind, 3 | 4 | 5 | 11 | 12))
-                || (protocol == ICMPV6 && kind < 128)
+            // Only real errors follow a flow as related traffic: destination unreachable, time
+            // exceeded and parameter problem (v4 3/11/12; v6 1-4, packet too big included).
+            // Redirects, source quench and unassigned v6 types are ordinary ICMP that needs an
+            // `All` grant (J592 P3, #265).
+            if (protocol == ICMP && matches!(kind, 3 | 11 | 12))
+                || (protocol == ICMPV6 && matches!(kind, 1..=4))
             {
                 let related = parse_quoted_flow(packet, offset + 8, packet_end)?;
                 (0, 0, None, Some(related))
@@ -1531,7 +1539,11 @@ fn parse_quoted_flow(packet: &[u8], offset: usize, outer_end: usize) -> Option<F
             let mut protocol = packet[offset + 6];
             let mut transport = offset + 40;
             let mut headers = 0;
-            while matches!(protocol, 0 | 43 | 44 | 51 | 60 | 135 | 139 | 140) {
+            // Only the headers Linux itself skips before the upper-layer protocol: hop-by-hop
+            // (0), routing (43), fragment (44), authentication (51) and destination options
+            // (60). Mobility (135), HIP (139) and Shim6 (140) are delivered to sockets as
+            // protocols of their own, so the filter must judge them as such (J592 P3, #265).
+            while matches!(protocol, 0 | 43 | 44 | 51 | 60) {
                 headers += 1;
                 if headers > 8 || transport + 2 > outer_end || protocol == 44 {
                     return None;
