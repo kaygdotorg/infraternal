@@ -210,13 +210,16 @@ pub fn io_mark() {
     *IO_MARK.lock().unwrap() = io_counts();
 }
 
-/// Latency summary for one run.
+/// Print one run's JSON line: latency percentiles, throughput, syscalls per op
+/// and `wal_bytes`, the WAL file's size at the end of the run with the pool
+/// still open.
 pub fn report(
     variant: &str,
     workload: &str,
     concurrency: usize,
     mut samples: Vec<u64>,
     elapsed: Duration,
+    wal_bytes: u64,
 ) {
     samples.sort_unstable();
     let q = |p: f64| samples[((samples.len() as f64 - 1.0) * p).round() as usize] as f64 / 1000.0;
@@ -225,7 +228,7 @@ pub fn report(
     let (r0, w0) = *IO_MARK.lock().unwrap();
     let (r1, w1) = io_counts();
     println!(
-        "{{\"read_syscalls_per_op\":{:.2},\"write_syscalls_per_op\":{:.2},\"variant\":\"{variant}\",\"workload\":\"{workload}\",\"conc\":{concurrency},\"n\":{n},\"p50_us\":{:.1},\"p99_us\":{:.1},\"p999_us\":{:.1},\"mean_us\":{mean:.1},\"ops_per_s\":{:.0},\"elapsed_s\":{:.3}}}",
+        "{{\"read_syscalls_per_op\":{:.2},\"write_syscalls_per_op\":{:.2},\"variant\":\"{variant}\",\"workload\":\"{workload}\",\"conc\":{concurrency},\"n\":{n},\"p50_us\":{:.1},\"p99_us\":{:.1},\"p999_us\":{:.1},\"mean_us\":{mean:.1},\"ops_per_s\":{:.0},\"elapsed_s\":{:.3},\"wal_bytes\":{wal_bytes}}}",
         (r1 - r0) as f64 / n as f64,
         (w1 - w0) as f64 / n as f64,
         q(0.5),

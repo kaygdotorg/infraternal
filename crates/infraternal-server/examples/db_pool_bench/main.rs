@@ -451,7 +451,14 @@ async fn bench(kind: &str, workload: &'static str, tasks: usize, path: &Path) {
     for handle in running {
         samples.extend(handle.await.unwrap());
     }
-    workload::report(front.label(), workload, tasks, samples, start.elapsed());
+    let elapsed = start.elapsed();
+    // Read while the connections are still open: closing the last one
+    // checkpoints and deletes the WAL. A large value means commits on this
+    // path never ran a checkpoint (see infraternal-db's pool docs, #473).
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal_bytes = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+    workload::report(front.label(), workload, tasks, samples, elapsed, wal_bytes);
 }
 
 /// Resident memory and thread count: before opening, after opening, and
