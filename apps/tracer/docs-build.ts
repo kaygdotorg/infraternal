@@ -40,6 +40,7 @@ import { resolve } from "node:path";
 import { checkReferences, referencesInPage, referencesInTree } from "./docs-anchors";
 import { citations, factsOf, readingAids, sourcesOf, type Facts } from "./docs-extras";
 import { figures, type FigureManifest, type FigureOptions } from "./docs-figure";
+import { AUDIENCES, escapeHtml, sideNav, sitePage, type Audience, type NavPage } from "./site-chrome";
 
 /** The repository root, found from this file's place (`apps/tracer/`). */
 const root = resolve(import.meta.dirname, "../..");
@@ -52,9 +53,6 @@ export const INDEX_SLUG = "index";
 export const APP_SOURCES = [resolve(root, "apps/tracer/src"), resolve(root, "packages/ui/src")];
 /** Top-level names the build writes into the docs tree itself, so no page or section may take them. */
 const RESERVED = new Set(["fonts", "figures"]);
-
-/** Escapes text for use in HTML, including inside a double-quoted attribute. */
-const escapeHtml = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /**
  * One searchable heading of a page: `id` is the anchor in the rendered page, `text` its plain title. `facts` is the text of the
@@ -295,26 +293,6 @@ export async function readUserDocs(dir: string): Promise<{ index: string | undef
   return { index, pages };
 }
 
-/** Wraps a page title and its body HTML in the full standalone docs page (head, theme colours and layout). */
-function page(title: string, body: string): string {
-  // The two page colours are the sign-in card's (auth-scheme.ts PAGE), so the browser chrome blends in on a phone.
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#101113" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
-<title>${escapeHtml(title)}</title>
-<link rel="stylesheet" href="/docs/docs.css">
-<link rel="stylesheet" href="/docs/doc.css">
-<script src="/docs/doc.js" defer></script>
-</head><body>
-<header><a href="/docs/">Infraternal docs</a></header>
-<main>
-${body}</main>
-</body></html>
-`;
-}
-
 /** A list of pages under a heading: the title over its one-line summary. Empty when there is nothing to list. */
 function pageList(heading: string, pages: readonly { slug: string; title: string; summary: string }[]): string {
   if (pages.length === 0) return "";
@@ -323,11 +301,11 @@ function pageList(heading: string, pages: readonly { slug: string; title: string
 }
 
 /** The page that stands at a former address: it sends the reader on, keeping the `#heading` the old link had (a refresh alone would drop it). */
-function redirectPage(to: string, title: string): string {
-  const target = `/docs/${to}/`;
+export function redirectPage(to: string, title: string, base = "/docs"): string {
+  const target = `${base}/${to}/`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>${escapeHtml(title)} · Infraternal docs</title>
+<title>${escapeHtml(title)} · Infraternal</title>
 <meta name="robots" content="noindex">
 <link rel="canonical" href="${target}">
 <meta http-equiv="refresh" content="0; url=${target}">
@@ -344,13 +322,26 @@ export async function figureOptionsFor(source: string = USER_DOCS_DIR): Promise<
 }
 
 /**
+ * How `buildDocs` places a tree. `audience` puts it under `/docs/<audience>/` and gives its pages the audience tabs and page list (D388);
+ * without it the tree is flat, `/docs/<page>/`, as the instance's own docs are today.
+ */
+export interface BuildOptions { audience?: Audience }
+
+/**
  * Writes the docs tree into `out` (for the app build, `<dist>/docs`), reading the pages of `source`. `scan` lists the source folders
  * whose docs addresses are checked against the pages (docs-anchors.ts); the real tree checks the app, a fixture tree none.
  */
-export async function buildDocs(out: string, source: string = USER_DOCS_DIR, scan: readonly string[] = source === USER_DOCS_DIR ? APP_SOURCES : []): Promise<DocsIndexPage[]> {
+export async function buildDocs(out: string, source: string = USER_DOCS_DIR, scan: readonly string[] = source === USER_DOCS_DIR ? APP_SOURCES : [], options: BuildOptions = {}): Promise<DocsIndexPage[]> {
+  const { audience } = options;
+  // With an audience (D388) the pages live under `<out>/<audience>/`; the shared files stay in `out`, one copy for every audience.
+  const tree = audience ? resolve(out, audience) : out;
+  const mount = audience ? `/docs/${audience}` : "/docs";
   await mkdir(resolve(out, "fonts"), { recursive: true });
+  await mkdir(tree, { recursive: true });
   await Promise.all([
     cp(resolve(import.meta.dirname, "docs.css"), resolve(out, "docs.css")),
+    // The frame around the pages: top bar, footer, side column, and the landing and install layouts.
+    cp(resolve(import.meta.dirname, "site.css"), resolve(out, "site.css")),
     // The structure shared with the canvas reader: summary, table of contents, footer.
     cp(resolve(import.meta.dirname, "doc.css"), resolve(out, "doc.css")),
     // The docs carry their own copy of the font, so the tree stands alone on a static host.
@@ -397,20 +388,35 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     await mkdir(resolve(out, "figures"), { recursive: true });
     await Promise.all(used.map((file) => cp(resolve(figureDirectory, file), resolve(out, "figures", file))));
   }
+  // The pages of an audience point at each other under its folder. Rewritten after the check above, which reads the addresses as the
+  // pages write them; the shared files (styles, fonts, figures) stay where they are.
+  const own = (html: string): string => (audience ? html.replace(/(href|src)="\/docs\/(?!(?:user|admin|dev)\/|docs\.css|doc\.|site\.css|fonts\/|figures\/)/g, `$1="${mount}/`) : html);
+  const nav: NavPage[] = all.filter((doc) => doc !== front).map(({ slug, title }) => {
+    const from = pages.find((entry) => entry.slug === slug);
+    return { slug, title, ...(from?.kind === "section" ? { section: true as const } : {}), ...(from?.parent ? { parent: from.parent } : {}) };
+  });
+  const area = audience ? AUDIENCES[audience].label : "Docs";
+  const write = (doc: RenderedDoc, slug: string): Promise<void> => writeFile(resolve(tree, slug === INDEX_SLUG ? "" : slug, "index.html"), sitePage({
+    title: doc === front ? area : `${doc.title} · ${area}`,
+    here: doc === front ? area : `${area} / ${doc.title}`,
+    area: "docs", main: "docs",
+    body: own(doc.html),
+    ...(audience ? { side: sideNav(audience, nav, slug) } : {}),
+  }));
   for (const doc of all) {
-    const directory = doc === front ? resolve(out, INDEX_SLUG) : resolve(out, doc.slug);
+    const directory = doc === front ? resolve(tree, INDEX_SLUG) : resolve(tree, doc.slug);
     await mkdir(directory, { recursive: true });
     // The same body without the page chrome: the app shows it in a canvas window (docs-body.on-demand.ts).
-    await writeFile(resolve(directory, "fragment.html"), doc.html);
-    if (doc !== front) await writeFile(resolve(directory, "index.html"), page(`${doc.title} · Infraternal docs`, doc.html));
+    await writeFile(resolve(directory, "fragment.html"), own(doc.html));
+    if (doc !== front) await write(doc, doc.slug);
   }
-  await writeFile(resolve(out, "index.html"), page("Infraternal docs", front.html));
+  await write(front, INDEX_SLUG);
   // A page that moved leaves a page at each former address; it is not in the index, so the app never lists it.
   for (const [former, slug] of moved) {
-    await mkdir(resolve(out, former), { recursive: true });
-    await writeFile(resolve(out, former, "index.html"), redirectPage(slug, made.get(slug)!.title));
+    await mkdir(resolve(tree, former), { recursive: true });
+    await writeFile(resolve(tree, former, "index.html"), redirectPage(slug, made.get(slug)!.title, mount));
   }
-  await writeFile(resolve(out, "index.json"), JSON.stringify({ pages: index }));
+  await writeFile(resolve(tree, "index.json"), JSON.stringify({ pages: index }));
   return index;
 }
 
