@@ -363,6 +363,8 @@ run_row() {
         kernel-plain) case_name=mesh-kernel-plain ;;
         wireguard-go) case_name=mesh-wireguard-go ;;
         underlay) case_name=mesh-underlay ;;
+        tailscale) case_name=mesh-tailscale ;;
+        netbird-userspace) case_name=mesh-netbird-userspace ;;
         *) echo "unknown engine $engine for $tag" >&2; return 2 ;;
     esac
     # A non-root `netbird` process is an outgoing ssh from another job (see
@@ -421,6 +423,14 @@ run_plan() {
 }
 
 case $mode in
+    bufferbloat)
+        # The home-router profile (D381, lib/bufferbloat.py) reuses this runner's host
+        # placement and restoration. It reads the validated plan; the bound keeps a
+        # stuck case from holding the shared lock past the 20-minute rule.
+        taskset -c "$housekeeping" timeout --signal=TERM --kill-after=15s 12m \
+            python3 -I "$kit/lib/bufferbloat.py" --kit "$kit" --plan "$plan" \
+            --profile "${H2H_HOME_PROFILE:?}" --seconds "${H2H_HOME_SECONDS:-12}" --out "$out/home"
+        ;;
     validate)
         smoke_dir="$out/cpuset-smoke"
         mkdir -p "$smoke_dir"
@@ -435,7 +445,7 @@ case $mode in
     smoke)
         run_plan 1
         ;;
-    calibration|hold|matrix|ab)
+    calibration|hold|matrix|ab|mixed)
         run_plan 0
         ;;
     soak)

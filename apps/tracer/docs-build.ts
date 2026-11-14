@@ -40,6 +40,8 @@ import { resolve } from "node:path";
 import { checkReferences, referencesInPage, referencesInTree } from "./docs-anchors";
 import { citations, factsOf, readingAids, sourcesOf, type Facts } from "./docs-extras";
 import { figures, type FigureManifest, type FigureOptions } from "./docs-figure";
+import { searchPageOf } from "./docs-search-index";
+import type { SearchPage } from "./src/canvas/docs/docs-search";
 import { AUDIENCES, escapeHtml, sideNav, sitePage, type Audience, type NavPage } from "./site-chrome";
 
 /** The repository root, found from this file's place (`apps/tracer/`). */
@@ -177,7 +179,7 @@ export function tocFor(headings: readonly OutlineHeading[]): string {
 }
 
 /** A page ready to be written: its parts as the index sees them, and the body markup both outputs share. */
-export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; facts: Facts; html: string; figureFiles: string[] }
+export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; facts: Facts; html: string; figureFiles: string[]; search: SearchPage }
 
 /**
  * Renders one page. `html` is the page without chrome (docs-reader.on-demand loads it into a canvas window; the standalone page
@@ -215,7 +217,7 @@ ${body}${notes}
 </div>
 </div>
 `;
-  return { slug, title: parts.title, summary: parts.summary, headings, facts, html, figureFiles: pictured.files };
+  return { slug, title: parts.title, summary: parts.summary, headings, facts, html, figureFiles: pictured.files, search: searchPageOf(slug, parts.title, parts.summary, body) };
 }
 
 /**
@@ -349,9 +351,13 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     // And its own copy of the app icons, for the tab and the home screen on the standalone pages.
     cp(resolve(import.meta.dirname, "icons"), resolve(out, "icons"), { recursive: true }),
   ]);
-  // The page script: the section being read, and copying code. Bundled here, minified, as a file of its own.
+  // The page script: the section being read, and copying code. Bundled here, minified, as a file of its own; the search is a second file, loaded on first use.
   const script = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "doc-page.ts")], target: "browser", minify: true, outdir: out, naming: { entry: "doc.js" } });
   if (!script.success) throw new Error(`docs script: ${script.logs.map(String).join("; ")}`);
+  // The search is its own ES module, imported by URL the first time it is opened. Not a split chunk: `doc.js` is a classic script, and a
+  // split bundle's loader reads `import.meta.url`, which a classic script cannot.
+  const search = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "site-search.ts")], target: "browser", format: "esm", minify: true, outdir: out, naming: { entry: "doc-search.js" } });
+  if (!search.success) throw new Error(`docs search script: ${search.logs.map(String).join("; ")}`);
   const { index: frontText, pages } = await readUserDocs(source);
   // The figures the capture made (docs-figure.ts). A tree with no figures folder simply has none.
   const figureOptions = await figureOptionsFor(source);
@@ -403,6 +409,8 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     here: doc === front ? area : `${area} / ${doc.title}`,
     area: "docs", main: "docs",
     body: own(doc.html),
+    // An audience's page searches all three guides; an instance's own flat docs search themselves.
+    ...(audience ? {} : { searchRoots: ["/docs"] }),
     ...(audience ? { side: sideNav(audience, nav, slug) } : {}),
   }));
   for (const doc of all) {
@@ -419,6 +427,8 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     await writeFile(resolve(tree, former, "index.html"), redirectPage(slug, made.get(slug)!.title, mount));
   }
   await writeFile(resolve(tree, "index.json"), JSON.stringify({ pages: index }));
+  // The words of every page, for ⌘K (docs-search-index.ts). Fetched only when a search is about to start, never with the index.
+  await writeFile(resolve(tree, "search.json"), JSON.stringify({ pages: all.map((doc) => doc.search) }));
   return index;
 }
 
