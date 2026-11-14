@@ -33,7 +33,14 @@ fn review_j589_server_init_over_ssh_does_not_pin_ssh_to_one_source_or_interface(
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("private fixture");
     // 127.0.0.1 is held by `lo` on every host, standing in for a VIP on `lo`.
     let plan = Command::new(env!("CARGO_BIN_EXE_infraternal"))
-        .args(["--json", "server", "init", "--system", "--dry-run", "--data"])
+        .args([
+            "--json",
+            "server",
+            "init",
+            "--system",
+            "--dry-run",
+            "--data",
+        ])
         .arg(&data)
         .current_dir(&root)
         .env_clear()
@@ -53,7 +60,10 @@ fn review_j589_server_init_over_ssh_does_not_pin_ssh_to_one_source_or_interface(
         .find("host-firewall-server.json:\n")
         .expect("server policy in the plan")
         + "host-firewall-server.json:\n".len();
-    let end = start + text[start..].find("\nWould write").expect("policy boundary");
+    let end = start
+        + text[start..]
+            .find("\nWould write")
+            .expect("policy boundary");
     let policy: serde_json::Value =
         serde_json::from_str(&text[start..end]).expect("server policy JSON");
     let ssh_rules = policy["admin_rules"]
@@ -62,10 +72,7 @@ fn review_j589_server_init_over_ssh_does_not_pin_ssh_to_one_source_or_interface(
         .iter()
         .filter(|rule| rule["protocol"] == "tcp" && rule["port"] == 22)
         .collect::<Vec<_>>();
-    assert!(
-        !ssh_rules.is_empty(),
-        "no SSH admin rule saved: {policy:#}"
-    );
+    assert!(!ssh_rules.is_empty(), "no SSH admin rule saved: {policy:#}");
     for rule in ssh_rules {
         assert!(
             rule["source"].is_null() && rule["interface"].is_null(),
