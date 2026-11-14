@@ -533,3 +533,152 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
     );
     worker.stop();
 }
+
+/// J609 review (#489): a policy-routing rule change moves a peer endpoint's underlay path, and
+/// the kernel announces it on the rule groups, not on the link or route groups the underlay
+/// watch subscribes to (#489 J552 P2-2).
+///
+/// Order matters and is the common one: a VPN or interface manager first adds its routes to a
+/// separate table (announced, so the watch moves and one refresh re-derives every peer while
+/// the main table still carries the endpoint), then adds the rule that sends the endpoint into
+/// that table (not announced). Every later refresh trusts the stale budget until the 30 s
+/// inventory check bumps the watch, so for up to 30 s the peer routes advertise a budget the
+/// new path cannot carry, the #489 failure itself. IPv4 and IPv6 both.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn review_j609_policy_rule_change_rederives_route_budgets() {
+    use crate::mesh_mtu::ROUTE_LOOKUPS;
+    use crate::policy::model::{Addresses, PublicKey};
+    review_route_command(&["link", "set", "lo", "up"]);
+    review_marked_tun(PublicKey([9; 32]));
+    review_route_command(&["route", "add", "10.254.0.3/32", "dev", "infraternal0"]);
+    review_route_command(&["-6", "route", "add", "fd01::3/128", "dev", "infraternal0"]);
+    // The main-table underlay: 1500 bytes, so a 1408 budget for both families.
+    let endpoint_v4 = review_learned_underlay(1500);
+    review_route_command(&[
+        "-6",
+        "address",
+        "add",
+        "2001:db8:1::1/64",
+        "dev",
+        "under0",
+        "nodad",
+    ]);
+    let endpoint_v6: std::net::SocketAddr = "[2001:db8:1::2]:51820".parse().expect("IPv6 endpoint");
+    let peer = |id: u8| crate::dataplane::Peer {
+        key: PublicKey([id; 32]),
+        previous_key: None,
+        previous_active: false,
+        addresses: Addresses {
+            ipv4: std::net::Ipv4Addr::new(10, 254, 0, id),
+            ipv6: format!("fd01::{id}").parse().expect("IPv6"),
+        },
+        endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+    };
+    let peers = [peer(2), peer(3)];
+    let learned = [
+        (peers[0].key, Some(endpoint_v4)),
+        (peers[1].key, Some(endpoint_v6)),
+    ];
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(&peers);
+    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let refresh = || {
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
+        let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
+        (ROUTE_LOOKUPS.with(std::cell::Cell::get), written)
+    };
+    // Refresh until one re-derives (the listener is asynchronous); the deadline only bounds it.
+    let refresh_until = |done: &dyn Fn((usize, usize)) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let result = refresh();
+            if done(result) || std::time::Instant::now() > deadline {
+                break result;
+            }
+            // The kernel announcement reaches the listener thread asynchronously, and the test
+            // can observe it only through a refresh.
+            // sleep: paces the polling refreshes; there is no event to wait on.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    let routes = || {
+        [
+            review_route_command(&["route", "show", "exact", "10.254.0.2/32"]),
+            review_route_command(&["-6", "route", "show", "exact", "fd01::2/128"]),
+            review_route_command(&["route", "show", "exact", "10.254.0.3/32"]),
+            review_route_command(&["-6", "route", "show", "exact", "fd01::3/128"]),
+        ]
+    };
+    let first = refresh();
+    let before = routes();
+
+    // A second, smaller underlay in its own table: 1300 bytes, so a 1216 budget.
+    review_route_command(&["link", "add", "under1", "type", "dummy"]);
+    review_route_command(&["link", "set", "under1", "mtu", "1300", "up"]);
+    review_route_command(&[
+        "route",
+        "add",
+        "198.51.100.0/24",
+        "dev",
+        "under1",
+        "table",
+        "100",
+    ]);
+    review_route_command(&[
+        "-6",
+        "route",
+        "add",
+        "2001:db8:1::/64",
+        "dev",
+        "under1",
+        "table",
+        "100",
+    ]);
+    // Those announcements move the watch: one refresh re-derives, still through the main table.
+    let table_added = refresh_until(&|(lookups, _)| lookups > 0);
+
+    // Now the rules send both endpoints into table 100. No link or route changes.
+    review_route_command(&[
+        "rule",
+        "add",
+        "to",
+        "198.51.100.2",
+        "lookup",
+        "100",
+        "pref",
+        "100",
+    ]);
+    review_route_command(&[
+        "-6",
+        "rule",
+        "add",
+        "to",
+        "2001:db8:1::2",
+        "lookup",
+        "100",
+        "pref",
+        "100",
+    ]);
+    let path_v4 = review_route_command(&["route", "get", "198.51.100.2"]);
+    let path_v6 = review_route_command(&["-6", "route", "get", "2001:db8:1::2"]);
+    let rule_added = refresh_until(&|(lookups, _)| lookups > 0);
+    let after = routes();
+    worker.stop();
+    eprintln!(
+        "REVIEW J609 policy rule: first={first:?} before={before:?} table_added={table_added:?} \
+         path_v4={path_v4:?} path_v6={path_v6:?} rule_added={rule_added:?} after={after:?}"
+    );
+    assert!(
+        before.iter().all(|route| route.contains("mtu 1408")),
+        "{before:?}"
+    );
+    assert!(path_v4.contains("dev under1") && path_v6.contains("dev under1"));
+    for route in &after {
+        assert!(
+            route.contains("mtu 1216"),
+            "a rule that moves the endpoint onto the 1300-byte underlay must re-derive the \
+             budget (1216) at the next refresh, not after the 30 s inventory check: {route}"
+        );
+    }
+}
