@@ -18,6 +18,7 @@ fn fixture() -> (PathBuf, Router) {
         ("index.html.br", b"compressed html".as_slice()),
         ("font.woff2", b"font bytes".as_slice()),
         ("main.js", b"mutable entry".as_slice()),
+        ("favicon.ico", b"\0\0\x01\0icon".as_slice()),
     ] {
         std::fs::write(root.join(name), bytes).unwrap();
     }
@@ -108,7 +109,6 @@ async fn spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip() {
         ("/", Some("br")),
         ("/index.html", Some("br")),
         ("/saved/session", Some("br")),
-        ("/chunk-deadbeef.js", Some("br")),
         ("/font.woff2", None),
         ("/main.js", None),
     ] {
@@ -149,6 +149,35 @@ async fn spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip() {
         .await
         .unwrap();
     assert_eq!(fallback.headers()[header::CONTENT_ENCODING], "gzip");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #518: a request for a file that is not in the bundle (it names an extension) is a 404, never the SPA page, so tools
+/// that fetch `/favicon.ico`, `/robots.txt` or a stale chunk get an honest answer. Extensionless app routes still
+/// get the SPA page, and the real icon is served as an image.
+#[tokio::test]
+async fn missing_files_are_404_and_app_routes_still_get_the_page() {
+    let (root, app) = fixture();
+    for path in ["/robots.txt", "/chunk-deadbeef.js", "/icons/nope.png", "/a/b.css"] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 404, "{path}");
+        assert_ne!(
+            response.headers().get(header::CONTENT_TYPE).map(|v| v.as_bytes().starts_with(b"text/html")),
+            Some(true),
+            "{path}"
+        );
+    }
+    for path in ["/", "/saved/session", "/approve/anything"] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert!(response.headers()[header::CONTENT_TYPE].as_bytes().starts_with(b"text/html"), "{path}");
+    }
+    let icon = get(&app, "/favicon.ico", &[]).await;
+    assert_eq!(icon.status(), 200);
+    assert!(
+        icon.headers()[header::CONTENT_TYPE].as_bytes().starts_with(b"image/"),
+        "favicon.ico is an image, not the SPA page"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
