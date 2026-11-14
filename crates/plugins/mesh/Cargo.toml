@@ -73,7 +73,7 @@ workspace = true
 # The production-schema proof needs coordinator storage, never an agent-only build.
 [[example]]
 name = "coordinator_fixture"
-required-features = ["server"]
+required-features = ["server", "agent"]
 
 # Namespace fixture for the seam C relay proof (scripts/mesh-relay-proof.py).
 [[example]]

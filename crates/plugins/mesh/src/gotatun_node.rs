@@ -216,6 +216,11 @@ enum WorkerCommand {
         private_key: StaticSecret,
         reply: sync::SyncSender<io::Result<()>>,
     },
+    SetOwner {
+        /// Public key already committed to the shared TUN owner marker.
+        owner: PublicKey,
+        reply: sync::SyncSender<io::Result<()>>,
+    },
     Counters(sync::SyncSender<io::Result<CounterMap>>),
     #[cfg(feature = "relay")]
     PrepareHandshake {
@@ -439,6 +444,17 @@ impl Engine {
         let (reply, result) = sync::sync_channel(1);
         self.commands
             .send(WorkerCommand::SetPrivateKey { private_key, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
+    /// Update the TUN owner's proof after the node commits a rotated interface marker.
+    /// # Errors
+    /// Reports a stopped worker that can no longer update its cloned TUN handles.
+    pub(crate) fn set_owner(&self, owner: PublicKey) -> io::Result<()> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::SetOwner { owner, reply })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
@@ -738,6 +754,9 @@ async fn run_worker(
                 Some(WorkerCommand::SetPrivateKey { private_key, reply }) => {
                     let _ = reply.send(state.set_private_key(private_key).await);
                 }
+                Some(WorkerCommand::SetOwner { owner, reply }) => {
+                    let _ = reply.send(state.set_owner(owner));
+                }
                 Some(WorkerCommand::Counters(reply)) => {
                     let _ = reply.send(state.counters().await);
                 }
@@ -872,6 +891,19 @@ impl RuntimeState {
                 .map(|policy| (policy.peer.key, None))
                 .collect()
         })
+    }
+
+    /// Replace the creation-time key used to prove ownership of every cloned TUN handle.
+    ///
+    /// The node calls this only after the live link marker names the committed key.
+    /// # Errors
+    /// Reports an engine runtime that no longer owns a TUN.
+    fn set_owner(&self, owner: PublicKey) -> io::Result<()> {
+        self.tun
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .set_owner(owner);
+        Ok(())
     }
 
     /// Change the live device key and retain that key for a later device rebuild.
@@ -1240,6 +1272,11 @@ impl LinuxPacketIo {
     /// Reports a missing interface or route-netlink configuration failure.
     fn set_mtu(&self, mtu: u16) -> io::Result<()> {
         self.tun.set_mtu(mtu)
+    }
+
+    /// Change the owner proof shared by the packet device and the worker's control handle.
+    fn set_owner(&self, owner: PublicKey) {
+        self.tun.set_owner(owner);
     }
 
     /// Future mesh-local services consume selected decrypted packets here before host delivery.
