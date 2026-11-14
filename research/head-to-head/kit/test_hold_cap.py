@@ -117,7 +117,8 @@ class HoldCapTest(unittest.TestCase):
             wait_for_file(pids)
             members = [int(p) for p in pids.read_text().split()]
             os.kill(process.pid, 9)
-            process.communicate(timeout=30)
+            # wait(), not communicate(): a surviving hold would keep the output pipes open.
+            process.wait(timeout=30)
             for _ in range(150):
                 if not any(alive(pid) for pid in members):
                     break
