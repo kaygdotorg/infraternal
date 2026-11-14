@@ -2821,7 +2821,7 @@ mod tests {
             ),
             ("running sshd processes", Ok(Vec::new())),
         ]);
-        assert!(unknown.required().is_empty());
+        assert_eq!(unknown.required(), Vec::<u16>::new());
         let SshdPorts::Unknown(tried) = unknown else {
             panic!("no port must be unknown");
         };
@@ -2836,11 +2836,12 @@ mod tests {
     #[test]
     fn proc_net_loopback_listeners_are_recognised() {
         let v4 = |address: [u8; 4]| format!("{:08X}", u32::from_ne_bytes(address));
+        // Each 32-bit word of an IPv6 address is printed like a whole IPv4 one.
         let v6 = |address: std::net::Ipv6Addr| {
             address
                 .octets()
                 .chunks(4)
-                .map(|word| format!("{:08X}", u32::from_ne_bytes(word.try_into().expect("word"))))
+                .map(|word| v4(word.try_into().expect("word")))
                 .collect::<String>()
         };
         assert!(super::proc_net_address_is_loopback(&v4([127, 0, 0, 1])));
