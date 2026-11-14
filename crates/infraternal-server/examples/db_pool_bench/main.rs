@@ -465,7 +465,21 @@ async fn bench(kind: &str, workload: &'static str, tasks: usize, pace: Duration,
     let mut wal = path.as_os_str().to_owned();
     wal.push("-wal");
     let wal_bytes = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
-    workload::report(front.label(), workload, tasks, samples, elapsed, wal_bytes);
+    // The file never shrinks when SQLite rewinds the log, so its size is a
+    // high-water mark. The live log length is the frame count a checkpoint
+    // reports; this one runs after the measurement, on its own connection.
+    let wal_frames: i64 = infraternal_db::rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(1))
+        .unwrap();
+    workload::report(
+        front.label(),
+        workload,
+        tasks,
+        samples,
+        elapsed,
+        (wal_bytes, wal_frames),
+    );
 }
 
 /// Resident memory and thread count: before opening, after opening, and
