@@ -14,6 +14,8 @@ workspace = true
 # `hooks` for the writer's WAL hook that moves checkpoints off the write path (#473).
 rusqlite = { workspace = true, features = ["hooks"] }
 thiserror.workspace = true
+# Failed background checkpoints are logged (rate-limited) instead of ignored (#473).
+tracing.workspace = true
 # Only the channel types: the pool's threads are plain OS threads, never runtime workers.
 tokio = { workspace = true, features = ["sync"] }
 

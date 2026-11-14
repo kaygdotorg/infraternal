@@ -114,7 +114,7 @@ use std::{
         mpsc::{Receiver, SyncSender, sync_channel},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -163,6 +163,10 @@ pub struct Options {
     /// read stays open for long (module docs, "Guarantees"). The same size is
     /// the writer's `journal_size_limit`, so a WAL that grew past it during a
     /// long read shrinks back once the log rewinds.
+    ///
+    /// Must be at least [`Options::checkpoint_pages`]. Below it, the inline
+    /// pass would always fire first and the checkpointer would never be kicked,
+    /// silently. Equal is allowed and means "checkpoint inline only".
     pub checkpoint_limit_pages: u32,
 }
 
@@ -262,6 +266,11 @@ impl Database {
         if options.checkpoint_pages == 0 || options.checkpoint_limit_pages == 0 {
             return Err(Error::InvalidOptions(
                 "checkpoint thresholds must be at least 1 page",
+            ));
+        }
+        if options.checkpoint_limit_pages < options.checkpoint_pages {
+            return Err(Error::InvalidOptions(
+                "checkpoint_limit_pages must be at least checkpoint_pages",
             ));
         }
         let path: PathBuf = path.as_ref().to_path_buf();
@@ -570,9 +579,10 @@ fn spawn_worker(
 ///
 /// The hook always reports success. Its result would become the result of
 /// the `COMMIT` that triggered it, and that commit has already happened, so
-/// a failed checkpoint must not turn it into an error. SQLite's own
-/// auto-checkpoint ignores checkpoint errors the same way. A checkpoint that
-/// fails is simply retried after the next commit.
+/// a failed checkpoint must not turn it into an error. A checkpoint that fails
+/// is retried after the next commit. The failure is logged, rate-limited (see
+/// [`CheckpointFailures`]), so a lasting error such as a full disk shows up
+/// instead of turning silently into unbounded WAL growth.
 fn install_checkpoint_hook(
     conn: &mut Connection,
     options: &Options,
@@ -580,15 +590,89 @@ fn install_checkpoint_hook(
 ) -> Result<(), Error> {
     let soft = c_int::try_from(options.checkpoint_pages).unwrap_or(c_int::MAX);
     let hard = c_int::try_from(options.checkpoint_limit_pages).unwrap_or(c_int::MAX);
+    let mut failures = CheckpointFailures::new("inline");
     conn.wal_hook(Some(move |wal: &mut Wal, pages: c_int| {
         if pages >= hard {
-            let _ = wal.checkpoint_v2(CheckpointMode::PASSIVE);
+            failures.record(wal.checkpoint_v2(CheckpointMode::PASSIVE), Some(pages));
         } else if pages >= soft {
             let _ = kick.try_send(());
         }
         Ok(())
     }))?;
     Ok(())
+}
+
+/// How often a failing checkpoint path may log: at most once per window.
+const CHECKPOINT_LOG_WINDOW: Duration = Duration::from_secs(60);
+
+/// Logs failed checkpoints without flooding the log (#473, J632 finding 4).
+///
+/// Each checkpoint path (the writer's inline backstop, the background thread)
+/// owns one. `SQLITE_BUSY` and `SQLITE_LOCKED` are not failures: they mean the
+/// other path or another process is checkpointing right now, and the next
+/// pass catches up. Any other error is logged at `warn` at most once per
+/// [`CHECKPOINT_LOG_WINDOW`], with the number of failures it held back. A
+/// lasting error (disk full, I/O error) therefore shows up once a minute
+/// instead of on every commit, or never.
+pub(crate) struct CheckpointFailures {
+    /// Which path this is, for the log line: `inline` or `background`.
+    path: &'static str,
+    /// When this path last logged, if ever.
+    last_logged: Option<Instant>,
+    /// Failures since then that were not logged.
+    suppressed: u64,
+}
+
+impl CheckpointFailures {
+    /// A logger for one checkpoint path that has not logged yet.
+    pub(crate) fn new(path: &'static str) -> Self {
+        Self {
+            path,
+            last_logged: None,
+            suppressed: 0,
+        }
+    }
+
+    /// Note the outcome of one checkpoint pass. `pages` is the WAL length the
+    /// writer saw, when known.
+    fn record<T>(&mut self, outcome: rusqlite::Result<T>, pages: Option<c_int>) {
+        if let Err(error) = outcome {
+            self.failed(&error, pages, Instant::now());
+        }
+    }
+
+    /// Count one failed pass at `now` and log it if the window allows.
+    /// Returns whether it logged (for tests).
+    pub(crate) fn failed(
+        &mut self,
+        error: &rusqlite::Error,
+        pages: Option<c_int>,
+        now: Instant,
+    ) -> bool {
+        if matches!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+        ) {
+            return false;
+        }
+        if self
+            .last_logged
+            .is_some_and(|last| now.duration_since(last) < CHECKPOINT_LOG_WINDOW)
+        {
+            self.suppressed += 1;
+            return false;
+        }
+        tracing::warn!(
+            path = self.path,
+            wal_pages = pages,
+            suppressed = self.suppressed,
+            %error,
+            "database checkpoint failed; the WAL keeps growing until one succeeds"
+        );
+        self.last_logged = Some(now);
+        self.suppressed = 0;
+        true
+    }
 }
 
 /// Start the checkpointer thread: it opens its own connection, reports
@@ -598,9 +682,8 @@ fn install_checkpoint_hook(
 /// A PASSIVE checkpoint never waits for locks: it copies every WAL frame that
 /// no reader still needs and leaves the rest for the next pass. It runs at the
 /// same time as the writer's commits, so its fsync is no longer on the write
-/// path. Errors are ignored for the reason given in
-/// [`install_checkpoint_hook`]; the inline backstop still bounds the WAL if
-/// this thread keeps failing.
+/// path. A failed pass is logged, rate-limited, and retried on the next kick;
+/// the inline backstop still bounds the WAL if this thread keeps failing.
 fn spawn_checkpointer(
     path: PathBuf,
     options: Arc<Options>,
@@ -620,8 +703,10 @@ fn spawn_checkpointer(
             if ready.send(Ok(())).is_err() {
                 return;
             }
+            let mut failures = CheckpointFailures::new("background");
             while kicks.recv().is_ok() {
-                let _ = conn.wal_checkpoint_v2(None::<&str>, CheckpointMode::PASSIVE);
+                let outcome = conn.wal_checkpoint_v2(None::<&str>, CheckpointMode::PASSIVE);
+                failures.record(outcome, None);
             }
         })
         .map_err(Error::Spawn)?;

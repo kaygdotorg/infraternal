@@ -535,6 +535,13 @@ async fn empty_options_are_refused() {
             checkpoint_limit_pages: 0,
             ..Options::default()
         },
+        // A hard limit below the kick threshold would silently disable the
+        // background checkpointer (J632 finding 4).
+        Options {
+            checkpoint_pages: 100,
+            checkpoint_limit_pages: 99,
+            ..Options::default()
+        },
     ] {
         let outcome = Database::open(dir.db(), options).await;
         assert!(
@@ -667,14 +674,15 @@ async fn checkpointer_copies_the_wal_back_while_the_pool_is_open() {
 /// The WAL stays bounded even when background checkpoints never run: at
 /// [`Options::checkpoint_limit_pages`] the writer catches the log up inline,
 /// and its next write rewinds the WAL to the start. Here the checkpointer is
-/// never kicked (threshold out of reach) and 400 one-page writes go through.
+/// never kicked (equal thresholds: the inline pass always fires first) and 400
+/// one-page writes go through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wal_stays_bounded_when_background_checkpoints_fall_behind() {
     const LIMIT: u32 = 32;
     let (dir, db) = setup(
         "ckpt-limit",
         Options {
-            checkpoint_pages: u32::MAX,
+            checkpoint_pages: LIMIT,
             checkpoint_limit_pages: LIMIT,
             ..Options::default()
         },
@@ -861,4 +869,34 @@ async fn wal_shrinks_back_after_a_long_read_ends() {
         "{frames} live frames after the read ended, limit {LIMIT}"
     );
     assert_eq!(values(&db).await.len(), 403);
+}
+
+/// Failed checkpoints are logged at most once per window, with a count of the
+/// ones held back. BUSY and LOCKED, the expected race between the two
+/// checkpoint paths, are never counted (J632 finding 4, #473).
+#[test]
+fn checkpoint_failures_are_rate_limited() {
+    use crate::pool::CheckpointFailures;
+    use rusqlite::ffi;
+    let failure = |code| rusqlite::Error::SqliteFailure(ffi::Error::new(code), None);
+    let full = failure(ffi::SQLITE_FULL);
+    let start = std::time::Instant::now();
+    let mut failures = CheckpointFailures::new("test");
+    assert!(!failures.failed(&failure(ffi::SQLITE_BUSY), Some(9), start));
+    assert!(!failures.failed(&failure(ffi::SQLITE_LOCKED), Some(9), start));
+    assert!(failures.failed(&full, Some(9), start), "first failure logs");
+    let soon = start + Duration::from_secs(1);
+    assert!(
+        !failures.failed(&full, Some(10), soon),
+        "held back in the window"
+    );
+    assert!(
+        !failures.failed(&full, None, soon),
+        "held back in the window"
+    );
+    let later = start + Duration::from_secs(61);
+    assert!(
+        failures.failed(&full, None, later),
+        "logs again after the window"
+    );
 }
