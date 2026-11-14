@@ -32,9 +32,26 @@ dur() { if [[ ${H2H_SMOKE:-0} == 1 ]]; then echo "$2"; else echo "$1"; fi; }
 # observed 5.5-8.1 ms per probe, so every probe is sent under load (see the D345
 # comment on the guard in cases/mesh.sh). Smoke uses 4 s for its 300 probes
 # (2.4 s at 8.1 ms), so the guard never fails a correct smoke window (J581 F1).
+#
+# An engine whose daemon slows ping under load passes the probe count and the
+# slowest probe rate it is expected to sustain (probes/s): the default is then
+# raised to ceil(count / rate) + H2H_LAN_LOAD_MARGIN seconds (10 by default), so
+# the probes still end inside the load (D345). The in-app mesh at 8 flows with
+# pinned cores sends about 110 probes/s, so 8,000 probes take 72.5 s and a fixed
+# 72 s load fails the guard (J610); the computed load is 83 s. The result is never
+# below the fixed default, and an explicit H2H_LAN_TPUT_SECONDS always wins.
 h2h_lan_tput_duration() {
-    local full_seconds=$1 smoke_seconds=$2 override=${H2H_LAN_TPUT_SECONDS:-}
+    local full_seconds=$1 smoke_seconds=$2 count=${3:-} rate=${4:-} override=${H2H_LAN_TPUT_SECONDS:-}
+    local margin=${H2H_LAN_LOAD_MARGIN:-10} needed
     if [[ -z $override ]]; then
+        if [[ -n $count && -n $rate && ${H2H_SMOKE:-0} != 1 ]]; then
+            [[ $count =~ ^[1-9][0-9]*$ && $rate =~ ^[1-9][0-9]*$ && $margin =~ ^[0-9]+$ ]] ||
+                die "probe count, probe rate and load margin must be integers"
+            needed=$(( (count + rate - 1) / rate + margin ))
+            (( needed > full_seconds )) || needed=$full_seconds
+            printf '%s\n' "$needed"
+            return
+        fi
         dur "$full_seconds" "$smoke_seconds"
         return
     fi

@@ -14,7 +14,7 @@ class LatencyCountTest(unittest.TestCase):
     """Exercise the LAN probe-count helper without starting a benchmark."""
 
     def run_tput_duration(
-        self, *, override: str | None = None, smoke: bool = False
+        self, *, override: str | None = None, smoke: bool = False, sizing: str = ""
     ) -> subprocess.CompletedProcess[str]:
         """Run the LAN duration helper with isolated smoke settings."""
         kit = Path(__file__).parent
@@ -27,7 +27,7 @@ class LatencyCountTest(unittest.TestCase):
         if smoke:
             environment["H2H_SMOKE"] = "1"
         return subprocess.run(
-            ["bash", "-c", 'source "$H2H_KIT/lib/common.sh"; h2h_lan_tput_duration 72 4'],
+            ["bash", "-c", 'source "$H2H_KIT/lib/common.sh"; h2h_lan_tput_duration 72 4 ' + sizing],
             capture_output=True,
             text=True,
             env=environment,
@@ -82,6 +82,33 @@ class LatencyCountTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "72")
         self.assertGreater(72, 8000 * 0.0081)
+
+    def test_in_app_load_is_sized_from_the_probe_count_and_pace(self) -> None:
+        """J610: the pinned in-app daemon paces ping at ~110 probes/s, so 8,000 probes take 72.5 s."""
+        self.assertGreater(8000 / 110, 72)
+        result = self.run_tput_duration(sizing="8000 110")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "83")
+        self.assertGreater(int(result.stdout), 8000 / 110 + 8)
+
+    def test_sized_load_never_drops_below_the_fixed_default(self) -> None:
+        """A fast pace or a small count keeps the 72 s default, so other rows stay comparable."""
+        self.assertEqual(self.run_tput_duration(sizing="1000 110").stdout.strip(), "72")
+
+    def test_sized_load_yields_to_an_explicit_override_and_to_smoke(self) -> None:
+        """The owner's H2H_LAN_TPUT_SECONDS wins; smoke keeps its 4 s for 300 probes."""
+        self.assertEqual(self.run_tput_duration(override="90", sizing="8000 110").stdout.strip(), "90")
+        self.assertEqual(self.run_tput_duration(smoke=True, sizing="300 110").stdout.strip(), "4")
+
+    def test_sized_load_rejects_a_bad_rate(self) -> None:
+        """A zero or non-numeric pace stops the run instead of dividing by zero."""
+        self.assertNotEqual(self.run_tput_duration(sizing="8000 0").returncode, 0)
+
+    def test_in_app_case_sizes_its_load_and_other_cases_do_not(self) -> None:
+        """Only the infraternal case passes a probe rate; GotaTun keeps the fixed 72 s."""
+        source = (Path(__file__).parent / "cases/mesh.sh").read_text()
+        self.assertIn('h2h_lan_tput_duration 72 4 "$LAT_COUNT" "${H2H_LAN_MIN_PROBE_RATE:-110}"', source)
+        self.assertEqual(source.count("h2h_lan_tput_duration 72 4"), 2)
 
     def test_loaded_window_fails_when_the_probe_stream_outlives_the_load(self) -> None:
         """A probe stream still running after the load ends mixes idle RTTs into the loaded p99 (D345)."""

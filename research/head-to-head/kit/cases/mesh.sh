@@ -70,7 +70,13 @@ matrix_apply_rps_policy() {
 
 LAT_COUNT=$(h2h_lan_latency_count)
 WAN_LAT_COUNT=$(dur 300 60)
-TPUT_S=$(h2h_lan_tput_duration 72 4)
+# The in-app daemon paces ping slower under load than the CLI (about 110 probes/s
+# at 8 flows with pinned cores, J610), so its load is sized from the probe count.
+if [[ $SYSTEM == infraternal ]]; then
+    TPUT_S=$(h2h_lan_tput_duration 72 4 "$LAT_COUNT" "${H2H_LAN_MIN_PROBE_RATE:-110}")
+else
+    TPUT_S=$(h2h_lan_tput_duration 72 4)
+fi
 WAN_TPUT_S=$(dur 20 4)
 IDLE_S=$(dur 15 3)
 GOTATUN_BIN=${H2H_GOTATUN_BIN:-$H2H_BIN/gotatun}
@@ -147,9 +153,9 @@ first_line() {
 }
 
 start_infraternal() {
-    note version "{\"infraternal\":\"$("$H2H_BIN/infraternal" --version | head -1)\",\"source\":\"$(cat "$H2H_KIT/SOURCE_COMMIT")\"}"
+    note version "{\"infraternal\":\"$("${H2H_INFRATERNAL_BIN:-$H2H_BIN/infraternal}" --version | head -1)\",\"source\":\"${H2H_INFRATERNAL_SOURCE:-$(cat "$H2H_KIT/SOURCE_COMMIT")}\"}"
     fifo_daemon ix sandboxed "$A_PID" env PYTHONPATH="$H2H_KIT/lib" python3 -I "$H2H_KIT/lib/mesh_ix.py" \
-        --binary "$H2H_BIN/infraternal" --coordinator "$H2H_BIN/coordinator_fixture" \
+        --binary "${H2H_INFRATERNAL_BIN:-$H2H_BIN/infraternal}" --coordinator "$H2H_BIN/coordinator_fixture" \
         --scratch "$D" --pid-b "$B_PID"
     local ready
     ready=$(first_line "$D/ix.out" 60) || die "infraternal mesh did not come up: $(tail -c 600 "$D/ix.err")"
