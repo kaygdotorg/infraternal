@@ -40,6 +40,8 @@ import { resolve } from "node:path";
 import { checkReferences, referencesInPage, referencesInTree } from "./docs-anchors";
 import { citations, factsOf, readingAids, sourcesOf, type Facts } from "./docs-extras";
 import { figures, type FigureManifest, type FigureOptions } from "./docs-figure";
+import { searchPageOf } from "./docs-search-index";
+import type { SearchPage } from "./src/canvas/docs/docs-search";
 import { AUDIENCES, escapeHtml, sideNav, sitePage, type Audience, type NavPage } from "./site-chrome";
 
 /** The repository root, found from this file's place (`apps/tracer/`). */
@@ -177,7 +179,7 @@ export function tocFor(headings: readonly OutlineHeading[]): string {
 }
 
 /** A page ready to be written: its parts as the index sees them, and the body markup both outputs share. */
-export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; facts: Facts; html: string; figureFiles: string[] }
+export interface RenderedDoc { slug: string; title: string; summary: string; headings: OutlineHeading[]; facts: Facts; html: string; figureFiles: string[]; search: SearchPage }
 
 /**
  * Renders one page. `html` is the page without chrome (docs-reader.on-demand loads it into a canvas window; the standalone page
@@ -215,7 +217,7 @@ ${body}${notes}
 </div>
 </div>
 `;
-  return { slug, title: parts.title, summary: parts.summary, headings, facts, html, figureFiles: pictured.files };
+  return { slug, title: parts.title, summary: parts.summary, headings, facts, html, figureFiles: pictured.files, search: searchPageOf(slug, parts.title, parts.summary, body) };
 }
 
 /**
@@ -419,6 +421,8 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     await writeFile(resolve(tree, former, "index.html"), redirectPage(slug, made.get(slug)!.title, mount));
   }
   await writeFile(resolve(tree, "index.json"), JSON.stringify({ pages: index }));
+  // The words of every page, for ⌘K (docs-search-index.ts). Fetched only when a search is about to start, never with the index.
+  await writeFile(resolve(tree, "search.json"), JSON.stringify({ pages: all.map((doc) => doc.search) }));
   return index;
 }
 

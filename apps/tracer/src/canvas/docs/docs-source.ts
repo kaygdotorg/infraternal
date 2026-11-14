@@ -37,6 +37,7 @@ export interface DocsSource {
   dispose(): void;
 }
 
+/** Installs the docs source on a core screen: the pages as palette rows, the "?" lookups, and the search through the pages' text (#339). The index and the search code load lazily; `dispose()` removes it all. */
 export function installDocsSource(core: CoreScreen, cx: Ctx): DocsSource {
   const controller = new AbortController();
   let rows: PaletteEntry[] = [];
@@ -51,6 +52,12 @@ export function installDocsSource(core: CoreScreen, cx: Ctx): DocsSource {
     return starting;
   };
   const removeProvider = core.addPaletteProvider(() => { void start(); return rows; });
+  // The text of the pages (#339): the search code and its index load when the palette opens, not before.
+  let textSearch: Promise<(query: string) => Promise<PaletteEntry[]>> | undefined;
+  const removeSearch = core.addPaletteSearch(async (query) => {
+    textSearch ??= onDemand(() => import("./docs-search.on-demand")).then((module) => module.docsSearch()).catch((error) => { textSearch = undefined; throw error; });
+    return (await textSearch)(query);
+  });
   const idle = (window as { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
   const begin = (): void => { void start(); };
   const timer = idle ? idle(begin, { timeout: 5000 }) : window.setTimeout(begin, 2000);
@@ -72,6 +79,7 @@ export function installDocsSource(core: CoreScreen, cx: Ctx): DocsSource {
     dispose() {
       controller.abort();
       removeProvider();
+      removeSearch();
       if (idle) (window as { cancelIdleCallback?: (handle: number) => void }).cancelIdleCallback?.(timer); else window.clearTimeout(timer);
     },
   };
