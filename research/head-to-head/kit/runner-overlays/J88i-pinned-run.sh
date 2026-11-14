@@ -363,6 +363,8 @@ run_row() {
         kernel-plain) case_name=mesh-kernel-plain ;;
         wireguard-go) case_name=mesh-wireguard-go ;;
         underlay) case_name=mesh-underlay ;;
+        tailscale) case_name=mesh-tailscale ;;
+        netbird-userspace) case_name=mesh-netbird-userspace ;;
         *) echo "unknown engine $engine for $tag" >&2; return 2 ;;
     esac
     # A non-root `netbird` process is an outgoing ssh from another job (see

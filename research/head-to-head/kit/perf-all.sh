@@ -35,7 +35,7 @@ usage() {
     cat <<'USAGE'
 usage:
   perf-all.sh --validate [--out DIR]
-  perf-all.sh --smoke --row TAG=gotatun|kernel|kernel-plain|wireguard-go [--binary TAG=PATH] [--source TAG=SHA] [--out DIR]
+  perf-all.sh --smoke --row TAG=ENGINE [--binary TAG=PATH] [--source TAG=SHA] [--out DIR]
   perf-all.sh --calibration [--row warmup=gotatun] --row control-a=gotatun --row control-b=gotatun --row control-c=gotatun [--binary TAG=PATH] [--out DIR]
     (controls may be given in any order; a leading warmup row is run and discarded;
      H2H_LAN_PING_COUNT and H2H_LAN_TPUT_SECONDS set the probe count and load window)
@@ -101,7 +101,8 @@ while (($#)); do
             (($# >= 2)) || { echo '--row needs a value' >&2; exit 2; }
             parse_pair "$2" tag engine
             [[ $tag =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid row tag: $tag" >&2; exit 2; }
-            [[ $engine == gotatun || $engine == infraternal || $engine == kernel || $engine == kernel-plain || $engine == wireguard-go || $engine == underlay ]] || {
+            [[ $engine == gotatun || $engine == infraternal || $engine == kernel || $engine == kernel-plain || $engine == wireguard-go || \
+               $engine == tailscale || $engine == netbird-userspace || $engine == underlay ]] || {
                 echo "invalid engine for row $tag: $engine" >&2; exit 2;
             }
             for existing in "${rows[@]}"; do
