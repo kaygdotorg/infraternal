@@ -118,6 +118,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     }
 
     ensure_server_unit_writable(&path, unit.as_bytes(), options.force)?;
+    let systemctl = systemctl_program()?;
 
     #[cfg(target_os = "linux")]
     let firewall = if options.system {
@@ -151,11 +152,11 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
                     .map_err(|error| InstallError::Io(std::io::Error::other(error)))
             },
             &mut |arguments| {
-                let mut command = Command::new("systemctl");
-                infraternal_shim::prepare_child(&mut command);
-                command.stdin(std::process::Stdio::null());
-                command.args(arguments);
-                Ok(command.status().map_err(InstallError::Io)?.success())
+                Ok(systemctl_command(&systemctl)
+                    .args(arguments)
+                    .status()
+                    .map_err(InstallError::Io)?
+                    .success())
             },
         )?;
     }
@@ -164,20 +165,22 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     // once the unit is accepted; an existing folder keeps its mode [#516].
     super::install_paths::create_private_dir(&absolute(&args.data)?).map_err(InstallError::Io)?;
 
-    let mut command = Command::new("systemctl");
-    infraternal_shim::prepare_child(&mut command);
-    command.stdin(std::process::Stdio::null());
-    command.args(&scope_args).arg("daemon-reload");
-    if !command.status().map_err(InstallError::Io)?.success() {
+    if !systemctl_command(&systemctl)
+        .args(&scope_args)
+        .arg("daemon-reload")
+        .status()
+        .map_err(InstallError::Io)?
+        .success()
+    {
         return Err(InstallError::Systemctl);
     }
-    let mut command = Command::new("systemctl");
-    infraternal_shim::prepare_child(&mut command);
-    command.stdin(std::process::Stdio::null());
-    command
+    if !systemctl_command(&systemctl)
         .args(&scope_args)
-        .args(["enable", "--now", &service]);
-    if !command.status().map_err(InstallError::Io)?.success() {
+        .args(["enable", "--now", &service])
+        .status()
+        .map_err(InstallError::Io)?
+        .success()
+    {
         return Err(InstallError::Systemctl);
     }
     #[cfg(target_os = "linux")]
@@ -206,12 +209,23 @@ struct FirewallTargets<'a> {
     unit: &'a Path,
 }
 
-/// Save the server policy and loader unit, then enable the loader and apply the table now.
+/// Save the server policy and loader unit, then enable the loader and apply the table now; undo all of it on failure.
 ///
 /// `write_policy` saves the policy (production: the root-only atomic
 /// writer) and `systemctl` runs one system-manager command, answering
 /// whether it succeeded; both are parameters so the order and failure
 /// handling can be tested without root.
+///
+/// Invariants (J658, #483):
+/// - A unit already at the loader's path is replaced only when it carries
+///   the product marker or is the known hand loader (#274,
+///   [`host_firewall::known_hand_firewall_unit`]). Anything else is refused
+///   before a file is written or a command runs (D386: only what is ours).
+/// - When any step up to `restart` fails, the previous policy and unit are
+///   restored (or removed when there were none), a loader that was not
+///   enabled before is disabled, and the manager is reloaded. Otherwise a
+///   rejected table left a saved policy and an enabled loader that the next
+///   boot applied. The error says when the rollback itself failed.
 #[cfg(target_os = "linux")]
 fn publish_firewall(
     firewall: &FirewallInstall,
@@ -219,18 +233,120 @@ fn publish_firewall(
     write_policy: &dyn Fn(&Path, &Policy) -> Result<(), InstallError>,
     systemctl: &mut dyn FnMut(&[&str]) -> Result<bool, InstallError>,
 ) -> Result<(), InstallError> {
-    write_policy(targets.policy, &firewall.policy)?;
-    write_atomic(targets.unit, firewall.unit.as_bytes()).map_err(InstallError::Io)?;
-    for arguments in [
-        &["daemon-reload"][..],
-        &["enable", FIREWALL_SERVICE],
-        &["restart", FIREWALL_SERVICE],
+    let previous_unit = read_previous(targets.unit)?;
+    if let Some(bytes) = &previous_unit
+        && !bytes
+            .split(|byte| *byte == b'\n')
+            .any(|line| line == host_firewall::HOST_FIREWALL_UNIT_MARKER.as_bytes())
+        && !host_firewall::known_hand_firewall_unit(bytes)
+    {
+        return Err(InstallError::HostFirewall(format!(
+            "{} is not an infraternal firewall unit and was left unchanged; inspect it, move it \
+             aside if it is no longer needed, then retry",
+            targets.unit.display()
+        )));
+    }
+    let previous_policy = read_previous(targets.policy)?;
+    let was_enabled = systemctl(&["is-enabled", "--quiet", FIREWALL_SERVICE])?;
+    let result = (|| -> Result<(), InstallError> {
+        write_policy(targets.policy, &firewall.policy)?;
+        write_atomic(targets.unit, firewall.unit.as_bytes()).map_err(InstallError::Io)?;
+        for arguments in [
+            &["daemon-reload"][..],
+            &["enable", FIREWALL_SERVICE],
+            &["restart", FIREWALL_SERVICE],
+        ] {
+            if !systemctl(arguments)? {
+                return Err(InstallError::Systemctl);
+            }
+        }
+        Ok(())
+    })();
+    let Err(error) = result else {
+        return Ok(());
+    };
+    let mut incomplete = Vec::new();
+    // Disable before the unit file goes: systemctl cannot disable a unit it no longer finds.
+    if !was_enabled && !matches!(systemctl(&["disable", FIREWALL_SERVICE]), Ok(true)) {
+        incomplete.push(format!("systemctl disable {FIREWALL_SERVICE}"));
+    }
+    for (path, bytes, mode) in [
+        (targets.policy, previous_policy.as_deref(), 0o600),
+        (targets.unit, previous_unit.as_deref(), 0o644),
     ] {
-        if !systemctl(arguments)? {
-            return Err(InstallError::Systemctl);
+        if let Err(restore_error) = restore_previous(path, bytes, mode) {
+            incomplete.push(format!("restore {}: {restore_error}", path.display()));
         }
     }
-    Ok(())
+    if !matches!(systemctl(&["daemon-reload"]), Ok(true)) {
+        incomplete.push("systemctl daemon-reload".to_owned());
+    }
+    if incomplete.is_empty() {
+        return Err(error);
+    }
+    Err(InstallError::HostFirewall(format!(
+        "{error}; rolling back also failed ({}); inspect {} and {} before the next boot",
+        incomplete.join("; "),
+        targets.policy.display(),
+        targets.unit.display()
+    )))
+}
+
+/// The bytes of a regular file that an install may replace, or `None` when it is absent.
+///
+/// A symlink or other non-regular file is refused rather than followed.
+#[cfg(target_os = "linux")]
+fn read_previous(path: &Path) -> Result<Option<Vec<u8>>, InstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => fs::read(path).map(Some).map_err(InstallError::Io),
+        Ok(_) => Err(InstallError::HostFirewall(format!(
+            "{} is not a regular file; inspect it before retrying",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(InstallError::Io(error)),
+    }
+}
+
+/// Put back the bytes `path` held before an install, or remove it when it did not exist.
+#[cfg(target_os = "linux")]
+fn restore_previous(path: &Path, bytes: Option<&[u8]>, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match bytes {
+        Some(bytes) => {
+            write_atomic(path, bytes)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        }
+        None => match fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// The system manager at its fixed, root-owned path, never found through `PATH` (D384, D386).
+///
+/// `server init --system` runs these commands as root, so a writable
+/// directory early in `PATH` must not be able to supply its own
+/// `systemctl` (J658). The same binary serves `--user` installs.
+#[cfg(target_os = "linux")]
+fn systemctl_program() -> Result<PathBuf, InstallError> {
+    host_firewall::discover_systemctl(None)
+        .map_err(|error| InstallError::HostFirewall(error.to_string()))
+}
+
+/// Elsewhere there is no systemd; the fixed path fails plainly when the commands run.
+#[cfg(not(target_os = "linux"))]
+fn systemctl_program() -> Result<PathBuf, InstallError> {
+    Ok(PathBuf::from("/usr/bin/systemctl"))
+}
+
+/// A `systemctl` command with the child hygiene every install command gets and no stdin.
+fn systemctl_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    infraternal_shim::prepare_child(&mut command);
+    command.stdin(std::process::Stdio::null());
+    command
 }
 
 /// Tell operators that the product unit now owns the named host firewall service and table.
