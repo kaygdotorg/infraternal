@@ -605,4 +605,38 @@ mod tests {
         let seen = Seen::default();
         assert!(Rotation::new(vec![at("198.51.100.21:10255")], Instant::now(), seen).is_none());
     }
+
+    /// J602 F2 (#515): a walk restarted because its peer went silent must walk.
+    ///
+    /// `refresh_walks` restarts a found walk once the peer has had no handshake for [`SILENT`].
+    /// The peer is unchanged, so `apply` installed nothing, and the engine still sends where the
+    /// first walk left it or where the peer last roamed it: here the second candidate, now dead.
+    /// The restarted walk is handed exactly that reading (no live handshake, the engine on
+    /// `list[1]`). Its first tick compares the engine's address with `list[0]`, reads the
+    /// difference as "the peer roamed", and stops as found without moving. The node stays on the
+    /// dead address, and every later apply repeats the same no-op restart.
+    #[test]
+    fn a_walk_restarted_for_a_silent_peer_moves_off_the_dead_address() {
+        let start = Instant::now();
+        let list = vec![at("10.9.0.3:10254"), at("198.51.100.21:30254")];
+        // The silent path: no handshake within SILENT, the engine still on the second candidate.
+        let silent = Seen {
+            received: 4_096,
+            handshake: 0,
+            endpoint: Some(list[1]),
+        };
+        let mut walk = Rotation::new(list.clone(), start, silent).unwrap();
+        assert!(!walk.settled(), "fixture: a silent peer starts a walk");
+        let mut now = start;
+        let mut moved = Vec::new();
+        while !walk.settled() && moved.is_empty() {
+            now += STEP;
+            moved.extend(walk.tick(now, silent));
+        }
+        assert!(
+            !moved.is_empty(),
+            "the restarted walk stopped as found without trying any address (settled={})",
+            walk.settled()
+        );
+    }
 }
