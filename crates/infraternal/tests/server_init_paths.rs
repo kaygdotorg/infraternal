@@ -55,7 +55,10 @@ impl Machine {
             .env_clear()
             .env("HOME", self.home())
             .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", self.root.join("system"));
+            .env(
+                "INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR",
+                self.root.join("system"),
+            );
         for (key, value) in extra {
             command.env(key, value);
         }
@@ -125,7 +128,14 @@ fn forcing_a_system_reinstall_keeps_its_custom_data_folder() {
     )
     .expect("install a custom system unit");
     let unit = planned_unit(&machine.run(
-        &["--json", "server", "init", "--system", "--dry-run", "--force"],
+        &[
+            "--json",
+            "server",
+            "init",
+            "--system",
+            "--dry-run",
+            "--force",
+        ],
         &[],
     ));
     assert!(unit.contains("\"--data\" \"/srv/custom state\""), "{unit}");

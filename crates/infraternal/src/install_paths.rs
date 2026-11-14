@@ -147,7 +147,11 @@ impl Environment {
 ///
 /// A dry run only prints the plan, so it is allowed without root. Root without
 /// `--system` keeps the existing behaviour: a per-user service for root.
-pub fn check_scope(scope: Scope, dry_run: bool, environment: &Environment) -> Result<(), PathError> {
+pub fn check_scope(
+    scope: Scope,
+    dry_run: bool,
+    environment: &Environment,
+) -> Result<(), PathError> {
     if scope == Scope::System && !dry_run && !environment.is_root {
         return Err(PathError(
             "--system installs a machine-wide service and needs root; run it with sudo, \
@@ -168,9 +172,7 @@ pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBu
                 .absolute_home()?
                 .join(".local/state/infraternal"),
         }),
-        (Os::MacOs, Scope::System) => {
-            Ok(PathBuf::from("/Library/Application Support/infraternal"))
-        }
+        (Os::MacOs, Scope::System) => Ok(PathBuf::from("/Library/Application Support/infraternal")),
         (Os::MacOs, Scope::User) => Ok(environment
             .absolute_home()?
             .join("Library/Application Support/infraternal")),
@@ -397,7 +399,11 @@ mod tests {
             let env = Environment::from_lookup(
                 Os::Linux,
                 false,
-                |name| (name == "HOME").then_some(home.map(OsString::from)).flatten(),
+                |name| {
+                    (name == "HOME")
+                        .then_some(home.map(OsString::from))
+                        .flatten()
+                },
                 None,
             );
             let error = resolve_server_init(Scope::User, None, None, &Installed::default(), &env)
