@@ -212,6 +212,7 @@ fn setup_token_permission_hint_covers_a_private_socket_in_a_readable_directory()
         "a refused socket connection must identify the elevated command even when its directory is readable"
     );
 }
+/// `setup-token` finds a service whose unit runs a versioned binary through a symlink.
 #[test]
 fn setup_token_discovers_a_service_installed_through_a_versioned_binary_symlink() {
     let root = std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture home"))

@@ -500,7 +500,7 @@ class PerfAllCliTest(unittest.TestCase):
         self.assertIn("H2H_LAN_PING_COUNT=8000", received)
         self.assertEqual(received.count("--root"), 1)
         overlay = (Path(__file__).parent / "runner-overlays/J88i-pinned-run.sh").read_text()
-        self.assertRegex(overlay, r"calibration\|hold\|matrix\|ab\)")
+        self.assertRegex(overlay, r"calibration\|hold\|matrix\|ab\|mixed\)")
 
     def test_ab_runs_the_in_app_engine_when_selected(self) -> None:
         """J610: `H2H_AB_ENGINE=infraternal` accepts four infraternal rows and refuses GotaTun rows."""

@@ -16,9 +16,8 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 import { buildDocsView, DOCS_VIEW } from "../views/docs";
 import { viewIcon } from "../views/icons";
+import { DOCS_ACTION } from "./docs-action";
 import type { DocsIndexPage } from "./docs-source";
-
-export const DOCS_ACTION = "canvas:docs:";
 
 /** Splits `canvas:docs:<section>/<page>#<heading>`; anything else is not ours. */
 export function parseDocsAction(action: string | undefined): { slug: string; heading?: string } | undefined {

@@ -110,6 +110,10 @@ pub enum Error {
     SetupClosed,
     #[error("storage unavailable")]
     Storage(#[from] sqlx::Error),
+    /// A statement on the D379 pool failed (see [`Auth::new`]). Same meaning
+    /// and same message as `Storage`; only the driver differs during the port.
+    #[error("storage unavailable")]
+    Database(#[from] infraternal_db::Error),
     #[error("migration failed")]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("ceremony failed")]
@@ -184,6 +188,12 @@ impl Pending {
 #[derive(Clone)]
 pub struct Auth {
     pool: SqlitePool,
+    /// The D379 rusqlite pool on the same file, when the database is a file
+    /// on disk (#473, slice 2). The session statements run here; everything
+    /// else still runs on `pool`. `None` for in-memory test databases, which
+    /// the pool cannot open (it needs WAL); the session code then falls back
+    /// to `pool`. See [`open_session_database`].
+    db: Option<infraternal_db::Database>,
     webauthn: Arc<Webauthn>,
     origin: String,
     system_service: bool,
@@ -269,6 +279,8 @@ impl Auth {
             .map_err(|_| Error::Invalid)?;
         migration_compat::normalize_production_index(&pool).await?;
         migration_compat::MIGRATIONS.run(&pool).await?;
+        // After the migrations, so the pool opens a file whose schema is current.
+        let db = open_session_database(&pool).await?;
         let recovery_clock = Arc::new(recovery::Clock::load(&pool).await?);
         recovery_clock.start_checkpointing(pool.clone());
         #[cfg(test)]
@@ -276,6 +288,7 @@ impl Auth {
         let (setup_consumed, _) = watch::channel(());
         Ok(Self {
             pool,
+            db,
             webauthn: Arc::new(webauthn),
             origin: url.origin().ascii_serialization(),
             system_service: false,
@@ -296,6 +309,22 @@ impl Auth {
             #[cfg(test)]
             test_recovery_elapsed,
         })
+    }
+
+    /// Shut the D379 pool down at server exit: finish queued session writes,
+    /// then copy the WAL into the main file (`infraternal_db::Database::close`).
+    /// Does nothing when there is no pool. Every clone shares the pool, so call
+    /// it once, after the listener has stopped.
+    pub async fn close_database(&self) {
+        if let Some(db) = &self.db {
+            db.close().await;
+        }
+    }
+
+    /// Whether the session statements run on the D379 pool (tests only).
+    #[cfg(test)]
+    pub(crate) fn sessions_on_pool(&self) -> bool {
+        self.db.is_some()
     }
 
     #[cfg(test)]
@@ -323,6 +352,53 @@ impl Auth {
             .load(std::sync::atomic::Ordering::Relaxed);
         (now != i64::MIN).then_some(now)
     }
+}
+
+/// Open the D379 rusqlite pool (`infraternal-db`) on the same file as `pool`,
+/// or `None` when `pool` is not a database file on disk (#473, slice 2).
+///
+/// The port moves call sites one slice at a time, so both drivers share the
+/// file for a while. sqlx still owns the schema: its migrations ran before
+/// this is called, and the pool only opens the existing file
+/// (`create_if_missing: false`). The pool gets two readers, not the default
+/// seven, because only the session reads use them so far; the eight sqlx
+/// connections still serve everything else, and each reader costs a thread
+/// and its page cache.
+///
+/// Only an absolute path to an existing regular file that is already in WAL
+/// mode qualifies:
+/// - sqlx names an in-memory database `file:sqlx-in-memory-N`, which SQLite
+///   would otherwise read as a relative file name and create in the working
+///   directory, and an in-memory database cannot run in WAL mode anyway.
+/// - The pool switches every file it opens to WAL, and that setting is stored
+///   in the file. The server's own database is WAL from `open_database`; a
+///   file the caller keeps in another journal mode (some tests use a
+///   rollback journal on purpose, to make a read wait on a lock) must stay as
+///   it is, so its session statements stay on sqlx.
+async fn open_session_database(pool: &SqlitePool) -> Result<Option<infraternal_db::Database>> {
+    let options = pool.connect_options();
+    let path = options.get_filename();
+    let on_disk = path.is_absolute()
+        && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file());
+    if !on_disk {
+        return Ok(None);
+    }
+    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(pool)
+        .await?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Ok(None);
+    }
+    let db = infraternal_db::Database::open(
+        path,
+        infraternal_db::Options {
+            readers: 2,
+            create_if_missing: false,
+            ..infraternal_db::Options::default()
+        },
+    )
+    .await?;
+    Ok(Some(db))
 }
 
 // Tests pause at the actual verification/write boundary without timing assumptions.
