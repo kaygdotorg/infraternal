@@ -1150,8 +1150,14 @@ export class TerminalClient {
             if (this.config.status.textContent === LINK_DOUBT_STATUS) this.setStatus("");
             this.config.hooks?.onLinkDoubt?.(false);
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
-            this.setStatus("Reconnected. The screen may be slightly out of date.");
-            this.config.hooks?.onApproximate?.();
+            // Only a repaint that completes a reattach follows a reconnect. On a live,
+            // confirmed attachment an approximate repaint is the host skipping flood
+            // output for a key (D381) or a credit catch-up: the session never dropped,
+            // so saying "Reconnected" would be untrue (#477).
+            if (!this.attachmentConfirmed) {
+              this.setStatus("Reconnected. The screen may be slightly out of date.");
+              this.config.hooks?.onApproximate?.();
+            }
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
           } else if (notice.type === "terminal.replay_complete") {
