@@ -2885,4 +2885,83 @@ mod tests {
             "fd01::2".parse::<IpAddr>().expect("IPv6")
         );
     }
+
+    /// TCP FIN plus ACK, used to close a test connection.
+    const FIN_ACK: u8 = 0x11;
+    /// J592 review (P1, availability, D384, #265): closing a connection never ends its flow
+    /// entry. FIN and RST are only inspected when a flow starts, so a closed TCP flow keeps one
+    /// of the peer's 128 slots for the full 300 s idle timeout, and a full table drops every new
+    /// flow. A peer granted TCP/443 that opens and cleanly closes 129 short connections within
+    /// a few seconds (a browser, a health check, a backup job) is cut off for minutes. Kernel
+    /// conntrack, which the full policy used, ends closed flows and holds far more.
+    #[test]
+    fn review_j592_closed_tcp_connections_do_not_exhaust_the_peer_flow_table() {
+        let filter = PacketFilter::new(
+            &config(grant(Protocol::Tcp, 443), TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let start = Instant::now();
+        for index in 0..200_u16 {
+            // One complete connection every 20 ms: 200 connections in 4 s.
+            let now = start + Duration::from_millis(u64::from(index) * 20);
+            let port = 40_000 + index;
+            let steps = [
+                (tcp4(PEER4, LOCAL4, port, 443, SYN), Direction::MeshToHost),
+                (
+                    tcp4(LOCAL4, PEER4, 443, port, SYN_ACK),
+                    Direction::HostToMesh,
+                ),
+                (tcp4(PEER4, LOCAL4, port, 443, ACK), Direction::MeshToHost),
+                (
+                    tcp4(PEER4, LOCAL4, port, 443, FIN_ACK),
+                    Direction::MeshToHost,
+                ),
+                (
+                    tcp4(LOCAL4, PEER4, 443, port, FIN_ACK),
+                    Direction::HostToMesh,
+                ),
+                (tcp4(PEER4, LOCAL4, port, 443, ACK), Direction::MeshToHost),
+            ];
+            for (step, (mut packet, direction)) in steps.into_iter().enumerate() {
+                assert!(
+                    filter.check_at(&mut packet, direction, now),
+                    "connection {index} (step {step}) was dropped: closed connections still \
+                     hold the peer's flow slots"
+                );
+            }
+        }
+    }
+
+    /// J592 review (P1, availability, D384, #265): UDP has no close, so each request from a new
+    /// source port holds a slot for 60 s. 128 slots per peer allow about two new UDP flows per
+    /// second: a peer resolving names through the mesh DNS service at four queries a second is
+    /// cut off after about 32 s, and the kernel conntrack it replaced did not do that.
+    #[test]
+    fn review_j592_a_peer_can_send_four_dns_queries_a_second_for_a_minute() {
+        let filter = PacketFilter::new(
+            &config(grant(Protocol::Udp, 53), TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let start = Instant::now();
+        let mut dropped = Vec::new();
+        for index in 0..240_u16 {
+            let now = start + Duration::from_millis(u64::from(index) * 250);
+            let port = 30_000 + index;
+            let mut query = udp4(PEER4, LOCAL4, port, 53);
+            let mut answer = udp4(LOCAL4, PEER4, 53, port);
+            if !filter.check_at(&mut query, Direction::MeshToHost, now)
+                || !filter.check_at(&mut answer, Direction::HostToMesh, now)
+            {
+                dropped.push(index);
+            }
+        }
+        assert!(
+            dropped.is_empty(),
+            "{} of 240 queries dropped, the first at query {:?}",
+            dropped.len(),
+            dropped.first()
+        );
+    }
 }
