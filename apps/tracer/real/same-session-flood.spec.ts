@@ -219,9 +219,12 @@ test("keys typed into a terminal that its own program floods keep showing on scr
     `flood_p50_ms=${p(flood, 0.5).toFixed(1)} flood_max_ms=${p(flood, 1).toFixed(1)} (bridge-observed, 150 ms each way)`);
   // The keys reached the bridge; now the person must see them. The newest token is drawn on row 1 of the rendered
   // terminal, on the route the flood started on, with no reconnect status (#477: these used to pass on a blank screen).
-  const tokenWidth = await expect.poll(firstRowInkWidth, { timeout: 5_000, intervals: [50, 100, 250] })
-    .toBeGreaterThan(40).then(() => firstRowInkWidth(), async (error: unknown) => {
+  // A page screenshot takes about 2 s while the flood keeps the renderer busy, so allow the spec's freeze bound.
+  let tokenWidth = 0;
+  await expect.poll(async () => (tokenWidth = await firstRowInkWidth()), { timeout: FREEZE_MS, intervals: [50, 100, 250] })
+    .toBeGreaterThan(40).catch(async (error: unknown) => {
       await page.screenshot({ path: test.info().outputPath("same-session-flood-no-token.png") });
+      console.error(`SAME_SESSION_FLOOD_NO_TOKEN last_token_row_ink_px=${tokenWidth.toFixed(1)}`);
       throw error;
     });
   await page.screenshot({ path: test.info().outputPath("same-session-flood.png") });
