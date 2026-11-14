@@ -41,6 +41,9 @@ thread_local! {
     /// Underlay route lookups this thread made, so tests can show which refreshes probed the
     /// underlay without timing them (#489 J552 P2-2).
     pub(crate) static ROUTE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many of this thread's next underlay route lookups fail as if the kernel refused them,
+    /// so tests can show what a refresh does after a failed lookup (#489 J609 P3).
+    pub(crate) static FAIL_ROUTE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Derive the shared interface MTU from the largest configured peer route budget.
@@ -108,6 +111,14 @@ impl EndpointProbe {
     fn route_mtu(&mut self, endpoint: SocketAddr) -> io::Result<u32> {
         #[cfg(test)]
         ROUTE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+        #[cfg(test)]
+        if FAIL_ROUTE_LOOKUPS.with(|failures| {
+            let remaining = failures.get();
+            failures.set(remaining.saturating_sub(1));
+            remaining > 0
+        }) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
         let socket = match &mut self.socket {
             Some(socket) => socket,
             empty => empty.insert(crate::netlink::Socket::open(

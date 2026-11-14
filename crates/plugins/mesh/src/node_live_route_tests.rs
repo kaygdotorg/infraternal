@@ -755,3 +755,71 @@ fn live_endpoint_refresh_rederives_after_nexthop_replace() {
     assert!(after.0.contains("mtu 1216"), "{after:?}");
     assert!(after.1.contains("mtu 1216"), "{after:?}");
 }
+
+/// A failed underlay lookup writes the safe fallback (1200) but is not an answer: the next
+/// refresh looks the peer up again instead of trusting the fallback until the 30 s inventory
+/// check (#489 J609 P3). A lookup that keeps failing is retried twice per underlay generation,
+/// not on every refresh, so a dead path cannot turn steady traffic into a netlink loop.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn live_endpoint_refresh_retries_a_failed_lookup() {
+    use crate::mesh_mtu::{FAIL_ROUTE_LOOKUPS, ROUTE_LOOKUPS};
+    use crate::policy::model::{Addresses, PublicKey};
+    review_route_command(&["link", "set", "lo", "up"]);
+    review_marked_tun(PublicKey([9; 32]));
+    let endpoint = review_learned_underlay(1500);
+    let peer = crate::dataplane::Peer {
+        key: PublicKey([2; 32]),
+        previous_key: None,
+        previous_active: false,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().expect("IPv4"),
+            ipv6: "fd01::2".parse().expect("IPv6"),
+        },
+        endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+    };
+    let learned = [(peer.key, Some(endpoint))];
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
+    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let refresh = || {
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
+        let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
+        (ROUTE_LOOKUPS.with(std::cell::Cell::get), written)
+    };
+
+    // One transient failure: the fallback is written, then replaced at the next refresh.
+    FAIL_ROUTE_LOOKUPS.with(|failures| failures.set(1));
+    let failed = refresh();
+    let fallback = review_peer_routes();
+    let retried = refresh();
+    let recovered = review_peer_routes();
+    let steady = refresh();
+
+    // A lookup that keeps failing: a full re-derivation (forced without netlink, so no
+    // asynchronous announcement adds refreshes) writes the fallback, then retries are bounded.
+    FAIL_ROUTE_LOOKUPS.with(|failures| failures.set(usize::MAX));
+    lock_route_state(&state).forget_written();
+    let persistent: Vec<_> = (0..6).map(|_| refresh()).collect();
+    FAIL_ROUTE_LOOKUPS.with(|failures| failures.set(0));
+    worker.stop();
+    eprintln!(
+        "failed lookup: failed={failed:?} fallback={fallback:?} retried={retried:?} \
+         recovered={recovered:?} steady={steady:?} persistent={persistent:?}"
+    );
+    assert_eq!(failed, (1, 1));
+    assert!(fallback.0.contains("mtu 1200"), "{fallback:?}");
+    assert_eq!(
+        retried,
+        (1, 1),
+        "a failed lookup must be retried at the next refresh"
+    );
+    assert!(recovered.0.contains("mtu 1408"), "{recovered:?}");
+    assert!(recovered.1.contains("mtu 1408"), "{recovered:?}");
+    assert_eq!(steady, (0, 0));
+    assert_eq!(
+        persistent,
+        [(1, 1), (1, 0), (1, 0), (0, 0), (0, 0), (0, 0)],
+        "a lookup that keeps failing is retried twice, then waits for the underlay to change"
+    );
+}
