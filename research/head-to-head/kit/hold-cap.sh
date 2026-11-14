@@ -52,10 +52,8 @@ members() {
                 }
                 for (p in hit) print p
             }'
-        for pid in /proc/[0-9]*; do
-            pid=${pid#/proc/}
-            tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "H2H_HOLD_TAG=$tag" && echo "$pid"
-        done
+        # -z reads the NUL-separated environment line by line; one grep covers every process.
+        grep -lzx "H2H_HOLD_TAG=$tag" /proc/[0-9]*/environ 2>/dev/null | sed -n 's|^/proc/\([0-9]*\)/environ$|\1|p'
     } | sort -un | while read -r pid; do
         state=$(ps -o stat= -p "$pid" 2>/dev/null) && [[ -n $state && $state != Z* ]] && echo "$pid"
     done
