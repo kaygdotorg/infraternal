@@ -1623,10 +1623,12 @@ pub fn admin_rule_for_ssh_session(value: &str) -> Result<AllowRule, PolicyError>
 /// learned. An empty list never passes: guessing 22 let a console install
 /// lock out an sshd configured on 2222 (J608, #483).
 ///
-/// A rule limited to the loopback interface, or to a single source address
-/// (/32 or /128), does not count: it admits only local logins or one machine,
-/// which proves nothing about the administrators' way in (J608 P3). A real
-/// interface or a source network is a deliberate admin path and counts.
+/// A rule limited to the loopback interface, to a single source address
+/// (/32 or /128), or to a loopback source network (`127.0.0.0/8`,
+/// `::1/127`, J658) does not count: it admits only local logins or one
+/// machine, which proves nothing about the administrators' way in (J608
+/// P3). A real interface or a real source network is a deliberate admin
+/// path and counts.
 #[must_use]
 pub fn admits_sshd(rules: &[AllowRule], sshd_ports: &[u16]) -> bool {
     rules.iter().any(|rule| {
@@ -1635,8 +1637,28 @@ pub fn admits_sshd(rules: &[AllowRule], sshd_ports: &[u16]) -> bool {
             && rule.interface.as_deref() != Some("lo")
             && rule.source.as_ref().is_none_or(|source| {
                 source.prefix() < if source.address().is_ipv4() { 32 } else { 128 }
+                    && !loopback_only(source)
             })
     })
+}
+
+/// Whether every address in `source` is a loopback address.
+///
+/// `source` holds its network address (host bits cleared), so `::1/127` is
+/// stored as `::/127`: it covers `::` and `::1` and nothing routable. A
+/// wider network that merely contains loopback (`64.0.0.0/2`) is not
+/// loopback-only.
+fn loopback_only(source: &IpPrefix) -> bool {
+    match source.address() {
+        IpAddr::V4(address) => source.prefix() >= 8 && address.octets()[0] == 127,
+        IpAddr::V6(address) => {
+            (source.prefix() >= 127 && address.segments()[..7] == [0; 7])
+                || (source.prefix() >= 104
+                    && address
+                        .to_ipv4_mapped()
+                        .is_some_and(|mapped| mapped.octets()[0] == 127))
+        }
+    }
 }
 
 /// sshd's TCP ports as learned for a console install, or why none could be.
