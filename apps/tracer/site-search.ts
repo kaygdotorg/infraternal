@@ -118,7 +118,7 @@ export function installSiteSearch(button: HTMLElement): { open: () => void; togg
     const made = document.createElement("dialog");
     made.className = "search";
     made.setAttribute("aria-label", "Search the docs");
-    made.innerHTML = '<div class="search-field"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input type="search" role="combobox" aria-expanded="true" aria-controls="search-results" aria-label="Search the docs" placeholder="Search the docs" autocomplete="off" spellcheck="false" enterkeyhint="go"></div><div class="search-results" id="search-results" role="listbox" aria-label="Results"></div><p class="search-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to open <kbd>esc</kbd> to close</p>';
+    made.innerHTML = '<div class="search-field"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input type="search" role="combobox" aria-expanded="true" aria-controls="search-results" aria-label="Search the docs" placeholder="Search the docs" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go"></div><div class="search-results" id="search-results" role="listbox" aria-label="Results"></div><p class="search-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to open <kbd>esc</kbd> to close</p>';
     input = made.querySelector("input")!;
     list = made.querySelector(".search-results")!;
     input.addEventListener("input", () => { void draw(); });
