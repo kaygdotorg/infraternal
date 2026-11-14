@@ -4078,3 +4078,77 @@ async fn a_relative_database_path_is_refused_not_downgraded() {
     }
     assert_eq!(refused, "the database path must be absolute");
 }
+
+/// How many rows a session token still has, read through sqlx.
+async fn session_rows(pool: &SqlitePool, token: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(token))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// J696 P3 (#473): during the port, a revoke (sqlx's `DELETE … RETURNING`)
+/// and the slide (the pool's `UPDATE … RETURNING`) are two drivers on one
+/// file. In either order the session ends revoked: a slide after the revoke
+/// is `Denied`, and a slide that committed first doesn't bring the row back.
+#[tokio::test]
+async fn a_sqlx_revoke_and_a_pool_slide_leave_the_session_revoked_in_either_order() {
+    let _guard = SERIAL.lock().await;
+    let (pool, path) = disk_pool("sessions-revoke").await;
+    let (auth, token) = empty_with_pool(pool.clone()).await;
+    assert!(auth.sessions_on_pool(), "an on-disk Auth must use the pool");
+    let f = fixture_with_bootstrap(auth, token).await;
+
+    // Revoke, then slide.
+    f.auth.logout(&f.session).await.unwrap();
+    assert!(matches!(
+        f.auth.session(&f.session, NOW + 1).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(session_rows(&pool, &f.session).await, 0);
+
+    // Slide, then revoke.
+    let second = random();
+    let mut tx = pool.begin().await.unwrap();
+    insert_session(&mut tx, &second, &f.user, "second", NOW, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(f.auth.session(&second, NOW + 1).await.is_ok());
+    f.auth.logout(&second).await.unwrap();
+    assert!(matches!(
+        f.auth.session(&second, NOW + 2).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(session_rows(&pool, &second).await, 0);
+
+    // Racing: slides on the pool while the revoke runs on sqlx. Whatever
+    // interleaving SQLite's write lock picks, the revoke wins at the end.
+    let third = random();
+    let mut tx = pool.begin().await.unwrap();
+    insert_session(&mut tx, &third, &f.user, "third", NOW, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let slides = (0..32).map(|n| {
+        let auth = f.auth.clone();
+        let third = third.clone();
+        tokio::spawn(async move { auth.session(&third, NOW + 1 + n).await.is_ok() })
+    });
+    let slides: Vec<_> = slides.collect();
+    f.auth.logout(&third).await.unwrap();
+    for slide in slides {
+        let _ = slide.await.unwrap();
+    }
+    assert!(matches!(
+        f.auth.session(&third, NOW + 100).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(session_rows(&pool, &third).await, 0);
+
+    f.auth.close_database().await;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
