@@ -15,10 +15,17 @@
 //! credit from unreturned raw Output that the client discards when it accepts
 //! the Snapshot. Each granted byte can fund at most one sent frame: a raw byte
 //! backs at most one replacement, and borrowed bytes become debt until credit
-//! returns. While reserve negotiation is pending, a repaint may use only
-//! unreturned raw output it replaces; it cannot spend unspent bulk credit or
-//! treat an unconfirmed reserve as free credit. Returned credit pays repaint
-//! debt before it funds more output.
+//! returns. Returned credit pays repaint debt before it funds more output.
+//!
+//! Key repaints run only once the reserve is ACTIVE, that is once the client
+//! has proved it granted the bulk window plus the reserve (today the browser).
+//! While negotiation is pending, and for a client that only ever grants the
+//! legacy window (native clients), the repaint budget is zero: a key never
+//! replaces raw output, so such a client keeps exact raw delivery and every
+//! byte arrives once, in order. A browser whose split opening grant completes
+//! later switches to ACTIVE in [`Output::grant`] and its next flood key
+//! repaints; raw bytes sent before that switch may then be replaced, because
+//! they were paid from that same client's confirmed window.
 //! Snapshots stay under the shim's 1 MiB frame cap. The unchanged 250 ms path
 //! uses ordinary bulk credit, and every `Output` owns its own budgets. Input
 //! cannot create credit: while a repaint is pending, later keys coalesce to the
@@ -386,15 +393,16 @@ impl Output {
 
     /// Commit a key repaint from granted credit and raw bytes the Snapshot replaces.
     ///
-    /// When reserve negotiation is active, its separate reserve pays first,
-    /// followed by unused capped bulk credit. While negotiation is pending, a
-    /// Snapshot may spend ordinary credit and borrow only from raw bytes sent
-    /// since the previous repaint; the client drops those bytes when it accepts
-    /// the replacement. Returned credit pays the borrow before funding more
-    /// output. A zero-byte repaint still costs one byte.
+    /// Only an ACTIVE reserve funds a repaint (see the module docs): its
+    /// separate reserve pays first, then unused capped bulk credit, then the
+    /// Snapshot borrows from raw bytes sent since the previous repaint, which
+    /// the client drops when it accepts the replacement. Returned credit pays
+    /// the borrow before funding more output. A zero-byte repaint still costs
+    /// one byte.
     /// # Errors
-    /// Rejects regression, overflow, a Snapshot above the shim frame limit, or
-    /// a repaint larger than its available credit plus replaceable raw output.
+    /// Rejects a relay whose reserve is not ACTIVE (pending or legacy window),
+    /// regression, overflow, a Snapshot above the shim frame limit, or a
+    /// repaint larger than its available credit plus replaceable raw output.
     pub fn repaint_reserved(&mut self, seq: u64, len: usize) -> Result<(), Error> {
         let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
         if seq < self.cursor {
@@ -402,20 +410,15 @@ impl Output {
         }
         let cost = bytes.max(1);
         let frame_limit = u64::try_from(MAX_FRAME.saturating_sub(9)).unwrap_or(u64::MAX);
-        if self.reserve_mode == 0 || bytes > frame_limit || cost > self.repaint_budget() {
+        if self.reserve_mode != RESERVE_ACTIVE
+            || bytes > frame_limit
+            || cost > self.repaint_budget()
+        {
             self.required = cost;
             return Err(Error::OutOfRange);
         }
-        let reserve_spent = if self.reserve_mode == RESERVE_ACTIVE {
-            cost.min(u64::from(self.repaint_reserve))
-        } else {
-            0
-        };
-        let bulk_spent = if self.reserve_mode == RESERVE_ACTIVE {
-            (cost - reserve_spent).min(self.bulk_credit())
-        } else {
-            0
-        };
+        let reserve_spent = cost.min(u64::from(self.repaint_reserve));
+        let bulk_spent = (cost - reserve_spent).min(self.bulk_credit());
         let borrowed = cost - reserve_spent - bulk_spent;
         let borrowed = u32::try_from(borrowed).map_err(|_| Error::Overflow)?;
         let repaint_debt = self
@@ -463,25 +466,18 @@ impl Output {
     }
 
     /// Credit available to a repaint, including raw output it can replace.
+    ///
+    /// Zero unless the reserve is ACTIVE, so the daemon never starts a key
+    /// repaint for a pending or legacy-window client (#477, J637).
     #[must_use]
     pub fn repaint_budget(&self) -> u64 {
-        if self.reserve_mode == 0 {
-            0
-        } else {
-            let reserve = if self.reserve_mode == RESERVE_ACTIVE {
-                u64::from(self.repaint_reserve)
-            } else {
-                0
-            };
-            let bulk = if self.reserve_mode == RESERVE_ACTIVE {
-                self.bulk_credit()
-            } else {
-                0
-            };
-            reserve
-                .saturating_add(bulk)
+        if self.reserve_mode == RESERVE_ACTIVE {
+            u64::from(self.repaint_reserve)
+                .saturating_add(self.bulk_credit())
                 .saturating_add(u64::from(self.raw_replacement_credit))
                 .saturating_sub(u64::from(self.repaint_debt))
+        } else {
+            0
         }
     }
 
