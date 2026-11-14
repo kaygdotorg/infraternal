@@ -878,6 +878,9 @@ fn a_settled_walk_survives_a_later_snapshot() {
 /// `refresh_walks` sees the first address unchanged and the engine on it with a live handshake,
 /// so the new walk starts finished ("live on its first address"). Nothing moves A off the dead
 /// address; only a packet from B could, and behind a filtering NAT none gets through.
+///
+/// J699 P3-3: the re-install itself must not move the engine off the working address either,
+/// which is still on the new list; it used to cost the found peer up to one walk step (5 s).
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
 fn a_changed_tail_does_not_pin_a_found_peer_to_a_dead_first_address() {
@@ -958,12 +961,20 @@ fn a_changed_tail_does_not_pin_a_found_peer_to_a_dead_first_address() {
     in_ns(NS_A, || {
         assert!(node_a.chunk(for_a(2, vec![working, other_dead])).unwrap());
     });
+    // J699 P3-3: the re-install keeps the engine on the address it found, which is still on
+    // the new list, so the peer loses no walk step to the change.
+    let right_after = seen(&node_a).and_then(|c| c.endpoint);
     // sleep: one walk step (5 s) and margin, still before B's first 25 s keepalive
     thread::sleep(Duration::from_millis(6_500));
     let endpoint = seen(&node_a).and_then(|c| c.endpoint);
     in_ns(NS_A, || node_a.down().unwrap());
     in_ns(NS_B, || node_b.down().unwrap());
     cleanup(&[&state_a, &state_b]);
+    assert_eq!(
+        right_after,
+        Some(working),
+        "the config change moved a found peer off its working address"
+    );
     assert_ne!(
         endpoint,
         Some(dead),
