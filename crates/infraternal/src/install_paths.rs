@@ -288,6 +288,173 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
         .create(path)
 }
 
+// ---------------------------------------------------------------------------
+// The command on PATH [D395]
+// ---------------------------------------------------------------------------
+
+/// What publishing the PATH link did, so the install can tell the user.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
+pub enum LinkOutcome {
+    /// The link did not exist and now points at the binary.
+    Created(PathBuf),
+    /// Our link pointed at an older release and now points at the binary.
+    Repointed(PathBuf),
+    /// The link already points at the binary.
+    Current(PathBuf),
+    /// Something else is at the link path; it was not touched.
+    Foreign(PathBuf),
+    /// No link is made here (macOS per user): add this directory to `PATH`.
+    PathAdvice(PathBuf),
+}
+
+impl LinkOutcome {
+    /// One plain sentence for the install output.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
+    #[must_use]
+    pub fn describe(&self, binary: &Path) -> String {
+        match self {
+            Self::Created(link) => format!("Linked {} to {}.", link.display(), binary.display()),
+            Self::Repointed(link) => {
+                format!("Re-pointed {} to {}.", link.display(), binary.display())
+            }
+            Self::Current(link) => format!("{} already points at this release.", link.display()),
+            Self::Foreign(link) => format!(
+                "Left {} alone: it is not our link, so `infraternal` on PATH may be another program. \
+                 Run {} directly, or move that file aside and install again.",
+                link.display(),
+                binary.display()
+            ),
+            Self::PathAdvice(dir) => format!(
+                "To run `infraternal` from any shell, add this line to your shell profile: \
+                 export PATH=\"{}:$PATH\"",
+                dir.display()
+            ),
+        }
+    }
+}
+
+/// Where the one `infraternal` link lives, or `None` when no link is made.
+///
+/// Linux per user is `~/.local/bin/infraternal`; system-wide (either OS) is
+/// `/usr/local/bin/infraternal`; macOS per user makes no link and prints the
+/// `PATH` line instead [D395].
+#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
+pub fn path_link(scope: Scope, environment: &Environment) -> Result<Option<PathBuf>, PathError> {
+    match (environment.os, scope) {
+        (_, Scope::System) => Ok(Some(PathBuf::from("/usr/local/bin/infraternal"))),
+        (Os::Linux, Scope::User) => Ok(Some(
+            environment.absolute_home()?.join(".local/bin/infraternal"),
+        )),
+        (Os::MacOs, Scope::User) => Ok(None),
+    }
+}
+
+/// Whether the symlink `link` points at a release of ours.
+///
+/// Ours means: exactly `binary`, or a file named `infraternal`, `live` or
+/// `current` below a folder called `infraternal` (an install folder of any
+/// release, old or new). That is how an update recognises the previous
+/// release's link and re-points it, while a link to `/usr/bin/other` is foreign.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
+fn points_at_ours(link: &Path, binary: &Path) -> bool {
+    let Ok(target) = std::fs::read_link(link) else {
+        return false;
+    };
+    let target = if target.is_absolute() {
+        target
+    } else {
+        link.parent()
+            .map_or(target.clone(), |dir| dir.join(&target))
+    };
+    if target == binary {
+        return true;
+    }
+    let named = target.file_name().is_some_and(|name| {
+        ["infraternal", "live", "current"]
+            .iter()
+            .any(|ours| name == *ours)
+    });
+    named
+        && target.parent().is_some_and(|dir| {
+            dir.components()
+                .any(|part| part.as_os_str() == "infraternal")
+        })
+}
+
+/// Point `link` at `binary`: create it, re-point our own older link, never replace anything else.
+///
+/// A regular file, a directory or a symlink to somewhere not ours is reported
+/// as [`LinkOutcome::Foreign`] and left untouched. Re-pointing builds the new
+/// symlink beside the old one and renames it over, so `PATH` never sees a gap.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
+pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
+    match std::fs::symlink_metadata(link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if std::fs::read_link(link)? == binary {
+                return Ok(LinkOutcome::Current(link.to_owned()));
+            }
+            if !points_at_ours(link, binary) {
+                return Ok(LinkOutcome::Foreign(link.to_owned()));
+            }
+            let parent = link.parent().ok_or(io::ErrorKind::InvalidInput)?;
+            let temporary = parent.join(format!(".infraternal.link-{}", std::process::id()));
+            let _ = std::fs::remove_file(&temporary);
+            std::os::unix::fs::symlink(binary, &temporary)?;
+            if let Err(error) = std::fs::rename(&temporary, link) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+            Ok(LinkOutcome::Repointed(link.to_owned()))
+        }
+        Ok(_) => Ok(LinkOutcome::Foreign(link.to_owned())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = link.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::os::unix::fs::symlink(binary, link)?;
+            Ok(LinkOutcome::Created(link.to_owned()))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove `link` only if it is a symlink that still points at our binary; report whether it did.
+///
+/// Uninstall calls this so a link someone re-pointed to another program stays.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the uninstall that calls it does not exist on dev yet"
+    )
+)]
+pub fn remove_link(link: &Path, binary: &Path) -> io::Result<bool> {
+    if std::fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
+        && points_at_ours(link, binary)
+    {
+        std::fs::remove_file(link)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// What to do about the `PATH` command for an install in `scope` with `binary`.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
+pub fn link_for_install(
+    scope: Scope,
+    binary: &Path,
+    environment: &Environment,
+) -> Result<LinkOutcome, PathError> {
+    match path_link(scope, environment)? {
+        Some(link) => publish_link(&link, binary)
+            .map_err(|error| PathError(format!("could not link {}: {error}", link.display()))),
+        None => Ok(LinkOutcome::PathAdvice(
+            binary.parent().map_or_else(PathBuf::new, Path::to_owned),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! One test per rule, so each has its own failure. Paths are plain values;
@@ -543,6 +710,85 @@ mod tests {
         assert_eq!(mode(&leaf), 0o700);
         assert_eq!(mode(&root), 0o755);
         create_private_dir(&leaf).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The link lives at the D395 path for each platform and scope.
+    #[test]
+    fn the_path_link_follows_d395() {
+        assert_eq!(
+            path_link(Scope::User, &linux()).unwrap(),
+            Some("/home/someone/.local/bin/infraternal".into())
+        );
+        assert_eq!(
+            path_link(Scope::System, &linux()).unwrap(),
+            Some("/usr/local/bin/infraternal".into())
+        );
+        assert_eq!(path_link(Scope::User, &macos()).unwrap(), None);
+        assert_eq!(
+            path_link(Scope::System, &macos()).unwrap(),
+            Some("/usr/local/bin/infraternal".into())
+        );
+        let advice =
+            link_for_install(Scope::User, Path::new("/Users/a/bin/infraternal"), &macos()).unwrap();
+        assert_eq!(advice, LinkOutcome::PathAdvice("/Users/a/bin".into()));
+        assert!(
+            advice
+                .describe(Path::new("x"))
+                .contains("export PATH=\"/Users/a/bin:$PATH\"")
+        );
+    }
+
+    /// Create, keep, re-point on update, and never overwrite anything foreign.
+    #[test]
+    fn the_link_is_created_repointed_and_never_overwrites_foreign_files() {
+        let root = scratch("link");
+        let releases = root.join("data/infraternal/bin");
+        std::fs::create_dir_all(&releases).unwrap();
+        let (old, new) = (
+            releases.join("infraternal"),
+            root.join("data/infraternal/new/infraternal"),
+        );
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        let link = root.join("bin/infraternal");
+        assert_eq!(
+            publish_link(&link, &old).unwrap(),
+            LinkOutcome::Created(link.clone())
+        );
+        assert_eq!(
+            publish_link(&link, &old).unwrap(),
+            LinkOutcome::Current(link.clone())
+        );
+        assert_eq!(
+            publish_link(&link, &new).unwrap(),
+            LinkOutcome::Repointed(link.clone())
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), new);
+
+        // A regular file and a link to another program are left exactly as found.
+        let file = root.join("bin/other");
+        std::fs::write(&file, "mine").unwrap();
+        assert_eq!(
+            publish_link(&file, &new).unwrap(),
+            LinkOutcome::Foreign(file.clone())
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
+        let foreign = root.join("bin/foreign");
+        std::os::unix::fs::symlink("/usr/bin/true", &foreign).unwrap();
+        assert_eq!(
+            publish_link(&foreign, &new).unwrap(),
+            LinkOutcome::Foreign(foreign.clone())
+        );
+        assert_eq!(
+            std::fs::read_link(&foreign).unwrap(),
+            Path::new("/usr/bin/true")
+        );
+
+        // Uninstall removes ours only.
+        assert!(!remove_link(&foreign, &new).unwrap());
+        assert!(!remove_link(&file, &new).unwrap());
+        assert!(remove_link(&link, &new).unwrap());
+        assert!(!link.exists() && std::fs::symlink_metadata(&link).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
