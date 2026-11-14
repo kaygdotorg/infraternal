@@ -510,6 +510,133 @@ mod tests {
         assert!(!lookup.trusted(Path::new("/tmp/not-nft")));
     }
 
+    /// J592 review (P1, security, D384, #265): a store entry's name says nothing about who asked
+    /// for it. On a multi-user Nix host any local user can `nix-store --add` a directory named
+    /// `nftables-999999.0.0` (or `iptables-999999.0.0`) through the world-writable daemon
+    /// socket; the result is root-owned and read-only, so it passes every ownership check, and
+    /// its version sorts first. A host with no fixed-path tool (production's shape, #483) would
+    /// then run it as root. The lookup must only trust fixed, root-owned entry points (system
+    /// and root profiles, the distribution directories, an explicit path), never a name match.
+    #[test]
+    fn review_j592_lookup_never_selects_a_store_path_by_its_name() {
+        let tree = Tree::new();
+        tree.tool(
+            &format!("{}/bin/nft", store('f', "nftables-999999.0.0")),
+            0o555,
+        );
+        for tool in [
+            Tool::IptablesNft,
+            Tool::IptablesNftRestore,
+            Tool::Ip6tablesNft,
+            Tool::Ip6tablesNftRestore,
+        ] {
+            tree.tool(
+                &format!(
+                    "{}/bin/{}",
+                    store('9', "iptables-999999.0.0"),
+                    tool.binary()
+                ),
+                0o555,
+            );
+        }
+        // Pin every fixture directory to 0755: under a group-writable umask the ownership
+        // check alone would refuse the store and this test would pass for the wrong reason.
+        for entry in ["nix", "nix/store"]
+            .into_iter()
+            .map(|relative| tree.0.join(relative))
+            .chain(
+                std::fs::read_dir(tree.0.join("nix/store"))
+                    .expect("fixture store")
+                    .flat_map(|entry| {
+                        let path = entry.expect("fixture entry").path();
+                        [path.join("bin"), path]
+                    }),
+            )
+        {
+            std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755))
+                .expect("test fixture");
+        }
+        for tool in [
+            Tool::Nft,
+            Tool::IptablesNft,
+            Tool::IptablesNftRestore,
+            Tool::Ip6tablesNft,
+            Tool::Ip6tablesNftRestore,
+        ] {
+            assert_eq!(
+                tree.lookup().find(tool),
+                Err(Missing(tool)),
+                "{tool:?}: a store path nobody linked from a root profile was chosen by name"
+            );
+        }
+    }
+
+    /// J592 review (P1, security, D384, #265), real Nix daemon: an unprivileged user plants
+    /// `nftables-999999.0.0/bin/nft` and `iptables-999999.0.0/bin/iptables-nft-restore` with
+    /// `nix-store --add`. The store scan must not offer either to run as root. The planted paths
+    /// are removed with `nix-store --delete` afterwards. Reports SKIP without a Nix daemon.
+    #[test]
+    fn review_j592_store_scan_never_offers_a_user_added_tool() {
+        use std::process::Command;
+
+        /// Deletes the planted store paths even when the assertion fails.
+        struct Planted(Vec<PathBuf>, PathBuf);
+        impl Drop for Planted {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    let _ = Command::new(&self.1).arg("--delete").arg(path).output();
+                }
+            }
+        }
+
+        let nix_store = PathBuf::from("/nix/var/nix/profiles/default/bin/nix-store");
+        if !nix_store.exists() || !Path::new("/nix/var/nix/daemon-socket/socket").exists() {
+            eprintln!("SKIP: no multi-user Nix daemon on this host");
+            return;
+        }
+        let scratch = Tree::new();
+        let mut planted = Planted(Vec::new(), nix_store.clone());
+        let mut offered = Vec::new();
+        for (package, tool) in [
+            ("nftables-999999.0.0", Tool::Nft),
+            ("iptables-999999.0.0", Tool::IptablesNftRestore),
+        ] {
+            let program = scratch.tool(&format!("{package}/bin/{}", tool.binary()), 0o755);
+            std::fs::write(
+                &program,
+                "#!/bin/sh\necho j592-not-a-firewall-tool >&2\nexit 1\n",
+            )
+            .expect("test fixture");
+            let added = Command::new(&nix_store)
+                .arg("--add")
+                .arg(scratch.0.join(package))
+                .output()
+                .expect("run nix-store --add as the unprivileged test user");
+            assert!(added.status.success(), "{added:?}");
+            let store_path = PathBuf::from(String::from_utf8_lossy(&added.stdout).trim());
+            planted.0.push(store_path.clone());
+            let path = store_path.join("bin").join(tool.binary());
+            let metadata = std::fs::metadata(&path).expect("planted tool");
+            let lookup = super::Lookup::system();
+            let candidates = lookup.store_candidates(tool);
+            eprintln!(
+                "PLANTED {} uid={} mode={:o} trusted={} first_store_candidate={:?}",
+                path.display(),
+                metadata.uid(),
+                metadata.mode() & 0o7777,
+                lookup.trusted(&path),
+                candidates.first()
+            );
+            if candidates.contains(&path) {
+                offered.push(path);
+            }
+        }
+        assert!(
+            offered.is_empty(),
+            "the lookup offers store paths an unprivileged user added, to run as root: {offered:?}"
+        );
+    }
+
     /// Numeric runs compare as numbers; text runs as text.
     #[test]
     fn versions_compare_by_number() {
