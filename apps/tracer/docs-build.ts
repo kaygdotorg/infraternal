@@ -301,7 +301,7 @@ function pageList(heading: string, pages: readonly { slug: string; title: string
 }
 
 /** The page that stands at a former address: it sends the reader on, keeping the `#heading` the old link had (a refresh alone would drop it). */
-function redirectPage(to: string, title: string, base = "/docs"): string {
+export function redirectPage(to: string, title: string, base = "/docs"): string {
   const target = `${base}/${to}/`;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

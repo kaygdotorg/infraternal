@@ -19,7 +19,7 @@
  */
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { buildDocs, type DocsIndexPage } from "./docs-build";
+import { buildDocs, INDEX_SLUG, readUserDocs, redirectPage, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
 import { figures, type FigureManifest } from "./docs-figure";
 import { AUDIENCES, escapeHtml, sitePage, type Audience } from "./site-chrome";
 
@@ -130,6 +130,25 @@ function notFound(inDocs: boolean): string {
   return `<div class="plain"><p class="code404">404</p><h1>${inDocs ? "That page is not in the docs" : "That page does not exist"}</h1><p class="lede">${inDocs ? "It may have moved, or the address has a typo. The guides below list every page." : "The address may have a typo, or the page may have moved."}</p>${links}</div>\n`;
 }
 
+/**
+ * Leaves a redirect page at each old flat address of the user pages, `/docs/<page>/` and `/docs/<section>/<page>/`, which now live
+ * under `/docs/user/` (D388). Former addresses (a page's `Former slugs` line) go straight to the page's current home, in one hop.
+ * Addresses of the three audiences themselves are never overwritten, and a user page may not take one of their names.
+ */
+export async function writeFlatRedirects(docs: string, index: readonly DocsIndexPage[]): Promise<number> {
+  const taken = new Set<string>(Object.keys(AUDIENCES));
+  const titles = new Map(index.map((page) => [page.slug, page.title]));
+  const targets = new Map<string, string>();
+  for (const page of index) if (page.slug !== INDEX_SLUG) targets.set(page.slug, page.slug);
+  for (const entry of (await readUserDocs(USER_DOCS_DIR)).pages) for (const former of entry.former) targets.set(former, entry.slug);
+  for (const [from, to] of targets) {
+    if (taken.has(from.split("/")[0]!)) throw new Error(`user page "${from}" would take the address of an audience`);
+    await mkdir(resolve(docs, from), { recursive: true });
+    await writeFile(resolve(docs, from, "index.html"), redirectPage(`user/${to}`, titles.get(to) ?? to, "/docs"));
+  }
+  return targets.size;
+}
+
 /** Writes one page of the site at `path` (`install` is `/install/`); an empty path is the front page. */
 async function put(out: string, path: string, html: string): Promise<void> {
   const dir = resolve(out, path);
@@ -146,6 +165,7 @@ export async function buildSite(options: SiteOptions): Promise<void> {
   const counts = {} as Record<Audience, number>;
   const indexes: Record<string, DocsIndexPage[]> = {};
   indexes.user = await buildDocs(docs, undefined, undefined, { audience: "user" });
+  await writeFlatRedirects(docs, indexes.user);
   for (const audience of ["admin", "dev"] as const) indexes[audience] = await buildDocs(docs, await standInSource(audience, scratch), [], { audience });
   for (const audience of Object.keys(AUDIENCES) as Audience[]) counts[audience] = indexes[audience]!.length - 1;
 
