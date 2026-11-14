@@ -485,8 +485,8 @@ mod tests {
             owned_cleanup: None,
         };
         let mut retained = retained_writer();
-        let (output, mut observed) = mpsc::channel(16);
-        retained.output = output;
+        let (output, mut observed) = mpsc::channel::<crate::embedded::TerminalOutput>(16);
+        retained.output = output.into();
         retained.awaiting_ack = true;
         retained.replaying = true;
         let mut attachments = HashMap::from([(1, retained)]);

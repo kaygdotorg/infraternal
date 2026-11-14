@@ -46,12 +46,8 @@ pub(super) const OUTPUT_ITEM_CHARGE: u64 = 64;
 /// The most one stream's queue may hold, in charged bytes: the 8 MiB credit ceiling plus 1 MiB of
 /// headroom for per-item charges and uncredited Acks and notices.
 pub(super) const OUTPUT_QUEUE_BYTES: u64 = MAX_OUTPUT_CREDIT + 1024 * 1024;
-/// Channel slots for a production attachment. Every item charges at least
+/// Channel slots for a production attachment (147,456). Every item charges at least
 /// [`OUTPUT_ITEM_CHARGE`], so the byte cap is always reached first.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "147,456 slots fits every supported usize"
-)]
 pub(super) const OUTPUT_QUEUE_SLOTS: usize = (OUTPUT_QUEUE_BYTES / OUTPUT_ITEM_CHARGE) as usize;
 /// A drained ledger keeps at most this many entries' worth of allocation after a flood.
 const LEDGER_KEEP: usize = 1024;
@@ -109,7 +105,7 @@ impl OutputQueue {
         }
         self.sender
             .try_send(item)
-            .map_err(|error| error.into_inner())?;
+            .map_err(mpsc::error::TrySendError::into_inner)?;
         // Within the cap, so the charge is at most 9 MiB and fits the compact ledger entry.
         ledger
             .charges

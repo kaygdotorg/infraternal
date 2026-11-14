@@ -474,7 +474,7 @@ async fn a_key_confirmed_by_a_route_proof_state_reply_still_gets_its_repaint() {
                 Ok(Some(Message::Shim(2, Shim::InputAck(seq)))) => acked |= seq >= 1,
                 Ok(Some(Message::Pong(2, 7, 9))) => ponged = true,
                 Ok(Some(Message::Shim(2, Shim::Snapshot(seq, bytes)))) => {
-                    repaint = Some((seq, bytes))
+                    repaint = Some((seq, bytes));
                 }
                 Ok(Some(Message::Shim(2, Shim::Output(..)) | Message::Event(2, _))) => {}
                 Ok(Some(_) | None) | Err(_) => break,
