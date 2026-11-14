@@ -26,13 +26,27 @@ pub(crate) enum Direction {
     MeshToHost,
 }
 
-/// Expire idle TCP state so a stale reverse tuple cannot keep a removed grant alive.
+/// Expire idle established TCP state so a stale reverse tuple cannot keep a removed grant alive.
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Expire a TCP flow whose opening SYN has not been answered yet.
+const TCP_OPENING_TIMEOUT: Duration = Duration::from_secs(60);
+/// Expire a half-closed TCP flow (FIN seen in one direction) that has gone quiet.
+const TCP_CLOSING_TIMEOUT: Duration = Duration::from_secs(120);
+/// Keep a closed TCP flow (FIN both ways, or RST) just long enough for the last ACK and any
+/// retransmitted FIN, then free its slot.
+const TCP_CLOSED_TIMEOUT: Duration = Duration::from_secs(10);
 /// Expire idle UDP state while allowing short request/response exchanges.
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Expire a UDP flow that never saw a reply sooner, as kernel conntrack does.
+const UDP_UNREPLIED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound the work a peer can make the filter retain for non-TCP and non-UDP flows.
 const OTHER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound each peer's conntrack memory and avoid allocations as packets arrive.
+///
+/// The table never grows. When it is full, a new flow first reclaims expired entries and then
+/// evicts the least recently seen flow that is not an established TCP connection (see
+/// [`FlowShard::evict_idle`]), so closed connections and finished UDP exchanges never cut a
+/// peer off (J592 P1-3, #265).
 const FLOWS_PER_PEER: usize = 128;
 /// `FLOWS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts.
 const FLOWS_PER_PEER_HASH: u64 = 128;
@@ -125,9 +139,10 @@ impl PacketFilter {
                 .flows
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for slot in &mut flows.slots {
-                if matches!(*slot, FlowSlot::Occupied(entry) if !next.allows_flow(entry)) {
-                    *slot = FlowSlot::Removed;
+            for index in 0..flows.slots.len() {
+                if matches!(flows.slots[index], FlowSlot::Occupied(entry) if !next.allows_flow(entry))
+                {
+                    flows.remove(index);
                 }
             }
             flows.remove_orphaned_fragments();
@@ -259,6 +274,7 @@ impl PacketFilter {
             }
             let mut refreshed = entry;
             refreshed.last_seen = now;
+            refreshed.observe(same_direction, parsed.tcp_flags);
             shard.slots[index] = FlowSlot::Occupied(refreshed);
             return true;
         }
@@ -429,11 +445,14 @@ impl PacketFilter {
             grant,
             last_seen: now,
             ssh_redirect_port: grant.ssh_redirect_port,
+            state: 0,
         };
         let slot_start = flow_start(entry.key);
         if !shard.insert(entry, slot_start) {
             shard.reclaim_expired(now);
-            if !shard.insert(entry, slot_start) {
+            let inserted = shard.insert(entry, slot_start)
+                || (shard.evict_idle() && shard.insert(entry, slot_start));
+            if !inserted {
                 return false;
             }
         }
@@ -792,15 +811,73 @@ struct FlowEntry {
     grant: Grant,
     last_seen: Instant,
     ssh_redirect_port: Option<u16>,
+    /// What the flow has seen so far, as [`FlowState`] bits.
+    state: u8,
+}
+
+/// Bits of [`FlowEntry::state`]. A packet can only add bits; a flow is never reopened in place.
+struct FlowState;
+
+impl FlowState {
+    /// A packet travelled against the initiating direction (a reply).
+    const REPLIED: u8 = 1;
+    /// The initiator sent FIN.
+    const FIN_ORIGINAL: u8 = 2;
+    /// The responder sent FIN.
+    const FIN_REPLY: u8 = 4;
+    /// Either side sent RST.
+    const RESET: u8 = 8;
 }
 
 impl FlowEntry {
-    /// Select the idle expiry that matches this flow's transport protocol.
+    /// Select the idle expiry that matches this flow's transport protocol and lifecycle.
     fn idle_timeout(self) -> Duration {
         match self.key.protocol {
+            TCP if self.closed() => TCP_CLOSED_TIMEOUT,
+            TCP if self.state & (FlowState::FIN_ORIGINAL | FlowState::FIN_REPLY) != 0 => {
+                TCP_CLOSING_TIMEOUT
+            }
+            TCP if self.state & FlowState::REPLIED == 0 => TCP_OPENING_TIMEOUT,
             TCP => TCP_IDLE_TIMEOUT,
+            UDP if self.state & FlowState::REPLIED == 0 => UDP_UNREPLIED_TIMEOUT,
             UDP => UDP_IDLE_TIMEOUT,
             _ => OTHER_IDLE_TIMEOUT,
+        }
+    }
+
+    /// Whether this TCP connection is over: reset, or FIN seen in both directions.
+    fn closed(self) -> bool {
+        self.state & FlowState::RESET != 0
+            || self.state & (FlowState::FIN_ORIGINAL | FlowState::FIN_REPLY)
+                == FlowState::FIN_ORIGINAL | FlowState::FIN_REPLY
+    }
+
+    /// Whether this is a live TCP connection that a full table must never evict: answered,
+    /// and neither reset nor closing.
+    fn established(self) -> bool {
+        self.key.protocol == TCP
+            && self.state & FlowState::REPLIED != 0
+            && self.state & (FlowState::FIN_ORIGINAL | FlowState::FIN_REPLY | FlowState::RESET) == 0
+    }
+
+    /// Record what one admitted packet says about the flow. `same_direction` is true when the
+    /// packet travels the way the flow was opened.
+    fn observe(&mut self, same_direction: bool, tcp_flags: Option<u8>) {
+        if !same_direction {
+            self.state |= FlowState::REPLIED;
+        }
+        if self.key.protocol == TCP {
+            let flags = tcp_flags.unwrap_or(0);
+            if flags & TCP_RST != 0 {
+                self.state |= FlowState::RESET;
+            }
+            if flags & TCP_FIN != 0 {
+                self.state |= if same_direction {
+                    FlowState::FIN_ORIGINAL
+                } else {
+                    FlowState::FIN_REPLY
+                };
+            }
         }
     }
 
@@ -1100,8 +1177,50 @@ impl FlowShard {
     }
 
     /// Turn one expired or revoked entry into a tombstone without breaking later probes.
+    ///
+    /// When the next slot is empty, no probe chain passes through this one, so this tombstone
+    /// and the run of tombstones before it become empty again. Without that, a table that has
+    /// seen churn has no empty slot left and every miss probes all slots.
     fn remove(&mut self, index: usize) {
+        let len = self.slots.len();
         self.slots[index] = FlowSlot::Removed;
+        if !matches!(self.slots[(index + 1) % len], FlowSlot::Empty) {
+            return;
+        }
+        let mut current = index;
+        for _ in 0..len {
+            if !matches!(self.slots[current], FlowSlot::Removed) {
+                break;
+            }
+            self.slots[current] = FlowSlot::Empty;
+            current = (current + len - 1) % len;
+        }
+    }
+
+    /// Free the slot of the least recently seen flow that is not an established TCP connection,
+    /// when a full table refuses a new flow.
+    ///
+    /// Closed and half-closed connections, unanswered SYNs and UDP or ICMP exchanges are all
+    /// candidates; recency protects active ones. An established connection is never evicted,
+    /// so a peer that fills its table with them can only stop itself opening more (the cap is
+    /// per peer). Returns whether a slot was freed. The scan is O(slots) and runs only when the
+    /// table is full.
+    fn evict_idle(&mut self) -> bool {
+        let victim = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| match slot {
+                FlowSlot::Occupied(entry) if !entry.established() => Some((entry.last_seen, index)),
+                FlowSlot::Empty | FlowSlot::Removed | FlowSlot::Occupied(_) => None,
+            })
+            .min();
+        let Some((_, index)) = victim else {
+            return false;
+        };
+        // The table is full, so a tombstone here keeps every other probe chain intact.
+        self.slots[index] = FlowSlot::Removed;
+        true
     }
 
     /// Find one fragment association by its complete IP identity and packet direction.
@@ -1187,9 +1306,9 @@ impl FlowShard {
 
     /// Reclaim idle entries only when a full shard refuses a new flow.
     fn reclaim_expired(&mut self, now: Instant) {
-        for slot in &mut self.slots {
-            if matches!(*slot, FlowSlot::Occupied(entry) if entry.expired(now)) {
-                *slot = FlowSlot::Removed;
+        for index in 0..self.slots.len() {
+            if matches!(self.slots[index], FlowSlot::Occupied(entry) if entry.expired(now)) {
+                self.remove(index);
             }
         }
         for slot in &mut self.fragments {
@@ -1712,7 +1831,9 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        Direction, FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, PacketFilter, UDP, UDP_IDLE_TIMEOUT,
+        Direction, FLOWS_PER_PEER, FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, FlowShard, FlowSlot,
+        FragmentCoverage, FragmentSlot, PacketFilter, PeerAccess, TCP_CLOSED_TIMEOUT, UDP,
+        UDP_IDLE_TIMEOUT,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -2051,15 +2172,13 @@ mod tests {
             .expect("compile two-peer policy");
         let now = Instant::now();
         for index in 0..PER_PEER_LIMIT {
-            let mut packet = tcp4(
-                LOCAL4,
-                PEER4,
-                20_000 + u16::try_from(index).expect("flow index"),
-                443,
-                SYN,
-            );
             assert!(
-                filter.check_at(&mut packet, Direction::HostToMesh, now),
+                establish4(
+                    &filter,
+                    PEER4,
+                    20_000 + u16::try_from(index).expect("flow index"),
+                    now
+                ),
                 "peer flow {index}"
             );
         }
@@ -2118,15 +2237,13 @@ mod tests {
         let now = Instant::now();
         for (node, address) in addresses.iter().take(4) {
             for index in 0..PER_PEER_LIMIT {
-                let mut packet = tcp4(
-                    LOCAL4,
-                    *address,
-                    20_000 + u16::try_from(index).expect("flow index"),
-                    443,
-                    SYN,
-                );
                 assert!(
-                    filter.check_at(&mut packet, Direction::HostToMesh, now),
+                    establish4(
+                        &filter,
+                        *address,
+                        20_000 + u16::try_from(index).expect("flow index"),
+                        now
+                    ),
                     "peer {} flow {index}",
                     node.0
                 );
@@ -2153,14 +2270,12 @@ mod tests {
         .expect("compile policy");
         let now = Instant::now();
         for index in 0..PER_PEER_LIMIT {
-            let mut packet = tcp4(
-                LOCAL4,
+            assert!(establish4(
+                &filter,
                 PEER4,
                 20_000 + u16::try_from(index).expect("flow index"),
-                443,
-                SYN,
-            );
-            assert!(filter.check_at(&mut packet, Direction::HostToMesh, now));
+                now
+            ));
         }
         let mut ipv6 = tcp6(LOCAL6, PEER6, 40_000, 443, SYN);
         assert!(
@@ -2178,14 +2293,12 @@ mod tests {
             .expect("compile initial policy");
         let now = Instant::now();
         for index in 0..PER_PEER_LIMIT {
-            let mut packet = tcp4(
-                LOCAL4,
+            assert!(establish4(
+                &filter,
                 PEER4,
                 20_000 + u16::try_from(index).expect("flow index"),
-                443,
-                SYN,
-            );
-            assert!(filter.check_at(&mut packet, Direction::HostToMesh, now));
+                now
+            ));
         }
 
         policy.peers.get_mut(&NodeId(2)).expect("peer").outbound = TrafficPolicy::None;
@@ -3075,5 +3188,139 @@ mod tests {
                 "ICMP type {kind} code {code} was admitted as related to the flow"
             );
         }
+    }
+
+    /// Open an established outbound TCP connection from `port` to `peer`:443 (SYN out, SYN-ACK
+    /// back); true when both packets pass.
+    fn establish4(filter: &PacketFilter, peer: Ipv4Addr, port: u16, now: Instant) -> bool {
+        let mut syn = tcp4(LOCAL4, peer, port, 443, SYN);
+        let mut syn_ack = tcp4(peer, LOCAL4, 443, port, SYN_ACK);
+        filter.check_at(&mut syn, Direction::HostToMesh, now)
+            && filter.check_at(&mut syn_ack, Direction::MeshToHost, now)
+    }
+
+    /// A full table evicts the least recently seen flow that is not an established connection:
+    /// here the oldest unanswered SYN goes, the next oldest stays, and established connections
+    /// are never evicted (J592 P1-3, #265).
+    #[test]
+    fn a_full_table_evicts_the_oldest_unestablished_flow_and_never_an_established_one() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let start = Instant::now();
+        for index in 0..64_u16 {
+            assert!(establish4(&filter, PEER4, 10_000 + index, start));
+        }
+        for index in 0..64_u16 {
+            let mut syn = tcp4(LOCAL4, PEER4, 20_000 + index, 443, SYN);
+            let at = start + Duration::from_millis(u64::from(index) + 1);
+            assert!(filter.check_at(&mut syn, Direction::HostToMesh, at));
+        }
+        let later = start + Duration::from_secs(1);
+        let mut extra = tcp4(LOCAL4, PEER4, 30_000, 443, SYN);
+        assert!(
+            filter.check_at(&mut extra, Direction::HostToMesh, later),
+            "a full table must make room by evicting an unanswered SYN"
+        );
+        let mut evicted = tcp4(PEER4, LOCAL4, 443, 20_000, SYN_ACK);
+        assert!(
+            !filter.check_at(&mut evicted, Direction::MeshToHost, later),
+            "the oldest unanswered SYN was the one evicted"
+        );
+        let mut kept = tcp4(PEER4, LOCAL4, 443, 20_001, SYN_ACK);
+        assert!(filter.check_at(&mut kept, Direction::MeshToHost, later));
+        for index in 0..64_u16 {
+            let mut data = tcp4(PEER4, LOCAL4, 443, 10_000 + index, ACK);
+            assert!(
+                filter.check_at(&mut data, Direction::MeshToHost, later),
+                "established connection {index} was evicted"
+            );
+        }
+    }
+
+    /// A closed connection lingers only for its last ACK: after `TCP_CLOSED_TIMEOUT` its tuple
+    /// is gone, and a half-closed one still carries data the other way.
+    #[test]
+    fn closed_tcp_flows_expire_quickly_and_half_closed_ones_keep_flowing() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, TrafficPolicy::All),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        assert!(establish4(&filter, PEER4, 40_000, now));
+        let mut fin = tcp4(LOCAL4, PEER4, 40_000, 443, FIN_ACK);
+        assert!(filter.check_at(&mut fin, Direction::HostToMesh, now));
+        let half_closed = now + TCP_CLOSED_TIMEOUT + Duration::from_secs(1);
+        let mut data = tcp4(PEER4, LOCAL4, 443, 40_000, ACK);
+        assert!(
+            filter.check_at(&mut data, Direction::MeshToHost, half_closed),
+            "a half-closed connection still carries the other direction's data"
+        );
+        let mut fin_back = tcp4(PEER4, LOCAL4, 443, 40_000, FIN_ACK);
+        assert!(filter.check_at(&mut fin_back, Direction::MeshToHost, half_closed));
+        let mut last_ack = tcp4(LOCAL4, PEER4, 40_000, 443, ACK);
+        assert!(filter.check_at(&mut last_ack, Direction::HostToMesh, half_closed));
+        let mut late = tcp4(PEER4, LOCAL4, 443, 40_000, ACK);
+        assert!(
+            !filter.check_at(
+                &mut late,
+                Direction::MeshToHost,
+                half_closed + TCP_CLOSED_TIMEOUT + Duration::from_secs(1)
+            ),
+            "a closed connection's tuple outlived its close timeout"
+        );
+    }
+
+    /// Removing flows turns their slots back into empty ones once no probe chain needs them,
+    /// so a table that has seen churn still ends a miss at the first empty slot.
+    #[test]
+    fn revoked_flows_leave_empty_slots_not_tombstones() {
+        let mut policy = config(TrafficPolicy::None, TrafficPolicy::All);
+        let filter =
+            PacketFilter::new(&policy, MeshProxyIngress::default()).expect("compile policy");
+        let now = Instant::now();
+        for index in 0..100_u16 {
+            assert!(establish4(&filter, PEER4, 20_000 + index, now));
+        }
+        policy.peers.get_mut(&NodeId(2)).expect("peer").outbound = TrafficPolicy::None;
+        filter.publish_policy(
+            PacketFilter::prepare_policy(&policy, MeshProxyIngress::default())
+                .expect("prepare revocation"),
+        );
+        let current = filter.policy.read().expect("policy");
+        let shard = current.peers[0].flows.lock().expect("flows");
+        assert!(
+            shard
+                .slots
+                .iter()
+                .all(|slot| matches!(slot, FlowSlot::Empty)),
+            "every slot of a fully revoked table is empty again"
+        );
+    }
+
+    /// Memory per peer for the fixed conntrack and fragment tables, times 1,000 peers (PROCESS
+    /// §1: memory per unit times the expected count). Printed for the issue; the bound keeps a
+    /// later change from growing it unnoticed.
+    #[test]
+    fn flow_table_memory_per_peer_times_one_thousand_peers() {
+        let per_peer = std::mem::size_of::<FlowSlot>() * FLOWS_PER_PEER
+            + (std::mem::size_of::<FragmentSlot>() + std::mem::size_of::<FragmentCoverage>())
+                * FRAGMENTS_PER_PEER
+            + std::mem::size_of::<FlowShard>()
+            + std::mem::size_of::<PeerAccess>();
+        println!(
+            "FLOW_TABLE_MEMORY flow_slot={} flows={} fragment_slot={} coverage={} fragments={} \
+             per_peer={per_peer} x1000={}",
+            std::mem::size_of::<FlowSlot>(),
+            FLOWS_PER_PEER,
+            std::mem::size_of::<FragmentSlot>(),
+            std::mem::size_of::<FragmentCoverage>(),
+            FRAGMENTS_PER_PEER,
+            per_peer * 1000
+        );
+        assert!(per_peer <= 160 * 1024, "{per_peer} bytes per peer");
     }
 }
