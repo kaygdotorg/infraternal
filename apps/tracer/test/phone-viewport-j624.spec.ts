@@ -16,6 +16,7 @@ const PHONE = { width: 393, height: 852 };
 const CAPTURES = process.env.J624_CAPTURES;
 test.use({ viewport: PHONE, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
 
+/** Takes a review capture when `J624_CAPTURES` is set. */
 async function capture(page: Page, name: string, theme: "light" | "dark"): Promise<void> {
   if (CAPTURES) await page.screenshot({ path: tracerEvidencePath("phone-viewport-j624", CAPTURES, `${name}-${theme}.png`) });
 }
@@ -50,6 +51,7 @@ for (const theme of ["light", "dark"] as const) {
     await capture(page, "palette-open", theme);
     await page.keyboard.press("Escape");
     await expect(page.locator("#palette-input")).toBeHidden();
+    // sleep: the keyboard watcher re-reads the layout 120 ms, 400 ms and 1 s after a close; a stuck state would show after the last
     await page.waitForTimeout(1_200);
     const after = await fills();
     expect(after.top).toBe(0);

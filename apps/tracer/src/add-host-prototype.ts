@@ -473,6 +473,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       else this.startInstall(false);
     }
 
+    /** Draws the credentials page: one secret field for the hosts that need a key or password. */
     private renderCredentials(page: HTMLElement): void {
       const needing = this.selected.filter((host) => host.credentialRequired);
       const names = needing.map((host) => `${host.user}@${host.id}`);
