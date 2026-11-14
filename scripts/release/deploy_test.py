@@ -11,6 +11,7 @@ import io
 import os
 from pathlib import Path
 import socket
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -254,7 +255,9 @@ class DeploymentTests(unittest.TestCase):
                 self.assertFalse(rollback, "candidate upgrade must use the normal restart path")
                 mesh = data / "mesh"
                 mesh.mkdir(mode=0o700)
-                legacy_key.rename(mesh / "mesh-private-key")
+                # The candidate copies the owned legacy identity and keeps the legacy copy.
+                shutil.copy2(legacy_key, mesh / "mesh-private-key")
+                # It then rotates its durable key; the legacy mirror is stale until a handoff.
                 (mesh / "mesh-private-key").write_bytes(b"latest-candidate-key")
                 (mesh / "mesh-public.json").write_bytes(b'{"enabled":true}')
             else:
@@ -302,7 +305,7 @@ class DeploymentTests(unittest.TestCase):
     def test_previous_binary_restarted_after_candidate_failure_keeps_mesh_identity(self):
         """J595 P1: a cold return to the previous build must not mint a new Mesh identity.
 
-        The candidate migrates /run/infraternal into data/mesh as its server starts. If it then
+        The candidate copies /run/infraternal into data/mesh as its server starts. If it then
         exits (a later start step fails, or it crashes), no live process can answer the warm
         rollback handoff. The unit's ExecStart still names the previous release during the D295
         window, so systemd's Restart=on-failure starts the previous build, which reads only the
@@ -350,10 +353,13 @@ class DeploymentTests(unittest.TestCase):
 
         def restart_for_test(_data, binary, rollback=False):
             if binary == release / "infraternal":
-                # The candidate migrates during its server start, then exits before health.
+                # The candidate adopts during its server start, then exits before health. Since
+                # J598 adoption copies and never empties the legacy path (the Rust tests
+                # `a_previous_build_started_cold_finds_the_same_identity` and
+                # `copies_legacy_mesh_identity_before_first_durable_start` pin the binary side).
                 mesh = data / "mesh"
                 mesh.mkdir(mode=0o700)
-                legacy_key.rename(mesh / "mesh-private-key")
+                shutil.copy2(legacy_key, mesh / "mesh-private-key")
                 # Restart=on-failure runs the unit's unchanged ExecStart: the previous build.
                 previous_build_starts()
                 return

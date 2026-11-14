@@ -191,21 +191,30 @@ impl Control {
                 let _ = socket.write_all(b"REFUSED\n").await;
                 continue;
             };
-            if rollback {
-                let volatile = match infraternal_agent::sessions::state_path(None) {
-                    Ok(path) => path,
-                    Err(error) => {
+            // Any restart into a named binary may start a build that reads only the legacy runtime
+            // path, so every one mirrors Mesh state there once writers stop (J595 P1). Only an
+            // explicit rollback makes a failed mirror refuse the restart.
+            if !reload {
+                match infraternal_agent::sessions::state_path(None) {
+                    Ok(volatile) => {
+                        replacement.mesh_handoff = Some((self.data.join("mesh"), volatile));
+                    }
+                    Err(error) if rollback => {
                         record_request("socket", peer.as_ref(), Some(&binary), "refused");
                         let _ = socket.write_all(b"REFUSED\n").await;
                         tracing::warn!(error_kind = ?error.kind(), "server rollback Mesh path unavailable");
                         continue;
                     }
-                };
+                    Err(error) => {
+                        tracing::warn!(error_kind = ?error.kind(), "server restart Mesh runtime path unavailable; the next build may not find the Mesh identity");
+                    }
+                }
+            }
+            if rollback {
                 let Ok(reply) = socket.into_std() else {
                     record_request("socket", peer.as_ref(), Some(&binary), "refused");
                     continue;
                 };
-                replacement.rollback_handoff = Some((self.data.join("mesh"), volatile));
                 replacement.rollback_reply = Some(reply);
                 return Ok(replacement);
             }
@@ -557,13 +566,16 @@ pub(crate) async fn request(
 }
 
 /// Holds the selected image and its recovery input until the restart decision is final.
-/// A rollback handoff is acknowledged only after its mesh state is safely back on the legacy path.
+/// Every restart into a named binary mirrors Mesh state to the legacy path once writers stop; a
+/// rollback is acknowledged only after that mirror is complete.
 pub(crate) struct Replacement {
     binary: crate::restart_binary::Opened,
     input: Option<std::os::unix::net::UnixStream>,
     recovery: crate::restart_binary::Opened,
     recovery_input: Option<std::os::unix::net::UnixStream>,
-    rollback_handoff: Option<(PathBuf, PathBuf)>,
+    /// Durable and legacy Mesh directories to mirror after quiescence, when a binary was named.
+    mesh_handoff: Option<(PathBuf, PathBuf)>,
+    /// Deferred reply to an explicit rollback request, sent only after the mirror finished.
     rollback_reply: Option<std::os::unix::net::UnixStream>,
 }
 impl Replacement {
@@ -597,27 +609,36 @@ impl Replacement {
             input,
             recovery,
             recovery_input,
-            rollback_handoff: None,
+            mesh_handoff: None,
             rollback_reply: None,
         })
     }
 
-    /// Quiesce mesh writers before transferring identity for a previous build.
+    /// Mirror Mesh state to the legacy path once writers stop, before another image starts.
+    ///
+    /// For an explicit rollback a failed mirror refuses the older image and recovers this build.
+    /// For any other named binary a failure is logged and the restart continues: the durable copy
+    /// is untouched, and a newer build reads it directly.
     /// # Errors
-    /// Refuses the older image if the handoff or its acknowledgement fails, then recovers this build.
+    /// Returns the recovery exec error when a rollback is refused or its requester disconnected.
     fn handoff_after_quiescence(mut self) -> Result<Self, io::Error> {
+        let rollback = self.rollback_reply.is_some();
         let result = self
-            .rollback_handoff
-            .as_ref()
+            .mesh_handoff
+            .take()
             .map_or(Ok(()), |(durable, volatile)| {
-                infraternal_server::embedded_mesh_state::rollback_handoff(durable, volatile)
+                infraternal_server::embedded_mesh_state::rollback_handoff(&durable, &volatile)
             });
         if let Err(error) = result {
+            if !rollback {
+                tracing::warn!(error_kind = ?error.kind(), "server restart Mesh mirror failed; a previous build started next may not find the Mesh identity");
+                return Ok(self);
+            }
             tracing::warn!(error_kind = ?error.kind(), "server rollback Mesh handoff refused");
             let _ = self.reply_rollback(b"REFUSED\n");
             return Err(self.exec_recovery_only());
         }
-        if self.rollback_handoff.is_some() {
+        if rollback {
             if let Err(error) = self.reply_rollback(b"RESTARTING\n") {
                 tracing::warn!(error_kind = ?error.kind(), "server rollback requester disconnected");
                 return Err(self.exec_recovery_only());
@@ -626,7 +647,6 @@ impl Replacement {
                 outcome = "rollback_mesh_handoff_complete",
                 "server_restart_request"
             );
-            self.rollback_handoff = None;
         }
         Ok(self)
     }

@@ -11,7 +11,7 @@ pub const RESTART: ActionDef = ActionDef {
         "To update, put the verified new program next to the current one and pass it with --binary.",
         "Run infraternal server --data <folder> restart. The new server takes over without writing its unlocked certificate authority to disk.",
         "Afterwards check that the server answers, that hosts reconnect and that the certificate authority is unlocked.",
-        "To go back, select the previous program with --binary and add --rollback. The running server returns its mesh identity to the runtime path the previous build reads before it starts.",
+        "To go back, select the previous program with --binary and add --rollback. Every restart into another program first copies the mesh identity to the runtime path older builds read; --rollback also refuses the switch if that copy fails.",
         "Without --binary the server restarts itself; a service manager can do the same by sending SIGHUP.",
     ],
     input: SchemaRef("remote.server.restart"),

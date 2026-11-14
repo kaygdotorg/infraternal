@@ -1,4 +1,4 @@
-//! Holds the embedded server node's mesh files durably and moves them safely across rollback [J501, #489].
+//! Holds the embedded server node's mesh files durably and keeps a runtime copy for previous builds [J501, #489].
 
 use std::{
     fs::{self, DirBuilder, File, OpenOptions},
@@ -24,6 +24,10 @@ const MIGRATION_MARKER: &str = ".mesh-state-migration.pending";
 const MIGRATION_MARKER_HEADER: &str = "J501 mesh state migration v1";
 /// Marker body used by the first candidate; recovery infers its file list from both directories.
 const LEGACY_MIGRATION_MARKER: &[u8] = b"J501 mesh state migration\n";
+/// Durable record of the public key last mirrored to the runtime path; it is not secret.
+const MIRROR_RECORD: &str = ".mesh-runtime-mirror";
+/// Versioned header of [`MIRROR_RECORD`]; the second line is the hex public key.
+const MIRROR_RECORD_HEADER: &str = "J598 mesh runtime mirror v1";
 /// A source replaced repeatedly by an uncooperative writer is left intact and retried next start.
 const MAX_SOURCE_RETRIES: usize = 16;
 
@@ -63,11 +67,21 @@ impl FileIdentity {
 
 /// Ensure embedded server mesh files are ready before its child starts.
 ///
-/// This takes the same directory flock that guards mesh-store writes. A durable private key wins
-/// over stale runtime files unless a pending rollback marker says the previous build may have
-/// updated its runtime copy. Transfers use unique synced 0600 temporaries, atomic renames, and
-/// source inode checks. A marker records the exact unfinished file set; startup never clears an
-/// incomplete marker or starts a child that could mint another identity.
+/// This takes the same directory flock that guards mesh-store writes. The durable directory is
+/// the authority; the legacy runtime path is never emptied, and ends each start as a byte copy of
+/// the durable identity (see [`mirror_locked`]) so a previous build started cold keeps it.
+///
+/// Which side wins when both hold a key:
+/// - the same key: nothing to decide;
+/// - the runtime key is the one this server last mirrored: the durable key rotated since, and
+///   the mirror is refreshed;
+/// - the runtime key changed after the last mirror and this database owns it: the previous
+///   build ran (a cold rollback) and rotated or minted it, so it is adopted;
+/// - otherwise the runtime key belongs to another server and is left exactly as found.
+///
+/// Transfers use unique synced 0600 temporaries, atomic renames, and source inode checks. A
+/// marker records the exact unfinished file set; startup never clears an incomplete marker or
+/// starts a child that could mint another identity.
 ///
 /// `owns` receives the public key derived from a legacy runtime private key and answers whether
 /// this data directory's server recorded that key as its own. Every root server on a host
@@ -119,16 +133,16 @@ pub(crate) fn migrate(
         if !present_files(volatile, uid)?.contains(&"mesh-private-key") {
             validate_private_key(durable, &present_files(durable, uid)?, uid)?;
         }
-        // A rollback marker makes the previous build's possibly updated runtime identity
-        // authoritative on re-upgrade. Its expanded file list is durable before this move.
-        move_plan(volatile, durable, &pending.files, uid)?;
+        // A rollback marker (written by the first J501 candidates) makes the previous build's
+        // possibly updated runtime identity authoritative. The marker was written by this data
+        // directory's own server, so it needs no further ownership proof.
+        copy_plan(volatile, durable, &pending.files, uid)?;
+        if !pending.legacy {
+            remove_other_files(durable, &pending.files, uid)?;
+        }
         finish_marker(&marker, uid)?;
         sync_directory(durable)?;
-        return if legacy_exists {
-            sync_directory(volatile)
-        } else {
-            Ok(())
-        };
+        return mirror_locked(durable, volatile, legacy_exists, uid);
     }
 
     let durable_files = present_files(durable, uid)?;
@@ -139,35 +153,182 @@ pub(crate) fn migrate(
     };
     validate_private_key(durable, &durable_files, uid)?;
     validate_private_key(volatile, &legacy_files, uid)?;
+    let durable_key = read_private_key(durable, uid)?;
+    let legacy_key = if legacy_exists {
+        read_private_key(volatile, uid)?
+    } else {
+        None
+    };
 
-    if durable_files.contains(&"mesh-private-key") {
-        // Without a rollback marker, the complete durable identity wins over stale /run files.
-        remove_files(volatile, &legacy_files, uid)?;
-        return sync_directory(durable);
-    }
-    if legacy_files.is_empty() {
-        return Ok(());
-    }
-    if let Some(legacy_key) = read_private_key(volatile, uid)? {
-        let public = public_key(&legacy_key)?;
-        if !owns(&public) {
-            tracing::error!(
-                legacy_state = %volatile.display(),
-                durable_state = %durable.display(),
-                public_key = %hex_key(&public),
-                "the Mesh identity at the shared runtime path is not recorded as this server's \
-                 own node; it was left in place and this server starts without it"
-            );
-            return Ok(());
+    match (&durable_key, &legacy_key) {
+        // Runtime files without a key carry no identity to prove or keep.
+        (None, None) => return Ok(()),
+        (Some(_), None) => {}
+        (Some(durable_key), Some(legacy_key)) if durable_key[..] == legacy_key[..] => {}
+        (None, Some(legacy_key)) => {
+            let public = public_key(legacy_key)?;
+            if !owns(&public) {
+                log_foreign_identity(volatile, durable, &public);
+                return Ok(());
+            }
+            adopt(volatile, durable, &legacy_files, &marker, uid)?;
+        }
+        (Some(_), Some(legacy_key)) => {
+            let public = public_key(legacy_key)?;
+            // A runtime key equal to our own earlier mirror means the durable key rotated since;
+            // the mirror below refreshes it.
+            let own_stale_mirror = read_mirror_record(durable, uid)? == Some(public);
+            if !own_stale_mirror {
+                if owns(&public) {
+                    // The runtime key changed after our last mirror and this database records
+                    // it: the previous build ran after a cold rollback and rotated or minted it,
+                    // so peers know this key now.
+                    tracing::warn!(
+                        legacy_state = %volatile.display(),
+                        public_key = %hex_key(&public),
+                        "the previous server build changed its Mesh identity; adopting it"
+                    );
+                    adopt(volatile, durable, &legacy_files, &marker, uid)?;
+                } else {
+                    log_foreign_identity(volatile, durable, &public);
+                    return sync_directory(durable);
+                }
+            }
         }
     }
+    mirror_locked(durable, volatile, legacy_exists, uid)
+}
 
-    create_marker(&marker, Direction::Forward, &legacy_files)?;
+/// Report a runtime identity this server does not own, which is left exactly as found.
+fn log_foreign_identity(volatile: &Path, durable: &Path, public: &[u8; 32]) {
+    tracing::error!(
+        legacy_state = %volatile.display(),
+        durable_state = %durable.display(),
+        public_key = %hex_key(public),
+        "the Mesh identity at the shared runtime path is not recorded as this server's own \
+         node; it was left in place and this server neither adopts nor overwrites it"
+    );
+}
+
+/// Copy an owned runtime identity into durable storage under a recoverable marker.
+///
+/// The runtime copy stays: a previous build started cold reads only that path (J595 P1). Durable
+/// files absent from the runtime set belong to the replaced identity, for example its rotation
+/// journal, and are removed so the durable set matches the adopted one.
+/// # Errors
+/// Leaves the marker in place when any copy, removal, or sync fails.
+fn adopt(
+    volatile: &Path,
+    durable: &Path,
+    legacy_files: &[&'static str],
+    marker: &Path,
+    uid: u32,
+) -> io::Result<()> {
+    create_marker(marker, Direction::Forward, legacy_files)?;
     sync_directory(durable)?;
-    move_plan(volatile, durable, &legacy_files, uid)?;
-    finish_marker(&marker, uid)?;
-    sync_directory(durable)?;
-    sync_directory(volatile)
+    copy_plan(volatile, durable, legacy_files, uid)?;
+    remove_other_files(durable, legacy_files, uid)?;
+    finish_marker(marker, uid)?;
+    sync_directory(durable)
+}
+
+/// Keep the runtime path a byte copy of the durable identity while a new build runs.
+///
+/// A previous build reads only the runtime path. Mirroring at every start and every warm restart
+/// means a crash, a failed start, or a cold rollback to that build finds the same identity
+/// instead of minting one (J595 P1, D295). The record of the mirrored public key lets the next
+/// start tell its own stale mirror apart from a key the previous build changed.
+///
+/// Writing the key at the runtime path restores exactly what J501 builds had there: before them
+/// the embedded node used that path directly.
+///
+/// `legacy_locked` says the caller already holds the runtime directory's lock; otherwise this
+/// creates the directory if needed and takes the lock, after the durable lock (stable order).
+/// # Errors
+/// Refuses unsafe runtime entries and reports any copy, removal, or sync failure.
+fn mirror_locked(durable: &Path, volatile: &Path, legacy_locked: bool, uid: u32) -> io::Result<()> {
+    let Some(key) = read_private_key(durable, uid)? else {
+        return Ok(());
+    };
+    let files = present_files(durable, uid)?;
+    let _legacy_lock = if legacy_locked {
+        None
+    } else {
+        match ensure_mesh_directory(volatile, uid) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tracing::warn!(
+                    legacy_state = %volatile.display(),
+                    "the runtime Mesh path has no parent directory; a previous build started cold \
+                     would not find this identity"
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+        Some(lock_mesh_directory(volatile)?)
+    };
+    sweep_migration_temporaries(volatile, uid)?;
+    present_files(volatile, uid)?;
+    for name in &files {
+        copy_one(&durable.join(name), &volatile.join(name), uid)?
+            .ok_or(io::ErrorKind::InvalidData)?;
+    }
+    remove_other_files(volatile, &files, uid)?;
+    validate_private_key(volatile, &present_files(volatile, uid)?, uid)?;
+    sync_directory(volatile)?;
+    let public = public_key(&key)?;
+    if read_mirror_record(durable, uid)? != Some(public) {
+        replace_private_file(
+            &durable.join(MIRROR_RECORD),
+            format!("{MIRROR_RECORD_HEADER}\n{}\n", hex_key(&public)).as_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Read the public key last mirrored to the runtime path, if this data directory recorded one.
+/// # Errors
+/// Refuses an unsafe or malformed record instead of guessing which identity is newer.
+fn read_mirror_record(durable: &Path, uid: u32) -> io::Result<Option<[u8; 32]>> {
+    let path = durable.join(MIRROR_RECORD);
+    if !owned_file(&path, uid, true)? {
+        return Ok(None);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)?;
+    if file.metadata()?.len() > 256 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut body = String::new();
+    file.read_to_string(&mut body)?;
+    let mut lines = body.lines();
+    if lines.next() != Some(MIRROR_RECORD_HEADER) {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let hex = lines.next().ok_or(io::ErrorKind::InvalidData)?;
+    if hex.len() != 64 || lines.next().is_some() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut key = [0_u8; 32];
+    for (index, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+    }
+    Ok(Some(key))
+}
+
+/// Remove known mesh files outside `keep`, unlinking only the exact inode that was checked.
+/// # Errors
+/// Refuses unsafe entries and stops if a writer replaces a file during removal.
+fn remove_other_files(directory: &Path, keep: &[&str], uid: u32) -> io::Result<()> {
+    let stale = present_files(directory, uid)?
+        .into_iter()
+        .filter(|name| !keep.contains(name))
+        .collect::<Vec<_>>();
+    remove_files(directory, &stale, uid)
 }
 
 /// Read every public key this data directory records for the server's own Mesh node.
@@ -200,14 +361,18 @@ pub(crate) async fn server_node_keys(pool: &sqlx::SqlitePool) -> io::Result<Vec<
     Ok(keys)
 }
 
-/// Hand current mesh state back to the legacy /run path before a previous binary starts.
+/// Mirror current mesh state to the legacy /run path before another binary starts.
 ///
 /// The caller first stops and reaps the embedded writer. This function then takes the same
-/// directory flock used by mesh-store writers, copies the selected state, verifies destination
-/// files and source inodes, and only then removes durable entries. Its marker remains until the
-/// next new build migrates the previous build's possibly updated state forward.
+/// directory flocks used by mesh-store writers, in the stable durable-then-runtime order, and
+/// copies the durable identity to the runtime path. The durable copy always stays: deleting it
+/// would leave a volatile copy as the only one, lost on the next reboot (J595 P3-2).
+///
+/// It refuses to overwrite a runtime key that is neither the durable key nor the one this server
+/// last mirrored: that key belongs to another server sharing the path.
 /// # Errors
-/// Refuses an unsafe directory, incomplete state, or any copy, sync, or unlink failure.
+/// Refuses an unsafe directory, an unfinished transfer, a foreign runtime identity, or any copy,
+/// removal, or sync failure.
 pub fn rollback_handoff(durable: &Path, volatile: &Path) -> io::Result<()> {
     let uid = nix::unistd::Uid::effective().as_raw();
     ensure_mesh_directory(durable, uid)?;
@@ -223,37 +388,18 @@ pub fn rollback_handoff(durable: &Path, volatile: &Path) -> io::Result<()> {
         return Err(io::ErrorKind::AlreadyExists.into());
     }
     let files = present_files(durable, uid)?;
-    if files.is_empty() {
-        return Ok(());
-    }
     validate_private_key(durable, &files, uid)?;
-    // Existing runtime bytes are stale, but their path types and link counts must be safe to replace.
-    present_files(volatile, uid)?;
-    create_marker(&marker, Direction::Rollback, &files)?;
-    sync_directory(durable)?;
-
-    let mut sources = Vec::with_capacity(files.len());
-    for name in &files {
-        let source = durable.join(name);
-        let target = volatile.join(name);
-        let identity = copy_one(&source, &target, uid)?.ok_or(io::ErrorKind::InvalidData)?;
-        sources.push((source, identity));
-    }
     validate_private_key(volatile, &present_files(volatile, uid)?, uid)?;
-    sync_directory(volatile)?;
-    // Check the complete source set before removing any source. The exclusive directory locks
-    // make each following unlink safe against every mesh-store writer.
-    for (source, identity) in &sources {
-        if !same_file_identity(source, *identity)? {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
+    if let (Some(durable_key), Some(legacy_key)) = (
+        read_private_key(durable, uid)?,
+        read_private_key(volatile, uid)?,
+    ) && durable_key[..] != legacy_key[..]
+        && read_mirror_record(durable, uid)? != Some(public_key(&legacy_key)?)
+    {
+        log_foreign_identity(volatile, durable, &public_key(&legacy_key)?);
+        return Err(io::ErrorKind::PermissionDenied.into());
     }
-    for (source, identity) in sources {
-        if !remove_if_same(&source, identity, uid)? {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
-    }
-    sync_directory(durable)
+    mirror_locked(durable, volatile, true, uid)
 }
 
 /// Create a mesh directory privately or tighten one owned by this service.
@@ -460,11 +606,23 @@ fn create_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Resul
 /// Refuses unsafe marker paths and reports failed private staging, rename, or sync operations.
 fn rewrite_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Result<()> {
     let body = marker_body(direction, files)?;
-    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     let uid = nix::unistd::Uid::effective().as_raw();
     if !owned_file(path, uid, true)? {
         return Err(io::ErrorKind::NotFound.into());
     }
+    replace_private_file(path, body.as_bytes())
+}
+
+/// Atomically replace a small private file through a unique synced 0600 temporary.
+///
+/// The temporary is named `.<name>.migrate-<pid>-<nonce>.new`, which the startup sweep removes
+/// if a crash leaves it behind.
+/// # Errors
+/// Refuses an unsafe existing file and reports failed staging, rename, or directory sync.
+fn replace_private_file(path: &Path, body: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let _ = owned_file(path, uid, true)?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -482,7 +640,7 @@ fn rewrite_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Resu
             .custom_flags(nix::libc::O_NOFOLLOW)
             .open(&temporary)?;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(body.as_bytes())?;
+        file.write_all(body)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)?;
@@ -602,52 +760,24 @@ fn ensure_recoverable_plan(
     Ok(())
 }
 
-/// Move a marked set from the runtime path to durable storage and sync both directories.
+/// Copy a marked set from the runtime path to durable storage and sync the target.
+///
+/// Sources stay in place. A source already consumed by an earlier move (first J501 candidates)
+/// is accepted when its target exists, so recovery of their markers still completes.
 /// # Errors
-/// Leaves the marker and any unfinished source file in place when a move fails.
-fn move_plan(source: &Path, target: &Path, files: &[&str], uid: u32) -> io::Result<()> {
+/// Leaves the marker in place when any planned file is missing from both sides or a copy fails.
+fn copy_plan(source: &Path, target: &Path, files: &[&str], uid: u32) -> io::Result<()> {
     ensure_recoverable_plan(source, target, files, uid)?;
     for name in files {
-        move_one(&source.join(name), &target.join(name), uid)?;
+        let _ = copy_one(&source.join(name), &target.join(name), uid)?;
     }
     for name in files {
-        if !owned_file(&target.join(name), uid, true)? || owned_file(&source.join(name), uid, true)?
-        {
+        if !owned_file(&target.join(name), uid, true)? {
             return Err(io::ErrorKind::InvalidData.into());
         }
     }
     validate_private_key(target, files, uid)?;
-    sync_directory(target)?;
-    if owned_directory(source, uid, false)? {
-        sync_directory(source)?;
-    }
-    Ok(())
-}
-
-/// Copy a source by atomic rename and unlink only the exact inode that was copied.
-/// # Errors
-/// Refuses unsafe entries and stops after bounded retries if a writer keeps replacing the source.
-fn move_one(source: &Path, target: &Path, uid: u32) -> io::Result<()> {
-    for _ in 0..MAX_SOURCE_RETRIES {
-        let Some(identity) = copy_one(source, target, uid)? else {
-            // The source may already have been consumed by a prior interrupted transfer.
-            if owned_file(target, uid, true)? {
-                if target
-                    .file_name()
-                    .is_some_and(|name| name == "mesh-private-key")
-                {
-                    let parent = target.parent().ok_or(io::ErrorKind::InvalidInput)?;
-                    validate_private_key(parent, &["mesh-private-key"], uid)?;
-                }
-                return Ok(());
-            }
-            return Err(io::ErrorKind::InvalidData.into());
-        };
-        if remove_if_same(source, identity, uid)? {
-            return Ok(());
-        }
-    }
-    Err(io::ErrorKind::WouldBlock.into())
+    sync_directory(target)
 }
 
 /// Publish one stable source as a unique, synced 0600 temporary followed by an atomic rename.
@@ -771,7 +901,7 @@ fn same_file_identity(path: &Path, expected: FileIdentity) -> io::Result<bool> {
     }
 }
 
-/// Remove stale runtime files only after a valid durable key has won.
+/// Remove the listed mesh files from one locked directory, each only if its inode is unchanged.
 fn remove_files(directory: &Path, files: &[&str], uid: u32) -> io::Result<()> {
     for name in files {
         let path = directory.join(name);
@@ -819,7 +949,9 @@ fn sweep_migration_temporaries(directory: &Path, uid: u32) -> io::Result<()> {
         let is_temporary = MESH_FILES.iter().any(|mesh_name| {
             name == format!(".{mesh_name}.migrate-new")
                 || (name.starts_with(&format!(".{mesh_name}.migrate-")) && has_new_extension)
-        }) || (name.starts_with(&format!(".{MIGRATION_MARKER}.migrate-"))
+        }) || ([MIGRATION_MARKER, MIRROR_RECORD]
+            .iter()
+            .any(|record| name.starts_with(&format!(".{record}.migrate-")))
             && has_new_extension);
         if !is_temporary {
             continue;
@@ -905,9 +1037,11 @@ mod tests {
         })
     }
 
-    /// Moves the old private identity and public snapshot into a private durable directory.
+    /// Copies the old private identity and public snapshot into a private durable directory.
+    ///
+    /// The runtime copy stays, so a previous build started cold still finds it (J595 P1).
     #[test]
-    fn moves_legacy_mesh_identity_before_first_durable_start() {
+    fn copies_legacy_mesh_identity_before_first_durable_start() {
         let root = fixture_root();
         let volatile = root.join("run/infraternal");
         let data = root.join("var/lib/infraternal");
@@ -931,7 +1065,10 @@ mod tests {
             fs::read(durable.join("mesh-public.json")).expect("durable public state"),
             br#"{"enabled":true}"#
         );
-        assert!(!volatile.join("mesh-private-key").exists());
+        assert_eq!(
+            fs::read(volatile.join("mesh-private-key")).expect("runtime key stays"),
+            [0x11; 32]
+        );
         let directory = fs::symlink_metadata(&durable).expect("durable directory metadata");
         assert_eq!(directory.uid(), nix::unistd::Uid::effective().as_raw());
         assert_eq!(directory.mode() & 0o777, 0o700);
@@ -943,9 +1080,9 @@ mod tests {
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
-    /// Keeps the durable identity and all of its state when the runtime copy also exists.
+    /// Keeps the durable identity and leaves another server's runtime identity untouched.
     #[test]
-    fn durable_identity_wins_over_a_different_runtime_key() {
+    fn durable_identity_wins_over_a_foreign_runtime_key() {
         let root = fixture_root();
         let volatile = root.join("run/infraternal");
         let durable = root.join("var/lib/infraternal/mesh");
@@ -969,7 +1106,7 @@ mod tests {
         fs::write(durable.join("mesh-public.json"), b"durable-public")
             .expect("write synthetic durable state");
 
-        migrate(&volatile, &durable, &owned).expect("keep the durable identity");
+        migrate(&volatile, &durable, &|_| false).expect("keep the durable identity");
 
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable key"),
@@ -979,8 +1116,14 @@ mod tests {
             fs::read(durable.join("mesh-public.json")).expect("durable public state"),
             b"durable-public"
         );
-        assert!(!volatile.join("mesh-private-key").exists());
-        assert!(!volatile.join("mesh-public.json").exists());
+        assert_eq!(
+            fs::read(volatile.join("mesh-private-key")).expect("foreign runtime key stays"),
+            [0x21; 32]
+        );
+        assert_eq!(
+            fs::read(volatile.join("mesh-public.json")).expect("foreign runtime state stays"),
+            b"runtime-public"
+        );
         let directory = fs::symlink_metadata(&durable).expect("durable directory metadata");
         assert_eq!(directory.mode() & 0o777, 0o700);
         let key =
@@ -1066,7 +1209,10 @@ mod tests {
             fs::read(durable.join("mesh-public.json")).expect("durable public state"),
             b"runtime-public"
         );
-        assert!(!volatile.join("mesh-private-key").exists());
+        assert_eq!(
+            fs::read(volatile.join("mesh-private-key")).expect("runtime mirror"),
+            [0x33; 32]
+        );
         assert!(!durable.join(MIGRATION_MARKER).exists());
         fs::remove_dir_all(root).expect("remove fixture root");
     }
@@ -1231,9 +1377,11 @@ mod tests {
         );
     }
 
-    /// Moves the latest durable identity back to the runtime path for a D295 rollback.
+    /// Copies the latest durable identity to the runtime path for a D295 rollback.
+    ///
+    /// The durable copy stays: removing it would leave a volatile copy as the only one (J595 P3-2).
     #[test]
-    fn rollback_restore_moves_the_identity_back_to_the_legacy_path() {
+    fn rollback_handoff_copies_the_identity_and_keeps_the_durable_copy() {
         let root = fixture_root();
         let volatile = root.join("run/infraternal");
         let durable = root.join("var/lib/infraternal/mesh");
@@ -1268,7 +1416,10 @@ mod tests {
             fs::read(volatile.join("mesh-public.json")).expect("rollback public state"),
             br#"{"enabled":true}"#
         );
-        assert!(!durable.join("mesh-private-key").exists());
+        assert_eq!(
+            fs::read(durable.join("mesh-private-key")).expect("durable key stays"),
+            [0x55; 32]
+        );
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
@@ -1975,6 +2126,148 @@ mod tests {
             durable_entries.is_empty(),
             "nothing may be adopted from an unowned identity: {durable_entries:?}"
         );
+    }
+
+    /// Create private runtime and durable fixture directories under one fixture root.
+    fn private_directories(root: &Path) -> (PathBuf, PathBuf) {
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        for directory in [&volatile, &durable] {
+            fs::create_dir_all(directory).expect("create fixture directory");
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .expect("make fixture directory private");
+        }
+        (volatile, durable)
+    }
+
+    /// Write one private 0600 fixture file.
+    fn write_private(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).expect("write fixture file");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("make fixture file private");
+    }
+
+    /// J595 P0 limit: a byte copy of the database passes the ownership proof, so the check copy
+    /// gets a copy too, but the live server's runtime identity is never taken away from it.
+    #[test]
+    fn a_byte_copy_of_the_database_never_takes_the_live_identity_away() {
+        let root = fixture_root();
+        let (shared_runtime, production) = private_directories(&root);
+        let check_instance = root.join("root/migcheck/mesh");
+        fs::create_dir_all(check_instance.parent().expect("check data directory"))
+            .expect("create migration-check data directory");
+        write_private(&shared_runtime.join("mesh-private-key"), &[0x2a; 32]);
+
+        let check = migrate(&shared_runtime, &check_instance, &owned);
+        fs::remove_dir_all(&check_instance).expect("the check deletes its scratch data");
+        let production_result = migrate(&shared_runtime, &production, &owned);
+        let production_key = fs::read(production.join("mesh-private-key")).ok();
+        let runtime_key = fs::read(shared_runtime.join("mesh-private-key")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(check.is_ok() && production_result.is_ok());
+        assert_eq!(production_key.as_deref(), Some([0x2a; 32].as_slice()));
+        assert_eq!(runtime_key.as_deref(), Some([0x2a; 32].as_slice()));
+    }
+
+    /// J595 P1: after any start of the new build, the previous build started cold keeps the key.
+    ///
+    /// This covers a crash or failed start of the new build (Restart=on-failure runs the previous
+    /// build), a cold rollback, and `server restart --binary <old>` without `--rollback`.
+    #[test]
+    fn a_previous_build_started_cold_finds_the_same_identity() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        write_private(&volatile.join("mesh-private-key"), &[0x31; 32]);
+        write_private(&volatile.join("mesh-public.json"), b"legacy-public");
+
+        migrate(&volatile, &durable, &owned).expect("first start of the new build");
+        // Reboot under the new build: the runtime path is empty again.
+        fs::remove_dir_all(&volatile).expect("reboot clears the runtime path");
+        fs::create_dir(&volatile).expect("service manager recreates the runtime path");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("runtime path is private");
+        migrate(&volatile, &durable, &owned).expect("start after reboot");
+        let runtime_key = fs::read(volatile.join("mesh-private-key")).ok();
+        let runtime_public = fs::read(volatile.join("mesh-public.json")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert_eq!(runtime_key.as_deref(), Some([0x31; 32].as_slice()));
+        assert_eq!(runtime_public.as_deref(), Some(b"legacy-public".as_slice()));
+    }
+
+    /// The new build's own rotation since its last start refreshes the runtime mirror, even
+    /// without an ownership answer, because the record shows the old runtime key was its mirror.
+    #[test]
+    fn an_own_stale_mirror_is_refreshed_after_rotation() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        write_private(&durable.join("mesh-private-key"), &[0x41; 32]);
+        migrate(&volatile, &durable, &|_| false).expect("first mirror");
+        // The running node rotates its durable key; only the durable copy changes.
+        write_private(&durable.join("mesh-private-key"), &[0x42; 32]);
+        write_private(&durable.join("mesh-key-rotation.bin"), b"journal");
+
+        migrate(&volatile, &durable, &|_| false).expect("next start");
+        let runtime_key = fs::read(volatile.join("mesh-private-key")).ok();
+        let durable_key = fs::read(durable.join("mesh-private-key")).ok();
+        let runtime_journal = fs::read(volatile.join("mesh-key-rotation.bin")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert_eq!(durable_key.as_deref(), Some([0x42; 32].as_slice()));
+        assert_eq!(runtime_key.as_deref(), Some([0x42; 32].as_slice()));
+        assert_eq!(runtime_journal.as_deref(), Some(b"journal".as_slice()));
+    }
+
+    /// A key the previous build rotated or minted after a cold rollback is adopted on re-upgrade,
+    /// with the replaced identity's durable-only files removed.
+    #[test]
+    fn a_key_the_previous_build_changed_is_adopted() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        write_private(&durable.join("mesh-private-key"), &[0x51; 32]);
+        write_private(&durable.join("mesh-key-rotation.bin"), b"old-journal");
+        migrate(&volatile, &durable, &owned).expect("mirror before the rollback");
+        // The previous build runs cold, rotates its key and rewrites its public state.
+        write_private(&volatile.join("mesh-private-key"), &[0x52; 32]);
+        write_private(&volatile.join("mesh-public.json"), b"rotated-public");
+        fs::remove_file(volatile.join("mesh-key-rotation.bin")).expect("journal finished");
+        let rotated = super::public_key(&[0x52; 32]).expect("derive rotated public key");
+
+        migrate(&volatile, &durable, &|public| *public == rotated).expect("re-upgrade");
+        let durable_key = fs::read(durable.join("mesh-private-key")).ok();
+        let durable_public = fs::read(durable.join("mesh-public.json")).ok();
+        let stale_journal = durable.join("mesh-key-rotation.bin").exists();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert_eq!(durable_key.as_deref(), Some([0x52; 32].as_slice()));
+        assert_eq!(
+            durable_public.as_deref(),
+            Some(b"rotated-public".as_slice())
+        );
+        assert!(
+            !stale_journal,
+            "the replaced identity's journal must not survive"
+        );
+    }
+
+    /// A warm handoff never overwrites a runtime key that another server put there.
+    #[test]
+    fn rollback_handoff_refuses_to_overwrite_a_foreign_runtime_key() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        write_private(&durable.join("mesh-private-key"), &[0x61; 32]);
+        write_private(&volatile.join("mesh-private-key"), &[0x62; 32]);
+
+        let result = rollback_handoff(&durable, &volatile);
+        let runtime_key = fs::read(volatile.join("mesh-private-key")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(
+            result.is_err(),
+            "a foreign runtime key must refuse the handoff"
+        );
+        assert_eq!(runtime_key.as_deref(), Some([0x62; 32].as_slice()));
     }
 
     /// J595 P2: every file the mesh Store keeps must be moved by migration and rollback.
