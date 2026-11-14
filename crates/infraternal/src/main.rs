@@ -1379,6 +1379,8 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
         .collect::<Result<Vec<_>, _>>()?;
     // Any TCP admin rule may be sshd's (it need not listen on 22); the live
     // session, when there is one, is checked port-exactly at install time.
+    // Without one, the session's port is admitted from anywhere, as `up` does
+    // (J589): never pinned to the installer's address or interface.
     if !admin_rules
         .iter()
         .any(|rule| rule.protocol == Protocol::Tcp)
@@ -1387,7 +1389,7 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
             "set an explicit TCP --host-firewall-allow rule for sshd's port".to_owned()
         })?;
         admin_rules.push(
-            host_firewall::admin_rule_for_ssh_connection(&active_ssh).map_err(|_| {
+            host_firewall::admin_rule_for_ssh_session(&active_ssh).map_err(|_| {
                 "the active SSH path could not be added to the host policy".to_owned()
             })?,
         );

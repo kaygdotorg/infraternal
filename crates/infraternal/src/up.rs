@@ -475,18 +475,8 @@ fn agent_host_firewall_rules(
 ) -> Result<Vec<String>, String> {
     let mut admin_rules = parse_agent_host_firewall_rules(values)?;
     if let Some(connection) = ssh_connection {
-        let port = connection
-            .split_ascii_whitespace()
-            .nth(3)
-            .and_then(|port| port.parse::<u16>().ok())
-            .filter(|port| *port != 0)
-            .ok_or_else(|| "the active SSH path could not be read".to_owned())?;
-        let session = AllowRule {
-            interface: None,
-            source: None,
-            protocol: host_firewall::Protocol::Tcp,
-            port,
-        };
+        let session = host_firewall::admin_rule_for_ssh_session(connection)
+            .map_err(|_| "the active SSH path could not be read".to_owned())?;
         if !admin_rules.contains(&session) {
             admin_rules.push(session);
         }

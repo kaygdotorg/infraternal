@@ -1581,21 +1581,28 @@ fn ensure_existing_admin_rules_are_preserved(
     Ok(())
 }
 
-/// Turn the current OpenSSH session into one explicit source and interface rule.
+/// Turn the current OpenSSH session into the rule that keeps sshd reachable: TCP on its port.
 ///
-/// `infraternal up` uses this before asking for approval, then passes the
-/// resulting typed rule to its root installer so sudo environment filtering
-/// cannot lose the active administrator path.
+/// The rule admits any source on any interface (`*,*,tcp,<port>`). Pinning
+/// it to the session's remote address would lock out a second
+/// administrator, or the same one after their address changes; pinning it to
+/// the interface that owns the dialled address would drop every new login to
+/// an address held by `lo` or a dummy interface (a VIP), whose packets
+/// arrive on the NIC (J589, #483). An operator who wants a narrower rule
+/// passes it explicitly. `server init` and `infraternal up` both use this.
 ///
 /// # Errors
-/// Returns an error when the SSH connection is malformed or its addresses cannot be parsed.
-pub fn admin_rule_for_ssh_connection(value: &str) -> Result<AllowRule, PolicyError> {
-    let Some((remote, port, local)) = parse_ssh_connection(value) else {
+/// Returns [`PolicyError::AdminPathWouldBeLost`] when the SSH connection is malformed.
+pub fn admin_rule_for_ssh_session(value: &str) -> Result<AllowRule, PolicyError> {
+    let Some((_remote, port, _local)) = parse_ssh_connection(value) else {
         return Err(PolicyError::AdminPathWouldBeLost);
     };
+    if port == 0 {
+        return Err(PolicyError::AdminPathWouldBeLost);
+    }
     Ok(AllowRule {
-        interface: interface_for_address(local),
-        source: Some(remote.to_string().parse()?),
+        interface: None,
+        source: None,
         protocol: Protocol::Tcp,
         port,
     })
