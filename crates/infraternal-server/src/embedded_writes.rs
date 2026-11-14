@@ -466,6 +466,7 @@ mod tests {
         );
     }
 
+    /// Applying a cached promotion Ack must not replay retained input from inside the actor.
     #[tokio::test]
     async fn cached_promotion_ack_never_replays_inside_the_actor() {
         use super::super::{AgentConnection, BytesMut, Peer, apply_cached_ack};
