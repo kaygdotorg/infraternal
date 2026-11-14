@@ -103,6 +103,24 @@ opt-level = 3
 [profile.test.package.sha2]
 opt-level = 3
 
+# Argon2id with the production parameters costs about 0.9 s of CPU per hash when this crate is built
+# unoptimised, against about 0.2 s optimised (compute01, #509). The server's auth fixtures hash
+# constantly, so the unoptimised build made up roughly 45% of the server suite's CPU (750 s of user
+# time against 414 s) and starved the fixtures that share the host under load. `blake2` is Argon2's
+# inner hash. Only the build of these two dependencies changes: the parameters are the production
+# ones and no test uses a weaker setting.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.test.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.test.package.blake2]
+opt-level = 3
+
 # Debug and test builds keep only line tables for GotaTun, the mesh engine (#260). Its full
 # debug info pushed the debug `infraternal` test binary past the 512 MiB bound the restart
 # admission code allows for a running development image. Release builds carry no debug info.
