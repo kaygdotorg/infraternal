@@ -5011,3 +5011,22 @@ access (#341 B19).
        is stored next to the key, a mismatch refuses to start, and an explicit
        command handles real host moves, so a copied or restored data directory
        cannot clone the mesh identity. Owner: "agreed".
+
+393. **Mesh design scale, the root-upgrade wait message, deploy isolation and latest-code tooling (owner, 2026-11-14, #489, #399, #260; extends D169, D376):**
+     - **Mesh design scale:** a mesh is designed for 1,000 peers and tested up
+       to 4,096. Every mesh change is measured against that, for example the
+       per-refresh cost J552 found (71 ms at 1,024 peers, 288 ms at 4,096).
+       Owner: "agreed".
+     - **While a host is being upgraded to root (D376),** opening a shell on
+       it says the host is being upgraded and comes back by itself, not
+       "offline or cannot reach this server". Owner: "agreed". A stale
+       "uninstall" status after a rolled-back upgrade is simply fixed. The
+       owner: "don't even need to ask, it's an obvious fix".
+     - **Deploys never touch the live mesh identity:** the deploy's migration
+       check runs as its own user with its own runtime directory, and prod
+       backups leave the mesh private key out (or keep it 0600 and prune it).
+       Owner: "agreed".
+     - **Tooling uses the latest code:** benchmark kits, harnesses and QA
+       runners live on `dev` with their own tests in the gate. Hand-copied or
+       stale-branch tools are not used. The owner, verbatim: "i don't know
+       why this is even a question. always use latest code."

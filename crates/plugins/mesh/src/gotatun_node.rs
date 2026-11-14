@@ -977,6 +977,13 @@ async fn build_device(
 /// used only while packets queue.
 const UDP_BUFFER_BYTES: usize = 7 * 1024 * 1024;
 
+/// Bind the engine's underlay UDP socket on `requested_port` (0 lets the kernel pick) and return
+/// it with the port it actually got.
+///
+/// Port 51820 stays free for the kernel engine, so a kernel pick that lands on it is retried, up
+/// to 16 times. Every bound socket sends IPv4 with Don't Fragment clear (#483).
+/// # Errors
+/// Returns the socket error from binding, or `AddrInUse` when no usable port came back.
 async fn bind_udp(requested_port: u16) -> io::Result<(BoundUdpFactory, u16)> {
     let mut factory = UdpSocketFactory {
         recv_buffer_size: Some(UDP_BUFFER_BYTES),
@@ -989,6 +996,9 @@ async fn bind_udp(requested_port: u16) -> io::Result<(BoundUdpFactory, u16)> {
             fwmark: None,
         };
         let (send, receive) = factory.bind(&params).await?;
+        // Routers may fragment our IPv4 packets, as with kernel WireGuard (#483 PMTU black hole).
+        #[cfg(target_os = "linux")]
+        infraternal_linux_tun::allow_ipv4_fragmentation(&send)?;
         let port = send.local_addr()?.port();
         if port != 0 && port != 51820 {
             return Ok((

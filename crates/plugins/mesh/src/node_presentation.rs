@@ -224,13 +224,26 @@ fn peers(value: &Value, width: usize) -> Result<Presented, PluginError> {
     peers_at(value, width, now_secs())
 }
 
-/// One peer as a table row, a JSON record, and, when it has no direct path yet, its label and address.
+/// One peer as a table row, a JSON record, and, when it has no direct path yet, what to tell the person.
 struct PeerView {
     cells: Vec<String>,
     record: Value,
-    waiting: Option<(String, String)>,
+    waiting: Option<Waiting>,
 }
 
+/// A peer without a direct path: its label, its mesh address, and whether traffic already went unanswered.
+struct Waiting {
+    label: String,
+    address: String,
+    /// This machine sent the peer packets and got nothing back. Sending more will not help, so the
+    /// hint must not suggest it (#483: on blocked or untraversable networks people were told to ping).
+    unanswered: bool,
+}
+
+/// Turn one `mesh.peers` row into its table cells, its JSON record and, for a peer without a
+/// direct path, the hint data. `now` is the wall clock in seconds, so ages are testable.
+/// # Errors
+/// Refuses a row missing a node id, mesh address, key, counters or a known path value.
 fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
     let node = row["node"].as_u64().ok_or(PluginError::Rejected)?;
     let address: std::net::Ipv4Addr = row["peer"]["addresses"]["ipv4"]
@@ -297,7 +310,11 @@ fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
             endpoint.map_or_else(String::new, |endpoint| endpoint.to_string()),
         ],
         record,
-        waiting: (!direct).then(|| (label, address.to_string())),
+        waiting: (!direct).then(|| Waiting {
+            label,
+            address: address.to_string(),
+            unanswered: sent > 0 && received == 0,
+        }),
     })
 }
 
@@ -328,10 +345,16 @@ fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginEr
             waiting.len()
         )
     };
-    // Only offer to set up a path when one is missing, and name the machine.
+    // Only offer to set up a path when one is missing, and name the machine. If traffic already
+    // went unanswered, say so instead of asking for more.
     let next = match waiting.first() {
-        Some((label, address)) if !more => vec![format!(
-            "Send traffic to {label} to set up its direct path, for example: ping {address}"
+        Some(peer) if !more && peer.unanswered => vec![format!(
+            "{} has not answered anything sent to it. A firewall or NAT between the two machines may block direct UDP, and there is no relay to fall back on yet.",
+            peer.label
+        )],
+        Some(peer) if !more => vec![format!(
+            "Send traffic to {} to set up its direct path, for example: ping {}",
+            peer.label, peer.address
         )],
         _ => Vec::new(),
     };
@@ -527,6 +550,41 @@ mod tests {
         assert!(shown.next[0].contains("10.254.0.4"), "{:?}", shown.next);
         assert!(shown.body.starts_with("PEER"), "{}", shown.body);
         assert!(shown.body.lines().all(|line| line.chars().count() <= 100));
+    }
+
+    /// Sent data and nothing back: the hint explains instead of asking for another ping (#483).
+    #[test]
+    fn an_unanswered_peer_is_not_told_to_send_more() {
+        let mut silent = peer(4, "10.254.0.4", 0);
+        silent["counters"]["received_bytes"] = 0.into();
+        silent["counters"]["sent_bytes"] = 2_220.into();
+        let page = serde_json::json!({"peers": [silent], "next_cursor": null});
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
+        assert_eq!(
+            shown.message,
+            "1 peer on the mesh, 1 without a direct path yet."
+        );
+        assert!(
+            shown.next[0].starts_with("10.254.0.4 has not answered"),
+            "{:?}",
+            shown.next
+        );
+        assert!(!shown.next[0].contains("ping"), "{:?}", shown.next);
+    }
+
+    /// Nothing sent yet: a ping is still the step that starts the handshake.
+    #[test]
+    fn a_peer_never_sent_to_still_gets_the_ping_hint() {
+        let mut idle = peer(4, "10.254.0.4", 0);
+        idle["counters"]["received_bytes"] = 0.into();
+        idle["counters"]["sent_bytes"] = 0.into();
+        let page = serde_json::json!({"peers": [idle], "next_cursor": null});
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
+        assert!(
+            shown.next[0].contains("ping 10.254.0.4"),
+            "{:?}",
+            shown.next
+        );
     }
 
     #[test]
