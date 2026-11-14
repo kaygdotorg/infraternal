@@ -1714,4 +1714,83 @@ mod tests {
         );
         fs::remove_dir_all(root).expect("remove fixture root");
     }
+
+    /// J595 P0: a second root server on the same host must not take the live server's identity.
+    ///
+    /// Every root server resolves the same legacy path, `/run/infraternal`. The release flow
+    /// starts a throwaway root server on a copy of production data (the migration check) before
+    /// it upgrades production. If that check instance migrates first, it moves production's live
+    /// key into its own scratch `mesh/` directory, which is then deleted. Production's own upgrade
+    /// then finds nothing to migrate and mints a new key, which is the F8 failure this branch fixes.
+    /// The fix needs an ownership check (for example, the server node's public key recorded in this
+    /// data directory) before a legacy identity is moved; adapt the calls below to that API.
+    #[test]
+    fn a_second_server_instance_does_not_take_the_live_servers_legacy_identity() {
+        let root = fixture_root();
+        let shared_runtime = root.join("run/infraternal");
+        let check_instance = root.join("root/migcheck/mesh");
+        let production = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&shared_runtime).expect("create shared legacy runtime directory");
+        fs::set_permissions(&shared_runtime, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(check_instance.parent().expect("check data directory"))
+            .expect("create migration-check data directory");
+        fs::create_dir_all(production.parent().expect("production data directory"))
+            .expect("create production data directory");
+        fs::write(shared_runtime.join("mesh-private-key"), [0x2a; 32])
+            .expect("write the live server's synthetic key");
+        fs::write(
+            shared_runtime.join("mesh-public.json"),
+            br#"{"enabled":true}"#,
+        )
+        .expect("write the live server's public state");
+
+        // The migration-check server starts first on its copy of production data.
+        let check = migrate(&shared_runtime, &check_instance);
+        // Production is upgraded afterwards and must still find its own identity.
+        let production_result = migrate(&shared_runtime, &production);
+        let production_key = fs::read(production.join("mesh-private-key")).ok();
+        let check_key = fs::read(check_instance.join("mesh-private-key")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(
+            production_result.is_ok(),
+            "production's upgrade must migrate"
+        );
+        assert_eq!(
+            production_key.as_deref(),
+            Some([0x2a; 32].as_slice()),
+            "production must keep its live identity after another instance started (check: {check:?})"
+        );
+        assert_eq!(
+            check_key, None,
+            "a server that does not own the identity must never hold a copy of it"
+        );
+    }
+
+    /// J595 P2: every file the mesh Store keeps must be moved by migration and rollback.
+    ///
+    /// `MESH_FILES` is a hand-kept copy of the names `Store::open` uses. A branch that adds a Store
+    /// file (J510c adds `mesh-listen-port.json`) would leave that file behind on upgrade and
+    /// rollback with no failing test. This guard reads the Store source so the two lists cannot
+    /// drift silently. It passes on J501b alone and fails once J510c is merged.
+    #[test]
+    fn mesh_files_cover_every_file_the_store_opens() {
+        let source = include_str!("../../plugins/mesh/src/node_state.rs");
+        let mut missing = Vec::new();
+        for (index, _) in source.match_indices("parent.join(\"") {
+            let start = index + "parent.join(\"".len();
+            let Some(length) = source[start..].find('"') else {
+                continue;
+            };
+            let name = &source[start..start + length];
+            if !super::MESH_FILES.contains(&name) && !missing.contains(&name) {
+                missing.push(name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "Store files missing from MESH_FILES: {missing:?}"
+        );
+    }
 }
