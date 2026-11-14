@@ -99,6 +99,66 @@ async fn request_key_repaint_if_ready(
     Ok(())
 }
 
+/// Forward the shim's confirmation that input through `seq` reached the PTY.
+///
+/// The shim keeps a single reply slot per peer, so a key's confirmation arrives either as an
+/// `InputAck` or, when a route proof's `InputStateRequest` was outstanding, inside that proof's
+/// `InputState` (#477). Both replies come here. While a key repaint is pending the Ack takes the
+/// writer's priority lane: that keeps it ahead of the Snapshot showing the key's echo and lets the
+/// writer drop the raw output the Snapshot replaces. An `InputAck` is always forwarded (`always`);
+/// a state reply only when it advances the cursor. Returns whether it advanced.
+async fn forward_input_confirmation(
+    tx: &mpsc::Sender<Message>,
+    priority: &mpsc::Sender<PriorityMessage>,
+    stream: u32,
+    seq: u64,
+    output_cursor: u64,
+    repaint_pending: bool,
+    always: bool,
+    acknowledged: &mut u64,
+) -> io::Result<bool> {
+    let advanced = seq > *acknowledged;
+    if advanced || always {
+        if repaint_pending {
+            emit_priority(
+                priority,
+                PriorityMessage::InputAck {
+                    stream,
+                    seq,
+                    output_cursor,
+                },
+            )
+            .await?;
+        } else {
+            emit(tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
+        }
+    }
+    *acknowledged = (*acknowledged).max(seq);
+    Ok(advanced)
+}
+
+/// Whether a confirmation through `seq` should start the pending key repaint's frame grace.
+///
+/// It must, whichever shim reply carried it: the relay discards raw output while a key repaint is
+/// pending, so a key confirmed without starting its grace would never be repainted and the screen
+/// would stay frozen with the client's credit unused (#477). A confirmation that does not advance
+/// still starts a grace that is neither running nor finished, for a key whose cursor advanced on
+/// another path first.
+fn key_repaint_grace_due(
+    target: Option<u64>,
+    requested: Option<u64>,
+    seq: u64,
+    advanced: bool,
+    ready: bool,
+    ready_at_set: bool,
+) -> bool {
+    target.is_some_and(|target| {
+        requested.is_none_or(|requested| target > requested)
+            && seq >= target
+            && (advanced || (!ready && !ready_at_set))
+    })
+}
+
 /// Decide whether a key should replace output that is waiting for flow-control credit.
 ///
 /// A writer-staged raw frame or already-sent backlog shows that output is
@@ -2323,27 +2383,36 @@ async fn terminal_run(
                     Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)
                         if key_repaint_target.is_some() && key_repaint_requested.is_none() => {}
                     frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
-                    Shim::InputAck(seq) => {
-                        if key_repaint_target.is_some() {
-                            emit_priority(
-                                &priority,
-                                PriorityMessage::InputAck {
-                                    stream,
-                                    seq,
-                                    output_cursor: output.cursor(),
-                                },
-                            )
-                            .await?;
-                        } else {
-                            emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
-                        }
-                        let ack_advanced = seq > acknowledged;
-                        acknowledged = acknowledged.max(seq);
-                        if let Some(target) = key_repaint_target
-                            && key_repaint_requested.is_none_or(|requested| target > requested)
-                            && seq >= target
-                            && (ack_advanced || (!key_repaint_ready && key_repaint_ready_at.is_none()))
-                        {
+                    reply @ (Shim::InputAck(_) | Shim::InputState(..)) => {
+                        let (seq, is_ack) = match reply {
+                            Shim::InputAck(seq) => (seq, true),
+                            Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
+                                if written < acknowledged {
+                                    return Err(sessions::invalid("shim input cursor regressed"));
+                                }
+                                (written, false)
+                            }
+                            _ => return Err(sessions::invalid("unexpected shim relay frame")),
+                        };
+                        let advanced = forward_input_confirmation(
+                            &tx,
+                            &priority,
+                            stream,
+                            seq,
+                            output.cursor(),
+                            key_repaint_target.is_some(),
+                            is_ack,
+                            &mut acknowledged,
+                        )
+                        .await?;
+                        if key_repaint_grace_due(
+                            key_repaint_target,
+                            key_repaint_requested,
+                            seq,
+                            advanced,
+                            key_repaint_ready,
+                            key_repaint_ready_at.is_some(),
+                        ) {
                             key_repaint_ready_at =
                                 Some(tokio::time::Instant::now() + KEY_REPAINT_GRACE);
                             key_repaint_ready = false;
@@ -2358,11 +2427,11 @@ async fn terminal_run(
                             finished_peer,
                         )
                         .await?;
-                    }
-                    Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
-                        input_progress(&tx, stream, &mut acknowledged, written).await?;
-                        let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
-                        emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
+                        // A state reply also answers the route proof that asked for it.
+                        if !is_ack {
+                            let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
+                            emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
+                        }
                     }
                     Shim::Exited(status, final_seq) => {
                         exited(&tx, stream, id, status, final_seq, false).await?;

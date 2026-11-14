@@ -419,6 +419,74 @@ async fn route_proof_is_answered_while_output_waits_for_client_credit() {
     assert_eq!(pong, Some((7, 9)), "the starved relay must still prove its route");
 }
 
+/// A key whose PTY write is confirmed by a route proof's state reply still gets its repaint (#477).
+///
+/// The shim keeps one reply slot per peer. When a route proof's `InputStateRequest` is outstanding
+/// as a key is written, the shim confirms the key with `InputState` instead of `InputAck`. The relay
+/// discards raw output while a key repaint is pending, so a confirmation that did not start the
+/// repaint's frame grace left the screen frozen under a flood with the client's credit unused
+/// (traced on the production build: Ack in 1.5 ms, then no repaint and no output for 12 s).
+#[tokio::test]
+async fn a_key_confirmed_by_a_route_proof_state_reply_still_gets_its_repaint() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window(&mut fixture).await;
+    let commands = fixture.commands.as_mut().unwrap();
+    commands.try_send(Command::Input(0, vec![b'k'])).unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SequencedInput(0, vec![b'k'])
+    );
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Ping(7, 9))
+        .unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::InputStateRequest
+    );
+    // One state reply answers the route proof and confirms the key, as the real shim's single slot does.
+    sessions::send(&mut fixture.peer, &Shim::InputState(1, 1))
+        .await
+        .unwrap();
+    let requested = matches!(
+        tokio::time::timeout(EVENT_GUARD, fixture.reader.read(&mut fixture.peer)).await,
+        Ok(Ok(Shim::SnapshotRequest))
+    );
+    let mut acked = false;
+    let mut ponged = false;
+    let mut repaint = None;
+    if requested {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Snapshot(u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec()),
+        )
+        .await
+        .unwrap();
+        while repaint.is_none() {
+            match tokio::time::timeout(EVENT_GUARD, fixture.messages.recv()).await {
+                Ok(Some(Message::Shim(2, Shim::InputAck(seq)))) => acked |= seq >= 1,
+                Ok(Some(Message::Pong(2, 7, 9))) => ponged = true,
+                Ok(Some(Message::Shim(2, Shim::Snapshot(seq, bytes)))) => repaint = Some((seq, bytes)),
+                Ok(Some(Message::Shim(2, Shim::Output(..)) | Message::Event(2, _))) => {}
+                Ok(Some(_) | None) | Err(_) => break,
+            }
+        }
+    }
+    stop_relay(&mut fixture).await;
+    assert!(
+        requested,
+        "a key confirmed by the route proof's state reply must still release its repaint request"
+    );
+    assert!(acked, "the client must see the key's acknowledgment");
+    assert!(ponged, "the route proof must still be answered");
+    assert_eq!(
+        repaint,
+        Some((u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec()))
+    );
+}
+
 /// A key must be written and acknowledged before the shim captures its echo.
 #[tokio::test]
 async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
