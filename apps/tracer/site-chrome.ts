@@ -101,6 +101,10 @@ export function sitePage(chrome: Chrome): string {
 <meta name="theme-color" content="#101113" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
 <title>${escapeHtml(chrome.title)} · Infraternal</title>
+<link rel="icon" href="/docs/icons/light.svg" type="image/svg+xml" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/docs/icons/dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="/docs/icons/dark-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/docs/icons/apple-touch-icon.png" sizes="180x180">
 <link rel="stylesheet" href="/docs/docs.css">
 <link rel="stylesheet" href="/docs/doc.css">
 <link rel="stylesheet" href="/docs/site.css">

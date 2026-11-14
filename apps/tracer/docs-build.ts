@@ -346,6 +346,8 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     cp(resolve(import.meta.dirname, "doc.css"), resolve(out, "doc.css")),
     // The docs carry their own copy of the font, so the tree stands alone on a static host.
     cp(resolve(import.meta.dirname, "fonts/maple-mono-nf/roman.latin.woff2"), resolve(out, "fonts/roman.latin.woff2")),
+    // And its own copy of the app icons, for the tab and the home screen on the standalone pages.
+    cp(resolve(import.meta.dirname, "icons"), resolve(out, "icons"), { recursive: true }),
   ]);
   // The page script: the section being read, and copying code. Bundled here, minified, as a file of its own.
   const script = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "doc-page.ts")], target: "browser", minify: true, outdir: out, naming: { entry: "doc.js" } });
