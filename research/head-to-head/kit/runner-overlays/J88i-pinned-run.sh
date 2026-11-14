@@ -423,6 +423,14 @@ run_plan() {
 }
 
 case $mode in
+    bufferbloat)
+        # The home-router profile (D381, lib/bufferbloat.py) reuses this runner's host
+        # placement and restoration. It reads the validated plan; the bound keeps a
+        # stuck case from holding the shared lock past the 20-minute rule.
+        taskset -c "$housekeeping" timeout --signal=TERM --kill-after=15s 12m \
+            python3 -I "$kit/lib/bufferbloat.py" --kit "$kit" --plan "$plan" \
+            --profile "${H2H_HOME_PROFILE:?}" --seconds "${H2H_HOME_SECONDS:-12}" --out "$out/home"
+        ;;
     validate)
         smoke_dir="$out/cpuset-smoke"
         mkdir -p "$smoke_dir"

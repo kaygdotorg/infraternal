@@ -21,6 +21,7 @@ mode=""
 label=""
 out=""
 scenario=""
+profile=""
 calibration_status="uncalibrated"
 partial=0
 wg_bin=""
@@ -55,6 +56,10 @@ usage:
     (one cross-engine hold: two to four different engines, each once, run in the given
      order as calibration-shaped LAN windows; take the orders from lib/latin_square.py
      and pool the holds with lib/head_to_head.py)
+  perf-all.sh --bufferbloat --profile fifo|fq_codel --label HOLD --row TAG=ENGINE ... \
+    [--binary TAG=PATH --source TAG=SHA] [--out DIR]
+    (the home-router profile, D381: underlay, gotatun, kernel-plain and wireguard-go rows
+     behind a shaped 481.5/778.9 Mbit/s link with a deep FIFO or fq_codel queue)
   perf-all.sh --soak --label CUT --row control=gotatun --row candidate=gotatun \
     --binary TAG=PATH [--source TAG=SHA] [--out DIR]
 
@@ -89,6 +94,8 @@ while (($#)); do
         --ab) set_mode ab ;;
         --soak) set_mode soak ;;
         --mixed) set_mode mixed ;;
+        --bufferbloat) set_mode bufferbloat ;;
+        --profile) (($# >= 2)) || { echo '--profile needs a value' >&2; exit 2; }; profile=$2; shift ;;
         --label) (($# >= 2)) || { echo '--label needs a value' >&2; exit 2; }; label=$2; shift ;;
         --scenario) (($# >= 2)) || { echo '--scenario needs a value' >&2; exit 2; }; scenario=$2; shift ;;
         --tcp-flow)
@@ -313,6 +320,20 @@ case $mode in
             fi
         done
         ;;
+    bufferbloat)
+        # One profile per hold: four engines x four load modes take about six minutes.
+        [[ $profile == fifo || $profile == fq_codel ]] || { echo '--profile must be fifo or fq_codel' >&2; exit 2; }
+        [[ -n $label ]] || { echo '--bufferbloat requires --label' >&2; exit 2; }
+        declare -A bufferbloat_seen=()
+        for row in "${rows[@]}"; do
+            engine=${row#*=}
+            [[ $engine == underlay || $engine == gotatun || $engine == kernel-plain || $engine == wireguard-go ]] || {
+                echo '--bufferbloat runs underlay, gotatun, kernel-plain and wireguard-go rows' >&2; exit 2;
+            }
+            [[ -z ${bufferbloat_seen[$engine]:-} ]] || { echo "--bufferbloat runs each engine at most once; $engine repeats" >&2; exit 2; }
+            bufferbloat_seen[$engine]=1
+        done
+        ;;
     soak)
         ((${#rows[@]} == 2)) || { echo '--soak takes exactly two rows' >&2; exit 2; }
         check_row 0 control gotatun
@@ -379,6 +400,13 @@ if [[ $mode == matrix ]]; then
 fi
 if [[ $mode == calibration || $mode == ab || $mode == mixed ]]; then
     run_env+=(H2H_CALIBRATION_ONLY=1)
+fi
+if [[ $mode == bufferbloat ]]; then
+    run_env+=("H2H_HOME_PROFILE=$profile")
+    if [[ -n ${H2H_HOME_SECONDS:-} ]]; then
+        [[ $H2H_HOME_SECONDS =~ ^[1-9][0-9]*$ ]] || { echo 'H2H_HOME_SECONDS must be a positive integer' >&2; exit 2; }
+        run_env+=("H2H_HOME_SECONDS=$H2H_HOME_SECONDS")
+    fi
 fi
 if [[ -n ${H2H_MATRIX_RPS_POLICY:-} ]]; then
     run_env+=("H2H_MATRIX_RPS_POLICY=$H2H_MATRIX_RPS_POLICY")
