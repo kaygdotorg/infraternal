@@ -1,0 +1,6 @@
+wireguard-go source b3bc704ef0ee21a36298601a9e1e5ff90377ac52
+wireguard-tools source a998407747005ea7e4e0258d96f105c97241e1d3
+26f64ade377d0336ad1b50839c26992976422dac99c11b72f40763ebe469d952  /home/claude/.cache/codex-scratch/r4-userspace-wg/out/wireguard-go
+610861327870fd1a66296aad1df57194e0e5036c69b086944764f6bc7138ed04  /home/claude/.cache/codex-scratch/r4-userspace-wg/out/wg
+/home/claude/.cache/codex-scratch/r4-userspace-wg/out/wireguard-go: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57/lib/ld-linux-x86-64.so.2, Go BuildID=6Xb8pXbjEKe3ew5CteRm/3kbjRekCgzxpKHKY2Ybc/Al7IHydfLEwB1RJZnWH2/k7KLYoI4XHo7Pzc9-8We, BuildID[sha1]=5b5d0cb1f5460031b4fb81ed4471ac0abbd0a0d0, stripped
+/home/claude/.cache/codex-scratch/r4-userspace-wg/out/wg:           ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /nix/store/pqyiidz5mi73wv5f91d48s9plcqyj5bz-glibc-2.44-57/lib/ld-linux-x86-64.so.2, for GNU/Linux 3.10.0, not stripped

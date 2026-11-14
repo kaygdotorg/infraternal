@@ -1,0 +1,11 @@
+--- a/perf-all.sh
++++ b/perf-all.sh
+@@ -13,7 +13,7 @@
+ mkdir -p "$out/receipts"
+ rc=0
+ for name in "${cases[@]}"; do
+-    "$runner" --root --out "$out/receipts" -- env H2H_LOCK=external H2H_USER=claude \
++    "$runner" --root --out "$out/receipts" -- env H2H_REORDER_CHECK="${H2H_REORDER_CHECK:-0}" H2H_LOCK=external H2H_USER=claude \
+         H2H_RESULTS="$out" bash "$kit/run.sh" --only "$name" \
+         --label "perf VM $(hostname), $(uname -m); perf.slice CPUs 1–3, 6 GiB" || rc=1
+ done
