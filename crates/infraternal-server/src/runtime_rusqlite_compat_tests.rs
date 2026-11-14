@@ -174,7 +174,7 @@ fn snapshot(path: &Path, mask_time: bool) -> Snapshot {
 /// The generated runner list is the server's migration list: same versions,
 /// descriptions, executable SQL and original checksums, one per `.sql` file
 /// in `migrations/` (counted from the directory, so a new migration never
-/// needs this test edited).
+/// needs this test edited), and none of them is a no-transaction migration.
 #[test]
 fn runner_list_matches_the_sqlx_list() {
     let files = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
@@ -195,6 +195,9 @@ fn runner_list_matches_the_sqlx_list() {
         assert_eq!(runner.description, sqlx.description);
         assert_eq!(runner.sql, sqlx.sql);
         assert_eq!(runner.checksum, &*sqlx.checksum);
+        // The runner always wraps a migration in a transaction; the build
+        // script refuses `-- no-transaction` until it can do otherwise (#473).
+        assert!(!sqlx.no_tx, "migration {} is no-transaction", sqlx.version);
     }
 }
 

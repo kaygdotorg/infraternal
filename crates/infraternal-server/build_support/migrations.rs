@@ -61,6 +61,17 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
         let sql = fs::read_to_string(&path)?;
         let checksum = Sha384::digest(sql.as_bytes());
         let no_tx = sql.starts_with("-- no-transaction");
+        // The D379 runner applies every migration inside a transaction with its
+        // history row; it has no "no-transaction" mode yet, so it would wrap such a
+        // migration where sqlx would not (J632 finding 6, #473). Refuse it at build
+        // time until the runner supports it, instead of letting the two runners differ.
+        if no_tx {
+            return Err(io::Error::other(format!(
+                "migration {name} starts with `-- no-transaction`, which the D379 runner \
+                 (infraternal_db::migrate) does not support yet; remove the marker or add \
+                 no-transaction support to the runner first (#473)"
+            )));
+        }
         let executable = compact_sql::compact(&sql);
         writeln!(generated,
             "sqlx::migrate::Migration {{ version: {}, description: std::borrow::Cow::Borrowed({description:?}), migration_type: sqlx::migrate::MigrationType::{kind}, sql: std::borrow::Cow::Borrowed({executable:?}), checksum: std::borrow::Cow::Borrowed(&{:?}), no_tx: {no_tx} }},",
