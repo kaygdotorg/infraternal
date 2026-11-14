@@ -353,8 +353,11 @@ async fn serve_inner(
     auth.checkpoint_recovery_clock()
         .await
         .map_err(ServerError::Auth)?;
-    // Last, after every request has ended: finish the D379 pool's queued
-    // writes and fold its WAL into the main file (#473).
+    // Last: finish the D379 pool's queued writes and fold its WAL into the
+    // main file (#473). The listener has stopped, but `select!` only dropped
+    // the serve future: connection tasks it spawned may still be running. A
+    // request still in flight then gets the pool's `Closed` (a 503, or a
+    // socket renewal that silently doesn't happen), which is harmless at exit.
     auth.close_database().await;
     result
 }
