@@ -197,6 +197,28 @@ pub struct Installed {
     /// The data folder of any installed system server unit, the readers' rule
     /// (`infraternal_status::server_data_directory`). Only used for `--system`.
     pub system_data: Option<PathBuf>,
+    /// Whether a system server unit named like this one exists, whatever it records.
+    pub system_unit: bool,
+}
+
+/// A note for root running `server init` without `--system` while a system server unit exists.
+///
+/// Root without `--system` still installs a per-user service for root (kept
+/// behaviour), which is rarely what a root login means and leaves two servers.
+/// The text names the system install and the flag; it is printed, never fatal.
+#[must_use]
+pub fn root_user_scope_warning(
+    scope: Scope,
+    installed: &Installed,
+    environment: &Environment,
+) -> Option<String> {
+    let system_unit = installed.system_data.is_some() || installed.system_unit;
+    (scope == Scope::User && environment.is_root && system_unit).then(|| {
+        "warning: a system-wide infraternal server is already installed on this machine, \
+         and you are root without --system, so this installs a second per-user service for root; \
+         pass --system to manage the system install instead"
+            .to_owned()
+    })
 }
 
 /// The folders `server init` will write into the unit.
@@ -615,6 +637,7 @@ mod tests {
                 relative: Vec::new(),
             }),
             system_data: Some("/srv/elsewhere".into()),
+            system_unit: false,
         };
         for scope in [Scope::User, Scope::System] {
             let folders = resolve_server_init(scope, None, None, &installed, &env).unwrap();
@@ -635,6 +658,7 @@ mod tests {
         let installed = Installed {
             unit: None,
             system_data: Some("/srv/state".into()),
+            system_unit: false,
         };
         let system = resolve_server_init(Scope::System, None, None, &installed, &linux()).unwrap();
         assert_eq!(system.data, PathBuf::from("/srv/state"));
@@ -655,6 +679,7 @@ mod tests {
                 relative: Vec::new(),
             }),
             system_data: None,
+            system_unit: false,
         };
         let folders = resolve_server_init(
             Scope::User,
@@ -747,6 +772,27 @@ mod tests {
             &linux(),
         )
         .unwrap();
+    }
+
+    /// Only root, without `--system`, with a system unit present gets the warning.
+    #[test]
+    fn root_without_system_beside_a_system_unit_is_warned() {
+        let installed = Installed {
+            system_unit: true,
+            ..Installed::default()
+        };
+        let root = Environment {
+            is_root: true,
+            ..linux()
+        };
+        let text = root_user_scope_warning(Scope::User, &installed, &root).unwrap();
+        assert!(
+            text.contains("system-wide") && text.contains("--system"),
+            "{text}"
+        );
+        assert!(root_user_scope_warning(Scope::System, &installed, &root).is_none());
+        assert!(root_user_scope_warning(Scope::User, &installed, &linux()).is_none());
+        assert!(root_user_scope_warning(Scope::User, &Installed::default(), &root).is_none());
     }
 
     /// The link lives at the D395 path for each platform and scope.

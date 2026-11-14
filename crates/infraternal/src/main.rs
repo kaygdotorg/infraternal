@@ -1270,7 +1270,16 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             name,
         ),
         system_data: infraternal_status::server_data_directory(&roots),
+        system_unit: infraternal_status::recorded_server_unit(
+            &roots,
+            infraternal_status::Scope::System,
+            name,
+        )
+        .is_some(),
     };
+    if let Some(warning) = install_paths::root_user_scope_warning(scope, &installed, &environment) {
+        eprintln!("{warning}");
+    }
     let folders = install_paths::check_scope(scope, dry_run, &environment).and_then(|()| {
         install_paths::resolve_server_init(
             scope,
