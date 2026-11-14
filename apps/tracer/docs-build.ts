@@ -351,9 +351,13 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     // And its own copy of the app icons, for the tab and the home screen on the standalone pages.
     cp(resolve(import.meta.dirname, "icons"), resolve(out, "icons"), { recursive: true }),
   ]);
-  // The page script: the section being read, and copying code. Bundled here, minified, as a file of its own.
+  // The page script: the section being read, and copying code. Bundled here, minified, as a file of its own; the search is a second file, loaded on first use.
   const script = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "doc-page.ts")], target: "browser", minify: true, outdir: out, naming: { entry: "doc.js" } });
   if (!script.success) throw new Error(`docs script: ${script.logs.map(String).join("; ")}`);
+  // The search is its own ES module, imported by URL the first time it is opened. Not a split chunk: `doc.js` is a classic script, and a
+  // split bundle's loader reads `import.meta.url`, which a classic script cannot.
+  const search = await Bun.build({ entrypoints: [resolve(import.meta.dirname, "site-search.ts")], target: "browser", format: "esm", minify: true, outdir: out, naming: { entry: "doc-search.js" } });
+  if (!search.success) throw new Error(`docs search script: ${search.logs.map(String).join("; ")}`);
   const { index: frontText, pages } = await readUserDocs(source);
   // The figures the capture made (docs-figure.ts). A tree with no figures folder simply has none.
   const figureOptions = await figureOptionsFor(source);
@@ -405,6 +409,8 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     here: doc === front ? area : `${area} / ${doc.title}`,
     area: "docs", main: "docs",
     body: own(doc.html),
+    // An audience's page searches all three guides; an instance's own flat docs search themselves.
+    ...(audience ? {} : { searchRoots: ["/docs"] }),
     ...(audience ? { side: sideNav(audience, nav, slug) } : {}),
   }));
   for (const doc of all) {
