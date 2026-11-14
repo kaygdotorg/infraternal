@@ -1172,12 +1172,20 @@ pub(crate) struct RouteMonitor {
     interface_index: u32,
     /// Reused storage for kernel notifications; route messages contain no private key material.
     buffer: Vec<u8>,
-    /// Bumped for every link or route change that is not our own link or peer route.
+    /// Bumped for every link, route, policy-rule or nexthop change that is not our own link or
+    /// peer route.
     underlay: std::sync::Arc<UnderlayWatch>,
 }
 
 impl RouteMonitor {
-    /// Subscribe to link, IPv4 route and IPv6 route notifications for the current mesh interface.
+    /// Subscribe to the notifications that can move a peer endpoint's underlay path: links, IPv4
+    /// and IPv6 routes, IPv4 and IPv6 policy rules, and nexthop objects.
+    ///
+    /// Rules and nexthops have their own groups (#489 J609): a VPN or interface manager that adds
+    /// its table routes first and the `ip rule` that selects them second moves endpoints with
+    /// no route announcement at all, and so does replacing a nexthop object routes refer to
+    /// while `net.ipv4.nexthop_compat_mode` is off. The mesh writes neither, so these groups
+    /// carry no echo of our own writes.
     /// # Errors
     /// Returns socket, bind, or interface lookup errors before the node becomes active.
     fn open(interface_index: u32, underlay: std::sync::Arc<UnderlayWatch>) -> io::Result<Self> {
@@ -1189,7 +1197,15 @@ impl RouteMonitor {
         )?;
         bind(
             fd.as_raw_fd(),
-            &NetlinkAddr::new(0, RTMGRP_LINK | RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE),
+            &NetlinkAddr::new(
+                0,
+                RTMGRP_LINK
+                    | RTMGRP_IPV4_ROUTE
+                    | RTMGRP_IPV6_ROUTE
+                    | RTMGRP_IPV4_RULE
+                    | RTMGRP_IPV6_RULE
+                    | RTMGRP_NEXTHOP,
+            ),
         )?;
         Ok(Self {
             fd,
@@ -1202,8 +1218,8 @@ impl RouteMonitor {
     /// Wait until a deletion, cancellation, or the full-inventory reconciliation deadline.
     ///
     /// Only unicast `/32` and `/128` routes in the main table, with this interface and protocol
-    /// 250, are reported. Every other link or route change bumps the underlay watch and is not
-    /// reported. A notification overflow (`ENOBUFS`) may have dropped a deletion, so it bumps the
+    /// 250, are reported. Every other link, route, rule or nexthop change bumps the underlay watch
+    /// and is not reported. A notification overflow (`ENOBUFS`) may have dropped a deletion, so it bumps the
     /// watch and asks for a full inventory check.
     /// # Errors
     /// Returns poll, receive, or malformed-netlink-message errors.
@@ -1314,14 +1330,17 @@ fn peer_route_payload(
     Ok(payload)
 }
 
-/// Whether one link or route notification may change a peer endpoint's underlay MTU.
+/// Whether one link, route, policy-rule or nexthop notification may change a peer endpoint's
+/// underlay MTU.
 ///
 /// Our own link's announcements (its MTU follows the peer budgets) and routes out of our own link
 /// (our peer host routes, whatever flags the kernel reports on them, such as `linkdown`) are the
 /// results of a refresh, not inputs to it: counting them would make each refresh that writes
 /// schedule a full re-derivation. A route out of the mesh link cannot carry the underlay to a
 /// peer endpoint either. Everything else counts, because any other link or route can sit on the
-/// path to some peer's endpoint.
+/// path to some peer's endpoint. Every rule and nexthop change counts too (#489 J609): a rule
+/// can send an endpoint to another table, and a nexthop replacement re-points every route that
+/// refers to it; the mesh writes neither, so no refresh can feed back into the watch.
 /// # Errors
 /// Returns `InvalidData` for a truncated link or route message.
 fn is_underlay_change(message: &netlink::Message<'_>, interface_index: u32) -> io::Result<bool> {
@@ -1341,6 +1360,8 @@ fn is_underlay_change(message: &netlink::Message<'_>, interface_index: u32) -> i
             }
             Ok(true)
         }
+        // RTM_NEWRULE, RTM_DELRULE, RTM_NEWNEXTHOP, RTM_DELNEXTHOP.
+        32 | 33 | 104 | 105 => Ok(true),
         _ => Ok(false),
     }
 }
@@ -1445,6 +1466,14 @@ const RTMGRP_LINK: u32 = 0x1;
 const RTMGRP_IPV4_ROUTE: u32 = 0x40;
 /// Subscribes to IPv6 unicast route changes in the main route table.
 const RTMGRP_IPV6_ROUTE: u32 = 0x400;
+/// Subscribes to IPv4 policy-rule changes: `RTNLGRP_IPV4_RULE` (group 8), bit `1 << 7`.
+const RTMGRP_IPV4_RULE: u32 = 0x80;
+/// Subscribes to IPv6 policy-rule changes: `RTNLGRP_IPV6_RULE` (group 19), bit `1 << 18`. The
+/// legacy `RTMGRP_*` macros stop before it, so it is derived from the group number.
+const RTMGRP_IPV6_RULE: u32 = 1 << (19 - 1);
+/// Subscribes to nexthop object changes: `RTNLGRP_NEXTHOP` (group 32), the last group the
+/// 32-bit bind mask can still express, bit `1 << 31`.
+const RTMGRP_NEXTHOP: u32 = 1 << (32 - 1);
 /// `RTA_METRICS`: nested per-route metrics accepted by rtnetlink.
 const RTA_METRICS: u16 = 8;
 /// `RTAX_MTU`: the per-peer inner packet limit stored on a mesh host route.
@@ -2003,5 +2032,53 @@ mod route_metric_tests {
         ] {
             assert!(!owns_encoded_metrics(&foreign));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod underlay_change_tests {
+    //! Which route-netlink notifications move the underlay watch (#489 J552 P2-2, J609).
+    use super::*;
+
+    /// Wrap `payload` as one received notification of `kind`.
+    fn message(kind: u16, payload: &[u8]) -> netlink::Message<'_> {
+        netlink::Message {
+            kind,
+            flags: 0,
+            sequence: 0,
+            payload,
+        }
+    }
+
+    /// Policy-rule and nexthop announcements can move a peer endpoint to another path, so each
+    /// one moves the watch, whatever it says: the mesh writes neither (#489 J609).
+    #[test]
+    fn policy_rule_and_nexthop_changes_move_the_underlay_watch() {
+        // RTM_NEWRULE / RTM_DELRULE carry a 12-byte `fib_rule_hdr`; RTM_NEWNEXTHOP /
+        // RTM_DELNEXTHOP an 8-byte `nhmsg`.
+        let rule = [0_u8; 12];
+        let nexthop = [0_u8; 8];
+        for (kind, payload) in [
+            (32, rule.as_slice()),
+            (33, rule.as_slice()),
+            (104, nexthop.as_slice()),
+            (105, nexthop.as_slice()),
+        ] {
+            assert!(
+                is_underlay_change(&message(kind, payload), 7).unwrap(),
+                "message type {kind} must move the underlay watch"
+            );
+        }
+    }
+
+    /// Our own link's announcements follow our writes and never count; any other link does.
+    #[test]
+    fn only_foreign_links_move_the_underlay_watch() {
+        // `ifinfomsg` is 16 bytes with the link index at bytes 4..8.
+        let mut link = [0_u8; 16];
+        link[4..8].copy_from_slice(&7_u32.to_ne_bytes());
+        assert!(!is_underlay_change(&message(16, &link), 7).unwrap());
+        assert!(is_underlay_change(&message(16, &link), 8).unwrap());
     }
 }
