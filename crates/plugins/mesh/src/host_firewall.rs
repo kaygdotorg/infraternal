@@ -2057,6 +2057,54 @@ mod tests {
         assert!(super::compare_versions("1.0.9", "1.0.9").is_eq());
     }
 
+    /// J589 review (P1, security): on a multi-user Nix host any local user can
+    /// put a root-owned, read-only `<hash>-nftables-<version>/bin/nft` into
+    /// `/nix/store` (`nix-store --add` through the world-writable daemon
+    /// socket). It passes every ownership check, and with a high version it
+    /// sorts first, so the store scan hands infraternal an attacker's program to
+    /// run as root whenever no fixed nft path exists (prod's shape, #483).
+    /// Store names and ownership say nothing about who asked for the path.
+    ///
+    /// Needs a Nix daemon; it reports SKIP without one.
+    #[cfg(unix)]
+    #[test]
+    fn review_j589_store_scan_never_offers_a_user_added_nft() {
+        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+        let nix_store = Path::new("/nix/var/nix/profiles/default/bin/nix-store");
+        if !nix_store.exists() || !Path::new("/nix/var/nix/daemon-socket/socket").exists() {
+            eprintln!("SKIP: no multi-user Nix daemon on this host");
+            return;
+        }
+        let scratch = std::env::temp_dir().join(format!("j589-store-{}", std::process::id()));
+        let package = scratch.join("nftables-999999.0.0");
+        fs::create_dir_all(package.join("bin")).expect("fixture package");
+        fs::write(
+            package.join("bin/nft"),
+            "#!/bin/sh\necho j589-not-nft >&2\nexit 1\n",
+        )
+        .expect("fixture executable");
+        fs::set_permissions(package.join("bin/nft"), fs::Permissions::from_mode(0o755))
+            .expect("fixture mode");
+        let added = Command::new(nix_store)
+            .arg("--add")
+            .arg(&package)
+            .output()
+            .expect("run nix-store --add as the unprivileged test user");
+        let _ = fs::remove_dir_all(&scratch);
+        assert!(added.status.success(), "{added:?}");
+        let store_path = PathBuf::from(String::from_utf8_lossy(&added.stdout).trim());
+        let planted = store_path.join("bin/nft");
+        let offered = super::nix_store_candidates();
+        assert!(
+            !offered.contains(&planted),
+            "the store scan offers {} (added by an unprivileged user) to run as root; \
+             first candidate: {:?}; safe_nft_path: {:?}",
+            planted.display(),
+            offered.first(),
+            super::safe_nft_path(&planted),
+        );
+    }
+
     /// Only a server policy makes the host table drop by default (J555, #483).
     #[test]
     fn only_the_server_role_gets_a_default_drop_table() {
