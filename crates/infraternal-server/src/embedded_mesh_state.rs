@@ -34,6 +34,12 @@ const LEGACY_MIGRATION_MARKER: &[u8] = b"J501 mesh state migration\n";
 const MIRROR_RECORD: &str = ".mesh-runtime-mirror";
 /// Versioned header of [`MIRROR_RECORD`]; the second line is the hex public key.
 const MIRROR_RECORD_HEADER: &str = "J598 mesh runtime mirror v1";
+/// Durable record of the hashed machine ID the identity belongs to (J595 P2-3).
+const HOST_BINDING_RECORD: &str = ".mesh-host-binding";
+/// Versioned header of [`HOST_BINDING_RECORD`]; the second line is the hex hash.
+const HOST_BINDING_HEADER: &str = "J598 mesh host binding v1";
+/// Domain separation so the stored hash is not a plain hash of the machine ID.
+const HOST_BINDING_DOMAIN: &[u8] = b"infraternal mesh host binding v1\0";
 /// Longest wait for a live mesh store to release its directory before start fails.
 const LOCK_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Retry interval while waiting for that lock; short against a 30 s limit, cheap in CPU.
@@ -108,6 +114,22 @@ pub(crate) fn migrate(
     durable: &Path,
     owns: &dyn Fn(&[u8; 32]) -> bool,
 ) -> io::Result<()> {
+    migrate_on_host(volatile, durable, owns, host_binding().as_ref())
+}
+
+/// [`migrate`] with an explicit host binding; `None` means this host has no machine ID.
+///
+/// A data directory restored or copied to another machine would bring its Mesh identity along,
+/// and two nodes would then share one key and overlay address. Before anything moves, a durable
+/// identity recorded for another host refuses start with recovery commands (J595 P2-3).
+/// # Errors
+/// Everything [`migrate`] refuses, plus `PermissionDenied` for an identity bound to another host.
+fn migrate_on_host(
+    volatile: &Path,
+    durable: &Path,
+    owns: &dyn Fn(&[u8; 32]) -> bool,
+    host: Option<&[u8; 32]>,
+) -> io::Result<()> {
     let uid = nix::unistd::Uid::effective().as_raw();
     ensure_mesh_directory(durable, uid)?;
     let _durable_lock = lock_mesh_directory(durable)?;
@@ -122,6 +144,26 @@ pub(crate) fn migrate(
     if legacy_exists {
         sweep_migration_temporaries(volatile, uid)?;
     }
+    if let Some(host) = host {
+        check_host_binding(durable, host, uid)?;
+    }
+    migrate_locked(volatile, durable, owns, legacy_exists, uid)?;
+    match host {
+        Some(host) => record_host_binding(durable, host, uid),
+        None => Ok(()),
+    }
+}
+
+/// The body of [`migrate`] once both directory locks are held and temporaries are swept.
+/// # Errors
+/// Refuses unsafe entries, an unrecoverable marker, or any failed filesystem operation.
+fn migrate_locked(
+    volatile: &Path,
+    durable: &Path,
+    owns: &dyn Fn(&[u8; 32]) -> bool,
+    legacy_exists: bool,
+    uid: u32,
+) -> io::Result<()> {
     let marker = durable.join(MIGRATION_MARKER);
     if let Some(mut pending) = read_marker(&marker, uid)? {
         if pending.legacy {
@@ -301,33 +343,103 @@ fn mirror_locked(durable: &Path, volatile: &Path, legacy_locked: bool, uid: u32)
 /// # Errors
 /// Refuses an unsafe or malformed record instead of guessing which identity is newer.
 fn read_mirror_record(durable: &Path, uid: u32) -> io::Result<Option<[u8; 32]>> {
-    let path = durable.join(MIRROR_RECORD);
-    if !owned_file(&path, uid, true)? {
+    read_hex_record(&durable.join(MIRROR_RECORD), MIRROR_RECORD_HEADER, uid)
+}
+
+/// Read a small private record made of a header line and one 32-byte hex value.
+/// # Errors
+/// Refuses an unsafe file, a wrong header, or a malformed value.
+fn read_hex_record(path: &Path, header: &str, uid: u32) -> io::Result<Option<[u8; 32]>> {
+    if !owned_file(path, uid, true)? {
         return Ok(None);
     }
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&path)?;
+        .open(path)?;
     if file.metadata()?.len() > 256 {
         return Err(io::ErrorKind::InvalidData.into());
     }
     let mut body = String::new();
     file.read_to_string(&mut body)?;
     let mut lines = body.lines();
-    if lines.next() != Some(MIRROR_RECORD_HEADER) {
+    if lines.next() != Some(header) {
         return Err(io::ErrorKind::InvalidData.into());
     }
     let hex = lines.next().ok_or(io::ErrorKind::InvalidData)?;
     if hex.len() != 64 || lines.next().is_some() {
         return Err(io::ErrorKind::InvalidData.into());
     }
-    let mut key = [0_u8; 32];
-    for (index, byte) in key.iter_mut().enumerate() {
+    let mut value = [0_u8; 32];
+    for (index, byte) in value.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
             .map_err(|_| io::ErrorKind::InvalidData)?;
     }
-    Ok(Some(key))
+    Ok(Some(value))
+}
+
+/// Hash this machine's ID into the value a durable identity is bound to.
+///
+/// The machine ID itself is not stored, only a domain-separated SHA-256 of it. `None` means the
+/// host has no readable machine ID (some containers); binding is then skipped with a warning.
+fn host_binding() -> Option<[u8; 32]> {
+    use sha2::Digest as _;
+
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(text) = fs::read_to_string(path) {
+            let id = text.trim();
+            if !id.is_empty() {
+                let mut digest = sha2::Sha256::new();
+                digest.update(HOST_BINDING_DOMAIN);
+                digest.update(id.as_bytes());
+                return Some(digest.finalize().into());
+            }
+        }
+    }
+    tracing::warn!("no machine ID found; the Mesh identity is not bound to this host");
+    None
+}
+
+/// Refuse a durable identity that was recorded on another host.
+/// # Errors
+/// Returns `PermissionDenied` after logging the recovery commands, or a record read error.
+fn check_host_binding(durable: &Path, host: &[u8; 32], uid: u32) -> io::Result<()> {
+    if read_private_key(durable, uid)?.is_none() {
+        return Ok(());
+    }
+    match read_hex_record(&durable.join(HOST_BINDING_RECORD), HOST_BINDING_HEADER, uid)? {
+        Some(bound) if bound != *host => {
+            let message = format!(
+                "this Mesh identity was created on another machine, so this data directory was \
+                 copied or restored here; refusing to start a second node with the same key. If \
+                 the server moved here for good and the old machine's server is stopped, keep the \
+                 identity: rm {}. If this is a copy, give it its own identity: rm -r {}. Then \
+                 start the server again.",
+                durable.join(HOST_BINDING_RECORD).display(),
+                durable.display(),
+            );
+            tracing::error!(mesh_state = %durable.display(), "{message}");
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Bind the current durable identity to this host, writing only when the record changes.
+/// # Errors
+/// Reports a failed private write; a missing key records nothing.
+fn record_host_binding(durable: &Path, host: &[u8; 32], uid: u32) -> io::Result<()> {
+    if read_private_key(durable, uid)?.is_none() {
+        return Ok(());
+    }
+    let path = durable.join(HOST_BINDING_RECORD);
+    if read_hex_record(&path, HOST_BINDING_HEADER, uid)? == Some(*host) {
+        return Ok(());
+    }
+    replace_private_file(
+        &path,
+        format!("{HOST_BINDING_HEADER}\n{}\n", hex_key(host)).as_bytes(),
+    )
 }
 
 /// Remove known mesh files outside `keep`, unlinking only the exact inode that was checked.
@@ -1010,7 +1122,7 @@ fn sweep_migration_temporaries(directory: &Path, uid: u32) -> io::Result<()> {
         let is_temporary = MESH_FILES.iter().any(|mesh_name| {
             name == format!(".{mesh_name}.migrate-new")
                 || (name.starts_with(&format!(".{mesh_name}.migrate-")) && has_new_extension)
-        }) || ([MIGRATION_MARKER, MIRROR_RECORD]
+        }) || ([MIGRATION_MARKER, MIRROR_RECORD, HOST_BINDING_RECORD]
             .iter()
             .any(|record| name.starts_with(&format!(".{record}.migrate-")))
             && has_new_extension);
@@ -2355,6 +2467,32 @@ mod tests {
             Some(std::io::ErrorKind::TimedOut)
         );
         assert!(waited >= Duration::from_millis(200), "waited {waited:?}");
+    }
+
+    /// A durable identity copied to another host refuses start and changes nothing (J595 P2-3).
+    #[test]
+    fn an_identity_copied_to_another_host_refuses_to_start() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        write_private(&durable.join("mesh-private-key"), &[0x71; 32]);
+        super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xa1; 32]))
+            .expect("first start binds the identity to host A");
+        fs::remove_dir_all(&volatile).expect("the copy lands on a host with no runtime state");
+
+        let on_other_host = super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xb2; 32]));
+        let again_on_first = super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xa1; 32]));
+        fs::remove_file(durable.join(super::HOST_BINDING_RECORD)).expect("operator keeps the move");
+        let after_rebind = super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xb2; 32]));
+        let key = fs::read(durable.join("mesh-private-key")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert_eq!(
+            on_other_host.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(again_on_first.is_ok(), "the original host still starts");
+        assert!(after_rebind.is_ok(), "removing the record accepts the move");
+        assert_eq!(key.as_deref(), Some([0x71; 32].as_slice()));
     }
 
     /// J595 P2: every file the mesh Store keeps must be moved by migration and rollback.
