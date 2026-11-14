@@ -229,6 +229,21 @@ pub fn resolve_server_init(
     environment: &Environment,
 ) -> Result<ServerFolders, PathError> {
     let recorded = installed.unit.as_ref();
+    // A hand-edited unit with a relative folder cannot be reproduced: its
+    // meaning depends on the directory systemd happened to use. Replacing it
+    // silently would move the server's data, so refuse and say what to do.
+    if let Some((flag, value)) = recorded.and_then(|unit| {
+        unit.relative.iter().find(|(flag, _)| {
+            (flag == "--data" && data.is_none()) || (flag == "--web-root" && web_root.is_none())
+        })
+    }) {
+        return Err(PathError(format!(
+            "the installed unit has a relative {flag} {} (a hand edit), so init cannot tell \
+             which folder it means and will not replace it; pass {flag} <absolute path> \
+             with --force, or fix the unit",
+            value.display()
+        )));
+    }
     let data = match explicit_absolute("--data", data)? {
         Some(path) => path,
         None => match (recorded.and_then(|unit| unit.data.clone()), scope) {
@@ -597,6 +612,7 @@ mod tests {
             unit: Some(RecordedServer {
                 data: Some("/srv/custom".into()),
                 web_root: None,
+                relative: Vec::new(),
             }),
             system_data: Some("/srv/elsewhere".into()),
         };
@@ -636,6 +652,7 @@ mod tests {
             unit: Some(RecordedServer {
                 data: Some("/srv/old".into()),
                 web_root: Some("/srv/oldweb".into()),
+                relative: Vec::new(),
             }),
             system_data: None,
         };
@@ -705,6 +722,31 @@ mod tests {
         assert_eq!(mode(&root), 0o755);
         create_private_dir(&leaf).unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A relative recorded folder is refused unless the flag is passed explicitly.
+    #[test]
+    fn a_relative_recorded_folder_is_refused_not_replaced() {
+        let installed = Installed {
+            unit: Some(RecordedServer {
+                relative: vec![("--data".to_owned(), "state".into())],
+                ..RecordedServer::default()
+            }),
+            ..Installed::default()
+        };
+        let error = resolve_server_init(Scope::User, None, None, &installed, &linux())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("relative --data state"), "{error}");
+        assert!(error.contains("--force"), "{error}");
+        resolve_server_init(
+            Scope::User,
+            Some(Path::new("/srv/new")),
+            None,
+            &installed,
+            &linux(),
+        )
+        .unwrap();
     }
 
     /// The link lives at the D395 path for each platform and scope.
