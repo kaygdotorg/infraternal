@@ -1886,10 +1886,7 @@ pub fn sshd_ports() -> SshdPorts {
         Err(error) => answers.push(("systemctl", Err(error.to_string()))),
     }
     answers.push(("sshd's configuration", sshd_config_answer()));
-    answers.push((
-        "running sshd processes",
-        Ok(sshd_listening_ports(&owners)),
-    ));
+    answers.push(("running sshd processes", Ok(sshd_listening_ports(&owners))));
     SshdPorts::combine(answers)
 }
 
@@ -2814,19 +2811,25 @@ mod tests {
         );
         // Nothing answered: unknown, with every reason kept.
         let unknown = SshdPorts::combine(vec![
-            ("systemctl", Err("no systemctl at the fixed paths".to_owned())),
-            ("sshd's configuration", Err("sshd -G: Permission denied".to_owned())),
+            (
+                "systemctl",
+                Err("no systemctl at the fixed paths".to_owned()),
+            ),
+            (
+                "sshd's configuration",
+                Err("sshd -G: Permission denied".to_owned()),
+            ),
             ("running sshd processes", Ok(Vec::new())),
         ]);
         assert!(unknown.required().is_empty());
         let SshdPorts::Unknown(tried) = unknown else {
             panic!("no port must be unknown");
         };
-        assert!(tried.contains("Permission denied") && tried.contains("running sshd processes: no port"));
-        assert_eq!(
-            super::service_uids("UID=[not set]\n\nUID=105\n"),
-            vec![105]
+        assert!(
+            tried.contains("Permission denied")
+                && tried.contains("running sshd processes: no port")
         );
+        assert_eq!(super::service_uids("UID=[not set]\n\nUID=105\n"), vec![105]);
     }
 
     /// A listener bound only to loopback needs no rule; wildcard and real addresses do.
@@ -2844,10 +2847,12 @@ mod tests {
         assert!(super::proc_net_address_is_loopback(&v4([127, 9, 9, 9])));
         assert!(!super::proc_net_address_is_loopback(&v4([0, 0, 0, 0])));
         assert!(!super::proc_net_address_is_loopback(&v4([10, 0, 0, 1])));
-        assert!(super::proc_net_address_is_loopback(&v6(std::net::Ipv6Addr::LOCALHOST)));
         assert!(super::proc_net_address_is_loopback(&v6(
-            "::ffff:127.0.0.1".parse().expect("mapped")
+            std::net::Ipv6Addr::LOCALHOST
         )));
+        assert!(super::proc_net_address_is_loopback(&v6("::ffff:127.0.0.1"
+            .parse()
+            .expect("mapped"))));
         assert!(!super::proc_net_address_is_loopback(&v6(
             std::net::Ipv6Addr::UNSPECIFIED
         )));

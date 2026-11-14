@@ -858,8 +858,7 @@ mod tests {
     impl PublishFixture {
         /// A fresh scratch directory and a server policy admitting tcp/22.
         fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("j662-{name}-{}", std::process::id()));
+            let root = std::env::temp_dir().join(format!("j662-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&root).expect("scratch");
             let args = ServerArgs {
@@ -901,9 +900,7 @@ mod tests {
                     policy: &self.policy(),
                     unit: &self.unit(),
                 },
-                &|path, _policy| {
-                    fs::write(path, b"NEW POLICY").map_err(InstallError::Io)
-                },
+                &|path, _policy| fs::write(path, b"NEW POLICY").map_err(InstallError::Io),
                 &mut |arguments| {
                     calls.push(arguments.join(" "));
                     Ok(match arguments.first() {
@@ -950,9 +947,14 @@ mod tests {
             !fixture.policy().exists(),
             "the policy stayed saved for the next boot: {calls:?}"
         );
-        assert!(!fixture.unit().exists(), "the loader unit stayed: {calls:?}");
         assert!(
-            calls.iter().any(|call| call == "disable infraternal-firewall.service"),
+            !fixture.unit().exists(),
+            "the loader unit stayed: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call == "disable infraternal-firewall.service"),
             "the loader was left enabled: {calls:?}"
         );
     }
