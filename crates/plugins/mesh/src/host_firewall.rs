@@ -2161,55 +2161,44 @@ mod tests {
     /// J589 review (P1, security): on a multi-user Nix host any local user can
     /// put a root-owned, read-only `<hash>-nftables-<version>/bin/nft` into
     /// `/nix/store` (`nix-store --add` through the world-writable daemon
-    /// socket). It passes every ownership check, and with a high version it
-    /// sorts first, so the store scan hands infraternal an attacker's program to
-    /// run as root whenever no fixed nft path exists (prod's shape, #483).
-    /// Store names and ownership say nothing about who asked for the path.
+    /// socket). It passes every ownership check, so a lookup that lists the
+    /// store and picks the highest version hands infraternal an attacker's
+    /// program to run as root (prod's shape, #483). Store names and ownership
+    /// say nothing about who asked for the path.
     ///
-    /// J591 removed the store scan, so the test now checks the two things
-    /// that replaced it: the search list holds no store path, and discovery
-    /// never resolves to the planted one.
-    ///
-    /// Needs a Nix daemon; it reports SKIP without one.
-    #[cfg(unix)]
+    /// J591 removed the store scan. This checks, without touching the store,
+    /// the two things that keep it removed: the search list names only fixed
+    /// entry points outside `/nix/store`, and the lookup code never lists a
+    /// directory. It used to plant a fake nft with `nix-store --add` and left
+    /// it in the real, shared store on every run (J608, #483); a static check
+    /// proves the same without writing anything.
     #[test]
     fn review_j589_store_scan_never_offers_a_user_added_nft() {
-        use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-        let nix_store = Path::new("/nix/var/nix/profiles/default/bin/nix-store");
-        if !nix_store.exists() || !Path::new("/nix/var/nix/daemon-socket/socket").exists() {
-            eprintln!("SKIP: no multi-user Nix daemon on this host");
-            return;
-        }
-        let scratch = std::env::temp_dir().join(format!("j589-store-{}", std::process::id()));
-        let package = scratch.join("nftables-999999.0.0");
-        fs::create_dir_all(package.join("bin")).expect("fixture package");
-        fs::write(
-            package.join("bin/nft"),
-            "#!/bin/sh\necho j589-not-nft >&2\nexit 1\n",
-        )
-        .expect("fixture executable");
-        fs::set_permissions(package.join("bin/nft"), fs::Permissions::from_mode(0o755))
-            .expect("fixture mode");
-        let added = Command::new(nix_store)
-            .arg("--add")
-            .arg(&package)
-            .output()
-            .expect("run nix-store --add as the unprivileged test user");
-        let _ = fs::remove_dir_all(&scratch);
-        assert!(added.status.success(), "{added:?}");
-        let store_path = PathBuf::from(String::from_utf8_lossy(&added.stdout).trim());
-        let planted = store_path.join("bin/nft");
-        eprintln!("PLANTED={}", store_path.display());
         let offered = super::nft_search_paths(None);
+        assert!(!offered.is_empty(), "the fixed search list is empty");
+        for path in &offered {
+            let text = path.to_str().expect("candidate paths are UTF-8");
+            assert!(
+                path.is_absolute() && !path.starts_with("/nix/store"),
+                "the search list names a store or relative path: {offered:?}"
+            );
+            assert!(
+                !text.contains(['*', '?', '[']),
+                "a candidate looks like a pattern, not a fixed path: {text}"
+            );
+        }
+        // The lookup is everything from `discover_nft` up to `run_nft`
+        // (search list, chain check, sticky directories). Listing a
+        // directory there would bring back a scan of the store.
+        let source = include_str!("host_firewall.rs");
+        let lookup_start = source
+            .find("pub fn discover_nft(")
+            .expect("discover_nft in this module");
+        let lookup_end = source.find("fn run_nft(").expect("run_nft in this module");
+        let lookup = &source[lookup_start..lookup_end];
         assert!(
-            offered.iter().all(|path| !path.starts_with("/nix/store")),
-            "the search list names store paths: {offered:?}"
-        );
-        let discovered = super::discover_nft(None);
-        assert!(
-            discovered.as_ref().map_or(true, |path| path != &planted),
-            "discovery picked {} (added by an unprivileged user) to run as root",
-            planted.display(),
+            !lookup.contains("read_dir") && !lookup.contains("glob"),
+            "nft lookup lists a directory; it must only check the fixed entry points"
         );
     }
 
