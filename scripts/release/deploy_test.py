@@ -299,6 +299,94 @@ class DeploymentTests(unittest.TestCase):
             "warm rollback must request the server's writer-quiesced Mesh handoff",
         )
 
+    def test_previous_binary_restarted_after_candidate_failure_keeps_mesh_identity(self):
+        """J595 P1: a cold return to the previous build must not mint a new Mesh identity.
+
+        The candidate migrates /run/infraternal into data/mesh as its server starts. If it then
+        exits (a later start step fails, or it crashes), no live process can answer the warm
+        rollback handoff. The unit's ExecStart still names the previous release during the D295
+        window, so systemd's Restart=on-failure starts the previous build, which reads only the
+        legacy path. A cold rollback (stop, point the unit back, start), a reboot onto the
+        previous build, or `server restart --binary <old>` without `--rollback` take the same
+        path. The previous build must still find the same key at the legacy path.
+        """
+        root = self.root / "deployment"
+        release = root / "releases" / "candidate"
+        release.mkdir(parents=True)
+        (release / "infraternal").write_bytes(b"candidate")
+        (release / "web").mkdir()
+        (release / "web/index.html").write_text("new web")
+
+        old_release = self.root / "old-release"
+        old_release.mkdir()
+        old_binary = old_release / "infraternal"
+        old_binary.write_bytes(b"c4")
+        for name, value in (("MANIFEST", b"manifest"),
+                            ("MANIFEST.sig", b"signature"),
+                            ("VERSION", b"edge-20261012T000000Z\n")):
+            (old_release / name).write_bytes(value)
+
+        data = self.root / "data"
+        data.mkdir()
+        with closing(sqlite3.connect(data / "infraternal.sqlite")):
+            pass
+        (data / "restart").mkdir()
+        web = self.root / "web"
+        web.mkdir()
+        (web / "index.html").write_text("old web")
+        legacy = self.root / "run/infraternal"
+        legacy.mkdir(parents=True, mode=0o700)
+        legacy_key = legacy / "mesh-private-key"
+        legacy_key.write_bytes(b"old-key")
+        legacy_key.chmod(0o600)
+
+        seen_by_previous_build = []
+
+        def previous_build_starts():
+            # The previous build knows only the legacy path; with no key there it mints one.
+            if not legacy_key.exists():
+                legacy_key.write_bytes(b"fresh-key-minted-by-previous-build")
+            seen_by_previous_build.append(legacy_key.read_bytes())
+
+        def restart_for_test(_data, binary, rollback=False):
+            if binary == release / "infraternal":
+                # The candidate migrates during its server start, then exits before health.
+                mesh = data / "mesh"
+                mesh.mkdir(mode=0o700)
+                legacy_key.rename(mesh / "mesh-private-key")
+                # Restart=on-failure runs the unit's unchanged ExecStart: the previous build.
+                previous_build_starts()
+                return
+            # The previous build cannot read the rollback bit and refuses the frame.
+            raise ValueError("warm verified replacement refused")
+
+        config = {
+            "root": root,
+            "sha": "candidate",
+            "data": data,
+            "binary": old_binary,
+            "web": web,
+            "pid": 1234,
+            "web_only": False,
+        }
+        with (patch.object(remote.os, "geteuid", return_value=0),
+              patch.object(remote, "checksums"),
+              patch.object(remote, "verify_signed"),
+              patch.object(remote, "healthy", return_value=True),
+              patch.object(remote, "same_image", return_value=True),
+              patch.object(remote, "endpoint", return_value=(1, 1)),
+              patch.object(remote, "restart", side_effect=restart_for_test),
+              patch.object(remote, "wait_for_success",
+                           side_effect=ValueError("candidate exited before its health check"))):
+            with self.assertRaises(ValueError):
+                remote.apply(config)
+
+        self.assertEqual(
+            seen_by_previous_build,
+            [b"old-key"],
+            "the previous build restarted after a candidate failure must keep the Mesh identity",
+        )
+
     def test_rollback_restart_signals_handoff_and_refusal(self):
         """Mark rollback on the private control frame and stop if handoff is refused."""
         data = self.root
