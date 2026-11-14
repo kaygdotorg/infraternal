@@ -31,6 +31,7 @@ import type { InputModifierState, InputModifiers, TerminalClient } from "./termi
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { titled } from "./palette-entry";
+import { snippetParts } from "./snippet-parts";
 
 /** True only in preview builds (see build.ts): there a palette row without a title is an error, in production it is repaired. */
 declare const __CLUSTERS_PREVIEW__: boolean;
@@ -138,6 +139,12 @@ export interface CoreScreen {
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void, extras?: Pick<BranchedOptions, "openRename">): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
+  /**
+   * Adds a search that answers what is typed with more rows (the text of the docs, #339). It is called with "" when the palette
+   * opens, so it can start loading what it needs, and with the query on every change; the rows it returns are listed under the
+   * ordinary matches and are not filtered again. Returns a remover.
+   */
+  addPaletteSearch(search: (query: string) => Promise<PaletteEntry[]>): () => void;
   /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
   refreshPalette(): void;
   /**
@@ -275,6 +282,8 @@ export interface PaletteEntry {
   search?: string;
   /** The row's own name when its label is a longer trail. A title that is, or starts with, the query lists this row's group first (palette-rank.ts). */
   title?: string;
+  /** A line of text under the label with the matched words highlighted (`marks` are `[start, end)` offsets into `text`). */
+  snippet?: { text: string; marks: [number, number][] };
 }
 
 /** The name of a modifier key on this platform: Option is the Mac key, Alt the PC one (Control is the same word everywhere). */
@@ -606,6 +615,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     entries.push(...contextual, ...staticEntries);
   };
   refreshEntries();
+  // Searches that add rows for what is typed (addPaletteSearch). Their rows are kept only for the query they answered.
+  const searches = new Set<(query: string) => Promise<PaletteEntry[]>>();
+  let extraRows: PaletteEntry[] = [];
+  let searchTurn = 0;
   let visibleEntries: PaletteEntry[] = [];
   let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
@@ -668,11 +681,31 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       else { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); rowCache.delete(entry); }
     }
   };
+  /** Asks the searches for more rows for `query`; the list is drawn again when they answer, if the query is still the one typed. */
+  const searchMore = (query: string): void => {
+    const turn = ++searchTurn;
+    const clear = (): void => { for (const entry of extraRows) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); } extraRows = []; };
+    const text = query.trim();
+    // Under two letters nothing is searched (a single letter matches every page); the rows of the last query go.
+    if (text.length < 2 || scopedEntries || searches.size === 0) { if (text.length < 2) clear(); if (text === "") for (const search of searches) void search("").catch(() => undefined); return; }
+    void Promise.all([...searches].map((search) => search(text).catch((): PaletteEntry[] => []))).then((lists) => {
+      if (turn !== searchTurn || palette.hidden) return;
+      clear();
+      extraRows = lists.flat();
+      extraRows.forEach((entry, index) => indexEntry(entry, 3000 + index));
+      renderPalette(paletteInput.value, visibleEntries[selected]?.action);
+    });
+  };
   const renderPalette = (query = "", preserveAction?: string): void => {
     const needle = query.trim().toLocaleLowerCase();
     const found = (scopedEntries ?? entries).filter((entry) => (needle !== "" || !entry.queryOnly) && (paletteSearchText.get(entry)?.includes(needle) ?? false));
     // A group with a row named by what was typed comes first (palette-rank.ts); nothing else is reordered.
     visibleEntries = needle === "" ? found : rankByTitle(found, needle);
+    // Rows a search added come last, so a title or heading match always lists above a match in the text; a row that is already listed is not repeated.
+    if (needle !== "" && !scopedEntries && extraRows.length > 0) {
+      const listed = new Set(visibleEntries.map((entry) => entry.action));
+      visibleEntries = [...visibleEntries, ...extraRows.filter((entry) => !listed.has(entry.action))];
+    }
     selected = preserveAction === undefined ? Math.min(selected, Math.max(0, visibleEntries.length - 1)) : Math.max(0, visibleEntries.findIndex((entry) => entry.action === preserveAction));
     visibleOptions = [];
     // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
@@ -716,7 +749,26 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         const hint = document.createElement("span");
         hint.className = "result-hint";
         hint.textContent = entry.hint;
-        result.append(icon, label, hint);
+        if (entry.snippet) {
+          // A match in the text: the heading and, under it, the words around the match with the match highlighted.
+          const line = document.createElement("span");
+          line.className = "result-snippet";
+          for (const part of snippetParts(entry.snippet.text, entry.snippet.marks)) {
+            if (!part.marked) { line.append(part.text); continue; }
+            const mark = document.createElement("mark");
+            mark.textContent = part.text;
+            line.append(mark);
+          }
+          const text = document.createElement("span");
+          text.className = "result-text";
+          // The page's name sits beside the heading when both fit, and wraps under it when they do not: a name is never cut off (TASTE).
+          const head = document.createElement("span");
+          head.className = "result-head";
+          head.append(label, hint);
+          text.append(head, line);
+          result.classList.add("has-snippet");
+          result.append(icon, text);
+        } else result.append(icon, label, hint);
         rowCache.set(entry, result);
       }
       result.setAttribute("aria-selected", String(index === selected));
@@ -809,6 +861,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       refreshEntries();
       selected = 0;
       paletteInput.value = "";
+      searchMore("");
       renderPalette();
       palette.hidden = false;
       scrim.hidden = false;
@@ -824,6 +877,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       scrim.hidden = true;
       coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
+      searchMore("");
       if (focusInPalette && paletteReturnFocus?.isConnected) paletteReturnFocus.focus({ preventScroll: true });
       paletteReturnFocus = null;
       syncFontPreview();
@@ -936,6 +990,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   scrim.addEventListener("click", scrimClick);
   paletteInput.addEventListener("input", () => {
     selected = 0;
+    searchMore(paletteInput.value);
     renderPalette(paletteInput.value);
   });
   paletteInput.addEventListener("keydown", (event) => {
@@ -1648,6 +1703,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     addPaletteProvider(provider) {
       providers.add(provider);
       return () => { providers.delete(provider); };
+    },
+    addPaletteSearch(search) {
+      searches.add(search);
+      return () => { searches.delete(search); };
     },
     refreshPalette() {
       if (palette.hidden || scopedEntries) return;
