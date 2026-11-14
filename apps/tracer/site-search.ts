@@ -122,7 +122,9 @@ export function installSiteSearch(button: HTMLElement): { open: () => void; togg
       else if (event.key === "ArrowUp") { select(selected - 1); event.preventDefault(); }
       // A search field uses Escape to clear itself first, which would leave the dialog open: Escape always closes it.
       else if (event.key === "Escape") { made.close(); event.preventDefault(); }
-      else if (event.key === "Enter" && hits[selected]) { location.href = hits[selected]!.href; event.preventDefault(); }
+      // Enter closes the dialog first: a result on the page being read is only a hash change, which would leave the dialog open over the
+      // heading. Closing gives focus back to what opened it; then the address changes. A key press that confirms an IME composition is not Enter.
+      else if (event.key === "Enter" && !event.isComposing && hits[selected]) { const href = hits[selected]!.href; made.close(); location.href = href; event.preventDefault(); }
     });
     // A click on the backdrop (the dialog's own box, outside its content) closes it.
     made.addEventListener("click", (event) => { if (event.target === made) made.close(); });

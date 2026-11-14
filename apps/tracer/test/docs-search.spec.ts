@@ -102,7 +102,8 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       // sleep: the page has been loaded a moment, so any early fetch of the text index would already have shown in `requests`.
       await page.waitForTimeout(600);
       const before = requests.filter((path) => path === "/docs/search.json").length;
-      await page.locator("button.bar-kbd").click();
+      const opener = page.locator("button.bar-kbd");
+      await opener.click();
       const input = page.locator("dialog.search input");
       await expect(input).toBeFocused();
       expect(requests.filter((path) => path === "/docs/search.json").length, "opening fetches the index").toBeGreaterThan(before);
@@ -133,6 +134,30 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       await input.fill("check value");
       await page.keyboard.press("Enter");
       await expect(page).toHaveURL(/\/docs\/reference\/keys\/#recovery-words$/);
+      // The result is on this very page, so the address only changes its hash: the dialog must still close, and focus must not stay in it.
+      await expect(page.locator("dialog.search")).toBeHidden();
+      expect(await page.evaluate(() => document.activeElement?.closest("dialog.search") ?? null), "focus left the dialog").toBeNull();
+      await expect(page.locator("#recovery-words")).toBeInViewport();
+      // Opened with the button and closed with Enter: following the hash moves the browser's focus starting point to the heading, so the
+      // next Tab lands after the heading in the page, not on the (now hidden) dialog or back on the top bar.
+      await opener.click();
+      await expect(input).toBeFocused();
+      await input.fill("check value");
+      await page.keyboard.press("Enter");
+      await expect(page.locator("dialog.search")).toBeHidden();
+      await page.keyboard.press("Tab");
+      expect(await page.evaluate(() => {
+        const heading = document.getElementById("recovery-words")!;
+        const now = document.activeElement!;
+        return !now.closest("dialog.search") && now !== document.body && Boolean(heading.compareDocumentPosition(now) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }), "Tab continues from the heading the result led to").toBe(true);
+      // A key press that confirms an IME composition is not Enter: the dialog stays and the page does not move.
+      await opener.click();
+      await input.fill("passkey");
+      const urlBefore = page.url();
+      await input.evaluate((element) => element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true })));
+      await expect(page.locator("dialog.search")).toBeVisible();
+      expect(page.url()).toBe(urlBefore);
       expect(failures).toEqual([]);
     } finally { await context.close(); }
   });
