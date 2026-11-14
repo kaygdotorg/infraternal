@@ -2535,6 +2535,44 @@ mod tests {
         assert!(!super::admits_sshd(&rules(&["*,*,tcp,22"]), &[]));
     }
 
+    /// J608 (P3): from a console, a rule limited to `lo` or to one source address is no SSH path.
+    ///
+    /// `lo,*,tcp,22` admits only local logins, and `*,10.255.255.1,tcp,22`
+    /// only one machine that may not exist; neither proves an administrator
+    /// can still get in. A real interface or a source network is a
+    /// deliberate admin path (prod's is netbird's `wt0` /24) and counts.
+    #[test]
+    fn console_admin_path_ignores_loopback_and_single_source_rules() {
+        let rules = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.parse().expect("rule"))
+                .collect::<Vec<super::AllowRule>>()
+        };
+        assert!(!super::admits_sshd(&rules(&["lo,*,tcp,22"]), &[22]));
+        assert!(!super::admits_sshd(
+            &rules(&["*,10.255.255.1/32,tcp,22"]),
+            &[22]
+        ));
+        assert!(!super::admits_sshd(
+            &rules(&["eth9,10.255.255.1,tcp,22"]),
+            &[22]
+        ));
+        assert!(!super::admits_sshd(
+            &rules(&["*,2001:db8::1/128,tcp,22"]),
+            &[22]
+        ));
+        assert!(super::admits_sshd(
+            &rules(&["wt0,10.69.69.0/24,tcp,22"]),
+            &[22]
+        ));
+        assert!(super::admits_sshd(&rules(&["eth0,*,tcp,22"]), &[22]));
+        assert!(super::admits_sshd(
+            &rules(&["lo,*,tcp,22", "*,*,tcp,22"]),
+            &[22]
+        ));
+    }
+
     /// `sshd -G`/`-T` output: `listenaddress` lines are exact, `port` lines are the fallback.
     #[test]
     fn sshd_config_ports_prefer_listen_addresses() {
