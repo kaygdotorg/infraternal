@@ -15,14 +15,16 @@ import { snippetParts } from "./src/snippet-parts";
 import { prepareSearch, searchDocs, type Prepared, type SearchHit } from "./src/canvas/docs/docs-search";
 
 /** The `search.json` of each root, loaded once and merged; a root that has none (a build without text search) is left out. */
-async function loadIndex(roots: readonly string[]): Promise<{ root: string; prepared: Prepared[] }[]> {
+async function loadIndex(roots: readonly string[]): Promise<{ found: { root: string; prepared: Prepared[] }[]; retry: boolean }> {
+  let retry = false;
   const loaded = await Promise.all(roots.map(async (root) => {
     const response = await fetch(`${root}/search.json`);
-    if (!response.ok) return undefined;
+    // A 404 means the build has no text search: that stays. A server error is worth asking again.
+    if (!response.ok) { retry ||= response.status >= 500; return undefined; }
     const data = (await response.json()) as { pages: Parameters<typeof prepareSearch>[0] };
     return { root, prepared: prepareSearch(data.pages) };
-  }).map((load) => load.catch(() => undefined)));
-  return loaded.filter((entry): entry is { root: string; prepared: Prepared[] } => entry !== undefined);
+  }).map((load) => load.catch(() => { retry = true; return undefined; })));
+  return { found: loaded.filter((entry): entry is { root: string; prepared: Prepared[] } => entry !== undefined), retry };
 }
 
 /** The result's snippet as nodes: the words around the match, with each matched word in a `<mark>`. No HTML is ever built from the text. */
@@ -45,7 +47,7 @@ export function installSiteSearch(button: HTMLElement): { open: () => void; togg
   let dialog: HTMLDialogElement | undefined;
   let input: HTMLInputElement;
   let list: HTMLElement;
-  let index: Promise<{ root: string; prepared: Prepared[] }[]> | undefined;
+  let index: ReturnType<typeof loadIndex> | undefined;
   let hits: { hit: SearchHit; href: string }[] = [];
   let selected = 0;
 
@@ -61,7 +63,10 @@ export function installSiteSearch(button: HTMLElement): { open: () => void; togg
   const draw = async (): Promise<void> => {
     const query = input.value;
     const turn = query;
-    const found = await (index ??= loadIndex(roots));
+    const loaded = await (index ??= loadIndex(roots));
+    // A failed load (offline, a server error) is not kept for the life of the page: the next keystroke asks again.
+    if (loaded.retry) index = undefined;
+    const found = loaded.found;
     // The words typed while the index was loading are searched now; an older answer is dropped.
     if (turn !== input.value) return;
     hits = found.flatMap(({ root, prepared }, at) => searchDocs(prepared, query).map((hit) => ({ hit: { ...hit, rank: hit.rank - at * 500 }, href: `${root}/${hit.slug}/${hit.id ? `#${hit.id}` : ""}` }))).sort((a, b) => b.hit.rank - a.hit.rank).slice(0, 24);

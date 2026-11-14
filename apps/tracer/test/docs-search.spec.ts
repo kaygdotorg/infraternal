@@ -162,3 +162,21 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
     } finally { await context.close(); }
   });
 }
+
+test("a search that failed to load is asked for again on the next keystroke", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await context.newPage();
+  try {
+    let calls = 0;
+    // The first answer is a server error; the next ones are the real file.
+    await page.route("**/docs/search.json", (route) => (++calls === 1 ? route.fulfill({ status: 503, body: "busy" }) : route.continue()));
+    await page.goto("/docs/reference/keys/");
+    await page.locator("button.bar-kbd").click();
+    const input = page.locator("dialog.search input");
+    await input.fill("check value");
+    await expect(page.locator("dialog.search .search-note")).toBeVisible();
+    await input.fill("value check");
+    await expect(page.locator('dialog.search a.search-row[href="/docs/reference/keys/#recovery-words"]')).toBeVisible();
+    expect(calls).toBeGreaterThanOrEqual(2);
+  } finally { await context.close(); }
+});
