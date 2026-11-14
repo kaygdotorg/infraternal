@@ -752,21 +752,6 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Each walking peer's first address in the applied configuration, by the key that owns its
-/// endpoint. A walk compares it across an apply to tell whether a session was made on the
-/// address the walk starts on.
-fn first_addresses(config: Option<&Config>) -> BTreeMap<PublicKey, Option<SocketAddr>> {
-    config
-        .map(|config| {
-            config
-                .peers
-                .values()
-                .map(|policy| (active_peer_key(&policy.peer), policy.peer.endpoint))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Wait until the next candidate walk step is due, or forever when no walk is running.
 async fn walk_due(at: Option<Instant>) {
     match at {
@@ -800,7 +785,7 @@ async fn run_worker(
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
-                    let before = first_addresses(state.config.as_ref());
+                    let before = state.engine_addresses(&config).await;
                     let result = state.apply(*config).await;
                     let applied = result.is_ok();
                     if applied {
@@ -1020,15 +1005,18 @@ impl RuntimeState {
     ///
     /// A peer that is unchanged keeps its walk, finished or not (J585 F4). `apply` re-installs a
     /// peer, and with it the first candidate, only when the peer itself changed, so an unrelated
-    /// snapshot never sends a working peer back through its list. `before` holds each peer's first
-    /// address in the previous configuration: a session made on another address proves nothing
-    /// about a new first candidate, so that walk starts without the engine's address.
+    /// snapshot never sends a working peer back through its list. `before` holds where the engine
+    /// sent each peer's packets before that apply ([`Self::engine_addresses`]). A re-installed
+    /// peer's live session proves its first candidate only if the engine was already there: after
+    /// a change to the rest of its list, the session may live on a later candidate, and the
+    /// re-install has just moved the engine off it (J602 F1).
     ///
     /// Each walk that starts running begins with a real handshake on its address
     /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
     ///
-    /// Cost: at most one counter read per applied snapshot, and none when no walk can need one.
-    /// No timer runs for a finished walk, so an idle node stays idle (D81).
+    /// Cost: at most one counter read per applied snapshot, and none when no walk can need one;
+    /// [`Self::engine_addresses`] adds one before the apply only when the snapshot changes a
+    /// walking peer. No timer runs for a finished walk, so an idle node stays idle (D81).
     async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
         let Some(config) = self.config.as_ref() else {
             self.walks.clear();
@@ -1072,7 +1060,8 @@ impl RuntimeState {
                     }
                 }
                 _ => {
-                    if before.get(&key) != Some(&peer.endpoint) {
+                    // The apply moved the engine here, so its live session was made elsewhere.
+                    if before.get(&key) != Some(&engine_at) {
                         observed.endpoint = None;
                     }
                 }
@@ -1105,6 +1094,37 @@ impl RuntimeState {
             }
             let _ = self.rehandshake(key);
         }
+    }
+
+    /// Where the engine sends each peer's packets before `next` is applied, by device key, for
+    /// [`Self::refresh_walks`] (J602 F1).
+    ///
+    /// Read only when `next` changes a peer that walks, because only then does `apply` re-install
+    /// a walking peer and move its engine to the first candidate. Every other snapshot reads
+    /// nothing here.
+    async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, Option<SocketAddr>> {
+        let Some(applied) = self.config.as_ref() else {
+            return BTreeMap::new();
+        };
+        let reinstalls = next.peers.iter().any(|(id, policy)| {
+            !policy.peer.candidates.is_empty()
+                && applied
+                    .peers
+                    .get(id)
+                    .is_some_and(|previous| previous.peer != policy.peer)
+        });
+        if !reinstalls {
+            return BTreeMap::new();
+        }
+        self.counters()
+            .await
+            .map(|counters| {
+                counters
+                    .into_iter()
+                    .map(|(key, counters)| (key, counters.endpoint))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// When the earliest running walk needs its next step.
