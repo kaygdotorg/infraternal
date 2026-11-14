@@ -133,6 +133,8 @@ const FRAGMENTS_PER_PEER_HASH: u64 = 64;
 const FRAGMENT_RANGES_PER_DATAGRAM: usize = 128;
 /// IP protocol number for TCP packets.
 const TCP: u8 = 6;
+/// Length of a TCP header without options, the least every judged TCP packet must carry.
+const TCP_MIN_HEADER: usize = 20;
 /// IP protocol number for UDP packets.
 const UDP: u8 = 17;
 /// IP protocol number for IPv4 ICMP packets.
@@ -289,7 +291,6 @@ impl PacketFilter {
         let peer_id = peer.node;
         if let Some(fragment) = parsed.fragment.filter(|fragment| !fragment.first) {
             return Self::allow_fragment(
-                packet,
                 fragment,
                 parsed.packet_end,
                 direction,
@@ -383,16 +384,10 @@ impl PacketFilter {
             if rewrite.is_some() && !can_rewrite_ssh_packet(&parsed) {
                 return false;
             }
-            let checksum_adjustment =
-                rewrite.and_then(|(offset, port)| rewrite_ssh_port(packet, &parsed, offset, port));
-            if !Self::remember_first_fragment(
-                &mut shard,
-                parsed,
-                direction,
-                entry.key,
-                checksum_adjustment,
-                now,
-            ) {
+            if let Some((offset, port)) = rewrite {
+                rewrite_ssh_port(packet, &parsed, offset, port);
+            }
+            if !Self::remember_first_fragment(&mut shard, parsed, direction, entry.key, now) {
                 return false;
             }
             let mut refreshed = entry;
@@ -424,7 +419,6 @@ impl PacketFilter {
         parsed: ParsedPacket,
         direction: Direction,
         flow: FlowKey,
-        checksum_adjustment: Option<FragmentChecksumAdjustment>,
         now: Instant,
     ) -> bool {
         let Some(fragment) = parsed
@@ -441,7 +435,6 @@ impl PacketFilter {
                 key: fragment.key,
                 flow,
                 direction,
-                checksum_adjustment,
                 last_seen: now,
             },
             fragment_start(fragment.key, direction),
@@ -452,7 +445,6 @@ impl PacketFilter {
 
     /// Admit a later fragment only while its first fragment's authorized flow remains live.
     fn allow_fragment(
-        packet: &mut [u8],
         fragment_packet: PacketFragment,
         packet_end: usize,
         direction: Direction,
@@ -495,31 +487,6 @@ impl PacketFilter {
             shard.remove(flow_index);
             shard.remove_fragment(fragment_index);
             return false;
-        }
-        if let Some(adjustment) = fragment.checksum_adjustment {
-            let payload_len = packet_end - fragment_packet.data_offset;
-            let fragment_end = fragment_packet.offset_bytes + payload_len;
-            let checksum_end = adjustment.offset + 2;
-            if adjustment.offset >= fragment_packet.offset_bytes && checksum_end <= fragment_end {
-                let checksum_offset = fragment_packet.data_offset
-                    + (adjustment.offset - fragment_packet.offset_bytes);
-                let Some(checksum) = read_u16(packet, checksum_offset) else {
-                    shard.remove_fragment(fragment_index);
-                    return false;
-                };
-                write_u16(
-                    packet,
-                    checksum_offset,
-                    adjust_checksum_for_word(
-                        checksum,
-                        adjustment.previous_port,
-                        adjustment.replacement_port,
-                    ),
-                );
-            } else if !fragment_packet.more && fragment_end < checksum_end {
-                shard.remove_fragment(fragment_index);
-                return false;
-            }
         }
         flow.last_seen = now;
         fragment.last_seen = now;
@@ -579,17 +546,10 @@ impl PacketFilter {
                 return false;
             }
         }
-        let checksum_adjustment = entry
-            .ssh_redirect_port
-            .and_then(|port| rewrite_ssh_port(packet, &parsed, parsed.transport_offset + 2, port));
-        if !Self::remember_first_fragment(
-            shard,
-            parsed,
-            direction,
-            entry.key,
-            checksum_adjustment,
-            now,
-        ) {
+        if let Some(port) = entry.ssh_redirect_port {
+            rewrite_ssh_port(packet, &parsed, parsed.transport_offset + 2, port);
+        }
+        if !Self::remember_first_fragment(shard, parsed, direction, entry.key, now) {
             // A dropped first fragment must not leave a reverse tuple that admits its reply.
             if let Some((index, _)) = shard.find(entry.key, slot_start)
                 && matches!(shard.slots[index], FlowSlot::Occupied(current) if current.key == entry.key)
@@ -630,7 +590,7 @@ impl PacketFilter {
             shard.remove(index);
             return false;
         }
-        if !Self::remember_first_fragment(&mut shard, parsed, direction, entry.key, None, now) {
+        if !Self::remember_first_fragment(&mut shard, parsed, direction, entry.key, now) {
             return false;
         }
         entry.last_seen = now;
@@ -1092,7 +1052,6 @@ struct FragmentEntry {
     key: FragmentKey,
     flow: FlowKey,
     direction: Direction,
-    checksum_adjustment: Option<FragmentChecksumAdjustment>,
     last_seen: Instant,
 }
 
@@ -1217,17 +1176,6 @@ impl FragmentCoverage {
         }
         self.range_count -= u8::try_from(end - start - 1).unwrap_or_default();
     }
-}
-
-/// A deferred checksum adjustment for an SSH port whose checksum bytes are in a later fragment.
-#[derive(Clone, Copy)]
-struct FragmentChecksumAdjustment {
-    /// TCP checksum word offset from the start of the datagram's fragmentable payload.
-    offset: usize,
-    /// TCP port value present in the datagram before the filter rewrites it.
-    previous_port: u16,
-    /// TCP port value that the checksum must cover after the filter's rewrite.
-    replacement_port: u16,
 }
 
 impl FragmentEntry {
@@ -1697,6 +1645,13 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
     };
 
     if let Some(fragment) = fragment.filter(|fragment| !fragment.first) {
+        // A later TCP fragment that starts inside the minimum TCP header could rewrite the
+        // first fragment's flags after the filter judged them (RFC 1858's overlapping-fragment
+        // attack). Every first fragment carries the whole header (see below), so a real later
+        // fragment never starts this early (J672 P2, #265).
+        if protocol == TCP && fragment.offset_bytes < TCP_MIN_HEADER {
+            return None;
+        }
         return Some(ParsedPacket {
             key: FlowKey {
                 source,
@@ -1716,25 +1671,23 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
 
     let (source_port, destination_port, tcp_flags, related) = match protocol {
         TCP => {
-            let first_fragment = fragment.is_some_and(|fragment| fragment.first && fragment.more);
-            if offset + 4 > packet_end || (!first_fragment && offset + 20 > packet_end) {
+            // Every TCP packet the filter judges carries its whole TCP header, options
+            // included, a first fragment too. A first fragment cut short of the flags would
+            // hide a SYN in a later fragment, where the filter never looks, and let it ride
+            // existing state (J672 P2, #265; RFC 1858 for IPv4, RFC 7112 for IPv6). Real
+            // senders never split the TCP header: it is at most 60 bytes and every link MTU
+            // is far larger.
+            if offset + TCP_MIN_HEADER > packet_end {
                 return None;
             }
-            let tcp_flags = if offset + 14 <= packet_end {
-                let header_len = usize::from(packet[offset + 12] >> 4) * 4;
-                if header_len < 20 || (!first_fragment && offset + header_len > packet_end) {
-                    return None;
-                }
-                Some(packet[offset + 13])
-            } else if first_fragment {
-                None
-            } else {
+            let header_len = usize::from(packet[offset + 12] >> 4) * 4;
+            if header_len < TCP_MIN_HEADER || offset + header_len > packet_end {
                 return None;
-            };
+            }
             (
                 read_u16(packet, offset)?,
                 read_u16(packet, offset + 2)?,
-                tcp_flags,
+                Some(packet[offset + 13]),
                 None,
             )
         }
@@ -1924,44 +1877,29 @@ fn can_rewrite_ssh_packet(parsed: &ParsedPacket) -> bool {
             .is_some_and(|end| end <= parsed.packet_end)
 }
 
-/// Rewrite one mesh SSH port and preserve the checksum of a fragmented TCP datagram.
+/// Rewrite one mesh SSH port and keep the TCP checksum valid.
 ///
-/// Callers first check [`can_rewrite_ssh_packet`]. For a first fragment, adjust the checksum
-/// immediately when its field is present. Otherwise return the word delta for the later fragment
-/// that carries the checksum; summing only the first fragment would invalidate the reassembled
-/// TCP segment.
-fn rewrite_ssh_port(
-    packet: &mut [u8],
-    parsed: &ParsedPacket,
-    offset: usize,
-    port: u16,
-) -> Option<FragmentChecksumAdjustment> {
+/// Callers first check [`can_rewrite_ssh_packet`]. A whole packet gets its checksum
+/// recomputed. A first fragment has only part of the segment, so its checksum field (always
+/// present: the parser refuses TCP first fragments without the whole header) is adjusted for the
+/// one changed word instead; summing only the first fragment would break the reassembled
+/// segment.
+fn rewrite_ssh_port(packet: &mut [u8], parsed: &ParsedPacket, offset: usize, port: u16) {
     let previous = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
     write_u16(packet, offset, port);
-    if let Some(fragment) = parsed
+    if parsed
         .fragment
-        .filter(|fragment| fragment.first && fragment.more)
+        .is_some_and(|fragment| fragment.first && fragment.more)
     {
         let checksum_offset = parsed.transport_offset + 16;
-        if checksum_offset + 2 <= parsed.packet_end {
-            let checksum =
-                u16::from_be_bytes([packet[checksum_offset], packet[checksum_offset + 1]]);
-            write_u16(
-                packet,
-                checksum_offset,
-                adjust_checksum_for_word(checksum, previous, port),
-            );
-            None
-        } else {
-            Some(FragmentChecksumAdjustment {
-                offset: checksum_offset - fragment.data_offset,
-                previous_port: previous,
-                replacement_port: port,
-            })
-        }
+        let checksum = u16::from_be_bytes([packet[checksum_offset], packet[checksum_offset + 1]]);
+        write_u16(
+            packet,
+            checksum_offset,
+            adjust_checksum_for_word(checksum, previous, port),
+        );
     } else {
         recompute_transport_checksum(packet, parsed);
-        None
     }
 }
 
@@ -2751,54 +2689,6 @@ mod tests {
         mesh_ssh::clear_listener(address, 1007);
     }
 
-    /// A split TCP checksum is adjusted in the later fragment after the SSH port is rewritten.
-    #[test]
-    fn ssh_redirect_adjusts_a_checksum_carried_by_a_later_fragment() {
-        let local = Ipv4Addr::new(10, 254, 99, 22);
-        let peer = Ipv4Addr::new(10, 254, 99, 23);
-        let address = IpAddr::V4(local);
-        mesh_ssh::clear_listener(address, 1008);
-        mesh_ssh::publish_listener(address, 1008).expect("publish private listener");
-        let mut policy = config(TrafficPolicy::All, TrafficPolicy::None);
-        policy.server = Some(NodeId(3));
-        policy.addresses.ipv4 = local;
-        policy
-            .peers
-            .get_mut(&NodeId(2))
-            .expect("fixture peer")
-            .peer
-            .addresses
-            .ipv4 = peer;
-        let filter =
-            PacketFilter::new(&policy, MeshProxyIngress::default()).expect("compile policy");
-        let mut datagram = tcp4(peer, local, 40_000, 22, SYN);
-        datagram.extend_from_slice(&[0xa5; 16]);
-        let total_len = u16::try_from(datagram.len()).expect("test TCP packet fits IPv4 length");
-        datagram[2..4].copy_from_slice(&total_len.to_be_bytes());
-        datagram[36..38].fill(0);
-        let checksum = tcp_checksum4(&datagram);
-        datagram[36..38].copy_from_slice(&checksum.to_be_bytes());
-        let mut first = ipv4_fragment(&datagram, 0x123c, 0, 16, true);
-        let mut later = ipv4_fragment(&datagram, 0x123c, 16, 20, false);
-
-        assert!(filter.check_at(&mut first, Direction::MeshToHost, Instant::now()));
-        assert_eq!(u16::from_be_bytes([first[22], first[23]]), 1008);
-        assert!(filter.check_at(
-            &mut later,
-            Direction::MeshToHost,
-            Instant::now() + Duration::from_secs(1)
-        ));
-
-        let mut reassembled = vec![0; datagram.len()];
-        reassembled[..20].copy_from_slice(&first[..20]);
-        reassembled[2..4].copy_from_slice(&total_len.to_be_bytes());
-        reassembled[6..8].fill(0);
-        reassembled[20..36].copy_from_slice(&first[20..36]);
-        reassembled[36..].copy_from_slice(&later[20..]);
-        assert_eq!(tcp_checksum4(&reassembled), 0);
-        mesh_ssh::clear_listener(address, 1008);
-    }
-
     /// A grant for all ports cannot reach the SSH listener's private redirect port directly.
     #[test]
     fn ssh_private_redirect_port_is_not_a_grantable_mesh_port() {
@@ -3005,9 +2895,12 @@ mod tests {
         }
     }
 
-    /// A TCP first fragment needs only enough bytes to identify its grant and SYN initiation.
+    /// A TCP first fragment must carry the whole TCP header. One cut after its ports hides the
+    /// flags in a later fragment the filter never parses, so it is refused, and its later
+    /// fragment finds no association to follow (J672 P2, #265). This also covers a mesh SSH
+    /// redirect, whose checksum then always sits in the first fragment.
     #[test]
-    fn tcp_first_fragment_can_split_after_its_syn_flags() {
+    fn a_tcp_first_fragment_without_the_whole_header_is_refused() {
         let filter = PacketFilter::new(
             &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
             MeshProxyIngress::default(),
@@ -3018,8 +2911,8 @@ mod tests {
         let mut first = ipv4_fragment(&datagram, 0x1239, 0, 16, true);
         let mut later = ipv4_fragment(&datagram, 0x1239, 16, 4, false);
 
-        assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
-        assert!(filter.check_at(
+        assert!(!filter.check_at(&mut first, Direction::HostToMesh, now));
+        assert!(!filter.check_at(
             &mut later,
             Direction::HostToMesh,
             now + Duration::from_secs(1)
@@ -3776,5 +3669,90 @@ mod tests {
         let past = just_before + TCP_ESTABLISHED_TIMEOUT + Duration::from_secs(1);
         let mut stale = tcp4(LOCAL4, PEER4, 40_000, 443, ACK);
         assert!(!filter.check_at(&mut stale, Direction::HostToMesh, past));
+    }
+
+    /// J672 P2 (#265): a peer with no inbound grant cannot get a reverse SYN to this host's
+    /// port by splitting it after the ports, so the first fragment carries no TCP flags and the
+    /// SYN bit arrives in a later fragment. Here on a reset tuple (J592's case).
+    #[test]
+    fn a_tiny_first_fragment_cannot_hide_a_reverse_syn() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut open = tcp4(LOCAL4, PEER4, 40_000, 443, SYN);
+        assert!(filter.check_at(&mut open, Direction::HostToMesh, now));
+        let mut accept = tcp4(PEER4, LOCAL4, 443, 40_000, SYN_ACK);
+        assert!(filter.check_at(&mut accept, Direction::MeshToHost, now));
+        let mut reset = tcp4(LOCAL4, PEER4, 40_000, 443, RST);
+        assert!(filter.check_at(&mut reset, Direction::HostToMesh, now));
+        let later = now + Duration::from_secs(1);
+        let whole = tcp4(PEER4, LOCAL4, 443, 40_000, SYN);
+        let mut first = ipv4_fragment(&whole, 7, 0, 8, true);
+        let mut second = ipv4_fragment(&whole, 7, 8, 12, false);
+        let first_ok = filter.check_at(&mut first, Direction::MeshToHost, later);
+        let second_ok = filter.check_at(&mut second, Direction::MeshToHost, later);
+        assert!(
+            !first_ok && !second_ok,
+            "a reverse SYN split after its ports reached port 40000 with no inbound grant \
+             (first fragment {first_ok}, second {second_ok})"
+        );
+    }
+
+    /// J672 P2 (#265): the same split on a live established tuple, where the whole reverse
+    /// SYN is refused by the bare-SYN rule, is refused too; and the same for IPv6.
+    #[test]
+    fn a_tiny_first_fragment_cannot_hide_a_reverse_syn_on_a_live_tuple() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        assert!(establish4(&filter, PEER4, 40_000, now));
+        let whole = tcp4(PEER4, LOCAL4, 443, 40_000, SYN);
+        let mut control = whole.clone();
+        assert!(!filter.check_at(&mut control, Direction::MeshToHost, now));
+        let mut first = ipv4_fragment(&whole, 9, 0, 8, true);
+        let mut second = ipv4_fragment(&whole, 9, 8, 12, false);
+        assert!(!filter.check_at(&mut first, Direction::MeshToHost, now));
+        assert!(!filter.check_at(&mut second, Direction::MeshToHost, now));
+
+        let mut open6 = tcp6(LOCAL6, PEER6, 40_000, 443, SYN);
+        let mut accept6 = tcp6(PEER6, LOCAL6, 443, 40_000, SYN_ACK);
+        let mut ack6 = tcp6(LOCAL6, PEER6, 40_000, 443, ACK);
+        assert!(filter.check_at(&mut open6, Direction::HostToMesh, now));
+        assert!(filter.check_at(&mut accept6, Direction::MeshToHost, now));
+        assert!(filter.check_at(&mut ack6, Direction::HostToMesh, now));
+        let whole6 = tcp6(PEER6, LOCAL6, 443, 40_000, SYN);
+        let mut first6 = ipv6_fragment(&whole6, 11, 0, 8, true);
+        let mut second6 = ipv6_fragment(&whole6, 11, 8, 12, false);
+        assert!(!filter.check_at(&mut first6, Direction::MeshToHost, now));
+        assert!(!filter.check_at(&mut second6, Direction::MeshToHost, now));
+    }
+
+    /// RFC 1858: a later TCP fragment that starts inside the minimum TCP header could
+    /// overwrite the flags the filter judged in the first fragment, so it is refused even
+    /// when its first fragment was admitted.
+    #[test]
+    fn a_later_tcp_fragment_cannot_overlap_the_tcp_header() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut datagram = tcp4(LOCAL4, PEER4, 40_000, 443, SYN);
+        datagram.extend_from_slice(&[0; 16]);
+        let total_len = u16::try_from(datagram.len()).expect("test TCP packet fits IPv4 length");
+        datagram[2..4].copy_from_slice(&total_len.to_be_bytes());
+        let mut first = ipv4_fragment(&datagram, 13, 0, 24, true);
+        let mut overlap = ipv4_fragment(&datagram, 13, 8, 8, true);
+        let mut rest = ipv4_fragment(&datagram, 13, 24, 12, false);
+        assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+        assert!(!filter.check_at(&mut overlap, Direction::HostToMesh, now));
+        assert!(filter.check_at(&mut rest, Direction::HostToMesh, now));
     }
 }
