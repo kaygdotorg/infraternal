@@ -126,21 +126,24 @@ pub(crate) fn migrate(
     durable: &Path,
     owns: &dyn Fn(&[u8; 32]) -> bool,
 ) -> io::Result<()> {
-    migrate_on_host(volatile, durable, owns, host_binding().as_ref())
+    migrate_on_host(volatile, durable, owns, &host_identity())
 }
 
-/// [`migrate`] with an explicit host binding; `None` means this host has no machine ID.
+/// [`migrate`] with an explicit host identity, so tests can play two machines.
 ///
 /// A data directory restored or copied to another machine would bring its Mesh identity along,
 /// and two nodes would then share one key and overlay address. Before anything moves, a durable
-/// identity recorded for another host refuses start with recovery commands (J595 P2-3).
+/// identity recorded for another host refuses start with recovery commands (J595 P2-3, D392).
+/// A host without a persistent machine ID records no binding, and refuses an identity that was
+/// bound elsewhere, because it cannot tell a copy from the original (J628).
 /// # Errors
-/// Everything [`migrate`] refuses, plus `PermissionDenied` for an identity bound to another host.
+/// Everything [`migrate`] refuses, plus `PermissionDenied` for an identity bound to another host
+/// or bound at all on a host without a persistent machine ID.
 fn migrate_on_host(
     volatile: &Path,
     durable: &Path,
     owns: &dyn Fn(&[u8; 32]) -> bool,
-    host: Option<&[u8; 32]>,
+    host: &HostIdentity,
 ) -> io::Result<()> {
     let uid = nix::unistd::Uid::effective().as_raw();
     ensure_mesh_directory(durable, uid)?;
@@ -156,13 +159,14 @@ fn migrate_on_host(
     if legacy_exists {
         sweep_migration_temporaries(volatile, uid)?;
     }
-    if let Some(host) = host {
-        check_host_binding(durable, host, uid)?;
+    match host {
+        HostIdentity::Stable(host) => check_host_binding(durable, host, uid)?,
+        HostIdentity::Unusable(reason) => check_unbound_host(durable, reason, uid)?,
     }
     migrate_locked(volatile, durable, owns, legacy_exists, uid)?;
     match host {
-        Some(host) => record_host_binding(durable, host, uid),
-        None => Ok(()),
+        HostIdentity::Stable(host) => record_host_binding(durable, host, uid),
+        HostIdentity::Unusable(_) => Ok(()),
     }
 }
 
@@ -505,26 +509,107 @@ fn parse_hex_key(hex: &str) -> io::Result<[u8; 32]> {
     Ok(value)
 }
 
-/// Hash this machine's ID into the value a durable identity is bound to.
+/// What this host offers to bind a Mesh identity to (D392).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HostIdentity {
+    /// A persistent machine ID, stored only as a domain-separated SHA-256 (never the ID itself).
+    Stable([u8; 32]),
+    /// No machine ID that survives a reboot; the text says what was found, for the operator.
+    Unusable(&'static str),
+}
+
+/// Read this host's machine ID the way systemd and D-Bus keep it.
+fn host_identity() -> HostIdentity {
+    host_identity_in(Path::new("/etc"), Path::new("/var/lib/dbus/machine-id"))
+}
+
+/// Classify the machine ID under `etc`, falling back to the D-Bus copy at `dbus` when the
+/// systemd file does not exist.
 ///
-/// The machine ID itself is not stored, only a domain-separated SHA-256 of it. `None` means the
-/// host has no readable machine ID (some containers); binding is then skipped with a warning.
-fn host_binding() -> Option<[u8; 32]> {
+/// Binding to an ID that changes at every boot would refuse every reboot, so only a persistent
+/// ID counts. systemd treats an empty file or the literal `uninitialized` as "not set yet" and,
+/// on a read-only root, mounts a transient random ID over `/etc/machine-id` from `/run` at each
+/// boot. That mount shows up as a different device than `/etc` (a symlink keeps `/etc`'s device,
+/// because its own metadata is read). Anything other than 32 hex digits is not a valid ID.
+fn host_identity_in(etc: &Path, dbus: &Path) -> HostIdentity {
     use sha2::Digest as _;
 
-    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
-        if let Ok(text) = fs::read_to_string(path) {
-            let id = text.trim();
-            if !id.is_empty() {
-                let mut digest = sha2::Sha256::new();
-                digest.update(HOST_BINDING_DOMAIN);
-                digest.update(id.as_bytes());
-                return Some(digest.finalize().into());
+    let primary = etc.join("machine-id");
+    let (path, text) = match fs::read_to_string(&primary) {
+        Ok(text) => (primary.as_path(), text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::read_to_string(dbus) {
+            Ok(text) => (dbus, text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return HostIdentity::Unusable("missing");
             }
-        }
+            Err(_) => return HostIdentity::Unusable("unreadable"),
+        },
+        Err(_) => return HostIdentity::Unusable("unreadable"),
+    };
+    let id = text.trim();
+    if id.is_empty() {
+        return HostIdentity::Unusable("empty");
     }
-    tracing::warn!("no machine ID found; the Mesh identity is not bound to this host");
-    None
+    if id == "uninitialized" {
+        return HostIdentity::Unusable("\"uninitialized\"");
+    }
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return HostIdentity::Unusable("malformed");
+    }
+    match (fs::symlink_metadata(path), path.parent().map(fs::metadata)) {
+        (Ok(file), Some(Ok(directory))) if file.dev() != directory.dev() => {
+            return HostIdentity::Unusable("transient (mounted over at boot)");
+        }
+        (Ok(_), Some(Ok(_))) => {}
+        _ => return HostIdentity::Unusable("unreadable"),
+    }
+    let mut digest = sha2::Sha256::new();
+    digest.update(HOST_BINDING_DOMAIN);
+    digest.update(id.as_bytes());
+    HostIdentity::Stable(digest.finalize().into())
+}
+
+/// Note the one case host binding cannot see, shared by every message about it.
+const VM_CLONE_LIMIT: &str = "This check compares machine IDs, so a virtual machine cloned \
+     together with its /etc/machine-id looks like the same host and is not detected; give every \
+     clone a new machine ID.";
+
+/// Handle a host without a persistent machine ID.
+///
+/// No binding is recorded, so a reboot that changes the ID never refuses start. An identity that
+/// was already bound to some machine is refused: this host cannot tell whether it is that machine
+/// or a copy, and accepting it silently would let a copied data directory clone the identity.
+/// # Errors
+/// Returns `PermissionDenied` after logging the recovery commands, or a record read error.
+fn check_unbound_host(durable: &Path, reason: &str, uid: u32) -> io::Result<()> {
+    if read_private_key(durable, uid)?.is_none() {
+        return Ok(());
+    }
+    let record = durable.join(HOST_BINDING_RECORD);
+    if read_hex_record(&record, HOST_BINDING_HEADER, uid)?.is_none() {
+        tracing::warn!(
+            mesh_state = %durable.display(),
+            machine_id = reason,
+            "this host has no persistent machine ID, so its Mesh identity is not bound to it and \
+             a copy of this data directory on another machine would not be detected. Give the \
+             host a persistent machine ID (on systemd hosts: systemd-machine-id-setup)."
+        );
+        return Ok(());
+    }
+    let message = format!(
+        "this host's machine ID is {reason}, so it has none that survives a reboot, but this Mesh \
+         identity was bound to a machine; start cannot tell whether this data directory was \
+         copied here, so it refuses to start a possible second node with the same key. If this is \
+         the machine the identity was created on, make its machine ID persistent again (on \
+         systemd hosts: systemd-machine-id-setup, or systemd-machine-id-setup --commit for a \
+         transient ID) and start the server again. If you are sure no other machine runs this \
+         identity, run it unbound here: rm '{}'. If this is a copy, give it its own identity: \
+         rm -r '{}'. {VM_CLONE_LIMIT}",
+        record.display(),
+        durable.display(),
+    );
+    tracing::error!(mesh_state = %durable.display(), "{message}");
+    Err(io::ErrorKind::PermissionDenied.into())
 }
 
 /// Refuse a durable identity that was recorded on another host.
@@ -540,8 +625,8 @@ fn check_host_binding(durable: &Path, host: &[u8; 32], uid: u32) -> io::Result<(
                 "this Mesh identity was created on another machine, so this data directory was \
                  copied or restored here; refusing to start a second node with the same key. If \
                  the server moved here for good and the old machine's server is stopped, keep the \
-                 identity: rm {}. If this is a copy, give it its own identity: rm -r {}. Then \
-                 start the server again.",
+                 identity: rm '{}'. If this is a copy, give it its own identity: rm -r '{}'. Then \
+                 start the server again. {VM_CLONE_LIMIT}",
                 durable.join(HOST_BINDING_RECORD).display(),
                 durable.display(),
             );
@@ -2778,17 +2863,20 @@ mod tests {
     /// A durable identity copied to another host refuses start and changes nothing (J595 P2-3).
     #[test]
     fn an_identity_copied_to_another_host_refuses_to_start() {
+        use super::HostIdentity::Stable;
         let root = fixture_root();
         let (volatile, durable) = private_directories(&root);
         write_private(&durable.join("mesh-private-key"), &[0x71; 32]);
-        super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xa1; 32]))
+        super::migrate_on_host(&volatile, &durable, &owned, &Stable([0xa1; 32]))
             .expect("first start binds the identity to host A");
         fs::remove_dir_all(&volatile).expect("the copy lands on a host with no runtime state");
 
-        let on_other_host = super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xb2; 32]));
-        let again_on_first = super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xa1; 32]));
+        let on_other_host =
+            super::migrate_on_host(&volatile, &durable, &owned, &Stable([0xb2; 32]));
+        let again_on_first =
+            super::migrate_on_host(&volatile, &durable, &owned, &Stable([0xa1; 32]));
         fs::remove_file(durable.join(super::HOST_BINDING_RECORD)).expect("operator keeps the move");
-        let after_rebind = super::migrate_on_host(&volatile, &durable, &owned, Some(&[0xb2; 32]));
+        let after_rebind = super::migrate_on_host(&volatile, &durable, &owned, &Stable([0xb2; 32]));
         let key = fs::read(durable.join("mesh-private-key")).ok();
         fs::remove_dir_all(root).expect("remove fixture root");
 
@@ -2799,6 +2887,84 @@ mod tests {
         assert!(again_on_first.is_ok(), "the original host still starts");
         assert!(after_rebind.is_ok(), "removing the record accepts the move");
         assert_eq!(key.as_deref(), Some([0x71; 32].as_slice()));
+    }
+
+    /// A host without a persistent machine ID records no binding, so a reboot that changes the
+    /// ID never refuses start, but it refuses an identity already bound to a machine (J628).
+    #[test]
+    fn a_host_without_a_persistent_machine_id_never_binds_and_refuses_a_bound_copy() {
+        use super::HostIdentity::{Stable, Unusable};
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        write_private(&durable.join("mesh-private-key"), &[0x75; 32]);
+        let record = durable.join(super::HOST_BINDING_RECORD);
+
+        let first_boot = super::migrate_on_host(&volatile, &durable, &owned, &Unusable("empty"));
+        let recorded_unbound = record.exists();
+        let next_boot = super::migrate_on_host(&volatile, &durable, &owned, &Unusable("empty"));
+        super::migrate_on_host(&volatile, &durable, &owned, &Stable([0xc1; 32]))
+            .expect("a persistent ID binds the identity");
+        let bound_copy = super::migrate_on_host(&volatile, &durable, &owned, &Unusable("missing"));
+        let key = fs::read(durable.join("mesh-private-key")).ok();
+        fs::remove_file(&record).expect("the operator runs it unbound");
+        let after_unbind =
+            super::migrate_on_host(&volatile, &durable, &owned, &Unusable("missing"));
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(first_boot.is_ok() && next_boot.is_ok());
+        assert!(!recorded_unbound, "an unusable ID must not be recorded");
+        assert_eq!(
+            bound_copy.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(key.as_deref(), Some([0x75; 32].as_slice()));
+        assert!(
+            after_unbind.is_ok(),
+            "removing the record runs the identity unbound"
+        );
+    }
+
+    /// Only a valid machine ID counts; systemd's "not set yet" values and a missing file do not.
+    #[test]
+    fn only_a_valid_machine_id_binds() {
+        use super::{HostIdentity, host_identity_in};
+        let root = fixture_root();
+        let etc = root.join("etc");
+        fs::create_dir_all(&etc).expect("create fixture etc");
+        let dbus = root.join("dbus-machine-id");
+        let mut seen = Vec::new();
+        for body in [
+            None,
+            Some("\n"),
+            Some("uninitialized\n"),
+            Some("not-a-machine-id\n"),
+            Some("0123456789abcdef0123456789abcdef\n"),
+        ] {
+            let _ = fs::remove_file(etc.join("machine-id"));
+            if let Some(body) = body {
+                fs::write(etc.join("machine-id"), body).expect("write fixture machine ID");
+            }
+            seen.push(host_identity_in(&etc, &dbus));
+        }
+        fs::remove_file(etc.join("machine-id")).expect("remove the systemd copy");
+        fs::write(&dbus, "0123456789abcdef0123456789abcdef\n").expect("write the D-Bus copy");
+        let from_dbus = host_identity_in(&etc, &dbus);
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert_eq!(
+            seen[..4],
+            [
+                HostIdentity::Unusable("missing"),
+                HostIdentity::Unusable("empty"),
+                HostIdentity::Unusable("\"uninitialized\""),
+                HostIdentity::Unusable("malformed"),
+            ]
+        );
+        assert!(matches!(seen[4], HostIdentity::Stable(_)));
+        assert_eq!(
+            from_dbus, seen[4],
+            "the D-Bus copy of the same ID binds the same way"
+        );
     }
 
     /// J595 P2: every file the mesh Store keeps must be moved by migration and rollback.
