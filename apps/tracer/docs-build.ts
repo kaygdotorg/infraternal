@@ -52,7 +52,7 @@ export const INDEX_SLUG = "index";
 /** Where the app names docs addresses: the build checks that each one lands on a page and heading that exist. */
 export const APP_SOURCES = [resolve(root, "apps/tracer/src"), resolve(root, "packages/ui/src")];
 /** Top-level names the build writes into the docs tree itself, so no page or section may take them. */
-const RESERVED = new Set(["fonts", "figures"]);
+const RESERVED = new Set(["fonts", "figures", "icons"]);
 
 /**
  * One searchable heading of a page: `id` is the anchor in the rendered page, `text` its plain title. `facts` is the text of the
