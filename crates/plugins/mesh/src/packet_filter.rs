@@ -227,10 +227,23 @@ impl PacketFilter {
                 FlowSlot::Empty | FlowSlot::Removed => return false,
             };
             let expired = now.saturating_duration_since(entry.last_seen) > entry.idle_timeout();
-            if expired || !policy.allows_flow(entry) {
+            // A bare SYN never rides existing state. Against the opening direction it would let
+            // a peer open a connection to this host through this host's own outbound tuple,
+            // with no inbound grant; kernel conntrack treats it as new as well (J592 P2, D164).
+            // On a closed connection it starts a new one, which needs a fresh grant check.
+            let bare_syn = parsed.key.protocol == TCP
+                && parsed
+                    .tcp_flags
+                    .is_some_and(|flags| flags & (TCP_SYN | TCP_ACK) == TCP_SYN);
+            if bare_syn && !expired && !same_direction && !entry.closed() {
+                return false;
+            }
+            let reopened = bare_syn && entry.closed();
+            if expired || reopened || !policy.allows_flow(entry) {
                 shard.remove(index);
-                // An expired tuple is treated as new. TCP continuations still cannot initiate it.
-                if expired {
+                // An expired or closed tuple is treated as new. TCP continuations still cannot
+                // initiate it, and a reverse SYN needs a grant in its own direction.
+                if expired || reopened {
                     let admitted = Self::start_flow(
                         packet,
                         parsed,
@@ -3272,6 +3285,38 @@ mod tests {
             ),
             "a closed connection's tuple outlived its close timeout"
         );
+    }
+
+    /// A SYN in the opening direction on a closed tuple starts a new connection, checked
+    /// against the current grant; on a live connection a reverse SYN is refused.
+    #[test]
+    fn a_syn_reopens_a_closed_tuple_only_through_a_fresh_grant_check() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        assert!(establish4(&filter, PEER4, 40_000, now));
+        let mut reverse = tcp4(PEER4, LOCAL4, 443, 40_000, SYN);
+        assert!(
+            !filter.check_at(&mut reverse, Direction::MeshToHost, now),
+            "a reverse SYN rode a live outbound connection"
+        );
+        let mut data = tcp4(PEER4, LOCAL4, 443, 40_000, ACK);
+        assert!(
+            filter.check_at(&mut data, Direction::MeshToHost, now),
+            "a refused reverse SYN must not tear down the live connection"
+        );
+        let mut reset = tcp4(PEER4, LOCAL4, 443, 40_000, RST);
+        assert!(filter.check_at(&mut reset, Direction::MeshToHost, now));
+        let mut again = tcp4(LOCAL4, PEER4, 40_000, 443, SYN);
+        assert!(
+            filter.check_at(&mut again, Direction::HostToMesh, now),
+            "this host may reopen its own granted tuple after a reset"
+        );
+        let mut accept = tcp4(PEER4, LOCAL4, 443, 40_000, SYN_ACK);
+        assert!(filter.check_at(&mut accept, Direction::MeshToHost, now));
     }
 
     /// Removing flows turns their slots back into empty ones once no probe chain needs them,
