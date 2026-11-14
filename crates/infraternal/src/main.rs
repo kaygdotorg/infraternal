@@ -45,6 +45,9 @@ mod up;
 
 #[cfg(feature = "plugin-server")]
 mod install;
+/// OS-standard default folders for `server init` [D395].
+#[cfg(feature = "plugin-server")]
+mod install_paths;
 
 use std::{
     io::{self, IsTerminal, Write},
@@ -1230,9 +1233,10 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
     })
 }
 
+/// Plan or perform `server init`: choose absolute folders, confirm, then install the service.
 #[cfg(feature = "plugin-server")]
 fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
-    let args = match server_args(matches) {
+    let mut args = match server_args(matches) {
         Ok(args) => args,
         Err(error) => {
             return report_failure(
@@ -1243,6 +1247,30 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
         }
     };
+    // Init, unlike the readers, never falls back to `./data` or the cwd [D345, D229].
+    match install_paths::resolve_server_init(
+        if matches.get_flag("system") {
+            install_paths::Scope::System
+        } else {
+            install_paths::Scope::User
+        },
+        matches.get_one::<String>("data").map(Path::new),
+        matches.get_one::<String>("web_root").map(Path::new),
+        &install_paths::Environment::detect(),
+    ) {
+        Ok((data, web_root)) => {
+            args.data = data;
+            args.web_root = Some(web_root);
+        }
+        Err(error) => {
+            return report_failure(
+                "server init",
+                "The server folders could not be chosen.",
+                error.to_string(),
+                json_output,
+            );
+        }
+    }
     let dry_run = matches.get_flag("dry_run");
     let yes = matches.get_flag("yes");
     if let Err(error) = confirm_server_setup(

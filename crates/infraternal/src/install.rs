@@ -25,6 +25,9 @@ pub enum InstallError {
     /// systemd rejected the requested reload or enable operation.
     #[error("systemctl failed")]
     Systemctl,
+    /// A data or web folder could not be chosen safely; the text says what to pass instead.
+    #[error(transparent)]
+    Paths(#[from] super::install_paths::PathError),
 }
 
 /// Install the unit and enable it, or print the exact operations in dry-run mode.
@@ -44,7 +47,12 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
 
     if options.dry_run {
         return Ok(format!(
-            "Would write {}:\n{}\nWould run:\n  {}\n  {}\n",
+            "Data folder: {}\n{}Would write {}:\n{}\nWould run:\n  {}\n  {}\n",
+            absolute(&args.data)?.display(),
+            match &args.web_root {
+                Some(web_root) => format!("Web folder: {}\n", absolute(web_root)?.display()),
+                None => String::new(),
+            },
             path.display(),
             unit,
             reload,
@@ -296,5 +304,31 @@ mod tests {
 
         let output = install(&args, &options).expect("dry-run output");
         assert!(output.contains("Environment=INFRATERNAL_SERVER_SERVICE_SCOPE=system"));
+    }
+
+    /// The dry run shows the folders the unit will use, as absolute paths.
+    #[test]
+    fn dry_run_prints_the_resolved_absolute_folders() {
+        let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
+            listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
+            data: PathBuf::from("/srv/state"),
+            public_origin: Some("https://localhost:47361".to_owned()),
+            web_root: Some(PathBuf::from("/srv/web")),
+            tls_cert: None,
+            tls_key: None,
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+        };
+        let options = InstallArgs {
+            system: false,
+            user: true,
+            dry_run: true,
+            force: false,
+            name: "x".to_owned(),
+        };
+        let output = install(&args, &options).unwrap();
+        assert!(output.contains("Data folder: /srv/state\n"));
+        assert!(output.contains("Web folder: /srv/web\n"));
     }
 }

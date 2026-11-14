@@ -85,6 +85,18 @@ by an installed system service, including its effective drop-ins. If no system
 service records a path, they use `./data`. A setup-token command that cannot
 read its selected directory prints one line with the matching `sudo` command.
 
+`server init` never depends on the directory it runs in (D395). Without
+`--data` the server's state and database go to `$XDG_STATE_HOME/infraternal/server`
+(else `~/.local/state/infraternal/server`) for `--user` on Linux,
+`/var/lib/infraternal` for `--system` on Linux (D229), and
+`~/Library/Application Support/infraternal/server` or
+`/Library/Application Support/infraternal/server` on macOS. Without
+`--web-root` it uses the `web/` folder beside the `infraternal` binary (the
+release bundle layout) and refuses, naming `--web-root`, when there is none. A
+relative `--data` or `--web-root` is refused, not resolved against the current
+directory. `--dry-run` prints the resolved `Data folder` and `Web folder` as
+absolute paths. The rules live in `crates/infraternal/src/install_paths.rs`.
+
 ## Generated skills
 
 `infraternal skill` lists the public, working actions registered in this build.
