@@ -17,7 +17,7 @@ from pathlib import Path
 KIT = Path(__file__).resolve().parent
 
 
-def run_adopt(root: Path, pid: str, cpus: str, *, allowed: dict[str, str], pinned: str = "1") -> subprocess.CompletedProcess[str]:
+def run_adopt(root: Path, pid: str, cpus: str, *, allowed: dict[str, str], pinned: str = "1", entry: str = "plain") -> subprocess.CompletedProcess[str]:
     """Source common.sh with a fake /proc and cgroup tree and call h2h_scope_adopt."""
     proc = root / "proc"
     cgroups = root / "cgroup"
@@ -35,7 +35,9 @@ def run_adopt(root: Path, pid: str, cpus: str, *, allowed: dict[str, str], pinne
         'source "$H2H_KIT/lib/common.sh"\n'
         # The holder scope is a real systemd scope on the VM; here it is PID 900.
         'h2h_scope_spawn() { printf -v "$1" %s 900; printf "spawn %s %s\\n" "$2" "${*:3}" >> "$ROOT/calls"; }\n'
-        'h2h_scope_adopt "$PID" "$CPUS"\n'
+        # The side lookup needs real network namespaces; the test answers it directly.
+        'h2h_cpu_mask_for_pid() { printf %s "$CPUS"; }\n'
+        + ('h2h_adopt_mesh_node_b \'{"pids":[700,701]}\' 555\n' if entry == "mesh_node_b" else 'h2h_scope_adopt "$PID" "$CPUS"\n')
     )
     environment = os.environ | {
         "H2H_KIT": str(KIT), "ROOT": str(root), "PID": pid, "CPUS": cpus,
@@ -77,12 +79,18 @@ class InAppPinningTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((root / "calls").exists())
 
-    def test_mesh_case_moves_node_b_to_side_b_before_measuring(self) -> None:
-        mesh = (KIT / "cases/mesh.sh").read_text()
-        starter = mesh.split("start_infraternal() {", 1)[1].split("\n}\n", 1)[0]
-        # Node B is the second PID that mesh_ix.py reports; its side is B's namespace.
-        self.assertIn('["pids"][1]', starter)
-        self.assertIn('h2h_scope_adopt "$node_b" "$(h2h_cpu_mask_for_pid "$B_PID")"', starter)
+    def test_mesh_node_b_is_adopted_into_side_b_and_node_a_is_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="j688-adopt-") as temporary:
+            root = Path(temporary)
+            for pid, children in (("700", ""), ("701", "702 "), ("702", "")):
+                (root / f"proc/{pid}/task/{pid}").mkdir(parents=True)
+                (root / f"proc/{pid}/task/{pid}/children").write_text(children)
+            result = run_adopt(root, "701", "3-4", allowed={"701": "3-4", "702": "3-4"}, entry="mesh_node_b")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # The second pid mesh_ix.py reports (node B) and its child moved; node A (700) did not.
+            procs = (root / "cgroup/perf.slice/j88i-holder.scope/cgroup.procs").read_text().split()
+            self.assertEqual(procs, ["701", "702"])
+            self.assertEqual((root / "calls").read_text(), "spawn 3-4 sleep infinity\n")
 
 
 if __name__ == "__main__":
