@@ -710,4 +710,38 @@ mod tests {
         tracker.record(Some((true, moved)), NOW + 25);
         assert_eq!(tracker.reflexive(), Vec::<Reflexive>::new());
     }
+
+    /// J602 F4 (#515): a handshake time that only moved by one second is the same handshake, so
+    /// it proves nothing about the address the device holds.
+    ///
+    /// The engine reports a handshake as "wall clock minus its age", truncated to seconds, so the
+    /// same handshake can read one second later (J587 deduplicates this in the walk, `tick`). Here
+    /// it counts as a newer handshake, and the reading becomes *proven*. A proven reading
+    /// bypasses the reflexive history (J585 F3), so if a snapshot compiled earlier has just put an
+    /// old, dead address back on the server's device, that address is stored and republished.
+    #[test]
+    fn a_handshake_one_second_later_is_not_proof() {
+        let current: SocketAddr = "198.51.100.21:30999".parse().unwrap();
+        let stale: SocketAddr = "198.51.100.21:30254".parse().unwrap();
+        let row = |handshake, endpoint| PeerRow {
+            node: NodeId(3),
+            handshake,
+            received: 1_000,
+            keepalive: 25,
+            endpoint: Some(endpoint),
+        };
+        let mut tracker = Tracker::default();
+        tracker.record(Some((true, vec![row(NOW - 20, current)])), NOW);
+        // A delayed snapshot sets the old address; the same handshake reads one second later.
+        tracker.record(Some((true, vec![row(NOW - 19, stale)])), NOW + 5);
+        assert_eq!(
+            tracker.reflexive(),
+            [Reflexive {
+                node: NodeId(3),
+                address: stale,
+                proven: false,
+            }],
+            "one second of reporting jitter proved the address a stale snapshot installed"
+        );
+    }
 }
