@@ -1024,6 +1024,9 @@ impl RuntimeState {
     /// address in the previous configuration: a session made on another address proves nothing
     /// about a new first candidate, so that walk starts without the engine's address.
     ///
+    /// Each walk that starts running begins with a real handshake on its address
+    /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
+    ///
     /// Cost: at most one counter read per applied snapshot, and none when no walk can need one.
     /// No timer runs for a finished walk, so an idle node stays idle (D81).
     async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
@@ -1057,8 +1060,11 @@ impl RuntimeState {
             return;
         };
         let (now, unix) = (std::time::Instant::now(), unix_now());
+        // Walks that start running, with where the engine sends that peer's packets now.
+        let mut started = Vec::new();
         for (key, peer) in wanted {
             let mut observed = seen(&counters, key, unix);
+            let engine_at = observed.endpoint;
             match self.walks.get(&key) {
                 Some((old, walk)) if *old == peer => {
                     if !walk.went_silent(observed) {
@@ -1077,12 +1083,27 @@ impl RuntimeState {
                 .chain(peer.candidates.iter().copied());
             match Rotation::new(list.collect(), now, observed) {
                 Some(walk) => {
+                    if !walk.settled() {
+                        started.push((key, walk.current(), engine_at));
+                    }
                     self.walks.insert(key, (peer, walk));
                 }
                 None => {
                     self.walks.remove(&key);
                 }
             }
+        }
+        // A walk starts on the engine's address when that is on the list (J602 F2), else on the
+        // first candidate, which a re-installed peer already has. Anything else is moved there,
+        // or the walk's first tick would read the engine's address as the peer having roamed.
+        // Then the walk's address gets a real handshake, so a working one answers at once.
+        for (key, address, engine_at) in started {
+            if engine_at != Some(address) && self.set_endpoint(key, address).await.is_err() {
+                // The engine could not be moved; the next applied snapshot starts the walk again.
+                self.walks.remove(&key);
+                continue;
+            }
+            let _ = self.rehandshake(key);
         }
     }
 
@@ -1316,13 +1337,15 @@ impl RuntimeState {
             .collect::<io::Result<Vec<_>>>()?;
         let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
         // Peers that keep their access but get a new first address: tell them at once
-        // (`rehandshake`, which sends even over the live session the old address carried).
+        // (`rehandshake`, which sends even over the live session the old address carried). A peer
+        // with candidates gets that handshake when its new walk starts (`refresh_walks`).
         let readdressed: Vec<PublicKey> = config
             .peers
             .iter()
             .filter(|(id, policy)| {
                 peer_has_network_access(policy)
                     && policy.peer.endpoint.is_some()
+                    && policy.peer.candidates.is_empty()
                     && self
                         .config
                         .as_ref()

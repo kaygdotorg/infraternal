@@ -229,19 +229,26 @@ pub struct Seen {
     /// The last handshake's time, `0` before the first. Callers read it through
     /// [`live_handshake`], so a session that has gone [`SILENT`] reads as none.
     pub handshake: u64,
-    /// Where the engine sends the peer's packets now. A caller that knows the session was not
-    /// made on the list's first candidate (the peer was just given a new first address) passes
-    /// `None`, so [`Rotation::new`] does not take that session as proof for the new address.
+    /// Where the engine sends the peer's packets now. A caller that just moved the engine to the
+    /// list's first candidate (an applied snapshot re-installed the peer) passes `None`: the live
+    /// session was made elsewhere, so [`Rotation::new`] must not take it as proof for the first
+    /// candidate (J602 F1).
     pub endpoint: Option<SocketAddr>,
 }
 
 /// A node's walk through one peer's candidate list.
 ///
-/// It starts on the first candidate. While nothing has come back from the peer, each [`STEP`]
-/// moves it to the next one, wrapping, for [`ROUNDS`] rounds; then it returns to the first and
-/// stops. Anything coming back stops it: new bytes, a newer handshake, or the engine's address
-/// moving away from the walk's (`WireGuard` roams to the source of every authenticated packet,
-/// keepalives included). The engine then already sends to a working address.
+/// It starts where the engine sends now, or on the first candidate when that is not on the list.
+/// While nothing has come back from the peer, each [`STEP`] moves it to the next one, wrapping,
+/// for [`ROUNDS`] rounds; then it returns to the first and stops. Anything coming back stops it:
+/// new bytes, a newer handshake, or the engine's address moving away from the walk's (`WireGuard`
+/// roams to the source of every authenticated packet, keepalives included). The engine then
+/// already sends to a working address.
+///
+/// The node sends a handshake to the walk's address when the walk starts and at every step, and
+/// the engine sends it even over a live session (`GotaTun`'s `rehandshake`, J604). So each
+/// address is really tried, and an address that works answers within one round trip, while the
+/// live session keeps carrying data until the new one is up.
 ///
 /// A stopped walk is kept, not dropped (J585 F4, #515). The node starts a new one only when the
 /// peer's list changes, or when a walk that found the peer later sees its path go silent
@@ -268,14 +275,23 @@ impl Rotation {
     /// A peer that already has a live session on the first candidate needs no walk: the walk
     /// starts stopped, as found. Moving such a peer would send an idle peer's next packets to an
     /// address that may be dead, until its next keepalive roams it back.
+    ///
+    /// Otherwise the walk starts at the engine's address when that is on the list, so its first
+    /// tick does not read the engine's position as the peer having roamed (J602 F2: a walk
+    /// restarted for a silent peer whose engine sits where the last walk left it). The caller
+    /// installs [`Self::current`] when the engine is anywhere else.
     #[must_use]
     pub fn new(list: Vec<SocketAddr>, now: std::time::Instant, seen: Seen) -> Option<Self> {
         let established = seen.handshake != 0 && seen.endpoint == list.first().copied();
+        let index = list
+            .iter()
+            .position(|address| Some(*address) == seen.endpoint)
+            .unwrap_or(0);
         (list.len() >= 2).then(|| Self {
             steps_left: ROUNDS * list.len() - 1,
             list,
-            index: 0,
-            from: 0,
+            index,
+            from: index,
             since: now,
             start: seen,
             settled: established,
@@ -287,6 +303,12 @@ impl Rotation {
     #[must_use]
     pub fn list(&self) -> &[SocketAddr] {
         &self.list
+    }
+
+    /// The address the walk is on: where the engine should be sending the peer's packets.
+    #[must_use]
+    pub fn current(&self) -> SocketAddr {
+        self.list[self.index]
     }
 
     /// Whether the walk has stopped: a packet came back, or every round is spent.
