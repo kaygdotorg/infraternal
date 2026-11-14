@@ -2583,6 +2583,38 @@ mod tests {
         ));
     }
 
+    /// J658 (P3): a loopback source network is no SSH path, whatever its prefix length.
+    ///
+    /// J608 excluded only /32 and /128 sources, so `127.0.0.0/8` and
+    /// `::1/127` (stored as its network address `::`) still counted, though
+    /// both admit only this machine's own logins. A loopback network inside a
+    /// wider one (`64.0.0.0/2` holds `127.0.0.0/8`) is a real network and
+    /// still counts.
+    #[test]
+    fn review_j658_loopback_networks_are_no_ssh_path() {
+        let rules = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.parse().expect("rule"))
+                .collect::<Vec<super::AllowRule>>()
+        };
+        for loopback in [
+            "*,127.0.0.0/8,tcp,22",
+            "*,127.1.0.0/16,tcp,22",
+            "*,::1/127,tcp,22",
+            "*,::ffff:127.0.0.0/104,tcp,22",
+            "eth0,127.0.0.0/8,tcp,22",
+        ] {
+            assert!(
+                !super::admits_sshd(&rules(&[loopback]), &[22]),
+                "{loopback} counted as an SSH path"
+            );
+        }
+        assert!(super::admits_sshd(&rules(&["*,64.0.0.0/2,tcp,22"]), &[22]));
+        assert!(super::admits_sshd(&rules(&["*,::/0,tcp,22"]), &[22]));
+        assert!(super::admits_sshd(&rules(&["*,0.0.0.0/0,tcp,22"]), &[22]));
+    }
+
     /// `sshd -G`/`-T` output: `listenaddress` lines are exact, `port` lines are the fallback.
     #[test]
     fn sshd_config_ports_prefer_listen_addresses() {
@@ -2745,5 +2777,65 @@ mod tests {
 
         assert!(error.to_string().contains(&format!("inet {HOST_TABLE}")));
         assert!(error.to_string().contains("permission denied"));
+    }
+
+    /// J658 (P3): a non-root process named `sshd` must not set the console check's port.
+    ///
+    /// Any local user can start a program named `sshd` that holds a
+    /// listener; only one owned by root, or by sshd's own service account,
+    /// is the real daemon. The holder here is a copy of the system shell
+    /// renamed `sshd`, blocked in `read` on a pipe this test keeps open, with
+    /// the listener as its stdout. It must be alive and named `sshd` when
+    /// the ports are read: J635's first version copied `sleep`, which under
+    /// Nix is a link to multi-call coreutils, so its copy exited at once
+    /// ("unknown program") and the test passed without a holder. As root the
+    /// holder would be root-owned, so the test reports SKIP.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn review_j658_a_non_root_process_named_sshd_sets_no_port() {
+        use std::os::{fd::OwnedFd, unix::fs::MetadataExt};
+        use std::process::{Command, Stdio};
+        if std::fs::metadata("/proc/self").expect("proc").uid() == 0 {
+            eprintln!("SKIP: running as root; the holder would be root-owned");
+            return;
+        }
+        // A real, single-program binary: a multi-call one exits when renamed.
+        let shell = std::fs::canonicalize("/bin/sh").expect("resolve /bin/sh");
+        let scratch = std::env::temp_dir().join(format!("j658-sshd-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let fake = scratch.join("sshd");
+        std::fs::copy(&shell, &fake).expect("copy the shell as sshd");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let mut holder = Command::new(&fake)
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(OwnedFd::from(listener)))
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the fake sshd");
+        let comm = format!("/proc/{}/comm", holder.id());
+        for _ in 0..100 {
+            if std::fs::read_to_string(&comm).is_ok_and(|name| name.trim_end() == "sshd") {
+                break;
+            }
+            // sleep: poll until the child has exec'd and its comm reads `sshd`.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let alive = holder.try_wait().expect("holder state").is_none();
+        let named = std::fs::read_to_string(&comm).unwrap_or_default();
+        let ports = super::sshd_listening_ports();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert!(
+            alive && named.trim_end() == "sshd",
+            "the holder is not a live process named sshd (alive {alive}, comm {named:?}); \
+             the check below would prove nothing"
+        );
+        assert!(
+            !ports.contains(&port),
+            "a non-root process named sshd set sshd's port to {port} ({ports:?})"
+        );
     }
 }
