@@ -556,7 +556,11 @@ fn a_coalesced_opening_remainder_and_refund_leave_no_phantom_raw_bytes() {
     output.grant(512 * K).unwrap();
     output.forward((100 * K) as usize).unwrap();
     output.grant(576 * K + 100 * K).unwrap();
-    assert_eq!(output.reserved_credit(), u64::from(64 * K), "reserve should be ACTIVE");
+    assert_eq!(
+        output.reserved_credit(),
+        u64::from(64 * K),
+        "reserve should be ACTIVE"
+    );
     assert_eq!(
         output.unreturned_output_credit(),
         0,

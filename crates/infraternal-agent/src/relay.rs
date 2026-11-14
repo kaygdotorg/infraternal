@@ -266,7 +266,11 @@ impl Output {
     pub fn grant(&mut self, bytes: u32) -> Result<(), Error> {
         let setting_up = self.setting_up();
         // During setup `repaint_debt` counts setup charges, not borrowed bytes.
-        let repaid = if setting_up { 0 } else { bytes.min(self.repaint_debt) };
+        let repaid = if setting_up {
+            0
+        } else {
+            bytes.min(self.repaint_debt)
+        };
         let available = bytes - repaid;
         let credit = self
             .credit

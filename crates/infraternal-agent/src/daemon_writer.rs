@@ -551,7 +551,12 @@ mod tests {
     /// Start the real writer and let its first frame through at once, for tests about content, not timing.
     async fn open_writer(
         first: Message,
-    ) -> (mpsc::Sender<Message>, mpsc::Sender<PriorityMessage>, mpsc::UnboundedReceiver<Vec<u8>>, JoinHandle<io::Result<()>>) {
+    ) -> (
+        mpsc::Sender<Message>,
+        mpsc::Sender<PriorityMessage>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+        JoinHandle<io::Result<()>>,
+    ) {
         let (channel, messages, priority, mut frames, task) = held_writer();
         messages.send(first).await.unwrap();
         channel.started.acquire().await.unwrap().forget();
@@ -564,7 +569,9 @@ mod tests {
     fn outputs(frames: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<(u32, u64, usize)> {
         let mut seen = vec![];
         while let Ok(frame) = frames.try_recv() {
-            if let (stream, infraternal_protocol::Frame::Output { out_seq, bytes }) = decoded(&frame) {
+            if let (stream, infraternal_protocol::Frame::Output { out_seq, bytes }) =
+                decoded(&frame)
+            {
                 seen.push((stream, out_seq, bytes.len()));
             }
         }
@@ -647,13 +654,20 @@ mod tests {
         while let Ok(frame) = frames.try_recv() {
             kinds.push(match decoded(&frame) {
                 (4, infraternal_protocol::Frame::Snapshot { .. }) => "snapshot".to_string(),
-                (4, infraternal_protocol::Frame::Ack { in_seq_acked }) => format!("ack {in_seq_acked}"),
-                (4, infraternal_protocol::Frame::Output { out_seq, bytes }) => format!("output {out_seq}+{}", bytes.len()),
+                (4, infraternal_protocol::Frame::Ack { in_seq_acked }) => {
+                    format!("ack {in_seq_acked}")
+                }
+                (4, infraternal_protocol::Frame::Output { out_seq, bytes }) => {
+                    format!("output {out_seq}+{}", bytes.len())
+                }
                 (stream, _) => format!("other {stream}"),
             });
         }
         // The current attachment's Ack covers through 150, so only its tail of the later Output remains.
-        assert_eq!(kinds, vec!["ack 3".to_string(), "output 150+50".to_string()]);
+        assert_eq!(
+            kinds,
+            vec!["ack 3".to_string(), "output 150+50".to_string()]
+        );
     }
 
     /// Decode one captured mux frame so the test checks the real writer's wire order.
