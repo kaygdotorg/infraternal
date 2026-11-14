@@ -24,9 +24,13 @@
 # the namespace, else a python process named `sshd` (the code only looks at
 # /proc comm and socket ownership, so both are the same input).
 #
-# Checks (exit 0 when it holds):
+# Checks (exit 0 when they hold):
 # - `*,*,tcp,22` alone is refused (exit 1 = the J635 red: a drop table was
-#   planned that drops the running sshd on 2222).
+#   planned that drops the running sshd on 2222);
+# - `*,*,tcp,2222` alone is refused too: a restart would bring sshd back
+#   on the configured 22 (J662);
+# - rules for both 22 and 2222 are planned, so the check is not simply
+#   refusing everything (J662).
 set -u
 BIN=${BIN:?set BIN to the infraternal binary}
 if [ "$(id -u)" != 0 ] || ! grep -Eq '^ +0 +0 +4294967295$' /proc/self/uid_map; then
@@ -74,25 +78,36 @@ if ! grep -q ':08AE .* 0A ' /proc/net/tcp6 /proc/net/tcp 2>/dev/null; then
     echo "SETUP_FAILED: nothing named sshd listened on 2222"
     kill "$HOLDER_PID" 2>/dev/null; rm -rf "$SCRATCH"; exit 2
 fi
+# console_init LABEL RULE... : plan a console `server init` with these allow rules.
 console_init() {
+    local label=$1; shift
+    local rules=()
+    for rule in "$@"; do rules+=(--host-firewall-allow "$rule"); done
     env -i PATH=/usr/bin:/bin HOME="$SCRATCH" \
         INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR="$SCRATCH/u" \
         "$BIN" --json server init --system --dry-run --data "$SCRATCH/d" \
-        --host-firewall-allow "$1" > "$SCRATCH/out" 2> "$SCRATCH/err"
+        "${rules[@]}" > "$SCRATCH/out" 2> "$SCRATCH/err"
     local status=$?
     if [ "$status" -eq 0 ] && grep -q 'host-firewall-server.json' "$SCRATCH/out"; then
-        echo "$2=planned: $(grep -o '\\"admin_rules\\": \[[^]]*\]' "$SCRATCH/out" | head -1)"
+        echo "$label=planned: $(grep -o '\\"admin_rules\\": \[[^]]*\]' "$SCRATCH/out" | head -1)"
         return 0
     fi
-    echo "$2=refused (status $status): $(cat "$SCRATCH/err" "$SCRATCH/out" | tr '\n' ' ' | head -c 600)"
+    echo "$label=refused (status $status): $(cat "$SCRATCH/err" "$SCRATCH/out" | tr '\n' ' ' | head -c 600)"
     return 1
 }
 RESULT=0
-if console_init '*,*,tcp,22' CONSOLE_INIT_22; then
+if console_init CONSOLE_INIT_22 '*,*,tcp,22'; then
     echo "RED: planned a default-drop table admitting only tcp/22 while the running sshd listens on 2222"
     RESULT=1
 fi
-console_init '*,*,tcp,2222' CONSOLE_INIT_2222 || true
+if console_init CONSOLE_INIT_2222 '*,*,tcp,2222'; then
+    echo "RED: planned a table admitting only tcp/2222 while sshd's configuration (the next restart) says 22"
+    RESULT=1
+fi
+if ! console_init CONSOLE_INIT_BOTH '*,*,tcp,22' '*,*,tcp,2222'; then
+    echo "RED: refused rules that admit both the configured and the running port"
+    RESULT=1
+fi
 kill "$HOLDER_PID" 2>/dev/null
 wait "$HOLDER_PID" 2>/dev/null
 rm -rf "$SCRATCH"
