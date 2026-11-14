@@ -1588,3 +1588,16 @@ mod peer_page_tests {
         }
     }
 }
+
+/// The Mac node's answer to the coordinator's candidate offer.
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::{Node, walks_candidates};
+
+    /// J699 P2-3 (#515): the Mac node walks candidate lists like Linux, so it accepts them and
+    /// reports its LAN addresses. Before J704 it answered like an older node and got one address.
+    #[test]
+    fn the_mac_node_offers_candidates() {
+        assert!(walks_candidates(&Node::default()));
+    }
+}

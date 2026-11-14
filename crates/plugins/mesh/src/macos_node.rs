@@ -3138,6 +3138,8 @@ mod tests {
     mod authority_mtu;
     /// The Mac UDP listener: socket reuse and the handshake admission guard.
     mod listener;
+    /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
+    mod walks;
 
     use super::{
         Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, Worker, WorkerCommand,
