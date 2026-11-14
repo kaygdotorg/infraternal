@@ -169,6 +169,33 @@ fn a_legacy_window_never_funds_a_key_repaint_from_raw_output() {
     );
 }
 
+/// A legacy client's later fresh grant is not a split opening grant (#477, J654).
+///
+/// `verify-agent-snapshot.py` grants 1 MiB, receives it without returning
+/// credit, grants 1 byte to pause, then 1 MiB to catch up. That last grant
+/// exceeds the bytes in flight and crosses 1 MiB + 64 KiB, which used to look
+/// like the browser's opening remainder: the relay activated a reserve the
+/// client never offered and withheld 64 KiB of granted credit, so the client
+/// waited forever. Once a grant has returned raw credit the opening is over.
+#[test]
+fn a_returned_credit_ends_reserve_setup_for_a_legacy_window() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(BULK_CREDIT).unwrap();
+    output.forward(BULK_CREDIT as usize).unwrap();
+    output.grant(1).unwrap();
+    output.grant(BULK_CREDIT).unwrap();
+
+    assert_eq!(output.reserved_credit(), 0, "the client never offered a reserve");
+    assert_eq!(output.repaint_budget(), 0, "a legacy window keeps exact raw delivery");
+    assert_eq!(
+        output.suffix(output.cursor(), 2 * BULK_CREDIT as usize),
+        Ok(0..BULK_CREDIT as usize + 1),
+        "every granted byte must stay available to raw output"
+    );
+}
+
 /// Once a split opening grant confirms the reserve, the repaint path engages.
 ///
 /// Shadow priming can split the browser's opening grant around early raw
