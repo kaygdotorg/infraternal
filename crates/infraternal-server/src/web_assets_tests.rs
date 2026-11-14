@@ -5,6 +5,8 @@ use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+/// Writes a small bundle (chunks with their encodings, the page, a font, `main.js`, `favicon.ico`) under `target/` and
+/// returns its directory (the test removes it) with the router that serves it.
 fn fixture() -> (PathBuf, Router) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target")
@@ -18,6 +20,7 @@ fn fixture() -> (PathBuf, Router) {
         ("index.html.br", b"compressed html".as_slice()),
         ("font.woff2", b"font bytes".as_slice()),
         ("main.js", b"mutable entry".as_slice()),
+        ("favicon.ico", b"\0\0\x01\0icon".as_slice()),
     ] {
         std::fs::write(root.join(name), bytes).unwrap();
     }
@@ -101,6 +104,8 @@ async fn encodings_and_identity_have_correct_headers_and_sizes() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Pages and mutable files are `no-cache` and served in their best encoding; a chunk whose `.br` is gone falls back to
+/// gzip. (A path naming a missing file is a 404, covered by the test below.)
 #[tokio::test]
 async fn spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip() {
     let (root, app) = fixture();
@@ -108,7 +113,6 @@ async fn spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip() {
         ("/", Some("br")),
         ("/index.html", Some("br")),
         ("/saved/session", Some("br")),
-        ("/chunk-deadbeef.js", Some("br")),
         ("/font.woff2", None),
         ("/main.js", None),
     ] {
@@ -149,6 +153,50 @@ async fn spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip() {
         .await
         .unwrap();
     assert_eq!(fallback.headers()[header::CONTENT_ENCODING], "gzip");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #518: a request for a file that is not in the bundle (it names an extension) is a 404, never the SPA page, so tools
+/// that fetch `/favicon.ico`, `/robots.txt` or a stale chunk get an honest answer. Extensionless app routes still
+/// get the SPA page, and the real icon is served as an image.
+#[tokio::test]
+async fn missing_files_are_404_and_app_routes_still_get_the_page() {
+    let (root, app) = fixture();
+    for path in [
+        "/robots.txt",
+        "/chunk-deadbeef.js",
+        "/icons/nope.png",
+        "/a/b.css",
+    ] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 404, "{path}");
+        assert_ne!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .map(|v| v.as_bytes().starts_with(b"text/html")),
+            Some(true),
+            "{path}"
+        );
+    }
+    for path in ["/", "/saved/session", "/approve/anything"] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .as_bytes()
+                .starts_with(b"text/html"),
+            "{path}"
+        );
+    }
+    let icon = get(&app, "/favicon.ico", &[]).await;
+    assert_eq!(icon.status(), 200);
+    assert!(
+        icon.headers()[header::CONTENT_TYPE]
+            .as_bytes()
+            .starts_with(b"image/"),
+        "favicon.ico is an image, not the SPA page"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -313,13 +361,7 @@ async fn head_and_get_share_validators_and_conditional_responses() {
     std::fs::write(root.join("main.js.br"), b"br entry").unwrap();
     std::fs::write(root.join("main.js.gz"), b"gzip entry").unwrap();
     let app = router(root.clone());
-    for path in [
-        "/main.js",
-        "/",
-        "/index.html",
-        "/saved/session",
-        "/chunk-deadbeef.js",
-    ] {
+    for path in ["/main.js", "/", "/index.html", "/saved/session"] {
         for encoding in ["identity", "br", "gzip"] {
             let mut get_headers: Option<axum::http::HeaderMap> = None;
             for method in ["GET", "HEAD"] {

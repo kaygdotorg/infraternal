@@ -14,7 +14,7 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::{HeaderValue, StatusCode, header},
-    middleware::{Next, from_fn_with_state},
+    middleware::{Next, from_fn, from_fn_with_state},
     response::Response,
 };
 use sha2::{Digest, Sha256};
@@ -33,9 +33,15 @@ use tower_http::services::{ServeDir, ServeFile};
 /// hashing at start-up and nothing per request.
 pub(crate) fn router(root: PathBuf) -> Router {
     let fingerprint: Arc<str> = bundle_fingerprint(&root).into();
-    let index = ServeFile::new(root.join("index.html"))
-        .precompressed_br()
-        .precompressed_gzip();
+    // The app page answers only for app routes (no file extension). A path that names a file the bundle does not hold
+    // is a 404, so a tool asking for `/robots.txt` or a stale chunk is not handed HTML as if it were that file (#518).
+    let index = Router::new()
+        .fallback_service(
+            ServeFile::new(root.join("index.html"))
+                .precompressed_br()
+                .precompressed_gzip(),
+        )
+        .layer(from_fn(missing_file_is_not_found));
     Router::new()
         .fallback_service(
             ServeDir::new(root)
@@ -45,6 +51,23 @@ pub(crate) fn router(root: PathBuf) -> Router {
                 .fallback(index),
         )
         .layer(from_fn_with_state(fingerprint, headers))
+}
+
+/// Answers `404` for a request whose last path segment has a file extension, and lets every other path through to the
+/// app page. It runs only after the file service found nothing, so real files (including `favicon.ico`) never get here.
+async fn missing_file_is_not_found(request: Request, next: Next) -> Response {
+    let names_a_file = request
+        .uri()
+        .path()
+        .rsplit('/')
+        .next()
+        .is_some_and(|last| last.contains('.'));
+    if names_a_file {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        return response;
+    }
+    next.run(request).await
 }
 
 /// Sets cache, framing and validator headers on every response from the file service.
