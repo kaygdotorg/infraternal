@@ -1022,4 +1022,129 @@ mod tests {
             "another process of this account opened the password terminal {opened:?}"
         );
     }
+
+    /// The children of this process right now, from every thread's
+    /// `/proc/self/task/<tid>/children` list.
+    fn children() -> Vec<u32> {
+        let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+            return Vec::new();
+        };
+        tasks
+            .filter_map(Result::ok)
+            .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+            .flat_map(|list| {
+                list.split_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                    .collect::<Vec<u32>>()
+            })
+            .collect()
+    }
+
+    /// Whether `pid` holds a private terminal (a pts node of mode 000, which
+    /// only `private_pty` makes), as far as this account can see. `None` when
+    /// its descriptor table is closed to this account, which is exactly when
+    /// another process of the account can't reach its descriptors either.
+    fn holds_a_private_terminal(pid: u32) -> Option<bool> {
+        use std::os::unix::fs::MetadataExt as _;
+        let table = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+        Some(table.filter_map(Result::ok).any(|fd| {
+            std::fs::read_link(fd.path()).is_ok_and(|to| to.starts_with("/dev/pts/"))
+                && std::fs::metadata(fd.path()).is_ok_and(|node| {
+                    nix::sys::stat::Mode::from_bits_truncate(node.mode()).is_empty()
+                })
+        }))
+    }
+
+    /// J701 F1 (#399, D274, D376): the only processes that ever hold the
+    /// password terminal are the infraternal agent (with its own fork before
+    /// exec) and the setuid elevation command.
+    ///
+    /// The private terminal stops new opens, but not a copy of a descriptor
+    /// taken from a process that already holds one. Any ordinary program the
+    /// account executes with the terminal open (such as `setsid --ctty`
+    /// before it executes su) is dumpable, so another process of the account
+    /// could take the descriptor through ptrace or `pidfd_getfd`.
+    ///
+    /// This is a structural check, not an attack: while the real su path
+    /// runs (no secret, so it stops at the prompt and nothing reaches PAM),
+    /// a thread keeps reading `/proc/<pid>/fd` of every child of this
+    /// process. Reading another process's descriptor table needs the same
+    /// access as reaching its descriptors, and Yama's ptrace policy doesn't
+    /// narrow it, so the check means the same under every `ptrace_scope`.
+    /// Any child whose table it can read and that holds the terminal must be
+    /// running this very binary (the fork before exec), judged by its program
+    /// read just before and just after its table; after su is executed the
+    /// table must be closed. It also checks it saw su, so a scanner that
+    /// sees nothing can't pass. (Run it alone: another test's private
+    /// terminal could also be seen.)
+    #[tokio::test]
+    async fn only_the_agent_and_the_setuid_command_hold_the_password_terminal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let posix =
+            root_shell_is_posix(&std::fs::read_to_string("/etc/passwd").unwrap_or_default());
+        if !posix || command(Way::Su, MARK, ["", "", "", ""]).is_none() {
+            eprintln!("no su with a POSIX root shell here; nothing to check");
+            return;
+        }
+        assert!(
+            std::path::Path::new(&format!(
+                "/proc/self/task/{}/children",
+                nix::unistd::gettid()
+            ))
+            .exists(),
+            "this kernel has no /proc children lists; the check can't run"
+        );
+        let own = std::fs::read_link("/proc/self/exe").unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let watching = stop.clone();
+        let scanner = std::thread::spawn(move || {
+            let mut reachable_holders = std::collections::BTreeSet::new();
+            let mut seen = std::collections::BTreeSet::new();
+            while !watching.load(Ordering::Acquire) {
+                for pid in children() {
+                    let name = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .map(|name| name.trim().to_owned())
+                        .unwrap_or_default();
+                    // The program is read before and after the descriptor
+                    // table: a child may execute su (and close to this
+                    // account) in between, which leaves no name to read.
+                    // Either name, when readable, must be this binary.
+                    let program = || std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+                    let before = program();
+                    if holds_a_private_terminal(pid) == Some(true) {
+                        for exe in [before, program()].into_iter().flatten() {
+                            if exe != own {
+                                reachable_holders.insert(format!("{name} ({})", exe.display()));
+                            }
+                        }
+                    }
+                    seen.insert(name);
+                }
+            }
+            (reachable_holders, seen)
+        });
+        for _ in 0..10 {
+            let attempt = elevate(
+                Way::Su,
+                None,
+                &[0; 32],
+                [
+                    "/nonexistent/j702",
+                    &"0".repeat(64),
+                    "/nonexistent/j702.sock",
+                    "65534",
+                ],
+                Duration::from_secs(5),
+            )
+            .await;
+            assert!(attempt.is_ok_and(|done| done.elevated.is_none()));
+        }
+        stop.store(true, Ordering::Release);
+        let (reachable_holders, seen) = scanner.join().unwrap();
+        assert!(
+            reachable_holders.is_empty(),
+            "a program this account can reach held the password terminal: {reachable_holders:?}"
+        );
+        assert!(seen.contains("su"), "the scanner never saw su: {seen:?}");
+    }
 }
