@@ -110,7 +110,7 @@ fn checksum(name: &str, sums: &[u8]) -> Result<[u8; 32], ReleaseError> {
             return Err(ReleaseError::Checksums);
         }
         let filename = line.get(66..).ok_or(ReleaseError::Checksums)?;
-        if !valid_name(filename) || !names.insert(filename) {
+        if !valid_path(filename) || !names.insert(filename) {
             return Err(ReleaseError::Checksums);
         }
         let mut hash = [0; 32];
@@ -123,6 +123,7 @@ fn checksum(name: &str, sums: &[u8]) -> Result<[u8; 32], ReleaseError> {
     }
     found.ok_or(ReleaseError::Checksums)
 }
+/// One plain file name: 1 to 128 bytes of `[A-Za-z0-9._-]`, never `.` or `..`.
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
@@ -131,6 +132,12 @@ fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|v| v.is_ascii_alphanumeric() || b"._-".contains(&v))
+}
+/// A listed bundle path: one or more [`valid_name`] segments joined by `/`. Signed lists
+/// name license notices as `licenses/libghostty-vt/<file>` (#419). Empty, `.` and `..`
+/// segments and absolute paths fail, so a listed name can never leave the bundle.
+fn valid_path(path: &str) -> bool {
+    path.len() <= 255 && path.split('/').all(valid_name)
 }
 fn hex(v: u8) -> Result<u8, ReleaseError> {
     match v {
