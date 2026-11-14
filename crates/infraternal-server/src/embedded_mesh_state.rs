@@ -89,11 +89,15 @@ impl FileIdentity {
 ///
 /// Which side wins when both hold a key:
 /// - the same key: nothing to decide;
-/// - the runtime key is the one this server last mirrored: the durable key rotated since, and
-///   the mirror is refreshed;
-/// - the runtime key changed after the last mirror and this database owns it: the previous
-///   build ran (a cold rollback) and rotated or minted it, so it is adopted;
+/// - this database records exactly one of them: that one wins, so the key peers know is never
+///   overwritten (J628);
+/// - otherwise, a runtime key equal to the one this server last mirrored is its own stale copy
+///   (the durable key rotated since), and the mirror is refreshed;
+/// - otherwise, a runtime key this database records is adopted: the previous build ran after a
+///   cold rollback and rotated or minted it;
 /// - otherwise the runtime key belongs to another server and is left exactly as found.
+///
+/// See [`keep_on_conflict`].
 ///
 /// Transfers use unique synced 0600 temporaries, atomic renames, and source inode checks. A
 /// marker records the exact unfinished file set; startup never clears an incomplete marker or
@@ -225,23 +229,25 @@ fn migrate_locked(
             }
             adopt(volatile, durable, &legacy_files, &marker, uid)?;
         }
-        (Some(_), Some(legacy_key)) => {
+        (Some(durable_key), Some(legacy_key)) => {
             let public = public_key(legacy_key)?;
-            // A runtime key equal to our own earlier mirror means the durable key rotated since;
-            // the mirror below refreshes it.
-            let own_stale_mirror = read_mirror_record(durable, uid)? == Some(public);
-            if !own_stale_mirror {
-                if owns(&public) {
-                    // The runtime key changed after our last mirror and this database records
-                    // it: the previous build ran after a cold rollback and rotated or minted it,
-                    // so peers know this key now.
+            match keep_on_conflict(
+                owns(&public_key(durable_key)?),
+                owns(&public),
+                read_mirror_record(durable, uid)? == Some(public),
+            ) {
+                Conflict::RefreshMirror => {}
+                Conflict::AdoptRuntime => {
                     tracing::warn!(
                         legacy_state = %volatile.display(),
                         public_key = %hex_key(&public),
-                        "the previous server build changed its Mesh identity; adopting it"
+                        "this database records the runtime Mesh identity, not the durable one \
+                         (the previous server build ran, or the database was restored); adopting \
+                         the runtime identity"
                     );
                     adopt(volatile, durable, &legacy_files, &marker, uid)?;
-                } else {
+                }
+                Conflict::LeaveForeign => {
                     log_foreign_identity(volatile, durable, &public);
                     return sync_directory(durable);
                 }
@@ -249,6 +255,45 @@ fn migrate_locked(
         }
     }
     mirror_locked(durable, volatile, legacy_exists, uid)
+}
+
+/// What a start does when the durable and runtime directories hold different keys.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Conflict {
+    /// Keep the durable key and copy it over the runtime path.
+    RefreshMirror,
+    /// Copy the runtime identity into durable storage, replacing the durable one.
+    AdoptRuntime,
+    /// The runtime key belongs to another server: change neither side's key.
+    LeaveForeign,
+}
+
+/// Decide which key wins when durable and runtime keys differ.
+///
+/// The database is the authority on which key peers know. If it records exactly one of the two,
+/// that one wins: J628 found that trusting the mirror record first destroyed the only recorded
+/// key. The new build had rotated inside the D295 window, a cold rollback restored the database
+/// copy taken before the switch (which knows only the pre-rotation key, still in the runtime
+/// mirror), and the re-upgrade then overwrote that mirror with an unrecorded key.
+///
+/// Only when the database records both keys (a rotation is open) or neither (no server node yet,
+/// or a fresh database) does the mirror record break the tie: a runtime key equal to the last
+/// mirror is this server's own stale copy, so the durable key rotated since and is kept. A tie
+/// with an unrecorded runtime key that this server never mirrored is another server's identity
+/// unless the database records it.
+///
+/// Every outcome keeps a copy of each key the database records, except a key that an open
+/// rotation recorded for both sides is already replacing; that case keeps J598's behaviour.
+fn keep_on_conflict(durable_owned: bool, runtime_owned: bool, runtime_is_mirror: bool) -> Conflict {
+    if runtime_owned && !durable_owned {
+        Conflict::AdoptRuntime
+    } else if runtime_is_mirror {
+        Conflict::RefreshMirror
+    } else if runtime_owned {
+        Conflict::AdoptRuntime
+    } else {
+        Conflict::LeaveForeign
+    }
 }
 
 /// Report a runtime identity this server does not own, which is left exactly as found.
@@ -2462,6 +2507,33 @@ mod tests {
             Some([0x81; 32].as_slice()),
             "the server must run with the key its database records, not an unrecorded rotation"
         );
+    }
+
+    /// The database decides first; the mirror record only breaks a tie (J628 P2).
+    #[test]
+    fn the_database_record_outranks_the_mirror_record() {
+        use super::{
+            Conflict::{AdoptRuntime, LeaveForeign, RefreshMirror},
+            keep_on_conflict,
+        };
+        // (durable owned, runtime owned, runtime is our last mirror) -> outcome
+        let table = [
+            ((false, true, true), AdoptRuntime),
+            ((false, true, false), AdoptRuntime),
+            ((true, false, true), RefreshMirror),
+            ((true, false, false), LeaveForeign),
+            ((true, true, true), RefreshMirror),
+            ((true, true, false), AdoptRuntime),
+            ((false, false, true), RefreshMirror),
+            ((false, false, false), LeaveForeign),
+        ];
+        for ((durable, runtime, mirror), expected) in table {
+            assert_eq!(
+                keep_on_conflict(durable, runtime, mirror),
+                expected,
+                "durable owned {durable}, runtime owned {runtime}, runtime is mirror {mirror}"
+            );
+        }
     }
 
     /// J628 review: resuming an interrupted adoption must not skip the ownership proof.
