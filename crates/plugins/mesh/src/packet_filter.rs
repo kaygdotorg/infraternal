@@ -3033,4 +3033,35 @@ mod tests {
             "a TCP/443 grant admitted an IPv6 packet whose upper-layer protocol is 139"
         );
     }
+
+    /// J592 review (P3, D384, #265): only ICMP errors may follow a flow as related traffic.
+    /// `ICMPv4` redirects (type 5) and source quench (4), and `ICMPv6` types 0 and 5-127 (not
+    /// errors), are admitted today whenever they quote a live flow.
+    #[test]
+    fn review_j592_only_real_icmp_errors_are_related_to_a_flow() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Udp, 53)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut request = udp4(LOCAL4, PEER4, 40_000, 53);
+        assert!(filter.check_at(&mut request, Direction::HostToMesh, now));
+        for (kind, code) in [(5_u8, 1_u8), (4, 0)] {
+            let mut message = vec![0; 56];
+            message[0] = 0x45;
+            message[2..4].copy_from_slice(&56_u16.to_be_bytes());
+            message[8] = 64;
+            message[9] = 1;
+            message[12..16].copy_from_slice(&PEER4.octets());
+            message[16..20].copy_from_slice(&LOCAL4.octets());
+            message[20] = kind;
+            message[21] = code;
+            message[28..56].copy_from_slice(&request);
+            assert!(
+                !filter.check_at(&mut message, Direction::MeshToHost, now),
+                "ICMP type {kind} code {code} was admitted as related to the flow"
+            );
+        }
+    }
 }
