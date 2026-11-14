@@ -952,7 +952,7 @@ pub fn apply_mode_with_ssh_connection(
     run_nft(
         &nft,
         &["-f", "-"],
-        Some(replace_table_transaction(&desired, exists).as_bytes()),
+        Some(replace_table_transaction(&desired).as_bytes()),
     )?;
     Ok(report)
 }
@@ -964,11 +964,16 @@ pub fn apply_mode_with_ssh_connection(
 /// earlier version re-filtered rendered lines by prefix and silently dropped
 /// rules starting with `ip saddr` or `ip6 saddr`, J573.) The delete and the
 /// add share one transaction, so the kernel never runs without the table.
-fn replace_table_transaction(rendered: &str, exists: bool) -> String {
-    let mut transaction = String::with_capacity(rendered.len() + 40);
-    if exists {
-        let _ = writeln!(transaction, "delete table inet {HOST_TABLE}");
-    }
+///
+/// The batch starts with `add table` (a no-op when the table exists) and
+/// then `delete table`, so it is correct whether or not the table is there
+/// when the kernel runs it. Choosing `delete` from an earlier `list tables`
+/// left a window: a table removed or created in between made the batch fail
+/// (J589 P3). Rejected: `destroy table`, which needs nft 1.0.8 or newer.
+fn replace_table_transaction(rendered: &str) -> String {
+    let mut transaction = String::with_capacity(rendered.len() + 80);
+    let _ = writeln!(transaction, "add table inet {HOST_TABLE}");
+    let _ = writeln!(transaction, "delete table inet {HOST_TABLE}");
     transaction.push_str(rendered);
     transaction
 }
@@ -1254,10 +1259,11 @@ fn remove_host_table(nft_path: Option<&Path>) -> Result<String, PolicyError> {
     let current = host_firewall_semantics::from_nft_json(&current, &nft)
         .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
     let mut report = host_firewall_semantics::report(Some(&current), None);
+    // `add` first keeps the delete valid if the table vanished since the listing.
     run_nft(
         &nft,
         &["-f", "-"],
-        Some(format!("delete table inet {HOST_TABLE}\n").as_bytes()),
+        Some(format!("add table inet {HOST_TABLE}\ndelete table inet {HOST_TABLE}\n").as_bytes()),
     )
     .map_err(|source| host_table_removal_failure(Some(&nft), source))?;
     let _ = writeln!(report, "host firewall removal: removed inet {HOST_TABLE}");
@@ -2335,22 +2341,22 @@ mod tests {
             ..Policy::default()
         };
         let rendered = render(&policy).expect("render");
-        for exists in [false, true] {
-            let batch = super::replace_table_transaction(&rendered, exists);
-            assert!(
-                batch.contains("ip saddr 192.0.2.0/24 tcp dport 22 accept"),
-                "{batch}"
-            );
-            assert!(
-                batch.contains("ip saddr 198.51.100.0/24 tcp dport 443 accept"),
-                "{batch}"
-            );
-            assert_eq!(
-                batch.starts_with("delete table inet infraternal_host\n"),
-                exists,
-                "{batch}"
-            );
-        }
+        let batch = super::replace_table_transaction(&rendered);
+        assert!(
+            batch.contains("ip saddr 192.0.2.0/24 tcp dport 22 accept"),
+            "{batch}"
+        );
+        assert!(
+            batch.contains("ip saddr 198.51.100.0/24 tcp dport 443 accept"),
+            "{batch}"
+        );
+        // One batch, valid whether or not the table exists when it runs.
+        assert!(
+            batch.starts_with(
+                "add table inet infraternal_host\ndelete table inet infraternal_host\ntable inet infraternal_host {"
+            ),
+            "{batch}"
+        );
     }
 
     /// J555 review (P2): a host that gets IPv6 addresses by `DHCPv6` must keep
