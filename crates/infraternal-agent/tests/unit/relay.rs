@@ -206,15 +206,16 @@ fn a_returned_credit_ends_reserve_setup_for_a_legacy_window() {
 
 /// Once a split opening grant confirms the reserve, the repaint path engages.
 ///
-/// Shadow priming can split the browser's opening grant around early raw
-/// output. Until the remainder arrives no key repaints; after it, a repaint can
-/// use the reserve and the raw bytes already sent from that same window.
+/// Shadow priming splits the browser's opening grant around early raw output:
+/// the server's 16 KiB shadow credit first, the remainder later. Until the
+/// remainder arrives no key repaints; after it, a repaint can use the reserve
+/// and the raw bytes already sent from that same window.
 #[test]
 fn a_confirmed_split_reserve_engages_the_repaint_path() {
     const BULK_CREDIT: u32 = 1024 * 1024;
     const REPAINT_RESERVE: u32 = 64 * 1024;
     const MAX_SNAPSHOT: usize = infraternal_shim::frame::MAX_FRAME - 9;
-    const EARLY: u32 = 256 * 1024;
+    const EARLY: u32 = 16 * 1024;
 
     let mut output = Output::attach_with_repaint_reserve(0);
     output.grant(EARLY).unwrap();

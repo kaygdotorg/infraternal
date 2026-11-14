@@ -7,10 +7,12 @@
 //!
 //! Raw output may spend only the ordinary 1 MiB bulk window. A relay attached
 //! for the tracer also protects up to 64 KiB for an input-triggered repaint.
-//! Shadow priming can split the opening grant around early raw output, so reserve
-//! negotiation measures grantable credit plus unreturned raw bytes until the
-//! full 1 MiB bulk window and reserve are accounted. A legacy 1 MiB grant keeps
-//! its full bulk allowance even after that output's credit returns. A
+//! The reserve is set up from the opening grant only, and only from credit that
+//! cannot be a refund (see [`Output::grant`]): the first Credit, plus the part
+//! of the second that exceeds every byte charged so far. The one exception is
+//! the server's 16 KiB shadow-priming split, whose remainder completes the
+//! opening first. A legacy 1 MiB grant keeps its full bulk allowance even after
+//! that output's credit returns. A
 //! Snapshot spends that reserve first, then unused capped bulk credit, then
 //! credit from unreturned raw Output that the client discards when it accepts
 //! the Snapshot. Each granted byte can fund at most one sent frame: a raw byte
@@ -22,8 +24,8 @@
 //! While negotiation is pending, and for a client that only ever grants the
 //! legacy window (native clients), the repaint budget is zero: a key never
 //! replaces raw output, so such a client keeps exact raw delivery and every
-//! byte arrives once, in order. A browser whose split opening grant completes
-//! later switches to ACTIVE in [`Output::grant`] and its next flood key
+//! byte arrives once, in order. A browser whose shadow-split opening grant
+//! completes later switches to ACTIVE in [`Output::grant`] and its next flood key
 //! repaints; raw bytes sent before that switch may then be replaced, because
 //! they were paid from that same client's confirmed window.
 //! Snapshots stay under the shim's 1 MiB frame cap. The unchanged 250 ms path
@@ -35,7 +37,8 @@
 //! session's credit. The terminal writer keeps each key's shim-confirmed
 //! acknowledgment ahead of the Snapshot containing its echo. A trusted remote
 //! cursor rebase clears grantable credit before the ordered reissue, but keeps
-//! the negotiated reserve mode and outstanding replacement/debt accounting.
+//! the negotiated reserve mode and outstanding replacement/debt accounting; a
+//! rebase during setup restarts setup from the reissued credit.
 
 use infraternal_shim::frame::MAX_FRAME;
 use std::{
@@ -52,13 +55,21 @@ pub const REPAINT_RESERVE: u32 = 64 * 1024;
 pub const KEY_REPAINT_BACKLOG: u64 = 16 * 1024;
 /// Maximum bulk credit raw output may spend in a reserved relay.
 const BULK_WINDOW: u64 = 1024 * 1024;
-/// Reserve setup state until a grant proves the client offered credit above the bulk window.
+/// Reserve setup state before the attachment's first Credit.
 const RESERVE_WAITING_FOR_INITIAL_CREDIT: u8 = 1;
-/// Reserve setup state after a grant proves the repaint budget is available.
+/// Reserve setup state after the opening grant proved the repaint budget is available.
 const RESERVE_ACTIVE: u8 = 2;
-/// Reserve setup ended without a reserve: the client returned credit before
-/// offering more than the bulk window, so it keeps exact raw delivery.
+/// Reserve setup ended without a reserve: the opening grant did not cover the
+/// bulk window plus the reserve, so the client keeps exact raw delivery.
 const RESERVE_LEGACY: u8 = 3;
+/// Reserve setup after a first Credit smaller than the reserve: the server's
+/// shadow-priming split, whose next Credit completes the opening grant first.
+const RESERVE_WAITING_FOR_SPLIT_REMAINDER: u8 = 4;
+/// Reserve setup after a first Credit short of the full opening grant: the next
+/// Credit settles setup, counted as a refund first.
+const RESERVE_WAITING_TO_SETTLE: u8 = 5;
+/// The full opening grant of a client that sets the repaint reserve aside.
+const RESERVED_OPENING: u64 = BULK_WINDOW + REPAINT_RESERVE as u64;
 
 /// Invalid sequence arithmetic, ordering, or credit consumption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,9 +158,15 @@ pub struct Output {
     raw_in_flight: u32,
     /// Unreturned raw bytes sent since the latest repaint, usable for one replacement.
     raw_replacement_credit: u32,
-    /// Unspent portion of the initial repaint reserve, restored by returned credit.
+    /// ACTIVE: unspent portion of the initial repaint reserve, restored by
+    /// returned credit. During reserve setup (no reserve exists yet) it holds
+    /// the credit counted as opening grant so far, which keeps `Output` small.
     repaint_reserve: u32,
-    /// Repaint bytes borrowed from raw output, paid before later credit is usable.
+    /// ACTIVE: repaint bytes borrowed from raw output, paid before later
+    /// credit is usable. During reserve setup (no repaint can borrow yet) it
+    /// holds the Output and Snapshot bytes charged since attach: nothing
+    /// returns before the grant that settles setup, so this bounds how much
+    /// of that grant can be a refund.
     repaint_debt: u32,
     stalled: Option<Instant>,
     snapshot: bool,
@@ -209,6 +226,12 @@ impl Output {
     pub fn reset_cursor(&mut self, cursor: u64) {
         self.cursor = cursor;
         self.credit = 0;
+        if self.setting_up() {
+            // The server's reissued credit is a fresh view of the client's
+            // window, so reserve setup starts over from it.
+            self.reserve_mode = RESERVE_WAITING_FOR_INITIAL_CREDIT;
+            self.repaint_debt = 0;
+        }
         self.repaint_reserve = 0;
         self.stalled = None;
         self.snapshot = false;
@@ -217,16 +240,33 @@ impl Output {
 
     /// Grant bounded credit, paying any replacement repaint debt first.
     ///
-    /// Shadow priming may split the browser's opening grant around early raw
-    /// output. Count grantable credit together with unreturned raw bytes so the
-    /// full reserve is recognized only after the complete 1 MiB + 64 KiB window
-    /// arrives. The first grant that returns raw credit ends setup: a client
-    /// that has not offered the reserve by then is a legacy window for the
-    /// rest of the attachment, however much fresh credit it grants later.
+    /// A Credit frame does not say whether it is fresh window or returned
+    /// output, so reserve setup decides from the opening grant alone, and only
+    /// from what cannot be a refund (#477, J693):
+    ///
+    /// - The first Credit is always opening credit: nothing can be charged
+    ///   before it. One covering the bulk window plus the reserve activates the
+    ///   reserve at once.
+    /// - Otherwise the second Credit settles setup. It is counted as a refund
+    ///   first, up to every Output and Snapshot byte charged so far, and only
+    ///   the rest as opening credit. Counted opening credit then never exceeds
+    ///   the client's real window, so a plain 1 MiB client can never be talked
+    ///   into reserve mode by how its refunds happen to be batched.
+    /// - The one exception is the server's own shadow-priming split, which
+    ///   sends a first Credit smaller than the reserve (16 KiB) and the rest
+    ///   later. There the second Credit completes the opening first and only
+    ///   its excess is a refund. A refund it hides is at most that first
+    ///   Credit, so the error stays below the reserve and a 1 MiB window still
+    ///   cannot reach the full opening.
+    ///
+    /// Setup that ends short of the full opening is a legacy window for the
+    /// rest of the attachment: exact raw delivery, never a key repaint.
     /// # Errors
     /// Rejects a credit counter overflow without mutating state.
     pub fn grant(&mut self, bytes: u32) -> Result<(), Error> {
-        let repaid = bytes.min(self.repaint_debt);
+        let setting_up = self.setting_up();
+        // During setup `repaint_debt` counts setup charges, not borrowed bytes.
+        let repaid = if setting_up { 0 } else { bytes.min(self.repaint_debt) };
         let available = bytes - repaid;
         let credit = self
             .credit
@@ -234,54 +274,66 @@ impl Output {
             .ok_or(Error::Overflow)?;
         self.credit = credit;
         self.repaint_debt -= repaid;
-        // Credit returns do not identify their frame. During reserve setup, a
-        // grant that crosses the full opening window and exceeds all raw bytes
-        // in flight is the remaining opening grant, not a refund. Otherwise
-        // treat returned bytes as older raw output first, which is conservative
-        // if a repaint returned first.
-        let opening_remainder = self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT
-            && u64::from(bytes) > u64::from(self.raw_in_flight)
-            && self
-                .credit
-                .saturating_add(u64::from(self.raw_in_flight))
-                .saturating_add(u64::from(bytes))
-                >= BULK_WINDOW + u64::from(REPAINT_RESERVE);
-        let raw_repaid = if opening_remainder {
-            0
-        } else {
-            bytes.min(self.raw_in_flight)
-        };
-        let already_replaced = self.raw_in_flight - self.raw_replacement_credit;
-        self.raw_replacement_credit -= raw_repaid.saturating_sub(already_replaced);
-        self.raw_in_flight -= raw_repaid;
-        if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT && raw_repaid > 0 {
-            // Returned credit means the client is past its opening grant
-            // without having offered the reserve: it is a legacy window. A
-            // later fresh grant from it must not look like an opening
-            // remainder, or the relay would withhold granted bytes as a reserve
-            // the client never set aside and repaint over its exact output.
-            self.reserve_mode = RESERVE_LEGACY;
-        } else if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT
-            && self.credit.saturating_add(u64::from(self.raw_in_flight))
-                >= BULK_WINDOW + u64::from(REPAINT_RESERVE)
-        {
-            // Early raw output may already have spent part of the extra credit
-            // before the split grant completes. Only currently unspent credit
-            // can be protected as reserve; replaced raw bytes remain a separate
-            // way to pay for the Snapshot.
-            self.repaint_reserve =
-                REPAINT_RESERVE.min(u32::try_from(self.credit).unwrap_or(u32::MAX));
-            self.reserve_mode = RESERVE_ACTIVE;
+        let mut returned = bytes;
+        if setting_up {
+            let opening = u64::from(self.repaint_reserve);
+            let fresh = match self.reserve_mode {
+                RESERVE_WAITING_FOR_INITIAL_CREDIT => u64::from(bytes),
+                RESERVE_WAITING_FOR_SPLIT_REMAINDER => {
+                    u64::from(bytes).min(RESERVED_OPENING.saturating_sub(opening))
+                }
+                _ => u64::from(bytes).saturating_sub(u64::from(self.repaint_debt)),
+            };
+            returned = bytes - u32::try_from(fresh).map_err(|_| Error::Overflow)?;
+            let opening = opening.saturating_add(fresh);
+            if opening >= RESERVED_OPENING {
+                // Early raw output may already have spent part of the extra
+                // credit. Only currently unspent credit can be protected as
+                // reserve; replaced raw bytes remain a separate way to pay for
+                // the Snapshot.
+                self.repaint_reserve =
+                    REPAINT_RESERVE.min(u32::try_from(self.credit).unwrap_or(u32::MAX));
+                self.repaint_debt = 0;
+                self.reserve_mode = RESERVE_ACTIVE;
+            } else if self.reserve_mode == RESERVE_WAITING_FOR_INITIAL_CREDIT {
+                // `opening` is this first Credit, below the full opening grant.
+                self.repaint_reserve = u32::try_from(opening).map_err(|_| Error::Overflow)?;
+                self.reserve_mode = if bytes < REPAINT_RESERVE {
+                    RESERVE_WAITING_FOR_SPLIT_REMAINDER
+                } else {
+                    RESERVE_WAITING_TO_SETTLE
+                };
+            } else {
+                self.repaint_reserve = 0;
+                self.repaint_debt = 0;
+                self.reserve_mode = RESERVE_LEGACY;
+            }
         } else if self.reserve_mode == RESERVE_ACTIVE {
             self.repaint_reserve = self
                 .repaint_reserve
                 .saturating_add(available)
                 .min(REPAINT_RESERVE);
         }
+        // Returned credit pays raw bytes in flight first, which can only
+        // understate what a later repaint may replace.
+        let raw_repaid = returned.min(self.raw_in_flight);
+        let already_replaced = self.raw_in_flight - self.raw_replacement_credit;
+        self.raw_replacement_credit -= raw_repaid.saturating_sub(already_replaced);
+        self.raw_in_flight -= raw_repaid;
         if self.bulk_credit() >= self.required {
             self.stalled = None;
         }
         Ok(())
+    }
+
+    /// Whether reserve setup still waits for the opening grant to settle.
+    const fn setting_up(&self) -> bool {
+        matches!(
+            self.reserve_mode,
+            RESERVE_WAITING_FOR_INITIAL_CREDIT
+                | RESERVE_WAITING_FOR_SPLIT_REMAINDER
+                | RESERVE_WAITING_TO_SETTLE
+        )
     }
 
     /// Select contiguous output affordable now, omitting already-sent overlap.
@@ -320,6 +372,7 @@ impl Output {
             .ok_or(Error::Overflow)?;
         self.cursor = next;
         self.credit -= bytes;
+        self.note_setup_charge(bytes);
         self.raw_in_flight = raw_in_flight;
         self.raw_replacement_credit = raw_replacement_credit;
         self.stalled = None;
@@ -397,9 +450,19 @@ impl Output {
         self.required = 1;
         self.cursor = seq;
         self.credit -= bytes;
+        self.note_setup_charge(bytes);
         self.snapshot = false;
         self.stalled = None;
         Ok(())
+    }
+
+    /// Count bytes charged to the client while reserve setup waits, so the
+    /// grant that settles setup can tell how much of it may be a refund.
+    fn note_setup_charge(&mut self, bytes: u64) {
+        if self.setting_up() {
+            let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+            self.repaint_debt = self.repaint_debt.saturating_add(bytes);
+        }
     }
 
     /// Commit a key repaint from granted credit and raw bytes the Snapshot replaces.
