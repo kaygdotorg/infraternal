@@ -140,13 +140,24 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
 
     #[cfg(target_os = "linux")]
     if let Some(firewall) = &firewall {
-        host_firewall::write_policy_file(
-            Path::new(host_firewall::SERVER_POLICY_PATH),
-            &firewall.policy,
-        )
-        .map_err(|error| InstallError::Io(std::io::Error::other(error)))?;
-        write_atomic(Path::new(FIREWALL_UNIT_PATH), firewall.unit.as_bytes())
-            .map_err(InstallError::Io)?;
+        publish_firewall(
+            firewall,
+            &FirewallTargets {
+                policy: Path::new(host_firewall::SERVER_POLICY_PATH),
+                unit: Path::new(FIREWALL_UNIT_PATH),
+            },
+            &|path, policy| {
+                host_firewall::write_policy_file(path, policy)
+                    .map_err(|error| InstallError::Io(std::io::Error::other(error)))
+            },
+            &mut |arguments| {
+                let mut command = Command::new("systemctl");
+                infraternal_shim::prepare_child(&mut command);
+                command.stdin(std::process::Stdio::null());
+                command.args(arguments);
+                Ok(command.status().map_err(InstallError::Io)?.success())
+            },
+        )?;
     }
     write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?;
     // Create the data folder private before the service first starts, only
@@ -159,23 +170,6 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     command.args(&scope_args).arg("daemon-reload");
     if !command.status().map_err(InstallError::Io)?.success() {
         return Err(InstallError::Systemctl);
-    }
-    #[cfg(target_os = "linux")]
-    if firewall.is_some() {
-        let mut command = Command::new("systemctl");
-        infraternal_shim::prepare_child(&mut command);
-        command.stdin(std::process::Stdio::null());
-        command.args(["enable", FIREWALL_SERVICE]);
-        if !command.status().map_err(InstallError::Io)?.success() {
-            return Err(InstallError::Systemctl);
-        }
-        let mut command = Command::new("systemctl");
-        infraternal_shim::prepare_child(&mut command);
-        command.stdin(std::process::Stdio::null());
-        command.args(["restart", FIREWALL_SERVICE]);
-        if !command.status().map_err(InstallError::Io)?.success() {
-            return Err(InstallError::Systemctl);
-        }
     }
     let mut command = Command::new("systemctl");
     infraternal_shim::prepare_child(&mut command);
@@ -198,6 +192,45 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
         ));
     }
     Ok(format!("Installed and enabled {}\n", path.display()))
+}
+
+/// Where a system server install publishes its host firewall policy and loader unit.
+///
+/// Production uses the fixed paths ([`host_firewall::SERVER_POLICY_PATH`],
+/// [`FIREWALL_UNIT_PATH`]); tests point both into a scratch directory.
+#[cfg(target_os = "linux")]
+struct FirewallTargets<'a> {
+    /// The saved server policy the loader applies at boot.
+    policy: &'a Path,
+    /// The `infraternal-firewall.service` unit file.
+    unit: &'a Path,
+}
+
+/// Save the server policy and loader unit, then enable the loader and apply the table now.
+///
+/// `write_policy` saves the policy (production: the root-only atomic
+/// writer) and `systemctl` runs one system-manager command, answering
+/// whether it succeeded; both are parameters so the order and failure
+/// handling can be tested without root.
+#[cfg(target_os = "linux")]
+fn publish_firewall(
+    firewall: &FirewallInstall,
+    targets: &FirewallTargets<'_>,
+    write_policy: &dyn Fn(&Path, &Policy) -> Result<(), InstallError>,
+    systemctl: &mut dyn FnMut(&[&str]) -> Result<bool, InstallError>,
+) -> Result<(), InstallError> {
+    write_policy(targets.policy, &firewall.policy)?;
+    write_atomic(targets.unit, firewall.unit.as_bytes()).map_err(InstallError::Io)?;
+    for arguments in [
+        &["daemon-reload"][..],
+        &["enable", FIREWALL_SERVICE],
+        &["restart", FIREWALL_SERVICE],
+    ] {
+        if !systemctl(arguments)? {
+            return Err(InstallError::Systemctl);
+        }
+    }
+    Ok(())
 }
 
 /// Tell operators that the product unit now owns the named host firewall service and table.

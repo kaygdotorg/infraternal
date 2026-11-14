@@ -353,7 +353,7 @@ impl Install {
         if old_bytes == unit {
             return Ok(());
         }
-        if !known_hand_firewall_unit(&old_bytes) {
+        if !host_firewall::known_hand_firewall_unit(&old_bytes) {
             return Err(refused(
                 "The host firewall unit does not match the supported nftables file loader. Inspect it before allowing infraternal up to take it over.",
             ));
@@ -717,51 +717,6 @@ impl Install {
         self.remove_replaced_backups();
         Ok(())
     }
-}
-
-/// Recognize only the production hand loader that reads the documented nft file.
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
-fn known_hand_firewall_unit(bytes: &[u8]) -> bool {
-    let Ok(unit) = std::str::from_utf8(bytes) else {
-        return false;
-    };
-    let mut starts = Vec::new();
-    let mut pres = Vec::new();
-    for line in unit.lines() {
-        if let Some(command) = line.strip_prefix("ExecStart=") {
-            starts.push(command);
-        } else if let Some(command) = line.strip_prefix("ExecStartPre=") {
-            pres.push(command);
-        } else if [
-            "ExecStartPost=",
-            "ExecStop=",
-            "ExecStopPost=",
-            "ExecCondition=",
-        ]
-        .iter()
-        .any(|prefix| line.starts_with(prefix))
-        {
-            return false;
-        }
-    }
-    if starts.len() != 1 || pres.len() > 1 {
-        return false;
-    }
-    let command_matches = |command: &str, expected_args: &str| {
-        let command = command.strip_prefix('-').unwrap_or(command);
-        let Some((executable, arguments)) = command.split_once(' ') else {
-            return false;
-        };
-        Path::new(executable).is_absolute()
-            && Path::new(executable)
-                .file_name()
-                .is_some_and(|name| name == "nft")
-            && arguments == expected_args
-    };
-    command_matches(starts[0], "-f /etc/nftables/infraternal-host.nft")
-        && pres
-            .first()
-            .is_none_or(|command| command_matches(command, "delete table inet infraternal_host"))
 }
 
 /// Read the hand unit without following a replacement symlink or allocating an unbounded file.

@@ -1356,6 +1356,58 @@ fn remove_owned_loader(
     Ok(report)
 }
 
+/// Recognize only the production hand loader that reads the documented nft file.
+///
+/// Before the product owned the host firewall (D386), prod's
+/// `infraternal-firewall.service` was written by hand to load
+/// `/etc/nftables/infraternal-host.nft` (#274). `infraternal up` and
+/// `server init` may replace exactly that unit, or one carrying
+/// [`HOST_FIREWALL_UNIT_MARKER`]; any other unit at that path is someone
+/// else's and is never overwritten.
+#[must_use]
+pub fn known_hand_firewall_unit(bytes: &[u8]) -> bool {
+    let Ok(unit) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut starts = Vec::new();
+    let mut pres = Vec::new();
+    for line in unit.lines() {
+        if let Some(command) = line.strip_prefix("ExecStart=") {
+            starts.push(command);
+        } else if let Some(command) = line.strip_prefix("ExecStartPre=") {
+            pres.push(command);
+        } else if [
+            "ExecStartPost=",
+            "ExecStop=",
+            "ExecStopPost=",
+            "ExecCondition=",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        {
+            return false;
+        }
+    }
+    if starts.len() != 1 || pres.len() > 1 {
+        return false;
+    }
+    let command_matches = |command: &str, expected_args: &str| {
+        let command = command.strip_prefix('-').unwrap_or(command);
+        let Some((executable, arguments)) = command.split_once(' ') else {
+            return false;
+        };
+        Path::new(executable).is_absolute()
+            && Path::new(executable)
+                .file_name()
+                .is_some_and(|name| name == "nft")
+            && arguments == expected_args
+    };
+    command_matches(starts[0], "-f /etc/nftables/infraternal-host.nft")
+        && pres
+            .first()
+            .is_none_or(|command| command_matches(command, "delete table inet infraternal_host"))
+}
+
 /// Check whether the root-owned loader file carries its exact product marker.
 fn has_unit_marker(path: &Path) -> Result<bool, PolicyError> {
     let metadata = match fs::symlink_metadata(path) {
@@ -1451,7 +1503,15 @@ fn sync_parent_after_removal(path: &Path) -> Result<(), PolicyError> {
 }
 
 /// Find systemctl from fixed system and Nix profile paths, never through `PATH`.
-fn discover_systemctl(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
+///
+/// `configured` replaces the search list (a test hook); `None` searches the
+/// fixed, root-owned locations, and every hop of a symlink chain must be
+/// root-controlled (the same rule as nft, D384/D386).
+///
+/// # Errors
+/// Returns [`PolicyError::UnsafeSystemctl`] for a candidate that is not
+/// root-controlled and [`PolicyError::SystemctlMissing`] when none exists.
+pub fn discover_systemctl(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
     const CANDIDATES: &[&str] = &[
         "/usr/bin/systemctl",
         "/bin/systemctl",
