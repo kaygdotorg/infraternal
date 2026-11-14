@@ -137,42 +137,72 @@ fn a_split_opening_credit_activates_the_repaint_reserve() {
     );
 }
 
-/// Use only same-stream raw bytes a Snapshot replaces when reserve setup is still pending.
+/// A client that granted only the legacy window never gets a key repaint (#477, J637).
+///
+/// Native clients grant 1 MiB without the repaint reserve and check every byte
+/// exactly once. Funding a Snapshot from their in-flight raw bytes replaced
+/// output they had to receive, so the reserve must be confirmed first.
 #[test]
-fn a_pending_reserve_can_fund_a_repaint_from_dropped_raw_credit_once() {
+fn a_legacy_window_never_funds_a_key_repaint_from_raw_output() {
     const BULK_CREDIT: u32 = 1024 * 1024;
-    const SNAPSHOT: usize = 128 * 1024;
 
     let mut output = Output::attach_with_repaint_reserve(0);
     output.grant(BULK_CREDIT).unwrap();
     output.forward(BULK_CREDIT as usize).unwrap();
 
     assert_eq!(output.reserved_credit(), 0);
-    assert_eq!(output.repaint_budget(), u64::from(BULK_CREDIT));
+    assert_eq!(
+        output.repaint_budget(),
+        0,
+        "raw bytes of an unconfirmed reserve cannot fund a repaint"
+    );
+    assert_eq!(
+        output.repaint_reserved(u64::from(BULK_CREDIT) + 1, 1),
+        Err(Error::OutOfRange),
+        "a legacy-window client keeps exact raw delivery"
+    );
+    output.grant(BULK_CREDIT).unwrap();
+    assert_eq!(
+        output.repaint_budget(),
+        0,
+        "returned legacy credit does not confirm a reserve"
+    );
+}
+
+/// Once a split opening grant confirms the reserve, the repaint path engages.
+///
+/// Shadow priming can split the browser's opening grant around early raw
+/// output. Until the remainder arrives no key repaints; after it, a repaint can
+/// use the reserve and the raw bytes already sent from that same window.
+#[test]
+fn a_confirmed_split_reserve_engages_the_repaint_path() {
+    const BULK_CREDIT: u32 = 1024 * 1024;
+    const REPAINT_RESERVE: u32 = 64 * 1024;
+    const MAX_SNAPSHOT: usize = infraternal_shim::frame::MAX_FRAME - 9;
+    const EARLY: u32 = 256 * 1024;
+
+    let mut output = Output::attach_with_repaint_reserve(0);
+    output.grant(EARLY).unwrap();
+    output.forward(EARLY as usize).unwrap();
+    assert_eq!(output.repaint_budget(), 0, "the reserve is still pending");
+    assert_eq!(output.repaint_reserved(u64::from(EARLY), 1), Err(Error::OutOfRange));
+
     output
-        .repaint_reserved(u64::from(BULK_CREDIT) + 1, SNAPSHOT)
-        .expect("the client drops these raw bytes when it accepts the Snapshot");
+        .grant(BULK_CREDIT + REPAINT_RESERVE - EARLY)
+        .unwrap();
+    assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
+    output.forward((BULK_CREDIT - EARLY) as usize).unwrap();
+    assert!(output.bulk_starved());
+    assert!(output.repaint_budget() >= MAX_SNAPSHOT as u64);
+    output
+        .repaint_reserved(u64::from(BULK_CREDIT) + 1, MAX_SNAPSHOT)
+        .expect("a confirmed reserve plus the replaced raw queue funds a frame-valid Snapshot");
     assert_eq!(output.repaint_budget(), 0);
     assert_eq!(
         output.repaint_reserved(u64::from(BULK_CREDIT) + 2, 1),
         Err(Error::OutOfRange),
-        "one dropped raw byte cannot fund a second repaint"
+        "one replaced raw byte cannot fund a second repaint"
     );
-}
-
-/// Keep frame-valid screen captures payable by the full raw queue they replace.
-#[test]
-fn a_pending_reserve_can_fund_the_largest_valid_snapshot_from_raw_credit() {
-    const BULK_CREDIT: u32 = 1024 * 1024;
-    const MAX_SNAPSHOT: usize = infraternal_shim::frame::MAX_FRAME - 9;
-
-    let mut output = Output::attach_with_repaint_reserve(0);
-    output.grant(BULK_CREDIT).unwrap();
-    output.forward(BULK_CREDIT as usize).unwrap();
-    output
-        .repaint_reserved(u64::from(BULK_CREDIT) + 1, MAX_SNAPSHOT)
-        .expect("a frame-valid Snapshot fits the full same-stream raw queue it replaces");
-    assert_eq!(output.repaint_budget(), 0);
 }
 
 /// Keep an early key repaint from taking credit that raw output could still spend.

@@ -526,7 +526,7 @@ async fn key_repaint_waits_for_its_input_ack_and_contains_the_echo() {
 #[tokio::test]
 async fn key_repaint_funds_a_large_styled_snapshot_from_dropped_bulk_credit() {
     let mut fixture = start_relay(2).await;
-    fill_bulk_window_without_repaint_reserve(&mut fixture).await;
+    fill_bulk_window(&mut fixture).await;
     let requested = type_key_and_wait_for_repaint_request(&mut fixture, 0).await;
     let styled = styled_snapshot_at_least(128 * 1024);
     assert!(styled.len() > REPAINT_CREDIT as usize);
@@ -552,6 +552,59 @@ async fn key_repaint_funds_a_large_styled_snapshot_from_dropped_bulk_credit() {
         Some((u64::from(BULK_CREDIT) + 1, styled.len())),
         "a faithful styled Snapshot above the small reserve must use only reclaimed or reserved credit"
     );
+}
+
+/// A key from a client that granted only the legacy window keeps exact raw delivery (#477, J637).
+///
+/// Native clients grant 1 MiB without the repaint reserve and expect every byte once, in order.
+/// The relay must not drop the parked flood frame for a repaint: after the key's Ack and returned
+/// credit, that same frame is forwarded whole. Before this fix the key discarded it and requested
+/// a Snapshot, which is what broke the real-binary exact-byte fixtures.
+#[tokio::test]
+async fn a_legacy_window_key_keeps_exact_raw_delivery() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window_without_repaint_reserve(&mut fixture).await;
+    let commands = fixture.commands.as_mut().unwrap();
+    commands.try_send(Command::Input(0, vec![b'k'])).unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SequencedInput(0, vec![b'k'])
+    );
+    // The relay holds the parked frame and does not read this Ack until credit returns.
+    sessions::send(&mut fixture.peer, &Shim::InputAck(1))
+        .await
+        .unwrap();
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(BULK_CREDIT))
+        .unwrap();
+    let mut forwarded = None;
+    let mut acked = false;
+    while forwarded.is_none() || !acked {
+        match tokio::time::timeout(EVENT_GUARD, fixture.messages.recv()).await {
+            Ok(Some(Message::Shim(stream, Shim::Output(seq, bytes)))) if stream == fixture.stream => {
+                forwarded = Some((seq, bytes.len()));
+            }
+            Ok(Some(Message::Shim(stream, Shim::InputAck(1)))) if stream == fixture.stream => {
+                acked = true;
+            }
+            Ok(Some(Message::Shim(stream, Shim::Snapshot(..)))) if stream == fixture.stream => {
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    stop_relay(&mut fixture).await;
+
+    assert_eq!(
+        forwarded,
+        Some((u64::from(BULK_CREDIT), STARVING_OUTPUT)),
+        "the parked raw frame must be delivered whole, not replaced by a repaint"
+    );
+    assert!(acked, "the key must still be acknowledged");
 }
 
 /// Use the unused granted bulk window when a valid large Snapshot replaces a small raw backlog.
