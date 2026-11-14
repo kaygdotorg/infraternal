@@ -105,6 +105,10 @@ async fn input_state_probe_preserves_written_ack_before_input() {
     state_ack(false).await;
 }
 
+/// Shared body of the two input-state probe tests: a relay answering a route
+/// proof with the shim's input state keeps the already written input
+/// acknowledged, whether the probe arrives before or after new input
+/// (`input_first`).
 async fn state_ack(input_first: bool) {
     let id = *uuid::Uuid::new_v4().as_bytes();
     let root = PathBuf::from(
@@ -219,6 +223,8 @@ async fn state_ack(input_first: bool) {
     );
 }
 
+/// A Ping to a relay detached for lack of output credit keeps the shim's
+/// written-input acknowledgment.
 #[tokio::test]
 async fn detached_ping_preserves_written_ack_without_output_credit() {
     let id = *uuid::Uuid::new_v4().as_bytes();
@@ -284,6 +290,8 @@ async fn detached_ping_preserves_written_ack_without_output_credit() {
     );
 }
 
+/// A terminal liveness probe waits for the shim's fence before it is answered,
+/// and the answer keeps the stream's identity.
 #[tokio::test]
 async fn terminal_probe_waits_for_the_shim_fence_and_keeps_stream_identity() {
     use infraternal_shim::frame::MULTI_WRITER;

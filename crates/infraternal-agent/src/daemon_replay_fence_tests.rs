@@ -16,6 +16,8 @@ const FRAME: usize = 453;
 /// Hang bound only: the fixed relay delivers the tail without waiting at all.
 const HANG_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// An Output frame that crosses the replay fence is delivered without the
+/// relay needing another client command.
 #[tokio::test]
 async fn output_frame_crossing_the_replay_fence_is_delivered_without_another_command() {
     use infraternal_shim::frame::MULTI_WRITER;

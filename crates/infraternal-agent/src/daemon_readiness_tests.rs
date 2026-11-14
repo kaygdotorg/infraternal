@@ -546,6 +546,8 @@ async fn the_unhealthy_handoff_case_survives_concurrent_spawns() {
     );
 }
 
+/// A replay's geometry is fixed when the replay starts, ahead of a queued
+/// Resize and of output that arrives later.
 #[tokio::test]
 async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
     use infraternal_shim::frame::MULTI_WRITER;

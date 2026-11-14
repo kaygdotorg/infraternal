@@ -58,6 +58,11 @@ static APPROXIMATE_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
 pub fn approximate_snapshots_total() -> u64 {
     APPROXIMATE_SNAPSHOTS.load(Ordering::Relaxed)
 }
+/// One item for the agent's leg-B writer, in the order it must reach the wire.
+///
+/// Relays, dispatch and control replies queue these; the writer turns each into
+/// protocol frames for its stream (or, for [`Message::Attached`], only updates
+/// its own per-stream state).
 pub(crate) enum Message {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Shim(u32, Shim),
@@ -565,7 +570,7 @@ mod tests {
         (messages, priority, frames, task)
     }
 
-    /// Every Output frame the writer put on the wire, as (stream, out_seq, length).
+    /// Every Output frame the writer put on the wire, as `(stream, out_seq, length)`.
     fn outputs(frames: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<(u32, u64, usize)> {
         let mut seen = vec![];
         while let Ok(frame) = frames.try_recv() {

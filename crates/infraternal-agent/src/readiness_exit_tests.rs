@@ -1,6 +1,8 @@
 //! Preserves queued private-probe output when ownership EOF precedes credit-funded delivery (#169).
 use super::*;
 
+/// End of file on a private shim's ownership socket does not discard terminal
+/// output the shim already wrote.
 #[tokio::test]
 async fn ownership_eof_does_not_discard_private_terminal_output() {
     use infraternal_shim::frame::{MULTI_WRITER, SESSION_OWNER};

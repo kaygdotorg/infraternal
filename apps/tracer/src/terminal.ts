@@ -1094,6 +1094,11 @@ export class TerminalClient {
     };
   }
 
+  /**
+   * Handles one frame for this terminal's stream: acknowledgments, output and repaints for the screen, terminal
+   * notices (reconnects, replay fences, approximate screens, exits), liveness pings and stream closes. A frame that
+   * breaks the wire contract fails the connection, which then reconnects.
+   */
   private handleTerminalFrame(frame: WireFrame, message: Uint8Array, receivedAt: number): void {
     if (!this.attached) {
       this.protocolFailure("server sent terminal data before AttachTerm");
