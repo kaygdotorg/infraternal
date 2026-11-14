@@ -26,7 +26,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     thread,
     time::{Duration, Instant},
@@ -269,6 +269,19 @@ fn stable_endpoint_tracks_underlay_mtu_with_outbound_only_traffic() {
     nested_underlay_case(ReviewCase::Egress);
 }
 
+/// A handshake initiation that is never followed by authenticated data must not choose the route
+/// budget (#489 J549 P1).
+///
+/// `GotaTun` accepts a valid initiation, and moves its send endpoint, before the sender proves it
+/// holds the peer's key; anyone who captured such an initiation can replay it from another
+/// address. The test plays that replay with B's own key from the 1280-byte path and never sends
+/// data, so the route must keep the configured 1450-byte path's budget.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn unconfirmed_initiation_does_not_change_route_budget() {
+    nested_underlay_case(ReviewCase::ForgedInit);
+}
+
 /// IPv6 inner streams must remain bidirectional over an authenticated IPv6 nested endpoint.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
@@ -289,10 +302,86 @@ enum ReviewCase {
     Shrink,
     /// Shrink, then grow, the carrier while only the route's owner sends.
     Egress,
+    /// Deliver an initiation from the low path that is never confirmed by data.
+    ForgedInit,
     /// Exercise large inner IPv6 packets on the nested IPv6 carrier.
     Ipv6Bulk,
     /// Alternate the authenticated peer between the two carriers.
     Flap,
+}
+
+/// Read the 32-byte private key a test node keeps in its state directory.
+fn node_private_key(state: &Path) -> [u8; 32] {
+    let bytes = fs::read(state.join("mesh-private-key")).unwrap();
+    bytes.try_into().unwrap()
+}
+
+/// Send A one valid initiation in B's name from B's low-MTU address, then never confirm it.
+///
+/// A accepts it and reports the new send endpoint, but its route must keep the configured
+/// path's 1360-byte budget while A keeps sending outbound traffic, which requests refreshes.
+fn unconfirmed_initiation(state_b: &Path, id_a: &Identity, id_b: &Identity, node_a: &Node) {
+    use gotatun::{
+        noise::{Tunn, index_table::IndexTable, rate_limiter::RateLimiter},
+        x25519::{PublicKey as WgPublicKey, StaticSecret},
+    };
+    let secret = StaticSecret::from(node_private_key(state_b));
+    let local = WgPublicKey::from(&secret);
+    let mut tunnel = Tunn::new(
+        secret,
+        WgPublicKey::from(id_a.public_key.0),
+        None,
+        None,
+        IndexTable::from_os_rng(),
+        std::sync::Arc::new(RateLimiter::new(&local, 100)),
+    );
+    let initiation = tunnel
+        .format_handshake_initiation(false)
+        .unwrap()
+        .into_bytes();
+    let replay_source = SocketAddr::from(([198, 51, 100, 2], 40_000));
+    let socket = in_ns(NS_B, || UdpSocket::bind(replay_source).unwrap());
+    socket
+        .send_to(
+            &initiation,
+            SocketAddr::from(([198, 51, 100, 1], id_a.port)),
+        )
+        .unwrap();
+
+    // The fixture must reach the case under test: A accepted the initiation and moved its send
+    // endpoint to the replay source.
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let endpoint = loop {
+        let endpoint = in_ns(NS_A, || node_a.counters().unwrap())
+            .get(&id_b.public_key)
+            .and_then(|counter| counter.endpoint);
+        if endpoint == Some(replay_source) || Instant::now() >= deadline {
+            break endpoint;
+        }
+        // sleep: poll the engine's peer table without spinning.
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        endpoint,
+        Some(replay_source),
+        "A must accept the initiation"
+    );
+
+    // A sends outbound traffic, which requests refreshes, for longer than several refresh
+    // intervals; the route must never take the low path's 1200-byte budget.
+    let outbound = in_ns(NS_A, || UdpSocket::bind(("10.254.0.1", 0)).unwrap());
+    let mut seen = Vec::new();
+    for _ in 0..40 {
+        let _ = outbound.send_to(b"unconfirmed path probe", ("10.254.0.2", 49206));
+        seen.push(route_mtu(NS_A, "10.254.0.2"));
+        // sleep: spread probes over ten 250 ms refresh intervals.
+        thread::sleep(Duration::from_millis(60));
+    }
+    eprintln!("REVIEW unconfirmed initiation endpoint={endpoint:?} route_mtus={seen:?}");
+    assert!(
+        seen.iter().all(|mtu| *mtu == Some(1360)),
+        "an unconfirmed initiation changed the route budget: {seen:?}"
+    );
 }
 
 /// Run the isolated two-carrier fixture for one review scenario.
@@ -415,6 +504,14 @@ fn nested_underlay_case(case: ReviewCase) {
     // Check the configured high-path budget before B starts on the alternate path: an
     // authenticated keepalive may roam A before the next route read.
     assert_eq!(route_mtu(NS_A, "10.254.0.2"), Some(1360));
+    if matches!(case, ReviewCase::ForgedInit) {
+        // B's node never learns about A, so B itself sends nothing.
+        unconfirmed_initiation(&state_b, &id_a, &id_b, &node_a);
+        in_ns(NS_A, || node_a.down().unwrap());
+        in_ns(NS_B, || node_b.down().unwrap());
+        cleanup(&[&state_a, &state_b]);
+        return;
+    }
     in_ns(NS_B, || {
         assert!(node_b.chunk(snapshot(b, a, active_b)).unwrap());
     });
@@ -650,7 +747,10 @@ fn nested_underlay_case(case: ReviewCase) {
                     "REVIEW 40 rapid flaps converged endpoint={final_endpoint:?} route_mtu=1200"
                 );
             }
-            ReviewCase::Bulk | ReviewCase::Ipv6Bulk | ReviewCase::Handshake => unreachable!(),
+            ReviewCase::Bulk
+            | ReviewCase::Ipv6Bulk
+            | ReviewCase::Handshake
+            | ReviewCase::ForgedInit => unreachable!(),
         }
         in_ns(NS_A, || node_a.down().unwrap());
         in_ns(NS_B, || node_b.down().unwrap());

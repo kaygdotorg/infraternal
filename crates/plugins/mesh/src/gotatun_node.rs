@@ -826,7 +826,13 @@ impl RuntimeState {
         Ok(endpoints)
     }
 
-    /// Read each installed peer's authenticated endpoint for bounded change detection.
+    /// Read each installed peer's confirmed endpoint for bounded change detection.
+    ///
+    /// This is `GotaTun`'s `confirmed_endpoint`: the source of the latest packet that proved the
+    /// peer's key (transport data, or the response to our own initiation). The send endpoint is
+    /// not used, because an accepted handshake initiation moves it before its sender proves
+    /// anything, and a replayed initiation could then choose our route MTU (#489 J549 P1).
+    /// `None` means no proof yet, and routes keep the coordinator's configured endpoint.
     async fn live_peer_endpoint_snapshot(&self) -> BTreeMap<PublicKey, Option<SocketAddr>> {
         let (Some(device), Some(config)) = (self.device.as_ref(), self.config.as_ref()) else {
             return BTreeMap::new();
@@ -847,19 +853,23 @@ impl RuntimeState {
             }
             let active_key = PublicKey(*peer.peer.public_key.as_bytes());
             if let Some(route_key) = route_keys.get(&active_key) {
-                endpoints.insert(*route_key, peer.peer.endpoint);
+                endpoints.insert(*route_key, peer.stats.confirmed_endpoint);
             }
         }
         endpoints
     }
 
-    /// Return the endpoint values against which installed route state was initially derived.
+    /// Return the snapshot that matches routes freshly derived from the configured endpoints.
+    ///
+    /// No peer has a confirmed endpoint in that state, so every value is `None`. The scan then
+    /// requests a refresh as soon as any peer proves a path, including one it proved before this
+    /// configuration was applied.
     fn configured_peer_endpoint_snapshot(&self) -> BTreeMap<PublicKey, Option<SocketAddr>> {
         self.config.as_ref().map_or_else(BTreeMap::new, |config| {
             config
                 .peers
                 .values()
-                .map(|policy| (policy.peer.key, policy.peer.endpoint))
+                .map(|policy| (policy.peer.key, None))
                 .collect()
         })
     }

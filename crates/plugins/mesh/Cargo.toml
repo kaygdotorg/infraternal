@@ -56,7 +56,7 @@ url = { workspace = true, optional = true }
 # Both node platforms use the same pinned source to keep Nix vendoring unambiguous (D352).
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # ring remains the one crypto backend (D289).
-gotatun = { version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "220887616163c9bbea1c5934fb46132925ea4e20", default-features = false, features = ["device", "ring"], optional = true }
+gotatun = { version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "9d7c3ffceaf30386c22f92eb0e06f5e9038d04f7", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
