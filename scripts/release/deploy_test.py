@@ -312,6 +312,15 @@ class DeploymentTests(unittest.TestCase):
         legacy path. A cold rollback (stop, point the unit back, start), a reboot onto the
         previous build, or `server restart --binary <old>` without `--rollback` take the same
         path. The previous build must still find the same key at the legacy path.
+
+        What this test proves: deploy_remote.py's failure path leaves the legacy path alone and
+        does not depend on the candidate emptying it. What it cannot prove: the stub below plays
+        the candidate's migration with `shutil.copy2`, so it is green by construction on that
+        point (J628). The proof that the real binary copies and never moves is in Rust, in
+        crates/infraternal-server/src/embedded_mesh_state.rs:
+        `copies_legacy_mesh_identity_before_first_durable_start` (asserts "runtime key stays")
+        and `a_previous_build_started_cold_finds_the_same_identity` (a reboot under the new
+        build, then the runtime path holds the same key again).
         """
         root = self.root / "deployment"
         release = root / "releases" / "candidate"
