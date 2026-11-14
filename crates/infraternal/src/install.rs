@@ -57,18 +57,12 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
         ) + &link_plan(user)?);
     }
 
-    match fs::read(&path) {
-        Ok(existing) if existing == unit.as_bytes() => {}
-        Ok(_) if !options.force => return Err(InstallError::ExistingUnit),
-        Ok(_) => write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?;
-        }
-        Err(error) => return Err(InstallError::Io(error)),
-    }
-    // Create the data folder private before the service first starts, only
-    // once the unit is accepted; an existing folder keeps its mode [#516].
-    super::install_paths::create_private_dir(&absolute(&args.data)?).map_err(InstallError::Io)?;
+    write_unit_after_data(
+        &path,
+        unit.as_bytes(),
+        &absolute(&args.data)?,
+        options.force,
+    )?;
 
     let mut command = Command::new("systemctl");
     infraternal_shim::prepare_child(&mut command);
@@ -90,6 +84,32 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     // A problem here is reported, not fatal: the service itself is already running.
     eprintln!("{}", link_note(user));
     Ok(format!("Installed and enabled {}\n", path.display()))
+}
+
+/// Create the data folder, then write the unit, so a failure leaves nothing half-written [#516].
+///
+/// The data folder comes first: a unit written before it would start a service
+/// with nowhere to put its data. Whether the unit may be written is decided
+/// before anything is created, so a refused re-run (a different unit without
+/// `--force`) touches nothing at all.
+fn write_unit_after_data(
+    path: &Path,
+    unit: &[u8],
+    data: &Path,
+    force: bool,
+) -> Result<(), InstallError> {
+    let write_unit = match fs::read(path) {
+        Ok(existing) if existing == unit => false,
+        Ok(_) if !force => return Err(InstallError::ExistingUnit),
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(InstallError::Io(error)),
+    };
+    super::install_paths::create_private_dir(data).map_err(InstallError::Io)?;
+    if write_unit {
+        write_atomic(path, unit).map_err(InstallError::Io)?;
+    }
+    Ok(())
 }
 
 /// The scope and binary the PATH link is made for, from the real environment.
@@ -378,5 +398,29 @@ mod tests {
         let output = install(&args, &options).unwrap();
         assert!(output.contains("Data folder: /srv/state\n"));
         assert!(output.contains("Web folder: /srv/web\n"));
+    }
+
+    /// A data folder that cannot be created leaves no unit behind; a refused re-run creates nothing.
+    #[test]
+    fn a_failed_data_folder_leaves_no_unit_and_a_refusal_creates_no_folder() {
+        let root = env::temp_dir().join(format!("unit-order-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("file");
+        fs::write(&blocker, "x").unwrap();
+        let unit = root.join("x.service");
+        let error = write_unit_after_data(&unit, b"new", &blocker.join("data"), false);
+        assert!(matches!(error, Err(InstallError::Io(_))));
+        assert!(!unit.exists());
+
+        fs::write(&unit, "old").unwrap();
+        let data = root.join("data");
+        let error = write_unit_after_data(&unit, b"new", &data, false);
+        assert!(matches!(error, Err(InstallError::ExistingUnit)));
+        assert!(!data.exists());
+        assert_eq!(fs::read_to_string(&unit).unwrap(), "old");
+        write_unit_after_data(&unit, b"new", &data, true).unwrap();
+        assert_eq!(fs::read_to_string(&unit).unwrap(), "new");
+        assert!(data.is_dir());
+        fs::remove_dir_all(root).unwrap();
     }
 }
