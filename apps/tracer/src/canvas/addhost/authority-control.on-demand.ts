@@ -146,7 +146,13 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
     busy = true;
     publish();
     // A failed chunk load leaves the lock as it was; the next try loads again.
-    await run().then(async (m) => m.announce(core.toast, await m.runUnlock(await service()))).catch(() => undefined);
+    await run().then(async (m) => {
+      const result = await m.runUnlock(await service());
+      // A successful ceremony is the answer: say so before the toast, so the palette and Settings never contradict it
+      // while the status call below is in flight. That call still confirms (or corrects) the state from the server.
+      if (result.ok) { state = "unlocked"; emit(); }
+      m.announce(core.toast, result);
+    }).catch(() => undefined);
     busy = false;
     await refresh();
     publish();

@@ -5,8 +5,10 @@ use sha2::Digest;
 mod signing;
 
 #[test]
+/// A release is accepted only with a signed identity and exactly the signed bytes.
 fn signed_identity_and_exact_bytes_are_required() {
-    let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
+    // Fixture files live on the private TMPDIR, not the slow build disk (#509).
+    let root = std::env::temp_dir();
     let path = root.join(format!("manifest-{}", uuid::Uuid::new_v4()));
     std::fs::write(&path, b"fixture").unwrap();
     let file = File::open(&path).unwrap();
