@@ -2972,24 +2972,54 @@ mod tests {
     /// `MESH_FILES` is a hand-kept copy of the names `Store::open` uses. A branch that adds a Store
     /// file (J510c adds `mesh-listen-port.json`) would leave that file behind on upgrade and
     /// rollback with no failing test. This guard reads the Store source so the two lists cannot
-    /// drift silently. It passes on J501b alone and fails once J510c is merged.
+    /// drift silently. A name given through a constant (`parent.join(AUTHORITY_FILE)`) is resolved
+    /// to its `const` value, and one that cannot be resolved fails the test too (J628 P3).
     #[test]
     fn mesh_files_cover_every_file_the_store_opens() {
-        let source = include_str!("../../plugins/mesh/src/node_state.rs");
+        // The server's embedded node, and so this migration, exists only on Linux; the macOS
+        // Store's own key file never appears in a server data directory.
+        const MACOS_ONLY: &[&str] = &["mesh-wireguard.key"];
+        let store = include_str!("../../plugins/mesh/src/node_state.rs");
+        let macos_key = include_str!("../../plugins/mesh/src/macos_key.rs");
+        let constant = |name: &str| {
+            let declaration = format!("const {name}: &str = \"");
+            [store, macos_key].into_iter().find_map(|source| {
+                let start = source.find(&declaration)? + declaration.len();
+                let length = source[start..].find('"')?;
+                Some(source[start..start + length].to_owned())
+            })
+        };
         let mut missing = Vec::new();
-        for (index, _) in source.match_indices("parent.join(\"") {
-            let start = index + "parent.join(\"".len();
-            let Some(length) = source[start..].find('"') else {
+        for (index, _) in store.match_indices("parent.join(") {
+            let argument_start = index + "parent.join(".len();
+            let Some(length) = store[argument_start..].find(')') else {
                 continue;
             };
-            let name = &source[start..start + length];
-            if !super::MESH_FILES.contains(&name) && !missing.contains(&name) {
+            let argument = store[argument_start..argument_start + length].trim();
+            let name = if let Some(literal) = argument.strip_prefix('"') {
+                literal.trim_end_matches('"').to_owned()
+            } else if argument.starts_with("format!") || argument.starts_with('&') {
+                // Temporaries (`format!(".mesh-public.{pid}...")`) are swept, not migrated.
+                continue;
+            } else {
+                let identifier = argument.rsplit("::").next().unwrap_or(argument);
+                constant(identifier).unwrap_or_else(|| format!("<unresolved {argument}>"))
+            };
+            if !super::MESH_FILES.contains(&name.as_str())
+                && !MACOS_ONLY.contains(&name.as_str())
+                && !missing.contains(&name)
+            {
                 missing.push(name);
             }
         }
         assert!(
             missing.is_empty(),
             "Store files missing from MESH_FILES: {missing:?}"
+        );
+        assert_eq!(
+            constant("AUTHORITY_FILE").as_deref(),
+            Some("mesh-authority.json"),
+            "the guard must resolve names given through constants"
         );
     }
 }
