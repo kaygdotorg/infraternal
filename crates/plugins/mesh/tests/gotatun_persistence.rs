@@ -971,6 +971,199 @@ fn a_changed_tail_does_not_pin_a_found_peer_to_a_dead_first_address() {
     );
 }
 
+/// Write `rules` to a file under `dir` and load it with `nft -f` inside `ns`.
+fn j603_nft(ns: &str, dir: &Path, rules: &str) {
+    let path = dir.join("j603.nft");
+    fs::write(&path, rules).unwrap();
+    in_ns(ns, || run("nft", &["-f", path.to_str().unwrap()]));
+    fs::remove_file(path).unwrap();
+}
+
+/// Make A's mesh socket appear on the underlay as `outside` instead of its own `port`, the way a
+/// NAT's mapping does. The rewrite is stateless (`notrack`), so changing `outside` is a rebind:
+/// packets to the old outside port reach nobody from then on.
+fn j603_map_a(dir: &Path, port: u16, outside: u16, first: bool) {
+    let reset = if first { "" } else { "delete table ip j603\n" };
+    let rules = format!(
+        "{reset}table ip j603 {{\n\
+         chain out {{ type filter hook output priority raw; policy accept;\n\
+          udp sport {port} notrack udp sport set {outside}\n }}\n\
+         chain pre {{ type filter hook prerouting priority raw; policy accept;\n\
+          udp dport {outside} notrack udp dport set {port}\n }}\n}}\n"
+    );
+    j603_nft(NS_A, dir, &rules);
+}
+
+/// #515 (J587's finding, J603): an established peer behind a filtering NAT rebinds, and the path
+/// comes back within one walk step plus a handshake.
+///
+/// B accepts underlay UDP on its mesh port only from an address and port it has sent to (an
+/// address-and-port-dependent filter, as a typical home router's). A's mesh port is mapped to an
+/// outside port by a stateless rewrite. After a session is up, B sends last, A rebinds to a new
+/// outside port, and B is given that port as its new first address (the coordinator's
+/// republication). A's packets from the new port are dropped at B's filter until B sends there.
+///
+/// Before the fix B sent nothing there: `GotaTun`'s forced handshake is a no-op while a session
+/// exists, so the walk's steps changed only the address, and the path came back only when B's own
+/// timers fired (15–25 s later here, 10–65 s in the NAT matrix). With the fix the walk's first
+/// step drops the session it cannot vouch for and handshakes on the new address.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+fn a_rebound_established_peer_comes_back_within_one_walk_step() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    const PROBE_PORT: u16 = 5603;
+    let (state_a, state_b) = (state("j603-a"), state("j603-b"));
+    run("mkdir", &["-p", "/run/netns"]);
+    run("mount", &["-t", "tmpfs", "netns", "/run/netns"]);
+    cleanup(&[]);
+    for ns in [NS_A, NS_B] {
+        run("ip", &["netns", "add", ns]);
+        run("ip", &["-n", ns, "link", "set", "lo", "up"]);
+    }
+    run(
+        "ip",
+        &[
+            "link", "add", "j603a", "netns", NS_A, "type", "veth", "peer", "j603b", "netns", NS_B,
+        ],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "address", "add", "192.0.2.1/24", "dev", "j603a"],
+    );
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "192.0.2.2/24", "dev", "j603b"],
+    );
+    run("ip", &["-n", NS_A, "link", "set", "j603a", "up"]);
+    run("ip", &["-n", NS_B, "link", "set", "j603b", "up"]);
+    let up = |ns: &str, path: &PathBuf| {
+        in_ns(ns, || {
+            let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+            let identity = node.up().unwrap();
+            (node, identity)
+        })
+    };
+    let (mut node_a, id_a) = up(NS_A, &state_a);
+    let (mut node_b, id_b) = up(NS_B, &state_b);
+    let a = (1, id_a.public_key);
+    let b = (2, id_b.public_key);
+    let (old_outside, new_outside, never) = (41_001, 41_002, 41_003);
+    j603_map_a(&state_a, id_a.port, old_outside, true);
+    j603_nft(
+        NS_B,
+        &state_b,
+        &format!(
+            "table inet j603 {{\n chain input {{ type filter hook input priority filter; \
+             policy accept;\n  udp dport {} ct state established accept\n  udp dport {} drop\n \
+             }}\n}}\n",
+            id_b.port, id_b.port
+        ),
+    );
+    let a_at = |port: u16| SocketAddr::from(([192, 0, 2, 1], port));
+    // What B is told about A: a first address and one more candidate, so B walks.
+    let for_b = |version, first: u16, other: u16| {
+        let mut chunk = j534_snapshot(b, a, Some(a_at(first)), version, true);
+        for policy in chunk.upserted.values_mut() {
+            policy.peer.candidates = vec![a_at(other)];
+        }
+        chunk
+    };
+    let endpoint_b = Some(SocketAddr::from(([192, 0, 2, 2], id_b.port)));
+    in_ns(NS_A, || {
+        assert!(
+            node_a
+                .chunk(j534_snapshot(a, b, endpoint_b, 1, true))
+                .unwrap()
+        );
+    });
+    in_ns(NS_B, || {
+        assert!(node_b.chunk(for_b(1, old_outside, never)).unwrap());
+    });
+    let mesh_a = SocketAddr::from((addresses(1).ipv4, PROBE_PORT));
+    let mesh_b = SocketAddr::from((addresses(2).ipv4, PROBE_PORT));
+    let sender_b = in_ns(NS_B, || UdpSocket::bind("0.0.0.0:0").unwrap());
+    let listener_b = in_ns(NS_B, || UdpSocket::bind(mesh_b).unwrap());
+    listener_b
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let sender_a = in_ns(NS_A, || UdpSocket::bind("0.0.0.0:0").unwrap());
+    // B opens its filter for A by sending first, as a node behind such a NAT must.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let handshake = |node: &Node| {
+        node.counters()
+            .unwrap()
+            .get(&id_a.public_key)
+            .is_some_and(|counters| counters.handshake_secs != 0)
+    };
+    while Instant::now() < deadline && !handshake(&node_b) {
+        let _ = sender_b.send_to(b"open", mesh_a);
+        // sleep: allow the GotaTun workers to exchange the first handshake
+        thread::sleep(Duration::from_millis(200));
+    }
+    assert!(handshake(&node_b), "fixture: no session between A and B");
+    // A streams small datagrams to B for the rest of the test; `paused` holds them back.
+    let paused = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let streamer = {
+        let (paused, stop) = (Arc::clone(&paused), Arc::clone(&stop));
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if !paused.load(Ordering::Relaxed) {
+                    let _ = sender_a.send_to(b"flow", mesh_b);
+                }
+                // sleep: the stream's pacing, one datagram every 50 ms
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let arrival = |deadline: Instant| {
+        let mut buffer = [0_u8; 16];
+        while Instant::now() < deadline {
+            if listener_b.recv(&mut buffer).is_ok() {
+                return Some(Instant::now());
+            }
+        }
+        None
+    };
+    assert!(
+        arrival(Instant::now() + Duration::from_secs(10)).is_some(),
+        "fixture: A's stream never reached B before the rebind"
+    );
+    // B sends last before the rebind, so none of its own timers is about to send for it: its
+    // next keepalive is 25 s away, and A's later packets never reach it to ask for one.
+    paused.store(true, Ordering::Relaxed);
+    // sleep: let A's last datagrams land before B's final send
+    thread::sleep(Duration::from_millis(200));
+    sender_b.send_to(b"last", mesh_a).unwrap();
+    // sleep: B's datagram crosses before the mapping changes under it
+    thread::sleep(Duration::from_millis(200));
+    j603_map_a(&state_a, id_a.port, new_outside, false);
+    let mut drain = [0_u8; 16];
+    while listener_b.recv(&mut drain).is_ok() {}
+    let republished = Instant::now();
+    in_ns(NS_B, || {
+        assert!(node_b.chunk(for_b(2, new_outside, old_outside)).unwrap());
+    });
+    paused.store(false, Ordering::Relaxed);
+    let budget = infraternal_plugin_mesh::candidates::STEP + Duration::from_secs(3);
+    let recovered = arrival(republished + Duration::from_secs(30));
+    stop.store(true, Ordering::Relaxed);
+    streamer.join().unwrap();
+    in_ns(NS_A, || node_a.down().unwrap());
+    in_ns(NS_B, || node_b.down().unwrap());
+    cleanup(&[&state_a, &state_b]);
+    let took = recovered.map(|at| at.saturating_duration_since(republished));
+    eprintln!("j603 rebind recovery after republication: {took:?}");
+    assert!(
+        took.is_some_and(|took| took <= budget),
+        "the rebound peer came back after {took:?}, not within one walk step plus a handshake \
+         ({budget:?})"
+    );
+}
+
 /// Build a peer snapshot with either full directional network access or no access.
 fn j534_snapshot(
     local: (u32, PublicKey),
