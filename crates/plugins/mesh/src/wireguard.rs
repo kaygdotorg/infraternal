@@ -1199,7 +1199,9 @@ impl RouteMonitor {
     /// carry no echo of our own writes. Addresses are the endpoint itself (#483): a new source
     /// address must reach peers before they can send to it.
     ///
-    /// Opening wakes `announce` once: nothing reported what changed while no listener ran.
+    /// Opening wakes `announce` once: nothing reported what changed while no listener ran. The
+    /// current addresses are read after the subscription exists (see [`AddressBook::dump`]); if
+    /// that read fails, the book starts empty and each address counts once when next refreshed.
     /// # Errors
     /// Returns socket, bind, or interface lookup errors before the node becomes active.
     fn open(
@@ -1234,7 +1236,7 @@ impl RouteMonitor {
             buffer: vec![0; netlink::DATAGRAM_BYTES],
             underlay,
             announce,
-            addresses: AddressBook::default(),
+            addresses: AddressBook::dump(interface_index).unwrap_or_default(),
         })
     }
 
@@ -1358,13 +1360,39 @@ fn classify_underlay_change(
     })
 }
 
-/// The host's interface addresses outside the mesh link, as the kernel last reported them.
+/// One interface address as the kernel identifies it: link, family, prefix length, the local
+/// address (`IFA_LOCAL`) and the address or point-to-point peer (`IFA_ADDRESS`).
+type AddressKey = (u32, u8, u8, Option<IpAddr>, Option<IpAddr>);
+
+/// The host's interface addresses outside the mesh link, with their flags, as the kernel last
+/// reported them (#483 J633 P1).
 ///
-/// Only a real change moves our endpoint. (This first version counts every address notice.)
+/// The kernel sends `RTM_NEWADDR` both for a new address and for every lifetime refresh of an
+/// existing one, which DHCP renewals and IPv6 router advertisements do all day. Only a new
+/// address, a flag change (such as the end of IPv6 duplicate address detection, or an address
+/// becoming deprecated) or a removal can move our endpoint, so only those count. The book is
+/// seeded from a dump when the listener opens and rebuilt after lost notifications. Adding host
+/// addresses needs `CAP_NET_ADMIN`, so its size is the host's own address count.
 #[derive(Debug, Default)]
-struct AddressBook;
+struct AddressBook {
+    /// Each known address's flags (`IFA_FLAGS`, or the header's 8-bit flags without it).
+    known: std::collections::HashMap<AddressKey, u32>,
+}
 
 impl AddressBook {
+    /// Read every current address outside the mesh link, so a later refresh of one of them is
+    /// recognised as a refresh. Open the subscription first: a change between the two is then
+    /// either in the dump or delivered after it.
+    /// # Errors
+    /// Returns socket, dump or malformed-reply errors.
+    fn dump(interface_index: u32) -> io::Result<Self> {
+        let mut book = Self::default();
+        Socket::open(SockProtocol::NetlinkRoute)?.visit(RTM_GETADDR, 0x300, &[0; 8], |reply| {
+            book.record(true, reply, interface_index).map(|_| ())
+        })?;
+        Ok(book)
+    }
+
     /// Record one notification and say whether it changed an address outside the mesh link.
     /// # Errors
     /// Returns `InvalidData` for a truncated address message.
@@ -1373,14 +1401,56 @@ impl AddressBook {
         message: &netlink::Message<'_>,
         interface_index: u32,
     ) -> io::Result<bool> {
-        if !matches!(message.kind, RTM_NEWADDR | RTM_DELADDR) {
-            return Ok(false);
+        match message.kind {
+            RTM_NEWADDR => self.record(true, message.payload, interface_index),
+            RTM_DELADDR => self.record(false, message.payload, interface_index),
+            _ => Ok(false),
         }
-        Ok(netlink::u32_at(message.payload, 4)? != interface_index)
     }
 
-    /// Notifications were lost; nothing recorded can be trusted any more.
-    fn lost_notifications(&mut self, _interface_index: u32) {}
+    /// Apply one `ifaddrmsg` payload: an add or update when `present`, a removal otherwise.
+    /// Returns whether it changed anything; a removal always counts, known or not.
+    fn record(&mut self, present: bool, payload: &[u8], interface_index: u32) -> io::Result<bool> {
+        let header = payload.get(..8).ok_or(io::ErrorKind::InvalidData)?;
+        let index = netlink::u32_at(header, 4)?;
+        if index == interface_index {
+            return Ok(false);
+        }
+        let (family, prefix) = (header[0], header[1]);
+        let mut flags = u32::from(header[2]);
+        let (mut local, mut address) = (None, None);
+        for field in netlink::attributes(&payload[8..])? {
+            match field.kind {
+                IFA_ADDRESS => address = interface_ip(family, field.payload),
+                IFA_LOCAL => local = interface_ip(family, field.payload),
+                IFA_FLAGS => flags = netlink::u32_at(field.payload, 0)?,
+                _ => {}
+            }
+        }
+        let key = (index, family, prefix, local, address);
+        if present {
+            Ok(self.known.insert(key, flags) != Some(flags))
+        } else {
+            self.known.remove(&key);
+            Ok(true)
+        }
+    }
+
+    /// Notifications were lost (`ENOBUFS`), so the book may miss changes: read it again. If
+    /// that fails too, start empty; each known address then counts once more when refreshed,
+    /// which costs an extra announcement, never a missed one.
+    fn lost_notifications(&mut self, interface_index: u32) {
+        *self = Self::dump(interface_index).unwrap_or_default();
+    }
+}
+
+/// Decode an interface address attribute of `family`; anything else is `None`.
+fn interface_ip(family: u8, bytes: &[u8]) -> Option<IpAddr> {
+    match family {
+        2 => <[u8; 4]>::try_from(bytes).ok().map(IpAddr::from),
+        10 => <[u8; 16]>::try_from(bytes).ok().map(IpAddr::from),
+        _ => None,
+    }
 }
 
 /// Builds the exact host-route payload used for installing, removing, or repairing a peer route.
@@ -1566,6 +1636,14 @@ const RTMGRP_IPV6_IFADDR: u32 = 0x100;
 const RTM_NEWADDR: u16 = 20;
 /// `RTM_DELADDR`: an address was removed.
 const RTM_DELADDR: u16 = 21;
+/// `RTM_GETADDR`: dump the current addresses.
+const RTM_GETADDR: u16 = 22;
+/// `IFA_ADDRESS`: the interface address, or the peer's on a point-to-point link.
+const IFA_ADDRESS: u16 = 1;
+/// `IFA_LOCAL`: the local address on a point-to-point link (IPv4 always sends it).
+const IFA_LOCAL: u16 = 2;
+/// `IFA_FLAGS`: the full 32-bit address flags; the header holds only the low 8 bits.
+const IFA_FLAGS: u16 = 8;
 /// Subscribes to IPv4 unicast route changes in the main route table.
 const RTMGRP_IPV4_ROUTE: u32 = 0x40;
 /// Subscribes to IPv6 unicast route changes in the main route table.
