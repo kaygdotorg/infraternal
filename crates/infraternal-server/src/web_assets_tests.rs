@@ -361,12 +361,7 @@ async fn head_and_get_share_validators_and_conditional_responses() {
     std::fs::write(root.join("main.js.br"), b"br entry").unwrap();
     std::fs::write(root.join("main.js.gz"), b"gzip entry").unwrap();
     let app = router(root.clone());
-    for path in [
-        "/main.js",
-        "/",
-        "/index.html",
-        "/saved/session",
-    ] {
+    for path in ["/main.js", "/", "/index.html", "/saved/session"] {
         for encoding in ["identity", "br", "gzip"] {
             let mut get_headers: Option<axum::http::HeaderMap> = None;
             for method in ["GET", "HEAD"] {
