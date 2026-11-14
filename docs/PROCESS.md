@@ -49,6 +49,9 @@ Definition of Done (it is in every job prompt):
    Clippy is not limited to the changed packages: a narrower feature set
    makes feature-dependent lints fire in untouched crates that the gate never
    reports.
+   The unit-test row builds first, untimed, and then runs the tests under a
+   hang timeout (`VERIFY_QUICK_TEST_TIMEOUT`, 1500 s), so a cold compile on a
+   busy host cannot be reported as a hung test (#509).
    It does not cover dependents of a changed crate, integration tests, the
    static builds, cargo-deny or the repository checks, so it never replaces
    `iterate` or `fast` and is never quoted as the gate. The `test` row of
@@ -186,6 +189,15 @@ numbered history, both timestamp arrival orders and altered checksums.
   zero-network-overhead reference.
 
 ## 7. Rust build speed and static binary size
+
+- Dev and test profiles build hot crypto dependencies optimised (`sha2`,
+  `argon2`, `blake2` in the root `Cargo.toml`). Unoptimised Argon2 cost about
+  0.9 s of CPU per hash against 0.21 s optimised and made up 45% of the
+  server suite's CPU (#509). Add a dependency to that list only with a
+  measured per-test CPU saving; the production parameters never change.
+- Test fixtures must not move or hash the test executable (about 400 MB). A
+  scripted transport that never runs its payload takes a small tracked file
+  (#509).
 
 - `scripts/verify fast` checks the stripped, static release binaries against
   recorded baselines and reports the signed byte delta for each target
