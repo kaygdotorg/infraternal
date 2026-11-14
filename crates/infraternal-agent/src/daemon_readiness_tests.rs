@@ -604,6 +604,11 @@ async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let relay = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, _))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(0)))

@@ -72,6 +72,11 @@ async fn output_frame_crossing_the_replay_fence_is_delivered_without_another_com
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let task = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, _))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(0)))

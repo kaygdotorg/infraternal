@@ -134,6 +134,11 @@ async fn start_relay(stream: u32) -> RelayFixture {
         messages,
         task: Some(task),
     };
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        next_message(&mut fixture).await,
+        Message::Attached(id, _) if id == stream
+    ));
     assert!(matches!(
         next_message(&mut fixture).await,
         Message::Shim(id, Shim::InputAck(0)) if id == stream

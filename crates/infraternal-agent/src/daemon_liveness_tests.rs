@@ -162,6 +162,11 @@ async fn state_ack(input_first: bool) {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let task = tokio::spawn(terminal(path, id, 2, 0, 30, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, _))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(30)))
@@ -250,6 +255,11 @@ async fn detached_ping_preserves_written_ack_without_output_credit() {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let task = tokio::spawn(terminal(path, id, 2, 0, 30, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, _))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(30)))
@@ -394,6 +404,11 @@ async fn terminal_probe_waits_for_the_shim_fence_and_keeps_stream_identity() {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let task = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, _))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(0)))

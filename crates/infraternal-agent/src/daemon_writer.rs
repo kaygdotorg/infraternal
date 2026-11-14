@@ -71,6 +71,28 @@ pub(crate) enum Message {
     Close(u32, &'static str),
     /// The session's shim is gone: a final stream close, never retried (wire §4).
     Ended(u32),
+    /// A relay started a new attachment on this stream, or rewound its output
+    /// cursor, under the given attachment id (see [`next_attachment`]). Nothing
+    /// is written to the wire. It travels on the ordered bulk lane, so raw
+    /// output queued before it may still be trimmed by an earlier key repaint,
+    /// while output queued after it never is: the server reuses a writer's
+    /// stream id when a browser resumes, and the new attachment's replay must
+    /// start exactly at the cursor the browser asked for (#477).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Attached(u32, u64),
+}
+
+/// Source of attachment ids. Starts at 1, so 0 never names a real attachment.
+static NEXT_ATTACHMENT: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh, process-unique id for one relay attachment (or one cursor rewind).
+///
+/// A relay announces it with [`Message::Attached`] before its first frame and
+/// stamps it on every [`PriorityMessage`]. The writer then ignores priority
+/// messages from an attachment that has already been replaced, such as a
+/// cancelled relay task that raced one last repaint into the priority lane.
+pub(crate) fn next_attachment() -> u64 {
+    NEXT_ATTACHMENT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A bounded writer message that may pass bulk output after relay authorization.
@@ -80,6 +102,8 @@ pub(crate) enum PriorityMessage {
     InputAck {
         /// Mux stream whose queued output may be replaced.
         stream: u32,
+        /// The relay attachment that sent it ([`next_attachment`]).
+        attachment: u64,
         /// Input sequence confirmed by the shim.
         seq: u64,
         /// Exclusive output cursor through which a key repaint will catch up.
@@ -89,6 +113,8 @@ pub(crate) enum PriorityMessage {
     Snapshot {
         /// Mux stream that owns this repaint.
         stream: u32,
+        /// The relay attachment that sent it ([`next_attachment`]).
+        attachment: u64,
         /// Exclusive output cursor captured by the shim.
         seq: u64,
         /// Faithful or approximate terminal bytes captured by the shim.
@@ -182,7 +208,7 @@ pub(crate) async fn writer(
         )
         .await?;
     }
-    let mut replace_through = HashMap::new();
+    let mut replace_through = ReplaceCursors::default();
     loop {
         let incoming = tokio::select! {
             biased;
@@ -222,32 +248,32 @@ async fn write_priority(
     tx: &mut Transmit,
     socket: &impl Channel,
     message: PriorityMessage,
-    replace_through: &mut HashMap<u32, u64>,
+    replace_through: &mut ReplaceCursors,
 ) -> io::Result<()> {
     match message {
         PriorityMessage::InputAck {
             stream,
+            attachment,
             seq,
             output_cursor,
         } => {
-            replace_through
-                .entry(stream)
-                .and_modify(|cursor| *cursor = (*cursor).max(output_cursor))
-                .or_insert(output_cursor);
+            if !replace_through.cover(stream, attachment, output_cursor) {
+                return Ok(());
+            }
             tx.send(socket, stream, &Frame::Ack { in_seq_acked: seq })
                 .await
         }
         PriorityMessage::Snapshot {
             stream,
+            attachment,
             seq,
             bytes,
             approximate,
             notice,
         } => {
-            replace_through
-                .entry(stream)
-                .and_modify(|cursor| *cursor = (*cursor).max(seq))
-                .or_insert(seq);
+            if !replace_through.cover(stream, attachment, seq) {
+                return Ok(());
+            }
             if let Some(notice) = notice {
                 write_event(tx, socket, stream, &notice).await?;
             }
@@ -273,7 +299,7 @@ async fn write_message(
     tx: &mut Transmit,
     socket: &impl Channel,
     message: Message,
-    replace_through: &mut HashMap<u32, u64>,
+    replace_through: &mut ReplaceCursors,
 ) -> io::Result<()> {
     match message {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -331,7 +357,7 @@ async fn write_message(
                 .await?;
         }
         Message::Ended(stream) => {
-            replace_through.remove(&stream);
+            replace_through.forget(stream);
             tx.send(
                 socket,
                 stream,
@@ -344,12 +370,65 @@ async fn write_message(
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Message::Close(stream, reason) => {
-            replace_through.remove(&stream);
+            replace_through.forget(stream);
             tx.send(socket, stream, &Frame::Close { code: 1, reason })
                 .await?;
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Message::Attached(stream, attachment) => replace_through.attach(stream, attachment),
     }
     Ok(())
+}
+
+/// Per-stream "raw output below this cursor is already covered by a key repaint"
+/// state for one writer, scoped to the relay attachment that set it (#477).
+///
+/// A key's Ack or repaint overtakes queued raw output on the priority lane, so
+/// the writer drops the raw bytes that repaint already covers. That cursor is
+/// only true for the attachment that produced it: when the server closes a
+/// stream and a resumed browser reattaches the same stream id, the new relay
+/// replays from the browser's cursor, which is usually far below the old one.
+/// [`Message::Attached`] therefore starts a clean slate, and priority messages
+/// from any other attachment neither move the cursor nor reach the wire.
+#[derive(Default)]
+struct ReplaceCursors {
+    /// Stream id to (current attachment id, exclusive covered cursor if any).
+    streams: HashMap<u32, (u64, Option<u64>)>,
+}
+
+impl ReplaceCursors {
+    /// A new attachment (or cursor rewind) owns `stream` from here on, with nothing covered yet.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn attach(&mut self, stream: u32, attachment: u64) {
+        self.streams.insert(stream, (attachment, None));
+    }
+
+    /// The stream closed: drop its state so a later stream with the same id starts clean.
+    fn forget(&mut self, stream: u32) {
+        self.streams.remove(&stream);
+    }
+
+    /// Record that `attachment` covered `stream`'s raw output below `through`.
+    ///
+    /// Returns false for a stale attachment: its frame must not be written,
+    /// because the browser is now attached through a different relay whose
+    /// credit and cursor it knows nothing about. A stream with no recorded
+    /// attachment adopts this one (writers fed without markers, such as tests
+    /// and the native bound relay before its first marker).
+    fn cover(&mut self, stream: u32, attachment: u64, through: u64) -> bool {
+        let entry = self.streams.entry(stream).or_insert((attachment, None));
+        if entry.0 != attachment {
+            return false;
+        }
+        entry.1 = Some(entry.1.map_or(through, |cursor| cursor.max(through)));
+        true
+    }
+
+    /// The covered cursor for `stream`'s current attachment, if a repaint set one.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn through(&self, stream: u32) -> Option<u64> {
+        self.streams.get(&stream).and_then(|entry| entry.1)
+    }
 }
 
 /// Drop covered output bytes and retain any suffix that follows the repaint cursor.
@@ -357,12 +436,12 @@ async fn write_message(
 fn filter_replaced_output(
     stream: u32,
     frame: Shim,
-    replace_through: &HashMap<u32, u64>,
+    replace_through: &ReplaceCursors,
 ) -> io::Result<Option<Shim>> {
     let Shim::Output(seq, bytes) = frame else {
         return Ok(Some(frame));
     };
-    let Some(through) = replace_through.get(&stream).copied() else {
+    let Some(through) = replace_through.through(stream) else {
         return Ok(Some(Shim::Output(seq, bytes)));
     };
     let length = u64::try_from(bytes.len()).map_err(|_| io::ErrorKind::InvalidData)?;
@@ -469,6 +548,114 @@ mod tests {
         (channel, messages_tx, priority_tx, frames_rx, task)
     }
 
+    /// Start the real writer and let its first frame through at once, for tests about content, not timing.
+    async fn open_writer(
+        first: Message,
+    ) -> (mpsc::Sender<Message>, mpsc::Sender<PriorityMessage>, mpsc::UnboundedReceiver<Vec<u8>>, JoinHandle<io::Result<()>>) {
+        let (channel, messages, priority, mut frames, task) = held_writer();
+        messages.send(first).await.unwrap();
+        channel.started.acquire().await.unwrap().forget();
+        channel.release.add_permits(1);
+        frames.recv().await.unwrap();
+        (messages, priority, frames, task)
+    }
+
+    /// Every Output frame the writer put on the wire, as (stream, out_seq, length).
+    fn outputs(frames: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<(u32, u64, usize)> {
+        let mut seen = vec![];
+        while let Ok(frame) = frames.try_recv() {
+            if let (stream, infraternal_protocol::Frame::Output { out_seq, bytes }) = decoded(&frame) {
+                seen.push((stream, out_seq, bytes.len()));
+            }
+        }
+        seen
+    }
+
+    /// A resumed browser reuses its writer stream id; the new attachment's replay must
+    /// start at the browser's cursor, not where the old attachment's key repaint ended (#477, J693).
+    #[tokio::test]
+    async fn a_new_attachment_on_a_reused_stream_keeps_its_replayed_raw_output() {
+        let (messages, priority, mut frames, task) =
+            open_writer(Message::Shim(9, Shim::Output(0, b"sibling".to_vec()))).await;
+        messages.send(Message::Attached(4, 1)).await.unwrap();
+        priority
+            .send(PriorityMessage::InputAck {
+                stream: 4,
+                attachment: 1,
+                seq: 1,
+                output_cursor: 4096,
+            })
+            .await
+            .unwrap();
+        // The server closed the stream and the browser resumed it at 1024.
+        messages.send(Message::Attached(4, 2)).await.unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(1024, vec![b'r'; 1024])))
+            .await
+            .unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(2048, vec![b's'; 4096])))
+            .await
+            .unwrap();
+        drop(messages);
+        drop(priority);
+        task.await.unwrap().unwrap();
+        assert_eq!(outputs(&mut frames), vec![(4, 1024, 1024), (4, 2048, 4096)]);
+    }
+
+    /// A cancelled relay's last repaint, racing in after its stream was reattached, neither
+    /// reaches the wire nor trims the new attachment's output (#477).
+    #[tokio::test]
+    async fn a_replaced_attachments_late_repaint_is_dropped() {
+        let (messages, priority, mut frames, task) =
+            open_writer(Message::Shim(9, Shim::Output(0, b"sibling".to_vec()))).await;
+        messages.send(Message::Attached(4, 7)).await.unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(0, vec![b'a'; 100])))
+            .await
+            .unwrap();
+        // The marker has been applied once the Output after it is on the wire.
+        frames.recv().await.unwrap();
+        priority
+            .send(PriorityMessage::Snapshot {
+                stream: 4,
+                attachment: 6,
+                seq: 9000,
+                bytes: b"old screen".to_vec(),
+                approximate: false,
+                notice: None,
+            })
+            .await
+            .unwrap();
+        priority
+            .send(PriorityMessage::InputAck {
+                stream: 4,
+                attachment: 7,
+                seq: 3,
+                output_cursor: 150,
+            })
+            .await
+            .unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(100, vec![b'b'; 100])))
+            .await
+            .unwrap();
+        drop(messages);
+        drop(priority);
+        task.await.unwrap().unwrap();
+        let mut kinds = vec![];
+        while let Ok(frame) = frames.try_recv() {
+            kinds.push(match decoded(&frame) {
+                (4, infraternal_protocol::Frame::Snapshot { .. }) => "snapshot".to_string(),
+                (4, infraternal_protocol::Frame::Ack { in_seq_acked }) => format!("ack {in_seq_acked}"),
+                (4, infraternal_protocol::Frame::Output { out_seq, bytes }) => format!("output {out_seq}+{}", bytes.len()),
+                (stream, _) => format!("other {stream}"),
+            });
+        }
+        // The current attachment's Ack covers through 150, so only its tail of the later Output remains.
+        assert_eq!(kinds, vec!["ack 3".to_string(), "output 150+50".to_string()]);
+    }
+
     /// Decode one captured mux frame so the test checks the real writer's wire order.
     fn decoded(bytes: &[u8]) -> (u32, infraternal_protocol::Frame<'_>) {
         let frame = infraternal_protocol::decode_muxed_frame(bytes).unwrap();
@@ -491,6 +678,7 @@ mod tests {
         priority
             .send(PriorityMessage::InputAck {
                 stream: 1,
+                attachment: 1,
                 seq: 1,
                 output_cursor: 5,
             })
@@ -542,6 +730,7 @@ mod tests {
         priority
             .send(PriorityMessage::InputAck {
                 stream: 1,
+                attachment: 1,
                 seq: 1,
                 output_cursor: 6,
             })
@@ -550,6 +739,7 @@ mod tests {
         priority
             .send(PriorityMessage::Snapshot {
                 stream: 1,
+                attachment: 1,
                 seq: 9,
                 bytes: b"screen".to_vec(),
                 approximate: false,

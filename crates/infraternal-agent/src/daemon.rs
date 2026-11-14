@@ -111,6 +111,7 @@ async fn forward_input_confirmation(
     tx: &mpsc::Sender<Message>,
     priority: &mpsc::Sender<PriorityMessage>,
     stream: u32,
+    attachment: u64,
     seq: u64,
     output_cursor: u64,
     repaint_pending: bool,
@@ -124,6 +125,7 @@ async fn forward_input_confirmation(
                 priority,
                 PriorityMessage::InputAck {
                     stream,
+                    attachment,
                     seq,
                     output_cursor,
                 },
@@ -1797,6 +1799,7 @@ async fn terminal(
                     bytes,
                     approximate,
                     notice,
+                    ..
                 } => {
                     if let Some(notice) = notice {
                         emit(&forwarded, Message::Event(stream, notice)).await?;
@@ -1866,6 +1869,13 @@ async fn terminal_run(
     priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
 ) -> io::Result<()> {
+    // Announce this attachment before any of its frames. The writer then stops
+    // trimming this stream's output by repaints of an earlier attachment that
+    // reused the stream id (a resumed browser), and ignores that attachment's
+    // late priority frames (#477).
+    #[cfg_attr(not(feature = "remote"), allow(unused_mut))]
+    let mut attachment = crate::daemon_writer::next_attachment();
+    emit(&tx, Message::Attached(stream, attachment)).await?;
     // Install ownership before output requests can exhaust credit. Dropping this
     // guard on cancellation/ordered exit releases only this window, even when
     // several windows or daemon connections share a shim.
@@ -2072,6 +2082,7 @@ async fn terminal_run(
                                 &priority,
                                 PriorityMessage::Snapshot {
                                     stream,
+                                    attachment,
                                     seq,
                                     bytes,
                                     approximate,
@@ -2203,6 +2214,10 @@ async fn terminal_run(
                         // already queued duplicates remain bounded and are trimmed
                         // by the server rather than charged to browser credit again.
                         output.reset_cursor(cursor);
+                        // The rewind starts a new replay below any cursor an
+                        // earlier key repaint covered: scope it afresh (#477).
+                        attachment = crate::daemon_writer::next_attachment();
+                        emit(&tx, Message::Attached(stream, attachment)).await?;
                         pending = None;
                         deadline = None;
                         key_repaint_target = None;
@@ -2398,6 +2413,7 @@ async fn terminal_run(
                             &tx,
                             &priority,
                             stream,
+                            attachment,
                             seq,
                             output.cursor(),
                             key_repaint_target.is_some(),

@@ -107,7 +107,8 @@ async fn terminal_stream_memory_at_200() {
             .await
             .unwrap()
             .unwrap();
-        receive.recv().await.unwrap();
+        // Skip each relay's attachment marker (#477) and wait for its first real reply.
+        while matches!(receive.recv().await.unwrap(), Message::Attached(..)) {}
     }
     let after = private_kib();
     println!(
