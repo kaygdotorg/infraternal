@@ -72,11 +72,14 @@ LAT_COUNT=$(h2h_lan_latency_count)
 WAN_LAT_COUNT=$(dur 300 60)
 # The in-app daemon paces ping slower under load than the CLI (about 110 probes/s
 # at 8 flows with pinned cores, J610), so its load is sized from the probe count.
-if [[ $SYSTEM == infraternal ]]; then
-    TPUT_S=$(h2h_lan_tput_duration 72 4 "$LAT_COUNT" "${H2H_LAN_MIN_PROBE_RATE:-110}")
-else
-    TPUT_S=$(h2h_lan_tput_duration 72 4)
-fi
+# The other full userspace daemons (Tailscale, NetBird userspace) get the same
+# sizing, so a slow ping never fails their window by design (J638). GotaTun and
+# the kernel engines keep the fixed 72 s that J579 and J629 measured with.
+case $SYSTEM in
+    infraternal | tailscale | netbird-userspace)
+        TPUT_S=$(h2h_lan_tput_duration 72 4 "$LAT_COUNT" "${H2H_LAN_MIN_PROBE_RATE:-110}") ;;
+    *) TPUT_S=$(h2h_lan_tput_duration 72 4) ;;
+esac
 WAN_TPUT_S=$(dur 20 4)
 IDLE_S=$(dur 15 3)
 GOTATUN_BIN=${H2H_GOTATUN_BIN:-$H2H_BIN/gotatun}
@@ -162,6 +165,11 @@ start_infraternal() {
     START=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["start_ns"])' "$ready")
     PEER=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["peer_ipv4"])' "$ready")
     WATCH=$(python3 -c 'import json,sys; print(",".join(map(str, json.loads(sys.argv[1])["pids"])))' "$ready")
+    # mesh_ix.py runs in side A's scope and starts node B from there; node B only
+    # enters B's network namespace. Move it to side B's CPUs before any window (D348, J638).
+    local node_b
+    node_b=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pids"][1])' "$ready")
+    h2h_scope_adopt "$node_b" "$(h2h_cpu_mask_for_pid "$B_PID")"
     TUN_A=infraternal0
     TUN_B=infraternal0
     note setup "$ready"

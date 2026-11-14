@@ -21,6 +21,7 @@ mode=""
 label=""
 out=""
 scenario=""
+profile=""
 calibration_status="uncalibrated"
 partial=0
 wg_bin=""
@@ -35,7 +36,7 @@ usage() {
     cat <<'USAGE'
 usage:
   perf-all.sh --validate [--out DIR]
-  perf-all.sh --smoke --row TAG=gotatun|kernel|kernel-plain|wireguard-go [--binary TAG=PATH] [--source TAG=SHA] [--out DIR]
+  perf-all.sh --smoke --row TAG=ENGINE [--binary TAG=PATH] [--source TAG=SHA] [--out DIR]
   perf-all.sh --calibration [--row warmup=gotatun] --row control-a=gotatun --row control-b=gotatun --row control-c=gotatun [--binary TAG=PATH] [--out DIR]
     (controls may be given in any order; a leading warmup row is run and discarded;
      H2H_LAN_PING_COUNT and H2H_LAN_TPUT_SECONDS set the probe count and load window)
@@ -51,6 +52,14 @@ usage:
     --row candidate-b=gotatun --row control-b=gotatun --binary TAG=PATH --source TAG=SHA [--out DIR]
     (one ABBA round in a single hold: four calibration-shaped LAN windows, no kernel or
      wireguard-go rows, so the round fits in under 17 minutes)
+  perf-all.sh --mixed --label HOLD --row TAG=ENGINE ... [--binary TAG=PATH --source TAG=SHA] [--out DIR]
+    (one cross-engine hold: two to four different engines, each once, run in the given
+     order as calibration-shaped LAN windows; take the orders from lib/latin_square.py
+     and pool the holds with lib/head_to_head.py)
+  perf-all.sh --bufferbloat --profile fifo|fq_codel --label HOLD --row TAG=ENGINE ... \
+    [--binary TAG=PATH --source TAG=SHA] [--out DIR]
+    (the home-router profile, D381: underlay, gotatun, kernel-plain and wireguard-go rows
+     behind a shaped 481.5/778.9 Mbit/s link with a deep FIFO or fq_codel queue)
   perf-all.sh --soak --label CUT --row control=gotatun --row candidate=gotatun \
     --binary TAG=PATH [--source TAG=SHA] [--out DIR]
 
@@ -84,6 +93,9 @@ while (($#)); do
         --hold) set_mode hold ;;
         --ab) set_mode ab ;;
         --soak) set_mode soak ;;
+        --mixed) set_mode mixed ;;
+        --bufferbloat) set_mode bufferbloat ;;
+        --profile) (($# >= 2)) || { echo '--profile needs a value' >&2; exit 2; }; profile=$2; shift ;;
         --label) (($# >= 2)) || { echo '--label needs a value' >&2; exit 2; }; label=$2; shift ;;
         --scenario) (($# >= 2)) || { echo '--scenario needs a value' >&2; exit 2; }; scenario=$2; shift ;;
         --tcp-flow)
@@ -101,7 +113,8 @@ while (($#)); do
             (($# >= 2)) || { echo '--row needs a value' >&2; exit 2; }
             parse_pair "$2" tag engine
             [[ $tag =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid row tag: $tag" >&2; exit 2; }
-            [[ $engine == gotatun || $engine == infraternal || $engine == kernel || $engine == kernel-plain || $engine == wireguard-go || $engine == underlay ]] || {
+            [[ $engine == gotatun || $engine == infraternal || $engine == kernel || $engine == kernel-plain || $engine == wireguard-go || \
+               $engine == tailscale || $engine == netbird-userspace || $engine == underlay ]] || {
                 echo "invalid engine for row $tag: $engine" >&2; exit 2;
             }
             for existing in "${rows[@]}"; do
@@ -290,6 +303,37 @@ case $mode in
             echo 'each repeated binary needs one matching source SHA' >&2; exit 2;
         }
         ;;
+    mixed)
+        # One cross-engine hold (J638): at most four windows keep it under the 17-minute
+        # hold cap (J629's four took 13m15s). Each engine once, so a Latin square over
+        # the holds balances position and carryover (lib/latin_square.py).
+        ((${#rows[@]} >= 2 && ${#rows[@]} <= 4)) || { echo '--mixed takes two to four rows' >&2; exit 2; }
+        [[ -n $label ]] || { echo '--mixed requires --label' >&2; exit 2; }
+        declare -A mixed_seen=()
+        for row in "${rows[@]}"; do
+            engine=${row#*=}
+            [[ -z ${mixed_seen[$engine]:-} ]] || { echo "--mixed runs each engine at most once; $engine repeats" >&2; exit 2; }
+            mixed_seen[$engine]=1
+            tag=${row%%=*}
+            if [[ $engine == gotatun || $engine == infraternal ]] && [[ -z ${sources[$tag]:-} ]]; then
+                echo "row $tag needs --source $tag=SHA" >&2; exit 2
+            fi
+        done
+        ;;
+    bufferbloat)
+        # One profile per hold: four engines x four load modes take about six minutes.
+        [[ $profile == fifo || $profile == fq_codel ]] || { echo '--profile must be fifo or fq_codel' >&2; exit 2; }
+        [[ -n $label ]] || { echo '--bufferbloat requires --label' >&2; exit 2; }
+        declare -A bufferbloat_seen=()
+        for row in "${rows[@]}"; do
+            engine=${row#*=}
+            [[ $engine == underlay || $engine == gotatun || $engine == kernel-plain || $engine == wireguard-go ]] || {
+                echo '--bufferbloat runs underlay, gotatun, kernel-plain and wireguard-go rows' >&2; exit 2;
+            }
+            [[ -z ${bufferbloat_seen[$engine]:-} ]] || { echo "--bufferbloat runs each engine at most once; $engine repeats" >&2; exit 2; }
+            bufferbloat_seen[$engine]=1
+        done
+        ;;
     soak)
         ((${#rows[@]} == 2)) || { echo '--soak takes exactly two rows' >&2; exit 2; }
         check_row 0 control gotatun
@@ -354,8 +398,15 @@ if [[ $mode == matrix ]]; then
     run_env+=("H2H_MATRIX_SCENARIO=$scenario" "H2H_MATRIX_CALIBRATION_STATUS=$calibration_status" \
         "H2H_MATRIX_CONFIG=$out/scenario.json" "H2H_WG_BIN=$wg_bin" "H2H_WIREGUARD_GO_BIN=$wireguard_go_bin")
 fi
-if [[ $mode == calibration || $mode == ab ]]; then
+if [[ $mode == calibration || $mode == ab || $mode == mixed ]]; then
     run_env+=(H2H_CALIBRATION_ONLY=1)
+fi
+if [[ $mode == bufferbloat ]]; then
+    run_env+=("H2H_HOME_PROFILE=$profile")
+    if [[ -n ${H2H_HOME_SECONDS:-} ]]; then
+        [[ $H2H_HOME_SECONDS =~ ^[1-9][0-9]*$ ]] || { echo 'H2H_HOME_SECONDS must be a positive integer' >&2; exit 2; }
+        run_env+=("H2H_HOME_SECONDS=$H2H_HOME_SECONDS")
+    fi
 fi
 if [[ -n ${H2H_MATRIX_RPS_POLICY:-} ]]; then
     run_env+=("H2H_MATRIX_RPS_POLICY=$H2H_MATRIX_RPS_POLICY")
@@ -366,7 +417,7 @@ fi
 # Longer sampling stays opt-in: H2H_LAN_PING_COUNT=15000 with H2H_LAN_TPUT_SECONDS=85
 # leaves about 150 samples above p99, but a three-control batch with it failed two
 # gates. The mesh case fails the window if the probes outlive the load (D345).
-if [[ $mode == calibration || $mode == ab ]] && [[ -z ${H2H_LAN_PING_COUNT:-} ]]; then
+if [[ $mode == calibration || $mode == ab || $mode == mixed ]] && [[ -z ${H2H_LAN_PING_COUNT:-} ]]; then
     H2H_LAN_PING_COUNT=8000
 fi
 if [[ -n ${H2H_LAN_PING_COUNT:-} ]]; then
