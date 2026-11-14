@@ -584,7 +584,9 @@ async fn a_legacy_window_key_keeps_exact_raw_delivery() {
     let mut acked = false;
     while forwarded.is_none() || !acked {
         match tokio::time::timeout(EVENT_GUARD, fixture.messages.recv()).await {
-            Ok(Some(Message::Shim(stream, Shim::Output(seq, bytes)))) if stream == fixture.stream => {
+            Ok(Some(Message::Shim(stream, Shim::Output(seq, bytes))))
+                if stream == fixture.stream =>
+            {
                 forwarded = Some((seq, bytes.len()));
             }
             Ok(Some(Message::Shim(stream, Shim::InputAck(1)))) if stream == fixture.stream => {

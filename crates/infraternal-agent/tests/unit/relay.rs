@@ -187,8 +187,16 @@ fn a_returned_credit_ends_reserve_setup_for_a_legacy_window() {
     output.grant(1).unwrap();
     output.grant(BULK_CREDIT).unwrap();
 
-    assert_eq!(output.reserved_credit(), 0, "the client never offered a reserve");
-    assert_eq!(output.repaint_budget(), 0, "a legacy window keeps exact raw delivery");
+    assert_eq!(
+        output.reserved_credit(),
+        0,
+        "the client never offered a reserve"
+    );
+    assert_eq!(
+        output.repaint_budget(),
+        0,
+        "a legacy window keeps exact raw delivery"
+    );
     assert_eq!(
         output.suffix(output.cursor(), 2 * BULK_CREDIT as usize),
         Ok(0..BULK_CREDIT as usize + 1),
@@ -212,11 +220,12 @@ fn a_confirmed_split_reserve_engages_the_repaint_path() {
     output.grant(EARLY).unwrap();
     output.forward(EARLY as usize).unwrap();
     assert_eq!(output.repaint_budget(), 0, "the reserve is still pending");
-    assert_eq!(output.repaint_reserved(u64::from(EARLY), 1), Err(Error::OutOfRange));
+    assert_eq!(
+        output.repaint_reserved(u64::from(EARLY), 1),
+        Err(Error::OutOfRange)
+    );
 
-    output
-        .grant(BULK_CREDIT + REPAINT_RESERVE - EARLY)
-        .unwrap();
+    output.grant(BULK_CREDIT + REPAINT_RESERVE - EARLY).unwrap();
     assert_eq!(output.reserved_credit(), u64::from(REPAINT_RESERVE));
     output.forward((BULK_CREDIT - EARLY) as usize).unwrap();
     assert!(output.bulk_starved());
