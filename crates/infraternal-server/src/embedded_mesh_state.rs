@@ -28,6 +28,8 @@ const MESH_FILES: &[&str] = &[
 const MIGRATION_MARKER: &str = ".mesh-state-migration.pending";
 /// Versioned marker header; its body lists the files that the interrupted transfer owns.
 const MIGRATION_MARKER_HEADER: &str = "J501 mesh state migration v1";
+/// Optional marker line naming the public key whose ownership was proven before the transfer.
+const MARKER_KEY_PREFIX: &str = "public-key ";
 /// Marker body used by the first candidate; recovery infers its file list from both directories.
 const LEGACY_MIGRATION_MARKER: &[u8] = b"J501 mesh state migration\n";
 /// Durable record of the public key last mirrored to the runtime path; it is not secret.
@@ -61,6 +63,12 @@ struct Marker {
     /// True only for the earlier marker format, which did not record its own file list.
     legacy: bool,
     files: Vec<&'static str>,
+    /// The public key whose ownership was proven before the transfer began (J628 P3).
+    ///
+    /// Resuming copies whatever the runtime path holds by then, which after a reboot may be
+    /// another server's mirror; recovery copies only this exact identity. Markers written before
+    /// this field existed carry `None`, and recovery asks the ownership check again instead.
+    public_key: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,7 +189,12 @@ fn migrate_locked(
             }
         }
         if pending.legacy || pending.direction == Direction::Rollback {
-            rewrite_marker(&marker, Direction::Forward, &pending.files)?;
+            rewrite_marker(
+                &marker,
+                Direction::Forward,
+                &pending.files,
+                pending.public_key.as_ref(),
+            )?;
             sync_directory(durable)?;
         }
         ensure_recoverable_plan(volatile, durable, &pending.files, uid)?;
@@ -190,8 +203,10 @@ fn migrate_locked(
             validate_private_key(durable, &present_files(durable, uid)?, uid)?;
         }
         // A rollback marker (written by the first J501 candidates) makes the previous build's
-        // possibly updated runtime identity authoritative. The marker was written by this data
-        // directory's own server, so it needs no further ownership proof.
+        // possibly updated runtime identity authoritative. The marker itself is this server's,
+        // but the runtime path is shared and emptied by a reboot, so the identity it now holds
+        // must still be the proven one (J628 P3).
+        check_resumed_identity(volatile, durable, &marker, &pending, owns, uid)?;
         copy_plan(volatile, durable, &pending.files, uid)?;
         if !pending.legacy {
             remove_other_files(durable, &pending.files, uid)?;
@@ -227,7 +242,7 @@ fn migrate_locked(
                 log_foreign_identity(volatile, durable, &public);
                 return Ok(());
             }
-            adopt(volatile, durable, &legacy_files, &marker, uid)?;
+            adopt(volatile, durable, &legacy_files, &marker, uid, &public)?;
         }
         (Some(durable_key), Some(legacy_key)) => {
             let public = public_key(legacy_key)?;
@@ -245,7 +260,7 @@ fn migrate_locked(
                          (the previous server build ran, or the database was restored); adopting \
                          the runtime identity"
                     );
-                    adopt(volatile, durable, &legacy_files, &marker, uid)?;
+                    adopt(volatile, durable, &legacy_files, &marker, uid, &public)?;
                 }
                 Conflict::LeaveForeign => {
                     log_foreign_identity(volatile, durable, &public);
@@ -307,8 +322,64 @@ fn log_foreign_identity(volatile: &Path, durable: &Path, public: &[u8; 32]) {
     );
 }
 
+/// Refuse to resume an interrupted transfer unless it still carries the proven identity.
+///
+/// Recovery copies the planned files from the runtime path, or keeps the durable copy when an
+/// earlier move already consumed the source. A reboot empties the shared runtime path, and
+/// another root server on the host may mirror its own identity there before this one starts, so
+/// the key recovery would publish is checked against the key the marker recorded (or, for an
+/// older marker without one, against this database's ownership answer). On a mismatch nothing
+/// moves and start fails closed (J628 P3).
+/// # Errors
+/// Returns `PermissionDenied` after logging recovery steps, or any key read error.
+fn check_resumed_identity(
+    volatile: &Path,
+    durable: &Path,
+    marker: &Path,
+    pending: &Marker,
+    owns: &dyn Fn(&[u8; 32]) -> bool,
+    uid: u32,
+) -> io::Result<()> {
+    if !pending.files.contains(&"mesh-private-key") {
+        return Ok(());
+    }
+    let key = match read_private_key(volatile, uid)? {
+        Some(key) => key,
+        None => match read_private_key(durable, uid)? {
+            Some(key) => key,
+            None => return Ok(()),
+        },
+    };
+    let public = public_key(&key)?;
+    let proven = match &pending.public_key {
+        Some(expected) => *expected == public,
+        None => owns(&public),
+    };
+    if proven {
+        return Ok(());
+    }
+    tracing::error!(
+        legacy_state = %volatile.display(),
+        durable_state = %durable.display(),
+        found_public_key = %hex_key(&public),
+        expected_public_key = %pending.public_key.as_ref().map_or_else(
+            || "a key this database records".to_owned(),
+            hex_key,
+        ),
+        "an interrupted Mesh identity transfer would now copy a different identity than the \
+         one it proved, probably another server's mirror after a reboot; nothing was copied. \
+         If the expected key is still available, put it back at the runtime path and start \
+         again. Otherwise remove {} to give up the transfer; this server then starts with a new \
+         Mesh identity that peers have to learn again.",
+        marker.display(),
+    );
+    Err(io::ErrorKind::PermissionDenied.into())
+}
+
 /// Copy an owned runtime identity into durable storage under a recoverable marker.
 ///
+/// `public` is the key whose ownership the caller proved; the marker records it so an
+/// interrupted copy resumes only with that identity.
 /// The runtime copy stays: a previous build started cold reads only that path (J595 P1). Durable
 /// files absent from the runtime set belong to the replaced identity, for example its rotation
 /// journal, and are removed so the durable set matches the adopted one.
@@ -320,8 +391,9 @@ fn adopt(
     legacy_files: &[&'static str],
     marker: &Path,
     uid: u32,
+    public: &[u8; 32],
 ) -> io::Result<()> {
-    create_marker(marker, Direction::Forward, legacy_files)?;
+    create_marker(marker, Direction::Forward, legacy_files, Some(public))?;
     sync_directory(durable)?;
     copy_plan(volatile, durable, legacy_files, uid)?;
     remove_other_files(durable, legacy_files, uid)?;
@@ -412,7 +484,17 @@ fn read_hex_record(path: &Path, header: &str, uid: u32) -> io::Result<Option<[u8
         return Err(io::ErrorKind::InvalidData.into());
     }
     let hex = lines.next().ok_or(io::ErrorKind::InvalidData)?;
-    if hex.len() != 64 || lines.next().is_some() {
+    if lines.next().is_some() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    parse_hex_key(hex).map(Some)
+}
+
+/// Decode exactly 64 hex digits into a 32-byte public value.
+/// # Errors
+/// Returns `InvalidData` for any other length or a non-hex digit.
+fn parse_hex_key(hex: &str) -> io::Result<[u8; 32]> {
+    if hex.len() != 64 || !hex.is_ascii() {
         return Err(io::ErrorKind::InvalidData.into());
     }
     let mut value = [0_u8; 32];
@@ -420,7 +502,7 @@ fn read_hex_record(path: &Path, header: &str, uid: u32) -> io::Result<Option<[u8
         *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
             .map_err(|_| io::ErrorKind::InvalidData)?;
     }
-    Ok(Some(value))
+    Ok(value)
 }
 
 /// Hash this machine's ID into the value a durable identity is bound to.
@@ -806,8 +888,13 @@ fn lock_mesh_directory_within(
 /// Write a non-secret, versioned manifest before moving files so recovery knows what must exist.
 /// # Errors
 /// Returns an error if the marker cannot be created, made private, or synced.
-fn create_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Result<()> {
-    let body = marker_body(direction, files)?;
+fn create_marker(
+    path: &Path,
+    direction: Direction,
+    files: &[&str],
+    public_key: Option<&[u8; 32]>,
+) -> io::Result<()> {
+    let body = marker_body(direction, files, public_key)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -822,8 +909,13 @@ fn create_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Resul
 /// Replace a pending marker atomically when rollback added runtime files absent from its manifest.
 /// # Errors
 /// Refuses unsafe marker paths and reports failed private staging, rename, or sync operations.
-fn rewrite_marker(path: &Path, direction: Direction, files: &[&str]) -> io::Result<()> {
-    let body = marker_body(direction, files)?;
+fn rewrite_marker(
+    path: &Path,
+    direction: Direction,
+    files: &[&str],
+    public_key: Option<&[u8; 32]>,
+) -> io::Result<()> {
+    let body = marker_body(direction, files, public_key)?;
     let uid = nix::unistd::Uid::effective().as_raw();
     if !owned_file(path, uid, true)? {
         return Err(io::ErrorKind::NotFound.into());
@@ -870,10 +962,14 @@ fn replace_private_file(path: &Path, body: &[u8]) -> io::Result<()> {
     result
 }
 
-/// Encode the marker's non-secret direction and stable list of mesh files.
+/// Encode the marker's non-secret direction, proven public key, and stable list of mesh files.
 /// # Errors
 /// Rejects empty or unknown file lists.
-fn marker_body(direction: Direction, files: &[&str]) -> io::Result<String> {
+fn marker_body(
+    direction: Direction,
+    files: &[&str],
+    public_key: Option<&[u8; 32]>,
+) -> io::Result<String> {
     if files.is_empty() || files.iter().any(|name| !MESH_FILES.contains(name)) {
         return Err(io::ErrorKind::InvalidInput.into());
     }
@@ -881,8 +977,11 @@ fn marker_body(direction: Direction, files: &[&str]) -> io::Result<String> {
         Direction::Forward => "forward",
         Direction::Rollback => "rollback",
     };
+    let key = public_key.map_or_else(String::new, |key| {
+        format!("{MARKER_KEY_PREFIX}{}\n", hex_key(key))
+    });
     Ok(format!(
-        "{MIGRATION_MARKER_HEADER}\n{direction}\n{}\n",
+        "{MIGRATION_MARKER_HEADER}\n{direction}\n{key}{}\n",
         files.join("\n")
     ))
 }
@@ -908,6 +1007,7 @@ fn read_marker(path: &Path, uid: u32) -> io::Result<Option<Marker>> {
             direction: Direction::Forward,
             legacy: true,
             files: Vec::new(),
+            public_key: None,
         }));
     }
     let text = std::str::from_utf8(&body).map_err(|_| io::ErrorKind::InvalidData)?;
@@ -919,6 +1019,19 @@ fn read_marker(path: &Path, uid: u32) -> io::Result<Option<Marker>> {
         Some("forward") => Direction::Forward,
         Some("rollback") => Direction::Rollback,
         _ => return Err(io::ErrorKind::InvalidData.into()),
+    };
+    let mut lines = lines.peekable();
+    let public_key = match lines
+        .peek()
+        .copied()
+        .and_then(|line| line.strip_prefix(MARKER_KEY_PREFIX))
+    {
+        Some(hex) => {
+            let key = parse_hex_key(hex)?;
+            lines.next();
+            Some(key)
+        }
+        None => None,
     };
     let mut files = Vec::new();
     for line in lines {
@@ -937,6 +1050,7 @@ fn read_marker(path: &Path, uid: u32) -> io::Result<Option<Marker>> {
         direction,
         legacy: false,
         files,
+        public_key,
     }))
 }
 
@@ -2570,6 +2684,48 @@ mod tests {
             Some([0x91; 32].as_slice()),
             "a pending marker adopted a key this database does not own (result {result:?})"
         );
+    }
+
+    /// A marker that recorded its proven key resumes only with that key, whatever the database
+    /// answers, and a matching key still finishes the transfer (J628 P3).
+    #[test]
+    fn a_resumed_adoption_copies_only_the_key_its_marker_proved() {
+        let proven = super::public_key(&[0xa1; 32]).expect("derive the proven public key");
+        let mut outcomes = Vec::new();
+        for runtime in [[0xa2_u8; 32], [0xa1; 32]] {
+            let root = fixture_root();
+            let (volatile, durable) = private_directories(&root);
+            write_private(
+                &durable.join(super::MIGRATION_MARKER),
+                super::marker_body(
+                    super::Direction::Forward,
+                    &["mesh-public.json", "mesh-private-key"],
+                    Some(&proven),
+                )
+                .expect("encode the marker")
+                .as_bytes(),
+            );
+            write_private(&durable.join("mesh-public.json"), b"own-public");
+            write_private(&volatile.join("mesh-private-key"), &runtime);
+            write_private(&volatile.join("mesh-public.json"), b"runtime-public");
+
+            let result = migrate(&volatile, &durable, &owned);
+            let durable_key = fs::read(durable.join("mesh-private-key")).ok();
+            let marker_left = durable.join(super::MIGRATION_MARKER).exists();
+            fs::remove_dir_all(root).expect("remove fixture root");
+            outcomes.push((
+                result.map_err(|error| error.kind()),
+                durable_key,
+                marker_left,
+            ));
+        }
+
+        assert_eq!(
+            outcomes[0],
+            (Err(std::io::ErrorKind::PermissionDenied), None, true),
+            "a different runtime key must fail closed and keep the marker"
+        );
+        assert_eq!(outcomes[1], (Ok(()), Some([0xa1; 32].to_vec()), false));
     }
 
     /// A warm handoff never overwrites a runtime key that another server put there.
