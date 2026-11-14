@@ -16,7 +16,7 @@ export CARGO_TARGET_DIR=/mnt/build/targets/J526
   --features infraternal-plugin-mesh/agent
 ```
 
-Run the matrix with `tc`, `nft`, `conntrack`, `unshare`, `nsenter`, and `ip`
+Run the matrix with `tc`, `nft`, `conntrack`, `tcpdump`, `unshare`, `nsenter`, and `ip`
 available on `PATH`. The Nix shell below supplies those tools without
 installing them on compute01. The runner creates private network and mount
 namespaces, with a private `/run/infraternal` directory for the server's
@@ -26,7 +26,7 @@ must not already exist because the matrix creates and owns that directory:
 
 ```sh
 ~/infraternal-ops/build-slot nice -n10 nix shell \
-  nixpkgs#iproute2 nixpkgs#nftables nixpkgs#conntrack-tools nixpkgs#util-linux \
+  nixpkgs#iproute2 nixpkgs#nftables nixpkgs#conntrack-tools nixpkgs#util-linux nixpkgs#tcpdump \
   --command bash -c '
     cd /home/claude/worktrees/J526
     scripts/gotatun_break_it/run_linux_matrix.sh \
@@ -52,7 +52,11 @@ reference and whether the budget was met.
 The NAT rebind row behaves like a router that has moved B's mapping: the
 translated port and a drop for new flows to the old port stay in place until
 the case's namespace is torn down, and the row fails unless A ends up
-addressing B at the new port. Never delete that nat table mid-flow: it is the
+addressing B at the new port. Every run, pass or fail, keeps
+`underlay-a.pcap` and `underlay-b.pcap` (UDP headers on both ends, until
+teardown) and `nat-rebind-evidence.jsonl`: B's conntrack, the injected NAT's
+counters and both agents' live peer rows before the rebind, right after it and
+after the fault window. Never delete that nat table mid-flow: it is the
 namespace's only nat chain, so removing it un-translates the live flow while a
 stale reverse mapping keeps dropping A's packets for good (#517).
 After recovery, a run of lost probes longer than one probe timeout (1 s) is a

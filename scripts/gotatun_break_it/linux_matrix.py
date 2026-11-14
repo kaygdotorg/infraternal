@@ -353,6 +353,8 @@ class NamespacePair:
         self.right: MeshNode | None = None
         self.runtime_root: Path | None = None
         self.closed = False
+        # Packet captures a fault started; stopped (and flushed) before the namespaces go.
+        self.captures: list[subprocess.Popen[bytes]] = []
         self.scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             self._create_underlay()
@@ -513,6 +515,8 @@ class NamespacePair:
         if self.closed:
             return
         self.closed = True
+        for capture in self.captures:
+            _stop_process(capture)
         if self.server is not None:
             self.server.close()
         for node in (self.left, self.right):
@@ -845,6 +849,69 @@ def _rebind_nat_port(namespace: int, old_port: int, new_port: int) -> None:
         raise RuntimeError("no underlay UDP mapping existed to rebind")
 
 
+def _start_underlay_captures(pair: NamespacePair, evidence: Path) -> None:
+    """Capture underlay UDP headers on both ends until the pair is torn down.
+
+    Every run keeps its captures, pass or fail, so a count of passes and failures can be
+    checked against what actually crossed the wire (#517, #483). Headers only: 128 bytes.
+    """
+    tcpdump = _tool("tcpdump")
+    for label, device, namespace in (("a", "underlay0", None), ("b", "underlay1", pair.peer_pid)):
+        pcap = evidence / f"underlay-{label}.pcap"
+        command = [tcpdump, "-i", device, "-n", "-U", "-s", "128", "-w", str(pcap), "udp"]
+        if namespace is not None:
+            command = _in_namespace(namespace, *command)
+        log = (evidence / f"underlay-{label}.tcpdump.log").open("wb")
+        try:
+            pair.captures.append(
+                subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            )
+        finally:
+            log.close()
+    # sleep: tcpdump needs a moment to attach before the fault's first packets matter.
+    time.sleep(0.5)
+
+
+def _record_nat_stage(pair: NamespacePair, evidence: Path, stage: str) -> None:
+    """Append B's conntrack, the injected NAT's counters and both peers' live state.
+
+    Each stage is written at once, so a run that errors later still keeps what it saw.
+    Lookups that fail are recorded as text rather than aborting the fault.
+    """
+
+    def text(command: list[str]) -> str:
+        """Return a command's output, or why it failed, without raising."""
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, check=False, timeout=15.0
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return f"error: {error}"
+        return result.stdout + result.stderr
+
+    def peers(node: MeshNode | None) -> Any:
+        """Return one agent's peer rows, or why they could not be read."""
+        try:
+            return node.peers() if node is not None else None
+        except (OSError, RuntimeError, ValueError) as error:
+            return f"error: {error}"
+
+    record = {
+        "stage": stage,
+        "monotonic_ns": time.monotonic_ns(),
+        "b_conntrack_udp": text(
+            _in_namespace(pair.peer_pid, _tool("conntrack"), "-L", "-p", "udp")
+        ),
+        "b_nat_table": text(
+            _in_namespace(pair.peer_pid, _tool("nft"), "list", "table", "ip", "j526")
+        ),
+        "a_peers": peers(pair.left),
+        "b_peers": peers(pair.right),
+    }
+    with (evidence / "nat-rebind-evidence.jsonl").open("a", encoding="utf-8") as output:
+        output.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def _peer_endpoint(node: MeshNode) -> str | None:
     """Return where a two-node fixture's agent currently sends its only peer's packets."""
     rows = node.peers()
@@ -872,11 +939,16 @@ def _apply_fault(case: FaultCase, pair: NamespacePair) -> dict[str, Any]:
         new_port = old_port + 7000 if old_port <= 58_535 else old_port - 10_000
         if new_port <= 1024 or new_port == old_port:
             raise RuntimeError("could not choose a distinct NAT source port")
+        evidence = pair.scratch.parent
+        _start_underlay_captures(pair, evidence)
+        _record_nat_stage(pair, evidence, "before")
         _rebind_nat_port(pair.peer_pid, old_port, new_port)
         details["recovery_started_ns"] = time.monotonic_ns()
+        _record_nat_stage(pair, evidence, "after-delete")
         _wait_for_duration(3)
         # The new mapping stays for the rest of the case, as a router's would. Prove that the
         # row really exercised a rebind: the peer must now address B at the translated port.
+        _record_nat_stage(pair, evidence, "after-window")
         endpoint = _peer_endpoint(pair.left)
         details.update(
             {

@@ -622,6 +622,12 @@ class FaultReportStallTests(unittest.TestCase):
 class NatPortRebindFaultTests(unittest.TestCase):
     """Rebind B's NAT mapping the way a router does, and prove the rebind took effect."""
 
+    def setUp(self):
+        """Give every run a private case directory for its evidence files."""
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.case_dir = Path(self.scratch.name)
+
     def _run_fault(self, *, endpoint="10.220.0.2:58821", deleted=(0, 1)):
         """Apply the NAT row against recorded commands; return the event and command log.
 
@@ -631,6 +637,7 @@ class NatPortRebindFaultTests(unittest.TestCase):
         events = []
         clock_value = 0
         exit_codes = iter(deleted)
+        self.pair = None
 
         def record_run(command):
             """Remember one namespace command without changing the test host."""
@@ -638,9 +645,15 @@ class NatPortRebindFaultTests(unittest.TestCase):
             return ""
 
         def record_subprocess(command, **_):
-            """Answer `conntrack -D` with the scripted exit code for its direction."""
+            """Answer `conntrack -D` with its scripted exit code and snapshots with text."""
             events.append(("run", tuple(command)))
-            return SimpleNamespace(returncode=next(exit_codes), stdout="", stderr="")
+            code = next(exit_codes) if "-D" in command else 0
+            return SimpleNamespace(returncode=code, stdout="snapshot", stderr="")
+
+        def record_capture(command, **_):
+            """Stand in for a tcpdump process without capturing on the test host."""
+            events.append(("capture", tuple(command)))
+            return SimpleNamespace(pid=0, poll=lambda: 0)
 
         def record_wait(seconds):
             """Record the bounded time before the rebind is checked."""
@@ -661,14 +674,19 @@ class NatPortRebindFaultTests(unittest.TestCase):
         pair = SimpleNamespace(
             coordinator=object(),
             left=SimpleNamespace(identity={"port": 51820}, peers=peers),
-            right=SimpleNamespace(identity={"port": 51821}),
+            right=SimpleNamespace(identity={"port": 51821}, peers=lambda: []),
             peer_pid=4321,
+            scratch=self.case_dir / "fixture",
+            captures=[],
         )
+        self.pair = pair
         case = matrix.FaultCase("nat-port-rebind", "nat-port")
         with (
             patch.object(matrix, "_tool", side_effect=lambda name: f"/nix/bin/{name}"),
             patch.object(matrix, "_run", side_effect=record_run),
             patch.object(matrix.subprocess, "run", side_effect=record_subprocess),
+            patch.object(matrix.subprocess, "Popen", side_effect=record_capture),
+            patch.object(matrix.time, "sleep"),
             patch.object(matrix, "_wait_for_duration", side_effect=record_wait),
             patch.object(matrix.time, "monotonic_ns", side_effect=monotonic_ns),
         ):
@@ -711,21 +729,53 @@ class NatPortRebindFaultTests(unittest.TestCase):
         self.assertLess(max(snat, refuse), deletes[0])
 
         kinds = [kind for kind, _ in events]
-        recovery_clock = next(
+        last_delete = max(
             i
-            for i, (kind, _) in enumerate(events)
-            if kind == "clock" and i > kinds.index("run")
+            for i, (kind, command) in enumerate(events)
+            if kind == "run" and "-D" in command
+        )
+        recovery_clock = next(
+            i for i, (kind, _) in enumerate(events) if kind == "clock" and i > last_delete
         )
         self.assertLess(recovery_clock, kinds.index("wait"))
-        self.assertLess(kinds.index("wait"), kinds.index("peers"))
+        # The endpoint check, A's last peer read, follows the fault window.
+        last_peers = max(i for i, kind in enumerate(kinds) if kind == "peers")
+        self.assertLess(kinds.index("wait"), last_peers)
         self.assertEqual(event["recovery_started_ns"], events[recovery_clock][1])
         self.assertEqual(event["peer_endpoint_after_rebind"], "10.220.0.2:58821")
         self.assertEqual(event["new_source_port"], 58821)
 
+    def test_nat_rebind_keeps_captures_and_staged_evidence_for_every_run(self):
+        """Capture both underlays and write conntrack, NAT and peer state at each stage.
+
+        A pass or fail count means little unless each run shows what happened (#517, #483).
+        """
+        _, events = self._run_fault()
+        captures = [" ".join(command) for kind, command in events if kind == "capture"]
+
+        self.assertEqual(len(captures), 2)
+        self.assertIn("-i underlay0", captures[0])
+        self.assertIn(str(self.case_dir / "underlay-a.pcap"), captures[0])
+        self.assertIn("nsenter -t 4321 -n -- /nix/bin/tcpdump -i underlay1", captures[1])
+        self.assertIn(str(self.case_dir / "underlay-b.pcap"), captures[1])
+        self.assertEqual(len(self.pair.captures), 2)
+        stages = [
+            json.loads(line)
+            for line in (self.case_dir / "nat-rebind-evidence.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(
+            [stage["stage"] for stage in stages], ["before", "after-delete", "after-window"]
+        )
+        self.assertEqual(stages[-1]["a_peers"][0]["counters"]["endpoint"], "10.220.0.2:58821")
+        self.assertEqual(stages[-1]["b_conntrack_udp"], "snapshot")
+        self.assertEqual(stages[-1]["b_nat_table"], "snapshot")
+
     def test_nat_rebind_fails_when_the_peer_never_saw_the_new_port(self):
-        """Refuse to report a rebind row that did not rebind anything."""
+        """Refuse to report a rebind row that did not rebind anything, keeping its evidence."""
         with self.assertRaisesRegex(RuntimeError, "did not take effect"):
             self._run_fault(endpoint="10.220.0.2:51821")
+        stages = (self.case_dir / "nat-rebind-evidence.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(stages[-1])["stage"], "after-window")
 
     def test_nat_rebind_fails_when_no_mapping_existed(self):
         """Refuse a rebind when neither conntrack direction matched the underlay flow."""
