@@ -141,6 +141,45 @@ function probeP99(report: string): number {
   return Number(match[1]);
 }
 
+/** A status that says the terminal lost, or is rebuilding, its connection. */
+const RECONNECT_STATUS = /Reconnect|Catching up|Connection lost|stopped responding|connection sent something unexpected/;
+
+/**
+ * How wide the ink at the start of the terminal's first text row is, in CSS pixels, measured on a screenshot of the
+ * rendered page (the production build exposes no screen text). A `<K000042>` token at row 1, column 1 spans nine
+ * cells; a lone `y` from flood output spans one, and one at the far end of the row is outside the measured 200 px. Pixels count as ink when they differ clearly from the row's background, so the
+ * theme and font do not matter. The probe panel is hidden while measuring because it overlaps the terminal.
+ */
+async function firstRowInkWidth(): Promise<number> {
+  const panel = page.locator("#probe-panel");
+  await panel.evaluate((element) => { (element as HTMLElement).hidden = true; });
+  const box = (await page.locator(".terminal-host").first().boundingBox())!;
+  const shot = await page.screenshot({ clip: { x: box.x, y: box.y, width: box.width, height: Math.min(48, box.height) } });
+  await panel.evaluate((element) => { (element as HTMLElement).hidden = false; });
+  return page.evaluate(async (bytes: number[]) => {
+    const bitmap = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d")!;
+    context.drawImage(bitmap, 0, 0);
+    const { data, width, height } = context.getImageData(0, 0, bitmap.width, bitmap.height);
+    const at = (x: number, y: number) => (y * width + x) * 4;
+    const background = at(6, 6);
+    let left = Infinity;
+    let right = -Infinity;
+    // Skip a 4 px frame so the host's border and rounded corners never count as text.
+    const end = Math.min(width - 4, Math.round(200 * window.devicePixelRatio));
+    for (let y = 4; y < height - 4; y++) for (let x = 4; x < end; x++) {
+      const i = at(x, y);
+      const distance = Math.abs(data[i]! - data[background]!) + Math.abs(data[i + 1]! - data[background + 1]!) + Math.abs(data[i + 2]! - data[background + 2]!);
+      if (distance < 90) continue;
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+    }
+    // The screenshot is taken at the device pixel ratio; report CSS pixels.
+    return right < left ? 0 : (right - left + 1) / window.devicePixelRatio;
+  }, [...shot]);
+}
+
 /** Finish when all requested keys paint, or surface the probe's own timeout with its partial trace. */
 async function waitForPaintedEchoes(page: Page, count: number, timeoutMs: number): Promise<void> {
   const outcome = await page.waitForFunction((expected: number) => {
@@ -165,6 +204,7 @@ test("keys typed into a terminal that its own program floods keep showing on scr
   for (let i = 0; i < KEYS; i++) quiet.push(await typeKey(++typed));
 
   const { output, stream } = terminalStream();
+  const route = terminalBridge().id;
   await page.keyboard.press("F");
   // `yes` is running once a screenful of its lines has reached the bridge, raw or repainted.
   await expect.poll(() => {
@@ -175,7 +215,17 @@ test("keys typed into a terminal that its own program floods keep showing on scr
   const flood: number[] = [];
   for (let i = 0; i < KEYS; i++) flood.push(await typeKey(++typed));
 
+  // The keys reached the bridge; now the person must see them. The newest token is drawn on row 1 of the rendered
+  // terminal, on the route the flood started on, with no reconnect status (#477: these used to pass on a blank screen).
+  const tokenWidth = await expect.poll(firstRowInkWidth, { timeout: 5_000, intervals: [50, 100, 250] })
+    .toBeGreaterThan(40).then(() => firstRowInkWidth(), async (error: unknown) => {
+      await page.screenshot({ path: test.info().outputPath("same-session-flood-no-token.png") });
+      throw error;
+    });
   await page.screenshot({ path: test.info().outputPath("same-session-flood.png") });
+  expect(activeTerminalBridge()?.id, "typing during the flood must not cost the browser its route").toBe(route);
+  await expect(page.locator("#connection-status")).not.toHaveText(RECONNECT_STATUS);
+  console.log(`SAME_SESSION_FLOOD_SCREEN token_row_ink_px=${tokenWidth.toFixed(1)} route=${route}`);
   console.log(`SAME_SESSION_FLOOD keys=${KEYS} quiet_p50_ms=${p(quiet, 0.5).toFixed(1)} quiet_max_ms=${p(quiet, 1).toFixed(1)} ` +
     `flood_p50_ms=${p(flood, 0.5).toFixed(1)} flood_max_ms=${p(flood, 1).toFixed(1)} (bridge-observed, 150 ms each way)`);
   const bridge = terminalBridge();
