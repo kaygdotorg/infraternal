@@ -292,7 +292,7 @@ impl Run {
         let scripts = Arc::new(Mutex::new(Vec::new()));
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let binary = std::env::current_exe().unwrap();
+        let binary = fixture_payload();
         let runner = Bootstrap::new(
             Arc::new(HostSession {
                 check,

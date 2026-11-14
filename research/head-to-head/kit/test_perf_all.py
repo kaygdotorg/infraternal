@@ -454,8 +454,8 @@ class PerfAllCliTest(unittest.TestCase):
             result = subprocess.run(arguments, capture_output=True, text=True, env=environment, check=False)
             return result, capture.read_text().splitlines() if capture.exists() else []
 
-    def run_ab_capture(self, *, rows: list[str] | None = None, environment_overrides: dict[str, str] | None = None
-                       ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    def run_ab_capture(self, *, rows: list[str] | None = None, environment_overrides: dict[str, str] | None = None,
+                       engine: str = "gotatun") -> tuple[subprocess.CompletedProcess[str], list[str]]:
         """Run `--ab` with a runner that records the arguments of the measured scope."""
         script = Path(__file__).with_name("perf-all.sh")
         sha = "84b7bb28e385d57dfb80493e78202898fad24d1e"
@@ -487,7 +487,7 @@ class PerfAllCliTest(unittest.TestCase):
             arguments = ["bash", str(script), "--ab", "--label", "j580", "--out", str(root / "out")]
             for tag in rows:
                 kind = "control" if tag.startswith("control") else "candidate"
-                arguments += ["--row", f"{tag}=gotatun", "--binary", f"{tag}={binaries[kind]}",
+                arguments += ["--row", f"{tag}={engine}", "--binary", f"{tag}={binaries[kind]}",
                               "--source", f"{tag}={sha if kind == 'control' else other}"]
             result = subprocess.run(arguments, capture_output=True, text=True, env=environment, check=False)
             return result, capture.read_text().splitlines() if capture.exists() else []
@@ -501,6 +501,36 @@ class PerfAllCliTest(unittest.TestCase):
         self.assertEqual(received.count("--root"), 1)
         overlay = (Path(__file__).parent / "runner-overlays/J88i-pinned-run.sh").read_text()
         self.assertRegex(overlay, r"calibration\|hold\|matrix\|ab\)")
+
+    def test_ab_runs_the_in_app_engine_when_selected(self) -> None:
+        """J610: `H2H_AB_ENGINE=infraternal` accepts four infraternal rows and refuses GotaTun rows."""
+        result, received = self.run_ab_capture(
+            engine="infraternal", environment_overrides={"H2H_AB_ENGINE": "infraternal"})
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("H2H_CALIBRATION_ONLY=1", received)
+        result, _ = self.run_ab_capture(
+            engine="gotatun", environment_overrides={"H2H_AB_ENGINE": "infraternal"})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("row 1 must be control-a=infraternal", result.stderr)
+        result, _ = self.run_ab_capture(engine="infraternal")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("row 1 must be control-a=gotatun", result.stderr)
+        result, _ = self.run_ab_capture(
+            engine="infraternal", environment_overrides={"H2H_AB_ENGINE": "other"})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("H2H_AB_ENGINE must be gotatun or infraternal", result.stderr)
+
+    def test_in_app_engine_runs_its_own_case_with_the_row_binary(self) -> None:
+        """The overlay maps `infraternal` to mesh-infraternal and hands the row binary to the case."""
+        kit = Path(__file__).parent
+        overlay = (kit / "runner-overlays/J88i-pinned-run.sh").read_text()
+        self.assertIn("infraternal) case_name=mesh-infraternal", overlay)
+        self.assertIn('H2H_INFRATERNAL_BIN="$binary"', overlay)
+        self.assertIn('H2H_INFRATERNAL_SOURCE="$source_sha"', overlay)
+        mesh = (kit / "cases/mesh.sh").read_text()
+        starter = mesh.split("start_infraternal() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('--binary "${H2H_INFRATERNAL_BIN:-$H2H_BIN/infraternal}"', starter)
+        self.assertIn("${H2H_INFRATERNAL_SOURCE:-", starter)
 
     def test_ab_rejects_other_row_orders_and_shapes(self) -> None:
         """The ABBA order is the experiment; any other order or count is refused before the lock."""

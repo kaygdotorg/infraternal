@@ -109,20 +109,48 @@ fn supervisor_fixture(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// Install a fake Traefik with the executable policy the supervisor enforces.
+///
+/// The supervisor execs this file while sibling tests, on other threads of the same test process, fork
+/// children. A child forked while this process holds the file open for writing keeps a copy of that
+/// descriptor until its own exec, and an exec of our file in that window fails with `ETXTBSY` ("Text file
+/// busy"). So the test process never opens the final file for writing: the bytes go to a staging file that
+/// is never executed, and the standard `install` tool publishes them from a short-lived single-threaded
+/// child that forks nothing (#509, the same cure as the `infraternal` crate's restart fixtures, #355).
 fn fake_traefik(path: &Path, script: &[u8]) {
-    std::fs::write(path, script).expect("write fake Traefik");
-    if crate::identity::rootful() {
-        let (_, group) = crate::identity::child_ids().expect("proxy identity");
-        nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(group)))
-            .expect("hand fake Traefik to the child group");
-    }
     let mode = if crate::identity::rootful() {
         0o550
     } else {
         0o500
     };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .expect("executable fixture mode");
+    let mut staging_name = path
+        .file_name()
+        .expect("fake Traefik file name")
+        .to_os_string();
+    staging_name.push(format!(".staging-{}", uuid::Uuid::new_v4().simple()));
+    let staging = path.with_file_name(staging_name);
+    std::fs::write(&staging, script).expect("stage fake Traefik");
+    let output = Command::new("install")
+        .arg("-m")
+        .arg(format!("{mode:o}"))
+        .arg("--")
+        .arg(&staging)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run install");
+    assert!(
+        output.status.success(),
+        "install of the fake Traefik failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_file(&staging).expect("remove fake Traefik staging file");
+    if crate::identity::rootful() {
+        let (_, group) = crate::identity::child_ids().expect("proxy identity");
+        nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(group)))
+            .expect("hand fake Traefik to the child group");
+    }
 }
 
 /// Create the ACME storage file the way the agent does.

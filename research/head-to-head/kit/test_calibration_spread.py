@@ -73,6 +73,27 @@ class CalibrationSpreadTest(unittest.TestCase):
         self.assertFalse(summary["passed"], summary)
         self.assertGreater(summary["spread_pct"]["p99_loss_aware_ms"]["8"], 5.9)
 
+    def test_results_reader_reads_the_selected_case_directory(self) -> None:
+        """J610: the in-app engine writes mesh-infraternal, so the reader takes the case name."""
+        module = load_summarizer()
+        with tempfile.TemporaryDirectory(prefix="j627-calibration-case-") as temporary:
+            root = Path(temporary)
+            for row in ("control-a", "control-b", "control-c"):
+                case_dir = root / row / "mesh-infraternal"
+                case_dir.mkdir(parents=True)
+                for flows in ("1", "8"):
+                    (case_dir / f"tput-lan-{flows}.json").write_text(json.dumps({
+                        "flows": int(flows), "gbit_per_s": 1.9, "machine_cpu_s_per_gbit": 1.0,
+                    }))
+                    (case_dir / f"icmp-lan-{flows}.raw").write_text(
+                        "64 bytes from 10.66.0.2: icmp_seq=1 ttl=64 time=1.000 ms\n"
+                        "8000 packets transmitted, 1 received, 99% packet loss, time 72000ms\n"
+                    )
+            _, probes = module.read_calibration_rows(root, 8000, "mesh-infraternal")
+            self.assertEqual(probes["control-a"]["1"]["sent"], 8000)
+            with self.assertRaises(FileNotFoundError):
+                module.read_calibration_rows(root, 8000)
+
     def test_three_control_rows_are_required(self) -> None:
         """Two rows cannot satisfy the revised calibration protocol."""
         module = load_summarizer()

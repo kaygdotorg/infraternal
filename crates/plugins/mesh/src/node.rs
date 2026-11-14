@@ -16,26 +16,140 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-/// The per-peer route state shared by config updates, route recovery, and relay callbacks (#381).
+/// The per-peer route state shared by config updates, authenticated live endpoints, route
+/// recovery, and relay callbacks (#381).
 ///
-/// One mutex guards both maps, and every peer host-route write happens while it is held.
+/// One mutex guards all maps, and every peer host-route write happens while it is held.
 /// `peers` is the set of peers whose routes this node last installed, keyed by public key,
 /// so a relay callback resolves the *current* endpoint and membership at write time instead
-/// of a copy taken when its relay shim started. A key missing from `peers` means the
-/// coordinator removed that peer: callbacks for it write nothing.
+/// of a copy taken when its relay shim started. `live_endpoints` holds authenticated endpoints
+/// learned by `GotaTun`; it only overrides route selection and never changes the accepted snapshot.
+/// A key missing from `peers` means the coordinator removed that peer: callbacks for it write
+/// nothing. `link` is the mesh link the route-repair worker proved when it started; live-endpoint
+/// refreshes write only to that link, never to whichever link holds the shared name later.
 #[derive(Clone, Debug, Default)]
 struct PeerRouteState {
     /// Active relay budgets; a peer without an entry uses its direct-path budget.
     overrides: BTreeMap<crate::policy::model::PublicKey, u16>,
+    /// Live direct endpoints learned after the coordinator's configured endpoint.
+    ///
+    /// Invariant (#489 J552 P2-1): no entry is a loopback address, and no peer with a relay
+    /// override has an entry. While a relay carries a peer, `GotaTun` confirms the relay shim's
+    /// local `127.0.0.1` socket as the peer's endpoint; a direct budget derived from it is the
+    /// loopback MTU (65456), which would outlive the relay. Installing a relay drops the peer's
+    /// entry, so its direct fallback uses the configured endpoint until a direct packet proves
+    /// another one.
+    live_endpoints: BTreeMap<crate::policy::model::PublicKey, std::net::SocketAddr>,
     /// Installed peers, refreshed with their routes for repair and relay path updates.
     peers: BTreeMap<crate::policy::model::PublicKey, crate::dataplane::Peer>,
+    /// The owner-marked link the running route-repair worker proved (J485), or `None` while no
+    /// worker runs. Its index, engine and owner are re-checked before each live-endpoint write.
+    link: Option<crate::wireguard::ActiveLink>,
+    /// The direct-path budget the live-endpoint refresh last wrote for each peer on `link`.
+    ///
+    /// A refresh skips peers whose budget is unchanged, so steady traffic does not rewrite two
+    /// routes per peer up to four times a second (#489 J549 P2). Any other writer of a peer's
+    /// routes (a snapshot, a relay change, a repair, a new link) forgets the entry, which costs at
+    /// most one extra write and never leaves a stale budget in place. Forget entries only through
+    /// [`PeerRouteState::forget_written`] and [`PeerRouteState::forget_written_for`], which also
+    /// schedule the re-derivation below.
+    written: BTreeMap<crate::policy::model::PublicKey, u16>,
+    /// Whether every installed peer outside `recheck` had its budget derived for its current
+    /// route endpoint while the underlay watch read `checked_generation` (#489 J552 P2-2).
+    ///
+    /// A refresh re-derives only `recheck` while this holds and the generation is unchanged, so
+    /// steady traffic costs no netlink request at all. It starts false, and anything that may
+    /// leave a route at another budget (a new peer set, a new link, a failed write) clears it.
+    all_current: bool,
+    /// The underlay generation the last full re-derivation started from.
+    checked_generation: Option<u64>,
+    /// Peers whose learned endpoint or written budget changed since their last derivation.
+    recheck: BTreeSet<crate::policy::model::PublicKey>,
+    /// Peers whose last underlay lookup failed, with the retries already queued for them at this
+    /// underlay generation (#489 J609 P3). A failed lookup writes the safe fallback, but the
+    /// peer goes back to `recheck` up to [`FAILED_LOOKUP_RETRIES`] times so a transient error
+    /// does not hold the fallback until the 30 s inventory check. Cleared by every full
+    /// re-derivation, so each underlay change earns the peer new retries.
+    failed_lookups: BTreeMap<crate::policy::model::PublicKey, u8>,
+    /// The running route-repair worker's underlay watch, published with `link`. Without one, no
+    /// change can be trusted to be announced, so every refresh re-derives every peer.
+    underlay: Option<Arc<crate::wireguard::UnderlayWatch>>,
 }
 
 impl PeerRouteState {
     /// Record `peers` as the installed set, replacing the previous one.
+    ///
+    /// The next live refresh re-derives every peer, since configured endpoints may have moved.
     fn set_peers(&mut self, peers: &[crate::dataplane::Peer]) {
-        self.peers = peers.iter().map(|peer| (peer.key, peer.clone())).collect();
+        let installed: BTreeMap<_, _> = peers.iter().map(|peer| (peer.key, peer.clone())).collect();
+        self.live_endpoints
+            .retain(|key, _| installed.contains_key(key));
+        self.peers = installed;
+        self.all_current = false;
     }
+
+    /// Forget every written budget: some other writer may have changed any peer's routes.
+    fn forget_written(&mut self) {
+        self.written.clear();
+        self.recheck.clear();
+        self.all_current = false;
+    }
+
+    /// Forget one peer's written budget and re-derive it on the next live refresh.
+    fn forget_written_for(&mut self, key: crate::policy::model::PublicKey) {
+        self.written.remove(&key);
+        self.recheck.insert(key);
+    }
+
+    /// Record the outcome of one peer's underlay lookup: a failure queues the peer for the next
+    /// refresh until its retries at this generation run out, and a success resets them.
+    ///
+    /// The bound keeps a path that keeps failing (an unreachable endpoint, a `prohibit` rule)
+    /// from costing one netlink request per refresh under steady traffic. Once the retries are
+    /// spent, the fallback stays until the underlay watch moves or the inventory check runs.
+    fn note_lookup(&mut self, key: crate::policy::model::PublicKey, failed: bool) {
+        if !failed {
+            self.failed_lookups.remove(&key);
+            return;
+        }
+        let retries = self.failed_lookups.entry(key).or_insert(0);
+        if *retries < FAILED_LOOKUP_RETRIES {
+            *retries += 1;
+            self.recheck.insert(key);
+        }
+    }
+
+    /// Copy a peer with its authenticated live endpoint for route-MTU selection.
+    ///
+    /// A peer a relay carries keeps its configured endpoint, and so does a learned endpoint that
+    /// could not be a direct path; `live_endpoints` never holds either, and this re-checks it so
+    /// a later writer cannot break the invariant by accident.
+    fn route_peer(&self, peer: &crate::dataplane::Peer) -> crate::dataplane::Peer {
+        let mut route_peer = peer.clone();
+        if let Some(endpoint) = self.live_endpoints.get(&peer.key)
+            && !self.overrides.contains_key(&peer.key)
+            && is_direct_learned_endpoint(*endpoint)
+        {
+            route_peer.endpoint = Some(*endpoint);
+        }
+        route_peer
+    }
+
+    /// Return route copies with live endpoints applied while leaving accepted peers unchanged.
+    fn route_peers(&self, peers: &[crate::dataplane::Peer]) -> Vec<crate::dataplane::Peer> {
+        peers.iter().map(|peer| self.route_peer(peer)).collect()
+    }
+}
+
+/// Whether an authenticated endpoint `GotaTun` reports can be a direct underlay path.
+///
+/// Loopback and unspecified sources are local sockets, not a remote peer's address: the relay
+/// shim delivers relayed datagrams from `127.0.0.1` (#489 J552 P2-1). The loopback route's MTU
+/// (65536) says nothing about the real path, so such an address never chooses a route budget.
+/// IPv4-mapped IPv6 sources are judged as the IPv4 address they carry.
+fn is_direct_learned_endpoint(endpoint: std::net::SocketAddr) -> bool {
+    let address = endpoint.ip().to_canonical();
+    !address.is_loopback() && !address.is_unspecified()
 }
 
 /// Idle delay before another full inventory check becomes due, independent of notifications.
@@ -43,6 +157,11 @@ impl PeerRouteState {
 /// and mutex waits, and a successful kernel reconciliation pass. This is not a real-time promise
 /// when the kernel rejects writes or the process cannot run; failures retry on the next check.
 const ROUTE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How many refreshes in a row look a peer's underlay up again after a failed lookup, per
+/// underlay generation (#489 J609 P3). Two covers a transient socket error (`EINTR`, `ENOMEM`)
+/// and a lookup racing a change; more would only repeat a lookup that keeps failing.
+const FAILED_LOOKUP_RETRIES: u8 = 2;
 
 /// Repairs accepted routes using notifications plus a low-frequency complete inventory check.
 /// The proven link identity is fixed for the worker's lifetime. Exclusive additions preserve
@@ -52,6 +171,12 @@ struct RouteRepairWorker {
     cancel: UnixStream,
     /// The listener that reads route notifications in the node's network namespace.
     worker: Option<JoinHandle<()>>,
+    /// Shared route state, whose `link` this worker publishes while it runs.
+    state: Arc<Mutex<PeerRouteState>>,
+    /// The proven link this worker repairs, and the only link live-endpoint refreshes may write.
+    link: crate::wireguard::ActiveLink,
+    /// The underlay watch this worker's route listener feeds and publishes with `link`.
+    underlay: Arc<crate::wireguard::UnderlayWatch>,
 }
 
 impl RouteRepairWorker {
@@ -60,16 +185,26 @@ impl RouteRepairWorker {
     /// Returns ownership, listener, cancellation-stream, or thread creation errors.
     fn start(state: Arc<Mutex<PeerRouteState>>) -> io::Result<Self> {
         let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
-        let monitor = Some(Device::route_monitor(&link)?);
-        Self::start_for_link(state, link, monitor)
+        let underlay = Arc::new(crate::wireguard::UnderlayWatch::default());
+        let monitor = Some(Device::route_monitor(&link, Arc::clone(&underlay))?);
+        Self::start_for_link(state, link, monitor, underlay)
     }
 
     /// Spawn the worker with a proven identity and an optional listener; absence uses the fallback.
+    ///
+    /// The proven link is published in the shared route state, so live-endpoint refreshes write to
+    /// the same link identity this worker verifies (#489 J549 P2). `underlay` is the watch that
+    /// `monitor` feeds; it is published too, and marked unwatched whenever no listener runs, so
+    /// refreshes then re-derive every peer instead of trusting a silent watch (#489 J552 P2-2).
     fn start_for_link(
         state: Arc<Mutex<PeerRouteState>>,
         link: crate::wireguard::ActiveLink,
         mut monitor: Option<crate::wireguard::RouteMonitor>,
+        underlay: Arc<crate::wireguard::UnderlayWatch>,
     ) -> io::Result<Self> {
+        let shared = Arc::clone(&state);
+        let worker_underlay = Arc::clone(&underlay);
+        underlay.set_watched(monitor.is_some());
         let (cancel_read, cancel) = UnixStream::pair()?;
         let worker = thread::Builder::new()
             .name("mesh-route-repair".to_owned())
@@ -89,29 +224,48 @@ impl RouteRepairWorker {
                             tracing::warn!(error = %error, "mesh route notifications unavailable; periodic recovery remains active");
                             // A broken listener cannot spin or permanently disable reconciliation.
                             monitor = None;
+                            worker_underlay.set_watched(false);
                             continue;
                         }
                     };
                     // Keep membership and relay budgets stable through the kernel writes.
-                    let route_state = lock_route_state(&state);
-                    if let Err(error) = repair_accepted_routes(&link, &route_state, address) {
+                    let mut route_state = lock_route_state(&state);
+                    if let Err(error) = repair_accepted_routes(&link, &mut route_state, address) {
                         tracing::warn!(error = %error, "mesh route repair skipped or failed; retrying on the next inventory check");
                     }
                     if address.is_none() {
+                        // Path-MTU exceptions the kernel caches from ICMP are never announced;
+                        // the next refresh after each periodic check re-derives every budget, so
+                        // they are picked up within one interval (#489 J552 P2-2).
+                        worker_underlay.changed();
                         deadline = std::time::Instant::now() + ROUTE_RECHECK_INTERVAL;
                         if monitor.is_none() {
-                            monitor = Device::route_monitor(&link).ok();
+                            monitor =
+                                Device::route_monitor(&link, Arc::clone(&worker_underlay)).ok();
+                            worker_underlay.set_watched(monitor.is_some());
                         }
                     }
                 }
             })?;
+        {
+            let mut published = lock_route_state(&shared);
+            published.link = Some(link);
+            published.underlay = Some(Arc::clone(&underlay));
+            published.forget_written();
+        }
         Ok(Self {
             cancel,
             worker: Some(worker),
+            state: shared,
+            link,
+            underlay,
         })
     }
 
     /// Stop and join the passive listener before the node tears down its link.
+    ///
+    /// It also withdraws the link it published, unless a newer worker already replaced it, so
+    /// live-endpoint refreshes stop writing once no worker vouches for the link.
     fn stop(&mut self) {
         let Some(worker) = self.worker.take() else {
             return;
@@ -120,6 +274,13 @@ impl RouteRepairWorker {
         if worker.join().is_err() {
             tracing::error!("mesh route repair listener panicked");
         }
+        let mut state = lock_route_state(&self.state);
+        if state.link == Some(self.link) {
+            state.link = None;
+            state.underlay = None;
+            state.forget_written();
+        }
+        self.underlay.set_watched(false);
     }
 
     /// Reports whether the listener exited early and can be replaced on the next `up` call.
@@ -163,7 +324,7 @@ fn wait_for_route_recheck(
 /// The caller holds the route-state lock; a full check dumps once and adds only missing routes.
 fn repair_accepted_routes(
     link: &crate::wireguard::ActiveLink,
-    state: &PeerRouteState,
+    state: &mut PeerRouteState,
     deleted: Option<IpAddr>,
 ) -> io::Result<()> {
     Device::verify_repair_link(link)?;
@@ -183,6 +344,7 @@ fn repair_accepted_routes(
         Device::missing_peer_routes(link, &expected)?
     };
     let mut first_error = None;
+    let mut repaired = BTreeSet::new();
     for peer in state.peers.values() {
         let mtu = state
             .overrides
@@ -196,11 +358,16 @@ fn repair_accepted_routes(
             if !missing.contains(&address) {
                 continue;
             }
+            // The re-added route has the configured budget; the next live refresh rewrites it.
+            repaired.insert(peer.key);
             if let Err(error) = Device::repair_peer_route(link, peer, address, mtu) {
                 tracing::warn!(%address, error = %error, "mesh peer route repair failed");
                 first_error.get_or_insert(error);
             }
         }
+    }
+    for key in &repaired {
+        state.forget_written_for(*key);
     }
     first_error.map_or(Ok(()), Err)
 }
@@ -212,10 +379,12 @@ fn lock_route_state(state: &Mutex<PeerRouteState>) -> MutexGuard<'_, PeerRouteSt
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Apply a full route snapshot while retaining relay budgets, restoring state if the write fails.
+/// Apply a full route snapshot while retaining relay budgets and valid live endpoints.
 ///
 /// On success `peers` becomes the installed set that relay callbacks resolve against. The
-/// returned snapshot lets an enclosing transaction roll both maps back.
+/// returned snapshot lets an enclosing transaction roll route state back. Keys in
+/// `clear_overrides_for` also forget their learned endpoint because the coordinator changed or
+/// removed that peer's direct route definition.
 fn refresh_peer_routes_from(
     state: &Mutex<PeerRouteState>,
     peers: &[crate::dataplane::Peer],
@@ -225,13 +394,176 @@ fn refresh_peer_routes_from(
     let previous = state.clone();
     for key in clear_overrides_for {
         state.overrides.remove(key);
-    }
-    if let Err(error) = Device::routes_with_mtu_overrides(peers, &state.overrides, false) {
-        *state = previous;
-        return Err(error);
+        state.live_endpoints.remove(key);
     }
     state.set_peers(peers);
+    state.forget_written();
+    let route_peers = state.route_peers(peers);
+    if let Err(error) = Device::routes_with_mtu_overrides(&route_peers, &state.overrides, false) {
+        *state = previous;
+        // A partial batch may have changed any route; the restored budgets are not trusted.
+        state.forget_written();
+        return Err(error);
+    }
     Ok(previous)
+}
+
+/// Remember learned endpoints and refresh the direct routes whose budget may have changed,
+/// without displacing relay MTU overrides.
+///
+/// A `None` live endpoint returns to the accepted coordinator endpoint. Endpoints for peers that
+/// are no longer installed are ignored, so a late packet cannot restore a retired host route.
+/// Peers a relay carries record nothing (#489 J552 P2-1).
+///
+/// Cost (#489 J552 P2-2): a budget is re-derived only for peers whose route endpoint changed or
+/// whose written budget was forgotten, and for every peer once after the underlay watch reports
+/// a link or route change (or while no watch runs). A refresh with nothing to re-derive takes
+/// the lock once and sends no netlink request. Derivation runs in three steps, so the route-state
+/// lock is never held across underlay lookups:
+/// 1. under the lock, record endpoints and claim the peers to re-derive;
+/// 2. without the lock, look their underlay routes up on one shared netlink socket;
+/// 3. under the lock again, write the budgets that changed, for peers whose route endpoint and
+///    relay state are still the ones that were looked up. Any other peer stays claimed for the
+///    next refresh.
+///
+/// Writes go only to the link the route-repair worker proved (`state.link`), re-verified right
+/// before the batch. A callback that outlives that link, even when a replacement link carries our
+/// marker under the shared name, therefore writes nothing (#489 J549 P2).
+///
+/// The result is the number of peers written, two routes each.
+/// # Errors
+/// Returns route-netlink errors and a missing or changed proven link. The peers of a failed
+/// batch are re-derived on the next refresh.
+fn update_live_peer_endpoints(
+    state: &Mutex<PeerRouteState>,
+    endpoints: &[(
+        crate::policy::model::PublicKey,
+        Option<std::net::SocketAddr>,
+    )],
+) -> io::Result<usize> {
+    let candidates = claim_live_route_rechecks(&mut lock_route_state(state), endpoints);
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    // Underlay route lookups are reads; one probe per batch shares its socket and its answers.
+    let mut probe = crate::mesh_mtu::EndpointProbe::default();
+    let derived: Vec<_> = candidates
+        .into_iter()
+        .map(|(key, endpoint)| (key, endpoint, probe.route_budget(endpoint)))
+        .collect();
+    drop(probe);
+    write_live_route_budgets(&mut lock_route_state(state), &derived)
+}
+
+/// Step 1 of [`update_live_peer_endpoints`]: record endpoints and claim the peers to re-derive,
+/// each with the route endpoint its budget must be derived from.
+fn claim_live_route_rechecks(
+    state: &mut PeerRouteState,
+    endpoints: &[(
+        crate::policy::model::PublicKey,
+        Option<std::net::SocketAddr>,
+    )],
+) -> Vec<(
+    crate::policy::model::PublicKey,
+    Option<std::net::SocketAddr>,
+)> {
+    for (key, endpoint) in endpoints {
+        let Some(configured) = state.peers.get(key).map(|peer| peer.endpoint) else {
+            continue;
+        };
+        if state.overrides.contains_key(key) {
+            // A relay owns this peer: its confirmed endpoint is the relay shim (#489 J552 P2-1).
+            continue;
+        }
+        let desired = (*endpoint).filter(|endpoint| {
+            Some(*endpoint) != configured && is_direct_learned_endpoint(*endpoint)
+        });
+        if state.live_endpoints.get(key).copied() == desired {
+            continue;
+        }
+        match desired {
+            Some(endpoint) => state.live_endpoints.insert(*key, endpoint),
+            None => state.live_endpoints.remove(key),
+        };
+        state.recheck.insert(*key);
+    }
+    let generation = state
+        .underlay
+        .as_ref()
+        .and_then(|underlay| underlay.generation());
+    let keys: Vec<_> =
+        if !state.all_current || generation.is_none() || generation != state.checked_generation {
+            // Claim everything at this generation; a change announced from now on moves it again.
+            state.all_current = true;
+            state.checked_generation = generation;
+            state.recheck.clear();
+            state.failed_lookups.clear();
+            state.peers.keys().copied().collect()
+        } else {
+            std::mem::take(&mut state.recheck).into_iter().collect()
+        };
+    keys.into_iter()
+        .filter(|key| !state.overrides.contains_key(key))
+        .filter_map(|key| state.peers.get(&key))
+        .map(|peer| (peer.key, state.route_peer(peer).endpoint))
+        .collect()
+}
+
+/// Step 3 of [`update_live_peer_endpoints`]: write the derived budgets that changed.
+///
+/// A peer whose route endpoint or relay state moved while its underlay was looked up is not
+/// written: whoever moved it scheduled it again, or owns its route now. A peer whose lookup
+/// failed gets the fallback written and is queued again, within its bounded retries.
+fn write_live_route_budgets(
+    state: &mut PeerRouteState,
+    derived: &[(
+        crate::policy::model::PublicKey,
+        Option<std::net::SocketAddr>,
+        crate::mesh_mtu::RouteBudget,
+    )],
+) -> io::Result<usize> {
+    let mut route_peers = Vec::new();
+    for (key, endpoint, budget) in derived {
+        if state.overrides.contains_key(key) {
+            continue;
+        }
+        let Some(peer) = state.peers.get(key) else {
+            continue;
+        };
+        let route_peer = state.route_peer(peer);
+        if route_peer.endpoint != *endpoint {
+            state.recheck.insert(*key);
+            continue;
+        }
+        state.note_lookup(*key, budget.lookup_failed);
+        if state.written.get(key) != Some(&budget.mtu) {
+            route_peers.push((route_peer, budget.mtu));
+        }
+    }
+    if route_peers.is_empty() {
+        return Ok(0);
+    }
+    let Some(link) = state.link else {
+        for (peer, _) in &route_peers {
+            state.forget_written_for(peer.key);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "mesh route refresh skipped: no proven mesh link",
+        ));
+    };
+    let routes: Vec<_> = route_peers.iter().map(|(peer, mtu)| (peer, *mtu)).collect();
+    if let Err(error) = Device::replace_peer_routes_on(&link, &routes) {
+        // A partial batch leaves unknown kernel budgets: rewrite these peers next time.
+        for (peer, _) in &route_peers {
+            state.forget_written_for(peer.key);
+        }
+        return Err(error);
+    }
+    for (peer, mtu) in &route_peers {
+        state.written.insert(peer.key, *mtu);
+    }
+    Ok(route_peers.len())
 }
 
 /// Write one peer's route from the accepted state, for a relay path change or MTU refresh.
@@ -257,13 +589,31 @@ fn update_relay_route_mtu(
         Some(mtu) => state.overrides.insert(key, mtu),
         None => state.overrides.remove(&key),
     };
-    let result =
-        Device::routes_with_mtu_overrides(std::slice::from_ref(&peer), &state.overrides, false);
+    // A relay starts because the direct path failed, and while it runs the confirmed endpoint
+    // is its shim. Forget the learned one, so the fallback starts from the configured endpoint
+    // (#489 J552 P2-1).
+    let learned = if relay_mtu.is_some() {
+        state.live_endpoints.remove(&key)
+    } else {
+        None
+    };
+    state.forget_written_for(key);
+    let route_peer = state.route_peer(&peer);
+    let result = Device::routes_with_mtu_overrides(
+        std::slice::from_ref(&route_peer),
+        &state.overrides,
+        false,
+    );
     if result.is_err() {
         match previous {
             Some(previous) => state.overrides.insert(key, previous),
             None => state.overrides.remove(&key),
         };
+        if previous.is_none()
+            && let Some(learned) = learned
+        {
+            state.live_endpoints.insert(key, learned);
+        }
     }
     result
 }
@@ -1246,6 +1596,15 @@ impl Node {
         Arc::new(move |relay_mtu| update_relay_route_mtu(&state, key, relay_mtu))
     }
 
+    /// Return a callback for learned endpoints reported by the `GotaTun` worker.
+    ///
+    /// The callback only updates installed peers and leaves relay budgets active. It runs route
+    /// netlink writes on Tokio's blocking pool, outside the packet workers' runtime tasks.
+    pub(crate) fn route_endpoint_updater(&self) -> crate::gotatun_node::RouteEndpointUpdater {
+        let state = Arc::clone(&self.peer_route_state);
+        Arc::new(move |endpoints| update_live_peer_endpoints(&state, endpoints).map(|_| ()))
+    }
+
     /// Refresh peer host routes using active relay budgets where present.
     ///
     /// `peers` is the complete installed set (an accepted snapshot or the one a rollback
@@ -1258,7 +1617,14 @@ impl Node {
         remove: bool,
     ) -> io::Result<()> {
         let mut state = lock_route_state(&self.peer_route_state);
-        Device::routes_with_mtu_overrides(peers, &state.overrides, remove)?;
+        let route_peers = if remove {
+            peers.to_vec()
+        } else {
+            state.route_peers(peers)
+        };
+        // Any write here may change budgets the live refresh remembers; forget them first.
+        state.forget_written();
+        Device::routes_with_mtu_overrides(&route_peers, &state.overrides, remove)?;
         if !remove {
             state.set_peers(peers);
         }
@@ -1280,8 +1646,18 @@ impl Node {
     }
 
     /// Restore relay budgets and the installed peer set after a failed configuration transaction.
+    ///
+    /// The proven link belongs to the running route-repair worker, not to the transaction, so it
+    /// is kept as it is now.
     fn restore_peer_route_state(&self, previous: PeerRouteState) {
-        *lock_route_state(&self.peer_route_state) = previous;
+        let mut state = lock_route_state(&self.peer_route_state);
+        let link = state.link;
+        let underlay = state.underlay.take();
+        *state = previous;
+        state.link = link;
+        state.underlay = underlay;
+        // The failed transaction may have rewritten routes after `previous` was taken.
+        state.forget_written();
     }
 
     fn apply_peer_changes(
@@ -1315,7 +1691,13 @@ impl Node {
             store.record_routes(&BTreeSet::new())?;
         }
         self.routes.clear();
-        *lock_route_state(&self.peer_route_state) = PeerRouteState::default();
+        // The route-repair worker withdraws its own proven link when it stops.
+        let mut state = lock_route_state(&self.peer_route_state);
+        *state = PeerRouteState {
+            link: state.link,
+            underlay: state.underlay.take(),
+            ..PeerRouteState::default()
+        };
         Ok(())
     }
     /// The key an interrupted Linux rotation left as this node's identity: the candidate once
@@ -1478,7 +1860,15 @@ impl Node {
             }
             EngineKind::GotaTun => {
                 let adopt = self.persisted_tun_to_adopt(public_key)?;
-                let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None, adopt)?;
+                let route_endpoint_updater = self.route_endpoint_updater();
+                let engine = Engine::start(
+                    key.gotatun_secret()?,
+                    public_key,
+                    0,
+                    None,
+                    adopt,
+                    route_endpoint_updater,
+                )?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
                     || port == 0
@@ -3398,6 +3788,7 @@ impl Retirement {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
     /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
     #[test]
     fn retirement_removes_the_private_key_file() {
@@ -3720,3 +4111,9 @@ mod restart_continuity_bench;
 #[cfg(test)]
 #[path = "node_route_repair_tests.rs"]
 mod route_repair_tests;
+
+/// Live-endpoint route refresh: learned endpoints, the proven link, relay fallback and refresh
+/// cost (#489).
+#[cfg(test)]
+#[path = "node_live_route_tests.rs"]
+mod live_route_tests;

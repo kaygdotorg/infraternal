@@ -77,6 +77,30 @@ calibration remains failed; owner-directed rows use the exact
 `uncalibrated, owner-directed` label and show measured and owner-reported
 spreads.
 
+### In-app A/B (the product binary)
+
+`perf-all.sh --calibration` and `--ab` measure the GotaTun CLI by default. Set
+`H2H_AB_ENGINE=infraternal` and give every row the engine `infraternal`
+(`--row control-a=infraternal --binary control-a=PATH --source control-a=SHA`)
+to run the in-app `mesh-infraternal` case with each row's own `infraternal`
+binary instead. Pinning, probes, the outlived-load guard, the calibration
+spread and the pooled analysis are the same, so an in-app A/B has the same
+calibrated method as a CLI one. One engine per run: a mixed set of rows is
+refused before the lock, and `calibration-spread.json` is read from the
+`mesh-infraternal` case directory. Each row's version note records the row
+binary and source SHA, not the kit's `SOURCE_COMMIT`. (J610, #260.)
+
+The in-app daemon paces ping more slowly under load than the CLI. With pinned
+cores it sends about 110 probes/s at 8 flows, so the 8,000-probe default takes
+72.5 s and the fixed 72 s load trips the probes-outlive-load guard (D345). The
+`mesh-infraternal` case therefore sizes its load from the probe count:
+`ceil(H2H_LAN_PING_COUNT / H2H_LAN_MIN_PROBE_RATE) + H2H_LAN_LOAD_MARGIN`
+seconds, defaults 110 probes/s and 10 s, so 8,000 probes get an 83 s load. The
+result is never below 72 s, smoke keeps 4 s, and an explicit
+`H2H_LAN_TPUT_SECONDS` always wins. If a run still trips the guard, lower
+`H2H_LAN_MIN_PROBE_RATE` instead of weakening the guard. GotaTun rows keep the
+fixed 72 s.
+
 For each later candidate, repeat `--gotatun-binary ID=PATH` and
 `--source ID=FULL_SHA` on every command; add `--engine-label ID=LABEL` when
 the default label is not descriptive enough. The candidate receives the same
