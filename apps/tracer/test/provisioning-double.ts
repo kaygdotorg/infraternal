@@ -149,6 +149,10 @@ let sshKeyMode: "ok" | "locked" | "missing" = "ok";
 let caLocked = true;
 /** Every open bootstrap socket, so a spec can drop them all the way a server restart does (`drop` in the config endpoint). */
 const openSockets = new Set<WebSocket>();
+/** While true a new bootstrap socket is closed at once, as when the server is still coming back after a restart (`refuse` in the config endpoint). */
+let refuseSockets = false;
+/** Bumped by `rotateKey` in the config endpoint: every host then presents a different key, as when a machine in the path swaps it. */
+let keyGeneration = 0;
 let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
 let installMode: "ok" | "off" = "ok";
 
@@ -157,6 +161,8 @@ export function resetBootstrapDouble(): void {
   trusted.clear();
   sshKeyMode = "ok";
   caLocked = true;
+  refuseSockets = false;
+  keyGeneration = 0;
   discoveryMode = "ok";
   installMode = "ok";
 }
@@ -164,7 +170,8 @@ export function resetBootstrapDouble(): void {
 /** A fixed v4-shaped UUID per target, so specs can assert the challenge round trip. */
 const challengeOf = (id: string): string => { const hex = createHash("sha256").update(`challenge:${id}`).digest("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`; };
 
-const fingerprintOf = (name: string): string => `SHA256:${createHash("sha256").update(`host-key:${name}`).digest("base64").replace(/=+$/, "")}`;
+/** The fingerprint a host presents now: fixed per name, and different after each `rotateKey`. */
+const fingerprintOf = (name: string): string => `SHA256:${createHash("sha256").update(`host-key:${name}${keyGeneration ? `:${keyGeneration}` : ""}`).digest("base64").replace(/=+$/, "")}`;
 
 /** Scripted outcome of one attempt for a host: undefined succeeds. */
 function failureOf(target: Target): Failure | undefined {
@@ -500,6 +507,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
   });
 
   // Disconnect cancels outstanding work; hosts that were running free their slot.
+  if (refuseSockets) { socket.close(); return; }
   openSockets.add(socket);
   socket.on("close", () => {
     openSockets.delete(socket);
@@ -558,6 +566,8 @@ export async function handleBootstrapHttp(request: IncomingMessage, response: Se
     const body = await bodyOf(request);
     if (body?.sshKey === "ok" || body?.sshKey === "locked" || body?.sshKey === "missing") sshKeyMode = body.sshKey;
     if (typeof body?.caLocked === "boolean") caLocked = body.caLocked;
+    if (typeof body?.refuse === "boolean") refuseSockets = body.refuse;
+    if (body?.rotateKey === true) keyGeneration++;
     if (body?.drop === true) for (const open of [...openSockets]) open.terminate();
     if (body?.discovery === "ok" || body?.discovery === "empty" || body?.discovery === "error" || body?.discovery === "hang" || body?.discovery === "off") discoveryMode = body.discovery;
     if (body?.install === "ok" || body?.install === "off") installMode = body.install;
