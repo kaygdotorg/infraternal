@@ -36,6 +36,16 @@ const RELAY_LINK_ID_OVERHEAD: u32 = 4;
 /// The lowest useful interface MTU and the minimum MTU we accept on an owned peer route.
 pub(crate) const MIN_MESH_MTU: u16 = 68;
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// Underlay route lookups this thread made, so tests can show which refreshes probed the
+    /// underlay without timing them (#489 J552 P2-2).
+    pub(crate) static ROUTE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many of this thread's next underlay route lookups fail as if the kernel refused them,
+    /// so tests can show what a refresh does after a failed lookup (#489 J609 P3).
+    pub(crate) static FAIL_ROUTE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Derive the shared interface MTU from the largest configured peer route budget.
 ///
 /// A peer whose endpoint cannot be resolved uses [`FALLBACK_MESH_MTU`] only for its
@@ -58,16 +68,33 @@ pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
     EndpointProbe::default().mesh_mtu(endpoint)
 }
 
+/// One peer's derived route budget, and whether it is the path's answer or a stand-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RouteBudget {
+    /// The budget to write on the peer's host routes.
+    pub(crate) mtu: u16,
+    /// The underlay lookup failed, so `mtu` is [`FALLBACK_MESH_MTU`]: safe to write for now, but
+    /// not known to be the path's budget, so the caller should look the path up again
+    /// (#489 J609 P3). A peer with no endpoint has nothing to look up and is never marked.
+    pub(crate) lookup_failed: bool,
+}
+
 /// Derives route MTUs for many peers of one snapshot, looking each underlay path up once.
 ///
 /// Peers often share an endpoint address, and on macOS every lookup starts two
 /// processes (`route` and `ifconfig`, about 6.5 ms together). The probe remembers the
-/// budget per endpoint IP and, on macOS, each underlay interface's MTU. Create a fresh
-/// probe per snapshot: its answers are only as current as the moment they were read.
-#[derive(Debug, Default)]
+/// budget per endpoint IP and, on macOS, each underlay interface's MTU. On Linux, every lookup
+/// of one probe shares one route-netlink socket, opened on the first lookup (#489 J552 P2-2).
+/// Create a fresh probe per snapshot: its answers are only as current as the moment they were
+/// read.
+#[derive(Default)]
 pub(crate) struct EndpointProbe {
-    /// Mesh MTU already derived for an endpoint address.
-    endpoints: HashMap<IpAddr, u16>,
+    /// Budget already derived for an endpoint address, failed lookups included, so peers that
+    /// share a dead path cost one failed request per probe, not one each.
+    endpoints: HashMap<IpAddr, RouteBudget>,
+    /// The route-netlink socket this probe's lookups share, once one was needed.
+    #[cfg(target_os = "linux")]
+    socket: Option<crate::netlink::Socket>,
     /// Underlay interface MTUs read with `ifconfig` during this probe (`None` if unreadable).
     #[cfg(target_os = "macos")]
     interfaces: HashMap<String, Option<u32>>,
@@ -76,26 +103,62 @@ pub(crate) struct EndpointProbe {
 impl EndpointProbe {
     /// Return the mesh route MTU for `endpoint`, or the safe fallback when it is unknown.
     pub(crate) fn mesh_mtu(&mut self, endpoint: Option<SocketAddr>) -> u16 {
+        self.route_budget(endpoint).mtu
+    }
+
+    /// Return the mesh route budget for `endpoint`, marking a fallback that stands in for a
+    /// failed lookup so a caller that keeps budgets current can retry it.
+    pub(crate) fn route_budget(&mut self, endpoint: Option<SocketAddr>) -> RouteBudget {
         let Some(endpoint) = endpoint else {
-            return FALLBACK_MESH_MTU;
+            return RouteBudget {
+                mtu: FALLBACK_MESH_MTU,
+                lookup_failed: false,
+            };
         };
-        if let Some(mtu) = self.endpoints.get(&endpoint.ip()) {
-            return *mtu;
+        if let Some(budget) = self.endpoints.get(&endpoint.ip()) {
+            return *budget;
         }
-        let mtu = self
-            .route_mtu(endpoint)
-            .map_or(FALLBACK_MESH_MTU, mtu_for_route);
-        self.endpoints.insert(endpoint.ip(), mtu);
-        mtu
+        let budget = self.route_mtu(endpoint).map_or(
+            RouteBudget {
+                mtu: FALLBACK_MESH_MTU,
+                lookup_failed: true,
+            },
+            |route| RouteBudget {
+                mtu: mtu_for_route(route),
+                lookup_failed: false,
+            },
+        );
+        self.endpoints.insert(endpoint.ip(), budget);
+        budget
     }
 
     /// Query the underlay route MTU toward `endpoint` through Linux route netlink.
     /// # Errors
     /// Reports an unreachable endpoint, missing egress link, or malformed route reply.
     #[cfg(target_os = "linux")]
-    #[allow(clippy::unused_self)] // The macOS twin caches interface MTUs in `self`.
     fn route_mtu(&mut self, endpoint: SocketAddr) -> io::Result<u32> {
-        crate::wireguard::route_mtu(endpoint)
+        #[cfg(test)]
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+        #[cfg(test)]
+        if FAIL_ROUTE_LOOKUPS.with(|failures| {
+            let remaining = failures.get();
+            failures.set(remaining.saturating_sub(1));
+            remaining > 0
+        }) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let socket = match &mut self.socket {
+            Some(socket) => socket,
+            empty => empty.insert(crate::netlink::Socket::open(
+                nix::sys::socket::SockProtocol::NetlinkRoute,
+            )?),
+        };
+        let result = crate::wireguard::route_mtu_on(socket, endpoint);
+        if result.is_err() {
+            // An error may leave unread replies behind; the next lookup starts on a fresh socket.
+            self.socket = None;
+        }
+        result
     }
 
     /// Query the underlay route MTU toward `endpoint` with macOS routing tools.
