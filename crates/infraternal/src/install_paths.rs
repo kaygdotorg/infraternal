@@ -294,7 +294,6 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
 
 /// What publishing the PATH link did, so the install can tell the user.
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
 pub enum LinkOutcome {
     /// The link did not exist and now points at the binary.
     Created(PathBuf),
@@ -310,7 +309,6 @@ pub enum LinkOutcome {
 
 impl LinkOutcome {
     /// One plain sentence for the install output.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
     #[must_use]
     pub fn describe(&self, binary: &Path) -> String {
         match self {
@@ -339,7 +337,6 @@ impl LinkOutcome {
 /// Linux per user is `~/.local/bin/infraternal`; system-wide (either OS) is
 /// `/usr/local/bin/infraternal`; macOS per user makes no link and prints the
 /// `PATH` line instead [D395].
-#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
 pub fn path_link(scope: Scope, environment: &Environment) -> Result<Option<PathBuf>, PathError> {
     match (environment.os, scope) {
         (_, Scope::System) => Ok(Some(PathBuf::from("/usr/local/bin/infraternal"))),
@@ -356,7 +353,6 @@ pub fn path_link(scope: Scope, environment: &Environment) -> Result<Option<PathB
 /// `current` below a folder called `infraternal` (an install folder of any
 /// release, old or new). That is how an update recognises the previous
 /// release's link and re-points it, while a link to `/usr/bin/other` is foreign.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
 fn points_at_ours(link: &Path, binary: &Path) -> bool {
     let Ok(target) = std::fs::read_link(link) else {
         return false;
@@ -387,7 +383,6 @@ fn points_at_ours(link: &Path, binary: &Path) -> bool {
 /// A regular file, a directory or a symlink to somewhere not ours is reported
 /// as [`LinkOutcome::Foreign`] and left untouched. Re-pointing builds the new
 /// symlink beside the old one and renames it over, so `PATH` never sees a gap.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
 pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
     match std::fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -440,7 +435,6 @@ pub fn remove_link(link: &Path, binary: &Path) -> io::Result<bool> {
 }
 
 /// What to do about the `PATH` command for an install in `scope` with `binary`.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired up by the next commit"))]
 pub fn link_for_install(
     scope: Scope,
     binary: &Path,
