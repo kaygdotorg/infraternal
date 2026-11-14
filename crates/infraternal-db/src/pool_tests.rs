@@ -964,3 +964,27 @@ async fn close_finishes_queued_work_checkpoints_and_stops() {
         .unwrap();
     assert_eq!(count, 51);
 }
+
+/// A database the pool creates is private from its first byte: the file,
+/// its `-wal` and its `-shm` are 0600 under the usual 022 umask (which would
+/// otherwise give 0644), the same mode the server's sqlx path sets with
+/// `set_private_file` (J632 finding 5, #473).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_created_database_and_its_wal_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let (dir, db) = setup("private", Options::default()).await;
+    db.write(|tx| {
+        tx.execute("INSERT INTO t (v) VALUES (1)", [])?;
+        Ok::<_, Error>(())
+    })
+    .await
+    .unwrap();
+    let mut shm = dir.db().into_os_string();
+    shm.push("-shm");
+    for path in [dir.db(), wal_of(&dir.db()), PathBuf::from(shm)] {
+        assert_eq!(mode(&path), 0o600, "{}", path.display());
+    }
+}

@@ -141,7 +141,11 @@ pub struct Options {
     /// connection keeps. 2000 is SQLite's own default and what the old pool
     /// used, written down here so it is a decision, not an accident.
     pub cache_kib: u32,
-    /// Create the database file when it does not exist yet.
+    /// Create the database file when it does not exist yet. On Unix it is
+    /// created with mode 0600 (owner read/write only), whatever the umask,
+    /// and SQLite gives the `-wal` and `-shm` files the same mode. An
+    /// existing file keeps its mode: the server's own startup makes it
+    /// private, as it did with sqlx.
     pub create_if_missing: bool,
     /// WAL size, in pages, at which a commit asks the checkpointer thread for
     /// a pass. 1,000 is SQLite's own auto-checkpoint threshold. The commit
@@ -211,6 +215,10 @@ pub enum Error {
     /// A pragma did not keep the value the pool set.
     #[error("pragma {0} did not take effect")]
     Pragma(&'static str),
+    /// The database file could not be created with private permissions (see
+    /// [`Options::create_if_missing`]).
+    #[error("could not create the database file: {0}")]
+    Create(#[source] std::io::Error),
     /// [`Options`] asked for zero readers or a zero-length queue.
     #[error("invalid pool options: {0}")]
     InvalidOptions(&'static str),
@@ -307,6 +315,9 @@ impl Database {
             ));
         }
         let path: PathBuf = path.as_ref().to_path_buf();
+        if options.create_if_missing {
+            create_private(&path)?;
+        }
         let options = Arc::new(options);
 
         // One pending kick is enough: a checkpoint pass copies everything
@@ -832,6 +843,44 @@ fn spawn_checkpointer(
         })
         .map_err(Error::Spawn)?;
     Ok((opened, on_exit))
+}
+
+/// Create the database file at `path` as an empty, owner-only (0600) file,
+/// unless it already exists.
+///
+/// SQLite would create it with the process umask, typically 0644: readable
+/// by every local user until the server chmods it. SQLite gives a database's
+/// `-wal` and `-shm` files the same permissions as the database file itself,
+/// so creating the main file first, privately, keeps all three private from
+/// their first byte. An empty file is a valid empty database.
+///
+/// Names SQLite does not treat as a plain path are left alone: `:memory:`,
+/// the empty name (a temporary database) and `file:` URIs (the pool opens with
+/// URI filenames on).
+#[cfg(unix)]
+fn create_private(path: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let name = path.as_os_str().as_encoded_bytes();
+    if name.is_empty() || name == b":memory:" || name.starts_with(b"file:") {
+        return Ok(());
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(Error::Create(error)),
+    }
+}
+
+/// On other platforms the file is created by SQLite with default permissions.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn create_private(_path: &Path) -> Result<(), Error> {
+    Ok(())
 }
 
 /// Open one connection to `path` and configure it for `role`.
