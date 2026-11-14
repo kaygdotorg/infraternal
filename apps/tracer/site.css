@@ -72,7 +72,10 @@
 /* ---- Docs layout: side column, text, contents ----------------------------------------------------------------------------------
    Wide: the audience's pages on the left (sticky), the text in the middle, the contents on the right (doc.css, sticky). The column that
    holds the text is the query container, so the contents fold when the column is too narrow for text and rail together. */
-main { display: block; }
+/* The page is a column that is at least as tall as the window, and the text takes the spare height, so the footer rests at the bottom of a
+   short page (the 404) instead of floating mid-screen. `width: 100%` because auto side margins would otherwise shrink a flex item to its content. */
+body { display: flex; flex-direction: column; min-height: 100dvh; }
+main { display: block; flex: 1 0 auto; width: 100%; }
 main.docs { box-sizing: border-box; max-width: 100rem; margin: 0 auto; padding: 1.5rem var(--gutter) 4rem; }
 main.docs .docs-grid { display: block; }
 .docs-col { container-type: inline-size; min-width: 0; }
