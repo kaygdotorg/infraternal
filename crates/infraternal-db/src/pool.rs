@@ -61,9 +61,26 @@
 //!   `.await` (backpressure) instead of growing a buffer. A caller waiting for
 //!   queue space that gives up leaves nothing behind in the queue. Per
 //!   connection, SQLite's page cache is capped by [`Options::cache_kib`] and
-//!   the prepared-statement cache by [`Options::statement_cache`]. The WAL
-//!   stays below about [`Options::checkpoint_limit_pages`] pages, even when
-//!   writes never pause.
+//!   the prepared-statement cache by [`Options::statement_cache`].
+//! - **A WAL bounded while the pool owns the file.** While this pool is the
+//!   only writer and no read transaction stays open for long, the WAL stays
+//!   below about [`Options::checkpoint_limit_pages`] pages, even when writes
+//!   never pause. Two things suspend the bound, because of how SQLite's WAL
+//!   works, not because of this pool:
+//!   - **A long read.** A read transaction, on a pool reader or in another
+//!     process, pins every frame committed after its snapshot: no checkpoint
+//!     may copy them, and the log cannot rewind while the read is open. The
+//!     WAL grows for as long as the read lasts (J632 measured ~50× a 32-page
+//!     limit).
+//!   - **A second writer on the same file**, such as the sqlx pool while
+//!     both drivers share the database during the port, or another process.
+//!     Its commits don't pass through this pool's WAL hook (J632 measured
+//!     ~9,700 pages against the 8,000-page limit).
+//!
+//!   Both are temporary. Once the read ends or the other writer stops, the
+//!   next checkpoint copies the backlog and the next write rewinds the log.
+//!   The writer's `journal_size_limit` (see [`configure`]) then truncates the
+//!   file back to the limit, so the disk space comes back as well.
 //! - **FIFO writes.** Writes run in the order their `write` calls entered the
 //!   queue. Reads have no order between each other.
 //!
@@ -141,7 +158,11 @@ pub struct Options {
     /// grow without end. At this limit the writer catches the log up itself,
     /// and its next write rewinds it. At the default 8,000 pages (about
     /// 32 MiB with 4 KiB pages) that happens only under sustained write load.
-    /// At least 1.
+    ///
+    /// The bound holds while this pool is the file's only writer and no
+    /// read stays open for long (module docs, "Guarantees"). The same size is
+    /// the writer's `journal_size_limit`, so a WAL that grew past it during a
+    /// long read shrinks back once the log rewinds.
     pub checkpoint_limit_pages: u32,
 }
 
@@ -650,6 +671,9 @@ fn open_connection(path: &Path, options: &Options, role: Role) -> Result<Connect
 /// - `foreign_keys = ON`: SQLite leaves them off by default; the schema relies
 ///   on them. Set per connection, outside any transaction.
 /// - `cache_size` ([`Options::cache_kib`]): caps page cache per connection.
+/// - `journal_size_limit` on the writer only: the WAL file shrinks back to
+///   [`Options::checkpoint_limit_pages`] after it rewinds (see
+///   [`wal_size_limit`]).
 /// - `query_only = ON` on readers only. Readers are opened read-only anyway
 ///   (see [`open_connection`]). This is a second layer, and makes a stray write
 ///   fail with a clear "query only" error first.
@@ -672,8 +696,31 @@ fn configure(conn: &Connection, options: &Options, role: Role) -> Result<(), Err
         conn.pragma_update(None, "query_only", true)?;
         expect_pragma(conn, "query_only", 1)?;
     }
+    if role == Role::Writer {
+        let limit = wal_size_limit(conn, options)?;
+        conn.pragma_update(None, "journal_size_limit", limit)?;
+        expect_pragma(conn, "journal_size_limit", limit)?;
+    }
     conn.set_prepared_statement_cache_capacity(options.statement_cache);
     Ok(())
+}
+
+/// The writer's `journal_size_limit` in bytes: a WAL of
+/// [`Options::checkpoint_limit_pages`] frames (a 32-byte header, then each
+/// frame is a 24-byte header plus one page).
+///
+/// SQLite never shrinks the WAL file on its own while the database is open.
+/// It reuses the file from the start each time the log rewinds, so the file
+/// keeps its high-water mark. With this limit, the first commit after a rewind
+/// truncates a larger file back to this size. A WAL that grew during a long
+/// read gives its disk space back once the read ends. The truncation costs one
+/// `fstat` per rewind, plus an `ftruncate` only when the file is over the
+/// limit.
+fn wal_size_limit(conn: &Connection, options: &Options) -> Result<i64, Error> {
+    let page: i64 = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    Ok(i64::from(options.checkpoint_limit_pages)
+        .saturating_mul(page.saturating_add(24))
+        .saturating_add(32))
 }
 
 /// Read an integer pragma back and fail with [`Error::Pragma`] if it differs.

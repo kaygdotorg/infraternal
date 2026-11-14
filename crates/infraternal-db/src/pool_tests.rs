@@ -748,3 +748,117 @@ async fn read_closure_cannot_switch_query_only_off() {
     assert!(outcome.is_err(), "a read closure wrote: {outcome:?}");
     assert_eq!(values(&db).await, Vec::<i64>::new());
 }
+
+/// How many frames the live WAL log of `db` holds right now, measured on a
+/// fresh connection of its own.
+///
+/// `PRAGMA wal_checkpoint(PASSIVE)` reports the log's length in frames. A
+/// connection that has not read anything yet has not loaded the WAL index and
+/// reports `-1` (J632's probe hit exactly that), so this reads a row first.
+fn live_wal_frames(db: &std::path::Path) -> i64 {
+    let probe = rusqlite::Connection::open(db).unwrap();
+    let _: i64 = probe
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    let (busy, log, _): (i64, i64, i64) = probe
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(busy, 0, "probe checkpoint was blocked");
+    assert!(log >= 0, "probe did not load the WAL index");
+    log
+}
+
+/// The documented exception to the WAL bound, and the recovery from it (J632
+/// finding 3, #473). While a read transaction stays open, its snapshot pins
+/// the WAL: no checkpoint may copy past it and the log cannot rewind, so the
+/// WAL grows far past [`Options::checkpoint_limit_pages`]. Once the read ends,
+/// the next write's inline pass copies the backlog and the following write
+/// rewinds the log. The writer's `journal_size_limit` then truncates the file
+/// back under the bound, so the disk space returns while the pool stays open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wal_shrinks_back_after_a_long_read_ends() {
+    const LIMIT: u32 = 32;
+    let (dir, db) = setup(
+        "ckpt-pinned",
+        Options {
+            readers: 2,
+            // Equal thresholds: inline checkpoints only, so the test does not
+            // depend on when the checkpointer thread gets scheduled.
+            checkpoint_pages: LIMIT,
+            checkpoint_limit_pages: LIMIT,
+            ..Options::default()
+        },
+    )
+    .await;
+    let write_batch = |db: &Database, from: i64, count: i64| {
+        let db = db.clone();
+        async move {
+            for v in from..from + count {
+                db.write(move |tx| {
+                    tx.execute("CREATE TABLE IF NOT EXISTS blobs (b BLOB NOT NULL)", [])?;
+                    tx.execute("INSERT INTO blobs (b) VALUES (zeroblob(3000))", [])?;
+                    tx.execute("INSERT INTO t (v) VALUES (?1)", [v])?;
+                    Ok::<_, Error>(())
+                })
+                .await
+                .unwrap();
+            }
+        }
+    };
+    let frame = 24 + 4096;
+    let bound = 32 + u64::from(LIMIT + 16) * frame;
+
+    // Pin a snapshot on one reader until `release` is sent to.
+    let (release, wait) = mpsc::channel::<()>();
+    let (started, is_started) = tokio::sync::oneshot::channel::<i64>();
+    let pinned_db = db.clone();
+    let pinned = tokio::spawn(async move {
+        pinned_db
+            .read(move |tx| {
+                let seen: i64 = tx.query_row("SELECT count(*) FROM t", [], |row| row.get(0))?;
+                let _ = started.send(seen);
+                let _ = wait.recv_timeout(PATIENCE);
+                Ok::<_, Error>(seen)
+            })
+            .await
+            .unwrap()
+    });
+    assert_eq!(
+        tokio::time::timeout(PATIENCE, is_started)
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+
+    write_batch(&db, 0, 400).await;
+    let pinned_len = file_len(&wal_of(&dir.db()));
+    assert!(
+        pinned_len > 4 * bound,
+        "a pinned read should hold the WAL far past the bound: {pinned_len} bytes, bound {bound}"
+    );
+
+    release.send(()).unwrap();
+    assert_eq!(pinned.await.unwrap(), 0, "the read kept its snapshot");
+
+    // First write: its commit is past the limit, so the writer copies the
+    // whole backlog inline. Second: the log rewinds, and that commit
+    // truncates the file. One more for slack.
+    write_batch(&db, 400, 3).await;
+    let after_len = file_len(&wal_of(&dir.db()));
+    let frames = live_wal_frames(&dir.db());
+    eprintln!(
+        "wal: pinned {pinned_len} B, after release {after_len} B, {frames} live frames, bound {bound} B"
+    );
+    assert!(
+        after_len <= bound,
+        "WAL file stayed at {after_len} bytes after the read ended, bound {bound}"
+    );
+    assert!(
+        frames <= i64::from(LIMIT + 16),
+        "{frames} live frames after the read ended, limit {LIMIT}"
+    );
+    assert_eq!(values(&db).await.len(), 403);
+}
