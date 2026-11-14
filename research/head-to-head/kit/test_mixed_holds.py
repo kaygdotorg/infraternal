@@ -147,13 +147,28 @@ class PooledReportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="j638-pool-") as temporary:
             root = Path(temporary)
             calibration = root / "calibration-spread.json"
-            calibration.write_text(json.dumps({"spread_pct": {}}))
+            calibration.write_text(json.dumps({"spread_pct": {
+                "throughput_gbit_s": {"8": 1.0}, "cpu_s_per_gbit": {"8": 1.0}, "p99_loss_aware_ms": {"8": 2.0}}}))
             hold = root / "h1"
             hold.mkdir()
             (hold / "rows.tsv").write_text("gotatun\tgotatun\t\t\ntailscale\ttailscale\t\t\n")
             write_row(hold, "gotatun", "mesh-gotatun", 8, 4.7, 3.4, 8.8)
             report = head_to_head.report(calibration, [hold], flows=(8,))
             self.assertIn("Missing (failed) rows: h1/tailscale/8f", report)
+
+    def test_missing_calibration_is_refused_unless_explicitly_allowed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="j688-pool-") as temporary:
+            root = Path(temporary)
+            calibration = root / "calibration-spread.json"
+            calibration.write_text(json.dumps({"spread_pct": {"throughput_gbit_s": {"8": 1.0}}}))
+            hold = root / "h1"
+            hold.mkdir()
+            (hold / "rows.tsv").write_text("gotatun\tgotatun\t\t\n")
+            write_row(hold, "gotatun", "mesh-gotatun", 8, 4.7, 3.4, 8.8)
+            with self.assertRaisesRegex(ValueError, "cpu_s_per_gbit.*8 flows"):
+                head_to_head.report(calibration, [hold], flows=(8,))
+            report = head_to_head.report(calibration, [hold], flows=(8,), allow_uncalibrated=True)
+            self.assertIn("WARNING: NOT CALIBRATED", report)
 
 
 if __name__ == "__main__":
