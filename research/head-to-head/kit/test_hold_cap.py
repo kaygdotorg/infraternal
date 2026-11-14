@@ -109,6 +109,35 @@ class HoldCapTest(unittest.TestCase):
             self.assertEqual(survivors, [])
             self.assertEqual(process.returncode, 143)
 
+    def test_killing_the_cap_itself_still_stops_the_hold(self) -> None:
+        # SIGKILL cannot be trapped, so the hold side must notice the cap is gone (#260, J688).
+        with tempfile.TemporaryDirectory(prefix="j688-cap-") as temporary:
+            pids = Path(temporary) / "pids"
+            process = self.cap("300s", "python3", "-c", TREE, str(pids))
+            wait_for_file(pids)
+            members = [int(p) for p in pids.read_text().split()]
+            os.kill(process.pid, 9)
+            process.communicate(timeout=30)
+            for _ in range(150):
+                if not any(alive(pid) for pid in members):
+                    break
+                time.sleep(0.2)  # sleep: the watchdog stops the hold a moment after the cap dies
+            survivors = [pid for pid in members if alive(pid)]
+            for pid in survivors:
+                os.kill(pid, 9)
+            self.assertEqual(survivors, [], "the hold outlived a SIGKILLed cap")
+
+    def test_unrelated_process_in_its_own_session_survives_a_cap_stop(self) -> None:
+        bystander = subprocess.Popen(["python3", "-c", "import time; time.sleep(600)"], start_new_session=True)
+        try:
+            process = self.cap("1s", "bash", "-c", "sleep 600")
+            _, stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 124, stderr)
+            self.assertTrue(alive(bystander.pid), "the cap killed a process that is not part of the hold")
+        finally:
+            bystander.kill()
+            bystander.wait()
+
     def test_rejects_a_bad_cap(self) -> None:
         process = self.cap("soon", "true")
         process.communicate(timeout=10)
