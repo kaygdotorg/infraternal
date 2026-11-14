@@ -12,7 +12,9 @@
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** The iPhone screen the owner reviews at, in CSS px. */
 const PHONE = { width: 393, height: 852 };
+/** Set to a folder name to take the review screenshots. */
 const CAPTURES = process.env.J624_CAPTURES;
 test.use({ viewport: PHONE, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
 

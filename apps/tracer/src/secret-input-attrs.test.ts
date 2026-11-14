@@ -6,6 +6,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
+/** The text of a tracer source file, relative to this test. */
 const source = (file: string): string => readFileSync(new URL(file, import.meta.url), "utf8");
 
 /** The opening tag of the first element whose `id` or `data-secret` marker is `marker`. */
@@ -16,8 +17,10 @@ function tag(file: string, marker: string): string {
   return text.slice(text.lastIndexOf("<", at), text.indexOf(">", at));
 }
 
+/** The attributes that stop iOS capitalising, correcting or spell-checking what is typed. */
 const NO_KEYBOARD_HELP = [/autocapitalize="(none|off)"/, /autocorrect="off"/, /spellcheck="false"/];
 
+/** Every token, word, username and secret field: its name, the file that draws it and a marker inside its opening tag. */
 const FIELDS: ReadonlyArray<[string, string, string]> = [
   ["setup token", "./onboarding-setup.on-demand.ts", 'id="setup-token"'],
   ["setup username", "./onboarding-setup.on-demand.ts", 'id="setup-username"'],

@@ -10,6 +10,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
+/** The production stylesheet, read as text. */
 const css = readFileSync(new URL("../style.css", import.meta.url), "utf8");
 
 /** The declarations of the first rule whose selector is exactly `selector`. */
