@@ -1619,19 +1619,214 @@ pub fn admin_rule_for_ssh_session(value: &str) -> Result<AllowRule, PolicyError>
 /// A console install has no `SSH_CONNECTION`, so [`validate_ssh_connection`]
 /// cannot prove the saved default-drop table keeps sshd reachable, and
 /// [`validate`] accepts any TCP rule (sshd may not listen on 22). This
-/// requires a TCP rule for one of `sshd_ports`, or for 22 when that list is
-/// empty (no sshd seen, or the caller cannot see root's sockets).
+/// requires a TCP rule for one of `sshd_ports`, the ports [`sshd_ports`]
+/// learned. An empty list never passes: guessing 22 let a console install
+/// lock out an sshd configured on 2222 (J608, #483).
 #[must_use]
 pub fn admits_sshd(rules: &[AllowRule], sshd_ports: &[u16]) -> bool {
-    let default_port = [22];
-    let ports = if sshd_ports.is_empty() {
-        &default_port[..]
-    } else {
-        sshd_ports
-    };
     rules
         .iter()
-        .any(|rule| rule.protocol == Protocol::Tcp && ports.contains(&rule.port))
+        .any(|rule| rule.protocol == Protocol::Tcp && sshd_ports.contains(&rule.port))
+}
+
+/// sshd's TCP ports as learned for a console install, or why none could be.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SshdPorts {
+    /// The ports sshd accepts connections on, sorted, and where they came from.
+    Known {
+        /// The TCP ports, sorted and without duplicates; never empty.
+        ports: Vec<u16>,
+        /// A short name for the source, for messages ("sshd -G", ...).
+        source: &'static str,
+    },
+    /// No source named a port; the text lists what was tried and why it failed.
+    Unknown(String),
+}
+
+/// The fixed places sshd is looked for, never through `PATH` (the same rule as nft, D386).
+#[cfg(target_os = "linux")]
+const SSHD_CANDIDATES: &[&str] = &[
+    "/usr/sbin/sshd",
+    "/usr/bin/sshd",
+    "/sbin/sshd",
+    "/usr/local/sbin/sshd",
+    "/run/current-system/sw/bin/sshd",
+    "/nix/var/nix/profiles/default/bin/sshd",
+    "/nix/var/nix/profiles/system/sw/bin/sshd",
+    "/root/.nix-profile/bin/sshd",
+];
+
+/// Learn the TCP ports sshd accepts on, for a console `server init`.
+///
+/// The saved table outlives this boot, so configuration wins over what
+/// happens to be listening now. Sources, first answer wins:
+/// 1. An `ssh.socket` or `sshd.socket` unit that is active or enabled: the
+///    service manager owns the listener (socket activation, the default on
+///    current Ubuntu), and sshd's own `Port` lines are ignored for it.
+/// 2. sshd's effective configuration, `sshd -G` (no host keys needed), then
+///    `sshd -T` for older releases. Both work when sshd is stopped, but only
+///    as root, because the configuration files are root-only.
+/// 3. Sockets held by running processes named `sshd` ([`sshd_listening_ports`]).
+///
+/// systemctl and sshd are run only from fixed, root-owned paths, with a
+/// clean environment. When nothing answers the result is
+/// [`SshdPorts::Unknown`]; the caller refuses rather than guess 22.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn sshd_ports() -> SshdPorts {
+    let mut tried = Vec::new();
+    match discover_systemctl(None) {
+        Ok(systemctl) => match capture(
+            &systemctl,
+            &[
+                "show",
+                "--property=Listen,ActiveState,UnitFileState",
+                "ssh.socket",
+                "sshd.socket",
+            ],
+        ) {
+            Ok(text) => {
+                let ports = socket_unit_ports(&text);
+                if !ports.is_empty() {
+                    return SshdPorts::Known {
+                        ports,
+                        source: "sshd's systemd socket unit",
+                    };
+                }
+                tried.push("no active or enabled ssh.socket or sshd.socket".to_owned());
+            }
+            Err(reason) => tried.push(format!("systemctl show: {reason}")),
+        },
+        Err(error) => tried.push(error.to_string()),
+    }
+    let mut sshd = None;
+    for candidate in SSHD_CANDIDATES {
+        match safe_nft_path(Path::new(candidate)) {
+            Ok(Some(path)) => {
+                sshd = Some(path);
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => tried.push(format!("{candidate} is not root-controlled")),
+        }
+    }
+    match sshd {
+        Some(sshd) => {
+            for (flag, source) in [("-G", "sshd -G"), ("-T", "sshd -T")] {
+                match capture(&sshd, &[flag]) {
+                    Ok(text) => {
+                        let ports = sshd_config_ports(&text);
+                        if !ports.is_empty() {
+                            return SshdPorts::Known { ports, source };
+                        }
+                        tried.push(format!("{source} printed no port"));
+                    }
+                    Err(reason) => tried.push(format!("{source}: {reason}")),
+                }
+            }
+        }
+        None => tried.push("no sshd at the fixed paths".to_owned()),
+    }
+    let ports = sshd_listening_ports();
+    if !ports.is_empty() {
+        return SshdPorts::Known {
+            ports,
+            source: "running sshd processes",
+        };
+    }
+    tried.push("no listening sshd process was seen".to_owned());
+    SshdPorts::Unknown(tried.join("; "))
+}
+
+/// Run a fixed, already trusted program with a clean environment and return its stdout.
+///
+/// The error is the first line of its stderr (or the spawn error), short
+/// enough to quote in a refusal.
+#[cfg(target_os = "linux")]
+fn capture(program: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .env_clear()
+        .env("LANG", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(stderr
+        .lines()
+        .next()
+        .map_or_else(|| format!("exit {}", output.status), str::to_owned))
+}
+
+/// The ports in `sshd -G`/`-T` output: its `listenaddress` lines, else its `port` lines.
+///
+/// sshd prints one `listenaddress <addr>:<port>` per socket it will open,
+/// with `Port` already applied, so those are exact; `port` lines are the
+/// fallback when a release prints none. Sorted, no duplicates, no zero.
+#[must_use]
+pub fn sshd_config_ports(text: &str) -> Vec<u16> {
+    let mut listen = Vec::new();
+    let mut port = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.split_ascii_whitespace();
+        let (Some(key), Some(value)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("listenaddress") {
+            listen.extend(
+                value
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse::<u16>().ok()),
+            );
+        } else if key.eq_ignore_ascii_case("port") {
+            port.extend(value.parse::<u16>().ok());
+        }
+    }
+    let mut ports = if listen.is_empty() { port } else { listen };
+    ports.retain(|port| *port != 0);
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// The TCP ports of active or enabled socket units in `systemctl show` output.
+///
+/// The output has one block per unit, separated by a blank line, holding
+/// `Listen=<address> (Stream)` lines plus `ActiveState=` and
+/// `UnitFileState=`. A unit that is neither active nor enabled (a stock
+/// `ssh.socket` next to a plain `ssh.service`) does not listen and is
+/// ignored. Sorted, no duplicates, no zero.
+#[must_use]
+pub fn socket_unit_ports(text: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for block in text.split("\n\n") {
+        let mut listens = Vec::new();
+        let mut live = false;
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("Listen=") {
+                let Some(address) = value.strip_suffix(" (Stream)") else {
+                    continue;
+                };
+                let port = address.rsplit_once(':').map_or(address, |(_, port)| port);
+                listens.extend(port.parse::<u16>().ok());
+            } else if let Some(state) = line.strip_prefix("ActiveState=") {
+                live |= state == "active";
+            } else if let Some(state) = line.strip_prefix("UnitFileState=") {
+                live |= state.starts_with("enabled");
+            }
+        }
+        if live {
+            ports.extend(listens);
+        }
+    }
+    ports.retain(|port| *port != 0);
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 /// The TCP ports processes named `sshd` are listening on, sorted; empty when none can be seen.
@@ -1641,8 +1836,8 @@ pub fn admits_sshd(rules: &[AllowRule], sshd_ports: &[u16]) -> bool {
 /// root's processes. Used only by a console `server init`, never at boot
 /// (sshd may not have started yet) and never as the only proof: the saved
 /// policy still needs an explicit rule ([`admits_sshd`]). A socket-activated
-/// sshd's listener belongs to the service manager, so it is not seen and the
-/// check falls back to port 22.
+/// sshd's listener belongs to the service manager, so it is not seen here;
+/// [`sshd_ports`] asks the socket unit and sshd's configuration first.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn sshd_listening_ports() -> Vec<u16> {
@@ -2319,7 +2514,7 @@ mod tests {
         );
     }
 
-    /// A console install needs a TCP rule on a seen sshd port, or on 22 when none is seen.
+    /// A console install needs a TCP rule on one of sshd's ports; no port known never passes.
     #[test]
     fn console_install_needs_a_rule_for_sshd() {
         let rules = |values: &[&str]| {
@@ -2328,14 +2523,51 @@ mod tests {
                 .map(|value| value.parse().expect("rule"))
                 .collect::<Vec<super::AllowRule>>()
         };
-        assert!(!super::admits_sshd(&rules(&["*,*,tcp,443"]), &[]));
+        assert!(!super::admits_sshd(&rules(&["*,*,tcp,443"]), &[22]));
         assert!(super::admits_sshd(
             &rules(&["*,*,tcp,443", "*,*,tcp,22"]),
-            &[]
+            &[22]
         ));
-        assert!(!super::admits_sshd(&rules(&["*,*,udp,22"]), &[]));
+        assert!(!super::admits_sshd(&rules(&["*,*,udp,22"]), &[22]));
         assert!(super::admits_sshd(&rules(&["*,*,tcp,2222"]), &[22, 2222]));
         assert!(!super::admits_sshd(&rules(&["*,*,tcp,22"]), &[2222]));
+        // J608 (P2): with no port learned, 22 is not assumed.
+        assert!(!super::admits_sshd(&rules(&["*,*,tcp,22"]), &[]));
+    }
+
+    /// `sshd -G`/`-T` output: `listenaddress` lines are exact, `port` lines are the fallback.
+    #[test]
+    fn sshd_config_ports_prefer_listen_addresses() {
+        let both = "port 2222\nport 2200\naddressfamily any\n\
+                    listenaddress [::]:2222\nlistenaddress 0.0.0.0:2222\n\
+                    listenaddress 192.0.2.1:2200\n";
+        assert_eq!(super::sshd_config_ports(both), vec![2200, 2222]);
+        // A ListenAddress with its own port overrides Port.
+        let listen = "port 22\nlistenaddress 0.0.0.0:2022\n";
+        assert_eq!(super::sshd_config_ports(listen), vec![2022]);
+        assert_eq!(super::sshd_config_ports("Port 2222\n"), vec![2222]);
+        assert_eq!(
+            super::sshd_config_ports("usedns no\nport 0\n"),
+            Vec::<u16>::new()
+        );
+    }
+
+    /// `systemctl show` output: only an active or enabled socket unit's stream ports count.
+    #[test]
+    fn socket_unit_ports_come_from_live_units_only() {
+        let active = "Listen=0.0.0.0:2222 (Stream)\nListen=[::]:2222 (Stream)\n\
+                      ActiveState=active\nUnitFileState=enabled\n\n\
+                      ActiveState=inactive\nUnitFileState=\n";
+        assert_eq!(super::socket_unit_ports(active), vec![2222]);
+        // Enabled but not started yet (before the next boot) still counts.
+        let enabled = "Listen=2200 (Stream)\nListen=/run/x.sock (Stream)\n\
+                       Listen=[::]:5353 (Datagram)\nActiveState=inactive\n\
+                       UnitFileState=enabled\n";
+        assert_eq!(super::socket_unit_ports(enabled), vec![2200]);
+        // A stock, disabled ssh.socket next to a plain ssh.service is ignored.
+        let disabled = "Listen=[::]:22 (Stream)\nActiveState=inactive\n\
+                        UnitFileState=disabled\n";
+        assert_eq!(super::socket_unit_ports(disabled), Vec::<u16>::new());
     }
 
     /// Only a server policy makes the host table drop by default (J555, #483).

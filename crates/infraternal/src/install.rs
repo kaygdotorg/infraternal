@@ -231,6 +231,10 @@ fn make_firewall_install(args: &ServerArgs) -> Result<FirewallInstall, InstallEr
     };
     host_firewall::validate_ssh_connection(&policy, ssh_connection.as_deref())
         .map_err(|error| InstallError::HostFirewall(error.to_string()))?;
+    if ssh_connection.is_none() {
+        console_admin_path(&policy.admin_rules, &console_sshd_ports())
+            .map_err(InstallError::HostFirewall)?;
+    }
     let policy_json = serde_json::to_string_pretty(&policy)
         .map_err(|error| InstallError::HostFirewall(error.to_string()))?;
     let unit = render_firewall_unit()?;
@@ -239,6 +243,62 @@ fn make_firewall_install(args: &ServerArgs) -> Result<FirewallInstall, InstallEr
         policy,
         policy_json,
     })
+}
+
+/// sshd's ports as the host reports them, for a console install.
+#[cfg(all(target_os = "linux", not(test)))]
+fn console_sshd_ports() -> host_firewall::SshdPorts {
+    host_firewall::sshd_ports()
+}
+
+/// A fixed sshd on 22 for unit tests, so install plans don't depend on the runner.
+///
+/// The real lookup reads root-only sshd configuration and the host's socket
+/// units, which a test runner may or may not see; `console_admin_path` and
+/// the parsers have their own tests, and the root path is proven by
+/// `review_j608_socket_sshd_console.sh`.
+#[cfg(all(target_os = "linux", test))]
+fn console_sshd_ports() -> host_firewall::SshdPorts {
+    host_firewall::SshdPorts::Known {
+        ports: vec![22],
+        source: "unit test",
+    }
+}
+
+/// From a console, require an admin rule for a port sshd really accepts on (J589 P3, J608).
+///
+/// Over SSH the live session's port is checked by
+/// `validate_ssh_connection`. From a console nothing proves the saved
+/// default-drop table keeps an SSH path, so the rules must admit one of the
+/// ports [`host_firewall::sshd_ports`] learned. When no port can be learned
+/// the install is refused: guessing 22 locked out an sshd configured on 2222.
+#[cfg(target_os = "linux")]
+fn console_admin_path(
+    rules: &[host_firewall::AllowRule],
+    sshd: &host_firewall::SshdPorts,
+) -> Result<(), String> {
+    match sshd {
+        host_firewall::SshdPorts::Known { ports, .. }
+            if host_firewall::admits_sshd(rules, ports) =>
+        {
+            Ok(())
+        }
+        host_firewall::SshdPorts::Known { ports, source } => {
+            let ports = ports
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "no --host-firewall-allow rule admits sshd's port {ports} (from {source}); add \
+                 one such as '*,*,tcp,<port>' so the default-drop host table keeps an SSH path"
+            ))
+        }
+        host_firewall::SshdPorts::Unknown(tried) => Err(format!(
+            "sshd's port could not be determined ({tried}); run server init as root, or over \
+             SSH so the live session's port is checked, before a default-drop host table is saved"
+        )),
+    }
 }
 
 /// Render the boot unit that applies the saved infraternal host policy before networking.
@@ -540,6 +600,34 @@ mod tests {
         let output = install(&args, &options).unwrap();
         assert!(output.contains("Data folder: /srv/state\n"));
         assert!(output.contains("Web folder: /srv/web\n"));
+    }
+
+    /// A console install refuses when sshd's port is unknown and names the port it needs (J608).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn console_install_never_guesses_sshd_port() {
+        use super::host_firewall::SshdPorts;
+        let rules = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.parse().expect("rule"))
+                .collect::<Vec<super::host_firewall::AllowRule>>()
+        };
+        let unknown = SshdPorts::Unknown("sshd -G: Permission denied".to_owned());
+        let refused = super::console_admin_path(&rules(&["*,*,tcp,22"]), &unknown)
+            .expect_err("an unknown sshd port must not pass as 22");
+        assert!(refused.contains("could not be determined"), "{refused}");
+        let on_2222 = SshdPorts::Known {
+            ports: vec![2222],
+            source: "sshd -G",
+        };
+        let refused = super::console_admin_path(&rules(&["*,*,tcp,22"]), &on_2222)
+            .expect_err("tcp/22 does not reach an sshd on 2222");
+        assert!(refused.contains("2222 (from sshd -G)"), "{refused}");
+        assert_eq!(
+            super::console_admin_path(&rules(&["*,*,tcp,2222"]), &on_2222),
+            Ok(())
+        );
     }
 
     /// Preview an explicit server-policy clear without writing host state.

@@ -238,9 +238,13 @@ fn setup_token_discovers_a_service_installed_through_a_versioned_binary_symlink(
             "--data",
         ])
         .arg(&data)
-        .args(["--host-firewall-allow", "wt0,10.69.69.0/24,tcp,22"])
+        .args(["--host-firewall-allow", "*,*,tcp,22"])
         .current_dir(&root)
         .env_clear()
+        // An install over SSH: the live session's port is the admin path, so
+        // the plan does not depend on whether this runner can read sshd's
+        // root-only configuration (a console install would, J608).
+        .env("SSH_CONNECTION", "192.0.2.5 43122 127.0.0.1 22")
         .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &units)
         .output()
         .expect("generate service plan");

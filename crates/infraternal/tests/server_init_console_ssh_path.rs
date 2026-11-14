@@ -4,9 +4,15 @@
 //! console install (no `SSH_CONNECTION`) with only `--host-firewall-allow
 //! '*,*,tcp,443'` saved a default-drop `inet infraternal_host` table that
 //! nothing on sshd's port could pass. The live-session check only protects
-//! remote installs. A console install must name a TCP rule for a port sshd is
-//! listening on, or for 22 when no sshd listener can be seen (an
-//! unprivileged dry-run cannot see root's sockets, so it always needs 22).
+//! remote installs. A console install must name a TCP rule for a port sshd
+//! really accepts on, learned from its socket unit, `sshd -G`/`-T` or its
+//! listeners; when none can be learned it is refused, never assumed to be 22
+//! (J608, #483).
+//!
+//! These runs are unprivileged, so whether sshd's port can be learned
+//! depends on the host (sshd's configuration is root-only). Only refusals
+//! are asserted here; the accepted path needs root and is proven by
+//! `review_j608_socket_sshd_console.sh` under a private mount namespace.
 #![cfg(all(target_os = "linux", feature = "plugin-server"))]
 #![allow(clippy::expect_used)]
 
@@ -63,14 +69,29 @@ fn console_server_init_with_no_sshd_rule_is_refused() {
     assert!(text.contains("sshd"), "the refusal must say why: {text}");
 }
 
-/// The same install with a TCP/22 rule added is accepted.
+/// A rule that misses the learned port, or a port that cannot be learned, is refused with a reason.
+///
+/// Port 1 is never sshd's here, so the run is refused either way. The
+/// refusal names the learned port and its source, or says no port could be
+/// determined; it never falls back to 22 (J608).
 #[test]
-fn console_server_init_with_an_ssh_rule_is_accepted() {
-    let output = console_dry_run("with-ssh", &["*,*,tcp,443", "*,*,tcp,22"]);
-    assert!(
-        output.status.success(),
-        "server init dry-run failed: {}{}",
+fn console_server_init_names_why_the_ssh_rule_is_refused() {
+    let output = console_dry_run("port-one", &["*,*,tcp,1"]);
+    let text = format!(
+        "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "tcp/1 was accepted as sshd's path: {text}"
+    );
+    assert!(
+        text.contains("(from ") || text.contains("could not be determined"),
+        "the refusal must name the port's source or say it is unknown: {text}"
+    );
+    assert!(
+        !text.contains("no sshd listener was seen"),
+        "the refusal still falls back to 22: {text}"
     );
 }
