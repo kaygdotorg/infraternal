@@ -668,3 +668,28 @@ async fn wal_stays_bounded_when_background_checkpoints_fall_behind() {
     assert!(wal <= bound, "WAL grew to {wal} bytes, bound {bound}");
     assert_eq!(values(&db).await.len(), 400);
 }
+
+/// J632 review, finding 1 (#473): a write closure that fails applies nothing,
+/// even when it ran `COMMIT` itself before failing. Today the stray `COMMIT`
+/// makes the rows written before it durable, the caller still receives the
+/// closure's `Err`, and the module's "commits only if the closure returns
+/// `Ok`" guarantee no longer holds. (The existing left-open test writes nothing
+/// before its `COMMIT`, so it cannot see this.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closure_that_commits_itself_then_fails_applies_nothing() {
+    let (_dir, db) = setup("stray-commit", Options::default()).await;
+    let outcome = db
+        .write(|tx| {
+            tx.execute("INSERT INTO t (v) VALUES (1)", [])?;
+            let _ = tx.execute_batch("COMMIT; BEGIN;");
+            Err::<(), _>(TestError::Refused)
+        })
+        .await;
+    assert!(matches!(outcome, Err(TestError::Refused)), "{outcome:?}");
+    assert_eq!(
+        values(&db).await,
+        Vec::<i64>::new(),
+        "a failed write left its rows behind"
+    );
+}
+
