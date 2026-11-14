@@ -2964,4 +2964,39 @@ mod tests {
             dropped.first()
         );
     }
+
+    /// TCP RST, used to abort a test connection.
+    const RST: u8 = 0x04;
+
+    /// J592 review (P2, security, D384 vs D164, #265): the established path never looks at TCP
+    /// flags and matches a tuple in either direction. After this host's outbound connection
+    /// from port 40000 to the peer's 443 is reset, the peer can still send a SYN from 443 to
+    /// 40000 and it is admitted as "established", although the peer has no inbound grant and
+    /// kernel conntrack would treat that SYN as a new, refused connection. By refreshing the
+    /// tuple every 299 s the peer keeps that door open indefinitely.
+    #[test]
+    fn review_j592_a_reset_outbound_flow_cannot_be_reopened_by_the_peer() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut open = tcp4(LOCAL4, PEER4, 40_000, 443, SYN);
+        assert!(filter.check_at(&mut open, Direction::HostToMesh, now));
+        let mut accept = tcp4(PEER4, LOCAL4, 443, 40_000, SYN_ACK);
+        assert!(filter.check_at(&mut accept, Direction::MeshToHost, now));
+        let mut reset = tcp4(LOCAL4, PEER4, 40_000, 443, RST);
+        assert!(filter.check_at(&mut reset, Direction::HostToMesh, now));
+
+        let mut reverse_syn = tcp4(PEER4, LOCAL4, 443, 40_000, SYN);
+        assert!(
+            !filter.check_at(
+                &mut reverse_syn,
+                Direction::MeshToHost,
+                now + Duration::from_secs(299)
+            ),
+            "a peer with no inbound grant opened a connection to this host's port 40000"
+        );
+    }
 }
