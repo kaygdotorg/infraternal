@@ -17,6 +17,10 @@
 # is still alive after that, the script says so and exits 125. Parts that start their own session
 # (`setsid`) are found through the parent chain and an environment tag, see `members`.
 #
+# If this script is itself killed (SIGKILL cannot be trapped), a watchdog stops the hold: it reads
+# a pipe only this script writes to, and when the pipe ends without the "done" message it runs the
+# same stop. See `watch_for_cap_death`.
+#
 # Exit status: COMMAND's own status when it finishes in time; 124 when the cap stopped it; 143
 # when this script was told to stop; 125 when processes were left running (a leak is a failure
 # even after a clean exit); 2 for a bad call.
@@ -76,6 +80,19 @@ stop_hold() {
     left=$(members "$pid" | paste -sd, -)
 }
 
+# Watchdog body, run in a forked copy of this script. Blocks until the cap says "done" (normal
+# end: nothing to do) or its end of the pipe closes without it (the cap died: stop the hold).
+# Ignores the signals the cap handles, so a terminal ^C cannot take the watchdog down first.
+watch_for_cap_death() {
+    local hold=$1 message=
+    trap '' TERM INT HUP
+    read -r message
+    if [[ $message != done ]]; then
+        echo "hold-cap: the cap died; stopping the hold's process group $hold" >&2
+        stop_hold "$hold"
+    fi
+}
+
 signalled=0
 tag="$$-$(date +%s%N)"
 trap 'signalled=143' TERM INT HUP
@@ -89,7 +106,10 @@ for _ in $(seq 50); do
     [[ $(ps -o sid= -p "$hold" 2>/dev/null | tr -d ' ') == "$hold" ]] && break
     sleep 0.1  # sleep: the child becomes a session leader right after the fork
 done
-sleep "$seconds" &
+# The pipe's write end (fd $watch) must stay out of the hold and the timer: any holder would keep
+# it open after the cap dies and hide the end-of-file. The hold started before the pipe exists.
+exec {watch}> >(watch_for_cap_death "$hold")
+sleep "$seconds" {watch}>&- &
 timer=$!
 
 done_pid=
@@ -116,6 +136,8 @@ else
         status=125
     fi
 fi
+echo done >&"$watch"
+exec {watch}>&-
 if [[ -n $left ]]; then
     echo "hold-cap: processes survived the stop: $left" >&2
     exit 125
