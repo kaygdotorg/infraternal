@@ -650,8 +650,22 @@ async fn build_router_core(
             let mesh_state = config.data_dir.join("mesh");
             let migration_source = legacy_state.clone();
             let migration_target = mesh_state.clone();
+            // A database error fails start closed: guessing "not ours" here would mint a new key.
+            let own_keys = crate::embedded_mesh_state::server_node_keys(&pool)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        error_kind = ?error.kind(),
+                        "embedded Mesh identity ownership could not be read"
+                    );
+                    ServerError::InvalidConfiguration
+                })?;
             let migration = tokio::task::spawn_blocking(move || {
-                crate::embedded_mesh_state::migrate(&migration_source, &migration_target)
+                crate::embedded_mesh_state::migrate(
+                    &migration_source,
+                    &migration_target,
+                    &|public| own_keys.contains(public),
+                )
             })
             .await
             .map_err(|error| {

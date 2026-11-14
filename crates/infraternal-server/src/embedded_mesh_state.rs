@@ -69,11 +69,21 @@ impl FileIdentity {
 /// source inode checks. A marker records the exact unfinished file set; startup never clears an
 /// incomplete marker or starts a child that could mint another identity.
 ///
+/// `owns` receives the public key derived from a legacy runtime private key and answers whether
+/// this data directory's server recorded that key as its own. Every root server on a host
+/// resolves the same legacy runtime path, so an identity found there may belong to another
+/// server, for example a throwaway check instance or a test server. Only an identity this
+/// server owns is adopted; any other one is left in place and logged (J595 P0).
+///
 /// Mesh private keys stay outside the D147 backup set, which contains the database, CA key and
 /// configuration.
 /// # Errors
 /// Refuses unsafe owners, permissions, file types, or any failed filesystem operation.
-pub(crate) fn migrate(volatile: &Path, durable: &Path) -> io::Result<()> {
+pub(crate) fn migrate(
+    volatile: &Path,
+    durable: &Path,
+    owns: &dyn Fn(&[u8; 32]) -> bool,
+) -> io::Result<()> {
     let uid = nix::unistd::Uid::effective().as_raw();
     ensure_mesh_directory(durable, uid)?;
     let _durable_lock = lock_mesh_directory(durable)?;
@@ -138,6 +148,19 @@ pub(crate) fn migrate(volatile: &Path, durable: &Path) -> io::Result<()> {
     if legacy_files.is_empty() {
         return Ok(());
     }
+    if let Some(legacy_key) = read_private_key(volatile, uid)? {
+        let public = public_key(&legacy_key)?;
+        if !owns(&public) {
+            tracing::error!(
+                legacy_state = %volatile.display(),
+                durable_state = %durable.display(),
+                public_key = %hex_key(&public),
+                "the Mesh identity at the shared runtime path is not recorded as this server's \
+                 own node; it was left in place and this server starts without it"
+            );
+            return Ok(());
+        }
+    }
 
     create_marker(&marker, Direction::Forward, &legacy_files)?;
     sync_directory(durable)?;
@@ -145,6 +168,36 @@ pub(crate) fn migrate(volatile: &Path, durable: &Path) -> io::Result<()> {
     finish_marker(&marker, uid)?;
     sync_directory(durable)?;
     sync_directory(volatile)
+}
+
+/// Read every public key this data directory records for the server's own Mesh node.
+///
+/// The server's embedded node attaches under the fixed host name `server`. Its current key and
+/// any key in an open rotation (candidate or previous) count as its own, so an identity caught
+/// mid-rotation is still recognised.
+/// # Errors
+/// Returns the database error; the caller fails start closed instead of guessing.
+pub(crate) async fn server_node_keys(pool: &sqlx::SqlitePool) -> io::Result<Vec<[u8; 32]>> {
+    use sqlx::Row as _;
+
+    let rows = sqlx::query(
+        "SELECT n.public_key, r.candidate_public_key, r.previous_public_key \
+         FROM mesh_nodes n LEFT JOIN mesh_node_key_rotation r ON r.node_id = n.id \
+         WHERE n.dataplane_host = 'server'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(io::Error::other)?;
+    let mut keys = Vec::new();
+    for row in rows {
+        for column in ["public_key", "candidate_public_key", "previous_public_key"] {
+            let value: Option<Vec<u8>> = row.try_get(column).map_err(io::Error::other)?;
+            if let Some(key) = value.and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()) {
+                keys.push(key);
+            }
+        }
+    }
+    Ok(keys)
 }
 
 /// Hand current mesh state back to the legacy /run path before a previous binary starts.
@@ -317,6 +370,61 @@ fn validate_private_key(directory: &Path, files: &[&str], uid: u32) -> io::Resul
         }
     }
     Ok(())
+}
+
+/// Read one directory's private key without following links; `None` means no key file exists.
+///
+/// The bytes stay in a zeroizing buffer and never leave this module: callers only derive the
+/// public key or compare two keys.
+/// # Errors
+/// Refuses an unsafe file or one whose length is not exactly 32 bytes.
+fn read_private_key(
+    directory: &Path,
+    uid: u32,
+) -> io::Result<Option<zeroize::Zeroizing<[u8; 32]>>> {
+    let path = directory.join("mesh-private-key");
+    if !owned_file(&path, uid, true)? {
+        return Ok(None);
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid || metadata.nlink() != 1 || metadata.len() != 32
+    {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut key = zeroize::Zeroizing::new([0_u8; 32]);
+    file.read_exact(key.as_mut())?;
+    Ok(Some(key))
+}
+
+/// Derive the X25519 public key that a Mesh private key presents to its peers.
+///
+/// X25519 clamps the scalar itself, so a stored key gives the same public key here as in either
+/// Mesh engine.
+/// # Errors
+/// Returns `InvalidData` if the crypto library rejects the key.
+pub(crate) fn public_key(private: &[u8; 32]) -> io::Result<[u8; 32]> {
+    let key = openssl::pkey::PKey::private_key_from_raw_bytes(private, openssl::pkey::Id::X25519)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let public = key
+        .raw_public_key()
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    public
+        .try_into()
+        .map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+/// Format a public key for logs and records; public keys are not secret.
+fn hex_key(key: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    key.iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
 }
 
 /// Open the mesh directory and take the same exclusive flock that guards mesh-store writes.
@@ -767,6 +875,24 @@ mod tests {
         std::env::temp_dir().join(format!("j501-mesh-state-{}", uuid::Uuid::new_v4()))
     }
 
+    /// RFC 7748 section 6.1 private key (Alice), used as a real X25519 identity fixture.
+    const RFC7748_PRIVATE: [u8; 32] = [
+        0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66,
+        0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9,
+        0x2c, 0x2a,
+    ];
+    /// The public key RFC 7748 section 6.1 gives for [`RFC7748_PRIVATE`].
+    const RFC7748_PUBLIC: [u8; 32] = [
+        0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7,
+        0x5a, 0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b,
+        0x4e, 0x6a,
+    ];
+
+    /// Ownership answer for fixtures whose database records the legacy key as the server's own.
+    fn owned(_public: &[u8; 32]) -> bool {
+        true
+    }
+
     /// Find this migration's unique private staging file without depending on its random suffix.
     fn migration_temporary_exists(directory: &Path, file_name: &str) -> bool {
         let prefix = format!(".{file_name}.migrate-");
@@ -795,7 +921,7 @@ mod tests {
         fs::write(volatile.join("mesh-public.json"), br#"{"enabled":true}"#)
             .expect("write synthetic public state");
 
-        migrate(&volatile, &durable).expect("migrate legacy mesh state");
+        migrate(&volatile, &durable, &owned).expect("migrate legacy mesh state");
 
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable private key"),
@@ -813,7 +939,7 @@ mod tests {
             fs::symlink_metadata(durable.join("mesh-private-key")).expect("durable key metadata");
         assert_eq!(key.uid(), nix::unistd::Uid::effective().as_raw());
         assert_eq!(key.mode() & 0o777, 0o600);
-        migrate(&volatile, &durable).expect("a repeated start is harmless");
+        migrate(&volatile, &durable, &owned).expect("a repeated start is harmless");
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
@@ -843,7 +969,7 @@ mod tests {
         fs::write(durable.join("mesh-public.json"), b"durable-public")
             .expect("write synthetic durable state");
 
-        migrate(&volatile, &durable).expect("keep the durable identity");
+        migrate(&volatile, &durable, &owned).expect("keep the durable identity");
 
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable key"),
@@ -890,7 +1016,7 @@ mod tests {
         )
         .expect("make durable key private");
 
-        let result = migrate(&volatile, &durable);
+        let result = migrate(&volatile, &durable, &owned);
         let legacy_key_remains = volatile.join("mesh-private-key").exists();
         fs::remove_dir_all(root).expect("remove fixture root");
 
@@ -930,7 +1056,7 @@ mod tests {
         )
         .expect("make pending move marker private");
 
-        migrate(&volatile, &durable).expect("resume the interrupted move");
+        migrate(&volatile, &durable, &owned).expect("resume the interrupted move");
 
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("durable key"),
@@ -961,7 +1087,7 @@ mod tests {
         symlink(root.join("outside-key"), volatile.join("mesh-private-key"))
             .expect("create legacy key symlink");
 
-        assert!(migrate(&volatile, &durable).is_err());
+        assert!(migrate(&volatile, &durable, &owned).is_err());
         assert!(!durable.join("mesh-private-key").exists());
         assert!(fs::symlink_metadata(volatile.join("mesh-private-key")).is_ok());
         fs::remove_dir_all(root).expect("remove fixture root");
@@ -987,7 +1113,7 @@ mod tests {
         fs::write(&outside, b"synthetic-outside-key").expect("write outside fixture key");
         symlink(&outside, durable.join("mesh-private-key")).expect("create durable key symlink");
 
-        let result = migrate(&volatile, &durable);
+        let result = migrate(&volatile, &durable, &owned);
 
         assert!(result.is_err(), "a durable symlink must be rejected");
         assert!(volatile.join("mesh-private-key").exists());
@@ -1022,7 +1148,7 @@ mod tests {
             .expect("write synthetic runtime key");
         symlink(&actual, &volatile).expect("link legacy runtime directory");
 
-        let result = migrate(&volatile, &durable);
+        let result = migrate(&volatile, &durable, &owned);
 
         assert!(
             result.is_err(),
@@ -1057,7 +1183,7 @@ mod tests {
             .expect("make actual durable directory private");
         symlink(&actual, &durable).expect("link durable mesh directory");
 
-        let result = migrate(&volatile, &durable);
+        let result = migrate(&volatile, &durable, &owned);
 
         assert!(
             result.is_err(),
@@ -1091,7 +1217,7 @@ mod tests {
         )
         .expect("make migration marker private");
 
-        let result = migrate(&volatile, &durable);
+        let result = migrate(&volatile, &durable, &owned);
         let marker_remains = durable.join(MIGRATION_MARKER).exists();
         fs::remove_dir_all(root).expect("remove fixture root");
 
@@ -1215,7 +1341,7 @@ mod tests {
             "the public-key fingerprint must survive rollback",
         );
 
-        migrate(&volatile, &durable).expect("migrate identity forward on re-upgrade");
+        migrate(&volatile, &durable, &owned).expect("migrate identity forward on re-upgrade");
         assert_eq!(
             fs::read(durable.join("mesh-private-key")).expect("re-upgraded private key"),
             PRIVATE,
@@ -1260,7 +1386,7 @@ mod tests {
         )
         .expect("make migration marker private");
 
-        migrate(&volatile, &durable).expect("resume the interrupted move");
+        migrate(&volatile, &durable, &owned).expect("resume the interrupted move");
 
         let temporary_remains = temporary.exists();
         let durable_key = fs::read(durable.join("mesh-private-key")).expect("durable key");
@@ -1292,7 +1418,7 @@ mod tests {
 
         let first_source = volatile.clone();
         let first_durable = durable.clone();
-        let first = std::thread::spawn(move || migrate(&first_source, &first_durable));
+        let first = std::thread::spawn(move || migrate(&first_source, &first_durable, &owned));
         for _ in 0..1_000_000 {
             if migration_temporary_exists(&durable, "mesh-public.json") {
                 break;
@@ -1300,7 +1426,7 @@ mod tests {
             std::thread::yield_now();
         }
         let temporary_was_published = migration_temporary_exists(&durable, "mesh-public.json");
-        let second = migrate(&volatile, &durable);
+        let second = migrate(&volatile, &durable, &owned);
         let first = first.join().expect("first migration thread");
         let durable_key = fs::read(durable.join("mesh-private-key")).ok();
         let temporary_remains = migration_temporary_exists(&durable, "mesh-public.json");
@@ -1357,7 +1483,7 @@ mod tests {
                     let durable = durable.clone();
                     thread::spawn(move || {
                         barrier.wait();
-                        migrate(&volatile, &durable)
+                        migrate(&volatile, &durable, &owned)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1403,7 +1529,8 @@ mod tests {
         fs::write(&source, original).expect("write synthetic original key");
         let migration_source = volatile.clone();
         let migration_target = durable.clone();
-        let migration = std::thread::spawn(move || migrate(&migration_source, &migration_target));
+        let migration =
+            std::thread::spawn(move || migrate(&migration_source, &migration_target, &owned));
         for _ in 0..1_000_000 {
             if migration_temporary_exists(&durable, "mesh-public.json") {
                 break;
@@ -1487,7 +1614,7 @@ mod tests {
         fs::hard_link(&backup_selected_path, durable.join("mesh-private-key"))
             .expect("link durable key into backup-selected path");
 
-        let result = migrate(&volatile, &durable);
+        let result = migrate(&volatile, &durable, &owned);
         let legacy_key_remains = volatile.join("mesh-private-key").exists();
         fs::remove_dir_all(root).expect("remove fixture root");
 
@@ -1520,7 +1647,7 @@ mod tests {
         fs::hard_link(&backup_selected_path, volatile.join("mesh-private-key"))
             .expect("link legacy key into backup-selected path");
 
-        let result = migrate(&volatile, &durable);
+        let result = migrate(&volatile, &durable, &owned);
         let backup_copy_remains = backup_selected_path.exists();
         fs::remove_dir_all(root).expect("remove fixture root");
 
@@ -1584,7 +1711,7 @@ mod tests {
 
         let volatile = root.join("run/infraternal");
         let durable = root.join("var/lib/infraternal/mesh");
-        migrate(&volatile, &durable).expect("migrate under a strict umask");
+        migrate(&volatile, &durable, &owned).expect("migrate under a strict umask");
         let key =
             fs::symlink_metadata(durable.join("mesh-private-key")).expect("durable key metadata");
         assert_eq!(
@@ -1644,7 +1771,7 @@ mod tests {
 
         let volatile = root.join("run/infraternal");
         let durable = root.join("var/lib/infraternal/mesh");
-        migrate(&volatile, &durable).expect("migrate under a strict umask");
+        migrate(&volatile, &durable, &owned).expect("migrate under a strict umask");
         let directory = fs::symlink_metadata(durable).expect("durable directory metadata");
         assert_eq!(
             directory.mode() & 0o777,
@@ -1685,7 +1812,7 @@ mod tests {
         let migration = thread::spawn(move || {
             started.send(()).expect("signal migration start");
             result_tx
-                .send(migrate(&migration_source, &migration_target))
+                .send(migrate(&migration_source, &migration_target, &owned))
                 .expect("send migration result");
         });
         started_rx
@@ -1722,8 +1849,9 @@ mod tests {
     /// it upgrades production. If that check instance migrates first, it moves production's live
     /// key into its own scratch `mesh/` directory, which is then deleted. Production's own upgrade
     /// then finds nothing to migrate and mints a new key, which is the F8 failure this branch fixes.
-    /// The fix needs an ownership check (for example, the server node's public key recorded in this
-    /// data directory) before a legacy identity is moved; adapt the calls below to that API.
+    /// The fix is an ownership check: the public key derived from the legacy key must be the one
+    /// this data directory's database records for its `server` node. Here the second instance's
+    /// database does not record it; a byte copy of production's database is covered separately.
     #[test]
     fn a_second_server_instance_does_not_take_the_live_servers_legacy_identity() {
         let root = fixture_root();
@@ -1745,10 +1873,15 @@ mod tests {
         )
         .expect("write the live server's public state");
 
-        // The migration-check server starts first on its copy of production data.
-        let check = migrate(&shared_runtime, &check_instance);
+        let live_public = super::public_key(&[0x2a; 32]).expect("derive the live public key");
+        // The other server starts first; its database records some other server node key.
+        let check = migrate(&shared_runtime, &check_instance, &|public| {
+            *public == [0x99; 32]
+        });
         // Production is upgraded afterwards and must still find its own identity.
-        let production_result = migrate(&shared_runtime, &production);
+        let production_result = migrate(&shared_runtime, &production, &|public| {
+            *public == live_public
+        });
         let production_key = fs::read(production.join("mesh-private-key")).ok();
         let check_key = fs::read(check_instance.join("mesh-private-key")).ok();
         fs::remove_dir_all(root).expect("remove fixture root");
@@ -1765,6 +1898,82 @@ mod tests {
         assert_eq!(
             check_key, None,
             "a server that does not own the identity must never hold a copy of it"
+        );
+    }
+
+    /// The ownership proof derives the same public key that peers know, per the RFC 7748 vector.
+    #[test]
+    fn ownership_proof_derives_the_x25519_public_key() {
+        assert_eq!(
+            super::public_key(&RFC7748_PRIVATE).expect("derive public key"),
+            RFC7748_PUBLIC
+        );
+    }
+
+    /// Only the `server` node's key counts as this server's own, read from the real schema.
+    #[tokio::test]
+    async fn ownership_reads_only_the_server_nodes_key() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate fixture database");
+        sqlx::query(
+            "INSERT INTO mesh_nodes(id,name,public_key,dataplane_host) \
+             VALUES (1,'server',?,'server'),(2,'peer',?,'host-1')",
+        )
+        .bind(RFC7748_PUBLIC.as_slice())
+        .bind([0x44_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert server and peer nodes");
+
+        let keys = super::server_node_keys(&pool)
+            .await
+            .expect("read server node keys");
+
+        assert_eq!(keys, vec![RFC7748_PUBLIC]);
+    }
+
+    /// A legacy key the database does not record is left in place, and nothing is adopted.
+    #[test]
+    fn an_unowned_legacy_identity_is_left_in_place() {
+        let root = fixture_root();
+        let volatile = root.join("run/infraternal");
+        let durable = root.join("var/lib/infraternal/mesh");
+        fs::create_dir_all(&volatile).expect("create legacy runtime directory");
+        fs::set_permissions(&volatile, fs::Permissions::from_mode(0o700))
+            .expect("make legacy runtime private");
+        fs::create_dir_all(durable.parent().expect("data directory"))
+            .expect("create data directory");
+        fs::write(volatile.join("mesh-private-key"), RFC7748_PRIVATE)
+            .expect("write synthetic legacy key");
+        fs::write(volatile.join("mesh-public.json"), b"other-server-public")
+            .expect("write synthetic legacy state");
+
+        let result = migrate(&volatile, &durable, &|public| *public == [0; 32]);
+        let legacy_key = fs::read(volatile.join("mesh-private-key")).ok();
+        let legacy_public = fs::read(volatile.join("mesh-public.json")).ok();
+        let durable_entries = fs::read_dir(&durable)
+            .expect("durable directory exists")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(result.is_ok(), "an unowned identity is not a start failure");
+        assert_eq!(legacy_key.as_deref(), Some(RFC7748_PRIVATE.as_slice()));
+        assert_eq!(
+            legacy_public.as_deref(),
+            Some(b"other-server-public".as_slice())
+        );
+        assert!(
+            durable_entries.is_empty(),
+            "nothing may be adopted from an unowned identity: {durable_entries:?}"
         );
     }
 
