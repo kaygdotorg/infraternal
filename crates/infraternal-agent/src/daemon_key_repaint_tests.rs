@@ -416,7 +416,11 @@ async fn route_proof_is_answered_while_output_waits_for_client_credit() {
         }
     };
     stop_relay(&mut fixture).await;
-    assert_eq!(pong, Some((7, 9)), "the starved relay must still prove its route");
+    assert_eq!(
+        pong,
+        Some((7, 9)),
+        "the starved relay must still prove its route"
+    );
 }
 
 /// A key whose PTY write is confirmed by a route proof's state reply still gets its repaint (#477).
@@ -468,7 +472,9 @@ async fn a_key_confirmed_by_a_route_proof_state_reply_still_gets_its_repaint() {
             match tokio::time::timeout(EVENT_GUARD, fixture.messages.recv()).await {
                 Ok(Some(Message::Shim(2, Shim::InputAck(seq)))) => acked |= seq >= 1,
                 Ok(Some(Message::Pong(2, 7, 9))) => ponged = true,
-                Ok(Some(Message::Shim(2, Shim::Snapshot(seq, bytes)))) => repaint = Some((seq, bytes)),
+                Ok(Some(Message::Shim(2, Shim::Snapshot(seq, bytes)))) => {
+                    repaint = Some((seq, bytes))
+                }
                 Ok(Some(Message::Shim(2, Shim::Output(..)) | Message::Event(2, _))) => {}
                 Ok(Some(_) | None) | Err(_) => break,
             }

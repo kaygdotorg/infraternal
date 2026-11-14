@@ -1361,7 +1361,11 @@ async fn uncredited_items_cannot_grow_a_paused_queue_without_bound() {
         "a million uncredited items never filled the queue"
     );
     // 64 bytes charged per item against the 9 MiB cap.
-    assert!(rx.len() <= 9 * 1024 * 1024 / 64, "{} items queued", rx.len());
+    assert!(
+        rx.len() <= 9 * 1024 * 1024 / 64,
+        "{} items queued",
+        rx.len()
+    );
 }
 
 /// Credit is a byte bound even when the downstream frame queue has spare slots.

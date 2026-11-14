@@ -107,9 +107,13 @@ impl OutputQueue {
         if ledger.queued.saturating_add(charge) > OUTPUT_QUEUE_BYTES {
             return Err(item);
         }
-        self.sender.try_send(item).map_err(|error| error.into_inner())?;
+        self.sender
+            .try_send(item)
+            .map_err(|error| error.into_inner())?;
         // Within the cap, so the charge is at most 9 MiB and fits the compact ledger entry.
-        ledger.charges.push_back(u32::try_from(charge).unwrap_or(u32::MAX));
+        ledger
+            .charges
+            .push_back(u32::try_from(charge).unwrap_or(u32::MAX));
         ledger.queued += charge;
         Ok(())
     }
@@ -140,7 +144,9 @@ impl OutputQueue {
 /// The charged size of one queued item.
 fn charge(item: &TerminalOutput) -> u64 {
     charge_for(match item {
-        TerminalOutput::Output { bytes, .. } | TerminalOutput::Snapshot { bytes, .. } => bytes.len(),
+        TerminalOutput::Output { bytes, .. } | TerminalOutput::Snapshot { bytes, .. } => {
+            bytes.len()
+        }
         TerminalOutput::Event { event_json } => event_json.len(),
         _ => 0,
     })
