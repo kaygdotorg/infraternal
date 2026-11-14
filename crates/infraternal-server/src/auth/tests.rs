@@ -4025,3 +4025,56 @@ async fn session_slides_keep_the_wal_bounded() {
         "the WAL reached {frames} frames after 5,000 session slides"
     );
 }
+
+/// `path` written relative to the current directory: one `..` per component
+/// of the working directory, then `path` without its root. Opening it reaches
+/// the same file, but the name no longer says where it is.
+fn relative_to_current_dir(path: &std::path::Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let mut relative = PathBuf::new();
+    for _ in cwd.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(path.strip_prefix("/").unwrap());
+    relative
+}
+
+/// J696 P3 (#473): a database file named by a relative path used to keep the
+/// session statements on sqlx without a word, so `server --data ./x` ran the
+/// unbounded-WAL slide. The pool reopens the path on its own threads, so a
+/// relative name would also follow any later change of directory. `Auth::new`
+/// now refuses it, and the runtime opens its database by an absolute path
+/// instead (`runtime::open_database`).
+#[tokio::test]
+async fn a_relative_database_path_is_refused_not_downgraded() {
+    let _guard = SERIAL.lock().await;
+    let (absolute_pool, path) = disk_pool("sessions-relative").await;
+    absolute_pool.close().await;
+    let relative = relative_to_current_dir(&path);
+    assert!(relative.is_relative());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&relative)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+    let outcome = Auth::new(pool.clone(), "auth.example.test", ORIGIN).await;
+    let refused = match &outcome {
+        Err(error) => error.to_string(),
+        Ok(auth) => format!(
+            "accepted; sessions on the pool: {}",
+            auth.sessions_on_pool()
+        ),
+    };
+    if let Ok(auth) = outcome {
+        auth.close_database().await;
+    }
+    pool.close().await;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    assert_eq!(refused, "the database path must be absolute");
+}
