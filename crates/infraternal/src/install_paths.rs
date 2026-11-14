@@ -45,6 +45,7 @@
 use std::{
     env,
     ffi::OsString,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -272,13 +273,27 @@ fn explicit_absolute(flag: &str, value: Option<&Path>) -> Result<Option<PathBuf>
     }
 }
 
+/// Create `path` and any missing parents as private (0700) folders.
+///
+/// Folders that already exist keep their mode: a re-run must not change an
+/// install it did not create. The server checks and tightens its own folder
+/// at start as well; creating it private here closes the window before that.
+pub fn create_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+}
+
 #[cfg(test)]
 mod tests {
     //! One test per rule, so each has its own failure. Paths are plain values;
-    //! only the bundle test touches the disk, under the temp dir.
+    //! only the bundle and folder-creation tests touch the disk, under the temp dir.
 
     use super::*;
     use infraternal_status::RecordedServer;
+    use std::os::unix::fs::PermissionsExt;
 
     /// A non-root Linux environment with no bundle beside the binary.
     fn linux() -> Environment {
@@ -507,5 +522,21 @@ mod tests {
         };
         check_scope(Scope::System, false, &root).unwrap();
         check_scope(Scope::User, false, &root).unwrap();
+    }
+
+    /// New folders are created 0700; an existing folder keeps its mode.
+    #[test]
+    fn created_folders_are_private_and_existing_ones_keep_their_mode() {
+        let root = scratch("mode");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let leaf = root.join("a/b");
+        create_private_dir(&leaf).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&root.join("a")), 0o700);
+        assert_eq!(mode(&leaf), 0o700);
+        assert_eq!(mode(&root), 0o755);
+        create_private_dir(&leaf).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

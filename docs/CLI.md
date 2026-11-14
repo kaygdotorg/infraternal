@@ -101,7 +101,7 @@ binary (the release bundle layout) when it exists, and otherwise leaves the
 flag out. A relative `--data` or `--web-root` is refused, and the error names
 the absolute path to pass instead. `--system` needs root, except with
 `--dry-run`; without `--system`, init installs a per-user service, for root
-too.
+too. A real install creates a missing data folder with mode 0700.
 `--dry-run` prints the resolved `Data folder` and `Web folder` as absolute
 paths. The rules live in `crates/infraternal/src/install_paths.rs`.
 

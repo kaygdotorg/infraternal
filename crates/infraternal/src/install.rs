@@ -66,6 +66,9 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
         }
         Err(error) => return Err(InstallError::Io(error)),
     }
+    // Create the data folder private before the service first starts, only
+    // once the unit is accepted; an existing folder keeps its mode [#516].
+    super::install_paths::create_private_dir(&absolute(&args.data)?).map_err(InstallError::Io)?;
 
     let mut command = Command::new("systemctl");
     infraternal_shim::prepare_child(&mut command);
