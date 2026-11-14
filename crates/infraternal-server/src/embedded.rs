@@ -41,7 +41,7 @@ const PREPARATION_CALL_BIT: u32 = 1 << 31;
 const RETIREMENT_CALL_BIT: u32 = 1 << 30;
 const BACKGROUND_CALL_BITS: u32 = PREPARATION_CALL_BIT | RETIREMENT_CALL_BIT;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
-// The queue is bounded in bytes, tied to the credit window; see `output_queue` [D381, #477].
+/// Each browser stream's output queue, bounded in bytes tied to the credit window [D381, #477].
 #[path = "embedded_output_queue.rs"]
 mod output_queue;
 use output_queue::{OUTPUT_QUEUE_SLOTS, OutputQueue};
@@ -840,6 +840,8 @@ enum Command {
     },
 }
 
+/// The host-link actor's state for one browser attachment: its cursors, retained unacknowledged
+/// input, granted output credit, route liveness, and the byte-bounded queue its output goes to.
 struct AttachmentState {
     session_id: [u8; 16],
     stream_id: u32,

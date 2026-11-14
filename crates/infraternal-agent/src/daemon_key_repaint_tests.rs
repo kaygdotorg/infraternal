@@ -399,8 +399,9 @@ async fn stop_relay(fixture: &mut RelayFixture) {
 async fn route_proof_is_answered_while_output_waits_for_client_credit() {
     let mut fixture = start_relay(2).await;
     fill_bulk_window_without_repaint_reserve(&mut fixture).await;
-    // sleep: the relay holds the starving frame only after it has read it from the shim socket, and
+    // The relay holds the starving frame only after it has read it from the shim socket, and
     // nothing observable marks that moment; the 250 ms recovery timer is the bound this stays under.
+    // sleep: let the relay read and park the starving frame before the route proof arrives.
     tokio::time::sleep(Duration::from_millis(60)).await;
     fixture
         .commands

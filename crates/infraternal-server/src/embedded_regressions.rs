@@ -138,6 +138,7 @@ async fn retirement_mailbox_bypasses_a_full_ordinary_command_queue() {
     ));
 }
 
+/// An unfunded, settled attachment on stream 2 whose output goes to the given channel.
 fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
     AttachmentState {
         session_id: [1; 16],

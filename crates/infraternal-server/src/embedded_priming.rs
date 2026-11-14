@@ -729,8 +729,11 @@ fn normalize_snapshot(
     }
 }
 
-// Shadow protocol errors/backpressure must not enter the ordinary handler's
-// retirement branch and destroy an otherwise working primary attachment.
+/// Whether the shadow may hand this Output or Snapshot to the ordinary handler: it must be in
+/// order, funded by credit and fit the stream's byte-bounded output queue.
+///
+/// Shadow protocol errors and backpressure must not enter the ordinary handler's retirement
+/// branch and destroy an otherwise working primary attachment.
 fn safe_delivery(incoming: &Incoming, attachments: &HashMap<u64, AttachmentState>) -> bool {
     let (stream, seq, bytes, snapshot) = match incoming {
         Incoming::Output {
@@ -814,6 +817,7 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
 
+    /// A funded attachment fixture with a four-slot output queue, and the queue's receiving end.
     pub(super) fn attachment() -> (AttachmentState, mpsc::Receiver<TerminalOutput>) {
         let (output, receiver) = mpsc::channel(4);
         let (input_credit, _) = watch::channel(0);

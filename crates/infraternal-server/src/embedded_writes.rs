@@ -379,6 +379,7 @@ pub(super) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bo
 mod tests {
     //! Checks the encoded queue bound and joins owned flights before shutdown returns.
     use super::*;
+    /// A writer that retains a full 4 MiB of unacknowledged input, for flight-bound tests.
     fn retained_writer() -> AttachmentState {
         let (output, _) = mpsc::channel::<crate::embedded::TerminalOutput>(16);
         AttachmentState {
@@ -616,6 +617,7 @@ mod tests {
         assert_eq!(CONTROL_FLIGHT, 33024);
     }
 
+    /// A full control lane must not take the flight slots that every terminal owner needs.
     #[tokio::test(flavor = "current_thread")]
     async fn full_control_lane_keeps_all_terminal_owner_slots_available() {
         use super::super::BytesMut;
