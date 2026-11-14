@@ -1005,8 +1005,9 @@ fn j603_map_a(dir: &Path, port: u16, outside: u16, first: bool) {
 ///
 /// Before the fix B sent nothing there: `GotaTun`'s forced handshake is a no-op while a session
 /// exists, so the walk's steps changed only the address, and the path came back only when B's own
-/// timers fired (15–25 s later here, 10–65 s in the NAT matrix). With the fix the walk's first
-/// step drops the session it cannot vouch for and handshakes on the new address.
+/// timers fired (15–25 s later here, 10–65 s in the NAT matrix). With the fix (J604) the new
+/// address gets a real handshake at once (`GotaTun`'s `rehandshake`), over the old session, so
+/// the path is back about one round trip after the republication.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
 fn a_rebound_established_peer_comes_back_within_one_walk_step() {
