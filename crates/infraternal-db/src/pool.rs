@@ -4,7 +4,7 @@
 //!
 //! ```text
 //!  async callers ──write(closure)──▶ [bounded queue] ──▶ writer thread ── read-write connection
-//!               └──read(closure)───▶ [bounded queue] ──▶ reader threads ─ query_only connections (WAL)
+//!               └──read(closure)───▶ [bounded queue] ──▶ reader threads ─ read-only connections (WAL)
 //!                                    writer's WAL hook ──kick──▶ checkpointer thread ── its own connection
 //! ```
 //!
@@ -14,8 +14,8 @@
 //!   sleeps, which is where the old pool's long write tails came from (J438,
 //!   #473). Here they queue in FIFO order instead, without sleeping.
 //! - **N readers.** In WAL mode readers never block the writer and the writer
-//!   never blocks readers. Each reader thread owns one connection with
-//!   `query_only` on, so a read closure cannot write by mistake.
+//!   never blocks readers. Each reader thread owns one connection opened
+//!   read-only, so a read closure cannot write, even on purpose.
 //! - **A whole transaction per call.** The closure you pass runs inside one
 //!   transaction on the worker thread and returns once. There is no
 //!   statement-by-statement round trip between your task and the connection.
@@ -315,8 +315,8 @@ impl Database {
     ///
     /// The transaction is a deferred `BEGIN`, so every statement inside `f`
     /// reads the same snapshot of the database, even when writes commit in
-    /// between. The connection is `query_only`: any write fails with an error
-    /// instead of changing data.
+    /// between. The connection is opened read-only: any write fails with an
+    /// error instead of changing data.
     ///
     /// # Errors
     ///
@@ -609,11 +609,22 @@ fn spawn_checkpointer(
 
 /// Open one connection to `path` and configure it for `role`.
 ///
-/// Flags: read-write (plus create when asked), `NO_MUTEX` because exactly one
-/// thread ever uses each connection, a private page cache, and URI filenames,
-/// the same flags the old sqlx pool used.
+/// Flags: `NO_MUTEX` because exactly one thread ever uses each connection, a
+/// private page cache, and URI filenames, the same flags the old sqlx pool
+/// used. The writer and the checkpointer open read-write (the writer also
+/// creates the file when asked). Readers open **read-only**: SQLite then
+/// refuses every write on that connection, whatever a closure does to its
+/// pragmas. `query_only` alone was not enough, because a closure can switch it
+/// off (J632, #473). A read-only connection still reads a WAL database
+/// normally: the writer, which always opens first, has already created the
+/// `-wal` and `-shm` files.
 fn open_connection(path: &Path, options: &Options, role: Role) -> Result<Connection, Error> {
-    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+    let access = if role == Role::Reader {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    let mut flags = access
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
         | OpenFlags::SQLITE_OPEN_URI;
@@ -639,7 +650,9 @@ fn open_connection(path: &Path, options: &Options, role: Role) -> Result<Connect
 /// - `foreign_keys = ON`: SQLite leaves them off by default; the schema relies
 ///   on them. Set per connection, outside any transaction.
 /// - `cache_size` ([`Options::cache_kib`]): caps page cache per connection.
-/// - `query_only = ON` on readers only: a read closure cannot write.
+/// - `query_only = ON` on readers only. Readers are opened read-only anyway
+///   (see [`open_connection`]). This is a second layer, and makes a stray write
+///   fail with a clear "query only" error first.
 fn configure(conn: &Connection, options: &Options, role: Role) -> Result<(), Error> {
     conn.busy_timeout(options.busy_timeout)?;
     let mode: String =
