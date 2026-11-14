@@ -3286,13 +3286,18 @@ mod tests {
         }
     }
 
-    /// Open an established outbound TCP connection from `port` to `peer`:443 (SYN out, SYN-ACK
-    /// back); true when both packets pass.
+    /// Open an established outbound TCP connection from `port` to `peer`:443 with the whole
+    /// three-way handshake (SYN out, SYN-ACK back, ACK out); true when all three packets pass.
+    ///
+    /// Stopping at the SYN-ACK would leave a half-open connection, which the filter rightly
+    /// treats as still opening (J617 P3, #265).
     fn establish4(filter: &PacketFilter, peer: Ipv4Addr, port: u16, now: Instant) -> bool {
         let mut syn = tcp4(LOCAL4, peer, port, 443, SYN);
         let mut syn_ack = tcp4(peer, LOCAL4, 443, port, SYN_ACK);
+        let mut ack = tcp4(LOCAL4, peer, port, 443, ACK);
         filter.check_at(&mut syn, Direction::HostToMesh, now)
             && filter.check_at(&mut syn_ack, Direction::MeshToHost, now)
+            && filter.check_at(&mut ack, Direction::HostToMesh, now)
     }
 
     /// A full table evicts the least recently seen flow that is not an established connection:
