@@ -19,6 +19,8 @@
 //!   fresh copy of the prepared file each time.
 //! - `db_pool_bench mem <sqlx|pool> <db>`: resident memory and threads, opened and warm.
 //! - `db_pool_bench startup <sqlx|pool> <db>`: open and validate every recorded migration.
+//! - `db_pool_bench migrate <sqlx|pool> <db>`: migrate an existing database (a
+//!   copy of production's, never the live file) and print the history counts.
 //!
 //! Each command prints one JSON line.
 #![allow(
@@ -504,6 +506,42 @@ async fn startup(kind: &str, path: &Path) {
     );
 }
 
+/// Bring an existing database (for example a backup-API copy of production's
+/// file) up to date with one migration path and print what it did, so the
+/// runner and today's sqlx path can be compared on real data (#473). Prints
+/// the history rows before and after, the failed rows, and for `pool` the
+/// runner's own report.
+async fn migrate_existing(kind: &str, path: &Path) {
+    let count = |sql: &'static str| {
+        let conn = infraternal_db::rusqlite::Connection::open(path).unwrap();
+        conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap()
+    };
+    let rows_before = count("SELECT count(*) FROM _sqlx_migrations");
+    let start = Instant::now();
+    let front = Front::open(kind, path).await;
+    let (validated, applied) = match &front {
+        Front::Sqlx { pool, .. } => {
+            migrations::MIGRATIONS.run(pool).await.unwrap();
+            (None, None)
+        }
+        Front::Pool(db) => {
+            let report = db.migrate(migrations::RUNNER_MIGRATIONS).await.unwrap();
+            (Some(report.validated), Some(report.applied))
+        }
+    };
+    let elapsed = workload::us(start);
+    drop(front);
+    println!(
+        "{{\"variant\":\"{}\",\"binary_migrations\":{},\"history_rows_before\":{rows_before},\"history_rows_after\":{},\"failed_rows\":{},\"validated\":{},\"applied\":{},\"us\":{elapsed:.0}}}",
+        kind,
+        migrations::RUNNER_MIGRATIONS.len(),
+        count("SELECT count(*) FROM _sqlx_migrations"),
+        count("SELECT count(*) FROM _sqlx_migrations WHERE success=0"),
+        validated.map_or("null".to_owned(), |n| n.to_string()),
+        applied.map_or("null".to_owned(), |v| format!("{v:?}")),
+    );
+}
+
 /// Build the template database with today's sqlx path and the seed rows.
 async fn prepare(path: &Path) {
     let pool = sqlx_pool(path, true).await;
@@ -541,6 +579,7 @@ async fn main() {
         }
         Some("mem") => mem(&args[2], path).await,
         Some("startup") => startup(&args[2], path).await,
-        _ => panic!("usage: db_pool_bench prepare|bench|mem|startup … <db>"),
+        Some("migrate") => migrate_existing(&args[2], path).await,
+        _ => panic!("usage: db_pool_bench prepare|bench|mem|startup|migrate … <db>"),
     }
 }
