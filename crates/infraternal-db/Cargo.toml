@@ -1,0 +1,23 @@
+# The server's SQLite access layer on rusqlite (D379): one writer thread, N reader threads,
+# and a migration runner that keeps the existing `_sqlx_migrations` history.
+[package]
+name = "infraternal-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Bundled SQLite: the same `libsqlite3-sys` build the static release already links (D213, D379).
+# `hooks` for the writer's WAL hook that moves checkpoints off the write path (#473).
+rusqlite = { workspace = true, features = ["hooks"] }
+thiserror.workspace = true
+# Failed background checkpoints are logged (rate-limited) instead of ignored (#473).
+tracing.workspace = true
+# Only the channel types: the pool's threads are plain OS threads, never runtime workers.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
