@@ -418,7 +418,8 @@ pub struct Elevated {
 /// Run `way` under a fresh pseudo-terminal and type `secret` at its prompt.
 ///
 /// The command starts in its own session with the terminal as its
-/// controlling terminal (util-linux `setsid --ctty`), with an empty
+/// controlling terminal, set up in the forked child before it executes
+/// sudo, doas or su (`private_pty::lead_session`, J701 F1), with an empty
 /// environment apart from `PATH` and the `C` locale. The whole session is
 /// killed on any answer but [`Outcome::Started`], and in every case after
 /// `bound`. On `Started` the command keeps running: it *is* the relay now,
@@ -478,10 +479,11 @@ pub async fn elevate(
     nix::fcntl::fcntl(&pty.master, nix::fcntl::FcntlArg::F_SETFL(flags))
         .map_err(io::Error::from)?;
     let slave = |fd: &OwnedFd| fd.try_clone().map(Stdio::from);
-    let mut child = tokio::process::Command::new("/usr/bin/setsid")
-        .arg("--ctty")
-        .arg("--")
-        .arg(&program)
+    // J701 F1: sudo, doas or su is executed directly, and the forked copy of
+    // this process takes the session and the controlling terminal itself, so
+    // no ordinary (dumpable) program ever holds the terminal.
+    let mut command = std::process::Command::new(&program);
+    command
         .args(&argv)
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
@@ -489,7 +491,9 @@ pub async fn elevate(
         .env("LC_ALL", "C")
         .stdin(slave(&pty.slave)?)
         .stdout(slave(&pty.slave)?)
-        .stderr(slave(&pty.slave)?)
+        .stderr(slave(&pty.slave)?);
+    infraternal_shim::private_pty::lead_session(&mut command);
+    let mut child = tokio::process::Command::from(command)
         .kill_on_drop(true)
         .spawn()?;
     drop(pty.slave);

@@ -23,6 +23,11 @@
 //! the terminal is refused before anything is typed. The process holding the
 //! master must itself be non-dumpable (the infraternal binary is, from
 //! startup), so its descriptors can't be reached through `/proc`.
+//!
+//! The same holds for every process that ever holds the slave: only the
+//! infraternal agent (and its own fork before exec) and the setuid elevation
+//! command may. [`lead_session`] gives the child its session and controlling
+//! terminal without running any helper program in between (J701 F1).
 #![allow(unsafe_code)]
 
 use std::{
@@ -96,6 +101,44 @@ fn open_with(window: impl FnOnce(&Path)) -> io::Result<PrivateTerminal> {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     Ok(PrivateTerminal { master, slave })
+}
+
+/// Make `command`'s child the leader of a new session whose controlling
+/// terminal is its standard input, before it executes its program.
+///
+/// Use it for the elevation command that reads from a [`PrivateTerminal`]:
+/// set the slave as the command's stdin (and stdout and stderr), call this,
+/// then spawn. The program then starts already holding the terminal as its
+/// controlling terminal, so sudo, doas and su can be executed directly.
+///
+/// Why not a helper program such as `setsid --ctty` (J701 F1, #399): any
+/// ordinary program the account executes is dumpable again, and while it
+/// holds the slave another process of the account could take a copy of the
+/// descriptor through it (ptrace or `pidfd_getfd`), which the mode 000 node
+/// and `TIOCEXCL` don't stop, since they only refuse new opens. Done here, the
+/// work runs in the forked copy of the infraternal agent, which is still
+/// non-dumpable, and the next program to hold the terminal is the setuid one.
+///
+/// Rust's `Command` installs the stdio descriptors before it runs this hook,
+/// so descriptor 0 is the slave when `TIOCSCTTY` runs. The child of a fork
+/// is never a process-group leader, so `setsid` can't fail with `EPERM`.
+/// The new session's id is the child's pid, so killing that process group
+/// still ends the whole elevation.
+pub fn lead_session(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: setsid and ioctl are async-signal-safe system calls; the hook
+    // touches no allocation, lock or other Rust state of the parent.
+    unsafe {
+        command.pre_exec(|| {
+            if nix::libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Open the slave of `master` without a path lookup (Linux 4.13+).
