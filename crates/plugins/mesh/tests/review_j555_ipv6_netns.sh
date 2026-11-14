@@ -1,19 +1,30 @@
 #!/usr/bin/env bash
 # J555 review (#483, D386): kernel proof for the rendered host input table's IPv6 behaviour.
 #
-# Run as `unshare -Urnm bash review_j555_ipv6_netns.sh` (no real root needed).
-# It loads the exact table `host_firewall::render` produces for an admin-only
-# policy into an outer namespace, links it by veth to a child namespace, then:
+# Build the renderer first, then run it under a user namespace (no real root needed):
+#   cargo build -p infraternal-plugin-mesh --example render_host_table
+#   RENDER=<target>/debug/examples/render_host_table unshare -Urnm bash review_j555_ipv6_netns.sh
+# It loads the exact table `host_firewall::render` prints for an admin-only
+# policy (no hand-written copy, so it cannot drift from the renderer) into an
+# outer namespace, links it by veth to a child namespace, then:
 #   1. ND control: the child pings the outer link-local address. Neighbour
 #      discovery must pass (expected to pass: ND is untracked, not invalid).
 #   2. DHCPv6: the outer host sends a client message from [fe80::a]:546 to
 #      ff02::1:2:547; the child "server" answers unicast from [fe80::b]:547.
 #      The reply must reach the outer client. Exit 1 when it is dropped.
 # NO_TABLE=1 runs the same probes without the table, as the harness control.
-# The table follows the renderer, including J573's DHCPv6 reply rule.
-# LEGACY_TABLE=1 leaves that rule out, reproducing J555's red.
+# LEGACY_TABLE=1 strips the renderer's DHCPv6 reply rule (J573), reproducing
+# J555's red; the run fails if there was no such rule to strip.
 set -u
 NFT=${NFT:-$(command -v nft || echo /usr/sbin/nft)}
+: "${RENDER:?set RENDER to the built render_host_table example}"
+POLICY='{"admin_rules":[{"interface":null,"source":null,"protocol":"tcp","port":22}],"accept_interfaces":[],"listeners":[],"mesh_enabled":false}'
+TABLE=$("$RENDER" "$POLICY") || { echo "RENDER_FAILED"; exit 2; }
+if [ -n "${LEGACY_TABLE:-}" ]; then
+  LEGACY=$(printf '%s\n' "$TABLE" | grep -v 'udp dport 546')
+  [ "$LEGACY" != "$TABLE" ] || { echo "RENDER_HAS_NO_DHCPV6_RULE"; exit 2; }
+  TABLE=$LEGACY
+fi
 ip link set lo up
 unshare -n sleep 30 & CHILD=$!
 # sleep: give the child a moment to enter its namespace before moving the veth.
@@ -26,23 +37,8 @@ ip link set v0 up
 in_child ip link set lo up
 in_child ip addr add fe80::b/64 dev v1 nodad
 in_child ip link set v1 up
-DHCPV6_RULE='ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept'
-[ -n "${LEGACY_TABLE:-}" ] && DHCPV6_RULE='# (legacy table: no DHCPv6 reply rule)'
 if [ -z "${NO_TABLE:-}" ]; then
-"$NFT" -f - <<NFT
-table inet infraternal_host {
-    chain input {
-        type filter hook input priority filter - 10; policy drop;
-        iifname "lo" accept
-        ct state invalid drop
-        ct state established,related accept
-        ip protocol icmp accept
-        meta l4proto ipv6-icmp accept
-        $DHCPV6_RULE
-        tcp dport 22 accept
-    }
-}
-NFT
+printf '%s\n' "$TABLE" | "$NFT" -f - || { echo "TABLE_LOAD_FAILED"; exit 2; }
 "$NFT" list table inet infraternal_host
 else
   echo "control run: no host table loaded"
