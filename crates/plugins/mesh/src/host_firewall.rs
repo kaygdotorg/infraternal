@@ -39,6 +39,10 @@ use std::{
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 /// The only nft executable names this product checks without a configured path.
+///
+/// Each is a fixed entry point that only root can repoint: distro paths, the
+/// Nix system profile, and root's own and the default Nix profiles. A store
+/// path is reached only through one of these root-owned links (J589, #483).
 const NFT_CANDIDATES: &[&str] = &[
     "/usr/sbin/nft",
     "/usr/bin/nft",
@@ -48,6 +52,7 @@ const NFT_CANDIDATES: &[&str] = &[
     "/nix/var/nix/profiles/default/bin/nft",
     "/nix/var/nix/profiles/system/sw/bin/nft",
     "/root/.nix-profile/bin/nft",
+    "/root/.local/state/nix/profile/bin/nft",
 ];
 /// The nftables table whose input chain protects server and agent listeners.
 pub const HOST_TABLE: &str = "infraternal_host";
@@ -565,7 +570,7 @@ pub enum PolicyError {
     /// No safe nft executable was available at the listed fixed paths.
     #[error("nft executable was not found; checked: {checked}")]
     NftMissing {
-        /// Every absolute candidate inspected, including the fixed Nix store glob.
+        /// Every absolute candidate inspected, in order.
         checked: String,
     },
     /// The nft executable is not a root-owned, non-group-writable regular file.
@@ -858,7 +863,7 @@ pub fn render_for(policy: &Policy, mode: InputMode) -> Result<String, PolicyErro
     }
 }
 
-/// Return the fixed system paths checked before the Nix store.
+/// Return the fixed paths nft discovery checks when no path is configured.
 #[must_use]
 pub fn nft_candidates() -> &'static [&'static str] {
     NFT_CANDIDATES
@@ -1728,10 +1733,22 @@ fn parse_protocol(value: &str) -> Result<Protocol, PolicyError> {
     }
 }
 
-/// Resolve a configured executable or the fixed distro and Nix paths.
+/// Resolve a configured executable or one of the fixed entry points in [`NFT_CANDIDATES`].
+///
+/// Only fixed paths that root alone can repoint are checked: the distro
+/// directories and the Nix system, default and root profiles. The Nix store
+/// is never scanned by name. Any local user can add a root-owned, read-only
+/// `<hash>-nftables-<version>` path through the Nix daemon, so a store
+/// entry's name and owner say nothing about who asked for it (J589, #483).
+/// A store path is used only when a root-owned profile link points at it,
+/// or when it is the explicitly configured path. Rejected: keeping the scan
+/// and checking the store's referrer or registration database (still
+/// user-writable through the daemon, and slower).
 ///
 /// # Errors
-/// Returns an error when a candidate is unsafe or no fixed executable path exists.
+/// Returns [`PolicyError::UnsafeNft`] when a candidate exists but any hop of
+/// its symlink chain is not root-controlled, or [`PolicyError::NftMissing`],
+/// listing every place checked, when none exists.
 pub fn discover_nft(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
     #[cfg(any(test, feature = "test-support"))]
     let test_path = configured
@@ -1741,115 +1758,54 @@ pub fn discover_nft(configured: Option<&Path>) -> Result<PathBuf, PolicyError> {
     #[cfg(not(any(test, feature = "test-support")))]
     let test_path: Option<PathBuf> = None;
     let configured = configured.or(test_path.as_deref());
-    let candidates = configured.map_or_else(
-        || NFT_CANDIDATES.iter().map(PathBuf::from).collect::<Vec<_>>(),
-        |configured| vec![configured.to_owned()],
-    );
-    let checked = candidates.clone();
+    let candidates = nft_search_paths(configured);
     for candidate in &candidates {
         if let Some(resolved) = safe_nft_path(candidate)? {
             return Ok(resolved);
         }
     }
-    // The store is scanned only after every fixed path is absent. Its entries
-    // are other packages' outputs, so an unsafe one is skipped rather than
-    // fatal: it cannot be picked, and a later, valid version still can.
-    if configured.is_none() {
-        for candidate in nix_store_candidates() {
-            if let Ok(Some(resolved)) = safe_nft_path(&candidate) {
-                return Ok(resolved);
-            }
-        }
-    }
-    let mut checked = checked
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    if configured.is_none() {
-        checked.push("/nix/store/*-nftables-*/bin/nft".to_owned());
-    }
     Err(PolicyError::NftMissing {
-        checked: checked.join(", "),
+        checked: candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
     })
 }
 
-/// Find package-local nft executables only below the fixed Nix store directory.
+/// Every path [`discover_nft`] may run, in order: the configured one alone, or the fixed list.
+fn nft_search_paths(configured: Option<&Path>) -> Vec<PathBuf> {
+    configured.map_or_else(
+        || NFT_CANDIDATES.iter().map(PathBuf::from).collect(),
+        |configured| vec![configured.to_owned()],
+    )
+}
+
+/// The most symlinks [`trusted_chain`] follows for one candidate, as the kernel limits it.
+#[cfg(unix)]
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Root-owned directories that may be group- or world-writable because they are sticky.
 ///
-/// The store also holds `.drv` files, source tarballs and patches whose names
-/// contain `nftables` (#483, J555). Only directories named
-/// `<32-char hash>-nftables-<digit>…` count, and the newest version comes
-/// first, so the choice does not depend on store hashes. J560's
-/// `firewall_tools` lookup applies the same rules to the mesh table's tools;
-/// once it merges, this scan should delegate to it.
-fn nix_store_candidates() -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir("/nix/store") else {
-        return Vec::new();
-    };
-    let mut found = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| {
-            let version = nix_store_nftables_version(&entry.file_name().to_string_lossy())?;
-            Some((version, entry.path().join("bin/nft")))
-        })
-        .collect::<Vec<_>>();
-    found.sort_by(|(left, left_path), (right, right_path)| {
-        compare_versions(right, left).then_with(|| left_path.cmp(right_path))
-    });
-    found.into_iter().map(|(_, path)| path).collect()
-}
+/// In a sticky directory nobody but root can rename or remove root's
+/// entries, and [`trusted_chain`] requires every entry it passes to be
+/// root-owned, so an entry another user created there is refused. Only these
+/// two are exempt: the store (`1775 root:nixbld`) and the per-user profile
+/// root, which older Nix installs create as `1777`.
+#[cfg(unix)]
+const STICKY_TRUSTED_DIRECTORIES: &[&str] = &["/nix/store", "/nix/var/nix/profiles/per-user"];
 
-/// Return the version of a `<hash>-nftables-<version>` store name, or `None` for any other name.
-fn nix_store_nftables_version(name: &str) -> Option<String> {
-    let (hash, rest) = name.split_once('-')?;
-    let version = rest.strip_prefix("nftables-")?;
-    (hash.len() == 32
-        && hash.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        && version.starts_with(|c: char| c.is_ascii_digit()))
-    .then(|| version.to_owned())
-}
-
-/// Order two version strings by their digit and text runs, so `1.1.10` sorts above `1.1.7`.
-fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    /// Split a version into alternating digit and non-digit runs.
-    fn runs(version: &str) -> Vec<&str> {
-        let mut runs = Vec::new();
-        let mut rest = version;
-        while let Some(first) = rest.chars().next() {
-            let digits = first.is_ascii_digit();
-            let end = rest
-                .find(|c: char| c.is_ascii_digit() != digits)
-                .unwrap_or(rest.len());
-            let (run, tail) = rest.split_at(end);
-            runs.push(run);
-            rest = tail;
-        }
-        runs
-    }
-    let (left, right) = (runs(left), runs(right));
-    for (a, b) in left.iter().zip(&right) {
-        let order = match (a.parse::<u64>(), b.parse::<u64>()) {
-            (Ok(a), Ok(b)) => a.cmp(&b),
-            _ => a.cmp(b),
-        };
-        if order.is_ne() {
-            return order;
-        }
-    }
-    left.len().cmp(&right.len())
-}
-
-/// Resolve and check a candidate without following any path from the environment.
+/// Check a candidate and return its final, root-controlled target.
 ///
 /// A path that does not exist, or that runs through a regular file
 /// (`NotADirectory`), is simply absent. Anything else that exists must pass
-/// the ownership checks, or the call fails loudly.
+/// [`trusted_chain`], or the call fails loudly.
 fn safe_nft_path(candidate: &Path) -> Result<Option<PathBuf>, PolicyError> {
     if !candidate.is_absolute() {
         return Err(PolicyError::UnsafeNft(candidate.to_owned()));
     }
-    let resolved = match candidate.canonicalize() {
-        Ok(path) => path,
+    match candidate.canonicalize() {
+        Ok(_) => {}
         Err(error)
             if matches!(
                 error.kind(),
@@ -1859,46 +1815,112 @@ fn safe_nft_path(candidate: &Path) -> Result<Option<PathBuf>, PolicyError> {
             return Ok(None);
         }
         Err(error) => return Err(PolicyError::Io(error)),
-    };
-    let metadata = fs::metadata(&resolved).map_err(PolicyError::Io)?;
+    }
     #[cfg(unix)]
     {
-        if !metadata.is_file()
-            || !safe_policy_owner(&metadata)
-            || metadata.permissions().mode() & 0o111 == 0
-        {
-            return Err(PolicyError::UnsafeNft(resolved));
-        }
-        for directory in resolved.parent().into_iter().flat_map(Path::ancestors) {
-            let directory_metadata = fs::metadata(directory).map_err(PolicyError::Io)?;
-            if !directory_metadata.is_dir() || !safe_nft_directory(directory, &directory_metadata) {
-                return Err(PolicyError::UnsafeNft(resolved));
-            }
-            // `/run` is a fixed root-owned trust anchor for private runtime
-            // tools and namespace fixtures. Its parent `/` may have an
-            // unmapped owner inside the privileged test user namespace.
-            if directory == Path::new("/run") || directory == Path::new("/nix/store") {
-                break;
-            }
-        }
-        let candidate_metadata = fs::symlink_metadata(candidate).map_err(PolicyError::Io)?;
-        if candidate_metadata.uid() != 0 {
-            return Err(PolicyError::UnsafeNft(resolved));
-        }
+        trusted_chain(candidate).map(Some)
     }
     #[cfg(not(unix))]
-    if !metadata.is_file() {
-        return Err(PolicyError::UnsafeNft(resolved));
+    {
+        let resolved = candidate.canonicalize().map_err(PolicyError::Io)?;
+        if !fs::metadata(&resolved).map_err(PolicyError::Io)?.is_file() {
+            return Err(PolicyError::UnsafeNft(resolved));
+        }
+        Ok(Some(resolved))
     }
-    Ok(Some(resolved))
 }
 
-/// Trust the sticky, root-owned Nix store while rejecting writable executable paths.
+/// Follow `candidate` one component at a time and check every hop of its symlink chain.
+///
+/// `canonicalize` alone checks only the end of the chain, so a link that a
+/// user could repoint in the middle (a profile generation, a per-user
+/// directory) would go unnoticed. Here every directory passed through must be
+/// root-owned and not group- or world-writable (except the sticky ones in
+/// [`STICKY_TRUSTED_DIRECTORIES`]), every symlink must be root-owned, and
+/// the target must be a root-owned regular file that is executable and not
+/// group- or world-writable. `current` never contains a symlink, so `..`
+/// is resolved by dropping its last component.
 #[cfg(unix)]
-fn safe_nft_directory(path: &Path, metadata: &fs::Metadata) -> bool {
+fn trusted_chain(candidate: &Path) -> Result<PathBuf, PolicyError> {
+    use std::{collections::VecDeque, ffi::OsString, path::Component};
+
+    /// Queue a path's components, keeping `..` and dropping `.` and the root.
+    fn components(path: &Path) -> impl DoubleEndedIterator<Item = OsString> + '_ {
+        path.components().filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_owned()),
+            Component::ParentDir => Some(OsString::from("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        })
+    }
+
+    let refuse = |path: &Path| PolicyError::UnsafeNft(path.to_owned());
+    let mut current = PathBuf::from("/");
+    let root = fs::metadata(&current).map_err(PolicyError::Io)?;
+    // `/run` is a fixed root-owned anchor for runtime tools and the
+    // privileged test sandbox, whose `/` shows host root as an unmapped uid.
+    // Below it, as before J591, `/` need only be unwritable by others.
+    let root_trusted = if candidate.starts_with("/run") {
+        root.is_dir() && root.permissions().mode() & 0o022 == 0
+    } else {
+        trusted_directory(&current, &root)
+    };
+    if !root_trusted {
+        return Err(refuse(&current));
+    }
+    let mut pending = components(candidate).collect::<VecDeque<_>>();
+    let mut hops = 0;
+    while let Some(name) = pending.pop_front() {
+        if name == ".." {
+            current.pop();
+            continue;
+        }
+        let next = current.join(&name);
+        let metadata = fs::symlink_metadata(&next).map_err(PolicyError::Io)?;
+        if metadata.uid() != 0 {
+            return Err(refuse(&next));
+        }
+        if metadata.file_type().is_symlink() {
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+                return Err(refuse(candidate));
+            }
+            let target = fs::read_link(&next).map_err(PolicyError::Io)?;
+            if target.is_absolute() {
+                current = PathBuf::from("/");
+            }
+            for component in components(&target).rev() {
+                pending.push_front(component);
+            }
+            continue;
+        }
+        if metadata.is_dir() {
+            if !trusted_directory(&next, &metadata) {
+                return Err(refuse(&next));
+            }
+            current = next;
+            continue;
+        }
+        let mode = metadata.permissions().mode();
+        if pending.is_empty() && metadata.is_file() && mode & 0o022 == 0 && mode & 0o111 != 0 {
+            return Ok(next);
+        }
+        return Err(refuse(&next));
+    }
+    // The chain ended on a directory, not an executable.
+    Err(refuse(candidate))
+}
+
+/// True for a root-owned directory that no other user can write into.
+#[cfg(unix)]
+fn trusted_directory(path: &Path, metadata: &fs::Metadata) -> bool {
     let mode = metadata.permissions().mode();
-    metadata.uid() == 0
-        && (mode & 0o022 == 0 || (path == Path::new("/nix/store") && mode & 0o1000 != 0))
+    metadata.is_dir()
+        && metadata.uid() == 0
+        && (mode & 0o022 == 0
+            || (mode & 0o1000 != 0
+                && STICKY_TRUSTED_DIRECTORIES
+                    .iter()
+                    .any(|sticky| path == Path::new(sticky))))
 }
 
 /// Run nft at its resolved absolute path while capturing inventory and error output.
@@ -2036,27 +2058,6 @@ mod tests {
         );
     }
 
-    /// Only `<hash>-nftables-<version>` store names are candidates, and the newest version wins.
-    #[test]
-    fn nix_store_names_are_filtered_and_ordered_by_version() {
-        let hash = "a".repeat(32);
-        let version = |name: &str| super::nix_store_nftables_version(name);
-        assert_eq!(
-            version(&format!("{hash}-nftables-1.1.10")).as_deref(),
-            Some("1.1.10")
-        );
-        assert_eq!(
-            version(&format!("{hash}-nftables-1.1.10.drv")).as_deref(),
-            Some("1.1.10.drv")
-        );
-        assert_eq!(version(&format!("{hash}-python3.12-nftables-1.1.1")), None);
-        assert_eq!(version(&format!("{hash}-nftables-docs")), None);
-        assert_eq!(version("short-nftables-1.1.1"), None);
-        assert!(super::compare_versions("1.1.10", "1.1.7").is_gt());
-        assert!(super::compare_versions("1.1", "1.1.1").is_lt());
-        assert!(super::compare_versions("1.0.9", "1.0.9").is_eq());
-    }
-
     /// J589 review (P1, security): on a multi-user Nix host any local user can
     /// put a root-owned, read-only `<hash>-nftables-<version>/bin/nft` into
     /// `/nix/store` (`nix-store --add` through the world-writable daemon
@@ -2064,6 +2065,10 @@ mod tests {
     /// sorts first, so the store scan hands infraternal an attacker's program to
     /// run as root whenever no fixed nft path exists (prod's shape, #483).
     /// Store names and ownership say nothing about who asked for the path.
+    ///
+    /// J591 removed the store scan, so the test now checks the two things
+    /// that replaced it: the search list holds no store path, and discovery
+    /// never resolves to the planted one.
     ///
     /// Needs a Nix daemon; it reports SKIP without one.
     #[cfg(unix)]
@@ -2094,16 +2099,70 @@ mod tests {
         assert!(added.status.success(), "{added:?}");
         let store_path = PathBuf::from(String::from_utf8_lossy(&added.stdout).trim());
         let planted = store_path.join("bin/nft");
-        let offered = super::nix_store_candidates();
+        eprintln!("PLANTED={}", store_path.display());
+        let offered = super::nft_search_paths(None);
         assert!(
-            !offered.contains(&planted),
-            "the store scan offers {} (added by an unprivileged user) to run as root; \
-             first candidate: {:?}; safe_nft_path: {:?}",
+            offered.iter().all(|path| !path.starts_with("/nix/store")),
+            "the search list names store paths: {offered:?}"
+        );
+        let discovered = super::discover_nft(None);
+        assert!(
+            discovered.as_ref().map_or(true, |path| path != &planted),
+            "discovery picked {} (added by an unprivileged user) to run as root",
             planted.display(),
-            offered.first(),
-            super::safe_nft_path(&planted),
         );
     }
+
+    /// A root-owned system chain with relative, absolute and `..` hops resolves to its file.
+    ///
+    /// The Nix default profile is prod's shape (#483): `default` ->
+    /// `per-user/root/profile` -> generation link -> store environment ->
+    /// store package, every hop root-owned.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_owned_symlink_chain_resolves() {
+        for candidate in [
+            "/bin/sh",
+            "/usr/bin/../bin/sh",
+            "/nix/var/nix/profiles/default/bin/nix-store",
+        ] {
+            let candidate = Path::new(candidate);
+            if !candidate.exists() {
+                eprintln!("SKIP: {} is absent", candidate.display());
+                continue;
+            }
+            let resolved = super::safe_nft_path(candidate).expect("trusted system chain");
+            assert_eq!(
+                resolved.as_deref(),
+                Some(candidate.canonicalize().expect("canonical").as_path())
+            );
+        }
+    }
+
+    /// Any hop a non-root user owns is refused loudly, not skipped, even when it ends at a root file.
+    #[cfg(unix)]
+    #[test]
+    fn a_user_owned_hop_in_the_chain_is_refused() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+        let scratch = std::env::temp_dir().join(format!("j591-chain-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch directory");
+        let link = scratch.join("nft");
+        symlink("/bin/sh", &link).expect("user-owned link to a root-owned file");
+        let owner = std::fs::symlink_metadata(&link)
+            .expect("link metadata")
+            .uid();
+        let result = super::safe_nft_path(&link);
+        let _ = std::fs::remove_dir_all(&scratch);
+        if owner == 0 {
+            eprintln!("SKIP: running as root, the link is root-owned");
+            return;
+        }
+        assert!(
+            matches!(result, Err(PolicyError::UnsafeNft(_))),
+            "a chain through a user-owned link must be refused, got {result:?}"
+        );
+    }
+
 
     /// Only a server policy makes the host table drop by default (J555, #483).
     #[test]
