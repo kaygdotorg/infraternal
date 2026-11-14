@@ -285,6 +285,93 @@ test("a server restart under the host-key step is recovered: the key is fetched 
   await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-newkey.lab");
 });
 
+/** Counts the bootstrap sockets the page opens from now on, so a spec can tell how often a host is asked again. */
+function countBootstrapSockets(page: Page): () => number {
+  let opened = 0;
+  page.on("websocket", (socket) => { if (socket.url().includes("/v1/bootstrap/ws")) opened++; });
+  return () => opened;
+}
+
+test("a server that stays down is asked 15 times, then the host fails as an ordinary connection error (#510)", async ({ page }) => {
+  test.setTimeout(120_000);
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const opened = countBootstrapSockets(page);
+  // The server goes away and does not come back: every new socket is closed at once.
+  await config(page, { refuse: true });
+  await config(page, { drop: true });
+  await expect(onScreen(page, "failure").getByText("Setting up newkey.lab didn't finish")).toBeVisible({ timeout: 60_000 });
+  // One first re-ask plus 15 timed ones, and no more.
+  const total = opened();
+  expect(total).toBe(16);
+  await expect(wizard(page).locator(".ah-error")).toHaveCount(0);
+  // sleep: a count that is still growing after the limit would show here
+  await page.waitForTimeout(3_000);
+  expect(opened()).toBe(total);
+});
+
+test("closing the card while a host is being asked again stops the asking (#510)", async ({ page }) => {
+  test.setTimeout(120_000);
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const opened = countBootstrapSockets(page);
+  await config(page, { refuse: true });
+  await config(page, { drop: true });
+  await expect.poll(opened, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  await page.locator(".ah-close").click();
+  await inWizard(page, "Stop installing").click();
+  await gone(page);
+  const after = opened();
+  // sleep: any timer left behind by the closed card would open another socket in this time
+  await page.waitForTimeout(3_500);
+  expect(opened()).toBe(after);
+});
+
+test("a changed key after a restart is shown as changed, not as a new key (#510)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@changedkey.lab");
+  await expect(page.getByText("Warning: this host’s trusted key changed.")).toBeVisible({ timeout: 15_000 });
+  const opened = countBootstrapSockets(page);
+  await config(page, { drop: true });
+  // The card asks again by itself (a new socket), and the new observation is still the warning with its own button.
+  await expect.poll(opened, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+  await expect(page.getByText("Warning: this host’s trusted key changed.")).toBeVisible({ timeout: 15_000 });
+  await expect(inWizard(page, "Replace trusted key")).toBeVisible({ timeout: 15_000 });
+  await expect(inWizard(page, "Trust and continue")).toHaveCount(0);
+  await inWizard(page, "Replace trusted key").click();
+  await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-changedkey.lab");
+});
+
+test("a key that is different after a restart's re-ask is called out as changed, not shown as the same question (#510, J558)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  const block = wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-keyblock");
+  await expect(block).toContainText(/SHA256:/, { timeout: 15_000 });
+  const before = await block.textContent();
+  // The person is comparing this fingerprint with the host when the server restarts, and the key the host presents
+  // is a different one by the time the card asks again (a machine in the path swapped it during the restart window).
+  await config(page, { rotateKey: true });
+  await config(page, { drop: true });
+  await expect.poll(() => block.textContent(), { timeout: 15_000 }).not.toBe(before);
+  // Same title, same neutral lede and the same "Trust and continue" in the same place: someone who already compared
+  // the first key clicks it. The page must say that the key differs from the one shown before the restart.
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-lede")).toContainText(/changed/i);
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-hero")).toBeVisible();
+  // Evidence for the issue: the changed-key page at desktop and phone width.
+  for (const width of [1440, 393]) {
+    await page.setViewportSize({ width, height: width === 393 ? 852 : 900 });
+    // The page that just left must be gone, or its fading text shows through behind the new one.
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `rekeyed-after-restart-${width}.png`) });
+  }
+});
+
 test("a double click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
   await trustWithRapidClicks(page, 2);
 });

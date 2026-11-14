@@ -69,6 +69,22 @@ def main():
     assert "UNEXPECTED_ARTIFACT_CHECK" not in result.stdout, result.stdout
     print("static build failure: rejected before artifact reporting PASS")
 
+    # The `test` row must not stop at the first failing test binary (#509): it has to pass
+    # --no-fail-fast, keep cargo's exit code, and list the failing tests at the end.
+    result = subprocess.run(
+        ["bash", "-c",
+         'source "$1"; cargo() { printf "ARGS %s\\n" "$*"; '
+         'printf "test a::b ... FAILED\\nerror: test failed, to rerun pass `-p x`\\n"; return 101; }; '
+         'rust_test_workspace',
+         "verify-test-row", str(ROOT / "scripts/verify.d/rust.sh")],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert "--no-fail-fast" in result.stdout, result.stdout
+    assert result.returncode == 101, result.stdout + result.stderr
+    summary = result.stdout.split("--- failing tests", 1)[-1]
+    assert "test a::b ... FAILED" in summary, result.stdout
+    print("test row: --no-fail-fast, exit code kept, failures summarised PASS")
+
 
 if __name__ == "__main__":
     main()
