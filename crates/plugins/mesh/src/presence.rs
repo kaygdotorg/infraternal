@@ -244,8 +244,11 @@ impl Tracker {
                 Some(previous) if row.received == previous.received => previous.last_received_at,
                 Some(_) | None => None,
             };
-            let proven =
-                grew || previous.is_some_and(|previous| row.handshake > previous.handshake);
+            // The same handshake can read one second later (J602 F4); that is not news.
+            let proven = grew
+                || previous.is_some_and(|previous| {
+                    crate::candidates::newer_handshake(row.handshake, previous.handshake)
+                });
             let moved = previous.is_none_or(|previous| previous.endpoint != row.endpoint);
             let reflexive = row
                 .endpoint

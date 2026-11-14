@@ -177,6 +177,19 @@ pub const fn live_handshake(handshake: u64, unix_now: u64) -> u64 {
     }
 }
 
+/// Whether a handshake time read as `now` (Unix seconds) shows a later handshake than one read
+/// earlier as `before`.
+///
+/// The engine reports a handshake's time as "wall clock minus its age", truncated to seconds, and
+/// the two clocks are read a moment apart, so the same handshake reads as either of two adjacent
+/// seconds. Only a time more than one second later is a new handshake. Real handshakes are
+/// seconds apart (one retry interval at least), so none is missed. The walk ([`Rotation::tick`])
+/// and the server's presence tracker (`presence.rs`, J602 F4) both judge by this rule.
+#[must_use]
+pub const fn newer_handshake(now: u64, before: u64) -> bool {
+    now > before.saturating_add(1)
+}
+
 /// What the engine reports for one peer, as far as a walk needs it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Seen {
@@ -281,8 +294,8 @@ impl Rotation {
         let roamed = seen
             .endpoint
             .is_some_and(|endpoint| endpoint != self.list[self.index]);
-        let newer_handshake = seen.handshake > self.start.handshake.saturating_add(1);
-        if seen.received != self.start.received || newer_handshake || roamed {
+        let newer = newer_handshake(seen.handshake, self.start.handshake);
+        if seen.received != self.start.received || newer || roamed {
             self.settled = true;
             self.found = true;
             return None;
