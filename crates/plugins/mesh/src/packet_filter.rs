@@ -17,6 +17,57 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Host settings the filter relies on instead of parsing the packet itself, with the value each
+/// must have (J592 P3-11, #265).
+///
+/// The filter judges the source, destination, protocol and ports of the packet as it arrives.
+/// Linux can act on parts of a packet the filter does not judge, and these settings turn that
+/// off:
+/// - `net.ipv4.conf.all.accept_source_route = 0`: an IPv4 packet carrying a loose or strict
+///   source-route option (LSRR/SSRR) is dropped rather than routed on to the next hop it names.
+/// - `net.ipv6.conf.all.accept_source_route <= 0`: an IPv6 routing header with segments left is
+///   not followed (0 still accepts the type 2 header that Mobile IPv6 uses; -1 refuses all).
+///
+/// Both are the kernel defaults on a host that does not forward. Known gaps that no setting
+/// closes, documented here rather than hidden: under an `All` grant a peer can reach the
+/// kernel's default IPIP, GRE and SIT tunnel devices (it is trusted for every protocol anyway);
+/// ICMP errors about a mesh SSH flow redirected to its private port are not translated back, so
+/// path-MTU discovery on that flow relies on the peer's MSS; and a later fragment that arrives
+/// before its first fragment is dropped, so the sender retransmits.
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) const REQUIRED_SYSCTLS: [(&str, i64); 2] = [
+    ("net/ipv4/conf/all/accept_source_route", 0),
+    ("net/ipv6/conf/all/accept_source_route", 0),
+];
+
+/// The required settings this host does not meet, as `name = value (want <= limit)` lines.
+///
+/// `read` returns a setting's current text, or `None` when it cannot be read (a missing IPv6
+/// stack, a sandbox); unreadable settings are not reported. Values above the limit are reported.
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn sysctl_gaps(read: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    REQUIRED_SYSCTLS
+        .iter()
+        .filter_map(|(name, limit)| {
+            let value = read(name)?.trim().parse::<i64>().ok()?;
+            (value > *limit)
+                .then(|| format!("{} = {value} (want <= {limit})", name.replace('/', ".")))
+        })
+        .collect()
+}
+
+/// Read [`REQUIRED_SYSCTLS`] from `/proc/sys` and log a warning for each setting that would
+/// let the kernel act on a part of a packet the filter does not judge.
+///
+/// Called once when the `GotaTun` engine starts. It warns rather than refuses: the settings are
+/// host-wide, owned by the host's own configuration, and the defaults are already correct.
+#[cfg(target_os = "linux")]
+pub(crate) fn warn_about_sysctl_gaps() {
+    for gap in sysctl_gaps(|name| std::fs::read_to_string(format!("/proc/sys/{name}")).ok()) {
+        tracing::warn!(setting = %gap, "mesh packet filter relies on a host setting that is not at its required value");
+    }
+}
+
 /// A packet's position relative to this host and its mesh peers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Direction {
@@ -3428,6 +3479,25 @@ mod tests {
         assert!(
             !filter.check_at(&mut data, Direction::MeshToHost, now),
             "the new owner inherited the old owner's flow"
+        );
+    }
+
+    /// Only readable settings above their limit are reported, with the dotted name.
+    #[test]
+    fn sysctl_gaps_report_only_values_above_their_limit() {
+        let gaps = super::sysctl_gaps(|name| match name {
+            "net/ipv4/conf/all/accept_source_route" => Some("1\n".to_owned()),
+            _ => None,
+        });
+        assert_eq!(
+            gaps,
+            ["net.ipv4.conf.all.accept_source_route = 1 (want <= 0)"]
+        );
+        assert_eq!(
+            super::sysctl_gaps(|name| Some(
+                if name.contains("ipv6") { "-1" } else { "0" }.to_owned()
+            )),
+            Vec::<String>::new()
         );
     }
 }

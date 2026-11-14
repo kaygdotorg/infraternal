@@ -241,6 +241,7 @@ impl Engine {
         proxy_ingress: &MeshProxyIngress,
         adopt: Option<u32>,
     ) -> io::Result<Self> {
+        crate::packet_filter::warn_about_sysctl_gaps();
         let filter = Arc::new(match config.as_ref() {
             Some(config) => PacketFilter::new(config, proxy_ingress.clone())?,
             None => PacketFilter::empty(),
