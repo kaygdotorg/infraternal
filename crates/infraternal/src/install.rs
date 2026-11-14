@@ -290,8 +290,9 @@ fn console_admin_path(
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(format!(
-                "no --host-firewall-allow rule admits sshd's port {ports} (from {source}); add \
-                 one such as '*,*,tcp,<port>' so the default-drop host table keeps an SSH path"
+                "no --host-firewall-allow rule admits sshd's port {ports} (from {source}); rules \
+                 limited to lo or to one source address do not count; add one such as \
+                 '*,*,tcp,<port>' so the default-drop host table keeps an SSH path"
             ))
         }
         host_firewall::SshdPorts::Unknown(tried) => Err(format!(

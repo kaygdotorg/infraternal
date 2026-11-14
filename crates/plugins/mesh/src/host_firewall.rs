@@ -1622,11 +1622,21 @@ pub fn admin_rule_for_ssh_session(value: &str) -> Result<AllowRule, PolicyError>
 /// requires a TCP rule for one of `sshd_ports`, the ports [`sshd_ports`]
 /// learned. An empty list never passes: guessing 22 let a console install
 /// lock out an sshd configured on 2222 (J608, #483).
+///
+/// A rule limited to the loopback interface, or to a single source address
+/// (/32 or /128), does not count: it admits only local logins or one machine,
+/// which proves nothing about the administrators' way in (J608 P3). A real
+/// interface or a source network is a deliberate admin path and counts.
 #[must_use]
 pub fn admits_sshd(rules: &[AllowRule], sshd_ports: &[u16]) -> bool {
-    rules
-        .iter()
-        .any(|rule| rule.protocol == Protocol::Tcp && sshd_ports.contains(&rule.port))
+    rules.iter().any(|rule| {
+        rule.protocol == Protocol::Tcp
+            && sshd_ports.contains(&rule.port)
+            && rule.interface.as_deref() != Some("lo")
+            && rule.source.as_ref().is_none_or(|source| {
+                source.prefix() < if source.address().is_ipv4() { 32 } else { 128 }
+            })
+    })
 }
 
 /// sshd's TCP ports as learned for a console install, or why none could be.
