@@ -145,7 +145,8 @@ export function installSiteSearch(button: HTMLElement): { open: () => void; togg
     dialog.showModal();
     input.value = "";
     void draw();
-    input.focus();
+    // preventScroll: the dialog is fixed; a focus scroll would move the visual viewport under it on iPhone.
+    input.focus({ preventScroll: true });
   };
 
   return { open, toggle: () => { if (dialog?.open) dialog.close(); else open(); } };
