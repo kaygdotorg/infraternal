@@ -774,11 +774,11 @@ fn walks_candidates(node: &Node) -> bool {
     node.engine_selection().engine == crate::node::EngineKind::GotaTun
 }
 
-/// The Mac runtime installs just the first candidate and does not walk yet (#515), so it answers
-/// like an older node until its walk lands.
+/// The Mac node runs `GotaTun` and walks its candidate lists with the same bookkeeping as Linux
+/// (#515, J704), so it always accepts a list and reports its LAN addresses.
 #[cfg(target_os = "macos")]
 const fn walks_candidates(_node: &Node) -> bool {
-    false
+    true
 }
 
 /// Both node types read the counters of the engine they run.

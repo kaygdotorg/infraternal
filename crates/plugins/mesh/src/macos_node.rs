@@ -49,7 +49,7 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-/// The worker loop and its session-keeping peer updates (#515).
+/// The worker loop, session-keeping peer updates and candidate walks (#515).
 mod walks;
 
 const UTUN_AF_INET: u32 = 2;
@@ -1341,6 +1341,7 @@ impl PendingWorker {
                     utun: Some(utun),
                     device: Some(Arc::new(device)),
                     handshakes: tokio::task::JoinSet::new(),
+                    walks: crate::candidate_walks::Walks::default(),
                     config,
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
@@ -1561,6 +1562,8 @@ struct RuntimeState {
     device: Option<Arc<GotaDevice>>,
     /// Running `rehandshake` waits ([`walks`]).
     handshakes: tokio::task::JoinSet<()>,
+    /// Each peer's direct-path candidate walk (#515).
+    walks: crate::candidate_walks::Walks,
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
     route_mtus: BTreeMap<IpAddr, u16>,
@@ -1898,6 +1901,7 @@ impl RuntimeState {
         // Ending every handshake task drops its device handle, so this one is the last.
         self.handshakes.abort_all();
         while self.handshakes.join_next().await.is_some() {}
+        self.walks.clear();
         if let Some(device) = self.device.take().and_then(Arc::into_inner) {
             device.stop().await;
         }
