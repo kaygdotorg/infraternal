@@ -145,12 +145,30 @@ fn migrate_on_host(
     owns: &dyn Fn(&[u8; 32]) -> bool,
     host: &HostIdentity,
 ) -> io::Result<()> {
+    migrate_on_host_within(volatile, durable, owns, host, LOCK_WAIT_LIMIT)
+}
+
+/// [`migrate_on_host`] with an explicit budget for each directory lock wait.
+///
+/// The product always passes [`LOCK_WAIT_LIMIT`], which exists to catch a store that never lets
+/// go. A test that queues dozens of starts on purpose waits behind holders that are all making
+/// progress; on a loaded build host their serialized total can pass 30 s, so such a test passes a
+/// longer budget instead of failing for the queue it built (J647).
+/// # Errors
+/// Everything [`migrate_on_host`] refuses, with `TimedOut` after `lock_limit` per lock.
+fn migrate_on_host_within(
+    volatile: &Path,
+    durable: &Path,
+    owns: &dyn Fn(&[u8; 32]) -> bool,
+    host: &HostIdentity,
+    lock_limit: std::time::Duration,
+) -> io::Result<()> {
     let uid = nix::unistd::Uid::effective().as_raw();
     ensure_mesh_directory(durable, uid)?;
-    let _durable_lock = lock_mesh_directory(durable)?;
+    let _durable_lock = lock_mesh_directory_within(durable, lock_limit)?;
     let legacy_exists = owned_directory(volatile, uid, true)?;
     let _legacy_lock = if legacy_exists {
-        Some(lock_mesh_directory(volatile)?)
+        Some(lock_mesh_directory_within(volatile, lock_limit)?)
     } else {
         None
     };
@@ -2020,15 +2038,22 @@ mod tests {
     }
 
     /// Lets many first starts race the absent durable directory without losing startup to `mkdir`.
+    ///
+    /// The 32 starts queue on one directory lock, and each holds it for a full migration with its
+    /// fsyncs. On a loaded build host that queue alone passed the product's 30 s lock budget
+    /// (J647's gate: seven starts `TimedOut`). That budget is about a holder that never lets go
+    /// and has its own test, so the starts here get a budget that only a real hang exhausts.
     #[test]
     fn concurrent_first_starts_share_one_new_durable_mesh_directory() {
         use std::{
             sync::{Arc, Barrier},
             thread,
+            time::Duration,
         };
 
         const STARTS: usize = 32;
         const ROUNDS: usize = 8;
+        let host = super::host_identity();
         for _ in 0..ROUNDS {
             let root = fixture_root();
             let volatile = root.join("run/infraternal");
@@ -2047,9 +2072,16 @@ mod tests {
                     let barrier = Arc::clone(&barrier);
                     let volatile = volatile.clone();
                     let durable = durable.clone();
+                    let host = host.clone();
                     thread::spawn(move || {
                         barrier.wait();
-                        migrate(&volatile, &durable, &owned)
+                        super::migrate_on_host_within(
+                            &volatile,
+                            &durable,
+                            &owned,
+                            &host,
+                            Duration::from_secs(600),
+                        )
                     })
                 })
                 .collect::<Vec<_>>();
