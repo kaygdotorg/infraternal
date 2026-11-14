@@ -2422,6 +2422,48 @@ mod tests {
         );
     }
 
+    /// J628 review: the "own stale mirror" rule must never destroy the key the database records.
+    ///
+    /// D295's cold rollback brings back the previous binary *and* the database copy taken before
+    /// the switch. If the new build rotated its durable key during that window, the restored
+    /// database records only the pre-rotation key, which is still the runtime mirror the previous
+    /// build ran with. On re-upgrade the runtime key equals the last mirror record, so the current
+    /// rule calls it "our stale mirror", keeps the durable key the database never heard of, and
+    /// mirrors it over the runtime path. The one key the database and peers know is then gone from
+    /// both directories. An open rotation in that database ("preparing"/"cleanup"/"retiring")
+    /// then refuses the server node's attach, with no private key left to recover it.
+    #[test]
+    fn review_j628_stale_mirror_rule_keeps_the_key_the_database_records() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        let recorded = super::public_key(&[0x81; 32]).expect("derive the recorded public key");
+        write_private(&durable.join("mesh-private-key"), &[0x81; 32]);
+        migrate(&volatile, &durable, &|public| *public == recorded)
+            .expect("first start of the new build mirrors the key");
+        // The new build rotates its durable key during the D295 window; only durable changes.
+        write_private(&durable.join("mesh-private-key"), &[0x82; 32]);
+        // Health fails: cold rollback restores the pre-switch database (it records only 0x81),
+        // and the previous build runs with the runtime mirror, which still holds 0x81.
+        // Re-upgrade: this database owns 0x81 and has never seen 0x82.
+        let result = migrate(&volatile, &durable, &|public| *public == recorded);
+        let durable_key = fs::read(durable.join("mesh-private-key")).ok();
+        let runtime_key = fs::read(volatile.join("mesh-private-key")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert!(result.is_ok(), "re-upgrade must start: {result:?}");
+        assert!(
+            durable_key.as_deref() == Some([0x81; 32].as_slice())
+                || runtime_key.as_deref() == Some([0x81; 32].as_slice()),
+            "the only key the database records was overwritten in both places \
+             (durable {durable_key:?}, runtime {runtime_key:?})"
+        );
+        assert_eq!(
+            durable_key.as_deref(),
+            Some([0x81; 32].as_slice()),
+            "the server must run with the key its database records, not an unrecorded rotation"
+        );
+    }
+
     /// A warm handoff never overwrites a runtime key that another server put there.
     #[test]
     fn rollback_handoff_refuses_to_overwrite_a_foreign_runtime_key() {
