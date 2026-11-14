@@ -32,9 +32,9 @@
 //! # }
 //! ```
 //!
-//! Slice 1 of the port: nothing in the server uses this crate on a request
-//! path yet. The server still runs on sqlx; this crate is measured and tested
-//! next to it first.
+//! The port moves the server onto this crate in slices (#473). Slice 2 runs
+//! the session statements (`auth/sessions.rs`) here; every other statement
+//! still runs on sqlx, against the same file, until its slice lands.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 /// The `_sqlx_migrations`-compatible schema migration runner.

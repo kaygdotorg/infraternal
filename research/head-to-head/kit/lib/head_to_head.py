@@ -85,8 +85,20 @@ def verdict(ratios: list[float], floor: float, higher_is_better: bool) -> tuple[
 
 
 def report(calibration: Path, holds: list[Path], flows: tuple[int, ...] = (1, 8),
-           baseline: str | None = None, focus: str | None = None) -> str:
+           baseline: str | None = None, focus: str | None = None, allow_uncalibrated: bool = False) -> str:
+    """The pooled Markdown report.
+
+    A verdict compares a difference with the calibration floor (the run-to-run spread of the same
+    row). Without a floor every difference would count as real, so a calibration that lacks a
+    metric for a flow count raises ValueError. `allow_uncalibrated=True` uses a zero floor instead
+    and puts a warning at the top of the report.
+    """
     spread = json.loads(calibration.read_text()).get("spread_pct", {})
+    absent = sorted({f"{key} at {count} flows" for _, _, _, key in METRICS if key for count in flows
+                     if str(count) not in spread.get(key, {})})
+    if absent and not allow_uncalibrated:
+        raise ValueError(f"{calibration} has no calibration for: {', '.join(absent)}; run the calibration "
+                         "or pass --allow-uncalibrated to use a zero floor")
     engines: dict[str, str] = {}
     data: dict[tuple[str, str, int], dict[str, float]] = {}
     missing: list[str] = []
@@ -105,7 +117,8 @@ def report(calibration: Path, holds: list[Path], flows: tuple[int, ...] = (1, 8)
     def name(tag: str) -> str:
         return NAMES.get(engines[tag], tag)
 
-    lines = ["Holds: " + "; ".join(f"{hold.name}={','.join(tag for tag, _ in plan(hold))}" for hold in holds)]
+    lines = [f"**WARNING: NOT CALIBRATED ({', '.join(absent)}): the floor is 0, so every same-sign difference reads as real.**", ""] if absent else []
+    lines += ["Holds: " + "; ".join(f"{hold.name}={','.join(tag for tag, _ in plan(hold))}" for hold in holds)]
     for count in flows:
         title = f"{count} flow{'s' if count > 1 else ''}"
         lines += ["", f"### {title}: absolute (mean over holds, min–max)", "",
@@ -160,8 +173,15 @@ def main() -> int:
     parser.add_argument("--baseline", help="row tag every engine is compared with (default: the kernel-plain row)")
     parser.add_argument("--focus", help="row tag compared with every rival (default: the gotatun row)")
     parser.add_argument("--flows", type=int, action="append", help="flow counts (default 1 and 8)")
+    parser.add_argument("--allow-uncalibrated", action="store_true",
+                        help="use a zero floor, with a loud warning, when the calibration lacks a metric")
     args = parser.parse_args()
-    sys.stdout.write(report(args.calibration, args.holds, tuple(args.flows or (1, 8)), args.baseline, args.focus))
+    try:
+        sys.stdout.write(report(args.calibration, args.holds, tuple(args.flows or (1, 8)), args.baseline, args.focus,
+                                args.allow_uncalibrated))
+    except ValueError as error:
+        print(f"head_to_head: {error}", file=sys.stderr)
+        return 2
     return 0
 
 

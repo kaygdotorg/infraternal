@@ -3859,3 +3859,169 @@ mod device_pending;
 
 #[path = "ceremony_pool_tests.rs"]
 mod ceremony_pool;
+
+/// A fresh on-disk database shaped like `runtime.rs::open_database` (WAL,
+/// `synchronous=NORMAL`), under a new private directory. Returns the pool and
+/// the database path; callers remove the path's directory when done.
+async fn disk_pool(label: &str) -> (SqlitePool, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("infraternal-{label}-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("infraternal.sqlite");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .test_before_acquire(false)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal),
+        )
+        .await
+        .unwrap();
+    (pool, path)
+}
+
+/// D379 slice 2 (#473): with a database on disk, the session statements run
+/// on the rusqlite pool and keep every rule the sqlx path had. The slide
+/// extends a live session, never one past its expiry; a refused unlock read
+/// deletes the token's expired pending login; the socket renewal and the two
+/// indexed reads see the pool's writes.
+#[tokio::test]
+async fn sessions_on_the_pool_keep_the_slide_rules() {
+    let _guard = SERIAL.lock().await;
+    let (pool, path) = disk_pool("sessions-pool").await;
+    let (auth, token) = empty_with_pool(pool.clone()).await;
+    assert!(auth.sessions_on_pool(), "an on-disk Auth must use the pool");
+    let f = fixture_with_bootstrap(auth, token).await;
+
+    assert!(matches!(
+        f.auth.session(&random(), NOW).await,
+        Err(Error::Denied)
+    ));
+    let session = f.auth.session(&f.session, NOW + SESSION - 1).await.unwrap();
+    assert_eq!(session.user_id, f.user);
+    assert!(
+        f.auth
+            .session(&f.session, NOW + 2 * SESSION - 2)
+            .await
+            .is_ok()
+    );
+    let state = f
+        .auth
+        .cookie_state(&f.session, NOW + 2 * SESSION - 2)
+        .await
+        .unwrap()
+        .expect("live cookie state");
+    assert_eq!(
+        state.expires,
+        NOW + 3 * SESSION - 2,
+        "the slide moved the deadline"
+    );
+    let live = f
+        .auth
+        .live_expiry(&f.session, &f.user, NOW + 2 * SESSION - 2, ())
+        .await
+        .unwrap();
+    assert_eq!(live, NOW + 3 * SESSION - 2);
+    assert!(
+        f.auth
+            .session(&f.session, NOW + 3 * SESSION - 2)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.auth
+            .cookie_state(&f.session, NOW + 3 * SESSION - 2)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // An expired pending login is deleted by the refused unlock read.
+    let pending = random();
+    let mut tx = pool.begin().await.unwrap();
+    insert_session(&mut tx, &pending, &f.user, "pending", NOW, None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET unlocked=0 WHERE token_hash=?")
+        .bind(hash(&pending))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(f.auth.unlock_session(&pending, NOW + 1).await.is_ok());
+    assert!(matches!(
+        f.auth.unlock_session(&pending, NOW + SESSION).await,
+        Err(Error::Denied)
+    ));
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(&pending))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the expired pending login was not cleaned up");
+
+    // The socket renewal slides from SQLite's own clock, on the pool's writer.
+    let socket = random();
+    let mut tx = pool.begin().await.unwrap();
+    insert_session(&mut tx, &socket, &f.user, "socket", 0, None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET expires=unixepoch()+60 WHERE token_hash=?")
+        .bind(hash(&socket))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    f.auth.renewal(&socket, &f.user, ()).await;
+    let (expires, clock): (i64, i64) =
+        sqlx::query_as("SELECT expires, unixepoch() FROM sessions WHERE token_hash=?")
+            .bind(hash(&socket))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        expires >= clock + SESSION - 5,
+        "renewal did not slide: {expires} vs {clock}"
+    );
+    f.auth.close_database().await;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// D379 slice 2 (#473): the session slide keeps the WAL bounded. On sqlx the
+/// slide is an `UPDATE … RETURNING` read with `fetch_optional`, which never
+/// reaches SQLite's auto-checkpoint, so the log only grows: about two frames
+/// per slide, over 10,000 frames after 5,000 slides (J619 measured 98.7 MB
+/// after 20k). On the pool every slide commits through `COMMIT`, the WAL hook
+/// runs, and the log stays within the pool's default 8,000-page limit even
+/// in this closed loop, where a background pass rarely finds the writer idle.
+#[tokio::test]
+async fn session_slides_keep_the_wal_bounded() {
+    let _guard = SERIAL.lock().await;
+    let (pool, path) = disk_pool("sessions-wal").await;
+    let (auth, token) = empty_with_pool(pool).await;
+    let f = fixture_with_bootstrap(auth, token).await;
+    for n in 0..5_000 {
+        f.auth.session(&f.session, NOW + n).await.unwrap();
+    }
+    let mut wal = path.clone().into_os_string();
+    wal.push("-wal");
+    let frames = std::fs::metadata(&wal)
+        .map_or(0, |meta| meta.len())
+        .saturating_sub(32)
+        / (24 + 4096);
+    f.auth.close_database().await;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    // The limit plus a little: the inline backstop's pass can lose a race to
+    // a background pass and run on a later commit.
+    assert!(
+        frames <= 8_200,
+        "the WAL reached {frames} frames after 5,000 session slides"
+    );
+}

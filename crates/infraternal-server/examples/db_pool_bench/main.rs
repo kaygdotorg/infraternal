@@ -20,6 +20,10 @@
 //!   a background checkpoint finds a quiet moment, see infraternal-db);
 //!   workloads are `session`, `hosts`, `events`, `apply` and `mixed`. Run it on a
 //!   fresh copy of the prepared file each time.
+//! - `db_pool_bench auth <tasks> [pace_us] <db>`: the server's own session path,
+//!   `Auth::session` on the prepared file, whichever driver this build's
+//!   `Auth` uses for it (sqlx before D379 slice 2, the pool after). It first
+//!   stores the real token hashes, so run it on a fresh copy as well.
 //! - `db_pool_bench mem <sqlx|pool> <db>`: resident memory and threads, opened and warm.
 //! - `db_pool_bench startup <sqlx|pool> <db>`: open and validate every recorded migration.
 //! - `db_pool_bench migrate <sqlx|pool> <db>`: migrate an existing database (a
@@ -459,26 +463,119 @@ async fn bench(kind: &str, workload: &'static str, tasks: usize, pace: Duration,
         samples.extend(handle.await.unwrap());
     }
     let elapsed = start.elapsed();
-    // Read while the connections are still open: closing the last one
-    // checkpoints and deletes the WAL. A large value means commits on this
-    // path never ran a checkpoint (see infraternal-db's pool docs, #473).
-    let mut wal = path.as_os_str().to_owned();
-    wal.push("-wal");
-    let wal_bytes = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
-    // The file never shrinks when SQLite rewinds the log, so its size is a
-    // high-water mark. The live log length is the frame count a checkpoint
-    // reports; this one runs after the measurement, on its own connection.
-    let wal_frames: i64 = infraternal_db::rusqlite::Connection::open(path)
-        .unwrap()
-        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(1))
-        .unwrap();
     workload::report(
         front.label(),
         workload,
         tasks,
         samples,
         elapsed,
-        (wal_bytes, wal_frames),
+        wal_state(path),
+    );
+}
+
+/// The WAL's file size (a high-water mark) and live length in frames.
+///
+/// Read while the connections are still open: closing the last one
+/// checkpoints and deletes the WAL. A large value means commits on this path
+/// never ran a checkpoint (see infraternal-db's pool docs, #473). The file
+/// never shrinks when SQLite rewinds the log, so its size is the largest the
+/// log got. The live length is the frame count a checkpoint reports; this one
+/// runs after the measurement, on its own connection.
+fn wal_state(path: &Path) -> (u64, i64) {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal_bytes = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+    let wal_frames: i64 = infraternal_db::rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(1))
+        .unwrap();
+    (wal_bytes, wal_frames)
+}
+
+/// The server's own session path: `Auth::session` from `tasks` concurrent
+/// callers, measured like [`bench`]'s `session` workload, on whichever driver
+/// this build's `Auth` runs the slide (#473). Prints one JSON line with the
+/// variant `server-auth`.
+///
+/// The template stores each token as its own lookup key (`tok-N`); `Auth`
+/// looks sessions up by the token's hash, so the live rows are rekeyed first,
+/// the same way `auth::crypto::hash` stores them.
+async fn bench_auth(tasks: usize, pace: Duration, path: &Path) {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+    {
+        let mut conn = infraternal_db::rusqlite::Connection::open(path).unwrap();
+        let tx = conn.transaction().unwrap();
+        for n in 0..workload::LIVE_SESSIONS {
+            let token = format!("tok-{n}");
+            let hash = URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()));
+            tx.execute(
+                "UPDATE sessions SET token_hash=?1 WHERE token_hash=?2",
+                params![hash, token],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+    }
+    let auth = Arc::new(
+        infraternal_server::auth::Auth::new(
+            sqlx_pool(path, false).await,
+            "bench.example.test",
+            "https://bench.example.test",
+        )
+        .await
+        .unwrap(),
+    );
+    let mut warm = Vec::new();
+    for task in 0..16_u64 {
+        let auth = auth.clone();
+        warm.push(tokio::spawn(async move {
+            let mut rng = Rng::new(10_000 + task);
+            for seq in 0..50 {
+                let input = draw(&mut rng, 9_000 + task as usize, seq);
+                auth.session(&input.token, NOW).await.unwrap();
+            }
+        }));
+    }
+    for handle in warm {
+        handle.await.unwrap();
+    }
+    let per_task = workload::ops_for("session", tasks);
+    workload::io_mark();
+    let start = Instant::now();
+    let mut running = Vec::new();
+    for task in 0..tasks {
+        let auth = auth.clone();
+        running.push(tokio::spawn(async move {
+            let mut rng = Rng::new(task as u64 + 1);
+            let mut samples = Vec::with_capacity(per_task);
+            for seq in 0..per_task {
+                let input = draw(&mut rng, task, seq);
+                let started = Instant::now();
+                std::hint::black_box(auth.session(&input.token, NOW).await.unwrap());
+                samples.push(started.elapsed().as_nanos() as u64);
+                if !pace.is_zero() {
+                    // sleep: pacing models a request rate; there is no event to wait for.
+                    tokio::time::sleep(pace).await;
+                }
+            }
+            samples
+        }));
+    }
+    let mut samples = Vec::new();
+    for handle in running {
+        samples.extend(handle.await.unwrap());
+    }
+    let elapsed = start.elapsed();
+    workload::report(
+        "server-auth",
+        "session",
+        tasks,
+        samples,
+        elapsed,
+        wal_state(path),
     );
 }
 
@@ -619,9 +716,18 @@ async fn main() {
             )
             .await;
         }
+        Some("auth") => {
+            // `auth <tasks> [pace_us] <db>`
+            let pace = if args.len() > 4 {
+                Duration::from_micros(args[3].parse().expect("pace in µs"))
+            } else {
+                Duration::ZERO
+            };
+            bench_auth(args[2].parse().expect("tasks"), pace, path).await;
+        }
         Some("mem") => mem(&args[2], path).await,
         Some("startup") => startup(&args[2], path).await,
         Some("migrate") => migrate_existing(&args[2], path).await,
-        _ => panic!("usage: db_pool_bench prepare|bench|mem|startup|migrate … <db>"),
+        _ => panic!("usage: db_pool_bench prepare|bench|auth|mem|startup|migrate … <db>"),
     }
 }
