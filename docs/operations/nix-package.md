@@ -63,7 +63,7 @@ builds. Equal executable sizes alone do not establish reproducibility.
 
 This source-built package is an unsigned build, with the workspace version and
 normal `scripts/static-cargo` identity. It does not manufacture `GATE`,
-`MANIFEST`, `MANIFEST.sig`, or a signed stable/edge identity. Those records belong
+`SHA256SUMS.sig`, or a signed stable/edge identity. Those records belong
 to the release admission/signing pipeline. A Nix build alone does not authorize
 a production replacement; #274 must preserve that pipeline's admission checks.
 A release builder can use `default.override { releaseVersion = "x.y.z"; }`
