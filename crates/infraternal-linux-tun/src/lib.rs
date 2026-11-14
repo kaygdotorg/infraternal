@@ -12,11 +12,17 @@
 //! (`TUNSETOWNER`, `TUNSETGROUP`). A persistent TUN with no owner admits any local user's attach
 //! once its last queue closes, and that user would read and inject the interface's packets
 //! (#260 J213 P1).
+//!
+//! It also holds the one socket option the userspace mesh engine needs and no safe crate
+//! offers on Linux: [`allow_ipv4_fragmentation`] for the encrypted underlay socket (#483).
 
 use std::{
     fs::{File, OpenOptions},
     io,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::{
+        fd::{AsFd, AsRawFd},
+        unix::fs::OpenOptionsExt,
+    },
 };
 
 const IFNAMSIZ: usize = 16;
@@ -178,9 +184,88 @@ fn restrict_to_caller(file: &File) -> io::Result<()> {
     Ok(())
 }
 
+/// Let routers fragment the mesh's encrypted IPv4 packets instead of dropping them.
+///
+/// Linux UDP sockets set Don't Fragment by default. A router whose next link is smaller than
+/// the packet must then drop it and send back "fragmentation needed"; many networks block
+/// that ICMP, so large mesh packets vanish while small ones (pings, handshakes) still pass and
+/// the path looks healthy (a PMTU black hole, #483 `mtu-576-icmp-blocked`). Kernel WireGuard
+/// sends with DF clear for exactly this reason; this gives the userspace engine the same
+/// behaviour. IPv6 has no in-network fragmentation, so only the IPv4 option is set. It applies
+/// to IPv4 traffic on a dual-stack IPv6 socket too.
+///
+/// Call it once on the bound underlay socket, before it sends. Linux only: macOS spells the
+/// option differently and its engine binds its own socket.
+/// # Errors
+/// Returns the kernel's error if the descriptor is not an IP socket.
+#[cfg(target_os = "linux")]
+pub fn allow_ipv4_fragmentation(socket: &impl AsFd) -> io::Result<()> {
+    let value: libc::c_int = libc::IP_PMTUDISC_DONT;
+    // SAFETY: IP_MTU_DISCOVER reads one c_int from the pointer for the length given; `value`
+    // lives on this stack frame for the whole call, and the descriptor is borrowed, so open.
+    let status = unsafe {
+        libc::setsockopt(
+            socket.as_fd().as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER,
+            std::ptr::from_ref(&value).cast(),
+            libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Checks the ioctl structure layout and the underlay socket option against the running kernel.
 #[cfg(test)]
 mod tests {
     use super::{IFNAMSIZ, IfReq};
+
+    /// Linux-only checks for the underlay socket option.
+    #[cfg(target_os = "linux")]
+    mod fragmentation {
+        use super::super::allow_ipv4_fragmentation;
+        use std::os::fd::AsRawFd;
+
+        /// Read back IP_MTU_DISCOVER so the test sees what the kernel stored.
+        fn mtu_discover(socket: &std::net::UdpSocket) -> libc::c_int {
+            let mut value: libc::c_int = -1;
+            let mut length = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap();
+            // SAFETY: the kernel writes at most `length` bytes into `value`, which outlives the call.
+            let status = unsafe {
+                libc::getsockopt(
+                    socket.as_raw_fd(),
+                    libc::IPPROTO_IP,
+                    libc::IP_MTU_DISCOVER,
+                    std::ptr::from_mut(&mut value).cast(),
+                    &raw mut length,
+                )
+            };
+            assert_eq!(status, 0, "{}", std::io::Error::last_os_error());
+            value
+        }
+
+        /// A fresh UDP socket sets DF; after the call the kernel stores "never set DF", for IPv4
+        /// and dual-stack IPv6 sockets alike.
+        #[test]
+        fn underlay_sockets_stop_setting_dont_fragment() {
+            for address in ["127.0.0.1:0", "[::]:0"] {
+                let Ok(socket) = std::net::UdpSocket::bind(address) else {
+                    continue; // a host without IPv6 still checks the IPv4 socket
+                };
+                assert_ne!(
+                    mtu_discover(&socket),
+                    libc::IP_PMTUDISC_DONT,
+                    "{address}: default sets DF"
+                );
+                allow_ipv4_fragmentation(&socket).unwrap();
+                assert_eq!(mtu_discover(&socket), libc::IP_PMTUDISC_DONT, "{address}");
+            }
+        }
+    }
 
     #[test]
     fn ifreq_matches_linux_abi_size() {
