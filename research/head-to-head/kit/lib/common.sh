@@ -188,6 +188,43 @@ h2h_scope_spawn() {
     printf -v "$outvar" '%s' "$scope_pid"
 }
 
+# Print a PID and all its descendants, parents first, from /proc's children lists.
+h2h_process_tree() {
+    local pid=$1 proc=${H2H_PROC_ROOT:-/proc} child
+    printf '%s\n' "$pid"
+    [[ -r $proc/$pid/task/$pid/children ]] || return 0
+    for child in $(cat "$proc/$pid/task/$pid/children"); do
+        h2h_process_tree "$child"
+    done
+}
+
+# Move an already running process tree into a new scope on `cpus` (D348).
+# For a daemon whose launcher sits on the other side: the in-app fixture starts
+# both infraternal nodes from side A's scope, and node B only enters B's network
+# namespace, so without this it would run on side A's CPUs (J629, #260). Writing
+# a PID to cgroup.procs moves all of its threads, and the cpuset resets their
+# affinity to the new scope's CPUs, which is verified before any window starts.
+h2h_scope_adopt() {
+    local pid=$1 cpus=$2
+    [[ ${H2H_CPUSET_PIN:-0} == 1 ]] || return 0
+    local proc=${H2H_PROC_ROOT:-/proc} cgroot=${H2H_CGROUP_ROOT:-/sys/fs/cgroup}
+    local holder rel member allowed members
+    h2h_scope_spawn holder "$cpus" sleep infinity
+    rel=$(awk -F: '$1 == "0" {print $3}' "$proc/$holder/cgroup")
+    [[ $rel == /perf.slice/* && -w $cgroot$rel/cgroup.procs ]] \
+        || die "cannot adopt PID $pid: holder scope cgroup '$rel' is not writable"
+    members=$(h2h_process_tree "$pid")
+    for member in $members; do
+        printf '%s\n' "$member" >> "$cgroot$rel/cgroup.procs" || die "cannot move PID $member into $rel"
+    done
+    for member in $members; do
+        allowed=$(awk '/^Cpus_allowed_list:/ {print $2}' "$proc/$member/status")
+        [[ $allowed == "$cpus" ]] || die "PID $member moved to $rel but is still allowed on $allowed, not $cpus"
+        printf '%s\t%s\t%s\n' "$member" "$cpus" "${rel##*/}" >> "$H2H_RESULTS/$H2H_CASE/cpuset-pids.tsv"
+    done
+    log "moved PID $pid and its descendants ($(echo $members)) into ${rel##*/} on CPUs $cpus"
+}
+
 # Wait for a clean preflight, then sample process placement and scheduler delay
 # across the measured phase; setup activity is stored separately from load.
 h2h_cpu_audit_start() {
