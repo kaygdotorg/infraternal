@@ -682,3 +682,76 @@ fn review_j609_policy_rule_change_rederives_route_budgets() {
         );
     }
 }
+
+/// Replacing a nexthop object re-points every route that refers to it. With
+/// `net.ipv4.nexthop_compat_mode` off, the kernel announces only the nexthop, not the routes,
+/// so the watch must listen to nexthop changes too (#489 J609 note). IPv4 only: the nexthop
+/// group and its compat switch are shared by both families.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn live_endpoint_refresh_rederives_after_nexthop_replace() {
+    use crate::mesh_mtu::ROUTE_LOOKUPS;
+    use crate::policy::model::{Addresses, PublicKey};
+    review_route_command(&["link", "set", "lo", "up"]);
+    review_marked_tun(PublicKey([9; 32]));
+    let endpoint = review_learned_underlay(1500);
+    review_route_command(&["link", "add", "under1", "type", "dummy"]);
+    review_route_command(&["link", "set", "under1", "mtu", "1300", "up"]);
+    // The endpoint's host route goes through nexthop object 1, first on the 1500-byte underlay.
+    review_route_command(&["nexthop", "add", "id", "1", "dev", "under0"]);
+    review_route_command(&["route", "add", "198.51.100.2/32", "nhid", "1"]);
+    // Off: a nexthop replacement is announced only on the nexthop group.
+    std::fs::write("/proc/sys/net/ipv4/nexthop_compat_mode", "0").expect("compat mode off");
+    let peer = crate::dataplane::Peer {
+        key: PublicKey([2; 32]),
+        previous_key: None,
+        previous_active: false,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().expect("IPv4"),
+            ipv6: "fd01::2".parse().expect("IPv6"),
+        },
+        endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+    };
+    let learned = [(peer.key, Some(endpoint))];
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
+    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let refresh = || {
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
+        let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
+        (ROUTE_LOOKUPS.with(std::cell::Cell::get), written)
+    };
+    let first = refresh();
+    let before = review_peer_routes();
+
+    review_route_command(&["nexthop", "replace", "id", "1", "dev", "under1"]);
+    let path = review_route_command(&["route", "get", "198.51.100.2"]);
+    // The listener is asynchronous: refresh until one re-derives; the deadline only bounds it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let replaced = loop {
+        let result = refresh();
+        if result.0 > 0 || std::time::Instant::now() > deadline {
+            break result;
+        }
+        // The nexthop announcement reaches the listener thread asynchronously, and the test
+        // can observe it only through a refresh.
+        // sleep: paces the polling refreshes; there is no event to wait on.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let after = review_peer_routes();
+    worker.stop();
+    eprintln!(
+        "nexthop replace: first={first:?} before={before:?} path={path:?} \
+         replaced={replaced:?} after={after:?}"
+    );
+    assert_eq!(first, (1, 1));
+    assert!(before.0.contains("mtu 1408"), "{before:?}");
+    assert!(path.contains("dev under1"), "{path}");
+    assert_eq!(
+        replaced,
+        (1, 1),
+        "a nexthop replacement must re-derive the budget at the next refresh"
+    );
+    assert!(after.0.contains("mtu 1216"), "{after:?}");
+    assert!(after.1.contains("mtu 1216"), "{after:?}");
+}
