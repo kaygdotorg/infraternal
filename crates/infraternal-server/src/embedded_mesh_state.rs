@@ -2464,6 +2464,42 @@ mod tests {
         );
     }
 
+    /// J628 review: resuming an interrupted adoption must not skip the ownership proof.
+    ///
+    /// `adopt()` proves ownership, writes a forward marker, then copies. If the server dies before
+    /// the marker is cleared and the host reboots, the runtime path is emptied, and any other
+    /// root server on the host that starts first mirrors its own identity there. The next start
+    /// sees the pending marker and copies whatever key the runtime path now holds, with no
+    /// ownership check, so the J595 P0 proof is bypassed on this path.
+    #[test]
+    fn review_j628_resumed_adoption_still_requires_ownership() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        // An adoption of public state then the key was interrupted after its first copy.
+        write_private(
+            &durable.join(super::MIGRATION_MARKER),
+            format!(
+                "{}\nforward\nmesh-public.json\nmesh-private-key\n",
+                super::MIGRATION_MARKER_HEADER
+            )
+            .as_bytes(),
+        );
+        write_private(&durable.join("mesh-public.json"), b"own-public");
+        // After a reboot, another root server mirrored its own identity to the shared path.
+        write_private(&volatile.join("mesh-private-key"), &[0x91; 32]);
+        write_private(&volatile.join("mesh-public.json"), b"other-server-public");
+
+        let result = migrate(&volatile, &durable, &|_| false);
+        let durable_key = fs::read(durable.join("mesh-private-key")).ok();
+        fs::remove_dir_all(root).expect("remove fixture root");
+
+        assert_ne!(
+            durable_key.as_deref(),
+            Some([0x91; 32].as_slice()),
+            "a pending marker adopted a key this database does not own (result {result:?})"
+        );
+    }
+
     /// A warm handoff never overwrites a runtime key that another server put there.
     #[test]
     fn rollback_handoff_refuses_to_overwrite_a_foreign_runtime_key() {
