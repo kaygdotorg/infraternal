@@ -2908,7 +2908,7 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
-        let packet_policy = if self.engine_kind == EngineKind::GotaTun {
+        let mut packet_policy = if self.engine_kind == EngineKind::GotaTun {
             self.gotatun
                 .as_ref()
                 .map(|_| {
@@ -3119,13 +3119,22 @@ impl Node {
                 crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
-            self.firewall.install_pending(&config)?;
+            // The same nodes keep the same addresses here, so the new grants can reach the
+            // packet path first: a revocation is enforced before the firewall, routes or the
+            // disk save run, not after them (J592 P2-5). A failure below republishes the old
+            // grants.
+            self.publish_gotatun_policy(packet_policy.take());
+            if let Err(error) = self.firewall.install_pending(&config) {
+                self.restore_gotatun_policy();
+                return Err(error);
+            }
             let configured_peers: Vec<_> = config
                 .peers
                 .values()
                 .map(|policy| policy.peer.clone())
                 .collect();
             if let Err(error) = self.install_peer_routes(&configured_peers, false) {
+                self.restore_gotatun_policy();
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3140,6 +3149,7 @@ impl Node {
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
             if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
+                self.restore_gotatun_policy();
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3152,7 +3162,6 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let _retire = crate::cutoff_measure::Stage::new(config.node, config.version, "retire");
             self.config = Some(config);
-            self.publish_gotatun_policy(packet_policy);
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.publish_dns(dns_records)?;
             self.connection_cleanup_pending = true;
@@ -3196,6 +3205,11 @@ impl Node {
             crate::mesh_mtu::for_config(Some(&config)),
         );
         self.apply_fence(&fence, &config)?;
+        // The engine starts delivering a reused or moved address's packets for its new owner as
+        // soon as the peers change below. Withdraw the old owners from the packet path first,
+        // then publish the new policy right after the peer change, before routes, the firewall
+        // and the disk save (J592 P2-5).
+        self.withdraw_moved_gotatun_peers(&config);
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
         let mut previous_route_overrides = None;
@@ -3214,6 +3228,7 @@ impl Node {
             // link stays IPv6-safe; its final size follows the largest peer budget.
             self.set_mesh_mtu(ifindex, previous_mtu.max(requested_mtu))?;
             self.apply_peer_changes(&config, &changed, &retired_keys)?;
+            self.publish_gotatun_policy(packet_policy.take());
             // A full accepted snapshot also re-derives routes for unchanged peers: the endpoint
             // route or its egress link MTU may have changed since their last peer update.
             let configured_peers: Vec<_> = config
@@ -3256,6 +3271,9 @@ impl Node {
             }
             // Saving can fail after the permissive policy transaction. Reinstall
             // the fence before rollback so any later error still denies NEW traffic.
+            // The packet path goes back to the accepted grants (or denies everything when there
+            // are none), whether or not the new policy was already published.
+            self.restore_gotatun_policy();
             self.apply_fence(&fence, &config)?;
             if let Some(old) = &self.config {
                 if old.addresses != config.addresses {
@@ -3327,18 +3345,58 @@ impl Node {
             self.authority_reset = AuthorityResetState::Stable;
         }
         self.config = Some(config);
-        self.publish_gotatun_policy(packet_policy);
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         self.publish_dns(dns_records)?;
         self.connection_cleanup_pending = true;
         self.finish_connection_cleanup()
     }
 
-    /// Publish a precompiled `GotaTun` policy only after the enclosing node transaction commits.
+    /// Publish a precompiled `GotaTun` policy as soon as the engine's peers match it.
+    ///
+    /// Callers publish before the firewall, routes and disk save, so a narrowed grant is
+    /// enforced first; a failed transaction then calls [`Self::restore_gotatun_policy`].
     fn publish_gotatun_policy(&self, policy: Option<crate::packet_filter::PreparedPolicy>) {
         if let (Some(engine), Some(policy)) = (self.gotatun.as_ref(), policy) {
             engine.publish_policy(policy);
         }
+    }
+
+    /// Put the accepted config's grants back on the packet path after a failed transaction.
+    ///
+    /// `self.config` is still the accepted config here. When it cannot be compiled again, or
+    /// there is none, the filter denies everything rather than keep a half-applied snapshot.
+    fn restore_gotatun_policy(&self) {
+        let Some(engine) = self.gotatun.as_ref() else {
+            return;
+        };
+        let restored = self
+            .config
+            .as_ref()
+            .and_then(|old| {
+                crate::gotatun_node::Engine::prepare_policy(old, self.proxy_ingress.clone()).ok()
+            })
+            .unwrap_or_else(crate::packet_filter::PacketFilter::deny_all_policy);
+        engine.publish_policy(restored);
+    }
+
+    /// Withdraw, before the peer change, every accepted peer that the new config removes or
+    /// moves to other addresses, so no other node's packets can use its grants.
+    fn withdraw_moved_gotatun_peers(&self, config: &Config) {
+        let (Some(engine), Some(old)) = (self.gotatun.as_ref(), self.config.as_ref()) else {
+            return;
+        };
+        let withdrawn = old
+            .peers
+            .iter()
+            .filter(|(node, previous)| {
+                config
+                    .peers
+                    .get(node)
+                    .is_none_or(|next| next.peer.addresses != previous.peer.addresses)
+            })
+            .map(|(node, _)| *node)
+            .collect::<BTreeSet<_>>();
+        engine.withdraw_peers(&withdrawn);
     }
 
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]

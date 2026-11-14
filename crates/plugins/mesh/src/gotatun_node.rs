@@ -367,6 +367,15 @@ impl Engine {
         self.filter.publish_policy(policy);
     }
 
+    /// Stop admitting the listed peers' addresses before the peer set changes; see
+    /// [`PacketFilter::withdraw_peers`].
+    pub(crate) fn withdraw_peers(
+        &self,
+        withdrawn: &std::collections::BTreeSet<crate::policy::model::NodeId>,
+    ) {
+        self.filter.withdraw_peers(withdrawn);
+    }
+
     /// Set the mesh MTU on the worker that owns the TUN and its packet-size watcher.
     /// # Errors
     /// Reports a stopped worker or a link update failure.

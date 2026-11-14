@@ -124,6 +124,38 @@ impl PacketFilter {
         )?))
     }
 
+    /// A prepared deny-all snapshot, published when a failed transaction cannot rebuild the
+    /// previous one, so the packet path fails closed.
+    pub(crate) fn deny_all_policy() -> PreparedPolicy {
+        PreparedPolicy(CompiledPolicy::empty())
+    }
+
+    /// Stop admitting packets from these peers' addresses at once, before the engine's peer set
+    /// changes.
+    ///
+    /// The filter knows a peer only by its source address. When a snapshot gives a removed
+    /// peer's address to another node, or moves a peer to a new address, the engine starts
+    /// delivering the new owner's packets as soon as its peers are applied; until the new policy
+    /// is published, those packets would otherwise use the old owner's grants and open flows
+    /// (J592 P2-5, #265). Withdrawing only removes index entries, so it never allocates and
+    /// cannot fail. Their flows stop matching too, because [`CompiledPolicy::allows_flow`]
+    /// resolves the flow's peer by address.
+    pub(crate) fn withdraw_peers(&self, withdrawn: &std::collections::BTreeSet<NodeId>) {
+        if withdrawn.is_empty() {
+            return;
+        }
+        let mut current = self
+            .policy
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let CompiledPolicy {
+            peer_addresses,
+            peers,
+            ..
+        } = &mut *current;
+        peer_addresses.retain(|_, index| !withdrawn.contains(&peers[*index].node));
+    }
+
     /// Publish a prepared snapshot and retire tuples the replacement no longer permits.
     pub(crate) fn publish_policy(&self, policy: PreparedPolicy) {
         let mut current = self
@@ -3367,5 +3399,35 @@ mod tests {
             per_peer * 1000
         );
         assert!(per_peer <= 160 * 1024, "{per_peer} bytes per peer");
+    }
+
+    /// Withdrawn peers lose their address at once: the old owner's open flows and grants stop
+    /// matching before the engine hands the address to a new node, and the new owner starts
+    /// with only its own grants when the next policy is published (J592 P2-5).
+    #[test]
+    fn a_withdrawn_peer_address_admits_nothing_until_its_new_owner_is_published() {
+        let old = config(TrafficPolicy::All, TrafficPolicy::All);
+        let filter = PacketFilter::new(&old, MeshProxyIngress::default()).expect("compile policy");
+        let now = Instant::now();
+        assert!(establish4(&filter, PEER4, 40_000, now));
+
+        filter.withdraw_peers(&BTreeSet::from([NodeId(2)]));
+        let mut data = tcp4(PEER4, LOCAL4, 443, 40_000, ACK);
+        assert!(!filter.check_at(&mut data, Direction::MeshToHost, now));
+        let mut syn = tcp4(PEER4, LOCAL4, 40_001, 22, SYN);
+        assert!(!filter.check_at(&mut syn, Direction::MeshToHost, now));
+
+        let mut moved = config(TrafficPolicy::None, TrafficPolicy::None);
+        let owner = moved.peers.remove(&NodeId(2)).expect("peer");
+        moved.peers.insert(NodeId(9), owner);
+        filter.publish_policy(
+            PacketFilter::prepare_policy(&moved, MeshProxyIngress::default())
+                .expect("prepare moved address"),
+        );
+        let mut data = tcp4(PEER4, LOCAL4, 443, 40_000, ACK);
+        assert!(
+            !filter.check_at(&mut data, Direction::MeshToHost, now),
+            "the new owner inherited the old owner's flow"
+        );
     }
 }
