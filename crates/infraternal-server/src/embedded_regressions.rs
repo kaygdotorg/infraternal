@@ -1224,7 +1224,8 @@ async fn offer_output(
 #[tokio::test]
 async fn small_frames_within_credit_never_retire_a_paused_viewer() {
     const GRANT: u64 = 1024 * 1024 + 64 * 1024;
-    const FRAME: u64 = 256;
+    const FRAME_LEN: usize = 256;
+    const FRAME: u64 = FRAME_LEN as u64;
     let (mut link, _peer) = connection();
     let (tx, mut rx) = production_output();
     let mut state = attachment(tx);
@@ -1239,7 +1240,7 @@ async fn small_frames_within_credit_never_retire_a_paused_viewer() {
                 &mut attachments,
                 &mut routes,
                 out_seq,
-                Bytes::from(vec![b'y'; FRAME as usize])
+                Bytes::from(vec![b'y'; FRAME_LEN])
             )
             .await
         );
@@ -1265,7 +1266,7 @@ async fn small_frames_within_credit_never_retire_a_paused_viewer() {
                     &mut attachments,
                     &mut routes,
                     out_seq,
-                    Bytes::from(vec![b'y'; FRAME as usize])
+                    Bytes::from(vec![b'y'; FRAME_LEN])
                 )
                 .await
             );
@@ -1290,13 +1291,14 @@ async fn small_frames_within_credit_never_retire_a_paused_viewer() {
 /// 8 MiB credit ceiling plus 1 MiB of headroom, and the shared host link must survive.
 #[tokio::test]
 async fn ignoring_credit_hits_the_hard_queue_cap() {
-    const FRAME: u64 = 1024 * 1024;
+    const FRAME_LEN: usize = 1024 * 1024;
+    const FRAME: u64 = FRAME_LEN as u64;
     const CAP: u64 = 9 * 1024 * 1024;
     let (mut link, _peer) = connection();
     let (tx, rx) = production_output();
     let mut attachments = HashMap::from([(1, attachment(tx))]);
     let mut routes = HashMap::from([(2, 1)]);
-    let payload = Bytes::from(vec![b'y'; FRAME as usize]);
+    let payload = Bytes::from(vec![b'y'; FRAME_LEN]);
     let mut out_seq = 0;
     for _ in 0..64 {
         if !routes.contains_key(&2) {
