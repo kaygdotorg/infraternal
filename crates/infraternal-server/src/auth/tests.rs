@@ -4092,7 +4092,7 @@ async fn session_rows(pool: &SqlitePool, token: &str) -> i64 {
 /// and the slide (the pool's `UPDATE … RETURNING`) are two drivers on one
 /// file. In either order the session ends revoked: a slide after the revoke
 /// is `Denied`, and a slide that committed first doesn't bring the row back.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sqlx_revoke_and_a_pool_slide_leave_the_session_revoked_in_either_order() {
     let _guard = SERIAL.lock().await;
     let (pool, path) = disk_pool("sessions-revoke").await;
