@@ -178,6 +178,10 @@ pub(crate) struct PeerAdmission {
     /// Spent before every key agreement. A plain mutex: it is held for one map update and
     /// never across an `.await`.
     budget: Mutex<Budget>,
+    /// Key agreements this guard has run, counted in tests only, so a test can prove that a
+    /// refused initiation never reached X25519 instead of inferring it from the verdict.
+    #[cfg(test)]
+    key_agreements: std::sync::atomic::AtomicU32,
 }
 
 impl PeerAdmission {
@@ -191,6 +195,8 @@ impl PeerAdmission {
             mac1,
             peers: BTreeSet::new(),
             budget: Mutex::default(),
+            #[cfg(test)]
+            key_agreements: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -244,6 +250,9 @@ impl PeerAdmission {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .spend(source.ip(), now)?;
+        #[cfg(test)]
+        self.key_agreements
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let verdict = match parse_handshake_anon(&self.private_key, &self.public_key, &initiation) {
             Ok(sender) if self.peers.contains(&PublicKey(sender.peer_static_public)) => Ok(()),
             Ok(_) => Err(Refusal::UnknownKey),
@@ -355,9 +364,14 @@ mod tests {
     };
     use std::{
         net::SocketAddr,
-        sync::Arc,
+        sync::{Arc, atomic::Ordering},
         time::{Duration, Instant},
     };
+
+    /// How many X25519 key agreements `admission` has run so far.
+    fn key_agreements(admission: &PeerAdmission) -> u32 {
+        admission.key_agreements.load(Ordering::Relaxed)
+    }
 
     /// The node's fixed test identity.
     const NODE: [u8; 32] = [0x31; 32];
@@ -417,6 +431,73 @@ mod tests {
             "after 100 initiations in one second the guard still ran X25519 for the next one"
         );
         assert!(next.is_err(), "an unknown key must never be admitted");
+    }
+
+    /// J648 (#483): every budget is checked before X25519, counted directly.
+    ///
+    /// The test above infers "no key agreement" from the verdict. This one counts the key
+    /// agreements the guard runs and requires that refusals past the per-source budget, past the
+    /// node budget, and for a bad MAC1 add none at all, for a flood far larger than any budget.
+    #[test]
+    fn refusals_past_any_budget_run_no_key_agreement() {
+        let admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let flood = initiation([0x55; 32]);
+        let now = Instant::now();
+        let one_source = source("198.51.100.7:40000");
+        for _ in 0..REFUSED_SOURCE_BUDGET {
+            assert_eq!(
+                admission.check(&Packet::copy_from(&flood), one_source, now),
+                Err(Refusal::UnknownKey)
+            );
+        }
+        assert_eq!(key_agreements(&admission), REFUSED_SOURCE_BUDGET);
+        for _ in 0..10_000 {
+            assert_eq!(
+                admission.check(&Packet::copy_from(&flood), one_source, now),
+                Err(Refusal::SourceBudget)
+            );
+        }
+        assert_eq!(
+            key_agreements(&admission),
+            REFUSED_SOURCE_BUDGET,
+            "a source past its budget caused X25519 work"
+        );
+
+        for index in 0..NODE_BUDGET - REFUSED_SOURCE_BUDGET {
+            let [_, _, high, low] = index.to_be_bytes();
+            let spoofed = SocketAddr::from(([198, 18, high, low], 40000));
+            assert_eq!(
+                admission.check(&Packet::copy_from(&flood), spoofed, now),
+                Err(Refusal::UnknownKey)
+            );
+        }
+        assert_eq!(key_agreements(&admission), NODE_BUDGET);
+        for index in 0..10_000_u32 {
+            let [_, _, high, low] = index.to_be_bytes();
+            let spoofed = SocketAddr::from(([198, 19, high, low], 40000));
+            assert_eq!(
+                admission.check(&Packet::copy_from(&flood), spoofed, now),
+                Err(Refusal::NodeBudget)
+            );
+        }
+        assert_eq!(
+            key_agreements(&admission),
+            NODE_BUDGET,
+            "a spoofed-source flood past the node budget caused X25519 work"
+        );
+
+        let mut forged = flood.clone();
+        forged[120] ^= 1;
+        let later = now + Duration::from_secs(1);
+        assert_eq!(
+            admission.check(&Packet::copy_from(&forged), one_source, later),
+            Err(Refusal::InvalidMac)
+        );
+        assert_eq!(
+            key_agreements(&admission),
+            NODE_BUDGET,
+            "a bad MAC1 reached X25519"
+        );
     }
 
     /// A registered peer's initiation still reaches `GotaTun`, and other packet types pass.
@@ -565,13 +646,17 @@ mod tests {
         );
     }
 
-    /// CPU per received initiation under a flood (J572, #483); run by hand, it asserts nothing.
+    /// CPU per received initiation under a flood (J572, J648, #483); run by hand, it asserts nothing.
     ///
     /// `cargo test -p infraternal-plugin-mesh --features agent --release --lib
-    /// bench_handshake_flood_cpu -- --ignored --nocapture` floods the guard on the calling
-    /// thread with real time, once from one source and once from 65,536 spoofed sources, and
-    /// prints this thread's CPU time per initiation and how many key agreements ran. The receive
-    /// task is single-threaded, so CPU per initiation sets the flood rate that saturates it.
+    /// bench_handshake_flood_cpu -- --ignored --nocapture` measures this thread's CPU time:
+    /// - per key agreement: initiations that fit the budget, each one running X25519;
+    /// - per rejected packet: initiations past the budget, which stop after MAC1;
+    /// - per initiation in a real-time flood, once from one source and once from 65,536 spoofed
+    ///   sources, with the key agreements counted.
+    ///
+    /// The receive task is single-threaded, so CPU per initiation sets the flood rate that
+    /// saturates it.
     #[test]
     #[ignore = "measurement; run by hand on a build VM"]
     fn bench_handshake_flood_cpu() {
@@ -581,13 +666,57 @@ mod tests {
                 .expect("thread CPU clock");
             Duration::from(time)
         }
-        let admission = PeerAdmission::new(StaticSecret::from(NODE));
+        /// Microseconds of CPU per packet.
+        fn per_packet(cpu: Duration, packets: u32) -> f64 {
+            cpu.as_secs_f64() * 1e6 / f64::from(packets)
+        }
         let flood = initiation([0x55; 32]);
+
+        // Within budget: a fresh window per packet, so every one runs X25519.
+        let admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let start = Instant::now();
+        let fresh = 2_000_u32;
+        let cpu = thread_cpu();
+        for index in 0..fresh {
+            let at = start + Duration::from_secs(u64::from(index));
+            let verdict = admission.check(&Packet::copy_from(&flood), source("198.18.0.1:1"), at);
+            assert_eq!(verdict, Err(Refusal::UnknownKey));
+        }
+        let cpu = thread_cpu().saturating_sub(cpu);
+        println!(
+            "J648 within budget: {fresh} initiations, {} key agreements, {:.2} us CPU each",
+            key_agreements(&admission),
+            per_packet(cpu, fresh)
+        );
+
+        // Past budget: one window, budget already spent, so every packet is refused after MAC1.
+        let admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let now = Instant::now();
+        let one = source("198.18.0.1:1");
+        for _ in 0..REFUSED_SOURCE_BUDGET {
+            let _ = admission.check(&Packet::copy_from(&flood), one, now);
+        }
+        let before = key_agreements(&admission);
+        let rejected = 200_000_u32;
+        let cpu = thread_cpu();
+        for _ in 0..rejected {
+            let verdict = admission.check(&Packet::copy_from(&flood), one, now);
+            assert_eq!(verdict, Err(Refusal::SourceBudget));
+        }
+        let cpu = thread_cpu().saturating_sub(cpu);
+        println!(
+            "J648 past budget: {rejected} rejected initiations, {} key agreements, \
+             {:.3} us CPU per rejected packet",
+            key_agreements(&admission) - before,
+            per_packet(cpu, rejected)
+        );
+
+        // Real-time floods.
         let packets = 200_000_u32;
         for (name, spoofed) in [("one source", false), ("65,536 spoofed sources", true)] {
+            let admission = PeerAdmission::new(StaticSecret::from(NODE));
             let started = Instant::now();
             let cpu = thread_cpu();
-            let mut key_agreements = 0_u32;
             for index in 0..packets {
                 let [_, _, high, low] = if spoofed {
                     index.to_be_bytes()
@@ -595,20 +724,18 @@ mod tests {
                     [0, 0, 0, 1]
                 };
                 let from = SocketAddr::from(([198, 18, high, low], 40000));
-                let verdict = admission.check(&Packet::copy_from(&flood), from, Instant::now());
-                if verdict == Err(Refusal::UnknownKey) {
-                    key_agreements += 1;
-                }
+                let _ = admission.check(&Packet::copy_from(&flood), from, Instant::now());
             }
             let cpu = thread_cpu().saturating_sub(cpu);
             let wall = started.elapsed();
             println!(
-                "J572 flood ({name}): {packets} initiations, {key_agreements} key agreements, \
+                "J648 flood ({name}): {packets} initiations, {} key agreements, \
                  thread CPU {:.3} s, wall {:.3} s, {:.2} us CPU per initiation, \
                  saturates one core at {:.0} initiations/s",
+                key_agreements(&admission),
                 cpu.as_secs_f64(),
                 wall.as_secs_f64(),
-                cpu.as_secs_f64() * 1e6 / f64::from(packets),
+                per_packet(cpu, packets),
                 f64::from(packets) / cpu.as_secs_f64(),
             );
         }
