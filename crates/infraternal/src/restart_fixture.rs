@@ -198,32 +198,46 @@ pub(crate) fn scratch_root() -> PathBuf {
         .to_owned()
 }
 
-/// A replacement binary for restart tests, together with a freshly signed release manifest
+/// A replacement binary for restart tests, together with freshly signed release metadata
 /// and the throwaway trust file that verifies it.
 ///
-/// The signing key lives only in memory while the fixture is created; the files written next
-/// to the binary (`MANIFEST`, `MANIFEST.sig`, `VERSION`, `fixture.trust`) hold no secret.
+/// The metadata has the shape the release signer Worker publishes (#211 S1): a sorted
+/// `SHA256SUMS` that also lists a nested license notice, its `SHA256SUMS.sig`, and
+/// `VERSION`. The signing key lives only in memory while the fixture is created; the files
+/// written next to the binary (`SHA256SUMS`, `SHA256SUMS.sig`, `VERSION`, `fixture.trust`)
+/// hold no secret.
 pub(crate) struct Signed {
     pub path: PathBuf,
     trust: String,
 }
 impl Signed {
-    /// Writes `bytes` to `path` as an executable and signs a manifest for it, in the same
-    /// folder. The manifest declares an `edge` release named for this platform's artifact.
+    /// Writes `bytes` to `path` as an executable and signs release metadata for it, in the
+    /// same folder. The metadata declares an `edge` release that lists this platform's artifact.
     pub fn new(path: PathBuf, bytes: &[u8]) -> Self {
         // Tests exec this file while sibling tests fork; see `test_executable`.
         crate::test_executable::write(&path, bytes, 0o700);
         let version = b"edge-20261012T000000Z\n";
-        let name = super::artifact_name();
-        let manifest = format!(
-            "infraternal-release-manifest-v1\nversion edge-20261012T000000Z\nchannel edge\n{}  VERSION\n{}  {name}\n",
-            hex(&openssl::sha::sha256(version)),
-            hex(&openssl::sha::sha256(bytes))
-        );
-        let (armor, trust) = signing::sign(manifest.as_bytes());
+        let mut entries = [
+            ("VERSION".to_owned(), hex(&openssl::sha::sha256(version))),
+            (
+                super::artifact_name().to_owned(),
+                hex(&openssl::sha::sha256(bytes)),
+            ),
+            (
+                "licenses/libghostty-vt/README.md".to_owned(),
+                hex(&openssl::sha::sha256(b"notice")),
+            ),
+        ];
+        entries.sort();
+        let mut sums = String::new();
+        for (name, digest) in &entries {
+            use std::fmt::Write;
+            writeln!(sums, "{digest}  {name}").unwrap();
+        }
+        let (armor, trust) = signing::sign(sums.as_bytes());
         let parent = path.parent().unwrap();
-        std::fs::write(parent.join("MANIFEST"), manifest).unwrap();
-        std::fs::write(parent.join("MANIFEST.sig"), armor).unwrap();
+        std::fs::write(parent.join("SHA256SUMS"), sums).unwrap();
+        std::fs::write(parent.join("SHA256SUMS.sig"), armor).unwrap();
         std::fs::write(parent.join("VERSION"), version).unwrap();
         std::fs::write(parent.join("fixture.trust"), &trust).unwrap();
         Self { path, trust }
@@ -240,21 +254,23 @@ impl Signed {
         let trust = std::fs::read_to_string(path.parent().unwrap().join("fixture.trust")).unwrap();
         Self { path, trust }
     }
-    /// Opens the binary the way the restart code does, checking its manifest and signature
+    /// Opens the binary the way the restart code does, checking its signed metadata
     /// against this fixture's trust file.
     pub fn open(&self) -> io::Result<super::Opened> {
         super::Opened::open_with(self.path.clone(), |file, path| self.verify(file, path))
     }
-    /// Re-checks an already open `file` against the manifest next to this fixture's binary.
+    /// Re-checks an already open `file` against the signed metadata next to this fixture's binary.
     pub fn verify_snapshot(&self, file: &File) -> io::Result<()> {
         self.verify(file, &self.path)
     }
+    /// Runs the production metadata check on `file` with this fixture's throwaway trust.
     fn verify(&self, file: &File, path: &Path) -> io::Result<()> {
-        super::verify_metadata(file, path, |file, name, manifest, signature| {
-            infraternal_server::release_manifest::verify_manifest_with_trust(
-                file,
+        super::verify_metadata(file, path, |version, image, name, sums, signature| {
+            infraternal_server::release_verify::verify_identity_with_trust(
+                version,
+                image,
                 name,
-                manifest,
+                sums,
                 signature,
                 &self.trust,
             )

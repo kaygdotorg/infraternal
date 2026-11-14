@@ -114,8 +114,8 @@ copy during export, which is immediately zeroized. Kernel socket buffers carry
 the bounded transfer frame and cannot be zeroized or excluded with userspace
 mapping advice. These protections do not remove those residual copies.
 
-A replacement now requires the hardened signed MANIFEST, signature and VERSION
-beside its executable. The immutable verified image is probed before shutdown;
+A replacement now requires the release's signed `SHA256SUMS`, `SHA256SUMS.sig`
+and `VERSION` beside its executable. The immutable verified image is probed before shutdown;
 late exec refusal recovers the retained current image with an independent CA
 handoff. See [safe replacement](replacement.md) for admission, recovery and
 platform qualifications. A successful exec with an invalid handoff still serves
