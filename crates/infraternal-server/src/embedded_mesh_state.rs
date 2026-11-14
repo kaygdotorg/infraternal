@@ -2967,6 +2967,68 @@ mod tests {
         );
     }
 
+    /// J628 note (b): a machine ID mounted over `/etc/machine-id` at boot never binds.
+    ///
+    /// On a read-only root with an empty or "uninitialized" file, systemd mounts a fresh random
+    /// ID over it from `/run` at every boot. Binding to that would make every reboot refuse start,
+    /// so `host_identity_in` treats a file on another device than its directory as transient. Only
+    /// a mount can make that true, so the check runs as a child in a private user and mount
+    /// namespace: it bind-mounts a tmpfs ID over one fixture's `machine-id` and leaves a second
+    /// fixture with the same ID as a plain file, which must still bind. Without `unshare` (macOS)
+    /// there is nothing to run, as in the remote plugin's split-device test.
+    #[test]
+    fn a_machine_id_mounted_over_at_boot_never_binds() {
+        let root = fixture_root();
+        for directory in ["mounted/etc", "plain/etc", "run"] {
+            fs::create_dir_all(root.join(directory)).expect("create fixture directories");
+        }
+        for file in ["mounted/etc/machine-id", "plain/etc/machine-id"] {
+            fs::write(root.join(file), "0123456789abcdef0123456789abcdef\n")
+                .expect("write fixture machine ID");
+        }
+        let script = "set -e; cd \"$2\"; mount -t tmpfs run run; \
+            printf '0123456789abcdef0123456789abcdef\\n' > run/machine-id; \
+            mount --bind run/machine-id mounted/etc/machine-id; \
+            J647_MACHINE_ID_ROOT=\"$2\" exec \"$1\" --exact \
+            embedded_mesh_state::tests::machine_id_mounted_over_inner --ignored --test-threads=1";
+        let Ok(status) = Command::new("unshare")
+            .args(["-Urm", "sh", "-c", script, "sh"])
+            .arg(std::env::current_exe().expect("find the test binary"))
+            .arg(&root)
+            .status()
+        else {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        };
+        fs::remove_dir_all(&root).expect("remove fixture root");
+        assert!(
+            status.success(),
+            "a machine ID mounted over /etc/machine-id was treated as persistent"
+        );
+    }
+
+    /// The namespace half of [`a_machine_id_mounted_over_at_boot_never_binds`].
+    #[test]
+    #[ignore = "Child-only fixture: started by the mounted machine ID test inside its namespace; does nothing alone."]
+    fn machine_id_mounted_over_inner() {
+        use super::{HostIdentity, host_identity_in};
+        let Some(root) = std::env::var_os("J647_MACHINE_ID_ROOT").map(PathBuf::from) else {
+            return;
+        };
+        let dbus = root.join("no-dbus-machine-id");
+        assert_eq!(
+            host_identity_in(&root.join("mounted/etc"), &dbus),
+            HostIdentity::Unusable("transient (mounted over at boot)")
+        );
+        assert!(
+            matches!(
+                host_identity_in(&root.join("plain/etc"), &dbus),
+                HostIdentity::Stable(_)
+            ),
+            "the same ID as a plain file still binds"
+        );
+    }
+
     /// J595 P2: every file the mesh Store keeps must be moved by migration and rollback.
     ///
     /// `MESH_FILES` is a hand-kept copy of the names `Store::open` uses. A branch that adds a Store
