@@ -166,3 +166,11 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
 - Every tap takes up to a minute while Safari has a heavy page open (XCUITest waits for the app to idle), so a full
   light+dark check takes about 70 minutes. Rerun a single phase with `check --phases "shell"`.
 - The QA server runs without a mesh node, so mesh cards (step 6) are N/A until a mesh node joins it.
+
+## Taking a whole-screen picture on the Mac VM (J668)
+
+`screencapture` over a plain ssh login fails with "could not create image from display": that login has no window
+server. Use `scripts/real-device-qa mac-shot [--url URL] [--out FILE.png]`, which takes the picture from a one-shot
+launchd agent in the console user's session. Run `scripts/real-device-qa mac-shot-setup` once per Mac VM first: it adds
+a Screen Recording grant for `/usr/sbin/screencapture` to the VM's own privacy database (the VM is ours; std's keychain
+is never touched). A stale system dialog on the VM's screen (for example a disk-unlock prompt) shows up in the picture.
