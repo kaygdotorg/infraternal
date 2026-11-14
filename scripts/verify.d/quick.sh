@@ -15,11 +15,26 @@
 # run is never quoted as the gate; `scripts/verify fast` stays the gate (docs/PROCESS.md).
 # Sourced by scripts/verify after rust.sh, whose rust_run_gate and summary it reuses.
 
+# Runs `cargo test <args>` with the hang backstop around the TEST RUN only (#509).
+# The build comes first, untimed (`--no-run`): a cold compile on a loaded host can
+# take most of the budget, and a timeout that covers it reports a slow build as a
+# hung test (exit 124, seen once on a busy compute01). The timeout then starts on
+# an up-to-date build, so it measures only what it is meant to catch: a test
+# binary that never ends. Failure of the build keeps cargo's own exit code.
+quick_cargo_test() {
+    cargo test "$@" --no-run || return $?
+    if command -v timeout >/dev/null; then
+        timeout --kill-after=30 "${VERIFY_QUICK_TEST_TIMEOUT:-1500}" cargo test "$@"
+    else
+        cargo test "$@"
+    fi
+}
+
 # Run the inexpensive pre-check rows, stopping before compilation on a policy failure.
 verify_quick() {
     local base="${VERIFY_QUICK_BASE:-origin/dev}"
     local scope token name
-    local -a packages=() cargo_scope=() excludes=() test_prefix=()
+    local -a packages=() cargo_scope=() excludes=()
     local tracer=0 whole=0 fuzz=0
 
     if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
@@ -75,12 +90,10 @@ verify_quick() {
     if ((${#cargo_scope[@]})); then
         # --lib --bins: unit tests only. Integration tests and doc tests belong to the full gate.
         # The timeout is a backstop: a test binary that never ends must fail the row (124), not hang
-        # the job and a build slot for the length of the hang (#329).
-        if command -v timeout >/dev/null; then
-            test_prefix=(timeout --kill-after=30 "${VERIFY_QUICK_TEST_TIMEOUT:-1500}")
-        fi
+        # the job and a build slot for the length of the hang (#329). quick_cargo_test starts it
+        # after the build, so a cold compile never counts against it (#509).
         if ((whole)); then
-            rust_run_gate "unit tests (changed)" ${test_prefix[@]+"${test_prefix[@]}"} cargo test "${cargo_scope[@]}" --lib --bins --locked
+            rust_run_gate "unit tests (changed)" quick_cargo_test "${cargo_scope[@]}" --lib --bins --locked
         else
             # `--lib` makes Cargo refuse a package that has no library (the `infraternal` CLI is
             # bin-only), so bin-only packages are tested with `--bins` alone, in their own run.
@@ -97,11 +110,11 @@ for pkg in meta["packages"]:
                 if grep -qxF "$name" <<< "$bin_only"; then bin_scope+=(-p "$name"); else lib_scope+=(-p "$name"); fi
             done
             if ((${#lib_scope[@]})); then
-                rust_run_gate "unit tests (changed)" ${test_prefix[@]+"${test_prefix[@]}"} cargo test "${lib_scope[@]}" --lib --bins --locked
+                rust_run_gate "unit tests (changed)" quick_cargo_test "${lib_scope[@]}" --lib --bins --locked
                 if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
             fi
             if ((${#bin_scope[@]})); then
-                rust_run_gate "unit tests (changed, bin-only)" ${test_prefix[@]+"${test_prefix[@]}"} cargo test "${bin_scope[@]}" --bins --locked
+                rust_run_gate "unit tests (changed, bin-only)" quick_cargo_test "${bin_scope[@]}" --bins --locked
             fi
         fi
         if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
