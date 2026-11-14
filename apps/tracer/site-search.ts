@@ -11,6 +11,7 @@
  * Keys: ⌘K or Ctrl+K opens it (the search button does too, with a tap on a phone; both are wired in doc-page.ts), ↑ ↓ move, Enter opens,
  * Esc closes and gives focus back.
  */
+import { snippetParts } from "./src/snippet-parts";
 import { prepareSearch, searchDocs, type Prepared, type SearchHit } from "./src/canvas/docs/docs-search";
 
 /** The `search.json` of each root, loaded once and merged; a root that has none (a build without text search) is left out. */
@@ -26,18 +27,12 @@ async function loadIndex(roots: readonly string[]): Promise<{ root: string; prep
 
 /** The result's snippet as nodes: the words around the match, with each matched word in a `<mark>`. No HTML is ever built from the text. */
 function snippetNodes(hit: SearchHit): Node[] {
-  const nodes: Node[] = [];
-  let at = 0;
-  for (const [start, end] of hit.marks) {
-    if (start < at) continue;
-    nodes.push(document.createTextNode(hit.snippet.slice(at, start)));
+  return snippetParts(hit.snippet, hit.marks).map((part) => {
+    if (!part.marked) return document.createTextNode(part.text);
     const mark = document.createElement("mark");
-    mark.textContent = hit.snippet.slice(start, end);
-    nodes.push(mark);
-    at = end;
-  }
-  nodes.push(document.createTextNode(hit.snippet.slice(at)));
-  return nodes;
+    mark.textContent = part.text;
+    return mark;
+  });
 }
 
 /**

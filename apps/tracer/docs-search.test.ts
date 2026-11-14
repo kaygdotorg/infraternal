@@ -7,6 +7,7 @@
 import { expect, test } from "bun:test";
 import { searchPageOf, sectionsOf, textOf } from "./docs-search-index";
 import { textRows } from "./src/canvas/docs/docs-search.on-demand";
+import { snippetParts } from "./src/snippet-parts";
 import { prepareSearch, queryWords, searchDocs, type SearchPage } from "./src/canvas/docs/docs-search";
 
 test("text keeps the words of cells and list items apart and decodes entities", () => {
@@ -101,4 +102,18 @@ test("inside a class, whole words and words side by side as typed rank above par
     { slug: "b", title: "B", sections: [{ heading: "Words", id: "words", text: "The server keeps a check value, not the words." }] },
   ]), "check value");
   expect(found.map((hit) => hit.slug)).toEqual(["b", "a"]);
+});
+
+test("a snippet is cut so no character is drawn twice when marks overlap (\"key keys\")", () => {
+  const found = searchDocs(prepared, "key keys");
+  expect(found.length).toBeGreaterThan(0);
+  for (const hit of found) {
+    // Whatever the marks are, the parts put back together are the snippet, once.
+    expect(snippetParts(hit.snippet, hit.marks).map((part) => part.text).join("")).toBe(hit.snippet);
+  }
+  expect(snippetParts("keys here", [[0, 3], [0, 4]])).toEqual([{ text: "keys", marked: true }, { text: " here", marked: false }]);
+  expect(snippetParts("a key and keys", [[2, 5], [10, 14], [10, 13]])).toEqual([
+    { text: "a ", marked: false }, { text: "key", marked: true }, { text: " and ", marked: false }, { text: "keys", marked: true },
+  ]);
+  expect(snippetParts("plain", [])).toEqual([{ text: "plain", marked: false }]);
 });

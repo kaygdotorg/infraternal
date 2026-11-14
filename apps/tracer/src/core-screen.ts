@@ -31,6 +31,7 @@ import type { InputModifierState, InputModifiers, TerminalClient } from "./termi
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { titled } from "./palette-entry";
+import { snippetParts } from "./snippet-parts";
 
 /** True only in preview builds (see build.ts): there a palette row without a title is an error, in production it is repaired. */
 declare const __CLUSTERS_PREVIEW__: boolean;
@@ -752,15 +753,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
           // A match in the text: the heading and, under it, the words around the match with the match highlighted.
           const line = document.createElement("span");
           line.className = "result-snippet";
-          let at = 0;
-          for (const [start, end] of entry.snippet.marks) {
-            line.append(entry.snippet.text.slice(at, start));
+          for (const part of snippetParts(entry.snippet.text, entry.snippet.marks)) {
+            if (!part.marked) { line.append(part.text); continue; }
             const mark = document.createElement("mark");
-            mark.textContent = entry.snippet.text.slice(start, end);
+            mark.textContent = part.text;
             line.append(mark);
-            at = end;
           }
-          line.append(entry.snippet.text.slice(at));
           const text = document.createElement("span");
           text.className = "result-text";
           text.append(label, line);
