@@ -305,10 +305,6 @@ rust_static_build_check() {
     return "$failed"
 }
 
-# Runs the Rust gate. Mode "final" (scripts/verify fast) is the full gate. Mode
-# "iterate" (scripts/verify iterate) runs every check except the static
-# release builds and what only they can check (linkage, D244 key heap, D243
-# size), which dominate the time and are rechecked by the final mode.
 # The `test` row (D345, #509). Runs every workspace test binary even after one
 # fails: plain `cargo test` stops at the first failing binary, so a flake in an
 # early package hid the results of every later package. `--no-fail-fast` keeps
@@ -329,6 +325,10 @@ rust_test_workspace() {
     return "$status"
 }
 
+# Runs the Rust gate. Mode "final" (scripts/verify fast) is the full gate. Mode
+# "iterate" (scripts/verify iterate) runs every check except the static
+# release builds and what only they can check (linkage, D244 key heap, D243
+# size), which dominate the time and are rechecked by the final mode.
 rust_verify_fast() {
     local mode="${1:-final}"
 
