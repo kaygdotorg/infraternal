@@ -573,13 +573,21 @@ async fn restarted_resolution_reclaims_partial_downloads_after_process_stop() {
         // fixed bound; that is setup, not behaviour under test. So the child
         // gets no clock until it has asked for the payload: while it starts, the
         // only failure is the child dying. The 20 s bound then covers only what
-        // this test is about, the child saving the MiB it was sent (#509).
+        // this test is about, the child saving the MiB it was sent (#509). One
+        // generous outer bound still turns a child that hangs before asking (for
+        // example a resolver deadlock) into a failure instead of a hung gate (J611).
         let mut body_sent = body_sent;
+        let start_bound = std::time::Instant::now() + Duration::from_secs(300);
         while let Err(tokio::sync::oneshot::error::TryRecvError::Empty) = body_sent.try_recv() {
             assert!(
                 child.try_wait().unwrap().is_none(),
                 "download child stopped before it asked for the payload"
             );
+            if std::time::Instant::now() >= start_bound {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("download child never asked for the payload within 300 s");
+            }
             // sleep: poll for the child's first payload request; its start has no deadline.
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
