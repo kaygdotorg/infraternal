@@ -129,6 +129,26 @@ pub fn is_lan(ip: IpAddr) -> bool {
     }
 }
 
+/// Whether `ip` only means something inside one network, so it must not be published to a peer
+/// the Access policy keeps apart (J699 P2-1, D164): every [`is_lan`] range, plus link-local
+/// (`169.254.0.0/16`, `fe80::/10`), loopback and the unspecified address. An IPv4-mapped IPv6
+/// address is judged as its IPv4 address, because a dual-stack listener reports IPv4 sources
+/// that way.
+///
+/// This is wider than [`is_lan`] on purpose: `is_lan` picks addresses worth *offering* as a LAN
+/// candidate, while this decides what must *never leak*. A public address returns false.
+#[must_use]
+pub fn is_private_scope(ip: IpAddr) -> bool {
+    let ip = ip.to_canonical();
+    is_lan(ip)
+        || ip.is_loopback()
+        || ip.is_unspecified()
+        || match ip {
+            IpAddr::V4(ip) => ip.is_link_local(),
+            IpAddr::V6(ip) => (ip.segments()[0] & 0xffc0) == 0xfe80,
+        }
+}
+
 /// Keep only LAN addresses that can be sent to another node: the first of each address family,
 /// so at most [`MAX_LAN`].
 ///
@@ -497,6 +517,30 @@ mod tests {
         assert!(is_lan("fd12::1".parse().unwrap()));
         assert!(!is_lan("100.128.0.1".parse().unwrap()));
         assert!(!is_lan("2001:db8::1".parse().unwrap()));
+    }
+
+    /// J699 P2-1 (#515): every scope that must stay inside its network counts as private, mapped
+    /// IPv4 included, and public addresses do not.
+    #[test]
+    fn private_scope_covers_lan_cgnat_link_local_and_ula() {
+        for private in [
+            "10.0.0.1",
+            "192.168.1.2",
+            "172.31.0.9",
+            "100.100.7.9",
+            "169.254.3.4",
+            "127.0.0.1",
+            "0.0.0.0",
+            "fd12::1",
+            "fe80::1",
+            "::1",
+            "::ffff:192.168.1.2",
+        ] {
+            assert!(is_private_scope(private.parse().unwrap()), "{private}");
+        }
+        for public in ["203.0.113.4", "100.128.0.1", "2001:db8::1", "::ffff:203.0.113.4"] {
+            assert!(!is_private_scope(public.parse().unwrap()), "{public}");
+        }
     }
 
     /// J585 F9b (#515): [`MAX_LAN`] promises one LAN address per address family, so a second

@@ -1692,7 +1692,7 @@ impl Store {
             .await
     }
     /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs). Private
-    /// addresses ([`crate::candidates::is_lan`]) are never recorded.
+    /// addresses ([`crate::candidates::is_private_scope`]) are never recorded.
     ///
     /// A proven observation replaces a different stored address. An unproven one is accepted only when the
     /// coordinator never published that address for the node: not its guess, reflexive or LAN address, and not one
@@ -1713,7 +1713,7 @@ impl Store {
             .iter()
             // A private address is what a server on the node's own LAN sees: no reflexive address, and it must not
             // reach peers on other sites (J585 F9a). The node's LAN candidates already cover its own site.
-            .filter(|seen| !crate::candidates::is_lan(seen.address.ip()))
+            .filter(|seen| !crate::candidates::is_private_scope(seen.address.ip()))
             .filter_map(|seen| {
                 let known = loaded.candidates.get(&seen.node)?;
                 let history = loaded
@@ -2775,6 +2775,21 @@ mod candidate_tests {
             private.is_empty(),
             "an ungranted peer on another network learned d's private address: {private:?}"
         );
+    }
+
+    /// J699 P2-1's other half (#515): a homelab where the server and every node share one LAN
+    /// has private guesses only, and the guess is the one address that works. A peer with
+    /// network access (the default Allow here) still gets it; only ungranted peers lose it.
+    #[tokio::test]
+    async fn a_granted_peer_still_learns_a_private_guess() {
+        let (store, [_, _, _, c]) = mesh().await;
+        let (d, _) = store
+            .attach("d", PublicKey([5; 32]), Some(at("192.168.1.9:10254")), false)
+            .await
+            .unwrap();
+        let view = store.config(c).await.unwrap();
+        assert!(view.peers[&d].has_network_access(), "fixture: allow by default");
+        assert_eq!(tries(&view, d), [at("192.168.1.9:10254")]);
     }
 
     /// J585 F2 (#515): "same public address" is decided by the UDP-observed reflexive address,
