@@ -433,6 +433,16 @@ async fn an_unavailable_key_repaint_delivers_the_output_its_ack_passed() {
         received, WINDOW_END,
         "every charged byte reaches the client: {wire:?}"
     );
+    // The notice reports the relay's cursor, so the bytes it counts must arrive before it, not
+    // only once the starvation timer releases them later.
+    let notice = wire.iter().position(|frame| *frame == Seen::Event);
+    let last_output = wire
+        .iter()
+        .rposition(|frame| matches!(frame, Seen::Output(..)));
+    assert!(
+        notice > last_output,
+        "the snapshot-unavailable notice follows the output it counts: {wire:?}"
+    );
     assert_eq!(
         resumed, received,
         "recovery resumes at the client's last received byte"
