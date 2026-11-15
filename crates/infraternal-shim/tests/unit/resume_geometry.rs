@@ -190,8 +190,8 @@ fn peer() -> Peer {
 }
 
 /// A new tab at `cols` attaches to a session whose output (after `start`) was
-/// written at 42 columns. The agent sends ReadFrom first and the browser's
-/// Resize after it; the shim may already have streamed the replay by then.
+/// written at 42 columns. The agent sends `ReadFrom` first and the browser's
+/// `Resize` after it; the shim may already have streamed the replay by then.
 fn reopen_at(cols: u16, start: &[u8]) -> (Session, Terminal, Option<Repaint>) {
     let mut session = Session::new(42, 24);
     session.output(&[start, typed_at_42().as_slice()].concat());

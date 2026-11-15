@@ -1263,6 +1263,12 @@ export class TerminalClient {
     });
   }
 
+  /**
+   * Sends AttachTerm for this window's session once nothing older is still being painted, so `lastOutSeq` names
+   * exactly what the screen shows. Grants the initial output credit and reports the grid size, but only once the
+   * grid has been fitted: the constructor's 80x24 default is no viewer's size (#521). Safe to call repeatedly; it
+   * returns early until every precondition holds.
+   */
   private tryAttach(): void {
     if (!this.attachRequested || !this.sessionId || this.attached || this.closed || this.exitReported || this.sessionGone || !this.conn.isOpen) return;
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
@@ -1695,6 +1701,12 @@ export class TerminalClient {
     this.drainOutput();
   }
 
+  /**
+   * Takes a host repaint (Snapshot) valid at output offset `sequence`. It must not go backwards or exceed the credit
+   * granted. It supersedes queued raw output and is painted on the next drain. The stale-screen note (D309) is
+   * settled only as far as the repaint carries output past the replay fence, because a repaint is the host's picture,
+   * not the program redrawing (#521).
+   */
   private acceptSnapshot(sequence: bigint, bytes: Uint8Array): void {
     performance.mark(`sw:snapshot:${this.streamId}`);
     performance.mark(`sw:snapshot:${this.streamId}`);
@@ -2019,6 +2031,12 @@ export class TerminalClient {
     this.setStatus(message);
   }
 
+  /**
+   * Fits the grid to the host element on the next animation frame: whole cells of the current metrics, at least
+   * 20x6. A changed size resizes the terminal, whose resize event reports it to the host. The first fit also marks the
+   * size as real, and reports it directly when the grid already had it, so the attach never sends a default (#521).
+   * Coalesces repeated calls and does nothing while the window is closed, suspended or frozen.
+   */
   private scheduleFit(): void {
     if (this.fitQueued || this.closed || this.suspended || this.frozen) return;
     this.fitQueued = true;
