@@ -154,7 +154,7 @@ mac() { timeout "${QA_TIMEOUT:-1200}" ssh -o ConnectTimeout=20 "$MAC" "$@"; }
 # Ships the desktop-Safari driver files to the Mac VM (they live in /tmp/j509 there; secrets are 0600 files in it).
 mac_ship() {
   mac 'mkdir -p /tmp/j509/out && chmod 700 /tmp/j509'
-  for f in real-device-qa-mac-flow.py:real-device-qa-mac-flow.py real-device-qa-mac-wd.py:wd.py real-device-qa-sw-authenticator.js:sw-authenticator.js; do
+  for f in real-device-qa-mac-flow.py:real-device-qa-mac-flow.py real-device-qa-mac-wd.py:wd.py real-device-qa-sw-authenticator.js:sw-authenticator.js real-device-qa-mac-appearance.sh:appearance.sh; do
     mac "cat > /tmp/j509/${f#*:}" < "$HERE/${f%%:*}"
   done
 }
@@ -188,11 +188,16 @@ cmd_mac() {
   mac_ship
   for theme in ${themes//,/ }; do
     mkdir -p "$out/$theme"
+    # A dark run is dark twice over: the page URL asks for the dark app theme (real-device-qa-mac-flow.py) and the VM's own
+    # appearance is dark, so `prefers-color-scheme` agrees. No AppleScript: see real-device-qa-mac-appearance.sh.
+    case "$theme" in mocha|dark) mode=dark;; *) mode=light;; esac
+    mac "lockf -k -t 1800 /tmp/mac-bench.lock bash /tmp/j509/appearance.sh $mode" | tee -a "$out/$theme/log.txt"
     for flow in all extras; do
       mac_flow "$QA2_URL" /tmp/j509/out $flow $theme | tee -a "$out/$theme/log.txt"
     done
     mac 'tar -C /tmp/j509/out -cf - .' | tar -C "$out/$theme" -xf - 2>/dev/null || true
   done
+  mac "lockf -k -t 1800 /tmp/mac-bench.lock bash /tmp/j509/appearance.sh light" >/dev/null   # leave the VM as found
   grep -h -E 'MAC_RESULT' "$out"/*/log.txt | sort | uniq -c | sort -rn | head -40
   echo "evidence: $out (log.txt = every MAC_RESULT and MAC_METRIC line; screenshots). Attach it to the issue; never commit it."
 }
