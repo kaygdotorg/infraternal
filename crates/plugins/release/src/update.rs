@@ -190,7 +190,36 @@ pub struct UpdateState {
     /// A release staged by an explicit request (a D295 rollback or a channel switch).
     /// Periodic checks keep it staged until it is applied or cancelled.
     pub hold: Option<String>,
+    /// How the last switch to a staged release ended (#211 S4; S5 shows it).
+    pub applied: Option<Applied>,
+    /// A release that failed here (its health check, its start, or it stopped during its
+    /// trial) and was undone (D295). Periodic checks never stage it again; a newer
+    /// release, or an explicit request, replaces it.
+    pub paused: Option<String>,
 }
+
+/// The outcome of one switch to a staged release (#211 S4, D295).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Applied {
+    /// The release the server switched to (or tried to).
+    pub version: String,
+    /// [`APPLIED`], [`UNDONE`] or [`NOT_APPLIED`].
+    pub outcome: String,
+    /// A fixed public reason when it was undone or not applied.
+    pub reason: Option<String>,
+    /// When the switch ended, in Unix seconds.
+    pub at: i64,
+}
+
+/// The new release passed its health check and is now the one that starts.
+pub const APPLIED: &str = "applied";
+/// The new release failed and the previous release and database copy came back (D295).
+pub const UNDONE: &str = "undone";
+/// The switch was refused before the new release ran; nothing changed.
+pub const NOT_APPLIED: &str = "not-applied";
+/// The periodic check's refusal for a release that failed here before.
+pub const PAUSED: &str = "this release failed on this server and was undone; it stays paused";
 
 /// A staged release the updater threw away, kept in the state so the owner can see why
 /// (S5 shows it). Cleared when another release is staged.
@@ -537,6 +566,14 @@ impl Updater {
         if guard(&self.current, &version, admission).map_err(Stop::Refusal)? == Verdict::Same {
             return Ok(Outcome::Current(version));
         }
+        // A release undone here (D295) is not offered again by the timer; only a newer
+        // release or an explicit request moves on.
+        if admission == Admission::Forward && state.paused.as_deref() == Some(version.as_str()) {
+            if let Some(paused) = staged.take() {
+                retire(lock, state, Some(paused), PAUSED)?;
+            }
+            return Err(Stop::Refusal(PAUSED));
+        }
         if admission == Admission::Explicit {
             // Set before the download: a failed attempt leaves no staged match, so the
             // next check ends the hold; a successful one keeps it.
@@ -673,7 +710,7 @@ impl Updater {
             path: self.directory.join("staged").join(&self.artifact),
             image,
             version,
-            _lock: lock,
+            lock,
         })
     }
 
@@ -819,7 +856,7 @@ fn random() -> u64 {
 }
 
 /// The current time in Unix seconds (0 if the clock is before 1970).
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -828,7 +865,7 @@ fn now() -> i64 {
 }
 
 /// The state saved in the updates folder `directory`, reporting `current` as the running version.
-fn status_of(directory: &Path, current: &str) -> UpdateState {
+pub(crate) fn status_of(directory: &Path, current: &str) -> UpdateState {
     let mut state = read_state(&directory.join("state.json")).unwrap_or_default();
     current.clone_into(&mut state.current);
     state
@@ -938,7 +975,7 @@ fn overtaken(staged: &str, announced: &str) -> bool {
 
 /// Open `path` without following symlinks and check it is a private, single-link regular file owned by this user.
 #[allow(clippy::verbose_bit_mask)]
-fn open_private(path: &Path) -> Result<std::fs::File, &'static str> {
+pub(crate) fn open_private(path: &Path) -> Result<std::fs::File, &'static str> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -970,7 +1007,7 @@ pub struct Confirmed {
     /// The open, verified image (the same inode as `path` while the lock is held).
     image: std::fs::File,
     /// Held until the caller has switched (or given up).
-    _lock: Locked,
+    lock: Locked,
 }
 
 impl Confirmed {
@@ -991,19 +1028,37 @@ impl Confirmed {
     pub fn file(&self) -> &std::fs::File {
         &self.image
     }
+
+    /// A confirmation built directly from its parts, for [`crate::apply`]'s unit tests.
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn for_test(version: &str, directory: &Path, artifact: &str) -> Self {
+        let path = directory.join("staged").join(artifact);
+        Self {
+            version: version.to_owned(),
+            image: std::fs::File::open(&path).unwrap(),
+            path,
+            lock: Locked::open(directory).unwrap(),
+        }
+    }
+
+    /// Take the parts S4's [`crate::apply`] needs: version, image file and the lock.
+    pub(crate) fn into_parts(self) -> (String, std::fs::File, Locked) {
+        (self.version, self.image, self.lock)
+    }
 }
 
 /// An exclusive lock on `updates/`, held for one whole check.
-struct Locked {
+pub(crate) struct Locked {
     directory: PathBuf,
     _lock: nix::fcntl::Flock<std::fs::File>,
 }
 
 /// A `download-<uuid>/` folder. Dropping it deletes the folder, so a failed or
 /// cancelled check never leaves a partial download behind, unless it was published.
-struct Download {
-    path: PathBuf,
-    published: bool,
+pub(crate) struct Download {
+    pub(crate) path: PathBuf,
+    pub(crate) published: bool,
 }
 impl Drop for Download {
     fn drop(&mut self) {
@@ -1014,9 +1069,14 @@ impl Drop for Download {
 }
 
 impl Locked {
+    /// The locked `updates/` folder.
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     /// Create `updates/` if needed (0700), check it is private and ours, and lock it,
     /// waiting for another check to finish.
-    fn open(directory: &Path) -> Result<Self, &'static str> {
+    pub(crate) fn open(directory: &Path) -> Result<Self, &'static str> {
         Self::lock(directory, nix::fcntl::FlockArg::LockExclusive)
     }
 
@@ -1031,7 +1091,7 @@ impl Locked {
     }
 
     /// Like [`Locked::open`] but gives up at once if a check holds the lock.
-    fn try_open(directory: &Path) -> Result<Self, &'static str> {
+    pub(crate) fn try_open(directory: &Path) -> Result<Self, &'static str> {
         Self::lock(directory, nix::fcntl::FlockArg::LockExclusiveNonblock)
     }
 
@@ -1066,7 +1126,7 @@ impl Locked {
 
     /// Delete abandoned `download-*` and `retired-*` folders. Holding the lock means no
     /// live check owns them. Symlinks and other entries are never followed or removed.
-    fn sweep(&self) -> Result<(), &'static str> {
+    pub(crate) fn sweep(&self) -> Result<(), &'static str> {
         let entries =
             std::fs::read_dir(&self.directory).map_err(|_| "the update folder is unavailable")?;
         for entry in entries {
@@ -1091,7 +1151,7 @@ impl Locked {
     }
 
     /// Make a fresh private `download-<uuid>/` folder.
-    fn download(&self) -> Result<Download, &'static str> {
+    pub(crate) fn download(&self) -> Result<Download, &'static str> {
         use std::os::unix::fs::DirBuilderExt;
         let path = self
             .directory
@@ -1145,7 +1205,7 @@ impl Locked {
 
     /// Replace `state.json` atomically: write a private temporary file, flush it,
     /// rename it over the old one and flush the folder. Then wake subscribers.
-    fn write_state(&self, state: &UpdateState) -> Result<(), &'static str> {
+    pub(crate) fn write_state(&self, state: &UpdateState) -> Result<(), &'static str> {
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
         let saved = "the update state could not be saved";
         let temporary = self.directory.join("state.json.tmp");
@@ -1168,7 +1228,7 @@ impl Locked {
     }
 
     /// Flush `updates/` itself so renames inside it survive a crash.
-    fn sync(&self) -> Result<(), &'static str> {
+    pub(crate) fn sync(&self) -> Result<(), &'static str> {
         std::fs::File::open(&self.directory)
             .and_then(|folder| folder.sync_all())
             .map_err(|_| "the update folder could not be saved")
