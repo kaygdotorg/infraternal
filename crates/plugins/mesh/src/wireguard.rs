@@ -1276,20 +1276,26 @@ impl RouteMonitor {
                 return Ok(RouteWake::Cancelled);
             }
             let route_events = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
-            if route_events
-                .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
-            {
+            if route_events.intersects(PollFlags::POLLHUP | PollFlags::POLLNVAL) {
                 return Err(io::Error::other("route notification socket disconnected"));
             }
-            if route_events.contains(PollFlags::POLLIN) {
-                let length = match recv(self.fd.as_raw_fd(), &mut self.buffer, MsgFlags::empty()) {
+            // An overflow shows as `POLLERR` (with `POLLIN` when notifications are still
+            // queued), and only `recv` reports and clears it as `ENOBUFS` (#483 J707 P2). Treating
+            // `POLLERR` as a dead socket dropped the listener until the 30 s recheck, so a route
+            // storm hid our own endpoint change for that long. The read never blocks: `POLLERR`
+            // can be the only event.
+            if route_events.intersects(PollFlags::POLLIN | PollFlags::POLLERR) {
+                let length = match recv(
+                    self.fd.as_raw_fd(),
+                    &mut self.buffer,
+                    MsgFlags::MSG_DONTWAIT,
+                ) {
                     Ok(length) => length,
                     Err(nix::errno::Errno::ENOBUFS) => {
-                        self.addresses.lost_notifications(self.interface_index);
-                        self.underlay.changed();
-                        self.announce.changed();
+                        self.lost_notifications();
                         return Ok(RouteWake::Reconcile);
                     }
+                    Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
                     Err(error) => return Err(error.into()),
                 };
                 if length == 0 || length == self.buffer.len() {
@@ -1320,7 +1326,37 @@ impl RouteMonitor {
             }
         }
     }
+
+    /// Recover from a notification overflow (`ENOBUFS`): some notifications are gone, so what
+    /// the listener knows may be stale.
+    ///
+    /// Everything still queued predates the loss and is discarded, because applying an old
+    /// "address added" after a fresh dump could book an address the lost notifications had
+    /// removed, and the next real re-add would then look like a refresh. The address book is
+    /// read again. Any lost notification may have moved our endpoint, so the announce wakes,
+    /// route budgets are re-derived, and the caller asks for a full inventory check, since a
+    /// lost notification may have been a deleted peer route.
+    fn lost_notifications(&mut self) {
+        // Bounded, so a storm that refills the queue as fast as it drains cannot hold us here.
+        for _ in 0..LOST_NOTIFICATION_DRAIN_LIMIT {
+            match recv(
+                self.fd.as_raw_fd(),
+                &mut self.buffer,
+                MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(_) | Err(nix::errno::Errno::ENOBUFS | nix::errno::Errno::EINTR) => {}
+                Err(_) => break,
+            }
+        }
+        self.addresses.lost_notifications(self.interface_index);
+        self.underlay.changed();
+        self.announce.changed();
+    }
 }
+
+/// How many queued datagrams an overflow recovery discards at most before it re-reads the host.
+/// The default receive buffer holds a few hundred; the bound only matters in an endless storm.
+const LOST_NOTIFICATION_DRAIN_LIMIT: usize = 4096;
 
 /// What one or more kernel notifications mean for the mesh.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2552,6 +2588,73 @@ mod endpoint_announce_tests {
                 "200",
             ]);
         }));
+    }
+
+    /// Read for 300 ms, through overflow recoveries too (they end a wait with `Reconcile`), and
+    /// fail on any listener error: an error drops the listener until the 30 s recheck.
+    fn read_everything(listener: &mut Listener) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            if let Err(error) = listener
+                .monitor
+                .wait_for_deleted_peer_route(listener.cancel.as_fd(), deadline)
+            {
+                panic!("the route listener failed: {error}");
+            }
+        }
+    }
+
+    /// Run one `ip -batch` of `verb` lines for 20,000 unrelated /32 routes via `d0`, as a
+    /// routing daemon loading or dropping a table does.
+    fn route_storm(verb: &str) {
+        use std::fmt::Write as _;
+        let mut batch = String::new();
+        for index in 0..20_000_u32 {
+            let [_, high, middle, low] = index.to_be_bytes();
+            writeln!(
+                batch,
+                "route {verb} 172.{}.{middle}.{low}/32 via 10.9.0.1 dev d0",
+                16 + high
+            )
+            .unwrap();
+        }
+        let path = std::env::temp_dir().join(format!("route-storm-{}", std::process::id()));
+        std::fs::write(&path, batch).unwrap();
+        ip(&["-batch", path.to_str().unwrap()]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// #483 J707 P2: a route storm overflows the notification socket while the listener is
+    /// busy. The overflow is reported as `POLLERR`; the listener must read it as `ENOBUFS`,
+    /// recover, and announce, both when the storm adds routes and when it removes them (the
+    /// trailing edge), then stay quiet. Before the fix the first overflow ended the listener
+    /// ("route notification socket disconnected"), and the change went unannounced for 30 s.
+    ///
+    /// The listener does not read during each storm, so the kernel's queue (a few hundred
+    /// kilobytes) must overflow: 20,000 route notifications are about 2 MB.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_route_storm_overflow_still_announces() {
+        let mut listener = namespace();
+        route_storm("add");
+        read_everything(&mut listener);
+        assert!(
+            listener.announce.take_for_test(),
+            "the storm that added routes was not announced"
+        );
+        read_everything(&mut listener);
+        assert!(
+            !listener.announce.take_for_test(),
+            "the listener kept announcing after the storm ended"
+        );
+        route_storm("del");
+        read_everything(&mut listener);
+        assert!(
+            listener.announce.take_for_test(),
+            "the storm that removed routes (the trailing edge) was not announced"
+        );
+        read_everything(&mut listener);
+        assert!(!listener.announce.take_for_test());
     }
 
     /// Routes out of the mesh link are our own writes and announce nothing.
