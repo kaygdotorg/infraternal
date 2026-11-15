@@ -134,6 +134,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     try restoreMouse(w, t);
+    try keyFlags(w, t);
     try w.writeAll("\x1b[?6l\x1b[3g");
     for (0..t.cols) |x| if (t.tabstops.get(@intCast(x))) {
         try w.print("\x1b[1;{d}H\x1bH", .{x + 1});
@@ -317,7 +318,19 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotEr
         skip_first = try row(w, p, skip_first);
         wrap = p.rowAndCell().row.wrap;
     }
-    // A screen has its own complete Kitty flag stack, including pop state.
+    try kittyKeyboard(w, screen);
+    try cursorShape(w, t, screen);
+    try regions(w, t);
+    try liveCursor(w, t, screen, false, false);
+}
+
+/// Rebuilds a screen's Kitty keyboard flag stack on the screen that is active
+/// in the viewer. Each screen has its own stack, including pop state.
+///
+/// Invariant: the viewer's stack must be at index 0, as after RIS or on a
+/// screen freshly created by a screen switch. The rebuild is relative to the
+/// starting index, so any other start would rotate the ring.
+fn kittyKeyboard(w: *Writer, screen: *const vt.Screen) SnapshotError!void {
     const keys = screen.kitty_keyboard;
     try w.print("\x1b[={d}u", .{keys.flags[0].int()});
     // Rebuild the complete eight-entry ring, including entries behind a
@@ -325,9 +338,20 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotEr
     for (1..keys.flags.len) |i| try w.print("\x1b[>{d}u", .{keys.flags[i].int()});
     try w.print("\x1b[>{d}u", .{keys.flags[0].int()});
     for (1..@as(usize, keys.idx) + 1) |i| try w.print("\x1b[>{d}u", .{keys.flags[i].int()});
-    try cursorShape(w, t, screen);
-    try regions(w, t);
-    try liveCursor(w, t, screen, false, false);
+}
+
+/// Restores key and mouse encoding flags that live outside the mode table:
+/// modifyOtherKeys level 2 (`CSI > 4 ; 2 m`) and XTSHIFTESCAPE (`CSI > Ps s`).
+/// RIS clears both; a program that set them (vim sets modifyOtherKeys) would
+/// otherwise receive differently encoded keys after a repaint (#524). The
+/// engine's unset shift-capture state has no setter, and RIS already leaves it.
+fn keyFlags(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
+    if (t.flags.modify_other_keys_2) try w.writeAll("\x1b[>4;2m");
+    switch (t.flags.mouse_shift_capture) {
+        .null => {},
+        .false => try w.writeAll("\x1b[>0s"),
+        .true => try w.writeAll("\x1b[>1s"),
+    }
 }
 
 fn regions(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
