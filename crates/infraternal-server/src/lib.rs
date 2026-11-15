@@ -36,6 +36,8 @@ mod completion;
 #[cfg(feature = "remote")]
 pub mod csr;
 mod embedded;
+/// Moves embedded server mesh state between durable storage and rollback runtime paths [J501, #489].
+pub mod embedded_mesh_state;
 mod node_bridge;
 #[cfg(any(feature = "ssh", feature = "release"))]
 mod release_http;
