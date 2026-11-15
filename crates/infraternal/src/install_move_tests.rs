@@ -279,7 +279,8 @@ fn a_non_empty_target_is_refused() {
     let error = plan(&setup.old, &setup.new, &setup.unit)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("is not empty"), "{error}");
+    assert!(error.contains("already holds theirs"), "{error}");
+    assert!(error.contains("infraternal did not put there"), "{error}");
     assert!(
         error.contains(&format!("--data {}", setup.old.display())),
         "{error}"

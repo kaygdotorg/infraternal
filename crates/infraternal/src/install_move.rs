@@ -28,7 +28,9 @@
 //! second live copy: whichever folder the unit names is the install.
 //!
 //! 1. [`plan`] checks everything and changes nothing. It refuses a target that
-//!    holds someone else's files, a symlinked or mounted old folder, a folder
+//!    holds someone else's files (infraternal's own files in the install base,
+//!    such as the host firewall's policy, may be there and stay untouched;
+//!    see `is_reserved`), a symlinked or mounted old folder, a folder
 //!    owned by another user, and a unit line other than `ExecStart` that names
 //!    the old folder (it would break after the move).
 //! 2. [`apply`] stops the service and confirms it is down.
@@ -198,6 +200,9 @@ pub struct Relocation {
     pub stage: Stage,
     /// Whether both folders are on one filesystem, so a rename moves the data.
     pub same_filesystem: bool,
+    /// Whether the target already holds infraternal's own files ([`is_reserved`]),
+    /// so the data is moved in entry by entry and the folder itself stays.
+    pub shared: bool,
     /// The unit files whose `ExecStart` changes, in write order.
     rewrites: Vec<Rewrite>,
 }
@@ -224,6 +229,7 @@ pub fn plan(from: &Path, to: &Path, unit: &Path) -> Result<Option<Relocation>, M
             to: to.to_owned(),
             stage: Stage::Cleanup,
             same_filesystem: true,
+            shared: false,
             rewrites: Vec::new(),
         }));
     }
@@ -241,6 +247,7 @@ pub fn plan(from: &Path, to: &Path, unit: &Path) -> Result<Option<Relocation>, M
         )));
     }
     let target = inspect_target(from, to)?;
+    let shared = target_is_shared(to);
     let stage = match (fs::symlink_metadata(from), target) {
         (Err(error), Target::Ours) if error.kind() == io::ErrorKind::NotFound => Stage::Switch,
         (Err(error), _) if error.kind() == io::ErrorKind::NotFound => {
@@ -254,6 +261,9 @@ pub fn plan(from: &Path, to: &Path, unit: &Path) -> Result<Option<Relocation>, M
         (Err(error), _) => return Err(MoveError::io("reading", from, &error)),
         (Ok(metadata), target) => {
             check_source(from, &metadata)?;
+            if shared {
+                check_no_reserved_names(from, to)?;
+            }
             match target {
                 Target::Missing | Target::Empty => Stage::Move,
                 Target::Ours => Stage::Redo,
@@ -279,6 +289,7 @@ pub fn plan(from: &Path, to: &Path, unit: &Path) -> Result<Option<Relocation>, M
         to: to.to_owned(),
         stage,
         same_filesystem,
+        shared,
         rewrites,
     }))
 }
@@ -407,15 +418,26 @@ pub fn apply(
 }
 
 /// Steps 3–6 of the module docs, undoing everything when the switch fails.
+///
+/// A target that already holds infraternal's own files (`shared`) cannot be
+/// replaced by a rename, and those files must stay where they are. The old
+/// folder is then renamed (or copied and verified) into
+/// `<target>/.infraternal-incoming` as one unit, and its entries are moved
+/// out into the target one rename at a time, the marker last. The incoming
+/// folder carries the marker until then, so a crash in between is finished
+/// by the next run ([`merge_incoming`]); no entry is ever in two places.
 fn move_and_switch(relocation: &Relocation, now: SystemTime) -> Result<Outcome, MoveError> {
     let (from, to) = (&relocation.from, &relocation.to);
+    let shared = relocation.shared;
+    let incoming = to.join(INCOMING);
     let mut copied = false;
-    if relocation.stage != Stage::Switch {
-        if relocation.stage == Stage::Redo {
-            // Our own verified copy of a folder that may have changed since.
-            fs::remove_dir_all(to)
-                .map_err(|error| MoveError::io("removing the stale copy", to, &error))?;
-        } else if to.is_dir() {
+    if relocation.stage == Stage::Redo {
+        // Our own verified copy of a folder that may have changed since;
+        // infraternal's own files in the target are never part of it.
+        discard_ours(to)?;
+    }
+    if matches!(relocation.stage, Stage::Move | Stage::Redo) {
+        if !shared && to.is_dir() {
             fs::remove_dir(to)
                 .map_err(|error| MoveError::io("removing the empty folder", to, &error))?;
         }
@@ -424,11 +446,16 @@ fn move_and_switch(relocation: &Relocation, now: SystemTime) -> Result<Outcome, 
             .ok_or_else(|| MoveError("the target has no parent folder".to_owned()))?;
         super::install_paths::create_private_dir(parent)
             .map_err(|error| MoveError::io("creating", parent, &error))?;
+        if shared {
+            // A crashed copy's staging folder is ours; never let it linger beside the data.
+            remove_stale_staging(&incoming, &staging_prefix(INCOMING))?;
+        }
         write_marker(from, from).map_err(|error| MoveError::io("marking", from, &error))?;
-        copied = match rename_folder(from, to) {
+        let destination = if shared { &incoming } else { to };
+        copied = match rename_folder(from, destination) {
             Ok(()) => false,
             Err(error) if error.raw_os_error() == Some(nix::libc::EXDEV) => {
-                if let Err(error) = copy_into_place(from, to) {
+                if let Err(error) = copy_into_place(from, destination) {
                     let _ = fs::remove_file(from.join(MARKER));
                     return Err(error);
                 }
@@ -440,26 +467,38 @@ fn move_and_switch(relocation: &Relocation, now: SystemTime) -> Result<Outcome, 
             }
         };
         sync_parent(from);
-        sync_parent(to);
+        sync_parent(destination);
     }
+    let resumed = relocation.stage == Stage::Switch;
     let undo = |copied: bool| {
-        if copied {
+        if resumed {
+            return;
+        }
+        if shared {
+            if copied {
+                let _ = discard_ours(to);
+            } else if gather_ours(to).is_ok() && fs::rename(&incoming, from).is_ok() {
+                sync_parent(from);
+            }
+        } else if copied {
             let _ = fs::remove_dir_all(to);
         } else if fs::rename(to, from).is_ok() {
             sync_parent(from);
         }
         let _ = fs::remove_file(from.join(MARKER));
     };
-    if let Err(error) = fs::set_permissions(to, fs::Permissions::from_mode(0o700)) {
-        if relocation.stage != Stage::Switch {
+    if shared {
+        if let Err(error) = merge_incoming(to) {
             undo(copied);
+            return Err(error);
         }
+    } else if let Err(error) = fs::set_permissions(to, fs::Permissions::from_mode(0o700)) {
+        // A shared install base keeps its own mode (`infraternal up` makes it 0711).
+        undo(copied);
         return Err(MoveError::io("making private", to, &error));
     }
     if let Err(error) = write_rewrites(&relocation.rewrites) {
-        if relocation.stage != Stage::Switch {
-            undo(copied);
-        }
+        undo(copied);
         return Err(error);
     }
     Ok(Outcome {
@@ -534,21 +573,178 @@ fn inspect_target(from: &Path, to: &Path) -> Result<Target, MoveError> {
             to.display()
         )));
     }
-    if read_marker(to).is_some_and(|previous| same_folder(&previous, from)) {
+    let ours =
+        |folder: &Path| read_marker(folder).is_some_and(|previous| same_folder(&previous, from));
+    if ours(to) || ours(&to.join(INCOMING)) {
         return Ok(Target::Ours);
     }
-    let mut entries = fs::read_dir(to).map_err(|error| MoveError::io("reading", to, &error))?;
-    if entries.next().is_none() {
-        Ok(Target::Empty)
-    } else {
-        Err(MoveError(format!(
-            "{} already exists and is not empty, so {} was not moved there; \
-             move its contents away, or pass --data {} to keep the current folder",
-            to.display(),
-            from.display(),
-            from.display()
-        )))
+    // infraternal's own files may stay; anything else is someone's to keep.
+    let mut foreign: Vec<String> = fs::read_dir(to)
+        .map_err(|error| MoveError::io("reading", to, &error))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !is_reserved(name) && !name.starts_with(&staging_prefix(INCOMING)))
+        .collect();
+    if foreign.is_empty() {
+        return Ok(Target::Empty);
     }
+    foreign.sort();
+    let more = foreign.len().saturating_sub(5);
+    foreign.truncate(5);
+    Err(MoveError(format!(
+        "{} already holds {}{}, which infraternal did not put there, so {} was not moved; \
+         move {} away, or pass --data {} to keep the current folder",
+        to.display(),
+        foreign.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        },
+        from.display(),
+        if foreign.len() + more == 1 {
+            "it"
+        } else {
+            "them"
+        },
+        from.display()
+    )))
+}
+
+/// The subfolder of a shared target that a move fills before its entries move out.
+const INCOMING: &str = ".infraternal-incoming";
+
+/// Whether `name` is something other parts of infraternal keep in the install
+/// base itself, so a move into that folder keeps it, never moves or deletes it,
+/// and never asks the operator to move it (J755, #483).
+///
+/// The list: the host firewall's policies (`host-firewall-server.json`,
+/// `host-firewall-agent.json`, any `host-firewall-*.json`) and their atomic
+/// writes in progress (`.host-firewall-*.pending`), whose loss would make the
+/// boot loader drop the host table; and the root infraternal agent's layout
+/// from `infraternal up` and SSH setup (`bin/`, `agent/`, `state/`,
+/// `sessions/`, `.bootstrap-lock`). A new file kept in `/var/lib/infraternal`
+/// by another part must be added here.
+fn is_reserved(name: &str) -> bool {
+    // Exact, case-sensitive names: these are written by our own code.
+    let extension = |wanted: &str| Path::new(name).extension().is_some_and(|ext| ext == wanted);
+    matches!(
+        name,
+        "bin" | "agent" | "state" | "sessions" | ".bootstrap-lock"
+    ) || (name.starts_with("host-firewall-") && extension("json"))
+        || (name.starts_with(".host-firewall-") && extension("pending"))
+}
+
+/// Whether the target folder exists and holds any of infraternal's own files.
+fn target_is_shared(to: &Path) -> bool {
+    fs::read_dir(to).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_str().is_some_and(is_reserved))
+    })
+}
+
+/// Refuse an old folder whose entries would take a reserved name in a shared target.
+fn check_no_reserved_names(from: &Path, to: &Path) -> Result<(), MoveError> {
+    let mut clashes: Vec<String> = fs::read_dir(from)
+        .map_err(|error| MoveError::io("reading", from, &error))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| is_reserved(name) || name == INCOMING)
+        .collect();
+    if clashes.is_empty() {
+        return Ok(());
+    }
+    clashes.sort();
+    Err(MoveError(format!(
+        "{} holds {}, a name infraternal keeps in {} for other parts, so it was not moved; \
+         pass --data {} to keep the current folder",
+        from.display(),
+        clashes.join(", "),
+        to.display(),
+        from.display()
+    )))
+}
+
+/// Move every entry of `<to>/.infraternal-incoming` into `to`, the marker last.
+///
+/// Each step is one rename inside one folder, so an entry is always in
+/// exactly one place; a crash leaves the rest in the incoming folder, still
+/// marked, for the next run. Nothing reserved is ever touched.
+fn merge_incoming(to: &Path) -> Result<(), MoveError> {
+    let incoming = to.join(INCOMING);
+    let entries = match fs::read_dir(&incoming) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(MoveError::io("reading", &incoming, &error)),
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        if name == MARKER {
+            continue;
+        }
+        let target = to.join(&name);
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(MoveError(format!(
+                "{} already exists, so the moved {} was left in {}",
+                target.display(),
+                name.to_string_lossy(),
+                incoming.display()
+            )));
+        }
+        fs::rename(entry.path(), &target)
+            .map_err(|error| MoveError::io("moving into", &target, &error))?;
+    }
+    if incoming.join(MARKER).exists() {
+        fs::rename(incoming.join(MARKER), to.join(MARKER))
+            .map_err(|error| MoveError::io("moving the marker into", to, &error))?;
+    }
+    fs::remove_dir(&incoming).map_err(|error| MoveError::io("removing", &incoming, &error))?;
+    sync_dir(to);
+    Ok(())
+}
+
+/// Put every non-reserved entry of `to` back into `<to>/.infraternal-incoming`.
+///
+/// The undo of [`merge_incoming`] after a failed switch; the caller then
+/// renames the incoming folder back to the old one.
+fn gather_ours(to: &Path) -> io::Result<()> {
+    let incoming = to.join(INCOMING);
+    if !incoming.exists() {
+        use std::os::unix::fs::DirBuilderExt;
+        // It becomes the old data folder again, so it is private like one.
+        fs::DirBuilder::new().mode(0o700).create(&incoming)?;
+    }
+    for entry in fs::read_dir(to)?.filter_map(Result::ok) {
+        let name = entry.file_name();
+        if name == INCOMING || name.to_str().is_some_and(is_reserved) {
+            continue;
+        }
+        fs::rename(entry.path(), incoming.join(&name))?;
+    }
+    sync_dir(to);
+    Ok(())
+}
+
+/// Remove everything in `to` that is not reserved: our own earlier copy.
+///
+/// Only called when the marker proves the copy is ours, or to undo a copy
+/// this run made. infraternal's own files stay.
+fn discard_ours(to: &Path) -> Result<(), MoveError> {
+    let entries = fs::read_dir(to).map_err(|error| MoveError::io("reading", to, &error))?;
+    for entry in entries.filter_map(Result::ok) {
+        if entry.file_name().to_str().is_some_and(is_reserved) {
+            continue;
+        }
+        let path = entry.path();
+        let result = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        result.map_err(|error| MoveError::io("removing the stale copy", &path, &error))?;
+    }
+    Ok(())
 }
 
 /// Refuse an old folder that a rename or copy would not move safely.
@@ -754,7 +950,7 @@ fn copy_into_place(from: &Path, to: &Path) -> Result<(), MoveError> {
         .file_name()
         .ok_or_else(|| MoveError("the target has no folder name".to_owned()))?
         .to_string_lossy();
-    let prefix = format!(".{name}.partial-");
+    let prefix = staging_prefix(&name);
     remove_stale_staging(to, &prefix)?;
     let staging = to.with_file_name(format!("{prefix}{}", std::process::id()));
     let result = copy_tree(from, &staging)
@@ -780,6 +976,11 @@ fn copy_into_place(from: &Path, to: &Path) -> Result<(), MoveError> {
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// The name prefix of the hidden staging folder a copy into a folder called `name` uses.
+fn staging_prefix(name: &str) -> String {
+    format!(".{name}.partial-")
 }
 
 /// Remove staging folders an interrupted copy left beside `to`.
