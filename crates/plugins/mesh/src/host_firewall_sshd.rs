@@ -19,6 +19,18 @@
 //! "which ports must stay open for sshd", and [`check_sshd_admission`] is
 //! the one check every caller runs, so a new path cannot skip it.
 //!
+//! # Address families (decided 2026-11-14 under D392, #483)
+//!
+//! A rule limited to a source network counts for a port when sshd accepts
+//! that network's address family on that port; it does not have to cover
+//! every family sshd accepts there. So an IPv4-only admin rule admits a
+//! dual-stack sshd on 22, while it can never admit an IPv6-only sshd (that
+//! rule passes no packet sshd would answer). Requiring every family was
+//! rejected: production's admin rule is IPv4-only, and under that stricter
+//! reading the boot loader would refuse prod's own table and fail open at the
+//! next boot, while IPv4 administrators would have kept their way in
+//! throughout. An interface-only or unrestricted rule covers both families.
+//!
 //! # Sources ([`sshd_ports`])
 //!
 //! Every source is asked and the answers are combined; none wins over
