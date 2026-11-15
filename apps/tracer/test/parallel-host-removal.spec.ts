@@ -89,7 +89,12 @@ async function open(page: Page, options: { held?: boolean; theme: string }): Pro
 
 /** Picks "Remove host: <name>" in the palette. */
 async function pick(page: Page, name: string): Promise<void> {
+  // The previous card and palette must be fully gone first: a shortcut pressed while they are still closing is lost, and the
+  // next card then never opens (seen once in sixteen runs). Wait for that real state, then for the palette to be open.
+  await expect(page.getByRole("button", { name: "Remove", exact: true })).toHaveCount(0);
+  await expect(page.locator("#palette-input")).toBeHidden();
   await page.keyboard.press("Control+Shift+K");
+  await expect(page.locator("#palette-input")).toBeVisible();
   await page.locator("#palette-input").fill(`Remove host: ${name}`);
   await page.getByRole("option").filter({ hasText: `Remove host: ${name}` }).click();
 }
@@ -139,6 +144,20 @@ for (const [width, theme] of [[1440, "ink"], [1440, "paper"], [393, "ink"], [393
       await page.screenshot({ animations: "disabled", path: tracerEvidencePath("parallel-removal", `${width}-${theme}-server-full.png`) });
     });
 
+    /** Cancelling the one shared prompt fails both removals, but the person reads one error, not one per host. */
+    test("cancelling the shared passkey prompt shows one error", async ({ page }) => {
+      const fixture = await open(page, { theme });
+      fixture.expire();
+      await remove(page, HOSTS[0].name);
+      await remove(page, HOSTS[1].name);
+      await page.getByRole("button", { name: "Keep host", exact: true }).click();
+      const cancelled = page.locator(".ui-toast").filter({ hasText: "Passkey confirmation was cancelled." });
+      await expect(cancelled).toHaveCount(1);
+      // Both removals have failed by now; a second toast for the other host would have appeared with the first.
+      await expect.poll(() => fixture.calls.filter((call) => call.startsWith("start:")).length).toBe(2);
+      await expect(cancelled).toHaveCount(1);
+    });
+
     /** One closed admin window, two removals, one passkey prompt; both finish after it. */
     test("two removals that find the window closed share one passkey prompt", async ({ page }) => {
       const cdp = await page.context().newCDPSession(page);
@@ -154,6 +173,8 @@ for (const [width, theme] of [[1440, "ink"], [1440, "paper"], [393, "ink"], [393
       await expect(page.getByRole("button", { name: "Confirm with passkey", exact: true })).toBeVisible();
       // Give a wrongly separate second prompt time to appear before counting.
       await expect.poll(() => fixture.calls.filter((call) => call === "reauth:start").length).toBeGreaterThan(0);
+      // The one card unblocks both hosts, so it is titled for both (#519).
+      await expect(page.locator('[role="dialog"][data-open="true"]')).toContainText(`Confirm removal of ${HOSTS[0].name} and ${HOSTS[1].name}`);
       await page.screenshot({ animations: "disabled", path: tracerEvidencePath("parallel-removal", `${width}-${theme}-one-prompt.png`) });
       await expect(page.getByRole("button", { name: "Confirm with passkey", exact: true })).toHaveCount(1);
       await page.getByRole("button", { name: "Confirm with passkey", exact: true }).click();
