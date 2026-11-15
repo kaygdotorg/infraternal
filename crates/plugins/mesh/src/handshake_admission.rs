@@ -587,7 +587,8 @@ impl PeerAdmission {
     ///
     /// Use `GotaTun`'s `confirmed_endpoint`, never the send endpoint: an accepted initiation
     /// moves the send endpoint before its sender proves anything, so a replayed initiation could
-    /// otherwise make an attacker's address known.
+    /// otherwise make an attacker's address known. The node workers call it through
+    /// [`ConfirmedEndpointFeed`], which skips the write lock when nothing changed.
     pub(crate) fn set_confirmed_endpoints(
         &mut self,
         endpoints: impl IntoIterator<Item = SocketAddr>,
@@ -721,6 +722,49 @@ impl PeerAdmission {
                 .refused(charge, now);
         }
         verdict
+    }
+}
+
+/// Hands the endpoints `GotaTun` confirmed for installed peers to a [`PeerAdmission`], but only
+/// when they changed since the last hand-over.
+///
+/// Both node workers (Linux and macOS) keep one of these next to their device and call
+/// [`Self::offer`] from a periodic scan of the device's peers. The receive task takes the
+/// guard's read lock for every initiation, so the write lock is taken only on a real change: a
+/// steady mesh costs one sorted list per scan and no lock at all.
+///
+/// Invariant: `last` is exactly the list most recently written into the guard this feed was
+/// used with. Use one feed per guard; a feed shared by two guards would skip a write that the
+/// second one still needs.
+#[derive(Debug, Default)]
+pub(crate) struct ConfirmedEndpointFeed {
+    /// The confirmed endpoints last written into the guard, in [`endpoint_list`] form.
+    last: Vec<EndpointKey>,
+}
+
+impl ConfirmedEndpointFeed {
+    /// Offer the current confirmed endpoints: `GotaTun`'s `confirmed_endpoint` of each active
+    /// installed peer. Never pass the send endpoint: an accepted initiation moves the send
+    /// endpoint before its sender proves anything, so a replayed initiation could otherwise
+    /// make an attacker's address known.
+    ///
+    /// Returns whether the guard's list was replaced. Order and duplicates do not matter: the
+    /// list is compared after sorting, so IPv4 and IPv4-mapped forms of one endpoint are equal.
+    pub(crate) async fn offer(
+        &mut self,
+        admission: &RwLock<PeerAdmission>,
+        endpoints: impl IntoIterator<Item = SocketAddr>,
+    ) -> bool {
+        let endpoints: Vec<SocketAddr> = endpoints.into_iter().collect();
+        let list = endpoint_list(endpoints.iter().copied());
+        if list == self.last {
+            return false;
+        }
+        // Through the setter, never by assigning the list: it also carries each endpoint's
+        // reserve count to its new slot, so a roaming member cannot refill shares (J757).
+        admission.write().await.set_confirmed_endpoints(endpoints);
+        self.last = list;
+        true
     }
 }
 
@@ -1442,6 +1486,41 @@ mod tests {
         assert_eq!(
             admission.check(&Packet::copy_from(&granted), known[0], now),
             Err(Refusal::NodeBudget)
+        );
+    }
+
+    /// The shared feed both node workers scan into: a changed set replaces the guard's
+    /// confirmed list, while the same set in another order or address form takes no write lock.
+    #[tokio::test]
+    async fn the_confirmed_endpoint_feed_writes_only_changes() {
+        let admission = tokio::sync::RwLock::new(PeerAdmission::new(StaticSecret::from(NODE)));
+        let mut feed = super::ConfirmedEndpointFeed::default();
+        let roamed = source("192.0.2.77:41000");
+        let other = source("[2001:db8::7]:41000");
+        assert!(
+            !feed.offer(&admission, []).await,
+            "empty to empty is no change"
+        );
+        assert!(feed.offer(&admission, [roamed, other]).await);
+        assert!(admission.read().await.is_known_endpoint(roamed));
+        assert!(admission.read().await.is_known_endpoint(other));
+        // Held read lock: a write here would deadlock, so `offer` must not try one.
+        let reader = admission.read().await;
+        let unchanged = tokio::time::timeout(
+            Duration::from_secs(1),
+            feed.offer(
+                &admission,
+                [other, source("[::ffff:192.0.2.77]:41000"), roamed],
+            ),
+        )
+        .await
+        .expect("an unchanged set took the write lock");
+        assert!(!unchanged);
+        drop(reader);
+        assert!(feed.offer(&admission, [other]).await);
+        assert!(
+            !admission.read().await.is_known_endpoint(roamed),
+            "a peer that roamed away loses its old endpoint"
         );
     }
 

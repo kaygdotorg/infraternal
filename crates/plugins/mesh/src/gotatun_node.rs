@@ -35,7 +35,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
+use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 use crate::{
     dataplane::Config,
@@ -740,8 +740,8 @@ async fn run_worker(
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
-    // The confirmed endpoints last handed to the admission guard's reserve.
-    let mut admitted_endpoints = BTreeMap::new();
+    // Hands the peers' confirmed endpoints to the admission guard's reserve on a change.
+    let mut confirmed_feed = ConfirmedEndpointFeed::default();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -798,7 +798,7 @@ async fn run_worker(
             _ = endpoint_scan.tick() => {
                 let endpoints = state.live_peer_endpoint_snapshot().await;
                 state
-                    .admit_confirmed_endpoints(&mut admitted_endpoints, &endpoints)
+                    .admit_confirmed_endpoints(&mut confirmed_feed, &endpoints)
                     .await;
                 let changed = observed_endpoints
                     .as_ref()
@@ -824,29 +824,24 @@ async fn run_worker(
 }
 
 impl RuntimeState {
-    /// Give the admission guard the peers' confirmed endpoints when they changed since
-    /// `admitted`, so those exact sources keep the guard's reserved budget under a flood.
+    /// Give the admission guard the peers' confirmed endpoints through `feed`, so those exact
+    /// sources keep the guard's reserved budget under a flood.
     ///
-    /// Runs on the 250 ms endpoint scan. The guard's write lock is taken only on a change,
-    /// because the receive task takes its read lock for every initiation.
+    /// Runs on the 250 ms endpoint scan. The shared feed takes the guard's write lock only on a
+    /// change, because the receive task takes its read lock for every initiation.
     async fn admit_confirmed_endpoints(
         &self,
-        admitted: &mut BTreeMap<PublicKey, Option<SocketAddr>>,
+        feed: &mut ConfirmedEndpointFeed,
         endpoints: &BTreeMap<PublicKey, Option<SocketAddr>>,
     ) {
-        if admitted == endpoints {
-            return;
-        }
         let Some(pending) = self.pending.as_ref() else {
             return;
         };
-        pending
-            .factory
-            .admission
-            .write()
-            .await
-            .set_confirmed_endpoints(endpoints.values().flatten().copied());
-        admitted.clone_from(endpoints);
+        feed.offer(
+            &pending.factory.admission,
+            endpoints.values().flatten().copied(),
+        )
+        .await;
     }
 
     /// Read authenticated live endpoints and refresh their route budgets away from the runtime.
