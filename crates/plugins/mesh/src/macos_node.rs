@@ -5053,24 +5053,50 @@ mod tests {
             .enable_all()
             .build()
             .expect("runtime");
+        // The worker's packet filter, compiled from a one-peer snapshot that grants the bench
+        // peer every port both ways, so the filter's per-packet cost is part of the measurement
+        // and nothing is dropped. An empty filter would deny all traffic.
+        let mut snapshot = config();
+        snapshot.addresses.ipv4 = var("J461_ADDR").parse().expect("tunnel IPv4");
+        let peer_key = bench_key("J461_PEER_PUBLIC_HEX");
+        for policy in snapshot.peers.values_mut() {
+            policy.peer.key = PublicKey(peer_key);
+            policy.peer.addresses.ipv4 = var("J461_PEER_ADDR").parse().expect("peer IPv4");
+            policy.peer.endpoint = Some(endpoint);
+        }
+        let filter = std::sync::Arc::new(
+            crate::packet_filter::PacketFilter::new(
+                &snapshot,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
         runtime.block_on(async {
-            let utun = super::MacUtun::from_open(super::OpenUtun::open().expect("utun"))
+            let utun = super::MacUtun::from_open(super::OpenUtun::open().expect("utun"), filter)
                 .expect("register utun");
-            let mut factory = UdpSocketFactory::default();
-            let params = UdpTransportFactoryParams { addr: None, port };
-            let (send, receive) = factory.bind(&params).await.expect("bind");
-            let factory = BoundUdpFactory {
-                send,
-                receive,
-                port,
-            };
-            let mut peer = WireGuardPeer::new(WgPublicKey::from(bench_key("J461_PEER_PUBLIC_HEX")))
+            // The worker's socket, with its handshake guard admitting the one bench peer.
+            let private_key = StaticSecret::from(bench_key("J461_PRIVATE_HEX"));
+            let (factory, port) = super::bind_udp(
+                crate::listen_port::Request {
+                    port,
+                    allow_fallback: false,
+                },
+                private_key.clone(),
+            )
+            .await
+            .expect("bind");
+            {
+                let mut admission = factory.admission.write().await;
+                admission.set_peers([PublicKey(peer_key)]);
+                admission.set_configured_endpoints([endpoint]);
+            }
+            let mut peer = WireGuardPeer::new(WgPublicKey::from(peer_key))
                 .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
             peer.endpoint = Some(endpoint);
             peer.keepalive = Some(25);
             let device = DeviceBuilder::new()
                 .with_udp(factory)
-                .with_private_key(StaticSecret::from(bench_key("J461_PRIVATE_HEX")))
+                .with_private_key(private_key)
                 .with_listen_port(port)
                 .with_ip_pair(utun.sender(), utun.receiver())
                 .with_peers(vec![peer])
