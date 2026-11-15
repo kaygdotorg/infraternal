@@ -3176,6 +3176,50 @@ mod endpoint_announce_tests {
         assert!(!listener.announce.take_for_test());
     }
 
+    /// A storm that adds and removes the same routes
+    /// while the listener is not reading overflows, and the resync finds nothing moved (D81).
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn overflow_with_no_net_change_is_quiet() {
+        let mut listener = namespace();
+        route_storm("add");
+        route_storm("del");
+        read_everything(&mut listener);
+        assert!(
+            !listener.announce.take_for_test(),
+            "a storm that ended where it started announced"
+        );
+    }
+
+    /// An address change lost inside an overflow, with
+    /// routes back where they started, is still announced by the resync (only the address book
+    /// differs: deprecating an address adds and removes no route).
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn address_change_lost_in_overflow_announces() {
+        let mut listener = namespace();
+        route_storm("add");
+        ip(&[
+            "-6",
+            "addr",
+            "change",
+            "2001:db8::2/64",
+            "dev",
+            "d0",
+            "nodad",
+            "valid_lft",
+            "300",
+            "preferred_lft",
+            "0",
+        ]);
+        route_storm("del");
+        read_everything(&mut listener);
+        assert!(
+            listener.announce.take_for_test(),
+            "an address change lost in the overflow was not announced"
+        );
+    }
+
     /// Routes out of the mesh link are our own writes and announce nothing.
     #[test]
     #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
