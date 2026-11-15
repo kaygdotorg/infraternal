@@ -38,6 +38,27 @@ fixed `/run/infraternal` and the second one's agent fails with "address in use".
 Steps 4 and 5 are recorded UI flows. They were driven by hand once on 2026-11-11 and then encoded; if a step stops
 matching (a label changed), the run names it and you re-drive that one step with `run.sh run <name> '<actions>'`.
 
+## Signing the simulator in (the QA1 route)
+
+The simulator never signs in to test.ssh.kayg.org or production: their shared account's key is wrapped by a passkey that
+lives in another browser (#500). The route that works, and the only one `check` assumes, is QA1 (mesh-staging :8443):
+
+1. `scripts/real-device-qa stage <bundle>` (or `stage/qa1-upgrade.sh`) so QA1 runs the build under test. Confirm with
+   `cat /opt/qa/current/SOURCE` on mesh-staging.
+2. If `check`'s `signin` phase says "This passkey could not sign in" (a data dir whose owner the simulator no longer has a
+   passkey for), run `scripts/real-device-qa qa1-reset [label]`. It gives QA1 an empty data dir (the old one is kept beside
+   it), makes the throwaway `qa-device` login on dev-02, creates a first-run owner in the simulator with a simulated Face ID
+   passkey, and adds the host through the phone UI. The setup token and host password travel only as 0600 files on the
+   Studio; nothing secret is in argv or a log. It takes about 5 minutes; the old data dir is never deleted.
+3. `scripts/real-device-qa check`.
+
+A recorded step names every wording it accepts, separated by `/` (`tapsbif~Use Passkey/Use Selected Passkey~6`): the system
+passkey sheet's button changed between releases, and the page's own labels (`Continue with passkey`, `Add host`,
+`Confirm with passkey`, `Trust and continue`, `Sign in with a password`, `Sign in`) come from `apps/tracer/src/onboarding.ts`,
+`canvas/addhost/wizard.ts` and `canvas/views/world.ts`. When the UI changes, read those files and update the recorded step;
+do not guess from a screenshot. Safari exposes the page's accessible names (aria-label, text) but not `data-*` ids, so the
+accessible name is the stable selector the tool can use.
+
 ## Every deploy
 
 ```
