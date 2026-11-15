@@ -78,6 +78,8 @@ export const ICON_INFO = `<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 
 /** A question mark in a circle: "what is this?", opens the docs for the thing beside it. */
 export const ICON_HELP = `<circle cx="12" cy="12" r="8.5"/><path d="M9.7 9.7a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1.1.9-1.1 1.7M12 16.8v.01"/>`;
 export const ICON_ALERT = `<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v5M12 16.2v.01"/>`;
+/** Two bars in a circle: something waits on purpose and picks up again by itself (a tab paused for another, #523). */
+export const ICON_PAUSE = `<circle cx="12" cy="12" r="8.5"/><path d="M10 9.2v5.6M14 9.2v5.6"/>`;
 export const ICON_CIRCLE_CHECK = `<circle cx="12" cy="12" r="8.5"/><path d="M8.2 12.4l2.7 2.7 5-5.6"/>`;
 /** A chain whose two links have come apart: a session that keeps running with no window showing it (detached). */
 export const ICON_DETACHED = `<path d="M10.5 8.5H8.5a3.5 3.5 0 0 0 0 7h2M13.5 8.5h2a3.5 3.5 0 0 1 0 7h-2"/>`;
