@@ -1,18 +1,26 @@
 //! Checks every packet at the GotaTun TUN boundary against one complete mesh policy snapshot [D164,D384].
 //!
-//! # State and memory (J675, #265)
+//! # State and memory (J675, J721, #265)
 //!
-//! Each peer gets a fixed table, allocated when a policy is compiled and never grown while
-//! packets are checked:
-//! - **Flows:** 256 per direction ([`FLOWS_PER_DIRECTION`]), 512 slots of 104 bytes. A full
-//!   direction reclaims expired entries, then evicts its own least recently seen flow that is
-//!   not an established TCP connection; an established connection is never evicted.
+//! A peer gets a fixed flow table only when its first flow is admitted (J721, #265). The table
+//! is never grown while packets are checked:
+//! - **Flows:** 256 per direction ([`FLOWS_PER_DIRECTION`]), 512 slots of 104 bytes. When a
+//!   direction is full, a new flow first reclaims expired and revoked entries. Then it evicts
+//!   that direction's least recently seen flow that is not an established TCP connection; an
+//!   established connection is never evicted.
 //! - **Timeouts** follow Linux conntrack's defaults: established TCP 5 days, opening 60 s,
 //!   closing 120 s, closed 10 s; UDP 30 s unreplied and 120 s replied; other protocols 60 s.
-//!   Revoked grants end their flows at publish, whatever the timeout.
-//! - **Memory:** about 68 KB per peer, under a 72 KiB budget ([`PER_PEER_MEMORY_BUDGET`],
-//!   checked at build time): 72 MiB at D393's 1,000 peers, 288 MiB at its 4,096-peer test
-//!   scale, and twice that for a moment while a policy is published.
+//! - **Revocation:** every packet of a tracked flow is checked against the grants published
+//!   now. A revoked grant therefore ends its flows the moment the new policy is published,
+//!   whatever their timeout. The sweep after a publish frees their slots.
+//! - **Memory:** about 0.1 KB per configured peer, plus about 68 KB for each peer that has
+//!   flows. Its 64 fragment slots are allocated separately, the first time the peer fragments.
+//!   The table must fit the 72 KiB budget ([`PER_PEER_MEMORY_BUDGET`], checked at build time).
+//!   At D393's design scale of 1,000 peers with 10 of them active, the filter adds under
+//!   1 MiB. Compiling a policy allocates no tables, so publishing never doubles memory.
+//! - **Publishing** a policy swaps one pointer under the write lock, the only lock every packet
+//!   waits behind, so it costs the same at 4,096 peers as at 4. The flow tables live outside the
+//!   policy, in [`PacketFilter::tables`], and survive the swap unchanged.
 
 use crate::{
     dataplane::{Config, PeerPolicy},
@@ -23,11 +31,11 @@ use crate::{
 };
 use infraternal_mesh::proxy_ports::MeshProxyIngress;
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{BTreeMap, HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, Instant},
 };
 
@@ -143,16 +151,15 @@ const FLOW_SLOTS_PER_PEER: usize = 2 * FLOWS_PER_DIRECTION;
 /// `FLOW_SLOTS_PER_PEER` represented without narrowing a packet hash on 32-bit hosts. A test
 /// checks that the two agree.
 const FLOW_SLOTS_PER_PEER_HASH: u64 = 512;
-/// The memory budget for one peer's fixed filter tables: 72 KiB, so 72 MiB at D393's design
-/// scale of 1,000 peers and 288 MiB at its 4,096-peer test scale.
+/// The memory budget for the fixed filter tables of one peer that has flows: 72 KiB.
 ///
 /// Why this number: it is the footprint already reviewed and measured for D394 (J618: 68,144
-/// bytes per peer, 68.1 MB at 1,000 peers) with a little room, so raising the flow quota does
-/// not grow the filter. Measured at J675 (`flow_table_memory_per_peer_times_one_thousand_peers`
-/// prints it): a flow slot is 104 bytes, so the 512 flow slots take 53,248 bytes; the 64
-/// fragment associations with their 32-range coverage records take about 15 KiB. Each policy
-/// publish briefly holds a second copy of every table until `reuse_flow_tables` drops it, so
-/// the peak during a publish is twice the steady figure (J592 #6, a known follow-up).
+/// bytes per peer) with a little room, so raising the flow quota does not grow the filter.
+/// Measured at J675 (`flow_table_memory_per_peer_times_one_thousand_peers` prints it): a flow
+/// slot is 104 bytes, so the 512 flow slots take 53,248 bytes; the 64 fragment associations
+/// with their 32-range coverage records take about 15 KiB. Since J721 only peers with flows
+/// pay it. An idle peer costs its [`PeerAccess`] entry and, once it has sent a packet, a
+/// [`PeerFlows`] cell of about 100 bytes (`idle_peers_allocate_no_flow_tables` measures RSS).
 const PER_PEER_MEMORY_BUDGET: usize = 72 * 1024;
 // The build fails when the fixed tables outgrow the budget, so a change to an entry's layout or
 // a table size cannot grow per-peer memory unnoticed.
@@ -160,7 +167,7 @@ const _: () = assert!(
     std::mem::size_of::<FlowSlot>() * FLOW_SLOTS_PER_PEER
         + (std::mem::size_of::<FragmentSlot>() + std::mem::size_of::<FragmentCoverage>())
             * FRAGMENTS_PER_PEER
-        + std::mem::size_of::<FlowShard>()
+        + std::mem::size_of::<PeerFlows>()
         + std::mem::size_of::<PeerAccess>()
         <= PER_PEER_MEMORY_BUDGET
 );
@@ -197,9 +204,24 @@ const TCP_RST: u8 = 0x04;
 /// TCP flag bit that makes a packet ineligible to start a connection.
 const TCP_ACK: u8 = 0x10;
 
-/// Publishes new policy snapshots atomically and checks packets without allocating on the data path.
+/// Publishes new policy snapshots atomically and checks packets against the current one.
+///
+/// Lock order, always taken in this order and never the reverse: `writer`, then `policy`, then
+/// `tables`, then one peer's [`PeerFlows::table`]. A packet takes the `policy` read lock, then
+/// `tables` only when it binds a peer's cell (see [`Self::flows_for`]), then the peer's table.
+/// The post-publish sweep takes `tables` and only `try_lock`s peer tables, so a packet never
+/// waits for it.
 pub(crate) struct PacketFilter {
-    policy: RwLock<CompiledPolicy>,
+    /// The published snapshot. A publish replaces the pointer and nothing else, so the write
+    /// lock that every packet waits behind lasts the same at any peer count (J721, #265).
+    policy: RwLock<Arc<CompiledPolicy>>,
+    /// Each peer's flow cell, keyed by node, outside any one policy snapshot so that flows
+    /// survive a publish without being copied. A peer gets an entry on its first packet. The
+    /// sweep after each publish drops the entries of peers the new policy no longer has.
+    tables: Mutex<BTreeMap<NodeId, Arc<PeerFlows>>>,
+    /// Serialises publish, withdraw and their sweep, so a sweep never judges flows against a
+    /// snapshot that a concurrent publish has already replaced.
+    writer: Mutex<()>,
 }
 
 /// One fully compiled snapshot that can be published after its related routes and peers succeed.
@@ -219,8 +241,8 @@ impl PreparedPolicy {
 impl PacketFilter {
     /// Build an empty, deny-by-default filter for a node that has not received its first snapshot.
     ///
-    /// Peer tables are allocated with each compiled policy. They are never grown while packets
-    /// are being checked, which keeps the packet path allocation-free and independently bounded.
+    /// A peer's flow table is allocated once, when its first flow is admitted, and is never
+    /// grown while packets are checked. If it cannot be allocated, that packet is dropped.
     pub(crate) fn empty() -> Self {
         Self::with_policy(CompiledPolicy::empty())
     }
@@ -239,11 +261,17 @@ impl PacketFilter {
     /// Attach one compiled snapshot before the filter reaches packet workers.
     fn with_policy(policy: CompiledPolicy) -> Self {
         Self {
-            policy: RwLock::new(policy),
+            policy: RwLock::new(Arc::new(policy)),
+            tables: Mutex::new(BTreeMap::new()),
+            writer: Mutex::new(()),
         }
     }
 
     /// Compile a policy before changing routes or device peers, so publication cannot fail later.
+    ///
+    /// It copies only the grants and the address index. No flow tables are allocated here:
+    /// each peer's existing table stays in [`Self::tables`] and is found again on its next
+    /// packet after the publish.
     ///
     /// # Errors
     /// Refuses duplicate peer addresses or a policy snapshot that cannot be indexed in memory.
@@ -270,43 +298,106 @@ impl PacketFilter {
     /// peer's address to another node, or moves a peer to a new address, the engine starts
     /// delivering the new owner's packets as soon as its peers are applied; until the new policy
     /// is published, those packets would otherwise use the old owner's grants and open flows
-    /// (J592 P2-5, #265). Withdrawing only removes index entries, so it never allocates and
-    /// cannot fail. Their flows stop matching too, because [`CompiledPolicy::allows_flow`]
-    /// resolves the flow's peer by address.
+    /// (J592 P2-5, #265). Withdrawing only removes index entries. Their flows stop matching
+    /// too, because [`CompiledPolicy::allows_flow`] resolves the flow's peer by address.
+    ///
+    /// The snapshot is edited in place under the write lock. Packets borrow it through the
+    /// read lock without holding a second reference, so the edit allocates nothing. Only a
+    /// sweep running at that moment holds one, and `writer` rules that out.
     pub(crate) fn withdraw_peers(&self, withdrawn: &std::collections::BTreeSet<NodeId>) {
         if withdrawn.is_empty() {
             return;
         }
-        self.policy
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .withdraw(withdrawn);
-    }
-
-    /// Publish a prepared snapshot and retire tuples the replacement no longer permits.
-    pub(crate) fn publish_policy(&self, policy: PreparedPolicy) {
+        let _writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut current = self
             .policy
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = policy.0;
-        next.reuse_flow_tables(&current);
-        // Packet checks take the policy read lock before a peer-table lock, so the write lock
-        // holds every packet on one side of publication while revoked tuples are retired.
-        for peer in &next.peers {
-            let mut flows = peer
-                .flows
-                .lock()
+        Arc::make_mut(&mut current).withdraw(withdrawn);
+    }
+
+    /// Publish a prepared snapshot. From that moment no packet rides a flow the replacement
+    /// no longer permits.
+    ///
+    /// Under the write lock this only swaps the snapshot pointer, so a publish holds packets
+    /// for the same short time at 4,096 peers as at 4 (J721, #265; J718 measured 7.3 ms while
+    /// every peer's table was copied and scanned under the lock). Revocation needs no scan
+    /// under the lock either: every packet of a tracked flow is checked with
+    /// [`CompiledPolicy::allows_flow`] against the snapshot it reads, so a revoked flow admits
+    /// nothing after the swap. The sweep that follows frees revoked and expired slots outside
+    /// the lock. It visits only peers that have a table. The old snapshot is dropped after the
+    /// lock is released.
+    pub(crate) fn publish_policy(&self, policy: PreparedPolicy) {
+        let _writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = Arc::new(policy.0);
+        let previous = {
+            let mut current = self
+                .policy
+                .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for index in 0..flows.slots.len() {
-                if matches!(flows.slots[index], FlowSlot::Occupied(entry) if !next.allows_flow(entry))
-                {
-                    flows.remove(index);
+            std::mem::replace(&mut *current, Arc::clone(&next))
+        };
+        drop(previous);
+        self.sweep(&next, Instant::now());
+    }
+
+    /// Free the slots of flows `policy` no longer permits or that have expired, free tables
+    /// left empty, and forget peers `policy` no longer has.
+    ///
+    /// Runs after a publish and outside every packet lock. It walks only the peers that have a
+    /// flow cell, not every configured peer. A table that a packet is using right now is
+    /// skipped rather than waited for. It is cleaned the next time its direction fills up
+    /// (see [`FlowShard::reclaim`]), and its revoked flows admit nothing in the meantime.
+    fn sweep(&self, policy: &CompiledPolicy, now: Instant) {
+        let mut tables = self
+            .tables
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tables.retain(|node, cell| {
+            if policy.peer_by_node(*node).is_none() {
+                return false;
+            }
+            let mut table = match cell.table.try_lock() {
+                Ok(table) => table,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return true,
+            };
+            if let Some(shard) = table.as_mut() {
+                shard.reclaim(now, policy);
+                shard.remove_orphaned_fragments();
+                if shard.is_empty() {
+                    *table = None;
                 }
             }
-            flows.remove_orphaned_fragments();
+            true
+        });
+    }
+
+    /// The flow cell of `peer`, binding the snapshot's peer entry to it on the peer's first
+    /// packet after a publish.
+    ///
+    /// The bound pointer is read without a lock on every later packet. Binding takes the
+    /// `tables` lock once per peer per publish. A new cell is about 100 bytes; the 68 KB table
+    /// inside it is allocated, fallibly, only when a flow is admitted (see
+    /// [`Self::start_flow`]).
+    fn flows_for<'policy>(&self, peer: &'policy PeerAccess) -> &'policy PeerFlows {
+        if let Some(cell) = peer.flows.get() {
+            return cell;
         }
-        *current = next;
+        let cell = {
+            let mut tables = self
+                .tables
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(tables.entry(peer.node).or_default())
+        };
+        peer.flows.get_or_init(|| cell)
     }
 
     /// Check one packet and apply an in-process mesh SSH port translation when needed.
@@ -336,6 +427,12 @@ impl PacketFilter {
         };
         let peer = &policy.peers[peer_index];
         let peer_id = peer.node;
+        // Checked before the peer's flow cell is looked up: a stateless message never touches
+        // flow state, so it must not create a cell either.
+        if parsed.icmp == IcmpKind::Stateless {
+            return Self::allow_stateless(parsed, direction, peer, &policy);
+        }
+        let flows = self.flows_for(peer);
         if let Some(fragment) = parsed.fragment.filter(|fragment| !fragment.first) {
             return Self::allow_fragment(
                 fragment,
@@ -343,7 +440,7 @@ impl PacketFilter {
                 direction,
                 peer_address,
                 peer_id,
-                &peer.flows,
+                flows,
                 &policy,
                 now,
             );
@@ -355,14 +452,10 @@ impl PacketFilter {
                 direction,
                 peer_address,
                 peer_id,
-                &peer.flows,
+                flows,
                 &policy,
                 now,
             );
-        }
-
-        if parsed.icmp == IcmpKind::Stateless {
-            return Self::allow_stateless(parsed, direction, peer, &policy);
         }
 
         let mut lookup_key = parsed.key;
@@ -379,11 +472,13 @@ impl PacketFilter {
         }
 
         let slot_start = flow_start(lookup_key);
-        let mut shard = peer
-            .flows
+        let mut table = flows
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((index, same_direction)) = shard.find(lookup_key, slot_start) {
+        if let Some(shard) = table.as_mut()
+            && let Some((index, same_direction)) = shard.find(lookup_key, slot_start)
+        {
             let entry = match shard.slots[index] {
                 FlowSlot::Occupied(entry) => entry,
                 FlowSlot::Empty | FlowSlot::Removed => return false,
@@ -414,7 +509,7 @@ impl PacketFilter {
                 // An expired or closed tuple is treated as new. TCP continuations still cannot
                 // initiate it, and a reverse SYN needs a grant in its own direction.
                 if expired || reopened {
-                    let admitted = Self::start_flow(
+                    return Self::start_flow(
                         packet,
                         parsed,
                         direction,
@@ -422,10 +517,9 @@ impl PacketFilter {
                         peer_id,
                         peer_index,
                         &policy,
-                        &mut shard,
+                        &mut table,
                         now,
                     );
-                    return admitted;
                 }
                 return false;
             }
@@ -446,7 +540,7 @@ impl PacketFilter {
             if let Some((offset, port)) = rewrite {
                 rewrite_ssh_port(packet, &parsed, offset, port);
             }
-            if !Self::remember_first_fragment(&mut shard, parsed, direction, entry.key, now) {
+            if !Self::remember_first_fragment(shard, parsed, direction, entry.key, now) {
                 return false;
             }
             let mut refreshed = entry;
@@ -467,7 +561,7 @@ impl PacketFilter {
             peer_id,
             peer_index,
             &policy,
-            &mut shard,
+            &mut table,
             now,
         )
     }
@@ -509,13 +603,17 @@ impl PacketFilter {
         direction: Direction,
         peer_address: IpAddr,
         peer_id: NodeId,
-        flow_table: &Mutex<FlowShard>,
+        flows: &PeerFlows,
         policy: &CompiledPolicy,
         now: Instant,
     ) -> bool {
-        let mut shard = flow_table
+        let mut table = flows
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(shard) = table.as_mut() else {
+            return false;
+        };
         let Some(fragment_index) = shard.find_fragment(
             fragment_packet.key,
             direction,
@@ -523,7 +621,7 @@ impl PacketFilter {
         ) else {
             return false;
         };
-        let FragmentSlot::Occupied(mut fragment) = shard.fragments[fragment_index] else {
+        let FragmentSlot::Occupied(mut fragment) = shard.fragment_slot(fragment_index) else {
             return false;
         };
         if fragment.expired(now) {
@@ -550,17 +648,23 @@ impl PacketFilter {
         flow.last_seen = now;
         fragment.last_seen = now;
         shard.slots[flow_index] = FlowSlot::Occupied(flow);
-        let completed =
-            shard.fragment_coverage[fragment_index].observe(fragment_packet, packet_end);
+        let Some(fragments) = shard.fragments.as_mut() else {
+            return false;
+        };
+        let completed = fragments.coverage[fragment_index].observe(fragment_packet, packet_end);
         if completed {
-            shard.remove_fragment(fragment_index);
+            fragments.remove(fragment_index);
         } else {
-            shard.fragments[fragment_index] = FragmentSlot::Occupied(fragment);
+            fragments.slots[fragment_index] = FragmentSlot::Occupied(fragment);
         }
         true
     }
 
     /// Admit and record a new tuple after its current grant and TCP initiation flags pass.
+    ///
+    /// `table` is the peer's flow table, still unallocated if the peer has never had a flow.
+    /// It is allocated here, after the grant check passes, so a packet that is refused never
+    /// costs memory. If the allocation fails, the packet is refused: fail closed.
     fn start_flow(
         packet: &mut [u8],
         parsed: ParsedPacket,
@@ -569,7 +673,7 @@ impl PacketFilter {
         peer_id: NodeId,
         peer_index: usize,
         policy: &CompiledPolicy,
-        shard: &mut FlowShard,
+        table: &mut Option<FlowShard>,
         now: Instant,
     ) -> bool {
         if parsed.key.protocol == TCP
@@ -586,6 +690,13 @@ impl PacketFilter {
         if grant.ssh_redirect_port.is_some() && !can_rewrite_ssh_packet(&parsed) {
             return false;
         }
+        let shard = match table {
+            Some(shard) => shard,
+            None => match FlowShard::new() {
+                Ok(shard) => table.insert(shard),
+                Err(_) => return false,
+            },
+        };
         let entry = FlowEntry {
             key: parsed.key,
             peer_address,
@@ -602,7 +713,7 @@ impl PacketFilter {
         };
         let slot_start = flow_start(entry.key);
         if !shard.insert(entry, slot_start) {
-            shard.reclaim_expired(now);
+            shard.reclaim(now, policy);
             let inserted = shard.insert(entry, slot_start)
                 || (shard.evict_idle(direction) && shard.insert(entry, slot_start));
             if !inserted {
@@ -648,14 +759,18 @@ impl PacketFilter {
         direction: Direction,
         peer_address: IpAddr,
         peer_id: NodeId,
-        flow_table: &Mutex<FlowShard>,
+        flows: &PeerFlows,
         policy: &CompiledPolicy,
         now: Instant,
     ) -> bool {
         let slot_start = flow_start(key);
-        let mut shard = flow_table
+        let mut table = flows
+            .table
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(shard) = table.as_mut() else {
+            return false;
+        };
         let Some((index, _)) = shard.find(key, slot_start) else {
             return false;
         };
@@ -670,12 +785,48 @@ impl PacketFilter {
             shard.remove(index);
             return false;
         }
-        if !Self::remember_first_fragment(&mut shard, parsed, direction, entry.key, now) {
+        if !Self::remember_first_fragment(shard, parsed, direction, entry.key, now) {
             return false;
         }
         entry.last_seen = now;
         shard.slots[index] = FlowSlot::Occupied(entry);
         true
+    }
+
+    /// Test seam: how many peers hold an allocated flow table right now.
+    #[cfg(test)]
+    fn allocated_tables(&self) -> usize {
+        self.tables
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|cell| {
+                cell.table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+            })
+            .count()
+    }
+
+    /// Test seam: run `inspect` on one peer's flow table, `None` while it is unallocated.
+    #[cfg(test)]
+    fn with_table<R>(&self, node: NodeId, inspect: impl FnOnce(Option<&FlowShard>) -> R) -> R {
+        let cell = self
+            .tables
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&node)
+            .cloned();
+        match cell {
+            Some(cell) => inspect(
+                cell.table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref(),
+            ),
+            None => inspect(None),
+        }
     }
 }
 
@@ -717,7 +868,7 @@ impl CompiledPolicy {
             .map_err(|_| io::Error::other("mesh peer policy index could not be allocated"))?;
         for (node, policy) in &config.peers {
             let index = peers.len();
-            peers.push(PeerAccess::from_policy(*node, policy)?);
+            peers.push(PeerAccess::from_policy(*node, policy));
             for address in [
                 IpAddr::V4(policy.peer.addresses.ipv4),
                 IpAddr::V6(policy.peer.addresses.ipv6),
@@ -758,21 +909,13 @@ impl CompiledPolicy {
         peer_addresses.retain(|_, index| !withdrawn.contains(&peers[*index].node));
     }
 
-    /// Reuse each surviving peer's fixed conntrack table across an atomic policy replacement.
-    fn reuse_flow_tables(&mut self, previous: &Self) {
-        let mut old_index = 0;
-        for peer in &mut self.peers {
-            while old_index < previous.peers.len() && previous.peers[old_index].node < peer.node {
-                old_index += 1;
-            }
-            if let Some(old) = previous
-                .peers
-                .get(old_index)
-                .filter(|old| old.node == peer.node)
-            {
-                peer.flows = Arc::clone(&old.flows);
-            }
-        }
+    /// Find a peer by node id. `peers` is built from the config's `BTreeMap`, so it is sorted
+    /// by node and a binary search finds the entry.
+    fn peer_by_node(&self, node: NodeId) -> Option<&PeerAccess> {
+        self.peers
+            .binary_search_by(|peer| peer.node.cmp(&node))
+            .ok()
+            .map(|index| &self.peers[index])
     }
 
     /// Return the peer address only when this packet uses the configured local address at this edge.
@@ -944,21 +1087,34 @@ struct PeerAccess {
     inbound: TrafficPolicy,
     outbound: TrafficPolicy,
     access_ssh: Option<bool>,
-    /// Each peer owns a separate fixed table so shard collisions cannot share its quota.
-    flows: Arc<Mutex<FlowShard>>,
+    /// This snapshot's pointer to the peer's flow cell in [`PacketFilter::tables`]. It starts
+    /// unset and is set on the peer's first packet after the snapshot is published (see
+    /// [`PacketFilter::flows_for`]), so compiling a snapshot allocates nothing per peer. Each
+    /// peer has its own cell, so peers whose tuples hash alike never share a quota.
+    flows: OnceLock<Arc<PeerFlows>>,
 }
 
 impl PeerAccess {
-    /// Copy access data and allocate this peer's fixed conntrack table, not peer keys or endpoints.
-    fn from_policy(node: NodeId, policy: &PeerPolicy) -> io::Result<Self> {
-        Ok(Self {
+    /// Copy access data only: no peer keys or endpoints, and no flow table.
+    fn from_policy(node: NodeId, policy: &PeerPolicy) -> Self {
+        Self {
             node,
             inbound: policy.inbound.clone(),
             outbound: policy.outbound.clone(),
             access_ssh: policy.access_ssh,
-            flows: Arc::new(Mutex::new(FlowShard::new()?)),
-        })
+            flows: OnceLock::new(),
+        }
     }
+}
+
+/// One peer's flow state, kept across policy publishes.
+///
+/// The table stays `None` until the peer's first flow is admitted, and returns to `None` when
+/// the sweep after a publish finds it empty. An idle peer therefore costs this cell (about
+/// 100 bytes), not the 68 KB table (J721, #265).
+#[derive(Default)]
+struct PeerFlows {
+    table: Mutex<Option<FlowShard>>,
 }
 
 /// The precise permission that admitted a flow and must remain true for its replies.
@@ -1181,7 +1337,7 @@ struct FragmentCoverage {
 }
 
 impl FragmentCoverage {
-    /// Reserve one empty coverage record while the peer's shard is compiled.
+    /// One empty coverage record, the fill value of a newly allocated [`FragmentTable`].
     fn empty() -> Self {
         Self {
             ranges: [FragmentRange { start: 0, end: 0 }; FRAGMENT_RANGES_PER_DATAGRAM],
@@ -1290,7 +1446,7 @@ enum FragmentSlot {
     Occupied(FragmentEntry),
 }
 
-/// One fixed-size conntrack and fragment shard protected independently from other peers.
+/// One peer's fixed-size conntrack table, guarded separately from every other peer's.
 ///
 /// Invariant: `initiated[d]` is the number of occupied slots whose flow was opened in direction
 /// `d` (see [`direction_slot`]), and never exceeds [`FLOWS_PER_DIRECTION`]. Every change to
@@ -1300,8 +1456,46 @@ enum FragmentSlot {
 struct FlowShard {
     slots: Vec<FlowSlot>,
     initiated: [usize; 2],
-    fragments: Vec<FragmentSlot>,
-    fragment_coverage: Vec<FragmentCoverage>,
+    /// The fragment associations, allocated the first time this peer fragments a datagram:
+    /// most peers never do.
+    fragments: Option<FragmentTable>,
+}
+
+/// One peer's fixed fragment associations and the byte coverage of each, index for index.
+struct FragmentTable {
+    slots: Vec<FragmentSlot>,
+    coverage: Vec<FragmentCoverage>,
+}
+
+impl FragmentTable {
+    /// Allocate the complete fragment arrays once, failing instead of aborting when memory is
+    /// short.
+    fn new() -> io::Result<Self> {
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(FRAGMENTS_PER_PEER)
+            .map_err(|_| io::Error::other("mesh fragment slots could not be allocated"))?;
+        slots.resize(FRAGMENTS_PER_PEER, FragmentSlot::Empty);
+        let mut coverage = Vec::new();
+        coverage
+            .try_reserve_exact(FRAGMENTS_PER_PEER)
+            .map_err(|_| io::Error::other("mesh fragment coverage slots could not be allocated"))?;
+        coverage.resize(FRAGMENTS_PER_PEER, FragmentCoverage::empty());
+        Ok(Self { slots, coverage })
+    }
+
+    /// Remove one association without breaking later entries in its probe chain.
+    fn remove(&mut self, index: usize) {
+        self.slots[index] = FragmentSlot::Removed;
+    }
+
+    /// Whether no association is open, so the table can be freed.
+    fn is_empty(&self) -> bool {
+        !self
+            .slots
+            .iter()
+            .any(|slot| matches!(slot, FragmentSlot::Occupied(_)))
+    }
 }
 
 /// The index of a direction's flow count in [`FlowShard::initiated`].
@@ -1313,29 +1507,27 @@ fn direction_slot(direction: Direction) -> usize {
 }
 
 impl FlowShard {
-    /// Allocate this peer's complete flow and fragment slot arrays before packet workers start.
+    /// Allocate this peer's complete flow slot array, once, when its first flow is admitted.
+    ///
+    /// # Errors
+    /// Fails, rather than aborting the process, when the memory is not available. The caller
+    /// then refuses the packet.
     fn new() -> io::Result<Self> {
         let mut slots = Vec::new();
         slots
             .try_reserve_exact(FLOW_SLOTS_PER_PEER)
             .map_err(|_| io::Error::other("mesh conntrack slots could not be allocated"))?;
         slots.resize(FLOW_SLOTS_PER_PEER, FlowSlot::Empty);
-        let mut fragments = Vec::new();
-        fragments
-            .try_reserve_exact(FRAGMENTS_PER_PEER)
-            .map_err(|_| io::Error::other("mesh fragment slots could not be allocated"))?;
-        fragments.resize(FRAGMENTS_PER_PEER, FragmentSlot::Empty);
-        let mut fragment_coverage = Vec::new();
-        fragment_coverage
-            .try_reserve_exact(FRAGMENTS_PER_PEER)
-            .map_err(|_| io::Error::other("mesh fragment coverage slots could not be allocated"))?;
-        fragment_coverage.resize(FRAGMENTS_PER_PEER, FragmentCoverage::empty());
         Ok(Self {
             slots,
             initiated: [0; 2],
-            fragments,
-            fragment_coverage,
+            fragments: None,
         })
+    }
+
+    /// Whether the table tracks no flow and no fragment, so the sweep can free it.
+    fn is_empty(&self) -> bool {
+        self.initiated == [0; 2] && self.fragments.as_ref().is_none_or(FragmentTable::is_empty)
     }
 
     /// Find either orientation of one flow and report whether the stored direction matched.
@@ -1458,11 +1650,19 @@ impl FlowShard {
         true
     }
 
+    /// The fragment slot at `index`, or an empty one while the fragment table is unallocated.
+    fn fragment_slot(&self, index: usize) -> FragmentSlot {
+        self.fragments
+            .as_ref()
+            .map_or(FragmentSlot::Empty, |fragments| fragments.slots[index])
+    }
+
     /// Find one fragment association by its complete IP identity and packet direction.
     fn find_fragment(&self, key: FragmentKey, direction: Direction, start: usize) -> Option<usize> {
-        for offset in 0..self.fragments.len() {
-            let index = (start + offset) % self.fragments.len();
-            match self.fragments[index] {
+        let fragments = &self.fragments.as_ref()?.slots;
+        for offset in 0..fragments.len() {
+            let index = (start + offset) % fragments.len();
+            match fragments[index] {
                 FragmentSlot::Empty => return None,
                 FragmentSlot::Occupied(entry)
                     if entry.key == key && entry.direction == direction =>
@@ -1476,6 +1676,9 @@ impl FlowShard {
     }
 
     /// Insert a first-fragment association without growing the table or replacing an active ID.
+    ///
+    /// Allocates the fragment table on this peer's first fragmented datagram. If that
+    /// allocation fails, the association is refused, and so is its first fragment.
     fn insert_fragment(
         &mut self,
         entry: FragmentEntry,
@@ -1483,14 +1686,21 @@ impl FlowShard {
         now: Instant,
         first_range: FragmentRange,
     ) -> bool {
+        let fragments = match &mut self.fragments {
+            Some(fragments) => fragments,
+            None => match FragmentTable::new() {
+                Ok(fragments) => self.fragments.insert(fragments),
+                Err(_) => return false,
+            },
+        };
         let mut removed = None;
-        for offset in 0..self.fragments.len() {
-            let index = (start + offset) % self.fragments.len();
-            match self.fragments[index] {
+        for offset in 0..fragments.slots.len() {
+            let index = (start + offset) % fragments.slots.len();
+            match fragments.slots[index] {
                 FragmentSlot::Empty => {
                     let index = removed.unwrap_or(index);
-                    self.fragments[index] = FragmentSlot::Occupied(entry);
-                    self.fragment_coverage[index].reset(first_range);
+                    fragments.slots[index] = FragmentSlot::Occupied(entry);
+                    fragments.coverage[index].reset(first_range);
                     return true;
                 }
                 FragmentSlot::Removed => {
@@ -1502,20 +1712,20 @@ impl FlowShard {
                     if !existing.expired(now) && existing.flow != entry.flow {
                         return false;
                     }
-                    self.fragments[index] = FragmentSlot::Occupied(entry);
-                    self.fragment_coverage[index].reset(first_range);
+                    fragments.slots[index] = FragmentSlot::Occupied(entry);
+                    fragments.coverage[index].reset(first_range);
                     return true;
                 }
                 FragmentSlot::Occupied(existing) if existing.expired(now) => {
-                    self.fragments[index] = FragmentSlot::Removed;
+                    fragments.slots[index] = FragmentSlot::Removed;
                     removed.get_or_insert(index);
                 }
                 FragmentSlot::Occupied(_) => {}
             }
         }
         if let Some(index) = removed {
-            self.fragments[index] = FragmentSlot::Occupied(entry);
-            self.fragment_coverage[index].reset(first_range);
+            fragments.slots[index] = FragmentSlot::Occupied(entry);
+            fragments.coverage[index].reset(first_range);
             true
         } else {
             false
@@ -1524,31 +1734,48 @@ impl FlowShard {
 
     /// Remove one association without breaking later entries in its probe chain.
     fn remove_fragment(&mut self, index: usize) {
-        self.fragments[index] = FragmentSlot::Removed;
+        if let Some(fragments) = &mut self.fragments {
+            fragments.remove(index);
+        }
     }
 
-    /// Retire associations whose conntrack entry a policy update removed or replaced.
+    /// Retire associations whose conntrack entry was removed or replaced, and free the
+    /// fragment table once none is left.
     fn remove_orphaned_fragments(&mut self) {
-        for index in 0..self.fragments.len() {
-            let FragmentSlot::Occupied(entry) = self.fragments[index] else {
+        let Some(fragments) = &self.fragments else {
+            return;
+        };
+        for index in 0..fragments.slots.len() {
+            let FragmentSlot::Occupied(entry) = self.fragment_slot(index) else {
                 continue;
             };
             if self.find(entry.flow, flow_start(entry.flow)).is_none() {
                 self.remove_fragment(index);
             }
         }
+        if self.fragments.as_ref().is_some_and(FragmentTable::is_empty) {
+            self.fragments = None;
+        }
     }
 
-    /// Reclaim idle entries only when a full shard refuses a new flow.
-    fn reclaim_expired(&mut self, now: Instant) {
+    /// Free the slots of flows that have expired or that `policy` no longer permits, and of
+    /// expired fragment associations.
+    ///
+    /// Called when a full direction refuses a new flow, and by the sweep after each publish. A
+    /// revoked flow admits nothing even before this runs, because every packet re-checks
+    /// [`CompiledPolicy::allows_flow`]; this only gives its slot back to the quota.
+    fn reclaim(&mut self, now: Instant, policy: &CompiledPolicy) {
         for index in 0..self.slots.len() {
-            if matches!(self.slots[index], FlowSlot::Occupied(entry) if entry.expired(now)) {
+            if matches!(self.slots[index], FlowSlot::Occupied(entry) if entry.expired(now) || !policy.allows_flow(entry))
+            {
                 self.remove(index);
             }
         }
-        for slot in &mut self.fragments {
-            if matches!(*slot, FragmentSlot::Occupied(entry) if entry.expired(now)) {
-                *slot = FragmentSlot::Removed;
+        if let Some(fragments) = &mut self.fragments {
+            for slot in &mut fragments.slots {
+                if matches!(*slot, FragmentSlot::Occupied(entry) if entry.expired(now)) {
+                    *slot = FragmentSlot::Removed;
+                }
             }
         }
     }
@@ -2087,8 +2314,8 @@ mod tests {
 
     use super::{
         Direction, FLOW_SLOTS_PER_PEER, FLOW_SLOTS_PER_PEER_HASH, FLOWS_PER_DIRECTION,
-        FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, FlowShard, FlowSlot, FragmentCoverage,
-        FragmentSlot, PER_PEER_MEMORY_BUDGET, PacketFilter, PeerAccess, TCP_CLOSED_TIMEOUT,
+        FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, FlowSlot, FragmentCoverage, FragmentSlot,
+        PER_PEER_MEMORY_BUDGET, PacketFilter, PeerAccess, PeerFlows, TCP_CLOSED_TIMEOUT,
         TCP_ESTABLISHED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
     };
     use crate::{
@@ -3540,26 +3767,31 @@ mod tests {
             PacketFilter::prepare_policy(&policy, MeshProxyIngress::default())
                 .expect("prepare revocation"),
         );
-        let current = filter.policy.read().expect("policy");
-        let shard = current.peers[0].flows.lock().expect("flows");
         assert!(
-            shard
+            filter.with_table(NodeId(2), |table| table.is_none_or(|shard| shard
                 .slots
                 .iter()
-                .all(|slot| matches!(slot, FlowSlot::Empty)),
+                .all(|slot| matches!(slot, FlowSlot::Empty)))),
             "every slot of a fully revoked table is empty again"
+        );
+        assert_eq!(
+            filter.allocated_tables(),
+            0,
+            "the sweep after the publish frees a table left empty"
         );
     }
 
-    /// Memory per peer for the fixed conntrack and fragment tables, times D393's 1,000-peer
-    /// design scale and 4,096-peer test scale (PROCESS §1: memory per unit times the expected
-    /// count). Printed for the issue; the bound keeps a later change from growing it unnoticed.
+    /// Memory of one active peer's fixed conntrack and fragment tables, times D393's 1,000-peer
+    /// design scale and 4,096-peer test scale, the worst case where every peer has flows
+    /// (PROCESS §1: memory per unit times the expected count). Printed for the issue; the
+    /// bound keeps a later change from growing it unnoticed. Idle peers allocate none; see
+    /// `idle_peers_add_under_five_mib_of_rss`.
     #[test]
     fn flow_table_memory_per_peer_times_one_thousand_peers() {
         let per_peer = std::mem::size_of::<FlowSlot>() * FLOW_SLOTS_PER_PEER
             + (std::mem::size_of::<FragmentSlot>() + std::mem::size_of::<FragmentCoverage>())
                 * FRAGMENTS_PER_PEER
-            + std::mem::size_of::<FlowShard>()
+            + std::mem::size_of::<PeerFlows>()
             + std::mem::size_of::<PeerAccess>();
         println!(
             "FLOW_TABLE_MEMORY flow_slot={} flow_slots={} per_direction={} fragment_slot={} \
@@ -3947,13 +4179,11 @@ mod tests {
         assert!(filter.check_at(&mut outbound, Direction::HostToMesh, now));
         let mut back = icmp4(PEER4, LOCAL4, 14, 0);
         assert!(!filter.check_at(&mut back, Direction::MeshToHost, now));
-        let current = filter.policy.read().expect("policy");
-        let shard = current.peers[0].flows.lock().expect("flows");
         assert!(
-            shard
+            filter.with_table(NodeId(2), |table| table.is_none_or(|shard| shard
                 .slots
                 .iter()
-                .all(|slot| !matches!(slot, FlowSlot::Occupied(_))),
+                .all(|slot| !matches!(slot, FlowSlot::Occupied(_))))),
             "a stateless ICMP message created a flow"
         );
     }
@@ -3982,5 +4212,267 @@ mod tests {
         for port in 0..quota {
             assert!(establish4(&filter, PEER4, 40_000 + port, now));
         }
+    }
+
+    /// The IPv4 mesh address of synthetic peer `n` (2 ≤ n < 65,536), for scale tests.
+    fn scale_peer4(n: u32) -> Ipv4Addr {
+        let [_, _, high, low] = n.to_be_bytes();
+        Ipv4Addr::new(10, 254, high, low)
+    }
+
+    /// One local node with `peers` synthetic peers, every one with `All` grants both ways,
+    /// shaped like D393's design and test scales (J718's fixture, #265).
+    fn scale_config(peers: u32) -> Config {
+        let mut config = config(TrafficPolicy::All, TrafficPolicy::All);
+        let template = config.peers.remove(&NodeId(2)).expect("template peer");
+        for n in 2..peers + 2 {
+            let mut peer = template.clone();
+            let [_, _, high, low] = n.to_be_bytes();
+            peer.peer.addresses = Addresses {
+                ipv4: scale_peer4(n),
+                ipv6: Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 1, u16::from_be_bytes([high, low])),
+            };
+            config.peers.insert(NodeId(u64::from(n)), peer);
+        }
+        config
+    }
+
+    /// Only peers with flows get a flow table (J721, #265): compiling, preparing and
+    /// publishing a 1,000-peer policy allocates none, and the 10 peers that open flows get one
+    /// each. Their flows survive the publish without being copied.
+    #[test]
+    fn idle_peers_allocate_no_flow_tables() {
+        let config = scale_config(1000);
+        let filter = PacketFilter::new(&config, MeshProxyIngress::default()).expect("compile");
+        assert_eq!(
+            filter.allocated_tables(),
+            0,
+            "compiling allocated flow tables"
+        );
+        let now = Instant::now();
+        for n in 2..12 {
+            for port in 0..8 {
+                assert!(establish4(&filter, scale_peer4(n), 40_000 + port, now));
+            }
+        }
+        assert_eq!(filter.allocated_tables(), 10);
+        let prepared =
+            PacketFilter::prepare_policy(&config, MeshProxyIngress::default()).expect("prepare");
+        assert_eq!(
+            filter.allocated_tables(),
+            10,
+            "preparing allocated flow tables"
+        );
+        filter.publish_policy(prepared);
+        assert_eq!(
+            filter.allocated_tables(),
+            10,
+            "publishing allocated or lost tables"
+        );
+        for n in 2..12 {
+            let mut reply = tcp4(scale_peer4(n), LOCAL4, 443, 40_000, ACK);
+            assert!(
+                filter.check_at(&mut reply, Direction::MeshToHost, now),
+                "peer {n}'s connection did not survive the publish"
+            );
+        }
+    }
+
+    /// A publish never waits for a peer's flow table (J721, #265): with the tables of every
+    /// active peer held by a packet worker, it still completes and the new grants apply at
+    /// once. The lock every packet waits behind is held only to swap a pointer. Before J721 a
+    /// publish locked and scanned every peer's table under that lock (J718: 7.3 ms at 4,096
+    /// peers). This checks the structure, not wall-clock time: PROCESS keeps timing in the
+    /// bench harness.
+    #[test]
+    fn publish_never_waits_for_a_peer_table() {
+        let mut config = scale_config(64);
+        let filter = std::sync::Arc::new(
+            PacketFilter::new(&config, MeshProxyIngress::default()).expect("compile"),
+        );
+        let now = Instant::now();
+        for n in 2..6 {
+            assert!(establish4(&filter, scale_peer4(n), 40_000, now));
+        }
+        let cells: Vec<_> = filter
+            .tables
+            .lock()
+            .expect("tables")
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(cells.len(), 4);
+        let guards: Vec<_> = cells
+            .iter()
+            .map(|cell| cell.table.lock().expect("table"))
+            .collect();
+        config.peers.get_mut(&NodeId(2)).expect("peer").outbound = TrafficPolicy::None;
+        let prepared =
+            PacketFilter::prepare_policy(&config, MeshProxyIngress::default()).expect("prepare");
+        let (done, publish_finished) = std::sync::mpsc::channel();
+        let publisher = std::sync::Arc::clone(&filter);
+        let thread = std::thread::spawn(move || {
+            publisher.publish_policy(prepared);
+            done.send(()).expect("report publish");
+        });
+        let finished = publish_finished.recv_timeout(Duration::from_secs(30));
+        drop(guards);
+        thread.join().expect("publisher thread");
+        assert!(
+            finished.is_ok(),
+            "publish waited for a peer table held by a packet worker"
+        );
+        // The sweep skipped the held tables, so the revoked flow's entry is still there, yet
+        // its next packet is refused.
+        let mut revoked = tcp4(LOCAL4, scale_peer4(2), 40_000, 443, ACK);
+        assert!(!filter.check_at(&mut revoked, Direction::HostToMesh, now));
+        let mut kept = tcp4(LOCAL4, scale_peer4(3), 40_000, 443, ACK);
+        assert!(filter.check_at(&mut kept, Direction::HostToMesh, now));
+    }
+
+    /// Revocation ends flows at publish even when the sweep could not visit the peer's table
+    /// (J721, #265): no revoked flow admits another packet, and their slots go back to the
+    /// quota the moment the full direction needs them.
+    #[test]
+    fn revoked_flows_skipped_by_the_sweep_free_their_quota_on_demand() {
+        let mut policy = config(TrafficPolicy::All, TrafficPolicy::All);
+        let filter = PacketFilter::new(&policy, MeshProxyIngress::default()).expect("compile");
+        let now = Instant::now();
+        let quota = u16::try_from(FLOWS_PER_DIRECTION).expect("quota");
+        for port in 0..quota {
+            assert!(establish4(&filter, PEER4, 20_000 + port, now));
+        }
+        policy.peers.get_mut(&NodeId(2)).expect("peer").outbound = grant(Protocol::Tcp, 8443);
+        let prepared =
+            PacketFilter::prepare_policy(&policy, MeshProxyIngress::default()).expect("prepare");
+        let cell = filter
+            .tables
+            .lock()
+            .expect("tables")
+            .get(&NodeId(2))
+            .cloned()
+            .expect("peer cell");
+        {
+            // Hold the table as a packet worker would, so the sweep skips it.
+            let _busy = cell.table.lock().expect("table");
+            filter.publish_policy(prepared);
+        }
+        assert_eq!(
+            filter.with_table(NodeId(2), |table| table.map(|shard| shard.initiated)),
+            Some([usize::from(quota), 0]),
+            "the sweep waited for a busy table"
+        );
+        let mut replacement = tcp4(LOCAL4, PEER4, 40_000, 8443, SYN);
+        assert!(filter.check_at(&mut replacement, Direction::HostToMesh, now));
+        assert_eq!(
+            filter.with_table(NodeId(2), |table| table.map(|shard| shard.initiated)),
+            Some([1, 0]),
+            "the full direction did not reclaim its revoked flows"
+        );
+        for port in [0, quota / 2, quota - 1] {
+            let mut stale = tcp4(LOCAL4, PEER4, 20_000 + port, 443, ACK);
+            assert!(!filter.check_at(&mut stale, Direction::HostToMesh, now));
+        }
+    }
+
+    /// Set in the child process that [`idle_peers_add_under_five_mib_of_rss`] starts, so the
+    /// measurement runs alone and other tests' allocations do not blur it.
+    #[cfg(target_os = "linux")]
+    const RSS_CHILD_ENV: &str = "INFRATERNAL_PACKET_FILTER_RSS_CHILD";
+
+    /// Read one `/proc/self/status` field, in KiB.
+    #[cfg(target_os = "linux")]
+    fn status_kib(field: &str) -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .expect("status")
+            .lines()
+            .find(|line| line.starts_with(field))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse().ok())
+            .expect("status field")
+    }
+
+    /// Build a filter for `peers` peers, open 8 connections on each of 10 of them, then
+    /// prepare and publish the same policy 21 times, the way config applies do. Print the RSS
+    /// added since before the filter existed, the peak (`VmHWM`, reset first) and the median and
+    /// worst publish time. The config is built before the baseline, so only the filter is
+    /// counted.
+    #[cfg(target_os = "linux")]
+    fn measure_filter_rss(peers: u32) -> (u64, u64) {
+        let config = scale_config(peers);
+        // "5" resets VmHWM to the current RSS, so the peak below is this run's own.
+        std::fs::write("/proc/self/clear_refs", "5").expect("reset peak RSS");
+        let baseline = status_kib("VmRSS:");
+        let filter = PacketFilter::new(&config, MeshProxyIngress::default()).expect("compile");
+        let now = Instant::now();
+        for n in 2..12 {
+            for port in 0..8 {
+                assert!(establish4(&filter, scale_peer4(n), 40_000 + port, now));
+            }
+        }
+        // 21 prepare + publish rounds: the first is the memory figure, all give the timing.
+        let mut publish_us = Vec::new();
+        for _ in 0..21 {
+            let prepared = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())
+                .expect("prepare");
+            let started = Instant::now();
+            filter.publish_policy(prepared);
+            publish_us.push(started.elapsed().as_micros());
+        }
+        let rss = status_kib("VmRSS:").saturating_sub(baseline);
+        let peak = status_kib("VmHWM:").saturating_sub(baseline);
+        publish_us.sort_unstable();
+        println!(
+            "FILTER_RSS peers={peers} active=10x8 rss_added_kib={rss} peak_added_kib={peak} \
+             publish_us_median={} publish_us_max={} tables={}",
+            publish_us[publish_us.len() / 2],
+            publish_us[publish_us.len() - 1],
+            filter.allocated_tables()
+        );
+        drop(filter);
+        (rss, peak)
+    }
+
+    /// RSS regression guard (J721, #265; J718 measured +66.2 MiB and a 137.5 MiB peak): at
+    /// D393's 1,000 peers with 10 active, the filter adds under 5 MiB, and a prepare plus
+    /// publish raises the peak by under 5 MiB too, so memory never doubles. It re-runs itself
+    /// in a child process, so the numbers are this filter's alone; it also prints the 4,096-peer
+    /// figures and the publish time for the issue.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_peers_add_under_five_mib_of_rss() {
+        const LIMIT_KIB: u64 = 5 * 1024;
+        if std::env::var_os(RSS_CHILD_ENV).is_some() {
+            let (rss, peak) = measure_filter_rss(1000);
+            assert!(
+                rss < LIMIT_KIB,
+                "1,000 peers with 10 active added {rss} KiB of RSS"
+            );
+            assert!(
+                peak < LIMIT_KIB,
+                "a publish at 1,000 peers peaked {peak} KiB above baseline"
+            );
+            measure_filter_rss(4096);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "packet_filter::tests::idle_peers_add_under_five_mib_of_rss",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(RSS_CHILD_ENV, "1")
+            .output()
+            .expect("run the measurement child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().filter(|line| line.contains("FILTER_RSS")) {
+            println!("{line}");
+        }
+        assert!(
+            output.status.success() && stdout.contains("FILTER_RSS peers=4096"),
+            "the RSS measurement failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
