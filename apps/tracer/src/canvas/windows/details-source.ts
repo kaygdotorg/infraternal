@@ -50,6 +50,23 @@ export interface HostFactsSnapshot {
   locale?: string;
 }
 
+/** The local mesh packet path and any kernel-only protections the machine has installed. */
+export interface MeshProtectionSnapshot {
+  /** Whether the mesh is on, waiting for its server, stopping, or off. */
+  state: "On" | "Waiting" | "Stopping" | "Off";
+  /** The packet path that currently checks D164 access rules. */
+  enforcement: "userspace" | "kernel";
+  /** The optional Linux guard state; macOS and kernel WireGuard have no separate guard. */
+  kernelGuard?: {
+    /** Whether the guard is installed, pending, missing, or failed. */
+    state: "installed" | "pending" | "missing" | "failed";
+    /** The exact kernel protections that are not currently active. */
+    missing: string[];
+    /** The tool path or installation result reported by `mesh.status`. */
+    detail: string;
+  };
+}
+
 export interface DetailsSource {
   /** Called when the popover opens and each time a tab is shown, so the connection's numbers are current. */
   /** The facts for a window, or nothing for a window with no machine behind it (a settings section, a node): its pill opens nothing. */

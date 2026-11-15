@@ -491,13 +491,10 @@ fn report_mesh_service_status_result(
     }
 }
 
-/// Says what `enforcement: unavailable` means for someone reading `mesh status`.
-///
-/// The server is named as something that can reach this Mac, not only as something
-/// the Mac connects to: until the slice-3 filter (#265), the coordinator's peer is
-/// installed without an inbound check, so the server host reaches every port here.
+/// Says where `mesh status` enforces network access on this Mac.
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
-const MESH_ENFORCEMENT_DETAILS: &str = "Access rules are not enforced on this Mac yet. Until they are, the server can reach every port on this Mac, and other peers connect only if they are allowed to reach every port on it.";
+const MESH_ENFORCEMENT_DETAILS: &str =
+    "Mesh access rules are enforced in the GotaTun userspace packet filter on this Mac.";
 
 /// The machine-readable `mesh status` fields; `enforcement` reports the access-rule gap (#265).
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
@@ -2377,23 +2374,25 @@ mod dispatch_tests {
     use super::mesh_status_result;
 
     #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    /// Mac mesh status reports that GotaTun enforces D164 rules in userspace.
     #[test]
-    fn mesh_status_reports_that_access_rules_are_not_enforced() {
+    fn mesh_status_reports_userspace_access_enforcement() {
         let data = super::mesh_status_data(infraternal_plugin_mesh::macos_service::Status {
             loaded: true,
             running: true,
             pid: Some(42),
         });
-        assert_eq!(data["enforcement"], "unavailable");
+        assert_eq!(data["enforcement"], "userspace");
         assert_eq!(data["running"], true);
+        assert!(super::MESH_ENFORCEMENT_DETAILS.contains("userspace packet filter"));
     }
 
-    /// J162 F1 (#265): the details must not hide that the server reaches every port here.
+    /// The Mac's visible status describes its active userspace access filter.
     #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
     #[test]
-    fn mesh_status_says_the_server_can_reach_every_port_on_this_mac() {
+    fn mesh_status_says_access_rules_are_enforced_on_this_mac() {
         assert!(
-            super::MESH_ENFORCEMENT_DETAILS.contains("the server can reach every port on this Mac"),
+            super::MESH_ENFORCEMENT_DETAILS.contains("userspace packet filter"),
             "{}",
             super::MESH_ENFORCEMENT_DETAILS
         );

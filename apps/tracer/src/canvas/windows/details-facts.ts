@@ -5,20 +5,22 @@
  */
 import { hostPlatformFromOs, type HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { ICON } from "../views/icons";
-import type { DetailsFacts, HostFactsSnapshot } from "./details-source";
+import type { DetailsFacts, HostFactsSnapshot, MeshProtectionSnapshot } from "./details-source";
 
 const OS_NAME: Record<HostPlatform, string> = { ubuntu: "Ubuntu", debian: "Debian", redhat: "Red Hat", proxmox: "Proxmox", nixos: "NixOS", apple: "macOS", unknown: "" };
 
 const ICON_HOST = ICON.host;
 const ICON_CONNECTION = '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>';
 
-/** Everything the details panel is built from: the host, the page's connection, the optional session, and whether extended info is on. */
+/** Everything the details panel is built from: the reported host, its local Mesh protection, the connection, the optional session, and extra facts. */
 export interface DetailsInput {
   /**
    * `unavailable` says why there are no `facts` for this host: `offline` (its infraternal agent is not connected) or `pending`
    * (not read yet, or never readable from here). The System row then says so in plain words; no other host's facts stand in.
    */
   host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string; facts?: HostFactsSnapshot; unavailable?: "offline" | "pending" };
+  /** Local `mesh.status` state, when this host has the Mesh component enabled. */
+  mesh?: MeshProtectionSnapshot;
   connection: { state: "connected" | "connecting" | "offline"; delayMs?: number; encrypted?: boolean };
   /** Extended machine info (Settings): adds the technical facts (init, virtualization, shell, locale, how it is reached). */
   extended?: boolean;
@@ -100,7 +102,15 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
   // where the server reaches it and how (moved from the Host tab's Access group), and the terminal session's own facts
   // (the old third tab), under their own headings. A heading shows only when one of its rows has a value.
   const link = (key: string, value: string, hint?: string) => ({ key, value, group: "Link", ...(hint ? { hint } : {}) });
+  const mesh = (key: string, value: string) => ({ key, value, group: "Mesh" });
   const own = (key: string, value: string) => ({ key, value, group: "Session" });
+  const meshAccess = input.mesh?.state !== "On"
+    ? ({ Off: "Off", Waiting: "Waiting for server", Stopping: "Stopping" } as const)[input.mesh?.state ?? "Off"]
+    : input.mesh.enforcement === "userspace" ? "Userspace packet filter" : "Kernel WireGuard";
+  const kernelGuard = input.mesh?.kernelGuard;
+  const kernelGuardText = kernelGuard && (kernelGuard.state === "installed"
+    ? kernelGuard.detail
+    : `Missing: ${kernelGuard.missing.join(", ")}${kernelGuard.missing.length ? "; " : ""}${kernelGuard.detail}`);
   return {
     ...(input.loading ? { loading: true } : {}),
     ...(os ? { os } : {}),
@@ -114,6 +124,10 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
         link("Encrypted", connection.encrypted === undefined ? "" : connection.encrypted ? "Yes" : "No, this page is not on HTTPS"),
         link("Address", host.address ?? ""),
         link("How it is reached", input.extended ? host.reach ?? "" : ""),
+        ...(input.mesh ? [
+          mesh("Mesh access rules", meshAccess),
+          ...(kernelGuardText ? [mesh("Kernel guard", kernelGuardText)] : []),
+        ] : []),
         own("Name", session?.name ?? ""),
         own("Started", session?.started ?? ""),
         own("Last used", session?.lastUsed ?? ""),
