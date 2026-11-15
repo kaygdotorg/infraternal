@@ -134,6 +134,7 @@ def signin(s, origin, out, unlock=True):
     if unlock:
         result(unlock_hosts(s), "host-connections-unlocked")
         time.sleep(5)
+    pick_theme(s)
     theme_check(s)
 
 
@@ -609,6 +610,17 @@ def phase_c392(s, origin, out, tag):
     result("no windows open" in body.lower(), "empty-state-says-no-windows-open", "text has 'No windows open': %s; 'No hosts yet': %s" % ("no windows open" in body.lower(), "no hosts yet" in body.lower()))
     result(bool(s.js("return [...document.querySelectorAll('button')].some(b => /open shell/i.test(b.textContent + ' ' + (b.getAttribute('aria-label') || '')))")), "empty-state-has-open-shell")
     print("MAC_LABELS " + json.dumps([l for l in labels(s) if 'Settings' not in l and 'Themes' not in l][:14]))
+
+
+def pick_theme(s):
+    """Picks the colour theme the run asked for through the palette ("Mocha" dark, "Latte" light). An account that has picked a
+    theme ignores both the system scheme and ?theme= (D352, D390), so a run only has the look it asks for once it is picked."""
+    s.keys(["\ue03d", "k"])
+    time.sleep(1.5)
+    type_text(s, "Mocha" if APP_THEME == "mocha" else "Latte")
+    time.sleep(1.5)
+    s.keys(["\ue007"])
+    time.sleep(3)
 
 
 def theme_check(s):

@@ -24,11 +24,16 @@ NEW_SHELL='0.616~0.501'       # "New shell" on an ended session, centred in a fu
 case "$theme" in dark) app_theme=mocha;; *) app_theme=latte;; esac
 fresh="open~$url/?r=$(date +%s)&theme=$app_theme|wait~12"
 
-# A fresh load shows the stored windows. The last shell phase ends its shell, so a later phase finds the empty state, whose
-# button reads "Open shell" (an ended session's pill says "New shell"): tap whichever is there, and do nothing when a
-# window is already open. Wordings come from canvas/views/world.ts and canvas/windows/session-ui.on-demand.ts.
-# The account has two hosts (the server's own and the QA host), so "Open shell" shows a palette of "Open shell on <host>" rows:
-# pick the QA host's row (QA_HOST_NAME, default the dev-02 login host) and do nothing when the empty state is not there.
+# A fresh load shows the stored windows. When none is open the page offers an "Open shell" pill (an ended session's pill says
+# "New shell"), and an account with two hosts answers it with a palette of "Open shell on <host>" rows, so: tap whichever pill is
+# there and then the QA host's row, and do nothing when a window is already open. Wordings come from canvas/views/world.ts,
+# canvas/windows/session-ui.on-demand.ts and canvas/toolbar/palette-rows.on-demand. QA_HOST_NAME is the QA host's name as the
+# palette shows it.
+#
+# KNOWN LIMIT (measured 2026-11-15, #510): while the server's host CA is locked, the page can stay on a single, never-connecting
+# "SSH shell" pane of the server's own host. Its key bar hides the toolbar and the views pill, the QA host is not listed, and
+# every phase after sign-in then reports missing controls. The `unlock` phase below is what clears it; if a run starts in that
+# state, run `check --phases unlock` by hand first and look at its screenshot.
 QA_HOST_NAME=${QA_HOST_NAME:-infraternal-dev-02}
 OPEN="tapif~Open shell/New shell~6|wait~2|tapifx~Open shell on $QA_HOST_NAME~4|wait~6"
 
@@ -47,7 +52,7 @@ run theme "$fresh|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|type~$pick|w
 
 # 1b. Unlock host connections. After a server restart (or a new session) the host CA is locked until one passkey tap, and a
 # locked host is offline: its shell opens but takes no input. The palette row exists only while the CA is locked.
-run unlock "$fresh|xy~0.093~0.85|wait~3|type~Unlock host connections|wait~3|return|wait~4|tapsbif~Use Passkey/Use Selected Passkey~8|face|wait~10|shot~unlocked"
+run unlock "$fresh|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|type~Unlock host connections|wait~3|return|wait~4|tapsbif~Use Passkey/Use Selected Passkey~8|face|wait~10|shot~unlocked"
 
 # 2 and 3. Open a shell, type, `exit`: does the window close, and does every window fit the 402 pt viewport?
 run shell "$fresh|$OPEN|xy~0.5~0.3|wait~2|shot~shell-opened|frames~region~regions-before|type~echo qa-ok|return|wait~2|shot~shell-typed|type~exit|return|wait~5|shot~after-exit|absent~shell ended~exit-closes-window|frames~shell, region~win-after-exit"
@@ -56,7 +61,7 @@ run shell "$fresh|$OPEN|xy~0.5~0.3|wait~2|shot~shell-opened|frames~region~region
 run pill "$fresh|$OPEN|xy~$PILL|wait~3|shot~pill-machine|labels|frames~Kernel~kernel-y0|swipe~0.5~0.72~0.5~0.3~1.2|wait~1|shot~pill-scrolled-now|frames~Kernel~kernel-y1|wait~35|frames~Kernel~kernel-y2|shot~pill-scrolled-35s|xy~$CONNECTION_TAB|wait~2|shot~pill-connection"
 
 # 6, 8. The views menu: mesh, settings and the palette ("Search everything").
-run menus "$fresh|xy~$TOP_PILL|wait~3|shot~views-menu|tapx~Mesh|wait~3|shot~mesh|frames~card~mesh-cards|xy~$TOP_PILL|wait~2|tapx~Settings|wait~4|shot~settings|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|shot~palette"
+run menus "$fresh|xy~$TOP_PILL|wait~3|shot~views-menu|tapx~Mesh|wait~3|shot~mesh|frames~card~mesh-cards|xy~$TOP_PILL|wait~2|tapx~Settings|wait~4|shot~settings|$PAL|shot~palette"
 
 # 7. Text sizes: heights of text rows in the machine panel, to compare between builds (the pixels are in the shots).
 run text "$fresh|$OPEN|xy~$PILL|wait~3|frames~SYSTEM~text-heading|frames~Architecture~text-label|frames~Name~text-row|shot~text-sample"

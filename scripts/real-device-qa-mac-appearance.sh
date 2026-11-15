@@ -14,5 +14,5 @@ case "${1:-}" in
   *) echo "usage: $0 light|dark" >&2; exit 2;;
 esac
 killall -HUP cfprefsd 2>/dev/null || true
-sleep 1
+sleep 4
 echo "appearance: $(defaults read -g AppleInterfaceStyle 2>/dev/null || echo Light)"
