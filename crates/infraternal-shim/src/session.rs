@@ -1592,6 +1592,9 @@ fn invalid_request() -> io::Error {
 #[cfg(test)]
 #[path = "../tests/unit/session_resize.rs"]
 mod resize_checks;
+#[cfg(test)]
+#[path = "../tests/unit/resume_geometry.rs"]
+mod resume_geometry_checks;
 
 #[cfg(test)]
 mod readiness_marker_checks {
