@@ -786,3 +786,55 @@ fn a_failed_switch_into_a_shared_target_puts_the_old_install_back() {
         assert!(service.running.get(), "{copy}");
     }
 }
+
+/// The hidden files SSH setup and promotion keep in the root install base
+/// count as infraternal's own too (J803, #516): an install base that a root
+/// infraternal agent was set up into over SSH is moved into, those files stay
+/// byte for byte, and a refusal never names them.
+///
+/// Before this, `.bootstrap-owner`, the setup transaction files, the
+/// superseded unit records and `.promotion-transaction` made the target look
+/// foreign, so the move was refused on such a host and the message told the
+/// operator to move the setup's own state away.
+#[test]
+fn the_root_agents_setup_files_count_as_infraternals_own() {
+    let own = [
+        ".bootstrap-owner",
+        ".bootstrap-ready",
+        ".bootstrap-acquiring",
+        ".bootstrap-transaction",
+        ".bootstrap-transaction-0123abcd.tmp",
+        ".bootstrap-transaction-rollback-0123abcd.tmp",
+        ".superseded-unit",
+        ".superseded-service",
+        ".promotion-transaction",
+    ];
+    let setup = install();
+    fs::create_dir_all(&setup.new).unwrap();
+    let mut neighbours = add_neighbours(&setup.new);
+    for directory in ["state", "sessions"] {
+        fs::create_dir_all(setup.new.join(directory)).unwrap();
+    }
+    for name in own {
+        let path = setup.new.join(name);
+        fs::write(&path, format!("setup state: {name}")).unwrap();
+        let inode = fs::metadata(&path).unwrap().ino();
+        neighbours.push((path.clone(), fs::read(&path).unwrap(), inode));
+    }
+    fs::write(setup.new.join("notes.txt"), b"someone's").unwrap();
+    let error = plan(&setup.old, &setup.new, &setup.unit)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("notes.txt"), "{error}");
+    for name in own {
+        assert!(!error.contains(name), "{name}: {error}");
+    }
+    fs::remove_file(setup.new.join("notes.txt")).unwrap();
+    let before = data_of(&setup.old);
+    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
+    assert_eq!(relocation.stage, Stage::Move);
+    apply(&relocation, &Fake::running(), when()).unwrap();
+    assert_eq!(data_of(&setup.new), before);
+    assert_untouched(&neighbours);
+    assert!(setup.new.join("state").is_dir() && setup.new.join("sessions").is_dir());
+}
