@@ -621,6 +621,15 @@ async fn build_router_core(
     // An injected actor's caller owns node-worker startup. Production starts
     // the process and binds admitted node workers after persisted switches load.
     let owns_node_workers = supplied_agent.is_none();
+    // The periodic update check (#211 S3) belongs to the production process only. It
+    // starts nothing outside root release builds and never applies a release.
+    #[cfg(feature = "release")]
+    if owns_node_workers {
+        drop(crate::release_latest::start_updates(
+            pool.clone(),
+            &config.data_dir,
+        ));
+    }
     #[cfg(feature = "remote")]
     let observed_server_ip = remote
         .as_ref()

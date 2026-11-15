@@ -62,11 +62,33 @@ pub const LATEST: ActionDef = ActionDef {
     api_scope: None,
     fresh_passkey: false,
 };
+/// The topic that streams [`UPDATE_STATUS`]'s state whenever it changes (#211 S3).
+pub const UPDATE_TOPIC: &str = "release.update";
+/// Read the server's update state (#211 S3): running version, channel, newest verified release, staged release, last and next check, last error.
+pub const UPDATE_STATUS: ActionDef = ActionDef {
+    id: "release.update.status",
+    summary: "Show the server's update state.",
+    instructions: &[
+        "Read the running version, the channel, the newest verified release, the staged release, and the last and next check.",
+        "A staged release is verified and waiting; staging never applies it.",
+        "Subscribe to release.update to receive the same state whenever it changes.",
+    ],
+    input: CHANNEL_GET.input,
+    output: SchemaRef("UpdateState"),
+    permission: Permission::One("server.configure"),
+    effect: Effect::Read,
+    target: Target::Global,
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: None,
+    fresh_passkey: false,
+};
+/// The release plugin's declaration: channel actions, `release.latest`, the update status action and the `release.update` topic.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "release",
     api: infraternal_plugin_api::API_VERSION,
-    actions: &[CHANNEL_GET, CHANNEL_SET, LATEST],
-    topics: &[],
+    actions: &[CHANNEL_GET, CHANNEL_SET, LATEST, UPDATE_STATUS],
+    topics: &[UPDATE_TOPIC],
     settings: Some(SchemaRef(
         r#"{"type":"object","properties":{"enabled":{"type":"boolean","default":true},"channel":{"enum":["stable","edge"],"default":"stable"}},"additionalProperties":false}"#,
     )),
@@ -83,7 +105,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         requires: &["server"],
         default_enabled: true,
     }],
-    max_frame_len: 2048,
+    max_frame_len: 4096,
     unavailable: br#"{"error":"release unavailable"}"#,
     unavailable_event: br#"{"type":"error","error":"release unavailable"}"#,
 };

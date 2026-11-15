@@ -1,5 +1,5 @@
 //! Persists release opt-in atomically and delegates bounded verified lookups without polling [198,226].
-use crate::descriptor::{CHANNEL_GET, CHANNEL_SET, EDGE_WARNING, LATEST};
+use crate::descriptor::{CHANNEL_GET, CHANNEL_SET, EDGE_WARNING, LATEST, UPDATE_STATUS};
 use infraternal_plugin_api::{Operation, SocketHost};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,6 +10,39 @@ use tokio::sync::Semaphore;
 /// The server supplies its existing download/signature engines; a disabled plugin owns no work.
 pub trait ReleaseLookup: Send + Sync {
     fn latest<'a>(&'a self, channel: &'a str) -> Operation<'a, Result<Value, &'static str>>;
+    /// The persisted update state (#211 S3) as JSON; see [`crate::update::UpdateState`].
+    /// Lookups without server state report that updates are unavailable.
+    /// # Errors
+    /// A fixed public reason when this lookup has no update state.
+    fn update_status(&self) -> Result<Value, &'static str> {
+        Err("updates unavailable")
+    }
+}
+
+/// Read the release plugin's switch and channel from the server database, with the
+/// plugin's defaults (on, stable) when nothing is saved.
+///
+/// A disabled plugin reports `(false, _)` before its channel is validated, so a
+/// switched-off feature never reports a configuration error.
+/// # Errors
+/// A fixed public reason when the database cannot be read or an enabled plugin's
+/// saved channel is neither stable nor edge.
+pub async fn settings(pool: &SqlitePool) -> Result<(bool, String), &'static str> {
+    let (enabled, channel): (bool, String) = sqlx::query_as("SELECT enabled,COALESCE(json_extract(settings,'$.channel'),'stable') FROM plugin_settings WHERE role='server' AND plugin='release'")
+        .fetch_optional(pool).await.map_err(|_| "release unavailable")?.unwrap_or((true,"stable".into()));
+    if enabled && !matches!(channel.as_str(), "stable" | "edge") {
+        return Err("invalid release channel setting");
+    }
+    Ok((enabled, channel))
+}
+
+/// [`settings`] as the reader the updater takes.
+#[must_use]
+pub fn settings_reader(pool: SqlitePool) -> crate::update::Settings {
+    Arc::new(move || {
+        let pool = pool.clone();
+        Box::pin(async move { settings(&pool).await })
+    })
 }
 /// One stateless service serves local operator and authenticated socket adapters.
 #[derive(Clone)]
@@ -124,18 +157,19 @@ impl ReleaseService {
             return Ok(json!({"channel":setting.channel}));
         }
         parse_empty(input).map_err(|_| "invalid input")?;
-        let (enabled, channel): (bool,String) = sqlx::query_as("SELECT enabled,COALESCE(json_extract(settings,'$.channel'),'stable') FROM plugin_settings WHERE role='server' AND plugin='release'")
-            .fetch_optional(&self.pool).await.map_err(|_| "release unavailable")?.unwrap_or((true,"stable".into()));
+        let (enabled, channel) = settings(&self.pool).await?;
         if !enabled {
             return Err("release unavailable");
-        }
-        if !matches!(channel.as_str(), "stable" | "edge") {
-            return Err("invalid release channel setting");
         }
         if action == CHANNEL_GET.id {
             Ok(json!({"channel":channel}))
         } else if action == LATEST.id {
             self.lookup.latest(&channel).await
+        } else if action == UPDATE_STATUS.id {
+            let mut state = self.lookup.update_status()?;
+            // The setting is authoritative; the file holds the channel of the last check.
+            state["channel"] = Value::String(channel);
+            Ok(state)
         } else {
             Err("invalid input")
         }
