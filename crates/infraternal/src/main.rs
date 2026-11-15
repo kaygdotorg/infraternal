@@ -45,12 +45,12 @@ mod up;
 
 #[cfg(feature = "plugin-server")]
 mod install;
+/// Moves an existing install's data folder to the D395 default [#516].
+#[cfg(feature = "plugin-server")]
+mod install_move;
 /// OS-standard default folders for `server init` [D395].
 #[cfg(feature = "plugin-server")]
 mod install_paths;
-/// Moves an existing install's data folder to the D395 default [#516].
-#[cfg(all(feature = "plugin-server", test))]
-mod install_move;
 
 use std::{
     io::{self, IsTerminal, Write},
@@ -1330,12 +1330,44 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
         }
     }
+    // An existing unit's non-standard folder moves to the D395 one (owner,
+    // 2026-11-15: "change for existing installs too"); `--data` keeps any folder.
+    let relocation = match plan_server_data_move(
+        matches.get_one::<String>("data").is_some(),
+        installed
+            .unit
+            .as_ref()
+            .and_then(|unit| unit.data.as_deref()),
+        scope,
+        &environment,
+        name,
+    ) {
+        Ok(relocation) => relocation,
+        Err(error) => {
+            return report_failure(
+                "server init",
+                "The existing data folder cannot be moved to its standard location.",
+                error,
+                json_output,
+            );
+        }
+    };
+    if let Some(relocation) = &relocation {
+        args.data.clone_from(&relocation.to);
+    }
     let yes = matches.get_flag("yes");
     if let Err(error) = confirm_server_setup(
         yes,
         dry_run,
         args.listen,
-        &args.data,
+        &match &relocation {
+            Some(relocation) if relocation.stage != install_move::Stage::Cleanup => format!(
+                "{} (moved from {})",
+                args.data.display(),
+                relocation.from.display()
+            ),
+            _ => args.data.display().to_string(),
+        },
         if matches.get_flag("system") {
             "system"
         } else {
@@ -1364,15 +1396,84 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         force: matches.get_flag("force"),
         name: name.to_owned(),
     };
-    install_server("server init", &args, &install_args, json_output)
+    let moved = match &relocation {
+        None => None,
+        Some(relocation) if dry_run => {
+            Some((relocation.describe(), relocation_json(relocation, None)))
+        }
+        Some(relocation) => {
+            let service = install_move::Systemd {
+                user: !install_args.system,
+                service: format!("{name}.service"),
+            };
+            match install_move::apply(relocation, &service, std::time::SystemTime::now()) {
+                Ok(outcome) => Some((
+                    outcome.describe(relocation),
+                    relocation_json(relocation, Some(&outcome)),
+                )),
+                Err(error) => {
+                    return report_failure(
+                        "server init",
+                        "The data folder was not moved; the existing install is unchanged.",
+                        error.to_string(),
+                        json_output,
+                    );
+                }
+            }
+        }
+    };
+    install_server("server init", &args, &install_args, moved, json_output)
 }
 
+/// Plan the move of an existing unit's data folder to the D395 default [#516].
+///
+/// Nothing is planned for a fresh install, an explicit `--data`, or a unit
+/// already at the standard folder with no unfinished move.
+#[cfg(feature = "plugin-server")]
+fn plan_server_data_move(
+    explicit_data: bool,
+    recorded: Option<&Path>,
+    scope: install_paths::Scope,
+    environment: &install_paths::Environment,
+    name: &str,
+) -> Result<Option<install_move::Relocation>, String> {
+    let Some(recorded) = recorded.filter(|_| !explicit_data) else {
+        return Ok(None);
+    };
+    let target =
+        install_paths::server_data_dir(scope, environment).map_err(|error| error.to_string())?;
+    let unit = install::unit_path(scope == install_paths::Scope::User, name)
+        .map_err(|error| error.to_string())?;
+    install_move::plan(recorded, &target, &unit).map_err(|error| error.to_string())
+}
+
+/// The move as JSON for `--json`: folders, method and any leftover to remove.
+#[cfg(feature = "plugin-server")]
+fn relocation_json(
+    relocation: &install_move::Relocation,
+    outcome: Option<&install_move::Outcome>,
+) -> serde_json::Value {
+    json!({
+        "from": relocation.from,
+        "to": relocation.to,
+        "same_filesystem": relocation.same_filesystem,
+        "unit_files": relocation.unit_files().collect::<Vec<_>>(),
+        "moved": outcome.is_some(),
+        "leftover": outcome.and_then(|outcome| outcome.leftover.as_ref()),
+        "warning": outcome.and_then(|outcome| outcome.warning.as_ref()),
+    })
+}
+
+/// Ask before creating the service on a terminal; `--yes` and `--dry-run` skip it.
+///
+/// `data_dir` is the text shown for the data folder, which names the old
+/// folder too when init is about to move it.
 #[cfg(feature = "plugin-server")]
 fn confirm_server_setup(
     yes: bool,
     dry_run: bool,
     listen: SocketAddr,
-    data_dir: &Path,
+    data_dir: &str,
     scope: &str,
 ) -> Result<(), String> {
     if yes || dry_run {
@@ -1382,8 +1483,7 @@ fn confirm_server_setup(
         return Err("pass --yes in non-interactive mode, or use --dry-run first".to_owned());
     }
     print!(
-        "Create and start the {scope} server service on {listen} with data in {}? [y/N] ",
-        data_dir.display()
+        "Create and start the {scope} server service on {listen} with data in {data_dir}? [y/N] ",
     );
     io::stdout()
         .flush()
@@ -1411,13 +1511,19 @@ fn run_server_install_compat(_matches: &ArgMatches, json_output: bool) -> ExitCo
     emit(result, json_output, Exit::Usage)
 }
 
+/// Install (or plan) the unit and print the result, with any data-folder move told first.
 #[cfg(feature = "plugin-server")]
 fn install_server(
     command: &str,
     args: &ServerArgs,
     install_args: &InstallArgs,
+    moved: Option<(String, serde_json::Value)>,
     json_output: bool,
 ) -> ExitCode {
+    let moved_note = moved
+        .as_ref()
+        .filter(|_| !install_args.dry_run)
+        .map(|(text, _)| text.clone());
     match install::install(args, install_args) {
         Ok(plan) => {
             let mut data = json!({
@@ -1425,6 +1531,15 @@ fn install_server(
                 "enabled": !install_args.dry_run,
                 "dry_run": install_args.dry_run,
             });
+            // The move is told first: in a dry run it is the first step, and
+            // after a real one its leftover note must not scroll away.
+            let (moved_text, plan) = match moved {
+                Some((text, value)) => {
+                    data["data_move"] = value;
+                    (text.clone(), format!("{text}{plan}"))
+                }
+                None => (String::new(), plan),
+            };
             if install_args.dry_run {
                 data["plan"] = json!(plan);
             }
@@ -1447,14 +1562,21 @@ fn install_server(
                 // The unit file is data for a person to read and copy: the generic renderer
                 // would reflow its lines into prose and break it.
                 result = result.with_body(plan);
+            } else if !moved_text.is_empty() {
+                result = result.with_body(moved_text);
             }
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
         }
+        // A move that already happened stays reported: its unit is switched
+        // and its leftover still needs the removal command.
         Err(error) => report_failure(
             command,
             "The server service could not be installed.",
-            error.to_string(),
+            match moved_note {
+                Some(note) => format!("{error}. {}", note.trim_end()),
+                None => error.to_string(),
+            },
             json_output,
         ),
     }

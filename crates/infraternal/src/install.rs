@@ -169,7 +169,8 @@ fn validate_name(name: &str) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
+/// The unit file `server init` writes for this scope and name.
+pub(super) fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
     let basename = format!("{name}.service");
     if user {
         let directory = match env::var_os("XDG_CONFIG_HOME") {
@@ -263,7 +264,8 @@ fn absolute(path: &Path) -> Result<PathBuf, InstallError> {
     }
 }
 
-fn quote_systemd(value: &std::ffi::OsStr) -> Result<String, InstallError> {
+/// Quote one `ExecStart` word as `server init` writes it; control characters are refused.
+pub(super) fn quote_systemd(value: &std::ffi::OsStr) -> Result<String, InstallError> {
     let value = value.to_str().ok_or(InstallError::Invalid)?;
     if value
         .bytes()
@@ -277,7 +279,8 @@ fn quote_systemd(value: &std::ffi::OsStr) -> Result<String, InstallError> {
     ))
 }
 
-fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+/// Replace a file by writing a fsynced sibling and renaming it over the original.
+pub(super) fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "unit path has no parent")
     })?;

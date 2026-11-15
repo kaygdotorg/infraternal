@@ -24,12 +24,14 @@
 //! (`infraternal-server`'s `remote_startup::default_ca_dir`). macOS has a single
 //! Application Support folder for both, as D395 says.
 //!
-//! # Existing installs are never moved here
+//! # Existing installs
 //!
-//! The new defaults apply only to a fresh install. [`resolve_server_init`] keeps
-//! the folders recorded in the unit it would overwrite, so re-running init
-//! leaves the unit byte-for-byte unchanged and never orphans a custom folder.
-//! Moving old locations is the updater's job (D395, "moved on the next update").
+//! [`resolve_server_init`] reports the folders recorded in the unit it would
+//! overwrite, so a custom web root is kept and a re-run plans the same unit.
+//! When that unit's data folder is not the default above and no `--data` was
+//! given, `server init` then moves it there with `install_move` (owner,
+//! 2026-11-15: "change for existing installs too"), which also rewrites the
+//! unit. An explicit `--data` keeps any folder where it is.
 //!
 //! # Not routed through here (yet)
 //!
