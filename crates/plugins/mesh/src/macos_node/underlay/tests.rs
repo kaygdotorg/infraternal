@@ -429,3 +429,93 @@ async fn the_kernel_reports_real_changes_only() {
     assert!(!lookup, "a route lookup is not a change");
     assert!(!idle, "nothing changed, so nothing is announced");
 }
+
+/// Decode a 64-character hex `WireGuard` key from the harness environment.
+fn harness_key(name: &str) -> [u8; 32] {
+    let hex = std::env::var(name).expect("harness key variable");
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex key"))
+        .collect();
+    bytes.try_into().expect("32-byte key")
+}
+
+/// The real-change proof's Mac side (#483 J710): this module's utun, the bound UDP factory and
+/// the pinned `GotaTun` device on a current-thread runtime, as the worker builds them, with one
+/// static peer (keepalive 25 s, D392) and the worker's own announce path
+/// ([`UnderlayAnnouncer`] plus `request_keepalives`). `J710_WATCH=off` leaves the announce path
+/// out, which is the node before this change; nothing else differs.
+///
+/// Root only (utun). Environment: `J710_PRIVATE_HEX`, `J710_PEER_PUBLIC_HEX`, `J710_ENDPOINT`
+/// (peer `ip:port`), `J710_PORT`, `J710_ADDR` and `J710_PEER_ADDR` (tunnel IPv4 addresses),
+/// `J710_IFNAME_FILE` (the utun name is written there once up). It runs until SIGTERM, so an
+/// idle run adds no wakeup of its own. Run with
+/// `cargo test --release --features agent --lib mac_underlay_announce_device -- --ignored`.
+#[test]
+#[ignore = "proof harness: root, a live peer and the J710_* environment"]
+fn mac_underlay_announce_device() {
+    use crate::macos_node::{BoundUdpFactory, MacUtun, OpenUtun};
+    use gotatun::{
+        device::{DeviceBuilder, Peer as WireGuardPeer},
+        udp::{UdpTransportFactory, UdpTransportFactoryParams, socket::UdpSocketFactory},
+        x25519::{PublicKey, StaticSecret},
+    };
+    let var = |name: &str| std::env::var(name).expect("harness variable");
+    let port: u16 = var("J710_PORT").parse().expect("port");
+    let endpoint: std::net::SocketAddr = var("J710_ENDPOINT").parse().expect("endpoint");
+    let peer_addr: IpAddr = var("J710_PEER_ADDR").parse().expect("peer address");
+    let watch = std::env::var("J710_WATCH").as_deref() != Ok("off");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let mut stop = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        let utun = MacUtun::from_open(OpenUtun::open().expect("utun")).expect("register utun");
+        let mut factory = UdpSocketFactory::default();
+        let params = UdpTransportFactoryParams { addr: None, port };
+        let (send, receive) = factory.bind(&params).await.expect("bind");
+        let factory = BoundUdpFactory {
+            send,
+            receive,
+            port,
+        };
+        let mut peer = WireGuardPeer::new(PublicKey::from(harness_key("J710_PEER_PUBLIC_HEX")))
+            .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
+        peer.endpoint = Some(endpoint);
+        peer.keepalive = Some(25);
+        let device = DeviceBuilder::new()
+            .with_udp(factory)
+            .with_private_key(StaticSecret::from(harness_key("J710_PRIVATE_HEX")))
+            .with_listen_port(port)
+            .with_ip_pair(utun.sender(), utun.receiver())
+            .with_peers(vec![peer])
+            .build()
+            .await
+            .expect("device");
+        utun.set_mtu(1280);
+        run("/sbin/ifconfig", &[
+            utun.name(),
+            "inet",
+            &var("J710_ADDR"),
+            &peer_addr.to_string(),
+            "mtu",
+            "1280",
+            "up",
+        ]);
+        std::fs::write(var("J710_IFNAME_FILE"), utun.name()).expect("publish the utun name");
+        let mut announcer = watch.then(|| UnderlayAnnouncer::start(utun.name()));
+        eprintln!("J710 harness up: watch={watch}");
+        loop {
+            tokio::select! {
+                _ = stop.recv() => break,
+                () = super::super::announcement_due(announcer.as_mut()) => {
+                    let sessions = device.request_keepalives().await;
+                    eprintln!("J710 announce {:?} sessions={sessions}", std::time::SystemTime::now());
+                }
+            }
+        }
+        device.stop().await;
+    });
+}
