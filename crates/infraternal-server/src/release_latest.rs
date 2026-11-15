@@ -93,10 +93,7 @@ pub(crate) fn start_updates(
     pool: sqlx::SqlitePool,
     data: &Path,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let artifact = infraternal_plugin_release::update::artifact_name()?;
-    if env!("INFRATERNAL_RELEASE_BUILD") != "1" || !nix::unistd::geteuid().is_root() {
-        return None;
-    }
+    let artifact = infraternal_plugin_release::update::availability(release_build()).ok()?;
     let updater = infraternal_plugin_release::update::Updater::new(
         data,
         ORIGIN.into(),
@@ -110,19 +107,29 @@ pub(crate) fn start_updates(
     );
     Some(Arc::new(updater).spawn())
 }
+/// Whether this binary is a pipeline release build (`INFRATERNAL_RELEASE_BUILD=1`).
+fn release_build() -> bool {
+    env!("INFRATERNAL_RELEASE_BUILD") == "1"
+}
+
 /// Bind declared release actions to an existing private state directory; never initialize a server.
 #[must_use]
 pub fn release_service(pool: sqlx::SqlitePool, state: &Path) -> ReleaseService {
     ReleaseService::new(
         pool,
-        Arc::new(VerifiedLookup::new(
-            state.to_owned(),
-            ORIGIN.into(),
-            Arc::new(Engine {
-                #[cfg(test)]
-                trust: None,
-            }),
-        )),
+        Arc::new(
+            VerifiedLookup::new(
+                state.to_owned(),
+                ORIGIN.into(),
+                Arc::new(Engine {
+                    #[cfg(test)]
+                    trust: None,
+                }),
+            )
+            .with_updates(
+                infraternal_plugin_release::update::availability(release_build()).map(|_| ()),
+            ),
+        ),
     )
 }
 pub(crate) async fn plugin(

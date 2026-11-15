@@ -15,6 +15,8 @@ pub struct VerifiedLookup {
     state: PathBuf,
     origin: String,
     engine: Arc<dyn ReleaseEngine>,
+    /// Whether this server runs the update check, or why not; see [`VerifiedLookup::with_updates`].
+    updates: Result<(), &'static str>,
 }
 struct Staging {
     path: PathBuf,
@@ -112,6 +114,7 @@ impl VerifiedLookup {
             state,
             origin,
             engine,
+            updates: Err(NO_UPDATER),
         }
     }
 
@@ -331,6 +334,20 @@ fn cleanup_abandoned_staging(state: &Path) -> std::io::Result<()> {
     drop(state_lock);
     Ok(())
 }
+/// The status reason for a lookup whose server never said whether it runs the updater.
+const NO_UPDATER: &str = "this server does not run the update check";
+
+impl VerifiedLookup {
+    /// Say whether this server runs the update check (`Ok`) or why not (the reason from
+    /// [`crate::update::availability`]), so `release.update.status` can report it
+    /// plainly (J725 P3-4). Without this call the status reports updates as off.
+    #[must_use]
+    pub fn with_updates(mut self, updates: Result<(), &'static str>) -> Self {
+        self.updates = updates;
+        self
+    }
+}
+
 impl ReleaseLookup for VerifiedLookup {
     fn latest<'a>(&'a self, channel: &'a str) -> Operation<'a, Result<Value, &'static str>> {
         Box::pin(async move {
@@ -339,13 +356,21 @@ impl ReleaseLookup for VerifiedLookup {
                 .map_err(|_| "release check exceeded its time limit")?
         })
     }
-    /// The data folder's `updates/state.json`, read without a lock (#211 S3).
+    /// The data folder's `updates/state.json`, read without a lock (#211 S3), plus
+    /// `mode` (`auto` or `off`) and `reason` (why it is off, else null).
     fn update_status(&self) -> Result<Value, &'static str> {
-        serde_json::to_value(crate::update::status(
+        let mut state = serde_json::to_value(crate::update::status(
             &self.state,
             infraternal_plugin_api::VERSION,
         ))
-        .map_err(|_| "updates unavailable")
+        .map_err(|_| "updates unavailable")?;
+        let (mode, reason) = match self.updates {
+            Ok(()) => ("auto", Value::Null),
+            Err(reason) => ("off", Value::String(reason.to_owned())),
+        };
+        state["mode"] = Value::String(mode.to_owned());
+        state["reason"] = reason;
+        Ok(state)
     }
 }
 

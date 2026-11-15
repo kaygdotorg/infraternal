@@ -273,6 +273,34 @@ pub fn artifact_name() -> Option<&'static str> {
     }
 }
 
+/// Why updates are off on a non-Linux host or one without a published server image.
+pub const OFF_PLATFORM: &str = "auto-update runs only on Linux servers (x86_64 or aarch64)";
+/// Why updates are off in a development build, whose version is not a signed release.
+pub const OFF_DEVELOPMENT: &str =
+    "this is a development build; only signed release builds update themselves";
+/// Why updates are off on a server that does not run as root.
+pub const OFF_NOT_ROOT: &str =
+    "the server is not running as root, so it cannot replace its own binary";
+
+/// Whether this process may run the update check, and if not, why (J725 P3-4).
+///
+/// `release_build` is whether this binary is a pipeline release build (the server's
+/// `INFRATERNAL_RELEASE_BUILD`). The check runs only where an update could ever be
+/// applied: a release build, on a platform with a published image, as root (the D295
+/// switch replaces a root-owned binary). Returns the image name to stage.
+/// # Errors
+/// [`OFF_PLATFORM`], [`OFF_DEVELOPMENT`] or [`OFF_NOT_ROOT`], in that order.
+pub fn availability(release_build: bool) -> Result<&'static str, &'static str> {
+    let artifact = artifact_name().ok_or(OFF_PLATFORM)?;
+    if !release_build {
+        return Err(OFF_DEVELOPMENT);
+    }
+    if !nix::unistd::geteuid().is_root() {
+        return Err(OFF_NOT_ROOT);
+    }
+    Ok(artifact)
+}
+
 /// Reads the `release` plugin's switch and channel, the same way the plugin's actions do.
 pub type Settings = Arc<
     dyn Fn() -> infraternal_plugin_api::Operation<'static, Result<(bool, String), &'static str>>

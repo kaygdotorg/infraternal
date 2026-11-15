@@ -11,7 +11,7 @@
 //! re-verified (or removed) before use; and a release the channel withdraws is removed,
 //! both by the periodic check and by S4's apply-time confirmation; policy refusals and
 //! "updates off" never back off the timer; and an explicit rollback holds until it is
-//! applied or cancelled.
+//! applied or cancelled; and the status says when updates are off on this host, and why.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::release_payload::tests::{Bucket, Release};
@@ -479,6 +479,18 @@ async fn the_timer_stages_on_its_own_and_status_reports_it() {
     assert_eq!(shown["available"], NEW);
     assert_eq!(shown["channel"], "edge");
     assert_eq!(shown["current"], infraternal_plugin_api::VERSION);
+    // It says plainly whether this host updates itself, and why not (J725 P3-4). Test
+    // binaries are development builds or run unprivileged, so this host reports off.
+    match infraternal_plugin_release::update::availability(super::release_build()) {
+        Ok(_) => {
+            assert_eq!(shown["mode"], "auto");
+            assert!(shown["reason"].is_null());
+        }
+        Err(reason) => {
+            assert_eq!(shown["mode"], "off");
+            assert_eq!(shown["reason"], reason);
+        }
+    }
 }
 
 /// A `staged/` found on disk is re-verified before use, never taken on its word (J725

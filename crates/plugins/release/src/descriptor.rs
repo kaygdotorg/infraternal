@@ -71,6 +71,7 @@ pub const UPDATE_STATUS: ActionDef = ActionDef {
     instructions: &[
         "Read the running version, the channel, the newest verified release, the staged release, and the last and next check.",
         "A staged release is verified and waiting; staging never applies it.",
+        "mode is auto or off; when off, reason says why updates are off on this host.",
         "Subscribe to release.update to receive the same state whenever it changes.",
     ],
     input: CHANNEL_GET.input,

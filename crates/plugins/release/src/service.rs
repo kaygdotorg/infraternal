@@ -157,6 +157,9 @@ impl ReleaseService {
             return Ok(json!({"channel":setting.channel}));
         }
         parse_empty(input).map_err(|_| "invalid input")?;
+        if action == UPDATE_STATUS.id {
+            return self.update_status().await;
+        }
         let (enabled, channel) = settings(&self.pool).await?;
         if !enabled {
             return Err("release unavailable");
@@ -165,16 +168,41 @@ impl ReleaseService {
             Ok(json!({"channel":channel}))
         } else if action == LATEST.id {
             self.lookup.latest(&channel).await
-        } else if action == UPDATE_STATUS.id {
-            let mut state = self.lookup.update_status()?;
-            // The setting is authoritative; the file holds the channel of the last check.
-            state["channel"] = Value::String(channel);
-            Ok(state)
         } else {
             Err("invalid input")
         }
     }
+
+    /// `release.update.status`: the update state with `mode` and `reason` (J725 P3-4).
+    ///
+    /// It answers even when the release plugin is off, because "updates are off, and
+    /// why" is exactly what the owner needs then. A host-level reason (not Linux, a
+    /// development build, not root) comes first, since switching the plugin on would
+    /// not help; otherwise a switched-off plugin or an unusable channel setting is the
+    /// reason. The channel shown is the saved setting, not the last check's.
+    async fn update_status(&self) -> Result<Value, &'static str> {
+        let mut state = self.lookup.update_status()?;
+        let off = match settings(&self.pool).await {
+            Ok((true, channel)) => {
+                state["channel"] = Value::String(channel);
+                None
+            }
+            Ok((false, _)) => Some(crate::update::UPDATES_OFF),
+            Err("invalid release channel setting") => Some(NO_CHANNEL),
+            Err(reason) => return Err(reason),
+        };
+        if let Some(reason) = off
+            && state["mode"] != "off"
+        {
+            state["mode"] = Value::String("off".to_owned());
+            state["reason"] = Value::String(reason.to_owned());
+        }
+        Ok(state)
+    }
 }
+
+/// The status reason when the saved channel is neither stable nor edge.
+const NO_CHANNEL: &str = "no valid release channel is set; choose stable or edge";
 
 #[cfg(test)]
 #[path = "service_tests.rs"]
