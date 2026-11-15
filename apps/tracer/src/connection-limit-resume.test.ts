@@ -25,9 +25,13 @@ function resumeAfterRefusal(reason: string): boolean[] {
     onopen?: () => void;
     onclose?: (event: { code: number; reason: string }) => void;
     onmessage?: (event: { data: ArrayBuffer }) => void;
+    /** Records each socket the connection opens. */
     constructor() { sockets.push(this); }
+    /** Frames the page sends are not inspected here. */
     send() {}
+    /** Delivers one control frame from the "server". */
     receive(frame: Parameters<typeof encodeMuxedFrame>[1]) { this.onmessage?.({ data: encodeMuxedFrame(0, frame).slice().buffer as ArrayBuffer }); }
+    /** The page closed it; no close event follows, as for a socket the page already retired. */
     close() { this.readyState = 3; }
   }
   let connection: MuxConnection | undefined;

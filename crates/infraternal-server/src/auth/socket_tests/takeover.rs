@@ -3,7 +3,7 @@ use super::*;
 
 /// Hello bit 2: this page reports its visibility on control Event 0.
 const VIEWER_VISIBILITY: u64 = 1 << 2;
-/// The reason a taken-over tab is closed with (stream_close.rs `TAKEN_OVER`).
+/// The reason a taken-over tab is closed with (`stream_close.rs`, `TAKEN_OVER`).
 const TAKEN_OVER_TEXT: &str = "another tab of this account is using this connection";
 
 /// Opens one welcomed socket for `cookie` that reports its visibility.
@@ -106,9 +106,15 @@ async fn a_full_account_takes_over_its_own_longest_hidden_tab() {
     }
 
     let _seventeenth = welcomed_viewer(address, &cookie).await;
-    assert_eq!(read_close(&mut tabs[15]).await, (1000, TAKEN_OVER_TEXT.to_owned()));
+    assert_eq!(
+        read_close(&mut tabs[15]).await,
+        (1000, TAKEN_OVER_TEXT.to_owned())
+    );
     let _eighteenth = welcomed_viewer(address, &cookie).await;
-    assert_eq!(read_close(&mut tabs[14]).await, (1000, TAKEN_OVER_TEXT.to_owned()));
+    assert_eq!(
+        read_close(&mut tabs[14]).await,
+        (1000, TAKEN_OVER_TEXT.to_owned())
+    );
 
     // The other account's tab, hidden before any of them, still answers.
     report_visibility(&mut other, true, 100).await;

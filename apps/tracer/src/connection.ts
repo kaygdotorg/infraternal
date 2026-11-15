@@ -581,6 +581,7 @@ export class MuxConnection {
     for (const s of this.streams.values()) s.onStatus(message);
   }
 
+  /** Opens a new socket and sends its Hello (and Resume, while one is still valid); a paused hidden tab waits instead. */
   private connect(): void {
     if (this.closed) return;
     this.clearRetryTimer();
@@ -844,6 +845,7 @@ export class MuxConnection {
   sessionIncarnation: string | undefined;
   terminalQueryReplies = false;
 
+  /** Handles one control-stream frame from the server: Hello, Welcome, results, events and the server's Close. */
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":

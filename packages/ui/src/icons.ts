@@ -1,3 +1,4 @@
+/** The shared line icons, as inner SVG markup on one 24 px grid, and the helper that wraps one in an svg. */
 import { TICK_PATH } from "./tick";
 
 /**

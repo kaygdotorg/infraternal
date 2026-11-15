@@ -2,6 +2,7 @@
 use super::*;
 #[path = "socket_tests/startup_guard.rs"]
 mod startup_guard;
+/// A full account's new page takes over its own longest-hidden tab (#523).
 #[path = "socket_tests/takeover.rs"]
 mod takeover;
 

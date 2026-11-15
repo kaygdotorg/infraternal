@@ -176,6 +176,7 @@ impl Drop for AccountSlot {
     }
 }
 
+/// Which socket is taken over, and what never is.
 #[cfg(test)]
 #[path = "account_sockets_tests.rs"]
 mod tests;

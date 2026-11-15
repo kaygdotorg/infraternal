@@ -37,7 +37,11 @@ async fn the_longest_hidden_socket_is_taken_over() {
     let taken = account.take_over_hidden(TAKEOVER_WAIT).await;
     assert!(taken.is_some(), "the new page gets the freed slot");
     ended.await.unwrap();
-    assert_eq!(Arc::strong_count(&oldest_viewer), 1, "the taken-over socket ended");
+    assert_eq!(
+        Arc::strong_count(&oldest_viewer),
+        1,
+        "the taken-over socket ended"
+    );
     assert!(!newest_hidden.viewer.claimed.load(Ordering::Acquire));
     assert!(!slots[0].viewer.claimed.load(Ordering::Acquire));
 }

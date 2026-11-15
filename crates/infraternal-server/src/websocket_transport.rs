@@ -126,6 +126,8 @@ fn queue_reply(sender: &mpsc::Sender<Reply>, reply: Reply) -> bool {
     }
 }
 
+/// What one socket's reader, proof task and writer share: who it belongs to, the writer, the liveness lease, the
+/// page's visibility (for probes and for takeover, #523) and how the socket ended.
 struct Context {
     state: Arc<WebSocketState>,
     user: String,
@@ -275,6 +277,8 @@ impl Drop for Transport {
 }
 
 impl Transport {
+    /// Starts one socket's transport: the reader and proof tasks, and the serialized writer the loop sends through.
+    /// `viewer` is the socket's entry in its account's list; the reader records the page's visibility on it.
     pub(super) fn start(
         writer: SplitSink<WebSocket, Message>,
         reader: SplitStream<WebSocket>,
@@ -473,7 +477,8 @@ fn visibility_notice(json: &[u8]) -> Option<bool> {
         .then(|| notice.get("hidden")?.as_bool())?
 }
 
-// Keep transport controls in one reader turn, ahead of bounded application admission.
+/// Reads the socket: answers transport probes and visibility notices in the reader turn itself, ahead of bounded
+/// application admission, and queues everything else for the socket loop.
 async fn read(
     context: Arc<Context>,
     mut reader: SplitStream<WebSocket>,
