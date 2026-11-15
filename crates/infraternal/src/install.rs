@@ -112,6 +112,24 @@ fn write_unit_after_data(
     Ok(())
 }
 
+/// The program the unit runs and the PATH link points at: one path for both (J719 P2).
+///
+/// The link must name exactly what the service runs, so it can never be left
+/// pointing at a binary the service no longer uses. `server init` does not
+/// copy itself into an install folder, so that program is the running binary.
+/// It is canonicalised so neither the unit nor the link records a symlink:
+/// on macOS the running path may be the PATH link itself, and a link to
+/// itself would loop. On Linux `current_exe` is already the resolved
+/// `/proc/self/exe`, so units written before this keep their exact text.
+fn service_program() -> std::io::Result<PathBuf> {
+    env::current_exe().and_then(fs::canonicalize)
+}
+
+/// Whether `binary` lives under the temporary folder, where it may vanish.
+fn in_temporary_folder(binary: &Path) -> bool {
+    fs::canonicalize(env::temp_dir()).is_ok_and(|temporary| binary.starts_with(temporary))
+}
+
 /// The scope and binary the PATH link is made for, from the real environment.
 fn link_target(
     user: bool,
@@ -123,9 +141,7 @@ fn link_target(
     ),
     InstallError,
 > {
-    let binary = env::current_exe()
-        .and_then(fs::canonicalize)
-        .map_err(InstallError::Io)?;
+    let binary = service_program().map_err(InstallError::Io)?;
     let scope = if user {
         super::install_paths::Scope::User
     } else {
@@ -154,7 +170,16 @@ fn link_note(user: bool) -> String {
             .map(|outcome| outcome.describe(&binary))
             .map_err(|error| InstallError::Io(std::io::Error::other(error.to_string())))
     });
-    result.unwrap_or_else(|error| format!("Could not set up the `infraternal` command: {error}"))
+    let note = result
+        .unwrap_or_else(|error| format!("Could not set up the `infraternal` command: {error}"));
+    match service_program() {
+        Ok(binary) if in_temporary_folder(&binary) => format!(
+            "{note} Note: the service and the link use {}, which is in the temporary folder; \
+             move the binary somewhere permanent and run init again from there.",
+            binary.display()
+        ),
+        _ => note,
+    }
 }
 
 fn validate_name(name: &str) -> Result<(), InstallError> {
@@ -184,13 +209,14 @@ pub(super) fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError>
     }
 }
 
+/// The unit text `server init` writes; every path in `ExecStart` is absolute and quoted.
 fn render_unit(
     args: &ServerArgs,
     name: &str,
     origin: &str,
     user: bool,
 ) -> Result<String, InstallError> {
-    let binary = env::current_exe().map_err(InstallError::Io)?;
+    let binary = service_program().map_err(InstallError::Io)?;
     let data = absolute(&args.data)?;
     let mut command = vec![binary.into_os_string()];
     command.extend([
@@ -425,5 +451,44 @@ mod tests {
         assert_eq!(fs::read_to_string(&unit).unwrap(), "new");
         assert!(data.is_dir());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The unit's program and the PATH link's target are the same canonical path (J719 P2).
+    #[test]
+    fn the_link_points_at_exactly_what_the_unit_runs() {
+        let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
+            listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
+            data: PathBuf::from("/srv/state"),
+            public_origin: Some("https://localhost:47361".to_owned()),
+            web_root: None,
+            tls_cert: None,
+            tls_key: None,
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+        };
+        let unit = render_unit(&args, "x", "https://localhost:47361", true).unwrap();
+        let (_, _, linked) = link_target(true).unwrap();
+        let program = service_program().unwrap();
+        assert_eq!(linked, program);
+        assert_eq!(
+            fs::canonicalize(&program).unwrap(),
+            program,
+            "no symlink recorded"
+        );
+        let exec = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .unwrap();
+        let words = infraternal_status::exec_words(exec).unwrap();
+        assert_eq!(Path::new(&words[0]), program);
+        assert!(in_temporary_folder(
+            &fs::canonicalize(env::temp_dir())
+                .unwrap()
+                .join("infraternal")
+        ));
+        assert!(!in_temporary_folder(Path::new(
+            "/usr/local/bin/infraternal"
+        )));
     }
 }
