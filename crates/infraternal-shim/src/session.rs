@@ -183,10 +183,11 @@ struct Peer {
     stopping: bool,
     request: Option<Request>,
     /// True from a `ReadFrom` that started a raw replay of bytes already
-    /// written until this viewer's next `Resize`. Raw bytes are only right at
-    /// the size they were written for, and a viewer reports its size just
-    /// after attaching. If that size changes the geometry, the viewer gets a
-    /// Snapshot of the reflowed engine instead (#521).
+    /// written until this viewer's next `Resize` or input. Raw bytes are only
+    /// right at the size they were written for, and a viewer reports its size
+    /// just after attaching, before it types. If that size differs from the
+    /// session's (once a viewer has ever sized it), the viewer gets a Snapshot
+    /// of the engine instead (#521).
     replay_awaits_size: bool,
 }
 impl Peer {
@@ -1440,6 +1441,9 @@ fn handle<'a>(
             return Err(io::ErrorKind::WouldBlock.into());
         }
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
+        // Typing means this peer is past its attach (browsers report their
+        // size before any input), so a later Resize is a live one (#521).
+        p.replay_awaits_size = false;
         trace_host!(
             InputQueued,
             config.session,
