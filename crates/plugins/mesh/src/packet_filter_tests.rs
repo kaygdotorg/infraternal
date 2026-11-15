@@ -1805,6 +1805,36 @@ fn a_later_tcp_fragment_cannot_overlap_the_tcp_header() {
     assert!(filter.check_at(&mut rest, Direction::HostToMesh, now));
 }
 
+/// The IPv4 overlap guard covers TCP options, not only the 20-byte minimum header (J750
+/// P3 1, #265). The first fragment's TCP header carries 20 bytes of options (data offset
+/// 10), so the filter judged bytes up to 40. A later fragment at offset 24 passes the
+/// parser's stateless "starts inside 20 bytes" check, yet would rewrite judged options, so
+/// `FragmentEntry::judged_end` must refuse it. The fragment at offset 40 still passes.
+#[test]
+fn an_ipv4_later_fragment_cannot_overlap_tcp_options() {
+    let filter = PacketFilter::new(
+        &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+        MeshProxyIngress::default(),
+    )
+    .expect("compile policy");
+    let now = Instant::now();
+    let mut datagram = tcp4(LOCAL4, PEER4, 40_000, 443, SYN);
+    // Data offset 10 words: a 40-byte TCP header, 20 of it options.
+    datagram[32] = 0xa0;
+    datagram.extend_from_slice(&[0; 40]);
+    let total_len = u16::try_from(datagram.len()).expect("test TCP packet fits IPv4 length");
+    datagram[2..4].copy_from_slice(&total_len.to_be_bytes());
+    let mut first = ipv4_fragment(&datagram, 31, 0, 40, true);
+    let mut overlap = ipv4_fragment(&datagram, 31, 24, 16, true);
+    let mut rest = ipv4_fragment(&datagram, 31, 40, 20, false);
+    assert!(filter.check_at(&mut first, Direction::HostToMesh, now));
+    assert!(
+        !filter.check_at(&mut overlap, Direction::HostToMesh, now),
+        "a later IPv4 fragment at offset 24 overlapped TCP options judged up to 40"
+    );
+    assert!(filter.check_at(&mut rest, Direction::HostToMesh, now));
+}
+
 /// Build an `ICMPv4` message of `kind` (code 0) with identifier `identifier`.
 fn icmp4(source: Ipv4Addr, destination: Ipv4Addr, kind: u8, identifier: u16) -> Vec<u8> {
     let mut packet = vec![0_u8; 40];
