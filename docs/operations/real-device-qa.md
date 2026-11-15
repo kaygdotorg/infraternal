@@ -180,7 +180,7 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
   REVIEW, and `check --phases shell` reruns it.
 - Production cannot be signed in to from a simulator without the owner's own passkey, so prod gets no real-device run
   yet.
-- Mac Safari is not covered. On 2026-11-11 `claude@infraternal-macos-01-std` could not `sudo -n` (a password is
+- (Superseded: see "Dark mode on the Mac VM" below.) Mac Safari is not covered. On 2026-11-11 `claude@infraternal-macos-01-std` could not `sudo -n` (a password is
   required), so neither `launchctl asuser 501 ... -u lume` (a GUI session to click in) nor `safaridriver --enable`
   was possible, and the Mac VM has no Touch ID for a platform passkey anyway. The same approach (its own owner on
   its own QA instance) would work if the Mac VM can make a passkey; that is unproven.
@@ -198,3 +198,22 @@ is never touched). Writing that database directly works only because System Inte
 VM; with SIP on, give the grant once by hand in System Settings → Privacy & Security → Screen Recording. Both commands
 refuse to run unless the target's host name is `infraternal-macos-01-std`, so a `QA_MAC` pointed at std itself is never
 touched. A stale system dialog on the VM's screen (for example a disk-unlock prompt) shows up in the picture.
+
+## Dark mode on the Mac VM (J752, #510)
+
+AppleScript to the console session times out, and it is not needed. `scripts/real-device-qa mac` now sets the VM's appearance
+with `real-device-qa-mac-appearance.sh` (`defaults write -g AppleInterfaceStyle Dark`, as lume, under the Mac lock; `light`
+deletes the key so the VM is left as found) and restores light when it ends. The flow picks the run's colour theme through the
+palette (Mocha or Latte) and fails the run unless the page looks like it (`theme-looks-dark` / `theme-looks-light`, from the
+luminance of the first opaque background under the page centre). Measured 2026-11-15: after the `defaults` write Safari reported
+`prefers-color-scheme: dark` in one safaridriver session; in the next the write had not reached Safari yet (a short sleep was
+added). **Not yet proven end to end:** the palette pick in the Mac flow did not turn the page dark in the one run that could get
+the Mac lock (other jobs held it for hours), so a dark Mac run still reports `theme-looks-dark` FAIL. That is the honest result,
+not a pass; the pick needs one interactive look at the Mac palette.
+
+## Known limit: locked CA and the ghost pane (J752, #510)
+
+While QA1's host CA is locked, a fresh load can stay on one never-connecting "SSH shell" pane of the server's own host (its key
+bar hides the toolbar and the views pill; the QA host is not listed). Every phase after sign-in then reports missing controls.
+Seen on 2026-11-15 after a run that opened a shell on the server's own host through the palette. The `unlock` phase is meant to
+clear it but needs the palette, which this pane hides. A run that starts there fails honestly; a human has to unlock once.
