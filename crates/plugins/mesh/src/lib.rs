@@ -68,6 +68,10 @@ pub mod gotatun_node;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
 
+/// Coalesced underlay endpoint announcements, shared by the Linux and macOS engines (#483).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+mod underlay_announce;
+
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Derives per-peer mesh route MTUs and a shared IPv6-safe interface MTU.
 mod mesh_mtu;
