@@ -1285,6 +1285,22 @@ mod tests {
             key_agreements(&admission) - before,
             per_packet(cpu, rejected)
         );
+        // Rejected from known endpoints that used up their share of the reserve (J748): each
+        // packet finds its slot, then takes the path every other source takes.
+        let before = key_agreements(&admission);
+        let cpu = thread_cpu();
+        for index in 0..rejected {
+            let spoofed = known[index as usize % known.len()];
+            let verdict = admission.check(&Packet::copy_from(&flood), spoofed, now);
+            assert_eq!(verdict, Err(Refusal::NodeBudget));
+        }
+        let cpu = thread_cpu().saturating_sub(cpu);
+        println!(
+            "J748 past their reserve share, 2,000 known endpoints: {rejected} rejected \
+             initiations, {} key agreements, {:.3} us CPU per rejected packet",
+            key_agreements(&admission) - before,
+            per_packet(cpu, rejected)
+        );
         let budget = admission.budget.lock().expect("budget lock");
         let map_bytes = |entries: usize, capacity: usize, entry: usize| {
             // hashbrown: a power-of-two bucket count of at least capacity * 8 / 7, one control
@@ -1295,7 +1311,7 @@ mod tests {
         };
         let source_entry = size_of::<(super::SourceKey, super::Spend)>();
         let network_entry = size_of::<(super::NetworkKey, super::Spend)>();
-        println!("J717 limiter memory at its bound:");
+        println!("J748 limiter memory at its bound:");
         let sources = map_bytes(
             budget.sources.len(),
             budget.sources.capacity(),
@@ -1309,10 +1325,14 @@ mod tests {
         let endpoints = (admission.configured_endpoints.capacity()
             + admission.confirmed_endpoints.capacity())
             * size_of::<super::EndpointKey>();
+        // One reserve counter per known endpoint slot (J748).
+        let shares = budget.endpoints.capacity() * size_of::<u8>();
         println!(
-            "J717 limiter memory: sources {sources} B, networks {networks} B, \
-             known endpoints {endpoints} B for {NODE_BUDGET} peers, total {:.1} KiB",
-            f64::from(u32::try_from(sources + networks + endpoints).expect("fits")) / 1024.0
+            "J748 limiter memory: sources {sources} B, networks {networks} B, \
+             known endpoints {endpoints} B and their reserve counters {shares} B for \
+             {NODE_BUDGET} peers, total {:.1} KiB",
+            f64::from(u32::try_from(sources + networks + endpoints + shares).expect("fits"))
+                / 1024.0
         );
         drop(budget);
 
