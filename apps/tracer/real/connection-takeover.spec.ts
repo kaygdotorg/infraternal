@@ -120,6 +120,9 @@ test("a full account's new page takes over its longest-hidden tab, which pauses 
         await expect(fresh.page.locator("#terminal-screen")).toHaveAttribute("data-connected", "true", { timeout: 15_000 });
         await expect(toast(fresh.page, "Too many open tabs")).toHaveCount(0);
         await expect(windows(fresh.page)).toHaveCount(1);
+        // The terminal reattaches, and the offline spell's own "connection ended" notice clears once it has.
+        await expect(fresh.page.getByRole("button", { name: /shell, connected/ })).toBeVisible({ timeout: 15_000 });
+        await expect(fresh.page.locator(".ui-toast").filter({ hasText: "connection to the server ended" })).toHaveCount(0, { timeout: 15_000 });
         await receipts(fresh.page, "resumed", scheme);
       } finally {
         for (const connection of held) connection.close();
