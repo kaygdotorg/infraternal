@@ -27,9 +27,10 @@
 //! follow updates across cold starts runs `updates/current/<image>` (S6 points the
 //! production unit there).
 //!
-//! **One live server.** Every switch, forward or back, is a same-PID exec. Two server
-//! processes never run at once, and nothing else in the runtime directory (the mesh
-//! key in `/run` included) is touched.
+//! **One live server.** Every switch, forward or back, is a same-PID exec, so two
+//! server processes never run at once. The mesh identity is never lost: it lives in
+//! `<data>/mesh/` (#489), and the switch mirrors it to the legacy runtime path for a
+//! previous build, which an undo requires before it starts.
 //!
 //! Layout inside `<data>/updates/` (all of it root-only, under the S3 folder lock):
 //!
@@ -108,8 +109,8 @@ pub struct Pending {
 
 /// How often B retries the warm undo when its exec of A keeps failing. After that B keeps
 /// serving and the marker stays in phase `rollback`, so A's next cold start still
-/// restores its database copy; B never exits on its own (an exit would lose state the
-/// service manager keeps only while the process lives, such as the mesh key in `/run`).
+/// restores its database copy. B never exits on its own: an exit is a cold start that
+/// locks the CA (D168), and its service manager may clear the runtime directory.
 pub const MAX_UNDO_ATTEMPTS: u32 = 3;
 /// The [`Resume::Finished`] outcome once B gave up undoing itself.
 pub const UNDO_FAILED: &str = "undo-failed";

@@ -208,8 +208,10 @@ The switch is the same warm in-memory handoff as `infraternal server … restart
 unlocked on a private stdin pipe, and live sessions continue in their own shim
 processes. If the CA is unlocked when the switch starts, whether by an earlier
 handoff or a passkey, the new release must receive it, or the switch is refused
-and nothing changes. Nothing in the runtime directory is touched, including the
-mesh key that production keeps in `/run`.
+and nothing changes. Like any restart into a named binary, the switch mirrors the
+durable mesh identity (`<data>/mesh/`, #489) to the legacy runtime path, so a
+previous build finds it too. An undo does not start the previous build without
+that mirror.
 
 Before the switch, the server:
 
