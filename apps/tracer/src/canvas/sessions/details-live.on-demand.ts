@@ -1,7 +1,7 @@
 /** The product's details source (#127): reads live host, connection and session data after the popover is requested. */
 import { ActionRefused, type MuxConnection } from "../../connection";
 import { hostPlatformFromOs } from "../../../../../packages/ui/src/host-icons";
-import type { DetailsSource, HostFactsSnapshot } from "../windows/details-source";
+import type { DetailsSource, HostFactsSnapshot, MeshProtectionSnapshot } from "../windows/details-source";
 import { detailsFacts } from "../windows/details-facts";
 import { readExtendedInfo } from "../windows/extended-info";
 import type { WinRec } from "../context";
@@ -39,6 +39,23 @@ export function createLiveDetails(options: {
   const refusedKeys = new Set<string>();
   const retarget = new Map<string, () => void>();
   const lastReadAt = new Map<string, number>();
+  let meshStatusAt = Number.NEGATIVE_INFINITY;
+  let meshStatusSnapshot: MeshProtectionSnapshot | undefined;
+  let meshStatusRequest: Promise<MeshProtectionSnapshot | undefined> | undefined;
+  /** Read the machine's mesh status at most once every five seconds across open detail cards. */
+  const meshStatus = (): Promise<MeshProtectionSnapshot | undefined> => {
+    if (meshStatusRequest) return meshStatusRequest;
+    if (performance.now() - meshStatusAt < 5_000) return Promise.resolve(meshStatusSnapshot);
+    meshStatusAt = performance.now();
+    meshStatusRequest = connection.call("mesh.status", {}).then((value) => {
+      meshStatusSnapshot = decodeMeshProtection(value);
+      return meshStatusSnapshot;
+    }).catch((error: unknown) => {
+      if (error instanceof ActionRefused) meshStatusSnapshot = undefined;
+      return meshStatusSnapshot;
+    }).finally(() => { meshStatusRequest = undefined; });
+    return meshStatusRequest;
+  };
   return {
     facts(rec) {
       if (rec.model.kind !== "terminal") return undefined;
@@ -51,6 +68,8 @@ export function createLiveDetails(options: {
       const facts = snapshots.get(cacheKey);
       const server = target.kind === "server";
       const gone = target.kind === "host" && !facts && offline.has(cacheKey);
+      // Mesh status belongs to this server host; never show it for a different added host's window.
+      const mesh = server ? meshStatusSnapshot : undefined;
       return detailsFacts({
         extended: readExtendedInfo(),
         // A readable host whose facts have not come back yet (and is not known to be offline) holds its rows' places.
@@ -64,6 +83,7 @@ export function createLiveDetails(options: {
           ...(server ? { address: location.hostname, reach: "Directly, over this connection" } : { ...(rec.model.address ? { address: rec.model.address } : {}), reach: "Through this server" }),
           ...(facts ? { facts } : server ? {} : { unavailable: gone ? "offline" as const : "pending" as const }),
         },
+        ...(mesh ? { mesh } : {}),
         connection: { state: gone ? "offline" : connection.isWelcomed ? "connected" : connection.isOpen ? "connecting" : "offline", ...(delay === undefined ? {} : { delayMs: delay }), encrypted: location.protocol === "https:" },
         session: {
           name: rec.model.session ?? record?.name ?? "",
@@ -120,6 +140,10 @@ export function createLiveDetails(options: {
         /** Late replies may affect only the same still-open host generation. */
         const current = (): boolean => active && started === generation && key === factsKey(factsTarget(rec.model, host));
         try {
+          if (target.kind === "server") {
+            // Mesh details have their own refresh path and must not hold up host facts or refusal handling.
+            void meshStatus().then(() => { if (current()) refresh(); });
+          }
           const result = target.kind === "host"
             ? await connection.call("remote.host.facts", { host_id: target.hostId })
             : await connection.call("host.facts.read", { includeLive: true });
@@ -172,6 +196,43 @@ function shortText(value: unknown): string | undefined {
     && !/[\u0000-\u001f\u007f]/u.test(value)
     ? value
     : undefined;
+}
+
+/** Decode only the small, known mesh status used in machine details; unknown fields stay out of the UI. */
+function decodeMeshProtection(value: Record<string, unknown>): MeshProtectionSnapshot | undefined {
+  const state = value.state;
+  const enforcement = value.enforcement;
+  if (
+    (state !== "On" && state !== "Waiting" && state !== "Stopping" && state !== "Off")
+    || (enforcement !== "userspace" && enforcement !== "kernel")
+  ) return undefined;
+  const snapshot: MeshProtectionSnapshot = { state, enforcement };
+  const raw = value.kernel_guard;
+  if (raw === null || raw === undefined) return snapshot;
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const guard = raw as Record<string, unknown>;
+  const guardState = guard.state;
+  const allowedProtections = [
+    "mesh-address anti-spoofing on non-mesh interfaces",
+    "underlay delivery to mesh addresses",
+    "forwarding drops",
+    "public TCP/80 and TCP/443 gate",
+  ];
+  const missing = guard.missing;
+  const detail = typeof guard.detail === "string"
+    && guard.detail.length <= 512
+    && !/[\u0000-\u001f\u007f]/u.test(guard.detail)
+    ? guard.detail
+    : undefined;
+  if (
+    (guardState !== "installed" && guardState !== "pending" && guardState !== "missing" && guardState !== "failed")
+    || !Array.isArray(missing)
+    || missing.length > allowedProtections.length
+    || !missing.every((item) => typeof item === "string" && allowedProtections.includes(item))
+    || detail === undefined
+  ) return undefined;
+  snapshot.kernelGuard = { state: guardState, missing: missing as string[], detail };
+  return snapshot;
 }
 
 /** Returns `value` if it is a finite number from 0 to `max`, else `undefined`. */

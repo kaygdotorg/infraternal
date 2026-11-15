@@ -1260,7 +1260,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                     let (call_id,result)=result?;
                     match result {
                         Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
-                        Err(_)=>reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                        Err(error)=>reply(&control,Message::Result(0,call_id,false,error.control_error_json()))?,
                     }
                 }
                 event=async {
@@ -1425,7 +1425,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             match plugin_calls.start(call_id, action_id, input_json, registry.context()) {
                                 Ok(Some(result)) => reply(&control, Message::Deferred(0, call_id, result))?,
                                 Ok(None) => {},
-                                Err(_) => reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                                Err(error) => reply(&control, Message::Result(0, call_id, false, error.control_error_json()))?,
                             }
                         }
                         // A registry-less reattach (#230) refuses actions as the image does.

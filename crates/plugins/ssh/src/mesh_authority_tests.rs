@@ -117,6 +117,7 @@ fn mesh(ssh_allowed: bool) -> MeshView {
         node: TARGET_NODE,
         addresses: vec!["10.254.0.9".parse().unwrap()],
         interface: "infraternal0".into(),
+        userspace_filter: false,
         peers: [(
             SOURCE_NODE,
             MeshPeer {
