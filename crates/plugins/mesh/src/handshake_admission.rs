@@ -1535,7 +1535,7 @@ mod tests {
         }
         let cpu = thread_cpu().saturating_sub(cpu);
         println!(
-            "J717 past node budget, 2,000 known endpoints: {rejected} rejected initiations, \
+            "J717 past node budget, 1,000 peers in both lists: {rejected} rejected initiations, \
              {} key agreements, {:.3} us CPU per rejected packet",
             key_agreements(&admission) - before,
             per_packet(cpu, rejected)
@@ -1551,7 +1551,7 @@ mod tests {
         }
         let cpu = thread_cpu().saturating_sub(cpu);
         println!(
-            "J748 past their reserve share, 2,000 known endpoints: {rejected} rejected \
+            "J748 past their reserve share, 1,000 peers in both lists: {rejected} rejected \
              initiations, {} key agreements, {:.3} us CPU per rejected packet",
             key_agreements(&admission) - before,
             per_packet(cpu, rejected)
@@ -1590,6 +1590,24 @@ mod tests {
                 / 1024.0
         );
         drop(budget);
+
+        // A confirmed-list change at D393's 1,000 peers (J757): one peer's confirmed endpoint
+        // moves, and the setter carries every count over. It runs on the 250 ms endpoint scan,
+        // under the guard's write lock, never per packet.
+        let mut moved = known.clone();
+        moved[NODE_BUDGET as usize / 2] = own_network(21, 0);
+        let changes = 10_000_u32;
+        let cpu = thread_cpu();
+        for change in 0..changes {
+            let list = if change % 2 == 0 { &moved } else { &known };
+            admission.set_confirmed_endpoints(list.iter().copied());
+        }
+        let cpu = thread_cpu().saturating_sub(cpu);
+        println!(
+            "J757 confirmed-list change, 1,000 peers in both lists: {changes} changes, \
+             {:.1} us CPU each",
+            per_packet(cpu, changes)
+        );
 
         // Real-time floods.
         let packets = 200_000_u32;
