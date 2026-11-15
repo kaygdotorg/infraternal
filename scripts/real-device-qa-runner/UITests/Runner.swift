@@ -145,6 +145,12 @@ final class DeviceQA: XCTestCase {
                 let found = findRow(a[1], timeout: Double(a.count > 2 ? a[2] : "5")!)
                 if found != nil { tapRow(found) }
                 print("QA_NOTE tapif \(a[1]) \(found != nil ? "tapped" : "absent")")
+            case "tapifx":
+                // tapifx~PART~SECONDS: like tapif, but matches a label that merely CONTAINS PART (palette rows carry a hint
+                // after their title), and a missing row is fine.
+                let found = findRow(a[1], contains: true, timeout: Double(a.count > 2 ? a[2] : "5")!)
+                if found != nil { tapRow(found) }
+                print("QA_NOTE tapifx \(a[1]) \(found != nil ? "tapped" : "absent")")
             case "tapx":
                 result("tap~contains \(a[1])", tapRow(findRow(a[1], contains: true)))
             case "field":

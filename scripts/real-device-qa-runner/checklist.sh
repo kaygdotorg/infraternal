@@ -24,6 +24,14 @@ NEW_SHELL='0.616~0.501'       # "New shell" on an ended session, centred in a fu
 case "$theme" in dark) app_theme=mocha;; *) app_theme=latte;; esac
 fresh="open~$url/?r=$(date +%s)&theme=$app_theme|wait~12"
 
+# A fresh load shows the stored windows. The last shell phase ends its shell, so a later phase finds the empty state, whose
+# button reads "Open shell" (an ended session's pill says "New shell"): tap whichever is there, and do nothing when a
+# window is already open. Wordings come from canvas/views/world.ts and canvas/windows/session-ui.on-demand.ts.
+# The account has two hosts (the server's own and the QA host), so "Open shell" shows a palette of "Open shell on <host>" rows:
+# pick the QA host's row (QA_HOST_NAME, default the dev-02 login host) and do nothing when the empty state is not there.
+QA_HOST_NAME=${QA_HOST_NAME:-infraternal-dev-02}
+OPEN="tapif~Open shell/New shell~6|wait~2|tapifx~Open shell on $QA_HOST_NAME~4|wait~6"
+
 # QA_PHASES="shell pill" runs only those phases (a phase that needed a fix can be rerun without the whole checklist).
 wanted() { [[ -z "${QA_PHASES:-}" || " $QA_PHASES " == *" $1 "* ]]; }
 run() { wanted "$1" || return 0; ./run.sh run "$theme-$1" "$2" || true; }
@@ -36,16 +44,16 @@ run signin "$fresh|tapif~Continue with passkey~5|tapsbif~Use Passkey/Use Selecte
 run unlock "$fresh|xy~0.093~0.85|wait~3|type~Unlock host connections|wait~3|return|wait~4|tapsbif~Use Passkey/Use Selected Passkey~8|face|wait~10|shot~unlocked"
 
 # 2 and 3. Open a shell, type, `exit`: does the window close, and does every window fit the 402 pt viewport?
-run shell "$fresh|tapif~New shell~10|wait~6|xy~0.5~0.3|wait~2|shot~shell-opened|frames~region~regions-before|type~echo qa-ok|return|wait~2|shot~shell-typed|type~exit|return|wait~5|shot~after-exit|absent~shell ended~exit-closes-window|frames~shell, region~win-after-exit"
+run shell "$fresh|$OPEN|xy~0.5~0.3|wait~2|shot~shell-opened|frames~region~regions-before|type~echo qa-ok|return|wait~2|shot~shell-typed|type~exit|return|wait~5|shot~after-exit|absent~shell ended~exit-closes-window|frames~shell, region~win-after-exit"
 
 # 4. The machine pill: both tabs, the facts, and whether a scrolled panel stays where it was for 35 s.
-run pill "$fresh|xy~$PILL|wait~3|shot~pill-machine|labels|frames~Kernel~kernel-y0|swipe~0.5~0.72~0.5~0.3~1.2|wait~1|shot~pill-scrolled-now|frames~Kernel~kernel-y1|wait~35|frames~Kernel~kernel-y2|shot~pill-scrolled-35s|xy~$CONNECTION_TAB|wait~2|shot~pill-connection"
+run pill "$fresh|$OPEN|xy~$PILL|wait~3|shot~pill-machine|labels|frames~Kernel~kernel-y0|swipe~0.5~0.72~0.5~0.3~1.2|wait~1|shot~pill-scrolled-now|frames~Kernel~kernel-y1|wait~35|frames~Kernel~kernel-y2|shot~pill-scrolled-35s|xy~$CONNECTION_TAB|wait~2|shot~pill-connection"
 
 # 6, 8. The views menu: mesh, settings and the palette ("Search everything").
 run menus "$fresh|xy~$TOP_PILL|wait~3|shot~views-menu|tapx~Mesh|wait~3|shot~mesh|frames~card~mesh-cards|xy~$TOP_PILL|wait~2|tapx~Settings|wait~4|shot~settings|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|shot~palette"
 
 # 7. Text sizes: heights of text rows in the machine panel, to compare between builds (the pixels are in the shots).
-run text "$fresh|xy~$PILL|wait~3|frames~SYSTEM~text-heading|frames~Architecture~text-label|frames~Name~text-row|shot~text-sample"
+run text "$fresh|$OPEN|xy~$PILL|wait~3|frames~SYSTEM~text-heading|frames~Architecture~text-label|frames~Name~text-row|shot~text-sample"
 
 # 9. Motion: a screen recording of the views menu and the machine panel opening and closing. Judged by eye / frame
 #    timing from the video; this script only records it.
