@@ -41,7 +41,7 @@ use crate::{
     dataplane::Config,
     gotatun_tun::LinuxTun,
     packet_filter::{Direction, PacketFilter, PreparedPolicy},
-    policy::{model::PublicKey, rules::TrafficPolicy},
+    policy::model::PublicKey,
 };
 use infraternal_mesh::proxy_ports::MeshProxyIngress;
 
@@ -1163,12 +1163,12 @@ impl RuntimeState {
             .peers
             .iter()
             .filter(|(id, policy)| {
-                peer_has_network_access(policy)
+                policy.has_network_access()
                     && self
                         .config
                         .as_ref()
                         .and_then(|old| old.peers.get(id))
-                        .is_none_or(|old| !peer_has_network_access(old) || old.peer != policy.peer)
+                        .is_none_or(|old| !old.has_network_access() || old.peer != policy.peer)
             })
             .map(|(_, policy)| peer_for_policy(policy))
             .collect::<io::Result<Vec<_>>>()?;
@@ -1214,7 +1214,7 @@ impl RuntimeState {
         let configured_endpoints = config
             .peers
             .values()
-            .filter(|policy| peer_has_network_access(policy))
+            .filter(|policy| policy.has_network_access())
             .filter_map(|policy| policy.peer.endpoint);
         let mut guard = admission.write().await;
         guard.set_peers(admitted_peers);
@@ -1479,7 +1479,7 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let peers = config
         .peers
         .values()
-        .filter(|peer| peer_has_network_access(peer))
+        .filter(|peer| peer.has_network_access())
         .map(peer_for_policy)
         .collect::<io::Result<Vec<_>>>()?;
     Ok(peers.into_iter().flatten().collect())
@@ -1557,28 +1557,14 @@ pub(crate) fn peer_keys_with_network_access(config: &Config) -> BTreeSet<PublicK
     config
         .peers
         .values()
-        .filter(|peer| peer_has_network_access(peer))
+        .filter(|peer| peer.has_network_access())
         .flat_map(policy_keys)
         .collect()
-}
-
-/// Tell whether either direction permits at least one network packet tuple.
-fn peer_has_network_access(peer: &crate::dataplane::PeerPolicy) -> bool {
-    has_network_access(&peer.inbound) || has_network_access(&peer.outbound)
 }
 
 /// Return identities whose effective network access permits traffic in at least one direction.
 fn admitted_peer_keys(config: &Config) -> BTreeSet<PublicKey> {
     peer_keys_with_network_access(config)
-}
-
-/// Tell whether a directional network rule allows at least one packet tuple.
-fn has_network_access(policy: &TrafficPolicy) -> bool {
-    match policy {
-        TrafficPolicy::All => true,
-        TrafficPolicy::Ports(ports) => !ports.is_empty(),
-        TrafficPolicy::None => false,
-    }
 }
 
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {
