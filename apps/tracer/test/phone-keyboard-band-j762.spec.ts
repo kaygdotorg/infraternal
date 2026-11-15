@@ -16,9 +16,11 @@
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** The iPhone screen the owner reviews at, in CSS px. */
 const PHONE = { width: 393, height: 852 };
 /** How much shorter the visual viewport is with the keyboard up, in CSS px (about an iPhone keyboard and its bar). */
 const KEYBOARD = 336;
+/** Set to a folder name to take the review screenshots. */
 const CAPTURES = process.env.J762_CAPTURES;
 test.use({ viewport: PHONE, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
 
@@ -31,8 +33,10 @@ async function installFakeViewport(page: Page): Promise<void> {
     (window as unknown as { __setKeyboard(px: number): void }).__setKeyboard = (px: number) => { shrink = px; vv.dispatchEvent(new Event("resize")); };
   });
 }
+/** Sets how many CSS px the fake keyboard covers (0 closes it) and fires the viewport `resize` event iOS would. */
 const setKeyboard = (page: Page, px: number): Promise<void> => page.evaluate((v) => (window as unknown as { __setKeyboard(px: number): void }).__setKeyboard(v), px);
 
+/** Opens the product canvas in the given colour scheme and waits for its first window. */
 async function open(page: Page, theme: "light" | "dark"): Promise<void> {
   await page.emulateMedia({ colorScheme: theme });
   await page.request.post("/__mock/reset", { maxRetries: 1 });
@@ -43,6 +47,7 @@ async function open(page: Page, theme: "light" | "dark"): Promise<void> {
 async function focusTerminal(page: Page): Promise<void> {
   await page.locator("[data-view='console'] textarea").first().focus();
 }
+/** Where the screen ends, the layout viewport's height, and the colours of the screen and of the page behind it. */
 const geometry = (page: Page): Promise<{ bottom: number; innerHeight: number; screenBg: string; rootBg: string }> =>
   page.evaluate(() => {
     const screen = document.querySelector(".terminal-screen") as HTMLElement;
@@ -53,6 +58,7 @@ const geometry = (page: Page): Promise<{ bottom: number; innerHeight: number; sc
       rootBg: getComputedStyle(document.documentElement).backgroundColor,
     };
   });
+/** Takes a review screenshot when `J762_CAPTURES` is set. */
 async function capture(page: Page, name: string, theme: string): Promise<void> {
   if (CAPTURES) await page.screenshot({ path: tracerEvidencePath("phone-keyboard-band-j762", CAPTURES, `${name}-${theme}.png`) });
 }
