@@ -95,3 +95,25 @@ for (const theme of ["light", "dark"] as const) {
     await capture(page, "after-close", theme);
   });
 }
+
+test("one window ending does not unfit the screen while another still has the keyboard up", async ({ page }) => {
+  await installFakeViewport(page);
+  await open(page, "light");
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:split:down", source: "pointer" } })));
+  await expect(page.locator("[data-view='console'] textarea")).toHaveCount(2, { timeout: 10_000 });
+  await page.locator("[data-view='console'] textarea").first().focus();
+  await setKeyboard(page, KEYBOARD);
+  // sleep: the keyboard watcher re-reads 120 ms after the event; the fitted state must be in place before the other window ends
+  await page.waitForTimeout(400);
+  expect((await geometry(page)).bottom, "fitted before").toBeLessThan(PHONE.height - 100);
+  // The OTHER window's shell exits: its close control is clicked without moving focus, as an exit would.
+  await page.evaluate(() => {
+    const wins = [...document.querySelectorAll<HTMLElement>("[data-view='console'] .ui-window")];
+    wins[1]!.querySelector<HTMLElement>("button[aria-label^='Close']")!.click();
+  });
+  await expect(page.locator("[data-view='console'] textarea")).toHaveCount(1, { timeout: 10_000 });
+  // sleep: longer than the watcher's last re-read, so a missed re-fit would show
+  await page.waitForTimeout(1_300);
+  const after = await geometry(page);
+  expect(after.bottom, "the survivor keeps the screen fitted to the visible area while the keyboard is up").toBeLessThan(PHONE.height - 100);
+});
