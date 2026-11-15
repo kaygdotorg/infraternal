@@ -5,8 +5,15 @@
 //! wraps a long line by printing past the margin and then returning with `\r`,
 //! so the same bytes parsed at another width put the wrapped tail over the
 //! start of the line. Each case below builds the screen a browser would show
-//! from exactly what the shim sends it, and compares it cell for cell with the
-//! shim's own engine, which reflows correctly on resize.
+//! from exactly what the shim sends it, and compares it with the shim's own
+//! engine, which reflows correctly on resize.
+//!
+//! A live shell's engine never leaves the state libghostty-vt's C API starts
+//! in (prompt redraw off), which the exact serializer refuses, so a real
+//! session's repaint is the flagged approximate one: visible cells and cursor
+//! are right, soft-wrap flags are not carried (D110). Those cases compare what
+//! the viewer sees; raw-replay controls and the exact-export case compare the
+//! full state, wrap flags included.
 use super::*;
 
 /// The prompt J745 saw, 36 columns wide; with `echo j` it fills 42 columns.
@@ -86,16 +93,26 @@ impl Session {
     }
     /// Sends `peer` everything the shim's loop would send it now, and applies
     /// it to the browser's `viewer` the way the client does: raw output is
-    /// written as is, a Snapshot replaces the screen.
-    fn deliver(&self, peer: &mut Peer, viewer: &mut Terminal) {
+    /// written as is, a Snapshot replaces the screen. Returns the repaint the
+    /// viewer got, if any.
+    fn deliver(&self, peer: &mut Peer, viewer: &mut Terminal) -> Option<Repaint> {
+        let mut repaint = None;
         match peer.request.take() {
             Some(Request::Read(seq)) => peer.cursor = Some(seq),
             Some(Request::Snapshot) => {
                 peer.snapshot(&self.terminal, self.ring.head()).unwrap();
                 let frames = Decoder::default().feed(&peer.pending).unwrap();
                 peer.pending.clear();
-                let [Frame::Snapshot(_, bytes)] = frames.as_slice() else {
-                    panic!("expected one exact Snapshot, got {frames:?}");
+                let bytes = match frames.as_slice() {
+                    [Frame::Snapshot(_, bytes)] => {
+                        repaint = Some(Repaint::Exact);
+                        bytes
+                    }
+                    [Frame::SnapshotWithFlags(_, 1, bytes)] => {
+                        repaint = Some(Repaint::Approximate);
+                        bytes
+                    }
+                    other => panic!("expected one Snapshot, got {other:?}"),
                 };
                 let (cols, rows) = (self.config.cols, self.config.rows);
                 *viewer = Terminal::new(cols, rows).unwrap();
@@ -108,7 +125,28 @@ impl Session {
             peer.cursor = Some(seq + bytes.len() as u64);
             viewer.process(&bytes);
         }
+        repaint
     }
+}
+
+/// Which kind of Snapshot replaced the viewer's screen.
+#[derive(Debug, PartialEq)]
+enum Repaint {
+    /// Full state, soft-wrap flags included.
+    Exact,
+    /// Visible cells and cursor only, flagged so the client says so (D110).
+    Approximate,
+}
+
+/// Asserts the viewer shows what the shim's engine holds: every visible cell,
+/// its style and the cursor. Painting both screens cell by cell makes two
+/// byte strings that are equal exactly when the visible screens are.
+fn assert_same_visible_screen(viewer: &Terminal, shim: &Terminal) {
+    assert_eq!(
+        String::from_utf8_lossy(&viewer.approximate_snapshot()),
+        String::from_utf8_lossy(&shim.approximate_snapshot()),
+        "the viewer must show the shim's screen"
+    );
 }
 
 /// A browser link as the agent opens it: the writer, no cursor yet.
@@ -136,34 +174,43 @@ fn peer() -> Peer {
     }
 }
 
-/// A new tab at `cols` attaches to a session whose output was written at 42
-/// columns. The agent sends ReadFrom first and the browser's Resize after it;
-/// the shim may already have streamed the replay when the Resize arrives.
-fn reopen_at(cols: u16) -> (Session, Terminal) {
+/// A new tab at `cols` attaches to a session whose output (after `start`) was
+/// written at 42 columns. The agent sends ReadFrom first and the browser's
+/// Resize after it; the shim may already have streamed the replay by then.
+fn reopen_at(cols: u16, start: &[u8]) -> (Session, Terminal, Option<Repaint>) {
     let mut session = Session::new(42, 24);
-    session.output(&typed_at_42());
+    session.output(&[start, typed_at_42().as_slice()].concat());
     let mut tab = peer();
     let mut viewer = Terminal::new(cols, 24).unwrap();
     session.handle(&mut tab, Frame::ReadFrom(0));
-    session.deliver(&mut tab, &mut viewer);
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
     session.resize(&mut tab, cols, 24);
-    session.deliver(&mut tab, &mut viewer);
-    (session, viewer)
+    let repaint = session.deliver(&mut tab, &mut viewer);
+    (session, viewer, repaint)
 }
 
 #[test]
 fn reopening_wider_shows_the_shim_screen_not_the_old_width_bytes() {
-    let (session, viewer) = reopen_at(45);
-    assert_eq!(
-        viewer.screen_difference(&session.terminal),
-        0,
-        "the wrapped tail must not overwrite the prompt (J745's screenshot)"
-    );
+    let (session, viewer, repaint) = reopen_at(45, b"");
+    // Without the repaint, row 0 reads "745-echo-oknfraternal-dev-02-std:~$ echo j"
+    // here, exactly as in J745's screenshot.
+    assert_same_visible_screen(&viewer, &session.terminal);
+    assert_eq!(repaint, Some(Repaint::Approximate));
 }
 
 #[test]
 fn reopening_narrower_shows_the_shim_screen() {
-    let (session, viewer) = reopen_at(38);
+    let (session, viewer, repaint) = reopen_at(38, b"");
+    assert_same_visible_screen(&viewer, &session.terminal);
+    assert_eq!(repaint, Some(Repaint::Approximate));
+}
+
+#[test]
+fn reopening_wider_after_a_reset_restores_the_exact_state() {
+    // After RIS the engine can export itself exactly, so the reopened viewer
+    // gets the full state, including the reflowed row's soft-wrap flag.
+    let (session, viewer, repaint) = reopen_at(45, b"\x1bc");
+    assert_eq!(repaint, Some(Repaint::Exact));
     assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
@@ -222,8 +269,8 @@ fn reopening_after_an_earlier_resize_shows_the_shim_screen() {
     let mut tab = peer();
     let mut viewer = Terminal::new(45, 24).unwrap();
     session.handle(&mut tab, Frame::ReadFrom(0));
-    session.deliver(&mut tab, &mut viewer);
+    assert!(session.deliver(&mut tab, &mut viewer).is_some());
     session.resize(&mut tab, 45, 24);
-    session.deliver(&mut tab, &mut viewer);
-    assert_eq!(viewer.screen_difference(&session.terminal), 0);
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    assert_same_visible_screen(&viewer, &session.terminal);
 }
