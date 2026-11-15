@@ -2099,7 +2099,9 @@ fn a_packet_binds_its_peer_while_the_sweep_is_paused() {
 
 /// Revocation ends flows at publish even when the sweep could not visit the peer's table
 /// (J721, #265): no revoked flow admits another packet, and their slots go back to the
-/// quota the moment the full direction needs them.
+/// quota the moment the full direction needs them. The first check comes before any
+/// reclaim, so it guards the busy-skip case on its own; the checks after the replacement SYN
+/// show the slots really were freed.
 #[test]
 fn revoked_flows_skipped_by_the_sweep_free_their_quota_on_demand() {
     let mut policy = config(TrafficPolicy::All, TrafficPolicy::All);
@@ -2141,11 +2143,23 @@ fn revoked_flows_skipped_by_the_sweep_free_their_quota_on_demand() {
         Some([usize::from(quota), 0]),
         "the sweep waited for a busy table"
     );
+    // The sweep skipped this table, so every revoked flow is still in it. A packet of one of
+    // them must be refused before anything has reclaimed the slot: only the per-packet grant
+    // check stands between the stale entry and the peer (J772 P3 3, #265).
+    let mut stale_before = tcp4(LOCAL4, PEER4, 20_000 + quota / 2, 443, ACK);
+    assert!(
+        !filter.check_at(&mut stale_before, Direction::HostToMesh, now),
+        "a revoked flow in a table the sweep skipped admitted a packet"
+    );
+    // Refusing that packet dropped its flow, which freed one slot. Fill it with a flow the
+    // new policy allows, so the direction is full again and the next SYN must reclaim.
+    let mut topping_up = tcp4(LOCAL4, PEER4, 39_999, 8443, SYN);
+    assert!(filter.check_at(&mut topping_up, Direction::HostToMesh, now));
     let mut replacement = tcp4(LOCAL4, PEER4, 40_000, 8443, SYN);
     assert!(filter.check_at(&mut replacement, Direction::HostToMesh, now));
     assert_eq!(
         filter.with_table(NodeId(2), |table| table.map(|shard| shard.initiated)),
-        Some([1, 0]),
+        Some([2, 0]),
         "the full direction did not reclaim its revoked flows"
     );
     for port in [0, quota / 2, quota - 1] {
