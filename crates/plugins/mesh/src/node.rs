@@ -381,11 +381,20 @@ fn repair_accepted_routes(
             if !missing.contains(&address) {
                 continue;
             }
-            // The re-added route has the configured budget; the next live refresh rewrites it.
-            repaired.insert(peer.key);
-            if let Err(error) = Device::repair_peer_route(link, peer, address, mtu) {
-                tracing::warn!(%address, error = %error, "mesh peer route repair failed");
-                first_error.get_or_insert(error);
+            // A re-added route has the configured budget, and a failed add leaves the route
+            // unknown: the next live refresh rewrites either. A route that turned out to be
+            // there already (`Ok(false)`) still has the budget we wrote, so it is left alone:
+            // forgetting it made one inventory check rewrite every peer (#483 J780).
+            match Device::repair_peer_route(link, peer, address, mtu) {
+                Ok(false) => {}
+                Ok(true) => {
+                    repaired.insert(peer.key);
+                }
+                Err(error) => {
+                    tracing::warn!(%address, error = %error, "mesh peer route repair failed");
+                    repaired.insert(peer.key);
+                    first_error.get_or_insert(error);
+                }
             }
         }
     }

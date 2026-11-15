@@ -1055,3 +1055,54 @@ fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
     );
 }
 
+/// J780 (#483): a repair that finds the route already in place leaves its written budget alone.
+///
+/// The exclusive add returns `EEXIST` when the route is there: nothing changed at that
+/// destination, so the next live refresh must not rewrite it. Forgetting the budget anyway is
+/// what turned one full inventory check into a rewrite of every peer.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn repair_of_a_present_route_keeps_its_budget() {
+    use crate::policy::model::{Addresses, PublicKey};
+    review_route_command(&["link", "set", "lo", "up"]);
+    let link = review_marked_tun(PublicKey([9; 32]));
+    let learned = review_learned_underlay(1500);
+    let key = PublicKey([7; 32]);
+    let peer = crate::dataplane::Peer {
+        key,
+        previous_key: None,
+        previous_active: false,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().expect("IPv4"),
+            ipv6: "fd01::2".parse().expect("IPv6"),
+        },
+        endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+    };
+    let state = Mutex::new(PeerRouteState::default());
+    {
+        let mut route_state = lock_route_state(&state);
+        route_state.set_peers(std::slice::from_ref(&peer));
+        route_state.link = Some(link);
+    }
+    let refresh = [(key, Some(learned))];
+    assert_eq!(
+        update_live_peer_endpoints(&state, &refresh).expect("first"),
+        1
+    );
+    {
+        let mut route_state = lock_route_state(&state);
+        for address in [
+            IpAddr::V4(peer.addresses.ipv4),
+            IpAddr::V6(peer.addresses.ipv6),
+        ] {
+            repair_accepted_routes(&link, &mut route_state, Some(address))
+                .expect("a present route is not an error");
+        }
+        assert_eq!(route_state.written.get(&key), Some(&1408));
+    }
+    assert_eq!(
+        update_live_peer_endpoints(&state, &refresh).expect("steady"),
+        0,
+        "the repair changed no route, so nothing is rewritten"
+    );
+}

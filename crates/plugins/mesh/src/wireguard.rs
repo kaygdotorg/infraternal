@@ -744,10 +744,12 @@ impl Device {
         Ok(())
     }
 
-    /// Re-add one missing route only when no route already occupies its destination.
+    /// Re-add one missing route only when no route already occupies its destination, and say
+    /// whether it was added.
     ///
     /// The caller has matched the deleted address against the currently installed peer set. The
-    /// exclusive create flag makes a concurrent or foreign route a no-op instead of replacing it.
+    /// exclusive create flag makes a concurrent or foreign route a no-op instead of replacing it;
+    /// then this returns `false`, since nothing at that destination changed (#483 J780).
     /// # Errors
     /// Returns route-netlink errors other than `AlreadyExists`, which means there is nothing safe
     /// to change at that destination.
@@ -756,7 +758,7 @@ impl Device {
         peer: &Peer,
         address: IpAddr,
         mtu: u16,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         Self::verify_repair_link(link)?;
         let (family, prefix, destination) = match address {
             IpAddr::V4(address) if address == peer.addresses.ipv4 => {
@@ -770,8 +772,8 @@ impl Device {
         let payload = peer_route_payload(family, prefix, &destination, link.ifindex, Some(mtu))?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         match socket.request(24, 4 | 0x200 | 0x400, &payload) {
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
             Err(error) => Err(error),
         }
     }
