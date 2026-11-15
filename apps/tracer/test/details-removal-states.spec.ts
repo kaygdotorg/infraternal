@@ -77,7 +77,7 @@ test("a removal that cannot start says why in the panel and offers Try again; Ke
   await openConnection(page, "refused");
   await row(page).click();
   await yes(page).click();
-  await expect(note(page)).toHaveText("Another host removal is still running. Try again in a moment.");
+  await expect(note(page)).toHaveText("This host is already being removed.");
   await expect(yes(page)).toHaveText("Try again");
   await keep(page).click();
   await expect(row(page)).toBeVisible();
