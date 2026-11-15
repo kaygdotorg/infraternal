@@ -4018,8 +4018,10 @@ async fn session_slides_keep_the_wal_bounded() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::remove_dir_all(dir);
     }
-    // The limit plus a little: the inline backstop's pass can lose a race to
-    // a background pass and run on a later commit.
+    // The limit plus a little: the backstop runs after the commit that
+    // crossed the limit, and the log rewinds on the write after it. It waits
+    // for a running background pass instead of losing the race to it (#525),
+    // so a starved checkpointer thread no longer lets the log grow.
     assert!(
         frames <= 8_200,
         "the WAL reached {frames} frames after 5,000 session slides"
