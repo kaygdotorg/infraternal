@@ -397,6 +397,27 @@ mod tests {
         assert!(walking_peers([&bare, &unaddressed]).is_empty());
     }
 
+    /// A peer whose grants allow no packet in either direction never walks, even with a first
+    /// address and candidates: the engines don't install it, so a walk step would send
+    /// handshakes toward a peer the node must not talk to (J781 finding 3, #515, #483).
+    #[test]
+    fn a_peer_without_network_access_never_walks() {
+        let mut denied = walking(4);
+        denied.inbound = TrafficPolicy::None;
+        denied.outbound = TrafficPolicy::None;
+        let mut no_ports = walking(5);
+        no_ports.inbound = TrafficPolicy::Ports(std::collections::BTreeSet::new());
+        no_ports.outbound = TrafficPolicy::None;
+        let mut one_way = walking(6);
+        one_way.inbound = TrafficPolicy::None;
+        let wanted = walking_peers([&denied, &no_ports, &one_way]);
+        assert_eq!(
+            wanted.keys().copied().collect::<Vec<_>>(),
+            [PublicKey([6; 32])],
+            "only the peer with outbound access walks"
+        );
+    }
+
     /// A rotation overlap that still routes through the previous key walks under that key.
     #[test]
     fn a_walk_follows_the_key_that_owns_the_routes() {
