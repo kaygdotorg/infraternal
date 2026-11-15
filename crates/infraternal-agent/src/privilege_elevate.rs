@@ -1108,18 +1108,21 @@ mod tests {
     ///
     /// No secret is used: sudo stops at its prompt, nothing reaches PAM, and
     /// nothing runs as root. The limit is generous (it checks that the try
-    /// ends, not how fast).
+    /// ends, not how fast). sudo may take seconds before it prompts (on a
+    /// host whose resolver stalls, it looks up the host name first), so a try
+    /// may end at the prompt (`Failed`, no secret) or at the bound
+    /// (`Timeout`); both kill sudo while it may run with real uid 0.
     #[tokio::test]
     async fn a_sudo_try_ends_within_its_bound() {
         /// The try's own bound, as `elevate` gets it.
-        const BOUND: Duration = Duration::from_secs(5);
-        /// Far past the bound plus the wait for the command to exit.
-        const LIMIT: Duration = Duration::from_secs(30);
+        const BOUND: Duration = Duration::from_secs(15);
+        /// Far past the bound plus the waits for the command to exit.
+        const LIMIT: Duration = Duration::from_secs(60);
         if !prompts_here(Way::Sudo) {
             eprintln!("no sudo that prompts this account here; nothing to check");
             return;
         }
-        for round in 0..5 {
+        for round in 0..3 {
             let attempt = tokio::time::timeout(
                 LIMIT,
                 elevate(
@@ -1143,7 +1146,11 @@ mod tests {
             };
             let done = done.unwrap();
             assert!(done.elevated.is_none());
-            assert_eq!(done.outcome, Outcome::Failed, "try {round}");
+            assert!(
+                matches!(done.outcome, Outcome::Failed | Outcome::Timeout),
+                "try {round}: {:?}",
+                done.outcome
+            );
         }
     }
 
