@@ -952,3 +952,106 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
     );
     assert!(after.0.contains("mtu 1216"), "{after:?}");
 }
+
+/// Wait until `counter` reaches `target`, or fail after 60 s with `what`.
+///
+/// The namespace tests use it to wait for the route-repair worker and its listener, which run
+/// on their own thread, instead of guessing a delay.
+fn review_wait_for(counter: &std::sync::atomic::AtomicUsize, target: usize, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while counter.load(std::sync::atomic::Ordering::Acquire) < target {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        // sleep: polls a counter another thread bumps; there is no event to block on.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// J780 (#483): an overflow recovery right after the node's own large route burst rewrites
+/// only the peer routes whose budget really changed.
+///
+/// A refresh at mesh scale writes two routes per peer, and the kernel echoes every write to the
+/// route listener. When that listener falls behind (a loaded host), the echoes overflow its
+/// socket (`ENOBUFS`), and the recovery asks for a full inventory check and a re-derivation of
+/// every budget. Both are correct, but neither may rewrite a route whose budget is already the
+/// one written: J767 measured the first steady refresh after such a recovery rewriting all
+/// 4,096 peers and holding the route-state lock for 80-90 s under load.
+///
+/// The overflow is forced: the test holds the route-state lock, deletes one peer route so the
+/// worker wakes and waits on that lock (its listener stops reading), and rewrites every other
+/// peer's routes at the same budget. Afterwards exactly one peer differs (the deleted one, which
+/// the repair re-adds at its configured budget), so one steady refresh writes exactly one peer
+/// and the next writes none. `J780_PEERS` overrides the peer count (default 4,096).
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
+    use crate::wireguard::OVERFLOW_RECOVERIES;
+    use std::sync::atomic::Ordering;
+    let peer_count: u16 = std::env::var("J780_PEERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4096);
+    let (peers, learned) = review_scale_mesh(peer_count);
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(&peers);
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
+    let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
+    assert_eq!(written, usize::from(peer_count));
+    // The first refresh's own burst may overflow the listener already; settle that first, so
+    // the forced overflow below is the only one the assertions measure.
+    for _ in 0..3 {
+        if update_live_peer_endpoints(&state, &learned).expect("settling refresh") == 0 {
+            break;
+        }
+    }
+
+    let overflows = OVERFLOW_RECOVERIES.load(Ordering::Acquire);
+    let repairs = ROUTE_REPAIR_PASSES.load(Ordering::Acquire);
+    let deleted = peers[0].addresses.ipv4.to_string();
+    {
+        let guard = lock_route_state(&state);
+        let link = guard.link.expect("the worker proved the link");
+        review_route_command(&[
+            "route",
+            "del",
+            &format!("{deleted}/32"),
+            "dev",
+            "infraternal0",
+        ]);
+        // sleep: lets the listener read the deletion and block on the lock this test holds;
+        // the overflow assertion below fails if it did not, so the delay cannot hide a bug.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let burst: Vec<_> = peers[1..]
+            .iter()
+            .map(|peer| (guard.route_peer(peer), guard.written[&peer.key]))
+            .collect();
+        let burst: Vec<_> = burst.iter().map(|(peer, mtu)| (peer, *mtu)).collect();
+        Device::replace_peer_routes_on(&link, &burst).expect("rewrite every other peer");
+    }
+    // One pass repairs the deletion; after it the listener reads the overflow, and its
+    // recovery asks for a second pass: the full inventory check.
+    review_wait_for(
+        &OVERFLOW_RECOVERIES,
+        overflows + 1,
+        "the burst overflowed the listener",
+    );
+    review_wait_for(&ROUTE_REPAIR_PASSES, repairs + 2, "the inventory check ran");
+
+    let mut writes = Vec::new();
+    for _ in 0..3 {
+        let started = std::time::Instant::now();
+        let written = update_live_peer_endpoints(&state, &learned).expect("steady refresh");
+        writes.push((written, started.elapsed()));
+    }
+    eprintln!("METRIC j780_overflow_rewrite peers={peer_count} refreshes={writes:?}");
+    worker.stop();
+    assert_eq!(
+        writes
+            .iter()
+            .map(|(written, _)| *written)
+            .collect::<Vec<_>>(),
+        [1, 0, 0],
+        "after an overflow only the re-added peer route differs, so only it is rewritten"
+    );
+}
+

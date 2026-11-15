@@ -1351,8 +1351,17 @@ impl RouteMonitor {
         if self.books.resync(self.interface_index) {
             self.announce.changed();
         }
+        #[cfg(test)]
+        OVERFLOW_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
+
+/// Test probe: how many overflow recoveries ([`RouteMonitor`]'s `lost_notifications`) have
+/// finished in this process, so a namespace test can prove its burst really overflowed the
+/// listener before it asserts what the recovery did (#483 J780).
+#[cfg(test)]
+pub(crate) static OVERFLOW_RECOVERIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// How many queued datagrams an overflow recovery discards at most before it re-reads the host.
 /// The default receive buffer holds a few hundred; the bound only matters in an endless storm.

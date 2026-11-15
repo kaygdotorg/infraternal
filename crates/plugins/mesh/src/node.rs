@@ -158,6 +158,12 @@ fn is_direct_learned_endpoint(endpoint: std::net::SocketAddr) -> bool {
 /// when the kernel rejects writes or the process cannot run; failures retry on the next check.
 const ROUTE_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Test probe: how many repair passes (one deletion or one full inventory check) the
+/// route-repair worker has finished in this process, so a namespace test can wait for the
+/// worker instead of guessing a delay (#483 J780).
+#[cfg(test)]
+static ROUTE_REPAIR_PASSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// How many refreshes in a row look a peer's underlay up again after a failed lookup, per
 /// underlay generation (#489 J609 P3). Two covers a transient socket error (`EINTR`, `ENOMEM`)
 /// and a lookup racing a change; more would only repeat a lookup that keeps failing.
@@ -244,6 +250,8 @@ impl RouteRepairWorker {
                     if let Err(error) = repair_accepted_routes(&link, &mut route_state, address) {
                         tracing::warn!(error = %error, "mesh route repair skipped or failed; retrying on the next inventory check");
                     }
+                    #[cfg(test)]
+                    ROUTE_REPAIR_PASSES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     if address.is_none() {
                         // Path-MTU exceptions the kernel caches from ICMP are never announced;
                         // the next refresh after each periodic check re-derives every budget, so
