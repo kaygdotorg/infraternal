@@ -228,8 +228,8 @@ class DeploymentTests(unittest.TestCase):
         old_release.mkdir()
         old_binary = old_release / "infraternal"
         old_binary.write_bytes(b"c4")
-        for name, value in (("MANIFEST", b"manifest"),
-                            ("MANIFEST.sig", b"signature"),
+        for name, value in (("SHA256SUMS", b"sums"),
+                            ("SHA256SUMS.sig", b"signature"),
                             ("VERSION", b"edge-20261012T000000Z\n")):
             (old_release / name).write_bytes(value)
 
@@ -333,8 +333,8 @@ class DeploymentTests(unittest.TestCase):
         old_release.mkdir()
         old_binary = old_release / "infraternal"
         old_binary.write_bytes(b"c4")
-        for name, value in (("MANIFEST", b"manifest"),
-                            ("MANIFEST.sig", b"signature"),
+        for name, value in (("SHA256SUMS", b"sums"),
+                            ("SHA256SUMS.sig", b"signature"),
                             ("VERSION", b"edge-20261012T000000Z\n")):
             (old_release / name).write_bytes(value)
 
