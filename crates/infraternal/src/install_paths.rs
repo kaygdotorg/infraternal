@@ -453,6 +453,13 @@ pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
             if !points_at_ours(link, binary) {
                 return Ok(LinkOutcome::Foreign(link.to_owned()));
             }
+            // Known window (J719 P3): between the check above and the rename
+            // below, someone could replace the link with a file of their own,
+            // and the rename would replace that file. Closing it needs an
+            // atomic swap (Linux `renameat2(RENAME_EXCHANGE)`, macOS
+            // `renamex_np(RENAME_SWAP)`) and a swap back, two OS paths for a
+            // race in a folder only its owner (or root) can write. Accepted:
+            // PATH readers still see the old or the new link, never neither.
             let parent = link.parent().ok_or(io::ErrorKind::InvalidInput)?;
             let temporary = parent.join(format!(".infraternal.link-{}", std::process::id()));
             let _ = std::fs::remove_file(&temporary);
