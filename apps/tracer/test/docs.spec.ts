@@ -27,7 +27,8 @@ const SIZES = [
 async function asPhone(page: Page): Promise<void> {
   const source = await (await page.request.get("/docs/docs.css")).text();
   const css = /@media \(pointer: coarse\)\s*\{\s*(:root\s*\{[^}]*\})\s*\}/.exec(source)?.[1] ?? "";
-  expect(css, "docs.css has a pointer: coarse rule").toContain("--ui-size-body: 0.9375rem");
+  expect(css, "docs.css has a pointer: coarse rule").toContain("--ui-base: 1");
+  expect(css, "the coarse rule gives rows the 44 px touch size").toContain("--row: 2.75rem");
   await page.addStyleTag({ content: css });
 }
 
@@ -123,7 +124,8 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
         // An entry jumps to its heading, which stops a little under the top.
         await page.locator('.toc-side a[href="#undoing-a-switch"]').click();
         await page.waitForTimeout(250);
-        expect(await page.evaluate(() => Math.abs(document.getElementById("undoing-a-switch")!.getBoundingClientRect().top - parseFloat(getComputedStyle(document.documentElement).fontSize))), "the heading is 1rem under the top").toBeLessThanOrEqual(1);
+        // The top bar stays on the screen here, so the heading stops 1rem under the bar (the page's scroll padding), not under the screen's top.
+        expect(await page.evaluate(() => Math.abs(document.getElementById("undoing-a-switch")!.getBoundingClientRect().top - (parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) + parseFloat(getComputedStyle(document.documentElement).fontSize)))), "the heading is 1rem under the bar").toBeLessThanOrEqual(1);
         await page.screenshot({ path: `${OUT}/${size.name}-${scheme}-multiplexer-scrolled.png` });
       } else {
         // Narrow: one folded row under the summary, closed until it is tapped; it is a 44 px target and starts at the text's left edge.
@@ -146,7 +148,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
 
       // Nothing scrolls sideways (wide tables and code scroll inside their own box), and the text meets the type scale.
       expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
-      expect(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".doc-body p")!).fontSize))).toBe(size.touch ? 15 : 15.4);
+      expect(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".doc-body p")!).fontSize))).toBe(size.touch ? 16 : 17.6);
       if (size.touch) expect(await page.evaluate(() => document.querySelector("header a")!.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
 
       // The keys page: a long page with sub-headings under three groups.
