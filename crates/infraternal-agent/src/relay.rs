@@ -383,6 +383,39 @@ impl Output {
         Ok(())
     }
 
+    /// Take back the newest raw forward, which will never reach the client.
+    ///
+    /// A key repaint may discard the one raw frame the daemon staged for its
+    /// writer. [`Self::forward`] already charged those bytes and moved the
+    /// cursor past them, but they are never sent: the client can never return
+    /// their credit, so the bulk window would shrink by that much for the rest
+    /// of the attachment, and a recovery that resumed at the cursor would skip
+    /// them, a gap (#477, J794). Retracting undoes that forward exactly, as if
+    /// the frame had never been read. Only the newest forward may be retracted,
+    /// so `seq + len` must equal the cursor.
+    /// # Errors
+    /// Rejects a range that does not end at the cursor, or overflow, without
+    /// mutating state.
+    pub fn retract(&mut self, seq: u64, len: usize) -> Result<(), Error> {
+        if end(seq, len)? != self.cursor {
+            return Err(Error::OutOfRange);
+        }
+        let bytes = u64::try_from(len).map_err(|_| Error::Overflow)?;
+        let raw_bytes = u32::try_from(bytes).map_err(|_| Error::Overflow)?;
+        let credit = self.credit.checked_add(bytes).ok_or(Error::Overflow)?;
+        self.cursor = seq;
+        self.credit = credit;
+        if self.setting_up() {
+            // During setup `repaint_debt` counts the bytes charged so far.
+            self.repaint_debt = self.repaint_debt.saturating_sub(raw_bytes);
+        }
+        // Returned credit may already have paid part of these counters down;
+        // saturating only understates what a later repaint may replace.
+        self.raw_in_flight = self.raw_in_flight.saturating_sub(raw_bytes);
+        self.raw_replacement_credit = self.raw_replacement_credit.saturating_sub(raw_bytes);
+        Ok(())
+    }
+
     /// Record an unaffordable pending frame; callers arm this one-shot deadline.
     /// Calling again does not postpone catch-up.
     pub fn pending(&mut self, now: Instant) -> Option<Instant> {

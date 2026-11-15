@@ -778,8 +778,9 @@ async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
 ///
 /// When the FIFO is full, retain one frame in `staged`; the caller may read one more shim frame
 /// into its bounded `pending` slot so acknowledgments and liveness replies stay live. A key
-/// repaint may discard the staged frame because the relay ledger has already charged its bytes
-/// and the replacement Snapshot covers the same output cursor. No caller may stage a second frame.
+/// repaint may discard the staged frame, and then retracts it from the relay ledger
+/// ([`relay::Output::retract`]): it was charged but is never sent. No caller may stage a second
+/// frame.
 /// # Errors
 /// Returns `WouldBlock` if a frame is already staged, or `BrokenPipe` if the writer is closed.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2064,7 +2065,7 @@ async fn terminal_run(
     // One credit-charged Output may wait here if the shared writer FIFO is full.
     // Invariant: it reaches the writer before any ordered message emitted
     // after it was staged (see `flush_staged`), unless a key repaint
-    // replaces it on purpose.
+    // discards it on purpose and retracts it from the ledger.
     let mut pending_bulk: Option<Message> = None;
     let mut deadline = None;
     // The latest input offset a repaint must show, and the offset covered by
@@ -2411,7 +2412,17 @@ async fn terminal_run(
                                             // Discard only this stream's pending
                                             // raw payload so the repaint replaces it.
                                             pending = None;
-                                            pending_bulk = None;
+                                            // The staged frame was charged but is
+                                            // never sent: give its credit and
+                                            // cursor back, or the window shrinks
+                                            // for good and a recovery that skips
+                                            // the repaint resumes after a gap
+                                            // (#477, J794).
+                                            if let Some(Message::Shim(_, Shim::Output(seq, bytes))) = pending_bulk.take() {
+                                                output
+                                                    .retract(seq, bytes.len())
+                                                    .map_err(|_| sessions::invalid("output credit invariant"))?;
+                                            }
                                             deadline = output
                                                 .pending(Instant::now())
                                                 .map(tokio::time::Instant::from_std);
