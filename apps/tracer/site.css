@@ -41,6 +41,12 @@
 }
 /* A phone: the bar scrolls away (height is dear), there is no key hint, and the section name is dropped from the place name. */
 @media (max-width: 40rem) { .bar { position: static; } .bar-kbd kbd { display: none; } .bar-area { display: none; } }
+/* The bar that scrolls away covers nothing, so a heading reached by a link needs no room for it: it lands 1 rem from the top, as doc.css says
+   (#482; docs.css reserved the sticky bar's height, which left a 66 px gap on a phone). */
+@media (max-width: 40rem) { :root { scroll-padding-top: 0; } }
+/* On a docs page the capsule's outer edge is the text's left edge, as on a phone: the page's side padding is 2 rem from 64 rem up (below),
+   so the bar takes the same padding and the same 96 rem of content instead of sitting 1 rem in from it (#482). */
+@media (min-width: 64rem) { body:has(main.docs) .bar { padding-inline: 2rem; } body:has(main.docs) .bar-in { max-width: 96rem; } }
 @media (prefers-reduced-motion: reduce) { .bar-brand, .bar-links a, .bar-sheet a { transition: none; } .bar-brand:active { transform: none; } }
 
 /* ---- The search palette (site-search.ts) -------------------------------------------------------------------------------------------
@@ -78,6 +84,11 @@ main { display: block; flex: 1 0 auto; width: 100%; }
 main.docs { box-sizing: border-box; max-width: 100rem; margin: 0 auto; padding: 1.5rem var(--gutter) 4rem; }
 main.docs .docs-grid { display: block; }
 .docs-col { container-type: inline-size; min-width: 0; }
+/* An instance's own flat docs have no side column and so no `.docs-col`; the page itself is then the query container that doc.css asks
+   whether the contents fit beside the text. Without it the contents stayed folded on a wide screen (#482). The sticky contents sit under
+   the bar, whose height docs.css holds in `--bar-h`, not behind its pills. */
+main.docs { container-type: inline-size; }
+main.docs .doc .toc { top: calc(var(--bar-h) + 0.5rem); max-height: calc(100dvh - var(--bar-h) - 1.5rem); }
 .side-rail { display: none; }
 @media (min-width: 64rem) {
   main.docs { padding-top: 2.5rem; padding-inline: 2rem; }
