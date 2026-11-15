@@ -124,21 +124,94 @@ fn open_with(window: impl FnOnce(&Path)) -> io::Result<PrivateTerminal> {
 /// is never a process-group leader, so `setsid` can't fail with `EPERM`.
 /// The new session's id is the child's pid, so killing that process group
 /// still ends the whole elevation.
+///
+/// The hook also marks every descriptor above stdio close-on-exec (J716 B),
+/// so the program starts holding only its terminal: nothing the infraternal
+/// agent inherited from its launcher (a lock, a socket) lives on in root's
+/// snippet and relay. It marks them instead of closing them because std's
+/// own close-on-exec pipe, which reports a failed exec back to `spawn`, is
+/// among them and must stay open until the exec itself.
 pub fn lead_session(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt as _;
-    // SAFETY: setsid and ioctl are async-signal-safe system calls; the hook
-    // touches no allocation, lock or other Rust state of the parent.
+    // Read here, in the parent, for the fallback in `mark_close_on_exec`.
+    let limit = open_file_limit();
+    // SAFETY: setsid, ioctl, close_range and fcntl are async-signal-safe
+    // system calls; the hook touches no allocation, lock or other Rust state
+    // of the parent (`limit` is a plain integer copied into the closure).
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if nix::libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
             if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(())
+            mark_close_on_exec(limit)
         });
     }
+}
+
+/// Mark every descriptor from 3 up close-on-exec, in the forked child.
+///
+/// `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` does it in one system call
+/// (Linux 5.11+). Older kernels answer `ENOSYS` (no `close_range`) or
+/// `EINVAL` (no flag); then each descriptor below `limit`, the open-file
+/// limit read before the fork, is marked with `fcntl`, which is slower but
+/// still allocates nothing. Descriptors at or above the limit can't have
+/// been opened under it.
+///
+/// # Safety
+/// Call only between fork and exec: it is written for that (no allocation,
+/// no locks), and outside it would mark the whole process's descriptors.
+unsafe fn mark_close_on_exec(limit: nix::libc::c_int) -> io::Result<()> {
+    /// The first descriptor after stdin, stdout and stderr.
+    const FIRST: nix::libc::c_uint = 3;
+    // SAFETY: close_range takes three integers and touches only this
+    // process's descriptor table.
+    let marked = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_close_range,
+            FIRST,
+            nix::libc::c_uint::MAX,
+            nix::libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if marked == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if !matches!(
+        error.raw_os_error(),
+        Some(nix::libc::ENOSYS | nix::libc::EINVAL)
+    ) {
+        return Err(error);
+    }
+    for fd in 3..limit {
+        // SAFETY: F_SETFD on a descriptor number changes only its flag; a
+        // number that isn't open fails with EBADF, which is fine here.
+        unsafe {
+            nix::libc::fcntl(fd, nix::libc::F_SETFD, nix::libc::FD_CLOEXEC);
+        }
+    }
+    Ok(())
+}
+
+/// The kernel's default ceiling on descriptor numbers (`fs.nr_open`), used
+/// when the soft limit can't be read or is unlimited.
+const DEFAULT_NR_OPEN: nix::libc::c_int = 1 << 20;
+
+/// This process's soft limit on open descriptors, for
+/// [`mark_close_on_exec`]'s fallback.
+fn open_file_limit() -> nix::libc::c_int {
+    let mut limit = nix::libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one rlimit to the pointer given.
+    if unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
+        return DEFAULT_NR_OPEN;
+    }
+    nix::libc::c_int::try_from(limit.rlim_cur).unwrap_or(DEFAULT_NR_OPEN)
 }
 
 /// Open the slave of `master` without a path lookup (Linux 4.13+).
