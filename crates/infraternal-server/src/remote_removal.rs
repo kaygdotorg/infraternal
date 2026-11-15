@@ -226,11 +226,7 @@ impl Removal {
         if entry.expires <= now {
             return Err(crate::auth::Error::Denied);
         }
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| crate::auth::Error::Denied)?;
+        let permit = admit(&self.admission)?;
         let service = self.clone();
         // Once verified, disconnecting HTTP must not abandon an accepted uninstall
         // halfway through revocation. No recurring worker or secret is retained.
@@ -276,11 +272,7 @@ impl Removal {
         audit_id: i64,
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| crate::auth::Error::Denied)?;
+        let permit = admit(&self.admission)?;
         let entry = Pending {
             hash: String::new(),
             user: person.to_owned(),
@@ -405,11 +397,7 @@ impl Removal {
         authority: RemovalAuthority,
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| crate::auth::Error::Denied)?;
+        let permit = admit(&self.admission)?;
         let service = self.clone();
         tokio::spawn(async move {
             let _permit = permit;
@@ -868,6 +856,17 @@ pub(crate) async fn request_uninstall(
     }
 }
 /// The machine part of a stored `account@machine` address, as people name the host.
+/// Take one of the removal service's bounded work permits, or say the service is busy.
+///
+/// Running out of permits is "try again in a moment" (`Throttled`, 429), never `Denied`: a 403 tells the browser the
+/// person lacks authority and sends them to refresh the host list, which is the wrong advice for a busy server (#519).
+fn admit(admission: &Arc<Semaphore>) -> Result<tokio::sync::OwnedSemaphorePermit, crate::auth::Error> {
+    admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| crate::auth::Error::Denied)
+}
+
 fn display_name(address: &str) -> &str {
     address
         .rsplit_once('@')
@@ -892,3 +891,6 @@ fn manual_uninstall(mode: &str, host: &str) -> String {
 #[cfg(test)]
 #[path = "remote_removal_review_tests.rs"]
 mod review_tests;
+#[cfg(test)]
+#[path = "remote_removal_admission_tests.rs"]
+mod admission_tests;
