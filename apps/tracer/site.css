@@ -44,6 +44,9 @@
 /* The bar that scrolls away covers nothing, so a heading reached by a link needs no room for it: it lands 1 rem from the top, as doc.css says
    (#482; docs.css reserved the sticky bar's height, which left a 66 px gap on a phone). */
 @media (max-width: 40rem) { :root { scroll-padding-top: 0; } }
+/* On a docs page the capsule's outer edge is the text's left edge, as on a phone: the page's side padding is 2 rem from 64 rem up (below),
+   so the bar takes the same padding and the same 96 rem of content instead of sitting 1 rem in from it (#482). */
+@media (min-width: 64rem) { body:has(main.docs) .bar { padding-inline: 2rem; } body:has(main.docs) .bar-in { max-width: 96rem; } }
 @media (prefers-reduced-motion: reduce) { .bar-brand, .bar-links a, .bar-sheet a { transition: none; } .bar-brand:active { transform: none; } }
 
 /* ---- The search palette (site-search.ts) -------------------------------------------------------------------------------------------
