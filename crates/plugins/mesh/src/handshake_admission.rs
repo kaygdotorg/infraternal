@@ -1444,6 +1444,54 @@ mod tests {
         );
     }
 
+    /// J778 (#483): the confirmed-endpoint feed both workers use goes through the setter, so a
+    /// roamed-to endpoint starts the window spent, as with [`PeerAdmission::set_confirmed_endpoints`].
+    ///
+    /// A feed that assigned the new list into the guard directly would leave the per-slot counts
+    /// and the share where they were: a confirmed endpoint would get no reserve slot at all, or
+    /// take over another endpoint's count, so the reserve would stop following the list.
+    #[tokio::test]
+    async fn the_confirmed_feed_starts_a_roamed_to_endpoint_spent() {
+        let admission = tokio::sync::RwLock::new(PeerAdmission::new(StaticSecret::from(NODE)));
+        let peer = [0x66; 32];
+        admission.write().await.set_peers([PublicKey(
+            *X25519PublicKey::from(&StaticSecret::from(peer)).as_bytes(),
+        )]);
+        let [old, roamed] = ["192.0.2.20:1", "192.0.2.10:1"].map(source);
+        let mut feed = super::ConfirmedEndpointFeed::default();
+        assert!(
+            feed.offer(&admission, [old]).await,
+            "the first list is written"
+        );
+        assert!(
+            !feed.offer(&admission, [old, old]).await,
+            "an unchanged list takes no write lock"
+        );
+        let now = Instant::now();
+        spend_unknown_share(&*admission.read().await, now);
+
+        assert!(
+            feed.offer(&admission, [roamed]).await,
+            "the roam is written"
+        );
+        let granted = initiation(peer);
+        let guard = admission.read().await;
+        assert!(guard.is_known_endpoint(roamed));
+        assert_eq!(
+            guard.check(&Packet::copy_from(&granted), roamed, now),
+            Err(Refusal::NodeBudget),
+            "a roamed-to endpoint must start the window spent"
+        );
+        // Spend the next window's unknown share first, so only the reserve can admit it.
+        let next = now + Duration::from_secs(1);
+        spend_unknown_share(&guard, next);
+        assert_eq!(
+            guard.check(&Packet::copy_from(&granted), roamed, next),
+            Ok(()),
+            "the next window gives it its share of the reserve"
+        );
+    }
+
     /// J754 P3 (#483): a spoofer sending a stranger's key from k known endpoints costs the
     /// reserve exactly k key agreements per window, because a refusal ends that endpoint's share.
     /// Past that, each one is an ordinary source with its own refused budget.
