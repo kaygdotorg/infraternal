@@ -239,8 +239,8 @@ struct Charge {
 ///
 /// Invariant: `sources` holds at most [`NODE_BUDGET`] entries and `networks` at most
 /// [`UNKNOWN_SOURCE_BUDGET`], because an entry is inserted only when it spends from the node
-/// budget, and everything resets together. Their memory is therefore bounded (about 40 KiB at
-/// most in all) whatever a flood sends.
+/// budget, and everything resets together. Their memory is therefore bounded whatever a flood
+/// sends: about 60 KiB at most for both (measured by the flood bench).
 #[derive(Debug, Default)]
 struct Budget {
     window_start: Option<Instant>,
@@ -1050,6 +1050,68 @@ mod tests {
             key_agreements(&admission) - before,
             per_packet(cpu, rejected)
         );
+
+        // Limiter memory at its bound: the per-window maps full, and known endpoints for
+        // D393's 1,000 peers (one configured and one confirmed each).
+        let admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let now = Instant::now();
+        for index in 0..UNKNOWN_SOURCE_BUDGET {
+            let _ = admission.check(&Packet::copy_from(&flood), own_network(18, index), now);
+        }
+        let mut admission = admission;
+        let known: Vec<_> = (0..NODE_BUDGET)
+            .map(|index| own_network(20, index))
+            .collect();
+        admission.set_configured_endpoints(known.iter().copied());
+        admission.set_confirmed_endpoints(known.iter().copied());
+        for spoofed in &known {
+            let _ = admission.check(&Packet::copy_from(&flood), *spoofed, now);
+        }
+        // Rejected past the node budget, with both endpoint lists full: the costliest refusal.
+        let rejected = 200_000_u32;
+        let before = key_agreements(&admission);
+        let cpu = thread_cpu();
+        for index in 0..rejected {
+            let verdict = admission.check(&Packet::copy_from(&flood), own_network(19, index), now);
+            assert_eq!(verdict, Err(Refusal::NodeBudget));
+        }
+        let cpu = thread_cpu().saturating_sub(cpu);
+        println!(
+            "J717 past node budget, 2,000 known endpoints: {rejected} rejected initiations, \
+             {} key agreements, {:.3} us CPU per rejected packet",
+            key_agreements(&admission) - before,
+            per_packet(cpu, rejected)
+        );
+        let budget = admission.budget.lock().expect("budget lock");
+        let map_bytes = |entries: usize, capacity: usize, entry: usize| {
+            // hashbrown: a power-of-two bucket count of at least capacity * 8 / 7, one control
+            // byte per bucket plus 16 trailing ones.
+            let buckets = (capacity * 8 / 7).next_power_of_two().max(4);
+            println!("    {entries} entries, capacity {capacity}, {buckets} buckets of {entry} B");
+            buckets * (entry + 1) + 16
+        };
+        let source_entry = size_of::<(super::SourceKey, super::Spend)>();
+        let network_entry = size_of::<(super::NetworkKey, super::Spend)>();
+        println!("J717 limiter memory at its bound:");
+        let sources = map_bytes(
+            budget.sources.len(),
+            budget.sources.capacity(),
+            source_entry,
+        );
+        let networks = map_bytes(
+            budget.networks.len(),
+            budget.networks.capacity(),
+            network_entry,
+        );
+        let endpoints = (admission.configured_endpoints.capacity()
+            + admission.confirmed_endpoints.capacity())
+            * size_of::<super::EndpointKey>();
+        println!(
+            "J717 limiter memory: sources {sources} B, networks {networks} B, \
+             known endpoints {endpoints} B for {NODE_BUDGET} peers, total {:.1} KiB",
+            f64::from(u32::try_from(sources + networks + endpoints).expect("fits")) / 1024.0
+        );
+        drop(budget);
 
         // Real-time floods.
         let packets = 200_000_u32;
