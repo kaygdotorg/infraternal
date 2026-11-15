@@ -76,6 +76,7 @@ for (const theme of ["light", "dark"] as const) {
     await open(page, theme);
     await focusTerminal(page);
     await setKeyboard(page, KEYBOARD);
+    // sleep: the keyboard watcher re-reads 120 ms after the event; the fitted state must be in place before the window ends
     await page.waitForTimeout(400);
     // The only window ends (a shell that exits); its terminal is disposed with the keyboard still up.
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:close", source: "keyboard" } })));
