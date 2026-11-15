@@ -772,7 +772,7 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
     result.and_then(|()| crate::node_state::write_authority(&authority_path(path), &authority))
 }
 
-/// Compare and replace one lower-revision full snapshot under the public-state directory lock.
+/// Compare and replace one lower-revision full snapshot under the mesh state update lock.
 ///
 /// This transaction is for a same-authority rollback only. Authority changes continue through
 /// the peer-free checkpoint path, which carries its own durable reset marker.
@@ -784,12 +784,8 @@ fn write_public_state_full_snapshot(
     expected: &Config,
 ) -> io::Result<()> {
     let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-        .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-        .map_err(|(_, error)| error)?;
+    // Not an exclusive directory lock: this node's own open Store holds a shared lease on it.
+    let _guard = crate::node_state::lock_mesh_state_update(parent)?;
     let previous = read_public_state(path)?.ok_or(io::ErrorKind::InvalidData)?;
     let old = previous.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
     let next = state.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
@@ -830,7 +826,9 @@ fn write_public_state_in_place(path: &Path, state: &SavedState) -> io::Result<()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
         .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+    // Shared: the node's own Store holds a shared lease here, and only migration locks it
+    // exclusively. The writer lock file can't be used, since this directory may be read-only.
+    let _lease = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockShared)
         .map_err(|(_, error)| error)?;
     let mut file = OpenOptions::new()
         .write(true)

@@ -206,6 +206,33 @@ fn lock_mesh_store_writer(
     })
 }
 
+/// Holds one update of a file in the mesh state directory for a caller with no Store handle.
+///
+/// The writer lock is declared first so it is released before the directory lease.
+#[cfg(target_os = "macos")]
+pub(crate) struct MeshStateUpdateGuard {
+    _writer: MeshStoreWriteGuard,
+    _lease: nix::fcntl::Flock<fs::File>,
+}
+
+/// Serialize one update of a file in the mesh state directory `path` with every Store's writes.
+///
+/// The Mac node's compare-and-replace of a full snapshot uses this instead of an exclusive lock
+/// on the directory itself. That exclusive lock now belongs to migration alone, and the node keeps its
+/// own Store open, so its shared lease would block an exclusive lock taken in the same process
+/// forever. The lease taken here is shared too, so a waiting migration still keeps this update out.
+/// # Errors
+/// Refuses an unsafe directory or lock file and reports lock failures.
+#[cfg(target_os = "macos")]
+pub(crate) fn lock_mesh_state_update(path: &Path) -> io::Result<MeshStateUpdateGuard> {
+    let lease = lock_mesh_directory_shared(path)?;
+    let writer = lock_mesh_store_writer(path, &lease)?;
+    Ok(MeshStateUpdateGuard {
+        _writer: writer,
+        _lease: lease,
+    })
+}
+
 impl Store {
     /// Read an owned private directory's public snapshot without following symlinks.
     /// # Errors
