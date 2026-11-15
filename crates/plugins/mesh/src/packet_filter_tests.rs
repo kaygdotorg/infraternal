@@ -2078,11 +2078,11 @@ fn a_packet_binds_its_peer_while_the_sweep_is_paused() {
         .recv_timeout(Duration::from_secs(30))
         .expect("the sweep never visited a peer");
 
-    let (passed, packet_result) = std::sync::mpsc::channel();
+    let (report_packet, packet_result) = std::sync::mpsc::channel();
     let worker = std::sync::Arc::clone(&filter);
     let packet = std::thread::spawn(move || {
         let mut reply = tcp4(scale_peer4(5), LOCAL4, 443, 40_000, ACK);
-        passed
+        report_packet
             .send(worker.check_at(&mut reply, Direction::MeshToHost, now))
             .expect("report packet");
     });
