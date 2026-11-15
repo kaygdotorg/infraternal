@@ -67,7 +67,10 @@
   font-family: var(--font-face);
   /* Auth tooltips remain monospace until the terminal explicitly selects its UI face. */
   --font-ui: var(--font-face);
-  background: #101113;
+  /* The page behind the app. The app screen is fitted to the visible area while a phone keyboard is up, so this shows through
+     the strip behind Safari's accessory bar: it follows the theme (`--bg`, written on the root by applyTheme) instead of a
+     fixed dark, which was a black strip on every light theme (#510). Sign-in pages set no theme, so they keep the fallback. */
+  background: var(--bg, #101113);
   color: #e6e7e9;
   font-synthesis: none;
   /* Maple Mono ligatures are contextual alternates (calt) that keep every glyph on its 0.6 em cell.
