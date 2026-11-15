@@ -10,19 +10,51 @@
 //!
 //! Decrypting the sender's key costs one X25519 key agreement, far more than the MAC1 check, and
 //! it runs in the single receive task that also carries every peer's data packets. So the guard
-//! checks budgets before any key agreement (J555 F1). Per source (an IPv4 address or an IPv6
-//! /64) and second: at most [`REFUSED_SOURCE_BUDGET`] key agreements that admitted nobody, and at
-//! most [`SOURCE_BUDGET`] in all. For the whole node: at most [`NODE_BUDGET`] a second. Past any
-//! budget an initiation is dropped silently: ungranted keys still never get a reply, and a flood
-//! costs one MAC1 check per packet, as it did before the guard existed.
+//! checks budgets before any key agreement (J555 F1), in this order, per one-second window:
+//! - per source (an IPv4 address or an IPv6 /64): at most [`REFUSED_SOURCE_BUDGET`] key
+//!   agreements that admitted nobody, and at most [`SOURCE_BUDGET`] in all;
+//! - per network (an IPv4 /24 or an IPv6 /48): at most [`REFUSED_NETWORK_BUDGET`] refused and
+//!   [`NETWORK_BUDGET`] in all, so one network's many addresses share one budget (J713);
+//! - per node: at most [`NODE_BUDGET`] in all, of which sources that are not known peer
+//!   endpoints may spend only [`UNKNOWN_SOURCE_BUDGET`].
+//!
+//! A known endpoint is an exact address and port that the coordinator configured for an
+//! installed peer, or that `GotaTun` confirmed from a peer's authenticated traffic. It skips the
+//! network budgets and may spend the reserved rest of the node budget. Past any budget an
+//! initiation is dropped silently: ungranted keys still never get a reply, and a flood costs one
+//! MAC1 check per packet, as it did before the guard existed.
 //!
 //! The total per-source budget is twice `GotaTun`'s own per-source limit, so a granted peer's
 //! burst still reaches `GotaTun`'s cookie reply and its MAC2 retry, as without the guard.
 //!
-//! Trade-off: a granted peer that shares a source with a flood, or that arrives while a
-//! spoofed-source flood holds the node budget, loses that initiation and retries five seconds
-//! later. Established sessions keep their keys and their data path meanwhile. The alternative,
-//! letting over-budget initiations reach `GotaTun`'s cookie reply, would answer ungranted keys.
+//! What a sustained flood of MAC1-valid initiations does (a replayed initiation is enough, and
+//! anyone who knows the node's public key can make one). The budgets refill every second, so a
+//! flood that lasts takes its share again in every window, and these limits hold for as long as
+//! it lasts. Measured by the `flood_fairness` tests at 20,000 packets a second for 90 s:
+//! - From one network, however many of its addresses it uses: it gets at most
+//!   [`REFUSED_NETWORK_BUDGET`] key agreements a second, and every granted peer outside that
+//!   network is still admitted (18 of 18 attempts, at an unknown endpoint too).
+//! - From many networks, or with spoofed sources: the flood spends [`UNKNOWN_SOURCE_BUDGET`] a
+//!   second. A granted peer at a known endpoint is still admitted every time, unless the flood
+//!   spoofs that exact address and port. A peer at an endpoint the node does not know yet (a new
+//!   join, or a NAT rebinding the coordinator has not published) is admitted only if its
+//!   initiation arrives before the flood has spent the unknown share in that second; at a
+//!   steady flood of R packets a second that is a chance of about [`UNKNOWN_SOURCE_BUDGET`]
+//!   out of R per attempt (2.5% at 20,000/s), and it retries every five seconds.
+//! - A granted peer that shares its source (its /64 or IPv4 address) with a flood loses its
+//!   initiations to that source's budget, unless that source is its known endpoint and the
+//!   flood stays under [`SOURCE_BUDGET`].
+//!
+//! Established sessions keep their keys and their data path throughout, and the node's own
+//! initiations to peers whose endpoints it knows are answered by responses, which the guard
+//! never budgets. The alternative, letting over-budget initiations reach `GotaTun`'s cookie
+//! reply, would answer ungranted keys.
+//!
+//! Cookie-proven (MAC2) initiations get no budget of their own: the cookie secret is private to
+//! the `GotaTun` device, so the guard cannot check MAC2 without a `GotaTun` change. `GotaTun`
+//! sends a cookie only to a source the guard admitted more than 100 times in one second, so a
+//! peer retrying every five seconds never holds one; a peer bursting from its known endpoint is
+//! covered by the reserve instead.
 
 use gotatun::{
     noise::{handshake::parse_handshake_anon, rate_limiter::RateLimiter},
