@@ -6,6 +6,13 @@
  * down again (a flow's own toast is not ours to dismiss).
  */
 import type { ToastController } from "../../../../packages/ui/src/toast";
+import { CONNECTION_LIMIT_REASON, plainCloseReason } from "../close-reasons";
+
+/**
+ * Status lines another surface already says: the account's connection limit and a tab paused for a newer one are the
+ * page's own notice (canvas/takeover-notice.ts, #523), so a terminal's copy of them would be a second toast.
+ */
+const SAID_ELSEWHERE = new Set([plainCloseReason(CONNECTION_LIMIT_REASON)]);
 
 /** Formats the signed infraternal agent status without mistaking a signal for a shell exit code. */
 export function exitStatusText(status: number): string {
@@ -35,7 +42,7 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
   let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
   const observer = new MutationObserver(() => {
     const message = element.textContent?.trim() ?? "";
-    if (message && !message.startsWith("Shell exited") && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
+    if (message && !SAID_ELSEWHERE.has(message) && !message.startsWith("Shell exited") && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
       clearTimeout(clearTimer);
       clearTimer = 0;
       relaying = true;
