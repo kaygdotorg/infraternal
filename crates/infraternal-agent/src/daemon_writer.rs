@@ -1072,7 +1072,7 @@ mod tests {
                 "output 150+50".to_string()
             ]
         );
-        assert_eq!(refunded.next().await, 50);
+        assert_eq!(refunded_within_a_moment(&mut refunded).await, 50);
     }
 
     /// A cursor rewind's `Attached` marker waits in the bulk FIFO behind earlier output, while
@@ -1273,7 +1273,7 @@ mod tests {
         drop(priority);
         task.await.unwrap().unwrap();
         assert_eq!(outputs(&mut frames), vec![(4, 300, 100)]);
-        assert_eq!(refunded.next().await, 300);
+        assert_eq!(refunded_within_a_moment(&mut refunded).await, 300);
     }
 
     /// A relay that abandons its key repaint releases what the key's Ack held: every frame is
@@ -1356,6 +1356,14 @@ mod tests {
         );
         cursors.attach(4, 3, no_refunds());
         assert_eq!(cursors.through(4), None);
+    }
+
+    /// The bytes refunded so far, or 0 if none arrive within a generous moment; a test that
+    /// waits for a refund must fail, not hang, when there is none.
+    async fn refunded_within_a_moment(refunded: &mut RefundReceiver) -> u32 {
+        tokio::time::timeout(std::time::Duration::from_secs(1), refunded.next())
+            .await
+            .unwrap_or(0)
     }
 
     /// A refund cell whose relay is gone, for writers whose credit a test does not watch.
