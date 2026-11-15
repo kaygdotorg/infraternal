@@ -146,3 +146,22 @@ test("the wait grows with the round trip and stays bounded", () => {
   expect(staleWaitMs(200)).toBe(800);
   expect(staleWaitMs(10_000)).toBe(STALE_WAIT_MAX_MS);
 });
+
+test("a host repaint at the replay fence keeps the note: it is not the program redrawing (#521)", () => {
+  const { watch, changes, advance } = harness();
+  watch.begin(100n, 100n, 400, RESIZED, ATTACH);
+  watch.repainted(100n); // the shim's Snapshot after the reattach's Resize, before the wait ends
+  advance(2000);
+  watch.repainted(100n); // and after the note is up
+  expect(changes).toEqual([true]);
+  expect(watch.shown).toBe(true);
+});
+
+test("a host repaint that carries newer output clears the note", () => {
+  const { watch, changes, advance } = harness();
+  watch.begin(100n, 100n, 400, RESIZED, ATTACH);
+  advance(2000);
+  watch.repainted(150n);
+  expect(changes).toEqual([true, false]);
+  expect(watch.shown).toBe(false);
+});
