@@ -621,6 +621,79 @@ mod cap_review_r3 {
         drop(clock);
     }
 
+    /// One caller stalled through several attempt deadlines holds one place,
+    /// not all four (#525). Its retries wait for the SELECT it already queued
+    /// instead of queueing more behind it, so another socket still gets a
+    /// place during the stall, and once the store answers both callers read
+    /// a fresh answer. Before the fix the stalled caller took every place in
+    /// six attempts and the other caller could not even queue its read.
+    /// Runtime time only moves while no SELECT is in flight, so the outcome
+    /// does not depend on how fast the host runs the SQLite worker.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_caller_holds_one_place_and_leaves_the_rest_to_others() {
+        let clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let places = || AUTHORITY_READS - state.authority.reads.available_permits();
+        let held = state.pool.acquire().await.unwrap();
+        let mut stalled = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+        // 300 ms of stall in 5 ms steps: six attempt deadlines and their pauses.
+        let mut most = 0;
+        for _ in 0..60 {
+            assert!(stalled.as_mut().now_or_never().is_none());
+            most = most.max(places());
+            tokio::time::advance(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            most, 1,
+            "one stalled caller held {most} of the {AUTHORITY_READS} authority places"
+        );
+        let mut other = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+        assert!(other.as_mut().now_or_never().is_none());
+        assert_eq!(
+            places(),
+            2,
+            "another socket could not queue its read behind the stalled caller"
+        );
+        drop(held);
+        let (mut first, mut second) = (None, None);
+        let started = std::time::Instant::now();
+        while first.is_none() || second.is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the reads never answered after the stall"
+            );
+            if first.is_none() {
+                first = stalled.as_mut().now_or_never();
+            }
+            if second.is_none() {
+                second = other.as_mut().now_or_never();
+            }
+            // A held place is a SELECT on the worker thread: give it real time.
+            // With none held, the callers are in their retry pause.
+            if places() == 0 {
+                tokio::time::advance(Duration::from_millis(1)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(matches!(first, Some(Ok(_))), "{first:?}");
+        assert!(matches!(second, Some(Ok(_))), "{second:?}");
+        assert_eq!(places(), 0);
+        drop(clock);
+    }
+
     /// A cancelled query waiting for the pool must finish at the pool's own
     /// acquire timeout even if the checked-out connection is never released.
     #[tokio::test(start_paused = true)]

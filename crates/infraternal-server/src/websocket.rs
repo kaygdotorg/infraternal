@@ -2745,11 +2745,26 @@ async fn authority_deadline(
 /// another connection holds the write lock. The renewal is a write that may
 /// wait seconds for that lock; it never runs here (`renew_soon`). Each attempt
 /// obtains one of the `AUTHORITY_READS` places within its deadline. Fast SELECTs
-/// run inline. If one misses its deadline, `DetachOnDrop` moves its pinned
-/// future into a task with its place until the SELECT future completes. Pool
-/// return and health checks may finish afterward, so the place bounds active
-/// queries rather than an instantaneous pool-idle count. A retry cannot start
-/// another SELECT while its previous query future remains in flight.
+/// run inline. Pool return and health checks may finish after a SELECT, so the
+/// place bounds active queries rather than an instantaneous pool-idle count.
+///
+/// One call has at most one SELECT in flight, so it holds at most one place
+/// (#525). A SELECT that misses its attempt deadline stays this call's: the
+/// retry first waits, up to the end of `wait`, for that SELECT to finish and
+/// throws its answer away, then starts a fresh SELECT with a fresh clock under
+/// a fresh attempt deadline. A missed answer is never used, however soon it
+/// arrives after its deadline, and every retry reads the authority as it is
+/// when the retry starts, so a revocation during a stall is seen. Before #525
+/// each retry queued a new SELECT behind its own abandoned ones: one stalled
+/// caller could take all four places and keep every other socket's reads out
+/// of them, and after the stall each fresh SELECT waited behind its
+/// predecessors, so on a slow store no retry could answer within its deadline.
+/// Rejected: using the missed SELECT's late answer (it may predate a
+/// revocation and was observed after its deadline), and cancelling it (sqlx
+/// cannot cancel a running statement, and the pool may already have handed it
+/// a connection). If the call ends while its SELECT is still running (the
+/// wait is over, or teardown's single attempt missed), `DetachOnDrop` moves
+/// that future into a task with its place until it completes.
 ///
 /// Expiry is monotonic: once a session's end has passed it is never found live
 /// again. Every attempt reads the wall clock when it starts, so a retry after a
@@ -2770,6 +2785,10 @@ async fn read_expiry(
     let read_timeout = AUTHORITY_READ_TIMEOUT;
     let give_up = tokio::time::Instant::now() + wait;
     let mut pause = AUTHORITY_RETRY_PAUSE;
+    // This call's SELECT, from the moment it holds a place until it finishes.
+    // It lives outside the attempt so a missed attempt leaves it here for the
+    // retry to wait out; dropping it with the call detaches it (see above).
+    let mut in_flight = None;
     let expiry = loop {
         let attempt_deadline = tokio::time::Instant::now() + read_timeout;
         let read = async {
@@ -2783,20 +2802,33 @@ async fn read_expiry(
                 return Some(Err(AuthorityMiss::Unavailable));
             };
             let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
-            let query = crate::completion::DetachOnDrop::new(Box::pin(
+            let query = in_flight.insert(crate::completion::DetachOnDrop::new(Box::pin(
                 state.auth.live_expiry(token, user_id, now, hold),
-            ));
-            Some(query.await.map_err(|error| match error {
+            )));
+            let result = query.await;
+            in_flight = None;
+            Some(result.map_err(|error| match error {
                 crate::auth::Error::Denied => AuthorityMiss::Refused,
                 _ => AuthorityMiss::Unavailable,
             }))
         };
-        match tokio::time::timeout_at(attempt_deadline, read).await {
+        let outcome = tokio::time::timeout_at(attempt_deadline, read).await;
+        match outcome {
             // A future that does not yield can finish after the timer. Keep the
             // explicit post-result check so such a completion still retries.
             Ok(Some(result)) if tokio::time::Instant::now() <= attempt_deadline => break result?,
             _ if tokio::time::Instant::now() + pause < give_up => {
-                tokio::time::sleep(pause).await;
+                let resume = tokio::time::Instant::now() + pause;
+                // Let the missed SELECT finish before the next one starts; its
+                // answer is stale by now and is discarded. The pause still
+                // separates attempts when it finished sooner.
+                if let Some(missed) = in_flight.as_mut() {
+                    if tokio::time::timeout_at(give_up, missed).await.is_err() {
+                        return Err(AuthorityMiss::Unavailable);
+                    }
+                    in_flight = None;
+                }
+                tokio::time::sleep_until(resume).await;
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
             }
             _ => return Err(AuthorityMiss::Unavailable),
