@@ -1250,18 +1250,26 @@ impl RouteMonitor {
                 return Ok(RouteWake::Cancelled);
             }
             let route_events = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
-            if route_events
-                .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
-            {
+            if route_events.intersects(PollFlags::POLLHUP | PollFlags::POLLNVAL) {
                 return Err(io::Error::other("route notification socket disconnected"));
             }
-            if route_events.contains(PollFlags::POLLIN) {
-                let length = match recv(self.fd.as_raw_fd(), &mut self.buffer, MsgFlags::empty()) {
+            // A notification overflow is not a disconnect: the kernel records it as the
+            // socket's pending error, so poll reports POLLERR, and the next receive returns
+            // ENOBUFS and clears it (#525: a burst of our own route writes overflowed the
+            // listener, which was then dropped as "disconnected" and the watch went unwatched).
+            if route_events.intersects(PollFlags::POLLIN | PollFlags::POLLERR) {
+                let length = match recv(
+                    self.fd.as_raw_fd(),
+                    &mut self.buffer,
+                    MsgFlags::MSG_DONTWAIT,
+                ) {
                     Ok(length) => length,
                     Err(nix::errno::Errno::ENOBUFS) => {
                         self.underlay.changed();
                         return Ok(RouteWake::Reconcile);
                     }
+                    // The error or datagram poll saw is already gone; wait again.
+                    Err(nix::errno::Errno::EAGAIN) => continue,
                     Err(error) => return Err(error.into()),
                 };
                 if length == 0 || length == self.buffer.len() {
