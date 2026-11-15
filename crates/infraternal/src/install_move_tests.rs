@@ -249,6 +249,10 @@ fn a_copy_is_verified_and_the_old_folder_is_kept_read_only() {
     assert_eq!(mode(&setup.new), 0o700);
     assert_eq!(mode(&setup.new.join("mesh/key")), 0o600);
     assert_eq!(mode(&leftover) & 0o222, 0);
+    assert!(
+        !leftover.join(MARKER).exists(),
+        "the leftover is not an unfinished move"
+    );
     assert_eq!(mode(&leftover.join("mesh/key")) & 0o222, 0);
     assert!(!setup.new.join(MARKER).exists());
     assert_eq!(
