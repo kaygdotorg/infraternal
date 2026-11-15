@@ -2305,6 +2305,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "sqlx",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "url",
@@ -2390,6 +2391,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "infraternal-agent",
+ "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-plugin-remote",
  "infraternal-shim",

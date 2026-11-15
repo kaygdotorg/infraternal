@@ -635,3 +635,36 @@ fn fidelity_mouse_effective_fields_follow_order_independently_of_booleans() {
 #[cfg(test)]
 #[path = "fresh_captures.rs"]
 mod fresh_captures;
+
+/// An approximate repaint keeps the scroll region, so output after it scrolls the same rows in the viewer as on the
+/// host (#477).
+///
+/// Under a flood the shared host's memory budget makes every repaint approximate, including each D381 key repaint.
+/// The repaint begins with RIS, which resets the margins; without restoring them, a program that keeps its status or
+/// input line outside a scroll region (here a token on row 1, flood output scrolling rows 2..24) had that line scrolled
+/// off in the browser by the very next lines of output, while the host still showed it.
+#[test]
+fn approximate_repaint_keeps_the_scroll_region_for_later_output() {
+    let mut host = reset_terminal(80, 24).unwrap();
+    host.process(b"\x1b[2J\x1b[2r\x1b[1;1H<K000001>\x1b[24;1H");
+    for _ in 0..30 {
+        host.process(b"y\r\n");
+    }
+    let repaint = host.approximate_snapshot();
+    let mut viewer = reset_terminal(80, 24).unwrap();
+    viewer.process(&repaint);
+    assert_eq!(
+        host.engine.difference(&viewer.engine),
+        0,
+        "the repaint shows the host's screen"
+    );
+    for _ in 0..30 {
+        host.process(b"y\r\n");
+        viewer.process(b"y\r\n");
+    }
+    assert_eq!(
+        host.engine.difference(&viewer.engine),
+        0,
+        "later output must scroll only the host's scroll region in the viewer"
+    );
+}

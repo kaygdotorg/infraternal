@@ -523,15 +523,6 @@ impl Session {
             // each peer's work, including a partially transmitted repaint.
             let mut write_bytes = CHUNK * 2;
             let mut write_attempts = 4;
-            if p.flush_bounded(&mut write_bytes, &mut write_attempts)
-                .is_err()
-            {
-                retired.push(i);
-                continue;
-            }
-            let current = p.buffer_bytes();
-            wire_bytes = wire_bytes - before + current;
-            before = current;
             if p.deferred.is_some() || !p.trailing.is_empty() {
                 let mut trailing = std::mem::take(&mut p.trailing);
                 match consume_peer(
@@ -570,20 +561,23 @@ impl Session {
             // requests, deferred input and ended sessions retain prompt replies.
             let defer_ack = coalesce_ack
                 && may_coalesce_data_ack(p, self.ring.head(), !self.drained && self.exit.is_none());
-            if p.pending.is_empty()
-                && !defer_ack
-                && let Some(reply) = p.input_reply.take()
-            {
+            if !defer_ack && p.input_reply.is_some() {
                 let state = self.cursors.get(p.writer)?;
-                p.ack_queued = state.written;
-                p.queue(&match reply {
-                    InputReply::State => Frame::InputState(state.written, state.accepted),
-                    InputReply::Ack => Frame::InputAck(state.written),
-                })?;
-                queued_reply = true;
+                queued_reply = p.queue_input_reply(state.written, state.accepted)?;
             }
             // Include all current buffers before reserving a repaint, even
             // when a preceding state frame completed without a new event.
+            let current = p.buffer_bytes();
+            wire_bytes = wire_bytes - before + current;
+            before = current;
+            // Process an already-read key and place its Ack before an unstarted
+            // Output before writing more flood bytes to the peer socket.
+            if p.flush_bounded(&mut write_bytes, &mut write_attempts)
+                .is_err()
+            {
+                retired.push(i);
+                continue;
+            }
             let current = p.buffer_bytes();
             wire_bytes = wire_bytes - before + current;
             before = current;
@@ -1692,6 +1686,28 @@ mod tests {
         let mut received = vec![0; expected.len()];
         client.read_exact(&mut received).unwrap();
         assert_eq!(received, expected, "a silent program must not hold the Ack");
+        drop(client);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    /// A fresh input Ack must pass a wholly unstarted flood frame so the relay can request its replacement repaint.
+    #[test]
+    fn data_ack_precedes_an_unstarted_output_frame() {
+        let (mut session, mut client, state) = ack_fixture(33);
+        let output = Frame::Output(0, b"flood".to_vec());
+        session.peers[0].queue(&output).unwrap();
+
+        session.housekeeping_coalesced(true).unwrap();
+
+        let mut expected = Frame::InputAck(0).encode().unwrap();
+        expected.extend(output.encode().unwrap());
+        let mut received = vec![0; expected.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(
+            received, expected,
+            "the unstarted output frame stays intact after the Ack"
+        );
         drop(client);
         drop(session);
         fs::remove_dir_all(state).unwrap();

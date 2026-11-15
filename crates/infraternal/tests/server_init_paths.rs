@@ -159,6 +159,12 @@ fn rerunning_init_on_an_existing_user_install_plans_the_move() {
 /// A system unit with a custom folder: without `--data` init plans the move to
 /// `/var/lib/infraternal` (or refuses because that folder is in use on this
 /// machine); `--data <custom> --force` keeps the custom folder.
+///
+/// Both plans use `--host-firewall-off`, so they hold only the server unit: a
+/// default-drop plan needs every port sshd uses (J671, #483), which an
+/// unprivileged runner cannot read, so it would be refused before the folder
+/// choice this test is about. The firewall plan's folder line is covered by
+/// `install::tests::system_units_mark_the_scope_used_by_first_run_status`.
 #[test]
 fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
     let machine = Machine::new("rerun-system");
@@ -181,6 +187,7 @@ fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
             "--system",
             "--dry-run",
             "--force",
+            "--host-firewall-off",
         ],
         &[],
     );
@@ -205,6 +212,7 @@ fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
             "--system",
             "--dry-run",
             "--force",
+            "--host-firewall-off",
             "--data",
             custom,
         ],

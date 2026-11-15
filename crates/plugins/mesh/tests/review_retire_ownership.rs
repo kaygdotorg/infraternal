@@ -57,6 +57,9 @@ fn traced<T>(stage: &'static str, result: std::io::Result<T>) -> std::io::Result
 #[test]
 #[ignore = "Run as root in a disposable network namespace."]
 fn retire_leaves_a_marked_interface_this_installation_never_recorded() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let state = fresh_state("retire-unrecorded");
     assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
     assert!(ip(&[
@@ -83,6 +86,9 @@ fn retire_leaves_a_marked_interface_this_installation_never_recorded() {
 #[test]
 #[ignore = "Run as root in a disposable network namespace."]
 fn retire_leaves_a_foreign_interface_without_failing_the_uninstall() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let state = fresh_state("retire-foreign");
     assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
     let result = Node::retire(&state);
@@ -101,6 +107,9 @@ fn retire_leaves_a_foreign_interface_without_failing_the_uninstall() {
 #[test]
 #[ignore = "Run as root in a disposable network namespace with nft."]
 fn retire_checks_every_object_before_deleting_any() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let state = fresh_state("retire-partial");
     assert!(ip(&["link", "add", "infraternal0", "type", "dummy"]));
     assert!(ip(&[
@@ -141,9 +150,21 @@ fn owned_table() {
             .success()
     );
 }
+/// Check whether the product-owned mesh table exists in the test namespace.
 fn table_present() -> bool {
     Command::new("nft")
         .args(["list", "table", "inet", "infraternal_mesh"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Check that the deliberately foreign control table survives product retirement.
+fn foreign_table_present() -> bool {
+    Command::new("nft")
+        .args(["list", "table", "inet", "operator_control"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -209,6 +230,9 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
 #[test]
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
 fn retire_removes_the_interface_and_filter_this_installation_created() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let state = fresh_state("retire-own");
     Node::restore_with_engine(&state, EngineKind::Kernel)
         .unwrap()
@@ -227,6 +251,9 @@ fn retire_removes_the_interface_and_filter_this_installation_created() {
 #[test]
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
 fn retire_leaves_another_installations_interface_and_filter() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let other = fresh_state("retire-other-owner");
     let ours = fresh_state("retire-other-ours");
     // Ours once made an interface (its record names that key), since replaced.
@@ -256,6 +283,9 @@ fn retire_leaves_another_installations_interface_and_filter() {
 #[test]
 #[ignore = "Run as root in a disposable network namespace with CAP_NET_ADMIN."]
 fn retire_does_not_remove_another_installations_live_gotatun_tun() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let ours = fresh_state("retire-gotatun-old-owner");
     let other = fresh_state("retire-gotatun-live-owner");
     let result = (|| {
@@ -300,6 +330,9 @@ fn retire_does_not_remove_another_installations_live_gotatun_tun() {
 #[test]
 #[ignore = "Run as root in a disposable network namespace with CAP_NET_ADMIN."]
 fn down_does_not_remove_another_installations_replacement_gotatun_tun() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let old_state = fresh_state("down-gotatun-old-owner");
     let current_state = fresh_state("down-gotatun-live-owner");
     let result = (|| {
@@ -342,6 +375,9 @@ fn down_does_not_remove_another_installations_replacement_gotatun_tun() {
 #[test]
 #[ignore = "Run as root in a disposable network namespace with CAP_NET_ADMIN and nft."]
 fn disabled_restore_leaves_another_gotatun_nodes_installed_policy() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let old_state = fresh_state("restore-disabled-gotatun-old-owner");
     let current_state = fresh_state("restore-disabled-gotatun-live-owner");
     let result = (|| {
@@ -398,6 +434,9 @@ fn disabled_restore_leaves_another_gotatun_nodes_installed_policy() {
 #[test]
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
 fn retire_with_a_record_leaves_a_foreign_interface_and_names_it() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let state = fresh_state("retire-record-foreign");
     Node::restore_with_engine(&state, EngineKind::Kernel)
         .unwrap()
@@ -412,11 +451,13 @@ fn retire_with_a_record_leaves_a_foreign_interface_and_names_it() {
     assert!(survived, "retire deleted an unmarked interface");
 }
 
-/// Our interface next to a foreign table of the filter's name: every object is
-/// decided first, ours goes, the foreign table stays and is named (#235).
+/// Product retirement removes its exact mesh table and leaves an unrelated table alone, D386.
 #[test]
 #[ignore = "Run as root in a disposable network namespace with WireGuard and nft."]
-fn retire_decides_every_object_and_leaves_a_foreign_table() {
+fn retire_removes_its_mesh_table_and_leaves_a_foreign_table() {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let state = fresh_state("retire-record-table");
     Node::restore_with_engine(&state, EngineKind::Kernel)
         .unwrap()
@@ -424,18 +465,31 @@ fn retire_decides_every_object_and_leaves_a_foreign_table() {
         .unwrap();
     assert!(
         Command::new("nft")
-            .args(["add", "table", "inet", "infraternal_mesh"])
+            .args(["add", "table", "inet", "operator_control"])
             .status()
             .unwrap()
             .success()
     );
     let planned = Node::plan_retirement(&state).map(|plan| plan.left().to_vec());
-    let planned_kept = link_present() && table_present();
+    let planned_kept = link_present() && foreign_table_present();
     let result = Node::retire(&state);
     let (link, table) = (link_present(), table_present());
+    let foreign_table = foreign_table_present();
     cleanup(&state);
-    assert_eq!(planned.unwrap(), ["infraternal_mesh"]);
+    let planned = planned.unwrap();
+    assert!(!planned.contains(&"operator_control"));
     assert!(planned_kept, "planning changed the kernel");
-    assert_eq!(result.unwrap(), ["infraternal_mesh"]);
-    assert!(!link && table, "link {link}, table {table}");
+    assert_eq!(result.unwrap(), [] as [&str; 0]);
+    assert!(
+        !link && !table && foreign_table,
+        "link {link}, mesh table {table}, foreign table {foreign_table}"
+    );
+    assert!(
+        Command::new("nft")
+            .args(["delete", "table", "inet", "operator_control"])
+            .status()
+            .unwrap()
+            .success(),
+        "test cleanup removes only the table it created"
+    );
 }

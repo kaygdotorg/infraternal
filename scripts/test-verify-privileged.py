@@ -45,6 +45,31 @@ def userns_available():
 class PrivilegedAreas(unittest.TestCase):
     """Trigger the namespace tests only for relevant code paths."""
 
+    def test_namespace_gets_only_host_verified_firewall_tool_paths(self):
+        """The user namespace can trust a firewall tool only after the host checks its fixed path."""
+        root = Path(__file__).resolve().parents[1]
+        with mock.patch.object(p, 'root_owned_executable', return_value=True):
+            trusted = p.sandbox_test_environment(root)
+        self.assertEqual(trusted['INFRATERNAL_TEST_STATE_ROOT'], '/tmp/st')
+        self.assertEqual(trusted[p.TEST_ROOT_OWNED_NFT_ENV].split(':'), list(p.FIREWALL_TOOL_PATHS))
+
+        # Only the paths that pass are listed; a failing iptables frontend is left out.
+        with mock.patch.object(p, 'root_owned_executable', side_effect=lambda path: path == '/usr/sbin/nft'):
+            nft_only = p.sandbox_test_environment(root)
+        self.assertEqual(nft_only[p.TEST_ROOT_OWNED_NFT_ENV], '/usr/sbin/nft')
+
+        with mock.patch.object(p, 'root_owned_executable', return_value=False):
+            untrusted = p.sandbox_test_environment(root)
+        self.assertNotIn(p.TEST_ROOT_OWNED_NFT_ENV, untrusted)
+
+    def test_root_owned_executable_rejects_a_user_owned_file(self):
+        """A mode-755 tool owned by the build user must not earn the test trust marker."""
+        with tempfile.TemporaryDirectory() as directory:
+            tool = Path(directory) / 'nft'
+            tool.write_text('test tool')
+            tool.chmod(0o755)
+            self.assertFalse(p.root_owned_executable(tool))
+
     def test_missing_host_frontend_skips_the_row_without_claiming_coverage(self):
         """An absent absolute-path backend is an environment gap, not a mesh failure."""
         with mock.patch.object(sys, 'argv', ['verify-privileged']), \
@@ -79,6 +104,7 @@ class PrivilegedAreas(unittest.TestCase):
         """Cover production files, fixtures, shared manifests and harmless docs."""
         for path, expected in (
             ('crates/infraternal/src/install.rs', {'install'}),
+            ('crates/plugins/mesh/src/host_firewall.rs', {'mesh'}),
             ('crates/plugins/ssh/src/install/setup_scripts.rs', {'install'}),
             ('crates/plugins/remote/src/uninstall.rs', {'install'}),
             ('crates/plugins/proxy/src/cgroup.rs', {'proxy'}),
