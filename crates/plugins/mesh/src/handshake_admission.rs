@@ -11,23 +11,25 @@
 //! Decrypting the sender's key costs one X25519 key agreement, far more than the MAC1 check, and
 //! it runs in the single receive task that also carries every peer's data packets. So the guard
 //! checks budgets before any key agreement (J555 F1), in this order, per one-second window:
-//! - per source (an IPv4 address or an IPv6 /64): at most [`REFUSED_SOURCE_BUDGET`] key
-//!   agreements that admitted nobody, and at most [`SOURCE_BUDGET`] in all;
-//! - per network (an IPv4 /24 or an IPv6 /48): at most [`REFUSED_NETWORK_BUDGET`] refused and
-//!   [`NETWORK_BUDGET`] in all, so one network's many addresses share one budget (J713);
+//! - per source (an IPv4 address, an IPv6 /64, or a link-local IPv6 address on its interface):
+//!   at most [`REFUSED_SOURCE_BUDGET`] key agreements that admitted nobody, and at most
+//!   [`SOURCE_BUDGET`] in all;
+//! - per network (an IPv4 /24, an IPv6 /48, or one link for link-local sources): at most
+//!   [`REFUSED_NETWORK_BUDGET`] refused and [`NETWORK_BUDGET`] in all, so one network's many
+//!   addresses share one budget (J713);
 //! - per node: at most [`NODE_BUDGET`] in all, in two halves. Sources that are not known peer
 //!   endpoints share [`UNKNOWN_SOURCE_BUDGET`]; known endpoints share [`RESERVED_BUDGET`].
 //!
-//! A known endpoint is an exact address and port that the coordinator configured for an
-//! installed peer, or that `GotaTun` confirmed from a peer's authenticated traffic. Each one may
-//! spend its own share of the reserve per window (see [`reserve_share`]: the reserve divided by
-//! the number of known endpoints, at least one), and those key agreements skip the source and
-//! network budgets. Past its share, or once the reserve is spent, a known endpoint is held to
-//! the same budgets as any other source. A refused key agreement at a known endpoint (a spoofed
-//! source or a stale key: the real peer's key is installed) uses up that endpoint's share for
-//! the rest of the window. Past any budget an initiation is dropped silently: ungranted keys
-//! still never get a reply, and a flood costs one MAC1 check per packet, as it did before the
-//! guard existed.
+//! A known endpoint is an exact address and port (and interface, for a link-local address) that
+//! the coordinator configured for an installed peer, or that `GotaTun` confirmed from a peer's
+//! authenticated traffic. Each one may spend its own share of the reserve per window (see
+//! [`reserve_share`]: the reserve divided by the number of known endpoints, at least one), and
+//! those key agreements skip the source and network budgets. Past its share, or once the
+//! reserve is spent, a known endpoint is held to the same budgets as any other source. A
+//! refused key agreement at a known endpoint (a spoofed source or a stale key: the real peer's
+//! key is installed) uses up that endpoint's share for the rest of the window. Past any budget
+//! an initiation is dropped silently: ungranted keys still never get a reply, and a flood costs
+//! one MAC1 check per packet, as it did before the guard existed.
 //!
 //! The total per-source budget is twice `GotaTun`'s own per-source limit, so a granted peer's
 //! burst still reaches `GotaTun`'s cookie reply and its MAC2 retry, as without the guard.
@@ -188,20 +190,36 @@ const BUDGET_WINDOW: Duration = Duration::from_secs(1);
 
 /// Who a per-source budget belongs to. IPv6 is keyed by /64, because one host can use every
 /// address in its /64; IPv4-mapped IPv6 addresses (from the dual-stack socket) count as IPv4.
+///
+/// Link-local IPv6 addresses are the exception (J735 P3, #483): every one of them, on every
+/// interface, sits in `fe80::/64`, so keying them by /64 would put every link-local peer the
+/// node has into one budget. A link-local source is its interface identifier on its interface
+/// (the scope id), and [`NetworkKey::Link`] bounds one on-link host that cycles addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum SourceKey {
     V4([u8; 4]),
     V6([u8; 8]),
+    /// A link-local source's low 64 bits, then its scope id (big-endian).
+    LinkLocal([u8; 12]),
 }
 
 impl SourceKey {
-    /// Key one packet source by its IPv4 address or IPv6 /64.
-    fn of(address: IpAddr) -> Self {
-        match address.to_canonical() {
+    /// Key one packet source by its IPv4 address, its IPv6 /64, or its link-local address and
+    /// interface.
+    fn of(address: SocketAddr) -> Self {
+        let scope = link_scope(address);
+        match address.ip().to_canonical() {
             IpAddr::V4(v4) => Self::V4(v4.octets()),
             IpAddr::V6(v6) => {
+                let octets = v6.octets();
+                if let Some(scope) = scope {
+                    let mut key = [0; 12];
+                    key[..8].copy_from_slice(&octets[8..]);
+                    key[8..].copy_from_slice(&scope.to_be_bytes());
+                    return Self::LinkLocal(key);
+                }
                 let mut prefix = [0; 8];
-                prefix.copy_from_slice(&v6.octets()[..8]);
+                prefix.copy_from_slice(&octets[..8]);
                 Self::V6(prefix)
             }
         }
@@ -220,16 +238,34 @@ impl SourceKey {
                 network.copy_from_slice(&prefix[..6]);
                 NetworkKey::V6(network)
             }
+            Self::LinkLocal(key) => {
+                let mut scope = [0; 4];
+                scope.copy_from_slice(&key[8..]);
+                NetworkKey::Link(scope)
+            }
         }
     }
 }
 
+/// The interface a link-local IPv6 source arrived on (its scope id), or `None` for any other
+/// address. Only link-local addresses carry a meaningful scope, so other addresses ignore it
+/// and match whatever scope id the socket reports for them.
+fn link_scope(address: SocketAddr) -> Option<u32> {
+    match address {
+        SocketAddr::V6(v6) if v6.ip().is_unicast_link_local() => Some(v6.scope_id()),
+        _ => None,
+    }
+}
+
 /// Who a per-network budget belongs to: an IPv4 /24 or an IPv6 /48, the smallest blocks that
-/// providers usually route to one customer.
+/// providers usually route to one customer, or one link for link-local sources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum NetworkKey {
     V4([u8; 3]),
     V6([u8; 6]),
+    /// Every link-local source on the interface with this scope id (big-endian): any host on
+    /// the link can use any link-local address, as anyone with a /48 can use all its /64s.
+    Link([u8; 4]),
 }
 
 /// One source's, or one network's, key agreements in the current window.
@@ -241,19 +277,21 @@ struct Spend {
     refused: u32,
 }
 
-/// An exact peer endpoint in a compact, sortable form: the IPv6 (or IPv4-mapped) address and
-/// the port, 18 bytes with no padding.
-type EndpointKey = [u8; 18];
+/// An exact peer endpoint in a compact, sortable form: the IPv6 (or IPv4-mapped) address, the
+/// port, and the scope id of a link-local address (zero otherwise), 22 bytes with no padding.
+type EndpointKey = [u8; 22];
 
-/// Turn a socket address into its [`EndpointKey`], treating IPv4 and IPv4-mapped IPv6 alike.
+/// Turn a socket address into its [`EndpointKey`], treating IPv4 and IPv4-mapped IPv6 alike. A
+/// link-local endpoint is known only on its own interface (J735 P3, #483).
 fn endpoint_key(address: SocketAddr) -> EndpointKey {
     let ip = match address.ip().to_canonical() {
         IpAddr::V4(v4) => v4.to_ipv6_mapped(),
         IpAddr::V6(v6) => v6,
     };
-    let mut key = [0; 18];
+    let mut key = [0; 22];
     key[..16].copy_from_slice(&ip.octets());
-    key[16..].copy_from_slice(&address.port().to_be_bytes());
+    key[16..18].copy_from_slice(&address.port().to_be_bytes());
+    key[18..].copy_from_slice(&link_scope(address).unwrap_or(0).to_be_bytes());
     key
 }
 
@@ -311,7 +349,7 @@ impl Budget {
     /// and network's budgets and to [`UNKNOWN_SOURCE_BUDGET`].
     fn spend(
         &mut self,
-        source: IpAddr,
+        source: SocketAddr,
         known: Option<usize>,
         known_endpoints: usize,
         now: Instant,
@@ -549,7 +587,7 @@ impl PeerAdmission {
             .budget
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .spend(source.ip(), known, self.known_endpoints(), now)?;
+            .spend(source, known, self.known_endpoints(), now)?;
         #[cfg(test)]
         self.key_agreements
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
