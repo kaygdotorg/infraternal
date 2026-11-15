@@ -804,6 +804,28 @@ fn queue_raw_output(
     }
 }
 
+/// Send the raw Output that [`queue_raw_output`] staged, if any, ahead of an
+/// ordered message whose meaning depends on the bytes before it.
+///
+/// A staged frame is otherwise sent only from the relay's `reserve_owned`
+/// select arm. An ordered message the relay awaits directly (`emit`) takes
+/// the next free FIFO slot instead, so without this flush it overtakes the
+/// staged bytes: a `ReplayComplete` names a cursor the client does not hold
+/// yet, and an exit notice or Close ends the stream while the relay drops
+/// the bytes (#477, J775). Call it before every replay completion, exit,
+/// end, Close, snapshot-unavailable notice and attachment marker that can
+/// follow staged output. Flushing waits for the same FIFO the next message
+/// waits for anyway, so it adds no wait of its own.
+/// # Errors
+/// Returns `BrokenPipe` if the writer is closed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn flush_staged(tx: &mpsc::Sender<Message>, staged: &mut Option<Message>) -> io::Result<()> {
+    match staged.take() {
+        Some(message) => emit(tx, message).await,
+        None => Ok(()),
+    }
+}
+
 /// Keep the shim reader live while one raw Output waits for the shared writer.
 ///
 /// The pending slot is the one-frame read-ahead bound beside `pending_bulk`.
@@ -2040,6 +2062,9 @@ async fn terminal_run(
     }
     let mut pending: Option<Shim> = None;
     // One credit-charged Output may wait here if the shared writer FIFO is full.
+    // Invariant: it reaches the writer before any ordered message emitted
+    // after it was staged (see `flush_staged`), unless a key repaint
+    // replaces it on purpose.
     let mut pending_bulk: Option<Message> = None;
     let mut deadline = None;
     // The latest input offset a repaint must show, and the offset covered by
@@ -2082,6 +2107,7 @@ async fn terminal_run(
                                 .forward(length)
                                 .map_err(|_| sessions::invalid("output credit invariant"))?;
                             if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                                flush_staged(&tx, &mut pending_bulk).await?;
                                 replay_complete(&tx, stream, id, output.cursor(), replay_size)
                                     .await?;
                                 replay_until = None;
@@ -2100,6 +2126,7 @@ async fn terminal_run(
                             .map_err(|_| sessions::invalid("output credit invariant"))?;
                     }
                     if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                        flush_staged(&tx, &mut pending_bulk).await?;
                         replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
                         replay_until = None;
                     }
@@ -2229,6 +2256,9 @@ async fn terminal_run(
             deadline = None;
         }
         if output.needs_snapshot() && session.is_none() {
+            // The relink may end the stream, and the replay it restarts
+            // continues after the staged bytes.
+            flush_staged(&tx, &mut pending_bulk).await?;
             let Some(mut next) = relink(&path, id, stream, &tx, primed).await? else {
                 return Ok(());
             };
@@ -2268,6 +2298,7 @@ async fn terminal_run(
                     finished_peer = true;
                     continue;
                 }
+                flush_staged(&tx, &mut pending_bulk).await?;
                 if recorded_end(&path, id, stream, &tx).await? {
                     return Ok(());
                 }
@@ -2304,6 +2335,9 @@ async fn terminal_run(
                         // The rewind starts a new replay below any cursor an
                         // earlier key repaint covered: scope it afresh (#477).
                         attachment = crate::daemon_writer::next_attachment();
+                        // Output the old attachment staged belongs before
+                        // the marker, where the writer may still trim it.
+                        flush_staged(&tx, &mut pending_bulk).await?;
                         emit(&tx, Message::Attached(stream, attachment)).await?;
                         pending = None;
                         deadline = None;
@@ -2335,6 +2369,7 @@ async fn terminal_run(
                     other => {
                         let detached = session.is_none();
                         if detached {
+                            flush_staged(&tx, &mut pending_bulk).await?;
                             let Some(mut next) = relink(&path, id, stream, &tx, primed).await? else { return Ok(()); };
                             let written = input_state(&mut next).await?;
                             input_progress(&tx, stream, &mut acknowledged, written).await?;
@@ -2537,6 +2572,7 @@ async fn terminal_run(
                         }
                     }
                     Shim::Exited(status, final_seq) => {
+                        flush_staged(&tx, &mut pending_bulk).await?;
                         exited(&tx, stream, id, status, final_seq, false).await?;
                         return Ok(());
                     }
@@ -2547,10 +2583,16 @@ async fn terminal_run(
                         let json = terminal_events::Notice::SnapshotUnavailable {
                             session_id: uuid::Uuid::from_bytes(id), seq: output.cursor(),
                         }.json()?;
+                        // The notice's seq already counts the staged bytes.
+                        flush_staged(&tx, &mut pending_bulk).await?;
                         emit(&tx, Message::Event(stream, json)).await?;
                         session = None; probe = None;
                     }
-                    Shim::Error(..) => { emit(&tx, Message::Close(stream, "shim refused terminal request")).await?; return Ok(()); }
+                    Shim::Error(..) => {
+                        flush_staged(&tx, &mut pending_bulk).await?;
+                        emit(&tx, Message::Close(stream, "shim refused terminal request")).await?;
+                        return Ok(());
+                    }
                     _ => return Err(sessions::invalid("unexpected shim relay frame")),
                 }
             }
