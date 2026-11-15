@@ -85,6 +85,13 @@ pub(crate) enum Message {
     /// start exactly at the cursor the browser asked for (#477).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Attached(u32, u64),
+    /// The server closed this stream, so the writer drops its per-stream state
+    /// for every attachment older than the given floor (see `Stream::retire` in
+    /// the shared dispatcher). Nothing is written: the server already knows.
+    /// Without it, a long-lived link keeps one entry per stream id it ever used
+    /// (#477, J730 P3).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Forget(u32, u64),
 }
 
 /// Source of attachment ids. Starts at 1, so 0 never names a real attachment.
@@ -244,8 +251,19 @@ pub(crate) async fn writer(
                 write_message(&mut tx, socket, message, &mut replace_through).await?;
             }
         }
+        #[cfg(test)]
+        let _ =
+            TRACKED_STREAMS.try_with(|count| count.store(replace_through.len(), Ordering::Relaxed));
     }
     Ok(())
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test-only window into a writer: how many streams its [`ReplaceCursors`] holds after
+    /// each item. A test runs a whole channel inside `TRACKED_STREAMS.scope(..)` to watch it;
+    /// task-local, so tests running in parallel never see each other's writers.
+    pub(crate) static TRACKED_STREAMS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
 }
 
 /// Apply a trusted key acknowledgment or repaint without changing relay credit.
@@ -381,6 +399,8 @@ async fn write_message(
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Message::Attached(stream, attachment) => replace_through.attach(stream, attachment),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Message::Forget(stream, floor) => replace_through.forget_before(stream, floor),
     }
     Ok(())
 }
@@ -422,6 +442,25 @@ impl ReplaceCursors {
     /// The stream closed: drop its state so a later stream with the same id starts clean.
     fn forget(&mut self, stream: u32) {
         self.streams.remove(&stream);
+    }
+
+    /// The server closed `stream`: drop its state unless a relay that attached after
+    /// the close (an id at or above `floor`) already owns it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn forget_before(&mut self, stream: u32, floor: u64) {
+        if self
+            .streams
+            .get(&stream)
+            .is_some_and(|entry| entry.0 < floor)
+        {
+            self.streams.remove(&stream);
+        }
+    }
+
+    /// How many streams currently hold state; the close tests check it returns to zero.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.streams.len()
     }
 
     /// Record that `attachment` covered `stream`'s raw output below `through`.
@@ -772,6 +811,22 @@ mod tests {
                 "other 9".to_string(),
             ]
         );
+    }
+
+    /// A stream the server closed leaves no writer state behind, but a relay that
+    /// reattached the same stream id after the close keeps its own (#477, J730 P3).
+    #[test]
+    fn forgetting_a_closed_stream_spares_its_replacement() {
+        let mut cursors = ReplaceCursors::default();
+        cursors.attach(4, 3);
+        assert!(cursors.cover(4, 3, 100));
+        cursors.attach(6, 4);
+        cursors.forget_before(4, 5);
+        assert_eq!(cursors.len(), 1, "stream 4's closed attachment was kept");
+        cursors.attach(6, 7);
+        cursors.forget_before(6, 6);
+        assert_eq!(cursors.through(6), None);
+        assert_eq!(cursors.len(), 1, "the replacement attachment 7 was dropped");
     }
 
     /// The marker of an attachment whose priority frames already adopted the stream keeps

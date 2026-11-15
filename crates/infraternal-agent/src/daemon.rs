@@ -194,10 +194,28 @@ enum Command {
     Cursor(u64),
     Ping(u64, u64),
 }
-// Dropping cancellation retires a stalled handshake as well as queued commands.
+/// One terminal stream the shared dispatcher has attached: where its commands go,
+/// and how to stop its relay task.
 struct Stream {
+    /// The relay task's bounded command queue.
     commands: session_commands::Sender,
-    _cancel: oneshot::Sender<()>,
+    /// Stops the relay task. Dropping it retires a stalled handshake as well as
+    /// queued commands; [`Stream::retire`] also tells the task to clear the
+    /// writer's per-stream state.
+    cancel: oneshot::Sender<u64>,
+}
+
+impl Stream {
+    /// Stop this stream's relay because the server closed it (or dispatch retired it).
+    ///
+    /// Sends a fresh attachment id as a floor: every attachment this relay ever
+    /// announced is older, and any relay that later reattaches the same stream
+    /// id is newer. The cancelled task forwards it as [`Message::Forget`] on the
+    /// bulk lane, after everything the old relay queued, so the writer's
+    /// per-stream cursor state goes away without touching a replacement's (#477).
+    fn retire(self) {
+        let _ = self.cancel.send(crate::daemon_writer::next_attachment());
+    }
 }
 
 #[cfg(feature = "remote")]
@@ -1354,13 +1372,24 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             let id = *session_id;
                             let (commands, rx) = session_commands::channel();
                             let (cancel, cancelled) = oneshot::channel();
-                            streams.insert(stream, Stream { commands, _cancel: cancel });
+                            streams.insert(stream, Stream { commands, cancel });
                             let tx = tx.clone();
+                            let forget = tx.clone();
                             let priority = priority.clone();
                             jobs.spawn(async move {
                                 let result = tokio::select! {
+                                    // Cancellation first: retiring a stream also drops its
+                                    // command sender, which can end the relay in the same
+                                    // poll and would otherwise skip the Forget.
+                                    biased;
+                                    floor = cancelled => match floor {
+                                        // Ordered after the dropped relay's queued output, so
+                                        // its marker cannot re-create the state (#477, J730 P3).
+                                        Ok(floor) => emit(&forget, Message::Forget(stream, floor)).await,
+                                        // Dispatch itself ended: the writer goes with it.
+                                        Err(_) => Ok(()),
+                                    },
                                     result = terminal_with_priority(path, id, stream, last_out_seq, last_in_seq, rx, tx, priority) => result,
-                                    _ = cancelled => Ok(()),
                                 };
                                 (stream, result)
                             });
@@ -1373,7 +1402,9 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 Frame::Credit {bytes} => Command::Credit(bytes),
                                 Frame::Resize {cols, rows, px_w, px_h} => Command::Resize(cols, rows, px_w, px_h),
                                 Frame::Close {..} => {
-                                    streams.remove(&stream);
+                                    if let Some(entry) = streams.remove(&stream) {
+                                        entry.retire();
+                                    }
                                     registry.refresh();
                                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                                     continue;
@@ -1388,7 +1419,9 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 matches!(entry.commands.try_send(command), Err(mpsc::error::TrySendError::Full(_)))
                             });
                             if overloaded {
-                                streams.remove(&stream);
+                                if let Some(entry) = streams.remove(&stream) {
+                                    entry.retire();
+                                }
                                 reply(&control, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input"))?;
                             }
                             // Frames already in flight after a stream closes are
@@ -2506,6 +2539,11 @@ mod key_repaint_tests;
 #[cfg(test)]
 #[path = "daemon_replay_fence_tests.rs"]
 mod replay_fence_tests;
+
+/// A server Close leaves no per-stream state in the shared writer (#477).
+#[cfg(test)]
+#[path = "daemon_close_forget_tests.rs"]
+mod close_forget_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "daemon_authenticated_tests.rs"]
