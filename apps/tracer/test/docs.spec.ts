@@ -117,9 +117,9 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
         const before = await page.evaluate(() => document.querySelector(".toc")!.getBoundingClientRect().top);
         await page.mouse.wheel(0, 900);
         await page.waitForTimeout(250);
-        const after = await page.evaluate(() => ({ top: document.querySelector(".toc")!.getBoundingClientRect().top, scrolled: window.scrollY, rem: parseFloat(getComputedStyle(document.documentElement).fontSize) }));
+        const after = await page.evaluate(() => ({ top: document.querySelector(".toc")!.getBoundingClientRect().top, scrolled: window.scrollY, rem: parseFloat(getComputedStyle(document.documentElement).fontSize), bar: parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) }));
         expect(after.scrolled, "the page scrolled").toBeGreaterThan(400);
-        expect(Math.abs(after.top - 1.5 * after.rem), "the contents stay 1.5rem under the top").toBeLessThanOrEqual(1);
+        expect(Math.abs(after.top - (after.bar + 0.5 * after.rem)), "the contents stay half a rem under the top bar").toBeLessThanOrEqual(1);
         expect(before).toBeGreaterThan(after.top - 1);
         // An entry jumps to its heading, which stops a little under the top.
         await page.locator('.toc-side a[href="#undoing-a-switch"]').click();
