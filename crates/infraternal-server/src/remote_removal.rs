@@ -214,6 +214,7 @@ impl Removal {
         }
         self.finish(token, id, now).await
     }
+    /// Complete a reviewed removal for a browser session: look the review up by its token, then publish it under one permit.
     async fn finish(&self, token: &str, id: &str, now: i64) -> Result<Value, crate::auth::Error> {
         let hash = crate::auth::hash(token);
         let entry = {
@@ -860,11 +861,13 @@ pub(crate) async fn request_uninstall(
 ///
 /// Running out of permits is "try again in a moment" (`Throttled`, 429), never `Denied`: a 403 tells the browser the
 /// person lacks authority and sends them to refresh the host list, which is the wrong advice for a busy server (#519).
-fn admit(admission: &Arc<Semaphore>) -> Result<tokio::sync::OwnedSemaphorePermit, crate::auth::Error> {
+fn admit(
+    admission: &Arc<Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, crate::auth::Error> {
     admission
         .clone()
         .try_acquire_owned()
-        .map_err(|_| crate::auth::Error::Denied)
+        .map_err(|_| crate::auth::Error::Throttled)
 }
 
 fn display_name(address: &str) -> &str {
@@ -888,9 +891,10 @@ fn manual_uninstall(mode: &str, host: &str) -> String {
         format!("~/.local/bin/infraternal --bootstrap-uninstall {host}")
     }
 }
-#[cfg(test)]
-#[path = "remote_removal_review_tests.rs"]
-mod review_tests;
+/// The removal service reports a full admission as busy, not as refused (#519).
 #[cfg(test)]
 #[path = "remote_removal_admission_tests.rs"]
 mod admission_tests;
+#[cfg(test)]
+#[path = "remote_removal_review_tests.rs"]
+mod review_tests;
