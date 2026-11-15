@@ -104,7 +104,7 @@ cmd_add_host() {
   # CA creation (one passkey tap), host key, password sign-in, install, shell. The password field makes Safari offer
   # "Use Strong Password?"; a system sheet stalls later taps, so typing and closing the sheet are separate runs.
   local f="/Users/kayg/Developer/infraternal-sim/qa"
-  runner "./run.sh run host-1 \"open~$QA_URL/?r=$(date +%s)|wait~9|tap~Add host|wait~3|field~Hosts to add|type~qa-device@$HOST_ADDR:$HOST_PORT|$KBD|wait~2|tap~Continue|wait~8|tapsbif~Use Passkey~6|face|wait~8|tapif~Trust and continue~10|wait~4\""
+  runner "./run.sh run host-1 \"open~$QA_URL/?r=$(date +%s)|wait~9|tap~Add host|wait~3|field~Hosts to add|type~qa-device@$HOST_ADDR:$HOST_PORT|$KBD|wait~2|tap~Continue|wait~8|tapsbif~Use Passkey/Use Selected Passkey~6|face|wait~8|tapif~Trust and continue~10|wait~4\""
   runner "./run.sh run host-2 \"swipe~0.5~0.62~0.5~0.5~0.4|wait~1|swipe~0.5~0.62~0.5~0.5~0.4|wait~1|swipe~0.5~0.62~0.5~0.5~0.4|wait~2|tap~Sign in with a password|wait~2|field~Password for $HOST_ADDR|typefile~$f/host-password.txt\""
   runner "./run.sh run host-3 \"xy~0.922~0.663|wait~2|shot~sheet-closed\""
   runner "./run.sh run host-4 \"tap~Sign in|wait~25|shot~host-added\""
