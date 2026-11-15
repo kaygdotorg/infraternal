@@ -20,8 +20,12 @@
 //!   At D393's design scale of 1,000 peers with 10 of them active, the filter adds under
 //!   1 MiB. Compiling a policy allocates no tables, so publishing never doubles memory.
 //! - **Publishing** a policy swaps one pointer under the write lock, the only lock every packet
-//!   waits behind, so it costs the same at 4,096 peers as at 4. The flow tables live outside the
-//!   policy, in [`PacketFilter::tables`], and survive the swap unchanged.
+//!   waits behind, so that lock is held for the same short time at 4,096 peers as at 4. The flow
+//!   tables live outside the policy, in [`PacketFilter::tables`], and survive the swap
+//!   unchanged. The sweep that follows scans every active peer's table, so its own cost grows
+//!   with the number of active peers, but it holds the `tables` lock only while it copies the
+//!   list of cells. A packet that binds its peer's cell after the publish waits at most for that
+//!   copy, never for the scan (J753, #265).
 
 use crate::{
     dataplane::{Config, PeerPolicy},
@@ -225,11 +229,12 @@ const TCP_ACK: u8 = 0x10;
 /// Lock order, always taken in this order and never the reverse: `writer`, then `policy`, then
 /// `tables`, then one peer's [`PeerFlows::table`]. A packet takes the `policy` read lock, then
 /// `tables` only when it binds a peer's cell (see [`Self::flows_for`]), then the peer's table.
-/// The post-publish sweep takes `tables` and only `try_lock`s peer tables, so a packet never
-/// waits for it.
+/// The post-publish sweep holds `tables` only to copy the list of cells, then releases it and
+/// only `try_lock`s peer tables, so a packet never waits for the scan (J753, #265).
 pub(crate) struct PacketFilter {
-    /// The published snapshot. A publish replaces the pointer and nothing else, so the write
-    /// lock that every packet waits behind lasts the same at any peer count (J721, #265).
+    /// The published snapshot. A publish replaces the pointer and nothing else under the write
+    /// lock, so that lock, which every packet waits behind, is held for the same short time at
+    /// any peer count (J721, #265).
     policy: RwLock<Arc<CompiledPolicy>>,
     /// Each peer's flow cell, keyed by node, outside any one policy snapshot so that flows
     /// survive a publish without being copied. A peer gets an entry on its first packet. The
@@ -238,6 +243,10 @@ pub(crate) struct PacketFilter {
     /// Serialises publish, withdraw and their sweep, so a sweep never judges flows against a
     /// snapshot that a concurrent publish has already replaced.
     writer: Mutex<()>,
+    /// Test seam: called by the sweep just before it visits each peer's cell, so a test can
+    /// pause the sweep part-way through and check what a packet can do meanwhile.
+    #[cfg(test)]
+    sweep_probe: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 /// One fully compiled snapshot that can be published after its related routes and peers succeed.
@@ -280,6 +289,8 @@ impl PacketFilter {
             policy: RwLock::new(Arc::new(policy)),
             tables: Mutex::new(BTreeMap::new()),
             writer: Mutex::new(()),
+            #[cfg(test)]
+            sweep_probe: Mutex::new(None),
         }
     }
 
@@ -338,14 +349,15 @@ impl PacketFilter {
     /// Publish a prepared snapshot. From that moment no packet rides a flow the replacement
     /// no longer permits.
     ///
-    /// Under the write lock this only swaps the snapshot pointer, so a publish holds packets
-    /// for the same short time at 4,096 peers as at 4 (J721, #265; J718 measured 7.3 ms while
-    /// every peer's table was copied and scanned under the lock). Revocation needs no scan
-    /// under the lock either: every packet of a tracked flow is checked with
+    /// Under the write lock this only swaps the snapshot pointer, so the write lock holds
+    /// packets for the same short time at 4,096 peers as at 4 (J721, #265; J718 measured
+    /// 7.3 ms while every peer's table was copied and scanned under the lock). Revocation
+    /// needs no scan under the lock either: every packet of a tracked flow is checked with
     /// [`CompiledPolicy::allows_flow`] against the snapshot it reads, so a revoked flow admits
     /// nothing after the swap. The sweep that follows frees revoked and expired slots outside
-    /// the lock. It visits only peers that have a table. The old snapshot is dropped after the
-    /// lock is released.
+    /// the lock. It visits only peers that have a cell, and its time grows with them; packets
+    /// do not wait for it (see [`Self::sweep`]). The old snapshot is dropped after the lock is
+    /// released.
     pub(crate) fn publish_policy(&self, policy: PreparedPolicy) {
         let _writer = self
             .writer
@@ -370,19 +382,38 @@ impl PacketFilter {
     /// flow cell, not every configured peer. A table that a packet is using right now is
     /// skipped rather than waited for. It is cleaned the next time its direction fills up
     /// (see [`FlowShard::reclaim`]), and its revoked flows admit nothing in the meantime.
+    ///
+    /// The `tables` lock is held only to drop removed peers and copy the remaining cell
+    /// pointers into a list (J753, #265). The tables themselves are scanned from that list
+    /// with the lock released. Every active peer's first packet after a publish takes
+    /// `tables` to bind its cell (see [`Self::flows_for`]), so holding it through the scan
+    /// made each of those packets wait for the whole sweep: J750 measured 3.6-13 ms (median)
+    /// at 4,096 active peers. With the lock released, a packet waits at most for the copy, or
+    /// for its own table while the sweep cleans that one table. Removed peers' cells are
+    /// freed after the lock is released too. A cell created for a new peer after the copy is
+    /// cleaned by the next sweep. Rejected: binding the new snapshot's cells before the swap,
+    /// which adds O(peers) work to every publish for nothing the copy does not already give.
     fn sweep(&self, policy: &CompiledPolicy, now: Instant) {
-        let mut tables = self
-            .tables
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        tables.retain(|node, cell| {
-            if policy.peer_by_node(*node).is_none() {
-                return false;
-            }
+        let (removed, cells) = {
+            let mut tables = self
+                .tables
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let removed: Vec<Arc<PeerFlows>> = tables
+                .extract_if(.., |node, _| policy.peer_by_node(*node).is_none())
+                .map(|(_, cell)| cell)
+                .collect();
+            let cells: Vec<Arc<PeerFlows>> = tables.values().cloned().collect();
+            (removed, cells)
+        };
+        drop(removed);
+        for cell in cells {
+            #[cfg(test)]
+            self.run_sweep_probe();
             let mut table = match cell.table.try_lock() {
                 Ok(table) => table,
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return true,
+                Err(std::sync::TryLockError::WouldBlock) => continue,
             };
             if let Some(shard) = table.as_mut() {
                 shard.reclaim(now, policy);
@@ -391,8 +422,7 @@ impl PacketFilter {
                     *table = None;
                 }
             }
-            true
-        });
+        }
     }
 
     /// The flow cell of `peer`, binding the snapshot's peer entry to it on the peer's first
@@ -818,6 +848,19 @@ impl PacketFilter {
         entry.last_seen = now;
         shard.slots[index] = FlowSlot::Occupied(entry);
         true
+    }
+
+    /// Test seam: run the probe a test installed in [`Self::sweep_probe`], if any.
+    #[cfg(test)]
+    fn run_sweep_probe(&self) {
+        if let Some(probe) = self
+            .sweep_probe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            probe();
+        }
     }
 
     /// Test seam: how many peers hold an allocated flow table right now.

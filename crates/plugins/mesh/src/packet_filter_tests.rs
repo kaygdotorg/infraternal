@@ -2013,6 +2013,60 @@ fn publish_never_waits_for_a_peer_table() {
     assert!(filter.check_at(&mut kept, Direction::HostToMesh, now));
 }
 
+/// A packet never waits for the sweep that follows a publish (J753, #265; J750 P2). After
+/// a publish every active peer's next packet binds its flow cell through the `tables` lock.
+/// The sweep is paused part-way through, and a packet from an active peer must still pass.
+/// Before J753 the sweep held `tables` for its whole scan, and J750 measured that packet
+/// waiting 3.6-13 ms (median) at 4,096 active peers. This checks the structure, not
+/// wall-clock time: the timeout only turns a wait into a failure instead of a hang.
+#[test]
+fn a_packet_binds_its_peer_while_the_sweep_is_paused() {
+    let config = scale_config(8);
+    let filter = std::sync::Arc::new(
+        PacketFilter::new(&config, MeshProxyIngress::default()).expect("compile"),
+    );
+    let now = Instant::now();
+    for n in 2..6 {
+        assert!(establish4(&filter, scale_peer4(n), 40_000, now));
+    }
+    let (paused, sweep_paused) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel::<()>();
+    let resumed = std::sync::Mutex::new(resumed);
+    let first_visit = std::sync::atomic::AtomicBool::new(true);
+    *filter.sweep_probe.lock().expect("probe") = Some(Box::new(move || {
+        if first_visit.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            paused.send(()).expect("report pause");
+            // Wait for the test to finish its packet; a broken channel just resumes.
+            let _ = resumed.lock().expect("resume").recv();
+        }
+    }));
+    let prepared =
+        PacketFilter::prepare_policy(&config, MeshProxyIngress::default()).expect("prepare");
+    let publisher = std::sync::Arc::clone(&filter);
+    let publish = std::thread::spawn(move || publisher.publish_policy(prepared));
+    sweep_paused
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the sweep never visited a peer");
+
+    let (passed, packet_result) = std::sync::mpsc::channel();
+    let worker = std::sync::Arc::clone(&filter);
+    let packet = std::thread::spawn(move || {
+        let mut reply = tcp4(scale_peer4(5), LOCAL4, 443, 40_000, ACK);
+        passed
+            .send(worker.check_at(&mut reply, Direction::MeshToHost, now))
+            .expect("report packet");
+    });
+    let result = packet_result.recv_timeout(Duration::from_secs(30));
+    resume.send(()).expect("resume the sweep");
+    publish.join().expect("publisher thread");
+    packet.join().expect("packet thread");
+    assert_eq!(
+        result,
+        Ok(true),
+        "a packet binding its peer waited for the paused sweep"
+    );
+}
+
 /// Revocation ends flows at publish even when the sweep could not visit the peer's table
 /// (J721, #265): no revoked flow admits another packet, and their slots go back to the
 /// quota the moment the full direction needs them.
