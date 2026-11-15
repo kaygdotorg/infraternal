@@ -522,9 +522,13 @@ impl Updater {
             };
             state.available = Some(version.clone());
             // The channel is authoritative: a staged release it no longer announces
-            // (yanked, replaced, or the pointer moved back) must never be applied.
+            // (yanked, or the pointer moved back or across) must never be applied. One
+            // it only overtook with a newer release stays until that one is published
+            // below, which replaces it (J734 P3-c): a failed download of the newer
+            // release must not leave nothing staged under a "withdrawn" label.
             if admission == Admission::Forward
-                && let Some(withdrawn) = staged.take_if(|staged| *staged != version)
+                && let Some(withdrawn) =
+                    staged.take_if(|staged| *staged != version && !overtaken(staged, &version))
             {
                 retire(lock, state, Some(withdrawn), REMOVED_WITHDRAWN)?;
             }
@@ -593,6 +597,19 @@ impl Updater {
         lock: &Locked,
         state: &mut UpdateState,
     ) -> Result<Option<String>, &'static str> {
+        Ok(self
+            .inspect_staged_image(lock, state)
+            .await?
+            .map(|(version, _)| version))
+    }
+
+    /// [`Updater::inspect_staged`], also returning the open image whose bytes were just
+    /// hashed (J734 P3-b), so S4 switches from exactly what was verified.
+    async fn inspect_staged_image(
+        &self,
+        lock: &Locked,
+        state: &mut UpdateState,
+    ) -> Result<Option<(String, std::fs::File)>, &'static str> {
         let path = self.directory.join("staged");
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             state.staged = None;
@@ -601,10 +618,12 @@ impl Updater {
         let verified = if private_directory(&metadata) {
             let (engine, artifact) = (Arc::clone(&self.engine), self.artifact.clone());
             let folder = path.clone();
-            tokio::task::spawn_blocking(move || verify_staged(engine.as_ref(), &folder, &artifact))
-                .await
-                .map_err(|_| "release verification could not finish")?
-                .ok()
+            tokio::task::spawn_blocking(move || {
+                verify_staged_image(engine.as_ref(), &folder, &artifact)
+            })
+            .await
+            .map_err(|_| "release verification could not finish")?
+            .ok()
         } else {
             None
         };
@@ -612,7 +631,7 @@ impl Updater {
             let claimed = staged_version(&self.directory);
             retire(lock, state, claimed, REMOVED_UNVERIFIED)?;
         }
-        state.staged.clone_from(&verified);
+        state.staged = verified.as_ref().map(|(version, _)| version.clone());
         Ok(verified)
     }
 
@@ -649,9 +668,10 @@ impl Updater {
             .await
             .unwrap_or(Err("the update check exceeded its time limit"));
         lock.write_state(&state)?;
-        let version = result?;
+        let (version, image) = result?;
         Ok(Confirmed {
-            image: self.directory.join("staged").join(&self.artifact),
+            path: self.directory.join("staged").join(&self.artifact),
+            image,
             version,
             _lock: lock,
         })
@@ -662,8 +682,14 @@ impl Updater {
         &self,
         lock: &Locked,
         state: &mut UpdateState,
-    ) -> Result<String, &'static str> {
-        let Some(staged) = self.inspect_staged(lock, state).await? else {
+    ) -> Result<(String, std::fs::File), &'static str> {
+        // The switch comes first (J734 P3-a): with updates off nothing applies, not even
+        // a held explicit stage. The stage and its hold are kept for when they return.
+        let (enabled, channel) = (self.settings)().await?;
+        if !enabled {
+            return Err(UPDATES_OFF);
+        }
+        let Some((staged, image)) = self.inspect_staged_image(lock, state).await? else {
             state.hold = None;
             return Err(NOTHING_STAGED);
         };
@@ -672,13 +698,9 @@ impl Updater {
         if state.hold.as_deref() == Some(staged.as_str())
             && guard(&self.current, &staged, Admission::Explicit) == Ok(Verdict::Stage)
         {
-            return Ok(staged);
+            return Ok((staged, image));
         }
         state.hold = None;
-        let (enabled, channel) = (self.settings)().await?;
-        if !enabled {
-            return Err(UPDATES_OFF);
-        }
         let download = lock.download()?;
         let announced = crate::latest::fetch_metadata(
             self.engine.as_ref(),
@@ -691,7 +713,15 @@ impl Updater {
         if announced.as_deref() == Some(staged.as_str())
             && guard(&self.current, &staged, Admission::Forward) == Ok(Verdict::Stage)
         {
-            return Ok(staged);
+            return Ok((staged, image));
+        }
+        // Overtaken, not withdrawn (J734 P3-c): never applied, but kept until the next
+        // check publishes the newer release over it.
+        if announced
+            .as_deref()
+            .is_some_and(|announced| overtaken(&staged, announced))
+        {
+            return Err(SUPERSEDED);
         }
         retire(lock, state, Some(staged), REMOVED_WITHDRAWN)?;
         Err("the channel no longer offers the staged release")
@@ -871,6 +901,15 @@ fn verify_staged(
     directory: &Path,
     artifact: &str,
 ) -> Result<String, &'static str> {
+    verify_staged_image(engine, directory, artifact).map(|(version, _)| version)
+}
+
+/// [`verify_staged`], also returning the open image file whose bytes were verified.
+fn verify_staged_image(
+    engine: &dyn ReleaseEngine,
+    directory: &Path,
+    artifact: &str,
+) -> Result<(String, std::fs::File), &'static str> {
     let read = |name: &str, limit: u64| -> Result<Vec<u8>, &'static str> {
         use std::io::Read;
         let file = open_private(&directory.join(name))?;
@@ -887,7 +926,14 @@ fn verify_staged(
     let signature = read("SHA256SUMS.sig", 1024)?;
     let version = open_private(&directory.join("VERSION"))?;
     let image = open_private(&directory.join(artifact))?;
-    engine.verify_image(&version, &image, artifact, &sums, &signature)
+    let version = engine.verify_image(&version, &image, artifact, &sums, &signature)?;
+    Ok((version, image))
+}
+
+/// Whether `announced` is a newer release than `staged` on the same channel, so the
+/// staged release was only overtaken, not withdrawn (J734 P3-c).
+fn overtaken(staged: &str, announced: &str) -> bool {
+    guard(staged, announced, Admission::Forward) == Ok(Verdict::Stage)
 }
 
 /// Open `path` without following symlinks and check it is a private, single-link regular file owned by this user.
@@ -912,11 +958,17 @@ fn open_private(path: &Path) -> Result<std::fs::File, &'static str> {
 
 /// A staged release [`Updater::confirm_staged`] just re-verified against the channel.
 /// While it lives, the update folder stays locked, so the staged files cannot change.
+///
+/// It also keeps the image file whose bytes the verifier hashed (J734 P3-b). S4 switches
+/// from that open file, never by opening a path again, so what runs is what was checked.
+/// The lock is a close-on-exec descriptor: the exec that switches releases it.
 pub struct Confirmed {
     /// The confirmed version.
     version: String,
     /// `updates/staged/<image>`, verified under the lock this value holds.
-    image: PathBuf,
+    path: PathBuf,
+    /// The open, verified image (the same inode as `path` while the lock is held).
+    image: std::fs::File,
     /// Held until the caller has switched (or given up).
     _lock: Locked,
 }
@@ -928,9 +980,15 @@ impl Confirmed {
         &self.version
     }
 
-    /// The verified image to switch to.
+    /// Where the verified image is staged (for reading only; switch from [`Self::file`]).
     #[must_use]
     pub fn image(&self) -> &Path {
+        &self.path
+    }
+
+    /// The open image file the verifier hashed.
+    #[must_use]
+    pub fn file(&self) -> &std::fs::File {
         &self.image
     }
 }
