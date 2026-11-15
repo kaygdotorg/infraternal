@@ -1070,6 +1070,11 @@ impl Confirmed {
     }
 }
 
+/// The lock error while another check or a switch holds `updates/`.
+const BUSY: &str = "an update check is already running";
+/// How often [`Locked::wait`] retries a busy lock.
+const LOCK_RETRY: Duration = Duration::from_millis(100);
+
 /// An exclusive lock on `updates/`, held for one whole check.
 pub(crate) struct Locked {
     directory: PathBuf,
@@ -1102,14 +1107,21 @@ impl Locked {
         Self::lock(directory, nix::fcntl::FlockArg::LockExclusive)
     }
 
-    /// [`Locked::open`] on the blocking pool, so waiting for another check (or for S4,
-    /// which holds the lock through a whole switch) never stalls an async worker that
-    /// serves terminals.
+    /// Take the lock, waiting while another check (or S4, which holds it until its exec)
+    /// has it.
+    ///
+    /// It retries a non-blocking lock every [`LOCK_RETRY`] on the async timer instead of
+    /// parking a thread in a blocking `flock` (#211 S4): a blocked thread cannot be
+    /// cancelled, and the switch's runtime shutdown waited its full 4 s for one, which
+    /// added 4 s of downtime to every update whose switch met a periodic check. Waits
+    /// are rare and short (a check or a switch), so the retry costs nothing measurable.
     async fn wait(directory: &Path) -> Result<Self, &'static str> {
-        let directory = directory.to_owned();
-        tokio::task::spawn_blocking(move || Self::open(&directory))
-            .await
-            .map_err(|_| "the update folder is unavailable")?
+        loop {
+            match Self::try_open(directory) {
+                Err(BUSY) => tokio::time::sleep(LOCK_RETRY).await,
+                locked => return locked,
+            }
+        }
     }
 
     /// Like [`Locked::open`] but gives up at once if a check holds the lock.
@@ -1138,8 +1150,7 @@ impl Locked {
         }) {
             return Err(unsafe_folder);
         }
-        let lock = nix::fcntl::Flock::lock(file, mode)
-            .map_err(|_| "an update check is already running")?;
+        let lock = nix::fcntl::Flock::lock(file, mode).map_err(|_| BUSY)?;
         Ok(Self {
             directory: directory.to_owned(),
             _lock: lock,
