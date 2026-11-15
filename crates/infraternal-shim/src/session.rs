@@ -1511,22 +1511,26 @@ fn handle<'a>(
             }
             p.size = (cols, rows, px_w, px_h);
             cursors.request_resize(p.writer, p.size)?;
-            let replay_awaits_size = std::mem::take(&mut p.replay_awaits_size);
+            // This viewer has just attached and is reporting its size. Its raw
+            // replay was written at the session's size, so if the viewer has
+            // another one, whatever part of it has already gone out lands on
+            // the wrong rows. That holds whether this Resize applies now or is
+            // only staged until the viewer types (another writer still owns
+            // the geometry). Repaint the engine instead: it has reflowed if the
+            // size applied, and otherwise paints at its own size with absolute
+            // positions. A live viewer's own resize reflows its screen locally
+            // and needs no repaint.
+            let replay_wrong_size = std::mem::take(&mut p.replay_awaits_size)
+                && (cols, rows) != (config.cols, config.rows);
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
-                let before = (config.cols, config.rows);
                 let applied = p.resize(pty, terminal, ring, config)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = p.writer;
                 }
-                // This viewer has just attached and is reporting its size. Its
-                // raw replay was written for the old size, so whatever part of
-                // it has already gone out is wrong at the new one. Repaint the
-                // reflowed engine instead; a live viewer's own resize reflows
-                // its screen locally and needs no repaint.
-                if replay_awaits_size && before != (config.cols, config.rows) {
-                    p.request = Some(Request::Snapshot);
-                }
+            }
+            if replay_wrong_size {
+                p.request = Some(Request::Snapshot);
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
