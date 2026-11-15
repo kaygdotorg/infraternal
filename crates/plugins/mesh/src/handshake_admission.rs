@@ -30,9 +30,12 @@
 //! key is installed) uses up that endpoint's share for the rest of the window. Replacing an
 //! endpoint list keeps each endpoint's count, and an endpoint new to the lists starts the window
 //! spent, so a list change never refills a share before the window ends (J754, #483): a member
-//! that roams its own endpoint four times a second cannot renew a spoofer's shares. Past any
-//! budget an initiation is dropped silently: ungranted keys still never get a reply, and a flood
-//! costs one MAC1 check per packet, as it did before the guard existed.
+//! that roams its own endpoint four times a second cannot renew a spoofer's shares. One exception
+//! (J778): a list that shrinks raises [`reserve_share`] at once, so each remaining endpoint may
+//! spend up to the larger share for the rest of the window; [`RESERVED_BUDGET`] still caps the
+//! total. Past any budget an initiation is dropped silently: ungranted keys' initiations still
+//! never get a reply, and a flood costs one MAC1 check per packet, as it did before the guard
+//! existed.
 //!
 //! The total per-source budget is twice `GotaTun`'s own per-source limit, so a granted peer's
 //! burst still reaches `GotaTun`'s cookie reply and its MAC2 retry, as without the guard.
@@ -73,6 +76,15 @@
 //! initiations to peers whose endpoints it knows are answered by responses, which the guard
 //! never budgets. The alternative, letting over-budget initiations reach `GotaTun`'s cookie
 //! reply, would answer ungranted keys.
+//!
+//! Handshake responses are not filtered (J778, #483). A response carries no sender key the guard
+//! could check, and only `GotaTun` knows which of its own initiations a response answers.
+//! `GotaTun`'s limiter counts responses together with initiations per source address and, past
+//! its per-source limit, answers a MAC1-valid response that lacks a valid MAC2 with a cookie
+//! reply, before it looks the response up. MAC1 needs only the node's public key, so anyone who
+//! knows that key can still draw cookie replies this way, to a spoofed address too. Each reply
+//! (64 bytes) is smaller than the response that caused it (92 bytes), so it never amplifies a
+//! flood. Closing this needs a response budget here or a `GotaTun` change; it is a follow-up.
 //!
 //! Cookie-proven (MAC2) initiations get no budget of their own: the cookie secret is private to
 //! the `GotaTun` device, so the guard cannot check MAC2 without a `GotaTun` change. `GotaTun`
