@@ -150,6 +150,12 @@ pub struct Firewall {
     // closes the window in which a revoked peer could open a new connection [#281].
     proxy_config: Option<Config>,
     previous_fence: bool,
+    // The UDP port the node's socket actually bound, as reported by the node through
+    // `set_listen_port`. It is the single source of the host table's mesh UDP rule (D386).
+    listen_port: Option<u16>,
+    // The port last written to the host input table by this process. `None` after a
+    // restart, so the first install re-checks the host table once and self-heals it.
+    host_listener: Option<u16>,
     mode: FirewallMode,
     guard_status: KernelGuardStatus,
 }
@@ -213,10 +219,19 @@ impl Firewall {
             TABLE
         }
     }
-    /// Whether the last `adopt` found our marked filter installed.
+    /// Whether the last `adopt` found our filter table installed.
     #[must_use]
     pub fn installed(&self) -> bool {
         self.installed
+    }
+    /// Whether this process opened the mesh listener in the host input table.
+    ///
+    /// A `GotaTun` node opens it even when no kernel guard is installed, so
+    /// cleanup must call [`Self::remove`] when either this or
+    /// [`Self::installed`] holds (D384, D386).
+    #[must_use]
+    pub(crate) fn host_ingress_open(&self) -> bool {
+        self.host_listener.is_some()
     }
     /// Read the optional kernel guard state for status and user-facing diagnostics.
     #[must_use]
@@ -319,7 +334,10 @@ impl Firewall {
     fn is_fallback(&self) -> bool {
         matches!(self.backend, Some(Backend::NfTables))
     }
-    /// Recover the owned table after a daemon restart; an unrelated table is refused.
+    /// Recover the owned table after a daemon restart.
+    ///
+    /// D386 makes every `infraternal_*` table product-owned, so a table with this
+    /// name is adopted with or without the old `infraternal.mesh.v1` marker.
     /// # Errors
     /// Reports missing tools, privilege failures or unrelated rules with the same name.
     pub fn adopt(&mut self) -> io::Result<()> {
@@ -388,32 +406,9 @@ impl Firewall {
             });
             self.installed = false;
             if exists {
-                let output = Command::new(&nft)
-                    .args(["-j", "list", "table", "inet", TABLE])
-                    .stderr(Stdio::null())
-                    .output()
-                    .map_err(|error| tool_error(&nft, "inspect the mesh table", &error))?;
-                if !output.status.success() {
-                    return Err(tool_error(
-                        &nft,
-                        "inspect the mesh table",
-                        &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
-                    ));
-                }
-                let state: serde_json::Value =
-                    serde_json::from_slice(&output.stdout).map_err(io::Error::other)?;
-                // Only the table's own complete comment establishes ownership.
-                // A rule/set comment or an operator's longer comment cannot do so.
-                if !state["nftables"].as_array().is_some_and(|items| {
-                    items.iter().any(|item| {
-                        let table = &item["table"];
-                        table["family"] == "inet"
-                            && table["name"] == TABLE
-                            && table["comment"] == "infraternal.mesh.v1"
-                    })
-                }) {
-                    return Err(io::ErrorKind::AlreadyExists.into());
-                }
+                // D386 defines the infraternal_* namespace as product-owned.
+                // The stable table name is sufficient for takeover; an old
+                // marker is not a prerequisite for updating a hand-built table.
                 self.installed = true;
             }
         }
@@ -611,10 +606,61 @@ impl Firewall {
         };
         self.installed = true;
         self.fallback_complete = self.is_fallback();
+        // Open host ingress only after the grant filter above is in place, so
+        // the newly admitted UDP port and `infraternal0` are already filtered.
+        self.sync_host_listener()
+    }
+    /// Tell the firewall which UDP port the node's socket actually bound.
+    ///
+    /// The node calls this whenever its identity changes: after the data plane
+    /// binds, after a rebind to another port, and with `None` when it stops.
+    /// While the grant filter is in place, a changed port is written to the
+    /// host input table at once; otherwise the next install writes it. For a
+    /// `GotaTun` node the grant filter is the engine's own deny-by-default
+    /// packet filter, which exists before the engine reports its port, so the
+    /// port is written at once whether or not the optional kernel guard is
+    /// installed (D384, D386).
+    ///
+    /// # Errors
+    /// Returns a failed host policy update; the previous host table stays active.
+    pub(crate) fn set_listen_port(&mut self, port: Option<u16>) -> io::Result<()> {
+        self.listen_port = port;
+        if self.installed || self.guard_only() {
+            self.sync_host_listener()?;
+        }
+        Ok(())
+    }
+    /// Admit the bound mesh port in the host input table when it differs from the last write.
+    ///
+    /// Skipping unchanged ports keeps ordinary grant updates free of host nft
+    /// transactions. Without a bound port there is nothing to admit yet.
+    fn sync_host_listener(&mut self) -> io::Result<()> {
+        let Some(port) = self.listen_port else {
+            return Ok(());
+        };
+        if self.host_listener == Some(port) {
+            return Ok(());
+        }
+        publish_host_listener(Some(port))?;
+        self.host_listener = Some(port);
         Ok(())
     }
     /// Apply only kernel-visible protections while `GotaTun` enforces all access grants itself.
     fn install_guard_only(
+        &mut self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+        proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+    ) -> io::Result<()> {
+        self.install_kernel_guard(config, aliases, proxy_ingress)?;
+        // `GotaTun` enforces every grant in userspace, so the host input table
+        // admits the mesh port and `infraternal0` whether or not the optional
+        // kernel guard could be installed. Without this a server-role host
+        // with a default-drop host table would drop all mesh traffic (D386, F5).
+        self.sync_host_listener()
+    }
+    /// Install the kernel-only guard on a best-effort basis; failures stay visible in status.
+    fn install_kernel_guard(
         &mut self,
         config: &Config,
         aliases: &[crate::policy::model::Addresses],
@@ -664,6 +710,14 @@ impl Firewall {
     /// # Errors
     /// Returns a failed kernel deletion without claiming the component is off.
     pub fn remove(&mut self) -> io::Result<()> {
+        if self.installed || self.host_listener.is_some() {
+            // Close host ingress before retiring the mesh grant filter. If the
+            // host transaction fails, leave the mesh filter installed and retry.
+            // A `GotaTun` node may have opened it without any kernel guard, so
+            // an open listener alone also calls for this step (D384, D386).
+            publish_host_listener(None)?;
+            self.host_listener = None;
+        }
         if self.guard_only() {
             if self.installed {
                 if self.nft_required() {
@@ -723,13 +777,31 @@ impl Firewall {
         Ok(())
     }
 }
+
+/// Write the mesh listener (or its absence) to the host input table; grants stay in the mesh filter.
+fn publish_host_listener(udp_port: Option<u16>) -> io::Result<()> {
+    match crate::host_firewall::set_mesh_listener(udp_port) {
+        Ok(Some(report)) => {
+            tracing::info!(report = %report, "host firewall mesh policy updated");
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "host firewall mesh policy update failed: {error}"
+        ))),
+    }
+}
+
 /// Run one fixed firewall command with a public rule script supplied on standard input.
+///
+/// A refused batch reports the tool, its path and the tool's own stderr, so a
+/// rejected rule names its cause instead of a bare permission error.
 fn run(program: &Path, args: &[&str], script: &str) -> io::Result<()> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| tool_error(program, "run", &error))?;
     // Policy contains public typed addresses/ports only. No shell or secret in argv/stdout.
@@ -738,13 +810,20 @@ fn run(program: &Path, args: &[&str], script: &str) -> io::Result<()> {
         .take()
         .ok_or(io::ErrorKind::BrokenPipe)?
         .write_all(script.as_bytes());
-    let status = child.wait()?;
+    let output = child.wait_with_output()?;
     write?;
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let reason = if stderr.is_empty() {
+            "the command failed"
+        } else {
+            stderr
+        };
         return Err(tool_error(
             program,
             "apply the requested rules",
-            &io::Error::new(io::ErrorKind::PermissionDenied, "the command failed"),
+            &io::Error::new(io::ErrorKind::PermissionDenied, reason.to_owned()),
         ));
     }
     Ok(())
@@ -1506,36 +1585,76 @@ mod tests {
         assert!(!open.contains(gate));
     }
 
-    /// Real nft: a foreign table is refused, a broken batch changes nothing, and a large
-    /// policy applies; nft is found through the same fixed-path lookup as the product.
+    /// Snapshot the host input table as nft JSON objects, without `metainfo`.
+    ///
+    /// Comparing these values, handles included, proves that a mesh update
+    /// left the host table's kernel objects untouched, independent of how a
+    /// given nft version prints them as text.
+    fn host_table_json(nft: &std::path::Path) -> Vec<serde_json::Value> {
+        let output = Command::new(nft)
+            .args(["-j", "list", "table", "inet", "infraternal_host"])
+            .output()
+            .expect("list the host input table");
+        assert!(
+            output.status.success(),
+            "list the host input table: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("nft JSON listing");
+        let objects: Vec<serde_json::Value> = document["nftables"]
+            .as_array()
+            .expect("nft JSON has an nftables array")
+            .iter()
+            .filter(|object| object.get("metainfo").is_none())
+            .cloned()
+            .collect();
+        assert!(
+            objects.iter().any(|object| object.get("rule").is_some()),
+            "host table snapshot must contain its rules: {objects:?}"
+        );
+        objects
+    }
+
+    /// Real nft: an unmarked `infraternal_mesh` table is adopted (D386), mesh changes leave the
+    /// host input table untouched, a broken batch changes nothing, and a large policy applies.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn real_nft_ownership_atomicity_and_scaled_apply() {
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = super::nft().expect("fixed root-owned nft path");
+        run(&nft, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("unrelated fixture");
         run(
-            &nft().expect("nft"),
+            &nft,
             &["-f", "-"],
-            &format!("add table inet {TABLE}\n"),
+            "add table inet infraternal_host\nadd chain inet infraternal_host input { type filter hook input priority filter - 10; policy drop; }\nadd rule inet infraternal_host input iifname \"lo\" accept\n",
         )
-        .expect("unrelated fixture");
-        let mut unrelated = Firewall::default();
+        .expect("host policy fixture");
+        let host_before = host_table_json(&nft);
+        let mut named_table = Firewall::default();
+        named_table
+            .adopt()
+            .expect("prefixed table is product-owned");
+        assert!(named_table.installed());
+        named_table.remove().expect("takeover fixture cleanup");
         assert_eq!(
-            unrelated.adopt().expect_err("unowned table").kind(),
-            io::ErrorKind::AlreadyExists
+            host_before,
+            host_table_json(&nft),
+            "mesh ownership must preserve the separately owned host table"
         );
-        run(
-            &nft().expect("nft"),
-            &["-f", "-"],
-            &format!("delete table inet {TABLE}\n"),
-        )
-        .expect("fixture cleanup");
         let mut filter = Firewall::default();
         filter.adopt().expect("empty namespace");
         let mut config = config();
         let started = std::time::Instant::now();
         filter.apply(&config).expect("scaled install");
         let initial = started.elapsed().as_micros();
+        assert_eq!(
+            host_before,
+            host_table_json(&nft),
+            "mesh policy updates must leave host input rules unchanged"
+        );
         let broken = format!("delete table inet {TABLE}\ninvalid syntax\n");
-        assert!(run(&nft().expect("nft"), &["-f", "-"], &broken).is_err());
+        assert!(run(&nft, &["-f", "-"], &broken).is_err());
         let mut recovered = Firewall::default();
         recovered
             .adopt()
@@ -1552,47 +1671,41 @@ mod tests {
                 .trim()
         );
         filter.remove().expect("off");
+        assert_eq!(
+            host_before,
+            host_table_json(&nft),
+            "mesh policy removal must leave host input rules unchanged"
+        );
         let mut absent = Firewall::default();
         absent.adopt().expect("clean namespace");
         assert!(!absent.installed);
     }
-    /// Removing a table someone already deleted still lets the component finish cleanup.
+    /// Cleanup succeeds when the product-owned mesh table is already absent.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn already_removed_owned_table_does_not_block_component_cleanup() {
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = super::nft().expect("fixed root-owned nft path");
         let mut filter = Firewall::default();
         filter.adopt().expect("empty namespace");
         filter.apply(&config()).expect("install");
-        run(
-            &nft().expect("nft"),
-            &["-f", "-"],
-            &format!("delete table inet {TABLE}\n"),
-        )
-        .expect("external removal");
+        run(&nft, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("external removal");
         filter.remove().expect("already absent owned table");
         assert!(!filter.installed);
     }
-    /// A first apply checks ownership itself and refuses a same-named table it did not create.
+    /// First adoption replaces an unmarked product-owned mesh table safely.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn initial_apply_without_adoption_refuses_a_foreign_table() {
-        run(
-            &nft().expect("nft"),
-            &["-f", "-"],
-            &format!("add table inet {TABLE}\n"),
-        )
-        .expect("foreign fixture");
+    fn initial_apply_takes_over_an_unmarked_infraternal_table() {
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = super::nft().expect("fixed root-owned nft path");
+        run(&nft, &["-f", "-"], &format!("add table inet {TABLE}\n")).expect("legacy fixture");
         let mut filter = Firewall::default();
-        assert_eq!(
-            filter.apply(&config()).expect_err("foreign table").kind(),
-            io::ErrorKind::AlreadyExists
-        );
-        run(
-            &nft().expect("nft"),
-            &["-f", "-"],
-            &format!("delete table inet {TABLE}\n"),
-        )
-        .expect("fixture cleanup");
+        filter
+            .apply(&config())
+            .expect("product takes over its named table");
+        assert!(filter.installed());
+        filter.remove().expect("product table cleanup");
     }
 
     /// Real kernel, both frontends: the optional `GotaTun` guard installs through the tool the

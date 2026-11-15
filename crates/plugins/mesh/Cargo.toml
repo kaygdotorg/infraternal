@@ -39,6 +39,7 @@ bytes.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing = { workspace = true, optional = true }
