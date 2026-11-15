@@ -246,6 +246,60 @@ mod tests {
         );
     }
 
+    /// J716 B (#399, D274): the elevation command gets only its terminal.
+    ///
+    /// sudo, doas or su, and then root's snippet and relay, must not inherit
+    /// a descriptor the infraternal agent happened to receive from whatever
+    /// launched it: a leaked lock would stay held, a leaked socket stay open,
+    /// for as long as the relay runs. This test leaks one on purpose (a
+    /// descriptor without close-on-exec, the way a launcher leaks them),
+    /// starts an ordinary program the way `elevate` starts the elevation
+    /// command, and reads that program's descriptor table once it runs: it
+    /// must hold exactly 0, 1 and 2, the terminal.
+    #[test]
+    fn the_session_leader_holds_only_its_terminal() {
+        let terminal = open().unwrap();
+        let null = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: dup returns a new descriptor (without close-on-exec), owned
+        // exactly once by the OwnedFd below.
+        let leaked = unsafe { nix::libc::dup(null.as_raw_fd()) };
+        assert!(leaked >= 3);
+        // SAFETY: just returned by dup and not owned anywhere else.
+        let leaked = unsafe { OwnedFd::from_raw_fd(leaked) };
+        let sleep = std::fs::canonicalize("/bin/sleep").unwrap();
+        let mut command = std::process::Command::new(&sleep);
+        command
+            .arg("30")
+            .stdin(terminal.slave.try_clone().unwrap())
+            .stdout(terminal.slave.try_clone().unwrap())
+            .stderr(terminal.slave.try_clone().unwrap());
+        lead_session(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_link(format!("/proc/{pid}/exe")).ok().as_ref() != Some(&sleep) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never ran sleep"
+            );
+            // sleep: waiting for the child to execute its program; there is no event for it.
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut held: Vec<u32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+            .collect();
+        held.sort_unstable();
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(leaked);
+        assert_eq!(
+            held,
+            [0, 1, 2],
+            "the elevation command inherited more than its terminal"
+        );
+    }
+
     /// Without the mode change no one gets in at all in that moment.
     #[test]
     fn a_locked_down_node_admits_no_opener_before_it_is_exclusive() {
