@@ -660,7 +660,56 @@ async fn build_router_core(
         let executable = std::path::PathBuf::from("/proc/self/exe");
         #[cfg(not(target_os = "linux"))]
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
-        EmbeddedAgent::spawn(executable)
+        #[cfg(target_os = "linux")]
+        {
+            let legacy_state = infraternal_agent::sessions::state_path(None).map_err(|error| {
+                tracing::error!(
+                    error_kind = ?error.kind(),
+                    "embedded Mesh runtime state location is unavailable"
+                );
+                ServerError::InvalidConfiguration
+            })?;
+            let mesh_state = config.data_dir.join("mesh");
+            let migration_source = legacy_state.clone();
+            let migration_target = mesh_state.clone();
+            // A database error fails start closed: guessing "not ours" here would mint a new key.
+            let own_keys = crate::embedded_mesh_state::server_node_keys(&pool)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        error_kind = ?error.kind(),
+                        "embedded Mesh identity ownership could not be read"
+                    );
+                    ServerError::InvalidConfiguration
+                })?;
+            let migration = tokio::task::spawn_blocking(move || {
+                crate::embedded_mesh_state::migrate(
+                    &migration_source,
+                    &migration_target,
+                    &|public| own_keys.contains(public),
+                )
+            })
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    task_panicked = error.is_panic(),
+                    "embedded Mesh state migration task failed"
+                );
+                ServerError::InvalidConfiguration
+            })?;
+            migration.map_err(|error| {
+                tracing::error!(
+                    error_kind = ?error.kind(),
+                    "embedded Mesh state migration failed"
+                );
+                ServerError::InvalidConfiguration
+            })?;
+            EmbeddedAgent::spawn_with_mesh_state(executable, mesh_state)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            EmbeddedAgent::spawn(executable)
+        }
     };
     #[cfg(feature = "remote")]
     let (ca_api, remote_api, hosts, listeners, issuer, enrollment_store, removal) = remote_router(

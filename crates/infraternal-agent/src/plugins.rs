@@ -65,9 +65,39 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
         reason = "Keep the fallible registry API identical when every optional component is compiled out."
     )
 )]
+/// Build a plugin registry whose state is rooted at `state`.
+/// # Errors
+/// Returns an error if the selected plugins cannot be registered.
 pub(crate) fn registry_at(
     mode: ExecutionMode,
     state: Option<&std::path::Path>,
+    installation: Option<&Installation>,
+) -> Result<PluginRegistry, PluginError> {
+    registry_at_with_mesh_state(mode, state, None, installation)
+}
+
+/// Create a registry whose embedded Mesh node may keep state apart from sessions.
+///
+/// `mesh_state` is an internal server override. Remote hosts continue to use `state` for Mesh,
+/// matching their installed `--state` directory.
+/// # Errors
+/// Returns an error if the compiled plugin descriptors conflict with the plugin API.
+#[cfg_attr(
+    not(any(
+        feature = "plugin-host-facts",
+        feature = "proxy",
+        feature = "remote",
+        all(feature = "mesh", any(target_os = "linux", target_os = "macos"))
+    )),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "Keep the fallible registry API identical when every optional component is compiled out."
+    )
+)]
+pub(crate) fn registry_at_with_mesh_state(
+    mode: ExecutionMode,
+    state: Option<&std::path::Path>,
+    mesh_state: Option<&std::path::Path>,
     installation: Option<&Installation>,
 ) -> Result<PluginRegistry, PluginError> {
     #[cfg(any(
@@ -100,7 +130,7 @@ pub(crate) fn registry_at(
     #[cfg(not(feature = "plugin-host-facts"))]
     let _ = mode;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
-    let mesh_plugin = state.map_or_else(
+    let mesh_plugin = mesh_state.or(state).map_or_else(
         infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
         infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
     );
@@ -165,9 +195,14 @@ pub(crate) fn registry_at(
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
     #[cfg(all(feature = "mesh", target_os = "macos"))]
-    registry.register(Box::new(darwin_mesh_plugin(state, installation)?))?;
+    registry.register(Box::new(darwin_mesh_plugin(
+        mesh_state.or(state),
+        installation,
+    )?))?;
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;
+    #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
+    let _ = mesh_state;
     Ok(registry)
 }
 
