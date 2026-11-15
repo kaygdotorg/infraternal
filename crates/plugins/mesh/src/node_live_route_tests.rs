@@ -461,23 +461,24 @@ fn review_j552_relay_fallback_does_not_derive_budget_from_relay_shim() {
     }
 }
 
-/// J552 review (#489): the cost of one steady live refresh at mesh scale, as a receipt.
+/// Build a mesh of `peer_count` peers for the scale tests, in the current (disposable)
+/// network namespace, and return the peers with the endpoint each one was learned at.
 ///
-/// Under any continuous traffic, the `GotaTun` worker refreshes up to four times a second
-/// and each refresh probes every installed peer's underlay route (one route and one link
-/// netlink request, each on a fresh socket) while holding the shared route-state mutex
-/// that relay callbacks, route repair and configuration also take. This prints the time
-/// of steady refreshes (no route writes) for 4,096 peers with distinct endpoints, or for
-/// `J552_PEERS` peers when that is set. It asserts only the write count, never speed
-/// (ENGINEERING P3); the numbers are the receipt.
-#[test]
-#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
-fn review_j552_steady_refresh_cost_at_4096_peers() {
+/// It brings `lo` up, adds a 1500-byte dummy underlay `under0` carrying `100.64.0.0/10`, and
+/// marks a TUN as this node's (see [`review_marked_tun`]). Every peer has its own mesh
+/// addresses (`10.200.x.y` and `fd02::…`), the same configured endpoint, and a distinct learned
+/// endpoint `100.65.x.y:51820` on the underlay, so each derives a 1408-byte budget with its own
+/// route lookup. No peer route is written: the caller's first refresh does that.
+fn review_scale_mesh(
+    peer_count: u16,
+) -> (
+    Vec<crate::dataplane::Peer>,
+    Vec<(
+        crate::policy::model::PublicKey,
+        Option<std::net::SocketAddr>,
+    )>,
+) {
     use crate::policy::model::{Addresses, PublicKey};
-    let peer_count: u16 = std::env::var("J552_PEERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(4096);
     review_route_command(&["link", "set", "lo", "up"]);
     review_route_command(&["link", "add", "under0", "type", "dummy"]);
     review_route_command(&["link", "set", "under0", "mtu", "1500", "up"]);
@@ -506,6 +507,26 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
             Some(std::net::SocketAddr::from(([100, 65, high, low], 51820))),
         ));
     }
+    (peers, learned)
+}
+
+/// J552 review (#489): the cost of one steady live refresh at mesh scale, as a receipt.
+///
+/// Under any continuous traffic, the `GotaTun` worker refreshes up to four times a second
+/// and each refresh probes every installed peer's underlay route (one route and one link
+/// netlink request, each on a fresh socket) while holding the shared route-state mutex
+/// that relay callbacks, route repair and configuration also take. This prints the time
+/// of steady refreshes (no route writes) for 4,096 peers with distinct endpoints, or for
+/// `J552_PEERS` peers when that is set. It asserts only the write count, never speed
+/// (ENGINEERING P3); the numbers are the receipt.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn review_j552_steady_refresh_cost_at_4096_peers() {
+    let peer_count: u16 = std::env::var("J552_PEERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4096);
+    let (peers, learned) = review_scale_mesh(peer_count);
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(&peers);
     // Run the route-repair worker as a node does: it proves and publishes the link, and its
