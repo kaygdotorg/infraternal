@@ -90,7 +90,7 @@ test("a host being upgraded to root says it will be back, with no address (D393)
   const { terminalRefusal } = await import("../../terminal-refusal");
   const upgrading = terminalRefusal(await refusal({ error: "terminal unavailable", reason: "host_upgrading" }), "build-01");
   expect(upgrading).toEqual({
-    message: "build-01 is being upgraded and will be back shortly. Try again in a minute.",
+    message: "build-01 is being upgraded and will be back shortly.",
     sessionList: false, action: "retry",
   });
   expect(upgrading.message).not.toContain("offline");

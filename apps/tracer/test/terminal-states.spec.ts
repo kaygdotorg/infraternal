@@ -197,7 +197,7 @@ for (const viewport of VIEWPORTS) {
         await expect(page.locator(".ui-window[data-kind='terminal']").first()).toHaveAttribute("data-status", "live", { timeout: 20_000 });
         const upgrading = await openFromPalette(page, "upgrading-host");
         const strip = upgrading.locator(".cl-sx-strip");
-        await expect(strip.locator(".cl-sx-strip-text")).toHaveText("upgrading-host is being upgraded and will be back shortly. Try again in a minute.");
+        await expect(strip.locator(".cl-sx-strip-text")).toHaveText("upgrading-host is being upgraded and will be back shortly.");
         await expect(strip.getByRole("button", { name: "Try again" })).toBeVisible();
         await expectAligned(upgrading, strip);
         await shot(page, "upgrading");
