@@ -1862,6 +1862,13 @@ fn deleted_mesh_peer_route(
 
 /// Decode the owned host-route shape shared by deletion events and actual kernel route dumps.
 /// Both paths require protocol 250, main table, exact host prefix, scope and original ifindex.
+///
+/// The route flags must be empty apart from [`ROUTE_CARRIER_FLAGS`]: the kernel marks every
+/// route of a link without carrier `linkdown` (and `dead` when it ignores such routes), but the
+/// route is still ours and still installed. Refusing it made every full inventory check of a
+/// carrier-less link see all peer routes as missing and re-add each one under the route-state
+/// lock, and made deletions of such routes go unrepaired (#483 J780). Every other flag, such as
+/// a cached exception's `RTM_F_CLONED`, still means the route is not ours.
 fn mesh_peer_route_destination(payload: &[u8], interface_index: u32) -> io::Result<Option<IpAddr>> {
     let Some(header) = payload.get(..12) else {
         return Err(io::ErrorKind::InvalidData.into());
@@ -1877,7 +1884,7 @@ fn mesh_peer_route_destination(payload: &[u8], interface_index: u32) -> io::Resu
         || header[5] != RTPROT_INFRATERNAL
         || header[6] != scope
         || header[7] != 1
-        || header[8..12] != [0; 4]
+        || netlink::u32_at(header, 8)? & !ROUTE_CARRIER_FLAGS != 0
     {
         return Ok(None);
     }
@@ -1990,6 +1997,9 @@ const RTM_F_CLONED: u32 = 0x200;
 /// `RTNH_F_DEAD | RTNH_F_ONLINK | RTNH_F_LINKDOWN`: the nexthop flags in `rtm_flags` that make a
 /// route unusable or bind it to its link. The offload and trap flags are hardware bookkeeping.
 const RTNH_LIVENESS_FLAGS: u32 = 0x1 | 0x4 | 0x10;
+/// `RTNH_F_DEAD | RTNH_F_LINKDOWN`: the flags the kernel sets on every route of a link without
+/// carrier. They say the link can't carry traffic now, not that the route is someone else's.
+const ROUTE_CARRIER_FLAGS: u32 = 0x1 | 0x10;
 /// `RTA_DST`: the route's destination prefix.
 const RTA_DST: u16 = 1;
 /// `RTA_SRC`: the route's source prefix (IPv6 source routing).
@@ -2491,6 +2501,63 @@ mod endpoint_tests {
         let mut unknown = v4;
         unknown[..2].copy_from_slice(&1_u16.to_ne_bytes());
         assert!(decode_sockaddr(&unknown).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod peer_route_shape_tests {
+    //! Which route messages count as one of our peer host routes, in dumps and deletions.
+    use super::*;
+
+    /// Our IPv4 and IPv6 peer route payloads on link 7, with `flags` in `rtm_flags`.
+    fn our_routes(flags: u32) -> [Vec<u8>; 2] {
+        [
+            (2, 32, vec![10, 200, 0, 1]),
+            (
+                10,
+                128,
+                "fd02::2".parse::<Ipv6Addr>().unwrap().octets().to_vec(),
+            ),
+        ]
+        .map(|(family, prefix, address)| {
+            let mut payload = peer_route_payload(family, prefix, &address, 7, Some(1408)).unwrap();
+            // The kernel reports IPv6 host routes at universe scope.
+            if family == 10 {
+                payload[6] = 0;
+            }
+            payload[8..12].copy_from_slice(&flags.to_ne_bytes());
+            payload
+        })
+    }
+
+    /// A carrier-less link's routes (`linkdown`, `dead`) are still ours (#483 J780): refusing
+    /// them made each full inventory check re-add every peer route under the state lock.
+    #[test]
+    fn carrier_flags_keep_a_route_ours() {
+        for flags in [0, 0x10, 0x1 | 0x10] {
+            for payload in our_routes(flags) {
+                assert!(
+                    mesh_peer_route_destination(&payload, 7).unwrap().is_some(),
+                    "flags {flags:#x}"
+                );
+                assert!(mesh_peer_route_destination(&payload, 8).unwrap().is_none());
+            }
+        }
+    }
+
+    /// Any other flag still marks a route that isn't ours: a cached exception, an on-link
+    /// nexthop we never write, or hardware offload bookkeeping.
+    #[test]
+    fn other_flags_stay_foreign() {
+        for flags in [RTM_F_CLONED, 0x4, 0x4000, 0x10 | RTM_F_CLONED] {
+            for payload in our_routes(flags) {
+                assert!(
+                    mesh_peer_route_destination(&payload, 7).unwrap().is_none(),
+                    "flags {flags:#x}"
+                );
+            }
+        }
     }
 }
 
