@@ -1208,6 +1208,85 @@ mod tests {
         assert!(admission.is_known_endpoint(source("192.0.2.78:41000")));
     }
 
+    /// Spend the whole unknown-source share at `now` with a stranger's key from 500 networks, so
+    /// any later initiation in that window is admitted only from the reserve.
+    fn spend_unknown_share(admission: &PeerAdmission, now: Instant) {
+        let flood = initiation([0x55; 32]);
+        for index in 0..UNKNOWN_SOURCE_BUDGET {
+            assert_eq!(
+                admission.check(&Packet::copy_from(&flood), own_network(18, index), now),
+                Err(Refusal::UnknownKey)
+            );
+        }
+    }
+
+    /// J754 P2/P3 (#483): replacing an endpoint list keeps each endpoint's reserve count with
+    /// that endpoint, not with its slot, and an endpoint new to the lists starts the window spent.
+    ///
+    /// `b05743838` zeroed every count on a replacement, so a member that changed its own
+    /// confirmed endpoint four times a second handed every spoofed endpoint a fresh share each
+    /// time. Here the list keeps its length while `B` moves from slot 1 to slot 0, so a fix that
+    /// keyed counts by slot, or left them alone, fails too.
+    #[test]
+    fn a_list_replacement_carries_each_count_by_endpoint() {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let peer = [0x66; 32];
+        admission.set_peers([PublicKey(
+            *X25519PublicKey::from(&StaticSecret::from(peer)).as_bytes(),
+        )]);
+        let [a, b, c, d] = [
+            "192.0.2.10:1",
+            "192.0.2.20:1",
+            "192.0.2.30:1",
+            "192.0.2.40:1",
+        ]
+        .map(source);
+        admission.set_configured_endpoints([b, c, d]);
+        let granted = initiation(peer);
+        let now = Instant::now();
+        let share = super::reserve_share(3);
+        for _ in 0..share {
+            assert_eq!(
+                admission.check(&Packet::copy_from(&granted), b, now),
+                Ok(())
+            );
+        }
+        spend_unknown_share(&admission, now);
+        assert_eq!(
+            admission.check(&Packet::copy_from(&granted), b, now),
+            Err(Refusal::NodeBudget),
+            "B spent its share"
+        );
+
+        admission.set_configured_endpoints([a, b, d]);
+        let check = |admission: &PeerAdmission, from| {
+            admission.check(&Packet::copy_from(&granted), from, now)
+        };
+        assert_eq!(
+            check(&admission, b),
+            Err(Refusal::NodeBudget),
+            "a replacement must not refill B's share"
+        );
+        assert_eq!(
+            check(&admission, a),
+            Err(Refusal::NodeBudget),
+            "an endpoint new to the lists starts the window spent"
+        );
+        assert_eq!(check(&admission, d), Ok(()), "D kept its unspent share");
+        admission.set_confirmed_endpoints([b]);
+        assert_eq!(
+            check(&admission, b),
+            Err(Refusal::NodeBudget),
+            "B confirmed as well is still the same spent endpoint"
+        );
+        let next = now + Duration::from_secs(1);
+        assert_eq!(
+            admission.check(&Packet::copy_from(&granted), a, next),
+            Ok(()),
+            "the next window gives A its share"
+        );
+    }
+
     /// CPU per received initiation under a flood (J572, J648, #483); run by hand, it asserts nothing.
     ///
     /// `cargo test -p infraternal-plugin-mesh --features agent --release --lib
@@ -1826,6 +1905,96 @@ mod flood_fairness {
             run.peer_admitted, 0,
             "the documented limit changed: update the module doc if peer 0 now gets in"
         );
+    }
+
+    /// J754 P2 (#483): a mesh member that roams its own confirmed endpoint must not refresh the
+    /// shares of the endpoints a flood spoofs.
+    ///
+    /// Linux replaces the confirmed list on every 250 ms scan that sees a change, and a member
+    /// holding a granted key can change its confirmed endpoint at will by sending from
+    /// alternating ports. On `f8e581b1d` each replacement zeroed every endpoint's count, so five
+    /// spoofed endpoints at 1,000/s plus a wide flood took peer 0 (unspoofed, retrying 900 ms
+    /// into the second) from 18 of 18 to 0 of 18. J754's probe, kept as the regression test; the
+    /// run without roaming is the control.
+    #[test]
+    fn a_member_roaming_its_endpoint_cannot_refresh_spoofed_shares() {
+        for roaming in [false, true] {
+            let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+            let key = |seed: u8| {
+                PublicKey(*X25519PublicKey::from(&StaticSecret::from([seed; 32])).as_bytes())
+            };
+            admission.set_peers([
+                key(0x66),
+                key(0x81),
+                key(0x82),
+                key(0x83),
+                key(0x84),
+                key(0x85),
+            ]);
+            let peer = peer_source();
+            admission.set_configured_endpoints(
+                std::iter::once(peer).chain((1..=5).map(spoofed_peer_endpoint)),
+            );
+            let replay = initiation([0x81; 32]);
+            let granted = initiation(PEER);
+            // The roaming member's two source ports, swapped every quarter second.
+            let roam = |n: u32| {
+                SocketAddr::from((
+                    [198, 51, 100, 7],
+                    u16::try_from(40_000 + n % 2).expect("port"),
+                ))
+            };
+            admission.set_confirmed_endpoints([roam(0)]);
+            let start = Instant::now();
+            let mut run = Run {
+                peer_admitted: 0,
+                peer_attempts: 0,
+                key_agreements: 0,
+                max_sources: 0,
+                max_capacity: 0,
+            };
+            for second in 0..FLOOD_SECONDS {
+                let base = start + Duration::from_secs(u64::from(second));
+                for quarter in 0..4_u32 {
+                    let at = base + Duration::from_millis(u64::from(quarter) * 250);
+                    if roaming {
+                        admission.set_confirmed_endpoints([roam(second * 4 + quarter + 1)]);
+                    }
+                    if quarter == 0 {
+                        for i in 0..20_000_u32 {
+                            let [_, _, high, low] = i.to_be_bytes();
+                            let from = SocketAddr::from(([10, high, low, 1], 40000));
+                            let _ = admission.check(&Packet::copy_from(&replay), from, at);
+                        }
+                    }
+                    for k in 1..=5 {
+                        for _ in 0..1_000 {
+                            let from = spoofed_peer_endpoint(k);
+                            let _ = admission.check(&Packet::copy_from(&replay), from, at);
+                        }
+                    }
+                }
+                if second % 5 == 0 {
+                    run.peer_attempts += 1;
+                    let at = base + Duration::from_millis(900);
+                    if admission.check(&Packet::copy_from(&granted), peer, at) == Ok(()) {
+                        run.peer_admitted += 1;
+                    }
+                }
+                let budget = admission.budget.lock().expect("budget lock");
+                run.max_sources = run.max_sources.max(budget.sources.len());
+                run.max_capacity = run.max_capacity.max(budget.sources.capacity());
+            }
+            run.key_agreements = admission.key_agreements.load(Ordering::Relaxed);
+            report(
+                &format!("J754 5 spoofed endpoints + wide flood, member roaming {roaming}"),
+                &run,
+            );
+            assert_eq!(
+                run.peer_admitted, run.peer_attempts,
+                "a member roaming its endpoint (roaming {roaming}) let spoofed endpoints starve peer 0"
+            );
+        }
     }
 
     /// After a flood stops, the very next window admits the peer.
