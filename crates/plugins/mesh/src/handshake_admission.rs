@@ -635,9 +635,10 @@ impl PeerAdmission {
         );
     }
 
-    /// Whether `source` is exactly a known peer endpoint.
+    /// Whether `source` is exactly a known peer endpoint (configured or confirmed). Tests ask
+    /// it what a guard knows, including the Mac worker's live guard (J736).
     #[cfg(test)]
-    fn is_known_endpoint(&self, source: SocketAddr) -> bool {
+    pub(crate) fn is_known_endpoint(&self, source: SocketAddr) -> bool {
         self.known_slot(source).is_some()
     }
 
@@ -1726,8 +1727,11 @@ mod tests {
 /// on a simulated clock, while a granted peer retries every 5 s. They count how often the peer
 /// still gets through, and check that the flood never runs more key agreements than the node
 /// budget allows and that the limiter's maps stay small.
+///
+/// The Mac node's real-device test (J736) runs the same flood against its live worker's guard
+/// through [`flood_against`] and [`report`].
 #[cfg(test)]
-mod flood_fairness {
+pub(crate) mod flood_fairness {
     #![expect(
         clippy::expect_used,
         reason = "a broken fixture (bad address, key or lock) must stop the test loudly"
@@ -1756,7 +1760,12 @@ mod flood_fairness {
 
     /// One MAC1-valid initiation from `sender` to the node, with a fresh ephemeral key.
     fn initiation(sender: [u8; 32]) -> Vec<u8> {
-        let node_public = X25519PublicKey::from(&StaticSecret::from(NODE));
+        initiation_to(X25519PublicKey::from(&StaticSecret::from(NODE)), sender)
+    }
+
+    /// One MAC1-valid initiation from `sender` to the node whose public key is `node_public`,
+    /// with a fresh ephemeral key.
+    pub(crate) fn initiation_to(node_public: X25519PublicKey, sender: [u8; 32]) -> Vec<u8> {
         let sender = StaticSecret::from(sender);
         let sender_public = X25519PublicKey::from(&sender);
         let mut tunn = Tunn::new(
@@ -1797,31 +1806,32 @@ mod flood_fairness {
 
     /// The shape of one simulated flood.
     #[derive(Clone, Copy)]
-    struct Flood {
+    pub(crate) struct Flood {
         /// Flood initiations per second, evenly spaced.
-        rate: u32,
+        pub(crate) rate: u32,
         /// How many IPv6 /48 networks the flood comes from.
-        networks: u16,
+        pub(crate) networks: u16,
         /// How many /64s inside each /48 the flood rotates over.
-        prefixes_per_network: u32,
+        pub(crate) prefixes_per_network: u32,
         /// When, into each second, the granted peer sends its initiation.
-        peer_offset_ms: u64,
-        /// Whether the node knows the peer's source as one of its endpoints.
-        peer_endpoint_known: bool,
+        pub(crate) peer_offset_ms: u64,
+        /// Whether the node knows the peer's source as one of its endpoints. Only [`simulate`]
+        /// reads it; [`flood_against`] uses whatever the guard already knows.
+        pub(crate) peer_endpoint_known: bool,
     }
 
     /// What one simulated flood did.
-    struct Run {
+    pub(crate) struct Run {
         /// Granted-peer initiations the guard admitted.
-        peer_admitted: u32,
+        pub(crate) peer_admitted: u32,
         /// Granted-peer initiations sent (one every 5 s).
-        peer_attempts: u32,
-        /// Key agreements the guard ran in total.
-        key_agreements: u32,
+        pub(crate) peer_attempts: u32,
+        /// Key agreements the guard ran during the flood.
+        pub(crate) key_agreements: u32,
         /// The most per-source entries the budget held at a window's end.
-        max_sources: usize,
+        pub(crate) max_sources: usize,
         /// The largest per-source map capacity seen.
-        max_capacity: usize,
+        pub(crate) max_capacity: usize,
     }
 
     /// Simulate `flood` for [`FLOOD_SECONDS`] while a granted peer retries every 5 s
@@ -1834,9 +1844,33 @@ mod flood_fairness {
         if flood.peer_endpoint_known {
             admission.set_configured_endpoints([peer_source()]);
         }
-        let attacker = initiation([0x55; 32]);
-        let granted = initiation(PEER);
-        let start = Instant::now();
+        flood_against(
+            &admission,
+            X25519PublicKey::from(&StaticSecret::from(NODE)),
+            &initiation(PEER),
+            peer_source(),
+            flood,
+            Instant::now(),
+        )
+    }
+
+    /// Run `flood` for [`FLOOD_SECONDS`] against an existing guard whose node key is
+    /// `node_public`, on a simulated clock from `start`, while a granted peer sends `granted`
+    /// (its MAC1-valid initiation) from `peer` every 5 s.
+    ///
+    /// The guard keeps whatever peers and known endpoints it already has, so a live worker's
+    /// guard shows what that worker taught it. `start` should be later than any real time the
+    /// guard has seen, so the simulated windows are fresh.
+    pub(crate) fn flood_against(
+        admission: &PeerAdmission,
+        node_public: X25519PublicKey,
+        granted: &[u8],
+        peer: SocketAddr,
+        flood: Flood,
+        start: Instant,
+    ) -> Run {
+        let attacker = initiation_to(node_public, [0x55; 32]);
+        let agreements_before = admission.key_agreements.load(Ordering::Relaxed);
         let mut run = Run {
             peer_admitted: 0,
             peer_attempts: 0,
@@ -1849,7 +1883,7 @@ mod flood_fairness {
         let mut n = 0_u32;
         let peer_tries = |admission: &PeerAdmission, at: Instant, run: &mut Run| {
             run.peer_attempts += 1;
-            if admission.check(&Packet::copy_from(&granted), peer_source(), at) == Ok(()) {
+            if admission.check(&Packet::copy_from(granted), peer, at) == Ok(()) {
                 run.peer_admitted += 1;
             }
         };
@@ -1861,7 +1895,7 @@ mod flood_fairness {
                 let at = base + step * i;
                 if !peer_done && at >= peer_at {
                     peer_done = true;
-                    peer_tries(&admission, peer_at, &mut run);
+                    peer_tries(admission, peer_at, &mut run);
                 }
                 let index = n % sources;
                 let network =
@@ -1872,18 +1906,21 @@ mod flood_fairness {
                 n = n.wrapping_add(1);
             }
             if !peer_done {
-                peer_tries(&admission, peer_at, &mut run);
+                peer_tries(admission, peer_at, &mut run);
             }
             let budget = admission.budget.lock().expect("budget lock");
             run.max_sources = run.max_sources.max(budget.sources.len());
             run.max_capacity = run.max_capacity.max(budget.sources.capacity());
         }
-        run.key_agreements = admission.key_agreements.load(Ordering::Relaxed);
+        run.key_agreements = admission
+            .key_agreements
+            .load(Ordering::Relaxed)
+            .saturating_sub(agreements_before);
         run
     }
 
     /// Check the bounds every flood must keep, and print the run for the issue log.
-    fn report(name: &str, run: &Run) {
+    pub(crate) fn report(name: &str, run: &Run) {
         println!(
             "J717 {name}: peer admitted {}/{} attempts, key agreements {} (cap {}), \
              max sources {}, max map capacity {}",
