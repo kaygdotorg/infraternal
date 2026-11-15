@@ -12,8 +12,10 @@
  *  - "Try again" asks the connection to retry now; the connection also keeps retrying by itself;
  *  - the first welcome ends the startup: the notice goes, and later closes belong to the canvas's own states.
  */
-/** The reason the server sends when the account already holds all its connections (crates/infraternal-server stream_close.rs). */
-export const CONNECTION_LIMIT_REASON = "this account has too many open connections";
+import { CONNECTION_LIMIT_REASON } from "../close-reasons";
+
+/** The reason the server sends when the account already holds all its connections; it lives with the other reasons. */
+export { CONNECTION_LIMIT_REASON };
 
 /** How long a page waits for its first welcome before it says it cannot reach the server. */
 export const STARTUP_NOTICE_DELAY_MS = 4000;

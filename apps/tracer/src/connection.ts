@@ -20,7 +20,7 @@
  * closing the socket: an intermediary may never deliver its close event. Streams retain unacknowledged input.
  */
 import { noteWsMessage } from "./perf-activity";
-import { CloseNotes, plainCloseReason } from "./close-reasons";
+import { CloseNotes, CONNECTION_LIMIT_REASON, plainCloseReason } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -632,12 +632,17 @@ export class MuxConnection {
     };
   }
 
-  /** Server refusals retain backoff; a refused resume also forgets its capability before fresh attach (#244). */
+  /**
+   * Server refusals retain backoff; a refused resume also forgets its capability before fresh attach (#244).
+   * The account's connection limit is the exception for the capability: the server refuses it before it reads the
+   * Resume, so the connection is still resumable in its window, and forgetting it would turn the next successful
+   * connect into a fresh one that drops every terminal's writer (#523).
+   */
   private forgetRefusedResume(code: number | undefined, reason: string | undefined): void {
     if (this.welcomed || (code !== 1008 && reason !== "the server refused to resume the connection")) return;
     this.refusalBackoff = true;
     this.fastRecovery = false;
-    if (!this.resumeSent) return;
+    if (!this.resumeSent || reason === CONNECTION_LIMIT_REASON) return;
     this.credentials?.connectionId.fill(0);
     this.credentials?.resumeToken.fill(0);
     this.credentials = undefined;

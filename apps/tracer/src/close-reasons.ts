@@ -6,6 +6,13 @@
  * an unknown or empty reason gets the fallback, and its text is never copied into the page or the console.
  */
 /**
+ * The reason the server sends when the account already holds all the live connections it may have
+ * (crates/infraternal-server/src/stream_close.rs `CONNECTION_LIMIT`). The page compares against it to say why it cannot
+ * connect, and to keep a resume it may still use: the refusal comes before the server reads any resume (#523).
+ */
+export const CONNECTION_LIMIT_REASON = "this account has too many open connections";
+
+/**
  * The reasons we recognise, each with the sentence a person reads. Several reasons can share a sentence. Add a new
  * server or infraternal agent reason here when one is added there; until then it shows the fallback.
  */
