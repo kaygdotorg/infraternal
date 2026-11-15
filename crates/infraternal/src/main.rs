@@ -48,6 +48,9 @@ mod install;
 /// OS-standard default folders for `server init` [D395].
 #[cfg(feature = "plugin-server")]
 mod install_paths;
+/// Moves an existing install's data folder to the D395 default [#516].
+#[cfg(all(feature = "plugin-server", test))]
+mod install_move;
 
 use std::{
     io::{self, IsTerminal, Write},
