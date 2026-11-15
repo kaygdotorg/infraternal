@@ -383,11 +383,24 @@ mod tests {
             // sleep: waiting for the child to execute its program; there is no event for it.
             std::thread::sleep(Duration::from_millis(5));
         }
-        let mut held: Vec<u32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-            .collect();
-        held.sort_unstable();
+        // The kernel points `exe` at the new program a moment BEFORE it closes the
+        // close-on-exec descriptors (std's own error pipe is one), so a single read can
+        // see that pipe. A leaked descriptor never goes away, so wait for the table to
+        // settle and judge the last reading.
+        let read_held = || {
+            let mut held: Vec<u32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+                .collect();
+            held.sort_unstable();
+            held
+        };
+        let mut held = read_held();
+        while held != [0, 1, 2] && std::time::Instant::now() < deadline {
+            // sleep: the kernel closes the close-on-exec descriptors right after it switches `exe`; there is no event for it.
+            std::thread::sleep(Duration::from_millis(5));
+            held = read_held();
+        }
         let _ = child.kill();
         let _ = child.wait();
         drop(leaked);
