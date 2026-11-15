@@ -98,6 +98,9 @@ pub(crate) async fn serve(
             |remote| remote.clock_health.clone(),
         );
         let control = crate::restart::Control::start_with_clock(&config.data_dir, clock_health);
+        // The auto-update's switches mirror Mesh state from this folder (#211 S4, #489).
+        #[cfg(feature = "release")]
+        let data_dir = config.data_dir.clone();
         let serving = async move {
             if let Some(remote) = remote {
                 infraternal_server::serve_with_remote(config, remote).await
@@ -127,7 +130,7 @@ pub(crate) async fn serve(
                 result = &mut serving => return result.map(|()| Outcome::Stopped),
                 Some(request) = switch => {
                     #[cfg(feature = "release")]
-                    if let Some(replacement) = crate::restart::switch(request, source.as_deref()) {
+                    if let Some(replacement) = crate::restart::switch(request, source.as_deref(), &data_dir) {
                         return Ok(Outcome::Restart(replacement));
                     }
                     #[cfg(not(feature = "release"))]

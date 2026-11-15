@@ -585,6 +585,9 @@ pub(crate) struct Replacement {
     mesh_handoff: Option<(PathBuf, PathBuf)>,
     /// Deferred reply to an explicit rollback request, sent only after the mirror finished.
     rollback_reply: Option<std::os::unix::net::UnixStream>,
+    /// An auto-update undo (#211 S4, D295): like an explicit rollback, a failed Mesh mirror
+    /// refuses the older image, which must never start without its Mesh identity.
+    mesh_required: bool,
 }
 impl Replacement {
     /// Describe whether the selected image can receive a warm CA handoff.
@@ -622,6 +625,7 @@ impl Replacement {
             hold: None,
             mesh_handoff: None,
             rollback_reply: None,
+            mesh_required: false,
         })
     }
 
@@ -633,7 +637,7 @@ impl Replacement {
     /// # Errors
     /// Returns the recovery exec error when a rollback is refused or its requester disconnected.
     fn handoff_after_quiescence(mut self) -> Result<Self, io::Error> {
-        let rollback = self.rollback_reply.is_some();
+        let rollback = self.rollback_reply.is_some() || self.mesh_required;
         let result = self
             .mesh_handoff
             .take()
@@ -763,9 +767,26 @@ fn execute_image(
 pub(crate) fn switch(
     request: infraternal_server::update_apply::SwitchRequest,
     source: Option<&dyn infraternal_server::ca::CaKeySource>,
+    data: &Path,
 ) -> Option<Replacement> {
     use infraternal_server::update_apply::{SwitchRequest, ca_warm, image_digest};
     let keeps_ca = |replacement: &Replacement| !ca_warm() || replacement.input.is_some();
+    // Like any restart into a named binary, both directions mirror the durable Mesh state
+    // to the legacy runtime path once writers stop (#489), so an older build finds its
+    // identity. An undo cannot go ahead without that mirror.
+    let mesh = |mut replacement: Replacement, required: bool| -> Option<Replacement> {
+        match infraternal_agent::sessions::state_path(None) {
+            Ok(volatile) => {
+                replacement.mesh_handoff = Some((data.join("mesh"), volatile));
+                replacement.mesh_required = required;
+                Some(replacement)
+            }
+            Err(error) => {
+                tracing::warn!(error_kind = ?error.kind(), "update switch Mesh runtime path unavailable");
+                (!required).then_some(replacement)
+            }
+        }
+    };
     match request {
         SwitchRequest::Apply { switch, reply } => {
             let admitted = crate::restart_binary::Opened::from_verified(
@@ -774,7 +795,8 @@ pub(crate) fn switch(
             )
             .and_then(|binary| Replacement::new(binary, source))
             .ok()
-            .filter(keeps_ca);
+            .filter(keeps_ca)
+            .and_then(|replacement| mesh(replacement, false));
             let Some(mut replacement) = admitted else {
                 record_request("update", None, Some(switch.path()), "refused");
                 let _ = reply.send(Err(switch));
@@ -798,7 +820,8 @@ pub(crate) fn switch(
                 })
                 .and_then(|binary| Replacement::new(binary, source))
                 .ok()
-                .filter(keeps_ca);
+                .filter(keeps_ca)
+                .and_then(|replacement| mesh(replacement, true));
             let Some(replacement) = admitted else {
                 record_request("update-undo", None, Some(&undo.image), "refused");
                 let _ = reply.send(Err(()));
