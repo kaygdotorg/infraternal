@@ -1603,6 +1603,16 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             Some((relocation.describe(), relocation_json(relocation, None)))
         }
         Some(relocation) => {
+            // The install's own checks first, so a refusal (such as the host
+            // firewall finding no admitted sshd port) moves nothing (J803).
+            if let Err(error) = install::preflight(&args, &install_args) {
+                return report_failure(
+                    "server init",
+                    "The data folder was not moved; the existing install is unchanged.",
+                    error.to_string(),
+                    json_output,
+                );
+            }
             let service = install_move::Systemd {
                 user: !install_args.system,
                 service: format!("{name}.service"),

@@ -163,6 +163,38 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     })
 }
 
+/// Run every check [`install`] can refuse on before it changes anything, and change nothing.
+///
+/// `server init` calls this before it moves an existing install's data
+/// folder (D395, #516), because the move stops the service, moves the folder
+/// and rewrites the unit before [`install`] runs. Without it, a refusal from
+/// the host firewall's sshd admission check (J671, #483) came after the move,
+/// so a refused re-run had still moved the install. With it the move keeps
+/// [`install_in_order`]'s promise: a refusal in the checks creates and moves
+/// nothing. [`install`] repeats the same checks, so this is only an earlier
+/// copy of them, never a replacement.
+///
+/// # Errors
+/// The same [`InstallError`] that [`install`] would return from its checks.
+pub fn preflight(args: &ServerArgs, options: &InstallArgs) -> Result<(), InstallError> {
+    validate_name(&options.name)?;
+    let user = !options.system || options.user;
+    if args.host_firewall_off && user {
+        return Err(InstallError::HostFirewall(
+            "--host-firewall-off is available only for a system install".to_owned(),
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    if args.host_firewall_off {
+        return Err(InstallError::Invalid);
+    }
+    #[cfg(target_os = "linux")]
+    if options.system && options.name == "infraternal-firewall" {
+        return Err(InstallError::Invalid);
+    }
+    plan_firewall(args, options).map(drop)
+}
+
 /// What a server install does to the host firewall, decided before anything is written.
 ///
 /// Only a system install on Linux touches the host firewall (D392): it
