@@ -1613,7 +1613,19 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
                     json_output,
                 );
             }
+            let program = match install::systemctl_program() {
+                Ok(program) => program,
+                Err(error) => {
+                    return report_failure(
+                        "server init",
+                        "The data folder was not moved; the existing install is unchanged.",
+                        error.to_string(),
+                        json_output,
+                    );
+                }
+            };
             let service = install_move::Systemd {
+                program,
                 user: !install_args.system,
                 service: format!("{name}.service"),
             };

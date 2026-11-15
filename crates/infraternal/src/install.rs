@@ -436,14 +436,14 @@ fn restore_previous(path: &Path, bytes: Option<&[u8]>, mode: u32) -> std::io::Re
 /// directory early in `PATH` must not be able to supply its own
 /// `systemctl` (J658). The same binary serves `--user` installs.
 #[cfg(target_os = "linux")]
-fn systemctl_program() -> Result<PathBuf, InstallError> {
+pub(super) fn systemctl_program() -> Result<PathBuf, InstallError> {
     host_firewall::discover_systemctl(None)
         .map_err(|error| InstallError::HostFirewall(error.to_string()))
 }
 
 /// Elsewhere there is no systemd, so a real install stops here with [`InstallError::Systemctl`].
 #[cfg(not(target_os = "linux"))]
-fn systemctl_program() -> Result<PathBuf, InstallError> {
+pub(super) fn systemctl_program() -> Result<PathBuf, InstallError> {
     Err(InstallError::Systemctl)
 }
 

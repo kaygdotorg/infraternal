@@ -100,6 +100,11 @@ pub trait Service {
 
 /// A systemd service, system-wide or in the caller's user manager.
 pub struct Systemd {
+    /// The `systemctl` to run, found at a fixed root-owned path the way the
+    /// install itself finds it, never through `PATH`: a system move runs as
+    /// root, and a writable folder early in `PATH` must not be able to supply
+    /// its own `systemctl` (J658, J803).
+    pub program: PathBuf,
     /// Talk to the user manager (`systemctl --user`).
     pub user: bool,
     /// The unit name, for example `infraternal-server.service`.
@@ -109,7 +114,7 @@ pub struct Systemd {
 impl Systemd {
     /// Run `systemctl` with this scope and return its output.
     fn systemctl(&self, arguments: &[&str]) -> io::Result<std::process::Output> {
-        let mut command = Command::new("systemctl");
+        let mut command = Command::new(&self.program);
         infraternal_shim::prepare_child(&mut command);
         command.stdin(Stdio::null());
         if self.user {
