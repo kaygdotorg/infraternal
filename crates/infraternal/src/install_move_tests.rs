@@ -550,3 +550,37 @@ fn stamps_are_utc_calendar_time() {
     assert_eq!(utc_stamp(951_868_799), "20000229-235959");
     assert_eq!(utc_stamp(1_794_733_687), "20261115-090807");
 }
+
+/// Real cross-filesystem proof: `INFRATERNAL_MOVE_PROOF_DIR` names a folder on
+/// another filesystem than `TMPDIR` (a tmpfs, or an attached disk image on
+/// macOS). Nothing is forced: the rename must really fail with EXDEV and the
+/// copy path must carry everything. Ignored by default; run it explicitly.
+#[test]
+#[ignore = "needs INFRATERNAL_MOVE_PROOF_DIR on a second filesystem"]
+fn a_real_second_filesystem_takes_the_copy_path() {
+    let other = PathBuf::from(
+        env::var_os("INFRATERNAL_MOVE_PROOF_DIR").expect("set INFRATERNAL_MOVE_PROOF_DIR"),
+    );
+    let mut setup = install();
+    setup.new = other.join(format!(
+        "mv-{}/state/infraternal",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    let before = data_of(&setup.old);
+    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
+    assert!(
+        !relocation.same_filesystem,
+        "{} is on the same filesystem",
+        other.display()
+    );
+    let outcome = apply(&relocation, &Fake::running(), when()).unwrap();
+    assert!(outcome.copied);
+    assert_eq!(data_of(&setup.new), before);
+    assert_eq!(data_of(outcome.leftover.as_ref().unwrap()), before);
+    assert_eq!(
+        fs::read_to_string(&setup.unit).unwrap(),
+        unit_text(&setup.new)
+    );
+    println!("{}", outcome.describe(&relocation));
+    let _ = fs::remove_dir_all(setup.new.parent().unwrap().parent().unwrap());
+}
