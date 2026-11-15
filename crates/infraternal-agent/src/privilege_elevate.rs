@@ -1188,7 +1188,8 @@ mod tests {
 
     /// J701 F1 (#399, D274, D376): the only processes that ever hold the
     /// password terminal are the infraternal agent (with its own fork before
-    /// exec) and the setuid elevation command.
+    /// exec) and the setuid elevation command: su, sudo and doas, each one
+    /// that is installed and prompts this account (J716 C).
     ///
     /// The private terminal stops new opens, but not a copy of a descriptor
     /// taken from a process that already holds one. Any ordinary program the
@@ -1196,25 +1197,31 @@ mod tests {
     /// before it executes su) is dumpable, so another process of the account
     /// could take the descriptor through ptrace or `pidfd_getfd`.
     ///
-    /// This is a structural check, not an attack: while the real su path
-    /// runs (no secret, so it stops at the prompt and nothing reaches PAM),
+    /// This is a structural check, not an attack: while the real su, sudo
+    /// and doas paths run (no secret, so each stops at its prompt and
+    /// nothing reaches PAM),
     /// a thread keeps reading `/proc/<pid>/fd` of every child of this
     /// process. Reading another process's descriptor table needs the same
     /// access as reaching its descriptors, and Yama's ptrace policy doesn't
     /// narrow it, so the check means the same under every `ptrace_scope`.
     /// Any child whose table it can read and that holds the terminal must be
     /// running this very binary (the fork before exec), judged by its program
-    /// read just before and just after its table; after su is executed the
-    /// table must be closed. It also checks it saw su, so a scanner that
-    /// sees nothing can't pass. (Run it alone: another test's private
+    /// read just before and just after its table; after the setuid program
+    /// is executed the table must be closed. It also checks it saw each
+    /// program it ran, so a scanner that sees nothing can't pass. It covers
+    /// direct children only; the setuid program's own children run as root. (Run it alone: another test's private
     /// terminal could also be seen.)
     #[tokio::test]
     async fn only_the_agent_and_the_setuid_command_hold_the_password_terminal() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        let posix =
-            root_shell_is_posix(&std::fs::read_to_string("/etc/passwd").unwrap_or_default());
-        if !posix || command(Way::Su, MARK, ["", "", "", ""]).is_none() {
-            eprintln!("no su with a POSIX root shell here; nothing to check");
+        // J716 C: every way in that prompts here, not only su. They share
+        // the spawn code, but each setuid program is checked for itself.
+        let ways: Vec<Way> = [Way::Su, Way::Sudo, Way::Doas]
+            .into_iter()
+            .filter(|way| prompts_here(*way))
+            .collect();
+        if ways.is_empty() {
+            eprintln!("no su, sudo or doas that prompts this account here; nothing to check");
             return;
         }
         assert!(
@@ -1254,21 +1261,30 @@ mod tests {
             }
             (reachable_holders, seen)
         });
-        for _ in 0..10 {
-            let attempt = elevate(
-                Way::Su,
-                None,
-                &[0; 32],
-                [
-                    "/nonexistent/j702",
-                    &"0".repeat(64),
-                    "/nonexistent/j702.sock",
-                    "65534",
-                ],
-                Duration::from_secs(5),
-            )
-            .await;
-            assert!(attempt.is_ok_and(|done| done.elevated.is_none()));
+        for way in &ways {
+            // su prompts at once. sudo may take seconds (it can look up the
+            // host name first), so it gets fewer, longer tries.
+            let (tries, bound) = if *way == Way::Su {
+                (10, Duration::from_secs(5))
+            } else {
+                (3, Duration::from_secs(15))
+            };
+            for _ in 0..tries {
+                let attempt = elevate(
+                    *way,
+                    None,
+                    &[0; 32],
+                    [
+                        "/nonexistent/j702",
+                        &"0".repeat(64),
+                        "/nonexistent/j702.sock",
+                        "65534",
+                    ],
+                    bound,
+                )
+                .await;
+                assert!(attempt.is_ok_and(|done| done.elevated.is_none()));
+            }
         }
         stop.store(true, Ordering::Release);
         let (reachable_holders, seen) = scanner.join().unwrap();
@@ -1276,6 +1292,12 @@ mod tests {
             reachable_holders.is_empty(),
             "a program this account can reach held the password terminal: {reachable_holders:?}"
         );
-        assert!(seen.contains("su"), "the scanner never saw su: {seen:?}");
+        for way in ways {
+            assert!(
+                seen.contains(way.word()),
+                "the scanner never saw {}: {seen:?}",
+                way.word()
+            );
+        }
     }
 }
