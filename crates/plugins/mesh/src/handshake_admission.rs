@@ -499,6 +499,7 @@ impl PeerAdmission {
         endpoints: impl IntoIterator<Item = SocketAddr>,
     ) {
         self.configured_endpoints = endpoint_list(endpoints);
+        self.forget_reserve_spend();
     }
 
     /// Replace the endpoints `GotaTun` confirmed from installed peers' authenticated traffic.
@@ -511,6 +512,22 @@ impl PeerAdmission {
         endpoints: impl IntoIterator<Item = SocketAddr>,
     ) {
         self.confirmed_endpoints = endpoint_list(endpoints);
+        self.forget_reserve_spend();
+    }
+
+    /// Start every known endpoint's reserve count afresh after a list replacement: the slots
+    /// moved, so old counts would land on other endpoints. [`Budget::spend`] also resizes the
+    /// counters when the number of slots changes, so a list replaced without this call is never
+    /// out of bounds; this call keeps a same-length replacement exact too.
+    fn forget_reserve_spend(&mut self) {
+        let slots = self.known_endpoints();
+        let budget = self
+            .budget
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        budget.endpoints.clear();
+        budget.endpoints.resize(slots, 0);
+        budget.endpoints.shrink_to_fit();
     }
 
     /// Whether `source` is exactly a known peer endpoint.
