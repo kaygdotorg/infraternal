@@ -379,8 +379,9 @@ pub(super) fn test_control_queue_state(peer: std::net::SocketAddr) -> Option<(bo
 mod tests {
     //! Checks the encoded queue bound and joins owned flights before shutdown returns.
     use super::*;
+    /// A writer that retains a full 4 MiB of unacknowledged input, for flight-bound tests.
     fn retained_writer() -> AttachmentState {
-        let (output, _) = mpsc::channel(16);
+        let (output, _) = mpsc::channel::<crate::embedded::TerminalOutput>(16);
         AttachmentState {
             session_id: [7; 16],
             stream_id: 2,
@@ -394,7 +395,7 @@ mod tests {
             replaying: false,
             route: None,
             proof_rebind_pending: false,
-            output,
+            output: output.into(),
         }
     }
 
@@ -465,6 +466,7 @@ mod tests {
         );
     }
 
+    /// Applying a cached promotion Ack must not replay retained input from inside the actor.
     #[tokio::test]
     async fn cached_promotion_ack_never_replays_inside_the_actor() {
         use super::super::{AgentConnection, BytesMut, Peer, apply_cached_ack};
@@ -484,8 +486,8 @@ mod tests {
             owned_cleanup: None,
         };
         let mut retained = retained_writer();
-        let (output, mut observed) = mpsc::channel(16);
-        retained.output = output;
+        let (output, mut observed) = mpsc::channel::<crate::embedded::TerminalOutput>(16);
+        retained.output = output.into();
         retained.awaiting_ack = true;
         retained.replaying = true;
         let mut attachments = HashMap::from([(1, retained)]);
@@ -616,6 +618,7 @@ mod tests {
         assert_eq!(CONTROL_FLIGHT, 33024);
     }
 
+    /// A full control lane must not take the flight slots that every terminal owner needs.
     #[tokio::test(flavor = "current_thread")]
     async fn full_control_lane_keeps_all_terminal_owner_slots_available() {
         use super::super::BytesMut;
@@ -656,7 +659,7 @@ mod tests {
         let limit = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
         let mut attachments: HashMap<_, _> = (0..limit)
             .map(|index| {
-                let (output, _) = mpsc::channel(1);
+                let (output, _) = mpsc::channel::<crate::embedded::TerminalOutput>(1);
                 (
                     u64::try_from(index).unwrap(),
                     AttachmentState {
@@ -672,7 +675,7 @@ mod tests {
                         replaying: false,
                         route: None,
                         proof_rebind_pending: false,
-                        output,
+                        output: output.into(),
                     },
                 )
             })
