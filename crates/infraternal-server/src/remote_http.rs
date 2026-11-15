@@ -158,6 +158,52 @@ impl InvitationIssuer {
     ) -> Result<JoinInvitation, StatusCode> {
         issue_approved_machine_join(self.0.clone(), poll_token, approval, now).await
     }
+    /// The invitation of a root upgrade's successor (D376, #399): a rootful,
+    /// uid-0 invitation for the same host, whose one-use token belongs to
+    /// the promotion `attempt` and is bound to the staged key `key_digest`.
+    /// It carries the same pins as every other invitation; redemption
+    /// records a successor certificate, never the host's active one.
+    pub(crate) async fn issue_successor(
+        &self,
+        attempt: Uuid,
+        host: Uuid,
+        key_digest: &[u8; 32],
+        now: i64,
+    ) -> Result<JoinInvitation, StatusCode> {
+        let token = self
+            .0
+            .store
+            .issue_successor_token(attempt, key_digest, now)
+            .await
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+        Ok(JoinInvitation {
+            host_id: host,
+            mode: Mode::Rootful,
+            execution_uid: 0,
+            public_origin: self.0.auth.origin().to_owned(),
+            token: token.secret().to_owned(),
+            ca_der: B64.encode(
+                self.0
+                    .source
+                    .public_issuer()
+                    .map(|issuer| issuer.to_der())
+                    .transpose()
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                    .unwrap_or_else(|| self.0.endpoint.ca_der.clone()),
+            ),
+            https_system_roots: self.0.source.uses_system_https(),
+            https_der: self
+                .0
+                .source
+                .https_certificate()
+                .map(|leaf| leaf.to_der().map(|der| B64.encode(der)))
+                .transpose()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+            endpoint: Some(self.0.endpoint.endpoint),
+            server_name: self.0.endpoint.server_name.clone(),
+        })
+    }
+
     pub(crate) fn ready(&self) -> bool {
         self.0.source.load().is_ok()
     }
@@ -610,6 +656,9 @@ async fn issue_approved_machine_join(
     Ok(invitation)
 }
 
+/// `POST /remote/join`: a host redeems its invitation (or a root upgrade's
+/// successor its promotion token) with a CSR, and gets its signed
+/// certificate and the uid it is bound to.
 async fn join(
     State(api): State<Api>,
     Json(request): Json<JoinRequest>,
@@ -628,13 +677,20 @@ async fn join(
         .join(request.host_id, request.mode, &request.token, &der, now()?)
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    let identity = store
-        .admit(&certificate.record.fingerprint, now()?)
-        .await
-        .map_err(|_| StatusCode::FORBIDDEN)?;
+    // A root upgrade's successor (D376) is not the host yet, so ordinary
+    // admission refuses its certificate by design (J415 R1); it answers as
+    // uid 0 through its own check instead.
+    let execution_uid = match store.admit(&certificate.record.fingerprint, now()?).await {
+        Ok(identity) => identity.execution_uid,
+        Err(_) => store
+            .admit_successor(&certificate.record.fingerprint, now()?)
+            .await
+            .map(|_| 0)
+            .map_err(|_| StatusCode::FORBIDDEN)?,
+    };
     Ok(Json(JoinResponse {
         certificate_der: B64.encode(certificate.der),
-        execution_uid: identity.execution_uid,
+        execution_uid,
     }))
 }
 

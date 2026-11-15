@@ -1,12 +1,15 @@
 <!-- Documents authenticated immutable replacement admission and live-service recovery for #157, D217/D224/D226. -->
 # Safe server replacement
 
-Stage the native architecture binary with `MANIFEST`, `MANIFEST.sig` and
-`VERSION` in the same directory. The manifest is the hardened signer's canonical
-`infraternal-release-manifest-v1` document: version and channel headers followed
-by the exact checksum list. The release signature covers the whole document in
-the existing `infraternal-release` namespace. Both compiled release keys remain
-trusted. Legacy `SHA256SUMS` metadata alone cannot admit a replacement.
+Stage the native architecture binary with the release's `SHA256SUMS`,
+`SHA256SUMS.sig` and `VERSION` in the same directory, exactly as the release
+signer publishes them (see [signed releases](release.md)). The signature covers
+`SHA256SUMS` in the `infraternal-release` namespace, and `SHA256SUMS` lists both
+`VERSION` and the binary's artifact name (`infraternal-x86_64-musl` or
+`infraternal-aarch64-musl`). So the signature covers the version, and the channel
+comes from that version [226]. `VERSION` must be exactly one stable or edge version
+and a newline. Both compiled release keys remain trusted. This is the only signed
+format: the earlier `MANIFEST`/`MANIFEST.sig` pair is no longer read (#211).
 
 Keep the executable and its parents owned by the service account or root, with
 no writable executable permissions for group or others, no set-ID bits, symlinks

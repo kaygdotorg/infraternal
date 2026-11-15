@@ -155,16 +155,7 @@ pub(crate) fn default_runner(
         let _ = remote;
         Arc::new(base)
     };
-    let binaries = BinaryPaths {
-        x86_64: std::env::var_os("INFRATERNAL_BOOTSTRAP_X86_64_BINARY").map_or_else(
-            || executable.with_file_name("infraternal-x86_64-musl"),
-            Into::into,
-        ),
-        aarch64: std::env::var_os("INFRATERNAL_BOOTSTRAP_AARCH64_BINARY").map_or_else(
-            || executable.with_file_name("infraternal-aarch64-musl"),
-            Into::into,
-        ),
-    };
+    let binaries = binary_paths(&executable);
     // Linux exposes the exact running inode even after its installation path is
     // atomically replaced. The public file source opens this in the server process [225].
     let payloads = crate::release_payload::ReleasePayload::new(
@@ -192,6 +183,35 @@ pub(crate) fn default_runner(
         binaries,
     )
     .with_payload_source(payloads))
+}
+
+/// Where this server's host payloads are: next to `executable`, or where
+/// `INFRATERNAL_BOOTSTRAP_<ARCH>_BINARY` says.
+pub(crate) fn binary_paths(executable: &Path) -> BinaryPaths {
+    BinaryPaths {
+        x86_64: std::env::var_os("INFRATERNAL_BOOTSTRAP_X86_64_BINARY").map_or_else(
+            || executable.with_file_name("infraternal-x86_64-musl"),
+            Into::into,
+        ),
+        aarch64: std::env::var_os("INFRATERNAL_BOOTSTRAP_AARCH64_BINARY").map_or_else(
+            || executable.with_file_name("infraternal-aarch64-musl"),
+            Into::into,
+        ),
+    }
+}
+
+/// The host payload source a root upgrade installs from (D376): the same
+/// version-scoped resolver Add host uses, over the same binaries.
+#[cfg(feature = "remote")]
+pub(crate) fn promotion_payload(
+    data_dir: &Path,
+) -> Result<Arc<dyn infraternal_plugin_ssh::install::PayloadSource>, ServerError> {
+    let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
+    Ok(crate::release_payload::ReleasePayload::new(
+        "/proc/self/exe".into(),
+        binary_paths(&executable),
+        data_dir,
+    ))
 }
 
 struct PendingRemoteRuntime {

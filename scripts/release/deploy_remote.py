@@ -34,30 +34,51 @@ def local_http(request):
         raise
 
 
-def verify_signed(directory, trust, image, complete=False):
-    manifest_path = directory / "MANIFEST"
-    signature = directory / "MANIFEST.sig"
-    if (manifest_path.stat().st_size > 65536 or signature.stat().st_size > 1024
-            or (directory / "VERSION").stat().st_size > 128):
-        raise ValueError("release metadata exceeds bound")
-    manifest = manifest_path.read_bytes()
-    subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(trust),
-                    "-I", "release@infraternal.com", "-n", "infraternal-release",
-                    "-s", str(signature)], input=manifest, capture_output=True, check=True)
-    lines = manifest.decode().splitlines()
-    version = (directory / "VERSION").read_text()
-    channel = "edge" if re.fullmatch(r"edge-[0-9]{8}T[0-9]{6}Z\n", version) else "stable"
-    if channel == "stable" and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\n", version):
-        raise ValueError("invalid signed version")
-    if lines[:3] != ["infraternal-release-manifest-v1", "version " + version.strip(), "channel " + channel]:
-        raise ValueError("signed release identity mismatch")
+# One bundle path segment, as the release signer lists it; nested names such as
+# licenses/libghostty-vt/README.md are segments joined by "/" (#419, #211).
+SEGMENT = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def signed_entries(text):
+    """Parse a signed SHA256SUMS exactly as the Rust verifier does (`release_verify.rs`
+    `checksum`), so deploy admission never passes a list `restart --binary` refuses
+    (J685 P3-1): a non-empty list of at most 64 KiB that ends in a newline, split on
+    newlines only (one trailing carriage return per line is dropped, as Rust's
+    `str::lines` does), where every line is a lowercase digest, two spaces and a
+    bundle-relative name. Traversal, absolute names and duplicates refuse the list."""
+    if not text or len(text.encode()) > 65536 or not text.endswith("\n"):
+        raise ValueError("invalid signed artifact list")
     entries = {}
-    for line in lines[3:]:
-        value, name = line.split("  ", 1)
-        if (name in entries or name not in {"VERSION", "infraternal", "infraternal-x86_64-musl", "infraternal-aarch64-musl"}
-                or not re.fullmatch(r"[0-9a-f]{64}", value)):
+    for line in text[:-1].split("\n"):
+        line = line.removesuffix("\r")
+        value, separator, name = line.partition("  ")
+        parts = name.split("/")
+        if (not separator or not re.fullmatch(r"[0-9a-f]{64}", value) or name in entries
+                or len(name) > 255 or not all(SEGMENT.fullmatch(p) and p not in (".", "..") for p in parts)):
             raise ValueError("invalid signed artifact list")
         entries[name] = value
+    return entries
+
+
+def verify_signed(directory, trust, image, complete=False):
+    """Authenticate the release metadata the signer Worker publishes (#211 S1, D224):
+    SHA256SUMS, its SHA256SUMS.sig and the VERSION it lists. The x86 server image must
+    match the signed x86 payload; `complete` also requires the signed arm payload."""
+    sums_path = directory / "SHA256SUMS"
+    signature = directory / "SHA256SUMS.sig"
+    if (sums_path.stat().st_size > 65536 or signature.stat().st_size > 1024
+            or (directory / "VERSION").stat().st_size > 128):
+        raise ValueError("release metadata exceeds bound")
+    sums = sums_path.read_bytes()
+    subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(trust),
+                    "-I", "release@infraternal.com", "-n", "infraternal-release",
+                    "-s", str(signature)], input=sums, capture_output=True, check=True)
+    entries = signed_entries(sums.decode())
+    # The signed VERSION carries the identity; the channel comes from it [226].
+    # Read it once: the same bytes are checked here and hashed below (J685 P3-2).
+    version = (directory / "VERSION").read_bytes()
+    if not re.fullmatch(rb"(edge-[0-9]{8}T[0-9]{6}Z|[0-9]+\.[0-9]+\.[0-9]+)\n", version):
+        raise ValueError("invalid signed version")
     required = {"VERSION", "infraternal-x86_64-musl"}
     if complete:
         required.add("infraternal-aarch64-musl")
@@ -68,7 +89,9 @@ def verify_signed(directory, trust, image, complete=False):
     with image.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != entries["infraternal-x86_64-musl"]:
             raise ValueError("signed server image mismatch")
-    for name in required:
+    if hashlib.sha256(version).hexdigest() != entries["VERSION"]:
+        raise ValueError("signed artifact mismatch")
+    for name in required - {"VERSION"}:
         if name == "infraternal-x86_64-musl" and not complete:
             continue  # The retained executable was already authenticated above.
         artifact = directory / name
@@ -79,13 +102,22 @@ def verify_signed(directory, trust, image, complete=False):
         raise ValueError("server and x86 payload identity mismatch")
 
 
+# The build host's own integrity list for a whole deploy bundle (web assets, SOURCE,
+# GATE included). It is unsigned and separate from the release's signed SHA256SUMS.
+BUILD_SUMS = "BUILDSUMS"
+# Files the build integrity list never covers: itself and the signed release metadata,
+# which is placed beside the bytes after the build.
+UNLISTED = {BUILD_SUMS, "SHA256SUMS", "SHA256SUMS.sig"}
+
+
 def checksums(directory):
+    """Check the bundle against the build host's BUILDSUMS, which must cover every file."""
     if directory.is_symlink() or any(p.is_symlink() for p in directory.rglob("*")):
         raise ValueError("release refuses symlinks")
     seen = set()
-    if (directory / "SHA256SUMS").stat().st_size > 4 * 1024 * 1024:
+    if (directory / BUILD_SUMS).stat().st_size > 4 * 1024 * 1024:
         raise ValueError("release checksum list exceeds bound")
-    for line in (directory / "SHA256SUMS").read_text().splitlines():
+    for line in (directory / BUILD_SUMS).read_text().splitlines():
         value, name = line.split("  ", 1)
         path = directory / name
         if (len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
@@ -97,7 +129,7 @@ def checksums(directory):
             if hashlib.file_digest(stream, "sha256").hexdigest() != value:
                 raise ValueError("release checksum mismatch")
     expected = {str(p.relative_to(directory)) for p in directory.rglob("*") if p.is_file()
-                and str(p.relative_to(directory)) not in {"SHA256SUMS", "MANIFEST", "MANIFEST.sig"}}
+                and str(p.relative_to(directory)) not in UNLISTED}
     if seen != expected:
         raise ValueError("release checksums must cover every artifact")
 
@@ -233,7 +265,7 @@ def apply(config):
         previous_directory = saved / "previous"
         previous_directory.mkdir(mode=0o700)
         shutil.copy2(previous, previous_directory / "infraternal")
-        for name in ("MANIFEST", "MANIFEST.sig", "VERSION"):
+        for name in ("SHA256SUMS", "SHA256SUMS.sig", "VERSION"):
             source = previous.parent / name
             if source.is_file():
                 shutil.copy2(source, previous_directory / name)
@@ -246,7 +278,7 @@ def apply(config):
                 old_payloads[name] = previous_directory / name
         old = endpoint(data)
         if not config["web_only"] and not all((previous.parent / name).is_file()
-                for name in ("MANIFEST", "MANIFEST.sig", "VERSION")):
+                for name in ("SHA256SUMS", "SHA256SUMS.sig", "VERSION")):
             raise ValueError("previous release requires signed metadata for warm rollback")
         new_web = web.with_name(web.name + ".new")
         if new_web.exists():

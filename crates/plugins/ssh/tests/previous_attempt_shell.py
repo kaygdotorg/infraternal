@@ -78,6 +78,14 @@ class EarlierSetup(unittest.TestCase):
                 child.wait(timeout=5)
         shutil.rmtree(self.temp)
 
+    def guard_file(self):
+        """The owner-only setup guard file (setup_guard.sh, #399 J569 P1-1),
+        created 0600 as setup creates it, so a test can hold it first."""
+        guard = Path(f'{self.base}.bootstrap-guard')
+        if not guard.exists():
+            os.close(os.open(guard, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+        return guard
+
     def shell_script(self, body):
         return f'''set -euC
 umask 077
@@ -757,7 +765,7 @@ mock_manager() {{
             env=dict(os.environ, HOME=str(self.home)),
         )
         self.children.append(observer)
-        with subprocess.Popen(['/bin/sh', '-c', 'exec 9< "$1"; flock 9; echo ready; read answer', 'sh', str(self.base.parent)], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+        with subprocess.Popen(['/bin/sh', '-c', 'exec 9< "$1"; flock 9; echo ready; read answer', 'sh', str(self.guard_file())], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
             self.assertEqual(child.stdout.readline(), b'ready\n')
             stat = Path(f'/proc/{child.pid}/stat').read_text()
             suffix = stat[stat.rfind(') ') + 2:].split()
@@ -771,7 +779,7 @@ mock_manager() {{
             self.assertEqual(fields[:2], ['INFRATERNAL_SETUP_LOCKED', socket.gethostname()])
             self.assertEqual(fields[2:4], [str(child.pid), start_time])
             self.assertEqual(fields[4], since)
-            self.assertEqual(fields[5], 'unknown', 'the parent guard names no setup attempt')
+            self.assertEqual(fields[5], 'unknown', 'the setup guard names no setup attempt')
             child.communicate(b'done\n')
 
     def test_parent_guard_holder_is_dated_by_its_own_start_not_another_lease(self):
@@ -797,7 +805,7 @@ mock_manager() {{
             env=dict(os.environ, HOME=str(self.home)),
         )
         self.children.append(observer)
-        with subprocess.Popen(['/bin/sh', '-c', 'exec 9< "$1"; flock 9; echo ready; read answer', 'sh', str(self.base.parent)], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+        with subprocess.Popen(['/bin/sh', '-c', 'exec 9< "$1"; flock 9; echo ready; read answer', 'sh', str(self.guard_file())], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
             self.assertEqual(child.stdout.readline(), b'ready\n')
             stat = Path(f'/proc/{child.pid}/stat').read_text()
             start_time = stat[stat.rfind(') ') + 2:].split()[19]
@@ -1642,7 +1650,7 @@ mock_manager() {{
         # A second shell must be refused while confirmation holds its guard,
         # including after inspect_previous runs in command substitution.
         body = '\nsetup_guard\nobserved=$(inspect_previous)\n'
-        body += f'flock -n "{self.base.parent}" true && exit 99\nexit 0\n'
+        body += f'flock -n "{self.guard_file()}" true && exit 99\nexit 0\n'
         self.assertEqual(self.run_shell(body).returncode, 0)
 
     def test_bound_socket_before_listen_is_live(self):

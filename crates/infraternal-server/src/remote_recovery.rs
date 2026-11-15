@@ -746,9 +746,10 @@ impl Service {
             return Err(Denied);
         }
         let inserted = sqlx::query(
-            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) \
-             SELECT ?,h.id,?,?,?,? FROM remote_hosts h JOIN remote_certificates old ON old.host_id=h.id \
-             WHERE h.id=? AND h.revoked_at IS NULL AND old.fingerprint=? AND old.revoked_at IS NULL",
+            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,role,execution_uid) \
+             SELECT ?,h.id,?,?,?,?,'active',h.execution_uid FROM remote_hosts h JOIN remote_certificates old ON old.host_id=h.id \
+             WHERE h.id=? AND h.revoked_at IS NULL AND old.fingerprint=? AND old.revoked_at IS NULL \
+             AND old.role='active' AND old.execution_uid=h.execution_uid",
         )
         .bind(signed.record.fingerprint.as_slice())
         .bind(signed.record.issuer_fingerprint.as_slice())
@@ -1048,7 +1049,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
             .bind(signed.record.fingerprint.as_slice())
             .bind(host.as_bytes().as_slice())
             .bind(signed.record.issuer_fingerprint.as_slice())

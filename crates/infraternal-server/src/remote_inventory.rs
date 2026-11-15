@@ -244,11 +244,11 @@ impl Inventory for Source {
 /// A pure data notification source is shared with durable admission and revocation writers.
 pub(crate) type InventoryChanges = Changes;
 
-/// Tests the admitted-host list and the per-host facts read against the real enrollment store.
+/// Tests inventory scoping and per-host facts against the real enrollment store.
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// The list is account-scoped, shows offline hosts, and drops revoked ones.
+    /// Each account sees only its admitted hosts, including offline hosts, while revoked hosts are excluded.
     #[tokio::test]
     async fn admitted_hosts_are_account_scoped_offline_and_revocation_filtered() {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -256,7 +256,7 @@ mod tests {
         sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('other','Other',0,'fixture','other','Other')").execute(&pool).await.unwrap();
         let foreign = Uuid::from_u128(43);
         sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'other','rootless',1002,100)").bind(foreign.as_bytes().as_slice()).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?, ?,100,604900)").bind([2u8;32].as_slice()).bind(foreign.as_bytes().as_slice()).bind([3u8;32].as_slice()).bind([4u8;32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3, ?4,100,604900,(SELECT execution_uid FROM remote_hosts WHERE id=?2))").bind([2u8;32].as_slice()).bind(foreign.as_bytes().as_slice()).bind([3u8;32].as_slice()).bind([4u8;32].as_slice()).execute(&pool).await.unwrap();
         let source = Source {
             pool,
             hosts: RemoteHosts::default(),
@@ -330,9 +330,11 @@ mod tests {
     }
 }
 
+/// Inventory pages stay bounded with long destinations.
 #[cfg(test)]
 mod pagination_tests {
     use super::*;
+    /// Every host appears on exactly one page, however long its address.
     #[tokio::test]
     async fn long_destinations_stay_bounded_and_all_pages_are_complete() {
         let (_, pool, _) = crate::enrollment::authority::tests::enrolled().await;
@@ -342,7 +344,7 @@ mod pagination_tests {
             let mut fingerprint = vec![0_u8; 32];
             fingerprint[..16].copy_from_slice(id.as_bytes());
             sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootless',1002,100)").bind(id.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
-            sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,zeroblob(32),zeroblob(32),100,604900)").bind(fingerprint).bind(id.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,zeroblob(32),zeroblob(32),100,604900,(SELECT execution_uid FROM remote_hosts WHERE id=?2))").bind(fingerprint).bind(id.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,?)")
                 .bind(id.as_bytes().as_slice())
                 .bind(format!("user@{}", "x".repeat(1000)))

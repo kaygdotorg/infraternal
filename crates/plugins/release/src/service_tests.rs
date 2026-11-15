@@ -229,3 +229,77 @@ async fn authority_is_rechecked_after_the_setting_write_before_commit() {
         "stable"
     );
 }
+
+/// A lookup whose server runs the updater, for the status-reason tests.
+struct Updating;
+impl ReleaseLookup for Updating {
+    fn latest<'a>(&'a self, _: &'a str) -> Operation<'a, Result<Value, &'static str>> {
+        Box::pin(async { Err("unused") })
+    }
+    fn update_status(&self) -> Result<Value, &'static str> {
+        Ok(json!({"current":"0.1.0","channel":"edge","mode":"auto","reason":null}))
+    }
+}
+
+/// `release.update.status` says plainly when updates are off and why (J725 P3-4): the
+/// plugin switched off or an unusable channel turns an updating host off, while a
+/// host-level reason from the server is kept as it is.
+#[tokio::test]
+async fn update_status_names_why_updates_are_off() {
+    let (base, _) = fixture().await;
+    let service = ReleaseService::new(base.pool.clone(), Arc::new(Updating));
+    let shown = service.call(UPDATE_STATUS.id, b"{}", None).await.unwrap();
+    assert_eq!(
+        (&shown["mode"], &shown["channel"]),
+        (&json!("auto"), &json!("stable"))
+    );
+    assert!(shown["reason"].is_null());
+    sqlx::query(
+        "INSERT INTO plugin_settings VALUES('server','release',1,'{\"channel\":\"beta\"}')",
+    )
+    .execute(&base.pool)
+    .await
+    .unwrap();
+    let shown = service.call(UPDATE_STATUS.id, b"{}", None).await.unwrap();
+    assert_eq!(shown["mode"], "off");
+    assert_eq!(shown["reason"], NO_CHANNEL);
+    sqlx::query("UPDATE plugin_settings SET enabled=0")
+        .execute(&base.pool)
+        .await
+        .unwrap();
+    let shown = service.call(UPDATE_STATUS.id, b"{}", None).await.unwrap();
+    assert_eq!(shown["mode"], "off");
+    assert_eq!(shown["reason"], crate::update::UPDATES_OFF);
+    // A lookup without server state still answers with its own fixed refusal.
+    assert_eq!(
+        base.call(UPDATE_STATUS.id, b"{}", None).await,
+        Err("updates unavailable")
+    );
+    // A host-level reason wins over the switch: turning the plugin on would not help.
+    let lookup = crate::latest::VerifiedLookup::new(
+        std::env::temp_dir().join(format!("absent-{}", uuid::Uuid::new_v4())),
+        "https://builds.invalid".into(),
+        Arc::new(NoEngine),
+    )
+    .with_updates(Err(crate::update::OFF_NOT_ROOT));
+    let host_off = ReleaseService::new(base.pool.clone(), Arc::new(lookup));
+    let shown = host_off.call(UPDATE_STATUS.id, b"{}", None).await.unwrap();
+    assert_eq!(shown["mode"], "off");
+    assert_eq!(shown["reason"], crate::update::OFF_NOT_ROOT);
+}
+
+/// An engine that is never used: the status test only reads state.
+struct NoEngine;
+impl crate::latest::ReleaseEngine for NoEngine {
+    fn download<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a std::path::Path,
+        _: u64,
+    ) -> Operation<'a, Result<(), crate::latest::DownloadError>> {
+        Box::pin(async { Err(crate::latest::DownloadError::Missing) })
+    }
+    fn verify_version(&self, _: &std::fs::File, _: &[u8], _: &[u8]) -> Result<(), &'static str> {
+        Err("unused")
+    }
+}

@@ -145,6 +145,21 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
+    // The root agent retiring the rootless install it replaced (D376, #399).
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    if let Some(result) = remote::promotion_retire_if_requested() {
+        return result;
+    }
+    // An abandoned root upgrade's cleanup, as root (D376, J465 P1).
+    #[cfg(all(feature = "remote", feature = "ssh", target_os = "linux"))]
+    if let Some(result) = remote::promotion_abandon_if_requested() {
+        return result;
+    }
+    // A root upgrade's relay, started by sudo, doas or su (D376, #399).
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    if let Some(result) = infraternal_agent::privilege_relay_host::run_if_requested() {
+        return result;
+    }
     #[cfg(feature = "plugin-agent")]
     if let Some(result) = infraternal_agent::startup_guard::run_if_requested() {
         return result;
@@ -157,6 +172,11 @@ fn run_invocation() -> ExitCode {
     }
     #[cfg(feature = "ssh")]
     if let Some(result) = ssh_internal::run_if_requested() {
+        return result;
+    }
+    // One install step of a root upgrade, bridged to the host's relay (D376).
+    #[cfg(feature = "ssh")]
+    if let Some(result) = infraternal_plugin_ssh::relay_session::run_if_requested() {
         return result;
     }
     #[cfg(all(feature = "session-payload", target_os = "linux"))]
@@ -1270,7 +1290,16 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             name,
         ),
         system_data: infraternal_status::server_data_directory(&roots),
+        system_unit: infraternal_status::recorded_server_unit(
+            &roots,
+            infraternal_status::Scope::System,
+            name,
+        )
+        .is_some(),
     };
+    if let Some(warning) = install_paths::root_user_scope_warning(scope, &installed, &environment) {
+        eprintln!("{warning}");
+    }
     let folders = install_paths::check_scope(scope, dry_run, &environment).and_then(|()| {
         install_paths::resolve_server_init(
             scope,

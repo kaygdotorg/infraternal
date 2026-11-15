@@ -4025,3 +4025,130 @@ async fn session_slides_keep_the_wal_bounded() {
         "the WAL reached {frames} frames after 5,000 session slides"
     );
 }
+
+/// `path` written relative to the current directory: one `..` per component
+/// of the working directory, then `path` without its root. Opening it reaches
+/// the same file, but the name no longer says where it is.
+fn relative_to_current_dir(path: &std::path::Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let mut relative = PathBuf::new();
+    for _ in cwd.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(path.strip_prefix("/").unwrap());
+    relative
+}
+
+/// J696 P3 (#473): a database file named by a relative path used to keep the
+/// session statements on sqlx without a word, so `server --data ./x` ran the
+/// unbounded-WAL slide. The pool reopens the path on its own threads, so a
+/// relative name would also follow any later change of directory. `Auth::new`
+/// now refuses it, and the runtime opens its database by an absolute path
+/// instead (`runtime::open_database`).
+#[tokio::test]
+async fn a_relative_database_path_is_refused_not_downgraded() {
+    let _guard = SERIAL.lock().await;
+    let (absolute_pool, path) = disk_pool("sessions-relative").await;
+    absolute_pool.close().await;
+    let relative = relative_to_current_dir(&path);
+    assert!(relative.is_relative());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&relative)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+    let outcome = Auth::new(pool.clone(), "auth.example.test", ORIGIN).await;
+    let refused = match &outcome {
+        Err(error) => error.to_string(),
+        Ok(auth) => format!(
+            "accepted; sessions on the pool: {}",
+            auth.sessions_on_pool()
+        ),
+    };
+    if let Ok(auth) = outcome {
+        auth.close_database().await;
+    }
+    pool.close().await;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    assert_eq!(refused, "the database path must be absolute");
+}
+
+/// How many rows a session token still has, read through sqlx.
+async fn session_rows(pool: &SqlitePool, token: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(token))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// J696 P3 (#473): during the port, a revoke (sqlx's `DELETE … RETURNING`)
+/// and the slide (the pool's `UPDATE … RETURNING`) are two drivers on one
+/// file. In either order the session ends revoked: a slide after the revoke
+/// is `Denied`, and a slide that committed first doesn't bring the row back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sqlx_revoke_and_a_pool_slide_leave_the_session_revoked_in_either_order() {
+    let _guard = SERIAL.lock().await;
+    let (pool, path) = disk_pool("sessions-revoke").await;
+    let (auth, token) = empty_with_pool(pool.clone()).await;
+    assert!(auth.sessions_on_pool(), "an on-disk Auth must use the pool");
+    let f = fixture_with_bootstrap(auth, token).await;
+
+    // Revoke, then slide.
+    f.auth.logout(&f.session).await.unwrap();
+    assert!(matches!(
+        f.auth.session(&f.session, NOW + 1).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(session_rows(&pool, &f.session).await, 0);
+
+    // Slide, then revoke.
+    let second = random();
+    let mut tx = pool.begin().await.unwrap();
+    insert_session(&mut tx, &second, &f.user, "second", NOW, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(f.auth.session(&second, NOW + 1).await.is_ok());
+    f.auth.logout(&second).await.unwrap();
+    assert!(matches!(
+        f.auth.session(&second, NOW + 2).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(session_rows(&pool, &second).await, 0);
+
+    // Racing: slides on the pool while the revoke runs on sqlx. Whatever
+    // interleaving SQLite's write lock picks, the revoke wins at the end.
+    let third = random();
+    let mut tx = pool.begin().await.unwrap();
+    insert_session(&mut tx, &third, &f.user, "third", NOW, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let slides = (0..32).map(|n| {
+        let auth = f.auth.clone();
+        let third = third.clone();
+        tokio::spawn(async move { auth.session(&third, NOW + 1 + n).await.is_ok() })
+    });
+    let slides: Vec<_> = slides.collect();
+    f.auth.logout(&third).await.unwrap();
+    for slide in slides {
+        let _ = slide.await.unwrap();
+    }
+    assert!(matches!(
+        f.auth.session(&third, NOW + 100).await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(session_rows(&pool, &third).await, 0);
+
+    f.auth.close_database().await;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

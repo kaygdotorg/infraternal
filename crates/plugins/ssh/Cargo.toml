@@ -23,6 +23,8 @@ tokio = { workspace = true, features = ["fs", "sync"] }
 url.workspace = true
 uuid.workspace = true
 zeroize = "1.9"
+# The root upgrade's relay frames (D376, #399); plain std without features.
+infraternal-plugin-remote = { path = "../remote", version = "0.1.0", default-features = false }
 
 # The unreaped exit check uses kqueue where waitid(WNOWAIT) is absent (child_exit.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
