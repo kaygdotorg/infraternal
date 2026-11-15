@@ -12,11 +12,13 @@ pub(crate) struct Options {
     /// Override the private runtime state directory.
     #[arg(long)]
     pub(crate) state: Option<PathBuf>,
+    /// Override only the embedded node's private mesh state directory.
+    #[arg(long, hide = true)]
+    pub(crate) mesh_state: Option<PathBuf>,
 }
 
-/// The reduced command line of `infraternal agent --fd <n> [--state <dir>]`, as spawned
-/// by the server. It exists so this start-up path parses only two flags instead of
-/// building the whole public command tree.
+/// The reduced command line of the trusted inherited-fd child, including its private Mesh path.
+/// It keeps this start-up path small instead of building the whole public command tree.
 #[derive(Parser)]
 #[command(name = "infraternal agent")]
 struct Inherited {
@@ -64,13 +66,16 @@ pub(crate) fn run_if_requested() -> Option<ExitCode> {
     let Some(fd) = options.fd else {
         return Some(ExitCode::from(2));
     };
-    Some(match infraternal_agent::run_embedded(fd, options.state) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("infraternal agent failed: {error}");
-            ExitCode::FAILURE
-        }
-    })
+    Some(
+        match infraternal_agent::run_embedded_with_mesh_state(fd, options.state, options.mesh_state)
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("infraternal agent failed: {error}");
+                ExitCode::FAILURE
+            }
+        },
+    )
 }
 
 #[cfg(test)]

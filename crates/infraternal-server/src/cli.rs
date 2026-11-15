@@ -11,6 +11,7 @@ pub const ID: &str = "server";
 #[cfg(feature = "cli-plugin")]
 const SETUP_TOKEN_COMMAND: [&str; 2] = ["server", "setup-token"];
 
+/// Build the server's CLI actions, including the read-only Mesh identity check.
 #[cfg(feature = "cli-plugin")]
 #[must_use]
 pub fn plugin() -> PluginDefinition {
@@ -42,10 +43,54 @@ pub fn plugin() -> PluginDefinition {
         }
     }
     #[cfg(feature = "remote")]
+    {
+        plugin = plugin.with_group("server mesh", "Check the running server's Mesh identity.");
+        plugin
+            .actions
+            .push(infraternal_plugin_remote::cli::restart_action());
+        plugin.actions.push(server_mesh_status_action());
+    }
     plugin
-        .actions
-        .push(infraternal_plugin_remote::cli::restart_action());
-    plugin
+}
+
+/// Define the command that reads the running server's public Mesh fingerprint.
+#[cfg(all(feature = "cli-plugin", feature = "remote"))]
+fn server_mesh_status_action() -> ActionDefinition {
+    let data = JsonSchema::object(
+        [
+            (
+                "running".to_owned(),
+                JsonSchema::boolean("The running server answered its private control socket."),
+            ),
+            (
+                "public_key_fingerprint".to_owned(),
+                JsonSchema::string("SHA-256 fingerprint of the server's public Mesh key."),
+            ),
+        ],
+        ["running".to_owned(), "public_key_fingerprint".to_owned()],
+    );
+    ActionDefinition::new(
+        ["server", "mesh", "status"],
+        "Show the running server's Mesh public-key fingerprint.",
+        "Use this command on the server host, as the account that runs the server, to verify Mesh identity continuity.",
+        [
+            "Pass the server's private data directory with --data.",
+            "The command checks the live server control socket and prints only the public-key fingerprint.",
+        ],
+        JsonSchema::empty_object(),
+        JsonSchema::command_result_with(data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "server.status",
+            DryRun::Unsupported,
+        ),
+    )
+    .with_cli_handler(CliHandler::ServerMeshStatus)
+    .with_example(
+        "server mesh status --data /var/lib/infraternal --json",
+        "Read the running server's public Mesh fingerprint.",
+    )
 }
 
 /// Register the command that runs the server in the current terminal.

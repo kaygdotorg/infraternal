@@ -302,6 +302,9 @@ fn dispatch_selected_action(
 }
 
 // Keep feature-gated command handlers beside their registry mappings.
+/// Dispatch one registered action to its local, remote, or server handler.
+///
+/// Feature-gated handlers share this path so unavailable actions return the same CLI result.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -414,6 +417,7 @@ fn dispatch_action(
         }
         CliHandler::RemoteAgent
         | CliHandler::ServerRestart
+        | CliHandler::ServerMeshStatus
         | CliHandler::RemoveHost
         | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
     }
@@ -2948,6 +2952,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             );
             let options = restart::Options {
                 binary: matches.get_one::<String>("binary").map(PathBuf::from),
+                rollback: matches.get_flag("rollback"),
             };
             return match tokio::runtime::Runtime::new() {
                 Ok(runtime) => restart::run(&runtime, &data, &options, json),
@@ -2958,6 +2963,14 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                     json,
                 ),
             };
+        }
+        #[cfg(all(feature = "plugin-server", feature = "remote"))]
+        if action.cli_handler == CliHandler::ServerMeshStatus {
+            let data = server_data_directory(
+                matches.get_one::<String>("data").map(String::as_str),
+                infraternal_status::Roots::detect,
+            );
+            return restart::mesh_status(&data, json);
         }
         if action.cli_handler == CliHandler::RemoveHost {
             let host = matches

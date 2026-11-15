@@ -970,6 +970,67 @@ mod backmerge_tests {
         }
     }
 
+    /// Parse an explicit previous-build rollback and require its replacement binary.
+    #[cfg(feature = "plugin-server")]
+    #[test]
+    fn restart_accepts_rollback_only_with_previous_binary() {
+        let registry = registry().unwrap();
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "server",
+                "restart",
+                "--binary",
+                "/verified/previous",
+                "--rollback",
+            ])
+            .unwrap();
+        assert!(selected(&matches).matches.get_flag("rollback"));
+
+        let error = build(&registry)
+            .try_get_matches_from(["infraternal", "server", "restart", "--rollback"])
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    /// The server exposes its active Mesh identity through an owner-only status command.
+    #[cfg(all(feature = "plugin-server", feature = "remote"))]
+    #[test]
+    fn server_mesh_status_is_a_read_only_local_command() {
+        let registry = registry().unwrap();
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "server",
+                "mesh",
+                "status",
+                "--data",
+                "/private/server",
+                "--json",
+            ])
+            .unwrap();
+
+        assert_eq!(selected(&matches).path, ["server", "mesh", "status"]);
+        assert_eq!(
+            registry
+                .find(&["server", "mesh", "status"])
+                .unwrap()
+                .action
+                .cli_handler,
+            CliHandler::ServerMeshStatus
+        );
+        assert_eq!(
+            selected(&matches)
+                .matches
+                .get_one::<String>("data")
+                .map(String::as_str),
+            Some("/private/server")
+        );
+    }
+
     #[test]
     fn removal_and_retention_inputs_keep_the_production_runtime_bindings() {
         let registry = registry().unwrap();
