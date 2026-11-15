@@ -36,7 +36,6 @@ use std::{
     process::Command,
     sync::{Arc, mpsc as sync},
     thread::JoinHandle,
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::unix::AsyncFd;
 use tokio::{
@@ -1550,6 +1549,9 @@ impl Drop for Worker {
     }
 }
 
+/// Reads per-peer statistics from the live device for the worker.
+mod peer_stats;
+
 /// Owns the live utun, peer-route MTUs, accepted snapshot and DNS resolver integration.
 /// `route_mtus` mirrors installed metrics so a failed update can restore them.
 struct RuntimeState {
@@ -1869,37 +1871,6 @@ impl RuntimeState {
             port: self.port,
             routes: new_routes,
         })
-    }
-
-    async fn counters(&self) -> io::Result<CounterMap> {
-        let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let peers = device.read(async |read| read.peers().await).await;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let mut counters = CounterMap::new();
-        for peer in peers {
-            let age = peer.stats.last_handshake.unwrap_or_default();
-            let timestamp = if peer.stats.last_handshake.is_some() {
-                now.checked_sub(age).unwrap_or_default()
-            } else {
-                Duration::ZERO
-            };
-            let key = crate::policy::model::PublicKey(*peer.peer.public_key.as_bytes());
-            counters.insert(
-                key,
-                Counters {
-                    persistent_keepalive_secs: peer.peer.keepalive.unwrap_or(0),
-                    handshake_secs: timestamp.as_secs(),
-                    #[cfg(feature = "relay")]
-                    handshake_nanos: timestamp.subsec_nanos(),
-                    received_bytes: u64::try_from(peer.stats.rx_bytes).unwrap_or(u64::MAX),
-                    sent_bytes: u64::try_from(peer.stats.tx_bytes).unwrap_or(u64::MAX),
-                    endpoint: peer.peer.endpoint,
-                },
-            );
-        }
-        Ok(counters)
     }
 
     /// Removes the host resolver route and listener before the Mac mesh device stops.
