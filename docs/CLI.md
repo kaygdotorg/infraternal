@@ -120,11 +120,20 @@ The move:
   switches. The old folder is then kept read-only as
   `<old>.moved-YYYYMMDD-HHMMSS` (UTC), and init prints the command that
   removes it once the server works;
-- refuses, changing nothing, when the target exists and is not empty, when
+- moves into a target that already holds infraternal's own files and leaves
+  them exactly where they are: in `/var/lib/infraternal` the host firewall's
+  `host-firewall-*.json` policies (and their pending writes) and the root
+  infraternal agent's `bin/`, `agent/`, `state/`, `sessions/` and
+  `.bootstrap-lock`. The data then goes in through a hidden
+  `.infraternal-incoming` folder, one rename per entry, and the folder keeps
+  its mode;
+- refuses, changing nothing, when the target holds anything else (the
+  message names only those files), when an old folder entry would take one
+  of those reserved names, when
   the old folder is a symlink, a mount point, inside the target (or the other
   way round) or owned by another user, or when a unit line other than
   `ExecStart` names the old folder;
-- gives the new folder mode 0700;
+- gives a folder it creates mode 0700;
 - is idempotent and crash-safe. The unit is the only pointer to the live
   folder, so there is never a second live copy. A marker file
   (`.infraternal-move`) in the moved folder lets the next run finish an
