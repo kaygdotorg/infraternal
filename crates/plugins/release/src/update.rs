@@ -215,6 +215,9 @@ pub const REMOVED_NOT_NEWER: &str =
 pub const REMOVED_CANCELLED: &str = "the explicit update was cancelled";
 /// Why a staged release was removed when its channel stopped announcing it.
 pub const REMOVED_WITHDRAWN: &str = "the channel no longer offers this release";
+/// [`Updater::confirm_staged`]'s refusal when the channel now offers a newer release
+/// than the staged one; the next check stages the newer one.
+pub const SUPERSEDED: &str = "the channel offers a newer release than the staged one";
 /// The refusal when the release plugin is switched off (or its channel setting is
 /// unusable): the check does nothing and the timer keeps its normal pace.
 pub const UPDATES_OFF: &str = "updates are turned off in the release settings";
