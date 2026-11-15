@@ -141,18 +141,30 @@ pub fn agent_actions() -> Vec<ActionDefinition> {
 /// Replacement uses the running server's private data coordinate inherited by Clap.
 #[must_use]
 pub fn restart_action() -> ActionDefinition {
-    action(
+    let mut restart = action(
         super::RESTART,
         &["server", "restart"],
         JsonSchema::object(
-            [(
-                "binary".to_owned(),
-                JsonSchema::string("Program to restart into, instead of the current one."),
-            )],
+            [
+                (
+                    "binary".to_owned(),
+                    JsonSchema::string("Program to restart into, instead of the current one."),
+                ),
+                (
+                    "rollback".to_owned(),
+                    JsonSchema::boolean(
+                        "Hand mesh state back to the selected previous build before it starts.",
+                    ),
+                ),
+            ],
             std::iter::empty(),
         ),
         CliHandler::ServerRestart,
-    )
+    );
+    restart
+        .cli_requires
+        .insert("rollback".to_owned(), "binary".to_owned());
+    restart
 }
 
 /// Host removal retains fresh proof and the deployed positional host identifier.
