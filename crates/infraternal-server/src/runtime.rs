@@ -475,6 +475,16 @@ async fn remote_router(
         .retire_unfinished_bootstraps()
         .await
         .map_err(ServerError::Storage)?;
+    // No promotion driver survives a restart either: abandon every live
+    // promotion, which bars its handover; the host's relay has rolled back
+    // by itself, and a joined successor uninstalls itself (D376, R4, R5).
+    enrollment_store
+        .sweep_promotions(
+            unix_seconds().map_err(|_| ServerError::InvalidConfiguration)?,
+            true,
+        )
+        .await
+        .map_err(|_| ServerError::InvalidConfiguration)?;
     let ca_api = ca_router(
         remote.as_ref(),
         &auth,
@@ -654,6 +664,25 @@ async fn build_router_core(
     .await?;
     #[cfg(feature = "remote")]
     let auth_api_issuer = issuer.clone();
+    // A root upgrade's endpoints (D376, #399) share the issuer, the host
+    // registry and the promotion ledger.
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let privilege_api = match issuer.clone() {
+        Some(issuer) => Some(crate::host_privilege_http::router(
+            auth.clone(),
+            crate::host_promotion::Promotions::new(
+                enrollment_store.clone(),
+                pool.clone(),
+                hosts.clone(),
+                issuer,
+                crate::bootstrap_runtime::promotion_payload(&config.data_dir)?,
+                "/proc/self/exe".into(),
+                config.data_dir.join("privilege"),
+            )
+            .map_err(|_| ServerError::InvalidConfiguration)?,
+        )),
+        None => None,
+    };
     #[cfg(all(feature = "ssh", feature = "remote"))]
     let integration = issuer.map(|issuer| (issuer, hosts.clone()));
     #[cfg(all(feature = "ssh", not(feature = "remote")))]
@@ -745,6 +774,11 @@ async fn build_router_core(
         .merge(ca_api);
     #[cfg(feature = "remote")]
     let app = app.merge(remote_api).merge(action_api);
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let app = match privilege_api {
+        Some(privilege_api) => app.merge(privilege_api),
+        None => app,
+    };
     #[cfg(feature = "ssh")]
     let warmup = Some(bootstrap.clone());
     #[cfg(not(feature = "ssh"))]
@@ -1613,7 +1647,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(zeroblob(32),?,zeroblob(32),zeroblob(32),?,?)")
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(zeroblob(32),?1,zeroblob(32),zeroblob(32),?2,?3,(SELECT execution_uid FROM remote_hosts WHERE id=?1))")
             .bind(host.as_bytes().as_slice()).bind(now-604_800).bind(now).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,'owner')")
             .bind(host.as_bytes().as_slice())

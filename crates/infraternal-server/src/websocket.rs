@@ -2963,6 +2963,7 @@ impl TerminalOpen {
     }
 }
 
+/// Open a terminal while holding remote-host admission through the persisted session row.
 async fn open_terminal(
     state: &WebSocketState,
     user_id: &str,
@@ -2977,6 +2978,17 @@ async fn open_terminal(
     let agent = terminal_agent(state, user_id, host)
         .await
         .map_err(|()| crate::embedded::AgentError::Unavailable)?;
+    #[cfg(feature = "remote")]
+    let _terminal_admission = host
+        .map(|host| state.remote_hosts.admit_terminal_open(host))
+        .transpose()
+        .map_err(|()| {
+            crate::embedded::AgentError::OpenRefused(
+                infraternal_plugin_api::admission::OpenRefusal::Unavailable,
+            )
+        })?;
+    #[cfg(not(feature = "remote"))]
+    let _terminal_admission = ();
     let person =
         uuid::Uuid::parse_str(user_id).map_err(|_| crate::embedded::AgentError::Rejected)?;
     #[cfg(feature = "ssh")]

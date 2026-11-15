@@ -76,6 +76,14 @@ nix = { workspace = true, features = ["time"] }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }
 
+# The root upgrade's real-host proof driver seals like the browser (#399).
+ring.workspace = true
+
+# Real-host proof of the root upgrade's host half (#399); never shipped.
+[[example]]
+name = "privilege-elevate-proof"
+required-features = ["remote"]
+
 # Opt-in probe driver; never linked into the product binary.
 [[example]]
 name = "runtime-responsiveness"
