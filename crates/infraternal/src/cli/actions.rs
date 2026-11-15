@@ -438,6 +438,7 @@ fn hosted_action(
     action
 }
 
+/// Describe the approved host-enrollment action and the result fields it returns.
 fn up_action() -> ActionDefinition {
     let data = JsonSchema::object(
         [
@@ -484,6 +485,18 @@ fn up_action() -> ActionDefinition {
         ],
         [],
     );
+    let mut inputs = vec![(
+        "server".to_owned(),
+        JsonSchema::string("HTTPS origin of the server."),
+    )];
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    inputs.push((
+        "host_firewall_allow".to_owned(),
+        JsonSchema::array(
+            JsonSchema::string("INTERFACE,SOURCE,tcp|udp,PORT; use * for any."),
+            "Administrator input rules saved for a host policy that drops by default. A joined machine only opens mesh input, so these take effect only if a server policy is added; `up` records the current SSH port automatically.",
+        ),
+    ));
     let action = ActionDefinition::new(
         ["up"],
         "Add this Linux machine to a server.",
@@ -492,14 +505,9 @@ fn up_action() -> ActionDefinition {
             "Approve this machine with a fresh passkey in the browser before the request expires.",
             "This command installs the Linux system service with one sudo prompt.",
             "After approval, it enrolls this machine over HTTPS and reports service status.",
+            "System installs open the mesh's input before networking and block nothing else.",
         ],
-        JsonSchema::object(
-            [(
-                "server".to_owned(),
-                JsonSchema::string("HTTPS origin of the server."),
-            )],
-            ["server".to_owned()],
-        ),
+        JsonSchema::object(inputs, ["server".to_owned()]),
         JsonSchema::command_result_with(data),
         ActionContract::new(
             ActionTarget::Global,
@@ -513,6 +521,11 @@ fn up_action() -> ActionDefinition {
     .with_example(
         "up https://infra.example.org",
         "Add this machine to the server.",
+    );
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    let action = action.with_example(
+        "up https://infra.example.org --host-firewall-allow wt0,10.69.69.0/24,tcp,22",
+        "Keep another SSH path after the host firewall is installed.",
     );
     #[cfg(not(all(feature = "remote", target_os = "linux")))]
     let action = action.not_available_yet();

@@ -3,6 +3,8 @@
 //! Unit-file text is not a command: prefixes, environment substitution and escapes
 //! belong to systemd. We ask its manager for executable identities, skip inert
 //! stock units, and refuse identified CLI images or unresolved references to them.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+use super::HOST_FIREWALL_SERVICE;
 use super::{SERVICE_NAME, refused};
 use std::{
     collections::BTreeSet,
@@ -514,6 +516,12 @@ pub(super) fn installed_services(
             continue;
         }
         if unit == SERVICE_NAME && recovery.owns(&root.join("etc/systemd/system").join(&unit)) {
+            continue;
+        }
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        if unit == HOST_FIREWALL_SERVICE
+            && recovery.owns(&root.join("etc/systemd/system").join(&unit))
+        {
             continue;
         }
         if unit == SERVICE_NAME {
