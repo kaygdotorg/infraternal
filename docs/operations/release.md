@@ -165,12 +165,32 @@ stage one, and never without the signature. Staging needs 192 MiB free
 Interrupted downloads are deleted and start over at the next check. Nothing is
 applied: switching to a staged release is S4.
 
+A `staged/` folder is never trusted as found. Before any use, at every check and
+once when the timer starts, it must be a real directory owned by the server's user
+with no group or other access, and its files must pass the same signed-release
+verification again. Anything else is removed. A staged release is kept only while
+the channel still announces it: when the pointer moves to anything else (a yanked
+build, another version, or nothing), the staged release is removed and the state
+says why. S4 applies only what `Updater::confirm_staged` returns. That call
+re-checks the staged release against the pointer and holds the folder lock until
+the switch is done.
+
+Only faults back off: the network, the disk or a failed verification. A
+refusal (an older or another channel's release) is recorded as `refused` and
+keeps the normal 15-minute pace, and so is "updates are off". An explicit stage
+(a D295 rollback or a channel switch) is recorded as `hold`. Periodic checks
+leave a held release alone until it is applied or cancelled.
+
 `<data>/updates/` is `0700` and owned by the server's user; `state.json` (0600)
 records the running version, channel, newest verified release, staged release,
-last and next check, last error and the failure count. It lives outside the
-database so that a D295 database restore does not erase it. Owners read it
-with the `release.update.status` action, and the `release.update` topic sends
-`{"type":"update","update":{…}}` whenever it changes.
+last and next check, last error, refusal, hold, the last removed release and
+why, and the failure count. It lives outside the database so that a D295
+database restore does not erase it. Owners read it with the
+`release.update.status` action, and the `release.update` topic sends
+`{"type":"update","update":{…}}` whenever it changes. The status also has
+`mode`, which is `auto` or `off`, and `reason`, which says plainly why updates
+are off on this host: not a Linux server, a development build, the server not
+running as root, the release plugin switched off, or no valid channel set.
 
 # Add-host payloads
 
