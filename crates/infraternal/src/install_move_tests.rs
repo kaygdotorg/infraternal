@@ -611,3 +611,177 @@ fn a_stray_partial_copy_is_removed_by_the_next_copy() {
         "a file that is not a staging folder stays"
     );
 }
+
+/// Files other parts of infraternal keep in the install base: the host
+/// firewall's policies and their pending writes, and the root agent layout.
+fn add_neighbours(folder: &Path) -> Vec<(PathBuf, Vec<u8>, u64)> {
+    fs::create_dir_all(folder.join("bin")).unwrap();
+    fs::create_dir_all(folder.join("agent")).unwrap();
+    let files = [
+        "host-firewall-server.json",
+        "host-firewall-agent.json",
+        ".host-firewall-server.json.77.0.pending",
+        "bin/infraternal",
+        "agent/identity",
+    ];
+    files
+        .iter()
+        .map(|name| {
+            let path = folder.join(name);
+            fs::write(&path, format!("owned by another part: {name}")).unwrap();
+            let inode = fs::metadata(&path).unwrap().ino();
+            (path, fs::read(folder.join(name)).unwrap(), inode)
+        })
+        .collect()
+}
+
+/// The neighbours are exactly where they were: same bytes, same inode.
+fn assert_untouched(neighbours: &[(PathBuf, Vec<u8>, u64)]) {
+    for (path, bytes, inode) in neighbours {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
+        assert_eq!(
+            fs::metadata(path).unwrap().ino(),
+            *inode,
+            "{}",
+            path.display()
+        );
+    }
+}
+
+/// A target that already holds infraternal's own files (the host firewall's
+/// policy, the root agent layout) is moved into, never refused, and those
+/// files are neither moved nor deleted; the folder keeps its mode (J755, #483).
+#[test]
+fn a_target_with_infraternals_own_files_is_moved_into_and_they_stay() {
+    for copy in [false, true] {
+        let setup = install();
+        let before = data_of(&setup.old);
+        fs::create_dir_all(&setup.new).unwrap();
+        fs::set_permissions(&setup.new, fs::Permissions::from_mode(0o711)).unwrap();
+        let neighbours = add_neighbours(&setup.new);
+        let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
+        assert_eq!(relocation.stage, Stage::Move, "{copy}");
+        FORCE_COPY.with(|force| force.set(copy));
+        let outcome = apply(&relocation, &Fake::running(), when());
+        FORCE_COPY.with(|force| force.set(false));
+        assert_eq!(outcome.unwrap().copied, copy);
+        assert_eq!(data_of(&setup.new), before, "{copy}");
+        assert_untouched(&neighbours);
+        assert_eq!(
+            mode(&setup.new),
+            0o711,
+            "{copy}: an existing install base keeps its mode"
+        );
+        assert!(!setup.new.join(".infraternal-incoming").exists(), "{copy}");
+        assert!(!setup.new.join(MARKER).exists(), "{copy}");
+        assert!(!setup.old.exists(), "{copy}");
+        assert_eq!(
+            fs::read_to_string(&setup.unit).unwrap(),
+            unit_text(&setup.new)
+        );
+        assert!(plan(&setup.new, &setup.new, &setup.unit).unwrap().is_none());
+    }
+}
+
+/// A refusal names only the files that are not infraternal's own, never the
+/// firewall policy, so following its advice cannot drop the host table.
+#[test]
+fn a_refusal_never_tells_the_operator_to_move_infraternals_own_files() {
+    let setup = install();
+    fs::create_dir_all(&setup.new).unwrap();
+    let neighbours = add_neighbours(&setup.new);
+    fs::write(setup.new.join("notes.txt"), b"someone's").unwrap();
+    let error = plan(&setup.old, &setup.new, &setup.unit)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("notes.txt"), "{error}");
+    for own in ["host-firewall", "bin", "agent", "pending"] {
+        assert!(!error.contains(own), "{own}: {error}");
+    }
+    assert_untouched(&neighbours);
+}
+
+/// An old folder holding a name infraternal keeps in the install base would
+/// collide with it there, so it is refused before anything changes.
+#[test]
+fn an_old_folder_with_a_reserved_name_is_refused_for_a_shared_target() {
+    let setup = install();
+    fs::create_dir_all(&setup.new).unwrap();
+    let neighbours = add_neighbours(&setup.new);
+    fs::write(setup.old.join("host-firewall-server.json"), b"old copy").unwrap();
+    let error = plan(&setup.old, &setup.new, &setup.unit)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("host-firewall-server.json"), "{error}");
+    assert_untouched(&neighbours);
+    assert!(setup.old.join("mesh/key").is_file());
+}
+
+/// Crash in the middle of moving entries into a shared target: the next run
+/// moves the rest and switches; nothing of the neighbours is touched.
+#[test]
+fn a_crash_mid_merge_is_finished_by_the_next_run() {
+    let setup = install();
+    let before = data_of(&setup.old);
+    fs::create_dir_all(&setup.new).unwrap();
+    let neighbours = add_neighbours(&setup.new);
+    write_marker(&setup.old, &setup.old).unwrap();
+    let incoming = setup.new.join(".infraternal-incoming");
+    fs::rename(&setup.old, &incoming).unwrap();
+    fs::rename(incoming.join("mesh"), setup.new.join("mesh")).unwrap();
+    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
+    assert_eq!(relocation.stage, Stage::Switch);
+    apply(&relocation, &Fake::running(), when()).unwrap();
+    assert_eq!(data_of(&setup.new), before);
+    assert_untouched(&neighbours);
+    assert!(!incoming.exists());
+    assert!(!setup.new.join(MARKER).exists());
+    assert_eq!(
+        fs::read_to_string(&setup.unit).unwrap(),
+        unit_text(&setup.new)
+    );
+}
+
+/// A failed switch into a shared target puts the old folder back whole and
+/// leaves the neighbours alone.
+#[test]
+fn a_failed_switch_into_a_shared_target_puts_the_old_install_back() {
+    if nix::unistd::Uid::effective().is_root() {
+        return; // root ignores the read-only folder this test relies on
+    }
+    for copy in [false, true] {
+        let setup = install();
+        let before = data_of(&setup.old);
+        fs::create_dir_all(&setup.new).unwrap();
+        let neighbours = add_neighbours(&setup.new);
+        let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
+        let units = setup.unit.parent().unwrap().to_owned();
+        fs::set_permissions(&units, fs::Permissions::from_mode(0o500)).unwrap();
+        FORCE_COPY.with(|force| force.set(copy));
+        let service = Fake::running();
+        let result = apply(&relocation, &service, when());
+        FORCE_COPY.with(|force| force.set(false));
+        fs::set_permissions(&units, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "{copy}");
+        assert_eq!(data_of(&setup.old), before, "{copy}");
+        assert!(!setup.old.join(MARKER).exists(), "{copy}");
+        assert_untouched(&neighbours);
+        let mut left: Vec<String> = fs::read_dir(&setup.new)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                ".host-firewall-server.json.77.0.pending",
+                "agent",
+                "bin",
+                "host-firewall-agent.json",
+                "host-firewall-server.json"
+            ],
+            "{copy}"
+        );
+        assert!(service.running.get(), "{copy}");
+    }
+}
