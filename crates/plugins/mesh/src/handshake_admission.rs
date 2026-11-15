@@ -966,6 +966,76 @@ mod tests {
         );
     }
 
+    /// A link-local IPv6 source on interface `scope`: `fe80::<host>`.
+    fn link_local(host: u16, scope: u32) -> SocketAddr {
+        let ip = std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, host);
+        SocketAddr::V6(std::net::SocketAddrV6::new(ip, 51820, 0, scope))
+    }
+
+    /// J735 P3 (#483): link-local sources are told apart by their interface (scope id). Every
+    /// link-local address shares the prefix `fe80::/64`, so keying them like global ones put
+    /// every link-local peer on every link into one source budget. A link-local source is its
+    /// full address on its link, and one link shares one network budget, the way an IPv4 /24
+    /// does; the known-endpoint match needs the scope too.
+    #[test]
+    fn link_local_sources_are_told_apart_by_interface() {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let peer = [0x66; 32];
+        admission.set_peers([PublicKey(
+            *X25519PublicKey::from(&StaticSecret::from(peer)).as_bytes(),
+        )]);
+        let flood = initiation([0x55; 32]);
+        let granted = initiation(peer);
+        let now = Instant::now();
+        let check = |packet: &[u8], from: SocketAddr| {
+            admission.check(&Packet::copy_from(packet), from, now)
+        };
+        for _ in 0..REFUSED_SOURCE_BUDGET {
+            assert_eq!(check(&flood, link_local(1, 2)), Err(Refusal::UnknownKey));
+        }
+        assert_eq!(
+            check(&flood, link_local(1, 2)),
+            Err(Refusal::SourceBudget),
+            "one link-local source still has one budget"
+        );
+        assert_eq!(
+            check(&granted, link_local(1, 3)),
+            Ok(()),
+            "the same address on another interface is another source"
+        );
+        assert_eq!(
+            check(&granted, link_local(7, 2)),
+            Ok(()),
+            "another host on the same link is another source"
+        );
+        // One host on a link can use any link-local address: the link's network budget bounds it.
+        for host in 0..u16::try_from(REFUSED_NETWORK_BUDGET - REFUSED_SOURCE_BUDGET).expect("fits")
+        {
+            assert_eq!(
+                check(&flood, link_local(100 + host, 2)),
+                Err(Refusal::UnknownKey)
+            );
+        }
+        assert_eq!(
+            check(&granted, link_local(9, 2)),
+            Err(Refusal::NetworkBudget),
+            "a link shares one network budget"
+        );
+        assert_eq!(
+            check(&granted, link_local(9, 3)),
+            Ok(()),
+            "another link has its own network budget"
+        );
+
+        let mut admission = admission;
+        admission.set_configured_endpoints([link_local(9, 2)]);
+        assert!(admission.is_known_endpoint(link_local(9, 2)));
+        assert!(
+            !admission.is_known_endpoint(link_local(9, 3)),
+            "a known link-local endpoint is known only on its own interface"
+        );
+    }
+
     /// Endpoints `GotaTun` confirmed count as known exactly like configured ones, and each list
     /// is replaced, not merged, by its next update.
     #[test]
@@ -1400,6 +1470,189 @@ mod flood_fairness {
         assert_eq!(
             unknown.peer_admitted, 0,
             "the documented limit changed: update the module doc if an unknown endpoint now gets in"
+        );
+    }
+
+    /// Peer `k`'s known endpoint in the spoofing tests: each peer in its own IPv4 /24.
+    fn spoofed_peer_endpoint(k: u16) -> SocketAddr {
+        let [high, low] = k.to_be_bytes();
+        SocketAddr::from(([198, high, low, 9], 51820))
+    }
+
+    /// The shape of one flood that spoofs other peers' known endpoints (J735, #483).
+    #[derive(Clone, Copy)]
+    struct Spoofing {
+        /// How many granted peers the node has besides peer 0, each with one configured
+        /// endpoint. The flood spoofs every one of them.
+        others: u16,
+        /// Spoofed initiations per second sent from each of those endpoints.
+        per_endpoint: u32,
+        /// Whether the flood replays one granted peer's initiation (which the guard admits:
+        /// it does not check timestamps) instead of sending a stranger's key.
+        replay: bool,
+        /// Whether a 20,000/s flood from 65,536 IPv4 /24s spends the unknown-source share too.
+        wide: bool,
+        /// Peer 0's own endpoint; the flood never spoofs it.
+        peer: SocketAddr,
+    }
+
+    /// Simulate `spoofing` for [`FLOOD_SECONDS`] while peer 0, at its configured endpoint,
+    /// retries every 5 s at 500 ms into the second. Every spoofed initiation of a second is sent
+    /// at its start, the worst case for peer 0.
+    fn simulate_spoofing(spoofing: Spoofing) -> Run {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let key = |seed: u8| {
+            PublicKey(*X25519PublicKey::from(&StaticSecret::from([seed; 32])).as_bytes())
+        };
+        admission.set_peers(
+            std::iter::once(key(0x66)).chain((1..=spoofing.others).map(|k| {
+                // Up to 255 distinct granted keys; more peers reuse them, which changes nothing here.
+                key(u8::try_from(k % 255).expect("fits").wrapping_add(0x80))
+            })),
+        );
+        admission.set_configured_endpoints(
+            std::iter::once(spoofing.peer).chain((1..=spoofing.others).map(spoofed_peer_endpoint)),
+        );
+        let payload = if spoofing.replay {
+            initiation([0x81; 32])
+        } else {
+            initiation([0x55; 32])
+        };
+        let granted = initiation(PEER);
+        let start = Instant::now();
+        let mut run = Run {
+            peer_admitted: 0,
+            peer_attempts: 0,
+            key_agreements: 0,
+            max_sources: 0,
+            max_capacity: 0,
+        };
+        for second in 0..FLOOD_SECONDS {
+            let base = start + Duration::from_secs(u64::from(second));
+            if spoofing.wide {
+                for i in 0..20_000_u32 {
+                    let [_, _, high, low] = i.to_be_bytes();
+                    let from = SocketAddr::from(([10, high, low, 1], 40000));
+                    let _ = admission.check(&Packet::copy_from(&payload), from, base);
+                }
+            }
+            for k in 1..=spoofing.others {
+                for _ in 0..spoofing.per_endpoint {
+                    let from = spoofed_peer_endpoint(k);
+                    let _ = admission.check(&Packet::copy_from(&payload), from, base);
+                }
+            }
+            if second % 5 == 0 {
+                run.peer_attempts += 1;
+                let at = base + Duration::from_millis(500);
+                if admission.check(&Packet::copy_from(&granted), spoofing.peer, at) == Ok(()) {
+                    run.peer_admitted += 1;
+                }
+            }
+            let budget = admission.budget.lock().expect("budget lock");
+            run.max_sources = run.max_sources.max(budget.sources.len());
+            run.max_capacity = run.max_capacity.max(budget.sources.capacity());
+        }
+        run.key_agreements = admission.key_agreements.load(Ordering::Relaxed);
+        run
+    }
+
+    /// J735 P2 (#483): a flood that spoofs OTHER peers' known endpoints must not starve a peer
+    /// whose own endpoint it does not spoof. On J717's guard the reserve was one shared pool, so
+    /// five spoofed endpoints with a stranger's key (plus a wide flood), five replaying a granted
+    /// initiation, or ten with a stranger's key took peer 0 to 0 of 18; four replaying ones (800
+    /// a second, under the node budget) were the control at 18 of 18.
+    #[test]
+    fn spoofing_other_known_endpoints_cannot_starve_an_unspoofed_one() {
+        let peer = "203.0.113.9:51000".parse().expect("test peer address");
+        for (name, others, replay, wide) in [
+            (
+                "wide flood + 5 spoofed known endpoints, stranger's key",
+                5,
+                false,
+                true,
+            ),
+            (
+                "5 spoofed known endpoints replaying a granted initiation",
+                5,
+                true,
+                false,
+            ),
+            (
+                "10 spoofed known endpoints, stranger's key",
+                10,
+                false,
+                false,
+            ),
+            (
+                "control, 4 spoofed known endpoints replaying",
+                4,
+                true,
+                false,
+            ),
+        ] {
+            let run = simulate_spoofing(Spoofing {
+                others,
+                per_endpoint: 1_000,
+                replay,
+                wide,
+                peer,
+            });
+            report(&format!("J735 {name}, 1,000/s each"), &run);
+            assert_eq!(
+                run.peer_admitted, run.peer_attempts,
+                "{name}: spoofing other peers' endpoints starved an unspoofed known endpoint"
+            );
+        }
+    }
+
+    /// A peer behind the same address as a spoofed endpoint (two peers behind one NAT, on
+    /// different ports) keeps its own known endpoint: spoofing its neighbour's port must not
+    /// spend the address's budget for it.
+    #[test]
+    fn spoofing_a_neighbour_behind_the_same_address_does_not_starve_a_peer() {
+        for replay in [false, true] {
+            let run = simulate_spoofing(Spoofing {
+                others: 1,
+                per_endpoint: 1_000,
+                replay,
+                wide: true,
+                // Peer 1's endpoint is 198.0.1.9:51820; peer 0 sits on the same address.
+                peer: SocketAddr::from(([198, 0, 1, 9], 51821)),
+            });
+            report(
+                &format!("J748 neighbour on the same address spoofed (replay {replay})"),
+                &run,
+            );
+            assert_eq!(
+                run.peer_admitted, run.peer_attempts,
+                "spoofing a neighbour's port starved a peer at its own known endpoint (replay {replay})"
+            );
+        }
+    }
+
+    /// The documented limit of the reserve: each known endpoint may spend only its share, so
+    /// a flood must spoof at least 500 other known endpoints at once (one per key agreement left
+    /// in the reserved half of [`NODE_BUDGET`]), plus spend
+    /// the unknown share, before an unspoofed known endpoint is refused. This one spoofs 600 of
+    /// 601 peers' endpoints with a wide flood, and peer 0 is refused; if this changes, update
+    /// the module doc.
+    #[test]
+    fn spoofing_more_endpoints_than_the_reserve_is_the_documented_limit() {
+        let run = simulate_spoofing(Spoofing {
+            others: 600,
+            per_endpoint: 2,
+            replay: true,
+            wide: true,
+            peer: "203.0.113.9:51000".parse().expect("test peer address"),
+        });
+        report(
+            "J748 wide flood + 600 spoofed known endpoints replaying",
+            &run,
+        );
+        assert_eq!(
+            run.peer_admitted, 0,
+            "the documented limit changed: update the module doc if peer 0 now gets in"
         );
     }
 
