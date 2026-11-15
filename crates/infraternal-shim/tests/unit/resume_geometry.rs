@@ -51,7 +51,16 @@ struct Session {
     cursors: Inputs,
 }
 impl Session {
+    /// A session that a viewer has already sized to `cols` x `rows`, as one is
+    /// by the time anyone can reopen it: its first viewer reported that size.
     fn new(cols: u16, rows: u16) -> Self {
+        let mut session = Self::spawned(cols, rows);
+        let mut first = peer();
+        session.resize(&mut first, cols, rows);
+        session
+    }
+    /// A session just spawned at `cols` x `rows`, before any viewer's size.
+    fn spawned(cols: u16, rows: u16) -> Self {
         let uid = Uid::effective().as_raw();
         let mut config = Config::new([0; 16], uid);
         config.cols = cols;
@@ -313,4 +322,23 @@ fn reopening_wider_while_another_writer_owns_the_size_still_repaints() {
     let mut repainted = Terminal::new(45, 24).unwrap();
     repainted.process(bytes);
     assert_same_visible_screen(&repainted, &session.terminal);
+}
+
+#[test]
+fn opening_a_new_session_keeps_the_raw_replay() {
+    // A session is spawned at the 80x24 placeholder and prints its first
+    // prompt before its opener reports a size. Nobody saw that width, so the
+    // opener keeps the cheap raw replay (and its shell redraws on SIGWINCH);
+    // a repaint here would be approximate on every new terminal.
+    let mut session = Session::spawned(80, 24);
+    session.output(PROMPT);
+    let mut tab = peer();
+    let mut viewer = Terminal::new(44, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    session.resize(&mut tab, 44, 24);
+    assert!(
+        tab.request.is_none(),
+        "the opener's first size needs no repaint"
+    );
 }
