@@ -990,3 +990,187 @@ async fn key_spam_cannot_mint_repaint_credit() {
         "keys alone must not mint a fifth repaint's credit"
     );
 }
+
+/// Flood frames that fill the relay's 16-slot writer FIFO in [`stage_the_last_bulk_frame`].
+const QUEUED_FRAMES: usize = 16;
+/// Each queued frame's length; with [`STAGED_FRAME`] they spend the bulk window exactly.
+const QUEUED_FRAME: usize = 61_680;
+/// The last frame, which finds the FIFO full and waits in `pending_bulk`.
+const STAGED_FRAME: usize = BULK_CREDIT as usize - QUEUED_FRAMES * QUEUED_FRAME;
+/// Bytes of the queued frames, which are all the client can actually receive.
+const QUEUED_BYTES: u64 = (QUEUED_FRAMES * QUEUED_FRAME) as u64;
+
+/// Spend the whole bulk window while the client reads nothing: the writer FIFO
+/// fills, and the last frame is credit-charged but waits for the writer.
+///
+/// Nothing observable marks the relay staging that frame, so this waits a moment.
+async fn stage_the_last_bulk_frame(fixture: &mut RelayFixture) {
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(INITIAL_CREDIT))
+        .unwrap();
+    for frame in 0..QUEUED_FRAMES {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Output((frame * QUEUED_FRAME) as u64, vec![b'f'; QUEUED_FRAME]),
+        )
+        .await
+        .unwrap();
+    }
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Output(QUEUED_BYTES, vec![b's'; STAGED_FRAME]),
+    )
+    .await
+    .unwrap();
+    // sleep: let the relay stage the last frame behind its full writer FIFO.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// Type one key while the last bulk frame is staged, confirm its PTY write,
+/// and wait for the relay's `SnapshotRequest`. The key discards the staged frame.
+async fn key_over_a_staged_frame(fixture: &mut RelayFixture) {
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Input(0, vec![b'k']))
+        .unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SequencedInput(0, vec![b'k'])
+    );
+    sessions::send(&mut fixture.peer, &Shim::InputAck(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SnapshotRequest
+    );
+}
+
+/// Read every message the relay has queued, until it stays quiet for a moment,
+/// and return the raw Output bytes among them (checking they are contiguous).
+async fn drain_raw_output(fixture: &mut RelayFixture, mut next: u64) -> u64 {
+    let start = next;
+    while let Ok(Some(message)) =
+        tokio::time::timeout(Duration::from_millis(400), fixture.messages.recv()).await
+    {
+        if let Message::Shim(stream, Shim::Output(seq, bytes)) = message {
+            assert_eq!(stream, fixture.stream);
+            assert_eq!(seq, next, "raw output reaches the client without a gap");
+            next += bytes.len() as u64;
+        }
+    }
+    next - start
+}
+
+/// A key that discards a staged, already-charged Output must not shrink the
+/// client's window: the client never receives those bytes, so it can never
+/// return their credit (#477, J794).
+///
+/// The client here returns exactly what it received (the queued frames and the
+/// repaint). Its whole bulk window is then free again, so the relay must be
+/// able to send a full bulk window of new output.
+#[tokio::test]
+async fn a_key_that_discards_a_staged_frame_keeps_the_whole_bulk_window() {
+    let mut fixture = start_relay(2).await;
+    stage_the_last_bulk_frame(&mut fixture).await;
+    key_over_a_staged_frame(&mut fixture).await;
+    let head = u64::from(BULK_CREDIT);
+    sessions::send(&mut fixture.peer, &Shim::Snapshot(head, b"echo:k".to_vec()))
+        .await
+        .unwrap();
+    let received = drain_raw_output(&mut fixture, 0).await;
+    assert_eq!(
+        received, QUEUED_BYTES,
+        "the staged frame never reaches the client"
+    );
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(
+            u32::try_from(received).unwrap() + u32::try_from(b"echo:k".len()).unwrap(),
+        ))
+        .unwrap();
+
+    // Offer more new output than one window; count what the relay forwards
+    // before it stalls for credit.
+    let chunk = 16 * 1024;
+    let frames = (BULK_CREDIT as usize + 2 * chunk) / chunk;
+    let peer = &mut fixture.peer;
+    let flood = async {
+        for frame in 0..frames {
+            let seq = head + (frame * chunk) as u64;
+            // The relay may detach once starved; later writes may then fail.
+            if sessions::send(peer, &Shim::Output(seq, vec![b'n'; chunk]))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    let messages = &mut fixture.messages;
+    let count = async {
+        let mut forwarded = 0_u64;
+        while let Ok(Some(message)) =
+            tokio::time::timeout(Duration::from_millis(400), messages.recv()).await
+        {
+            if let Message::Shim(_, Shim::Output(_, bytes)) = message {
+                forwarded += bytes.len() as u64;
+            }
+        }
+        forwarded
+    };
+    let ((), forwarded) = tokio::join!(flood, count);
+    stop_relay(&mut fixture).await;
+
+    assert_eq!(
+        forwarded,
+        u64::from(BULK_CREDIT),
+        "a discarded staged frame must not leak its credit from the bulk window"
+    );
+}
+
+/// A key repaint that never commits must not leave the relay's cursor past
+/// bytes the client never received, or the recovery replay starts after a gap
+/// (#477, J794).
+///
+/// Here an older shim answers the `SnapshotRequest` with "snapshot unavailable",
+/// which parks the link. The 250 ms starvation timer firing before the repaint
+/// commits abandons it the same way.
+#[tokio::test]
+async fn an_abandoned_key_repaint_never_skips_a_discarded_staged_frame() {
+    let mut fixture = start_relay(2).await;
+    stage_the_last_bulk_frame(&mut fixture).await;
+    key_over_a_staged_frame(&mut fixture).await;
+    sessions::send(&mut fixture.peer, &Shim::Error(1, "no repaint".into()))
+        .await
+        .unwrap();
+    // The relay's notice waits behind the full writer FIFO: read it all first.
+    let received = drain_raw_output(&mut fixture, 0).await;
+    assert_eq!(
+        received, QUEUED_BYTES,
+        "the staged frame never reaches the client"
+    );
+    wait_for_link_close(&mut fixture).await;
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Credit(u32::try_from(received).unwrap()))
+        .unwrap();
+    accept_relinked_peer(&mut fixture).await;
+    let resumed = read_shim(&mut fixture.reader, &mut fixture.peer).await;
+    stop_relay(&mut fixture).await;
+
+    assert_eq!(
+        resumed,
+        Shim::ReadFrom(received),
+        "recovery must resume at the client's last received byte, not after the discarded frame"
+    );
+}
