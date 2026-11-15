@@ -413,6 +413,12 @@ export class TerminalClient {
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
   private readonly prediction: PredictiveEcho | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
+  /**
+   * Whether the grid has been fitted to its host at least once. Until then `lastSize` is only the constructor's
+   * default, and reporting it would resize the shared session to 80x24 and back on every attach. The host then
+   * treats the reattach as a size change and repaints approximately instead of replaying (#521).
+   */
+  private sizeFitted = false;
   /** Stops the keyboard watcher that keeps the screen's height right (keyboard-viewport.ts). */
   private stopKeyboardWatch: (() => void) | undefined;
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
@@ -1272,7 +1278,8 @@ export class TerminalClient {
     });
     this.creditAvailable = INITIAL_CREDIT;
     this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
-    this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
+    // An unfitted default is not this viewer's size; the first fit reports the real one (#521).
+    if (this.sizeFitted) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     this.setStatus("Catching up…");
     this.hasAttached = true;
     this.wakeTerminal();
@@ -2025,9 +2032,16 @@ export class TerminalClient {
       const metrics = this.cellMetrics();
       const cols = clamp(Math.floor(width / metrics.width), 20, 0xffff);
       const rows = clamp(Math.floor(height / metrics.height), 6, 0xffff);
+      const first = !this.sizeFitted;
+      this.sizeFitted = true;
       if (this.terminal.cols !== cols || this.terminal.rows !== rows) {
         this.wakeTerminal();
         this.terminal.resize(cols, rows);
+      } else if (first && this.attached) {
+        // The grid already had the fitted size, so no resize event follows: report it here, once.
+        const rect = this.config.host.getBoundingClientRect();
+        this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
+        this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
       }
     });
   }
