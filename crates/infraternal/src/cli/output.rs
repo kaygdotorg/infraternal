@@ -889,8 +889,16 @@ mod tests {
         }
     }
 
+    /// Build representative data for each registered command's output schema.
+    ///
+    /// Keep the empty fallback so commands with required fields need an explicit
+    /// fixture that reflects the data they actually return.
     fn sample_data(command: &str) -> serde_json::Value {
         match command {
+            "server mesh status" => json!({
+                "running": true,
+                "public_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }),
             "status" => json!({
                 "role": "node",
                 "components": [{"name": "server", "state": "Stopped"}]

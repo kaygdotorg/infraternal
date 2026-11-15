@@ -36,7 +36,7 @@ const fn action(
         fresh_passkey: false,
     }
 }
-/// Lists the mesh actions that a remote caller may inspect or request.
+/// Mesh node actions shared by the API and command-line adapters.
 pub const ACTIONS: &[ActionDef] = &[
     action(
         "mesh.status",
@@ -48,7 +48,7 @@ pub const ACTIONS: &[ActionDef] = &[
             "Read whether the mesh is on, its addresses, and which access rules apply.",
             "Read the UDP port this machine is actually listening on.",
             "Read how this machine reaches its server: over the mesh, or over the enrolled port.",
-            "Add --json for the same facts as data.",
+            "With --json, data.public_key is the active public key only; the field is absent without a Mesh identity.",
         ],
     ),
     action(
@@ -172,6 +172,7 @@ struct Owner {
     path: Option<std::path::PathBuf>,
 }
 impl Owner {
+    /// Return the process-owned node, restoring it lazily when this action first needs it.
     fn node(&mut self) -> Result<&mut Node, PluginError> {
         if self.node.is_none() {
             let path = self.path.as_deref().ok_or(PluginError::Rejected)?;
@@ -181,7 +182,7 @@ impl Owner {
             // only Linux reaches this lazy path, through `new`.
             #[cfg(target_os = "macos")]
             let node = Node::restore(path, None);
-            self.node = Some(node.map_err(|_| PluginError::Rejected)?);
+            self.node = Some(node.map_err(|error| node_action_error(&error))?);
         }
         self.node.as_mut().ok_or(PluginError::Rejected)
     }
@@ -201,7 +202,8 @@ type Counters =
 #[cfg(target_os = "macos")]
 type Counters =
     std::collections::BTreeMap<crate::policy::model::PublicKey, crate::macos_node::Counters>;
-type ConfigurationObserver = Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
+/// Publishes each accepted mesh configuration and the engine enforcing its access rules.
+type ConfigurationObserver = Arc<dyn Fn(Option<Config>, bool) -> std::io::Result<()> + Send + Sync>;
 /// How this node contains its proxy processes, as `(kind, detail)` for `mesh.status` [#281, D336].
 pub type ProxyContainmentProbe = Arc<dyn Fn() -> (&'static str, String) + Send + Sync>;
 /// Synchronous return path used by the proxy controller after Traefik applies a route snapshot.
@@ -275,6 +277,42 @@ fn peer_page(
         json!({"peers":peers,"version":config.map(|config|config.version),"next_cursor":if more {last.zip(config).map(|(node,config)|Cursor {version:config.version,node})} else {None}}),
     )
 }
+
+/// Map D346 nft refusals to their own reason while keeping unrelated local errors generic.
+///
+/// Every nft failure from the firewall starts with `nft ` (a missing tool, or `nft at <path>`
+/// for a found one that failed), so the prefix identifies them wherever nft was found.
+fn node_action_error(error: &std::io::Error) -> PluginError {
+    let message = error.to_string();
+    #[cfg(target_os = "linux")]
+    {
+        if message.starts_with("nft ") {
+            return PluginError::KernelFirewallUnavailable;
+        }
+    }
+    let _ = message;
+    PluginError::Rejected
+}
+
+/// Keep the D346 path in component-operation failures while using the caller's fallback otherwise.
+fn node_action_message(error: &std::io::Error, fallback: &'static str) -> &'static str {
+    let error = node_action_error(error);
+    if error == PluginError::KernelFirewallUnavailable {
+        error.control_error_message()
+    } else {
+        fallback
+    }
+}
+
+/// Keep a path-specific plugin refusal when adapting it to the component-operation result.
+fn plugin_action_message(error: PluginError, fallback: &'static str) -> &'static str {
+    if error == PluginError::KernelFirewallUnavailable {
+        error.control_error_message()
+    } else {
+        fallback
+    }
+}
+
 impl MeshNodePlugin {
     /// Bind one process-owned component to its validated public-state directory.
     #[must_use]
@@ -484,17 +522,17 @@ fn rotation_response(
         Request::RotationPrepare(operation) => json!({
             "public_key": node
                 .prepare_rotation(&operation.operation_id, operation.sequence)
-                .map_err(|_| PluginError::Rejected)?
+                .map_err(|error| node_action_error(&error))?
         }),
         Request::RotationCommit(operation) => json!({
             "public_key": node
                 .commit_rotation(&operation.operation_id, operation.sequence)
-                .map_err(|_| PluginError::Rejected)?
+                .map_err(|error| node_action_error(&error))?
                 .public_key
         }),
         Request::RotationFinish(operation) => {
             node.finish_rotation(&operation.operation_id, operation.sequence)
-                .map_err(|_| PluginError::Rejected)?;
+                .map_err(|error| node_action_error(&error))?;
             json!({})
         }
         _ => return Err(PluginError::Rejected),
@@ -624,7 +662,7 @@ impl AgentPlugin for MeshNodePlugin {
                         candidates: candidates && walks_candidates(node),
                     };
                     let candidates = requested.candidates;
-                    let identity = node.ensure().map_err(|_| PluginError::Rejected)?;
+                    let identity = node.ensure().map_err(|error| node_action_error(&error))?;
                     let lan = match (&identity, candidates) {
                         (Some(identity), true) => {
                             // The node's own mesh addresses are never LAN candidates.
@@ -642,7 +680,7 @@ impl AgentPlugin for MeshNodePlugin {
                 }
                 Request::Up => {
                     json!(identity_response(
-                        Some(node.up().map_err(|_| PluginError::Rejected)?),
+                        Some(node.up().map_err(|error| node_action_error(&error))?),
                         IdentityProbe::default(),
                         Vec::new(),
                     ))
@@ -657,7 +695,7 @@ impl AgentPlugin for MeshNodePlugin {
                     value
                 }
                 Request::Down => {
-                    node.down().map_err(|_| PluginError::Rejected)?;
+                    node.down().map_err(|error| node_action_error(&error))?;
                     json!({"state":"Off","version":null})
                 }
                 Request::Status => {
@@ -682,7 +720,13 @@ impl AgentPlugin for MeshNodePlugin {
                         "server_link": self.server_link,
                         "engine": engine_health(node),
                         "engine_selection": engine_selection(node),
+                        "enforcement": access_enforcement(node),
+                        "kernel_guard": kernel_guard_status(node),
                     });
+                    // Public identity is useful for continuity checks; private key material never leaves the node.
+                    if let Some(public_key) = node.interface_key() {
+                        status["public_key"] = json!(public_key.0);
+                    }
                     if let Some(probe) = &self.proxy_containment {
                         let (kind, detail) = probe();
                         status["proxy_containment"] = json!({"kind": kind, "detail": detail});
@@ -690,7 +734,9 @@ impl AgentPlugin for MeshNodePlugin {
                     status
                 }
                 Request::Configure(chunk) => {
-                    let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
+                    let applied = node
+                        .chunk(*chunk)
+                        .map_err(|error| node_action_error(&error))?;
                     json!({"applied":applied,"version":node.config().map(|c|c.version)})
                 }
                 Request::Peers(page) => {
@@ -723,7 +769,12 @@ impl AgentPlugin for MeshNodePlugin {
                 action,
                 "mesh.identity" | "mesh.up" | "mesh.down" | "mesh.status" | "mesh.configure"
             )
-            .then(|| node.config().cloned());
+            .then(|| {
+                (
+                    node.config().cloned(),
+                    access_enforcement(node) == "userspace",
+                )
+            });
             (result, observed_config)
         };
         if matches!(
@@ -732,10 +783,10 @@ impl AgentPlugin for MeshNodePlugin {
         ) {
             self.changed.store(true, Ordering::Release);
         }
-        if let Some(config) = observed_config
+        if let Some((config, userspace_filter)) = observed_config
             && let Some(observer) = &self.configuration_observer
         {
-            observer(config).map_err(|_| PluginError::Rejected)?;
+            observer(config, userspace_filter).map_err(|error| node_action_error(&error))?;
         }
         serde_json::to_vec(&result).map_err(|_| PluginError::Rejected)
     }
@@ -781,9 +832,36 @@ const fn walks_candidates(_node: &Node) -> bool {
     true
 }
 
+/// Name the packet path that actually enforces this node's access rules.
+#[cfg(target_os = "linux")]
+fn access_enforcement(node: &Node) -> &'static str {
+    match node.engine_selection().engine {
+        crate::gotatun_node::EngineKind::GotaTun => "userspace",
+        crate::gotatun_node::EngineKind::Kernel => "kernel",
+    }
+}
+
+/// macOS always enforces access rules at the userspace `GotaTun` TUN boundary.
+#[cfg(target_os = "macos")]
+fn access_enforcement(_node: &Node) -> &'static str {
+    crate::macos_node::ENFORCEMENT
+}
+
+/// Serialize the optional Linux-only kernel guard, or report no separate guard on macOS.
+#[cfg(target_os = "linux")]
+fn kernel_guard_status(node: &Node) -> serde_json::Value {
+    json!(node.kernel_guard_status())
+}
+
+/// macOS applies the filter in userspace and has no separate kernel guard state.
+#[cfg(target_os = "macos")]
+fn kernel_guard_status(_node: &Node) -> serde_json::Value {
+    serde_json::Value::Null
+}
+
 /// Both node types read the counters of the engine they run.
 fn read_counters(node: &mut Node) -> Result<Counters, PluginError> {
-    node.counters().map_err(|_| PluginError::Rejected)
+    node.counters().map_err(|error| node_action_error(&error))
 }
 
 impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
@@ -818,18 +896,27 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
             // Component adapters invoke this boundary off their dispatch reactor,
             // just as the synchronous action registry does. Down returns only
             // after kernel state and the owned idle socket have retired.
-            let config = {
+            let (config, userspace_filter) = {
                 let mut owner = self.owner.lock().map_err(|_| "Mesh owner unavailable.")?;
-                let node = owner.node().map_err(|_| "Mesh state unavailable.")?;
+                let node = owner
+                    .node()
+                    .map_err(|error| plugin_action_message(error, "Mesh state unavailable."))?;
                 if enabled {
-                    node.up().map_err(|_| "Mesh start failed.")?;
+                    node.up()
+                        .map_err(|error| node_action_message(&error, "Mesh start failed."))?;
                 } else {
-                    node.down().map_err(|_| "Mesh stop failed.")?;
+                    node.down()
+                        .map_err(|error| node_action_message(&error, "Mesh stop failed."))?;
                 }
-                node.config().cloned()
+                (
+                    node.config().cloned(),
+                    access_enforcement(node) == "userspace",
+                )
             };
             if let Some(observer) = &self.configuration_observer {
-                observer(config).map_err(|_| "Mesh publication routes could not be updated.")?;
+                observer(config, userspace_filter).map_err(|error| {
+                    node_action_message(&error, "Mesh publication routes could not be updated.")
+                })?;
             }
             self.changed.store(true, Ordering::Release);
             Ok(())
@@ -842,7 +929,33 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
-    /// An unenrolled rootless mesh component can be inspected without probing a privileged firewall.
+
+    /// `mesh.status` exposes only the live public identity needed to verify persistence.
+    #[test]
+    fn status_reports_its_public_mesh_key_without_private_material() {
+        use crate::{dataplane::Identity, policy::model::PublicKey};
+
+        let mut plugin = MeshNodePlugin::from_node(Node::with_identity_for_action_test(Identity {
+            public_key: PublicKey([7; 32]),
+            port: 44000,
+            compact_access: false,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: false,
+        }));
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
+                .expect("status JSON");
+
+        assert_eq!(status["public_key"], json!(vec![7; 32]));
+        assert!(status.get("private_key").is_none());
+    }
+
+    /// An inactive rootless mesh can be read without kernel setup or persisted Mesh state.
+    ///
+    /// Opening the store creates only its private writer lock, which lets cleanup serialize with
+    /// migration; no key, public snapshot, or engine record is written.
     #[test]
     fn rootless_owner_can_read_an_inactive_mesh_without_kernel_setup() {
         assert!(
@@ -860,7 +973,15 @@ mod tests {
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("rootless status"))
                 .expect("status JSON");
         assert_eq!(status["state"], "Off");
-        assert_eq!(std::fs::read_dir(&directory.0).expect("state").count(), 0);
+        let entries = std::fs::read_dir(&directory.0)
+            .expect("state")
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("state entries");
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from(".mesh-store-write.lock")]
+        );
     }
 
     /// Inactive rootless inspection must not conceal an unsafe retained ownership record.
@@ -874,6 +995,25 @@ mod tests {
         let mut plugin = MeshNodePlugin::new(&directory.0);
         assert!(plugin.call("mesh.peers", b"{}").is_err());
         assert_eq!(std::fs::read(&unrelated).expect("preserved file"), b"keep");
+    }
+
+    /// Required nft failures keep their own reason through mesh action mapping, whether nft is
+    /// missing everywhere or was found (here in the Nix store) and then failed.
+    #[test]
+    fn required_nft_failure_is_not_reduced_to_generic_rejection() {
+        for message in [
+            "nft was not found as a root-owned executable in /usr/sbin, /usr/bin",
+            "nft at /nix/store/aaaa-nftables-1.1.7/bin/nft could not run: denied",
+        ] {
+            let error = std::io::Error::new(std::io::ErrorKind::NotFound, message);
+            assert_eq!(
+                node_action_error(&error),
+                PluginError::KernelFirewallUnavailable,
+                "{message}"
+            );
+        }
+        let other = std::io::Error::other("iptables-nft at /usr/sbin/iptables-nft could not run");
+        assert_eq!(node_action_error(&other), PluginError::Rejected);
     }
 
     /// #382 P2 (J418): after a server rollback (D295) to a release without authority epochs, a
@@ -1233,10 +1373,32 @@ mod tests {
         assert!(parse_action("mesh.up", br#"{"enabled":false}"#).is_err());
         assert!(matches!(parse_action("mesh.up", b"{}"), Ok(Request::Up)));
     }
-    /// Preserves the stopping state after failed cleanup and explicit-off intent after reconnect.
+
+    /// `mesh.status` exposes the protections the optional Linux guard has not installed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mesh_status_reports_optional_kernel_guard_state() {
+        let mut plugin = MeshNodePlugin::default();
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
+                .expect("status JSON");
+
+        assert_eq!(status["enforcement"], "userspace");
+        assert_eq!(status["kernel_guard"]["state"], "pending");
+        assert_eq!(
+            status["kernel_guard"]["missing"],
+            serde_json::json!([
+                "mesh-address anti-spoofing on non-mesh interfaces",
+                "underlay delivery to mesh addresses",
+                "forwarding drops",
+                "public TCP/80 and TCP/443 gate"
+            ])
+        );
+    }
+    /// Preserves explicit-off intent after failed kernel-firewall cleanup and reconnect.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off() {
+    fn kernel_firewall_cleanup_failure_reports_stopping_and_reconnect_keeps_explicit_off() {
         use crate::{
             dataplane::DefaultPolicy,
             policy::model::{Addresses, NodeId},
@@ -1245,7 +1407,9 @@ mod tests {
             io::Write as _,
             process::{Command, Stdio},
         };
-        let mut plugin = MeshNodePlugin::default();
+        let mut plugin = MeshNodePlugin::from_node(
+            Node::default().with_engine(crate::gotatun_node::EngineKind::Kernel),
+        );
         plugin.call("mesh.up", b"{}").expect("start");
         let chunk = Chunk {
             access_updates: Vec::new(),

@@ -18,7 +18,7 @@
 
 use super::{
     CounterMap, GotaDevice, RuntimeState, WireGuardPeer, WorkerCommand, X25519PublicKey,
-    installed_keys, installed_peers, peer_for_policy, peers_for_config,
+    installed_keys, peer_for_policy, peers_for_config,
 };
 use crate::{
     candidate_walks::{HANDSHAKE_WAIT, Observed, active_peer_key, kept_address, walking_peers},
@@ -32,6 +32,14 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
+
+/// The peers the Mac engine installs for `config`: every configured peer, in the order
+/// `peers_for_config` converts them. The D384 packet filter enforces each peer's grants at the
+/// utun (#265), so the Mac no longer leaves out peers it could not narrow; the walk bookkeeping
+/// must see exactly the peers the engine has.
+fn installed_peers(config: &Config) -> impl Iterator<Item = &PeerPolicy> {
+    config.peers.values()
+}
 
 /// Run the Mac worker: apply queued commands one at a time, step candidate walks when one is
 /// due, and reap finished handshake tasks. It stops cleanly when told to or when its queue

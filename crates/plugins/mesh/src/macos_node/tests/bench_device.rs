@@ -41,8 +41,27 @@ fn mac_bench_device() {
         .enable_all()
         .build()
         .expect("runtime");
+    // The worker's packet filter, compiled from a one-peer snapshot that grants the bench
+    // peer every port both ways, so the filter's per-packet cost is part of the measurement
+    // and nothing is dropped. An empty filter would deny all traffic.
+    let mut snapshot = super::config();
+    snapshot.addresses.ipv4 = var("J461_ADDR").parse().expect("tunnel IPv4");
+    let peer_key = bench_key("J461_PEER_PUBLIC_HEX");
+    for policy in snapshot.peers.values_mut() {
+        policy.peer.key = crate::policy::model::PublicKey(peer_key);
+        policy.peer.addresses.ipv4 = var("J461_PEER_ADDR").parse().expect("peer IPv4");
+        policy.peer.endpoint = Some(endpoint);
+    }
+    let filter = std::sync::Arc::new(
+        crate::packet_filter::PacketFilter::new(
+            &snapshot,
+            infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+        )
+        .expect("compile filter"),
+    );
     runtime.block_on(async {
-        let utun = MacUtun::from_open(OpenUtun::open().expect("utun")).expect("register utun");
+        let utun =
+            MacUtun::from_open(OpenUtun::open().expect("utun"), filter).expect("register utun");
         let private_key = StaticSecret::from(bench_key("J461_PRIVATE_HEX"));
         // The same listener `Node` binds: the exact port, behind the handshake admission
         // guard, which admits the one bench peer as an applied snapshot would.
@@ -51,7 +70,7 @@ fn mac_bench_device() {
             allow_fallback: false,
         };
         let (factory, _) = bind_udp(request, private_key.clone()).await.expect("bind");
-        let mut peer = WireGuardPeer::new(WgPublicKey::from(bench_key("J461_PEER_PUBLIC_HEX")))
+        let mut peer = WireGuardPeer::new(WgPublicKey::from(peer_key))
             .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
         peer.endpoint = Some(endpoint);
         peer.keepalive = Some(25);

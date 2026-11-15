@@ -156,14 +156,16 @@ def same_image(pid, binary):
         return hashlib.file_digest(running, "sha256").digest() == hashlib.file_digest(installed, "sha256").digest()
 
 
-def restart(data, binary):
+def restart(data, binary, rollback=False):
+    """Request a restart, asking the current server to hand Mesh state back on rollback."""
     payload = os.fsencode(binary)
     if len(payload) > 4096:
         raise ValueError("replacement path exceeds control bound")
     with socket.socket(socket.AF_UNIX) as peer:
         peer.settimeout(5)
         peer.connect(str(data / "restart/control.sock"))
-        peer.sendall(struct.pack("!H", len(payload)) + payload)
+        length = len(payload) | (0x8000 if rollback else 0)
+        peer.sendall(struct.pack("!H", length) + payload)
         reply = bytearray()
         while b"\n" not in reply and len(reply) < 128:
             part = peer.recv(128 - len(reply))
@@ -214,24 +216,14 @@ def swap_link(path, target):
 
 
 def backup(data, destination):
+    """Write D295's SQLite-only snapshot while the live server stays available."""
     destination.mkdir(mode=0o700)
     # The SQLite backup API includes committed WAL pages while serving continues.
-    # Other persisted state is retained unchanged by binary handoff; save encrypted
-    # state/public metadata too, excluding live sockets and mutable database sidecars.
+    # D295 snapshots only this database; the separate release handoff preserves Mesh state.
     database = data / "infraternal.sqlite"
     with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
         with closing(sqlite3.connect(destination / "infraternal.sqlite")) as target:
             source.backup(target)
-    for path in data.iterdir():
-        if path.name.startswith("infraternal.sqlite") or path.name == "restart":
-            continue
-        if path.is_dir() and not path.is_symlink():
-            shutil.copytree(path, destination / path.name,
-                            ignore=lambda root, names: [n for n in names if
-                                Path(root, n).is_symlink() or not
-                                (Path(root, n).is_file() or Path(root, n).is_dir())])
-        elif path.is_file() and not path.is_symlink():
-            shutil.copy2(path, destination / path.name)
 
 
 def apply(config):
@@ -335,7 +327,7 @@ def apply(config):
             # recovery: its signed image already exists in the retained backup.
             if requested:
                 before_rollback = endpoint(data)
-                restart(data, previous)
+                restart(data, previous, rollback=True)
                 wait_for_success(config, before_rollback, previous)
             # Never overwrite a running SQLite database. Restoring a database is
             # a separate cold recovery operation; automatic rollback keeps its data.

@@ -211,3 +211,35 @@ labels. A deliberate rewind across it restores the pre-migration database
 backup; do not remove its bookkeeping row and run the older binary against the
 rewritten names. The deploy script's automatic health-check rollback already
 restores the database copy it took before migration.
+
+## The server's Mesh identity and its host
+
+The server's own Mesh node keeps its private key in the data directory, under
+`mesh/` (#489). Each start also copies it to `/run/infraternal`, so a previous
+build started during a rollback finds the same identity (D295).
+
+The identity is tied to its host (D392). Next to the key, `mesh/.mesh-host-binding`
+holds a hash of `/etc/machine-id`, never the ID itself. If the data directory is
+copied or restored onto another machine, the server refuses to start and logs
+two recovery commands:
+
+- The server moved for good and the old machine's server is stopped: remove
+  `mesh/.mesh-host-binding` to keep the identity. The next start binds it to the
+  new machine.
+- The directory is a copy: remove `mesh/` to give the copy its own identity.
+  Its peers then learn a new key.
+
+A host without a persistent machine ID records no binding. That covers a
+missing or empty `/etc/machine-id`, the value `uninitialized`, a malformed ID,
+and a transient ID that systemd mounts over the file at every boot on a
+read-only root. Such a host starts with a warning, so a reboot that changes the
+ID never refuses start. It does refuse an identity that was already bound to a
+machine, because it cannot tell the original from a copy. The fix is to make
+the machine ID persistent (`systemd-machine-id-setup`, with `--commit` for a
+transient ID), or, when no other machine runs that identity, to remove
+`mesh/.mesh-host-binding`.
+
+**Limit:** the check compares machine IDs. A virtual machine cloned together
+with its `/etc/machine-id` looks like the same host and is not detected. Give
+every clone a new machine ID (empty `/etc/machine-id` in the template, or run
+`systemd-machine-id-setup` on the clone) before its server starts.

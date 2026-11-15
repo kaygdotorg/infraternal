@@ -2,6 +2,7 @@
 
 use crate::dataplane::Config;
 use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
+use crate::packet_filter::{Direction, PacketFilter};
 use bytes::Buf;
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
@@ -13,6 +14,7 @@ use gotatun::{
     },
     x25519::{PublicKey as X25519PublicKey, StaticSecret},
 };
+use infraternal_mesh::proxy_ports::MeshProxyIngress;
 use ipnetwork::IpNetwork;
 use nix::{
     fcntl::{FcntlArg, FdFlag, OFlag, fcntl},
@@ -238,13 +240,14 @@ struct MacUtun {
     fd: Arc<AsyncFd<OwnedFd>>,
     name: Arc<str>,
     mtu: watch::Sender<u16>,
+    filter: Arc<PacketFilter>,
 }
 
 impl MacUtun {
     /// Register one previously opened utun descriptor with this daemon's tokio runtime.
     /// # Errors
     /// Returns readiness registration failures.
-    fn from_open(open: OpenUtun) -> io::Result<Self> {
+    fn from_open(open: OpenUtun, filter: Arc<PacketFilter>) -> io::Result<Self> {
         // Tokio's safe constructor is deprecated but remains the only safe API;
         // the replacement requires unsafe code, which this crate forbids.
         #[allow(deprecated)]
@@ -254,6 +257,7 @@ impl MacUtun {
             fd: Arc::new(fd),
             name: Arc::from(open.name),
             mtu,
+            filter,
         })
     }
 
@@ -267,6 +271,7 @@ impl MacUtun {
             fd: self.fd.clone(),
             mtu: self.mtu.subscribe().into(),
             frame: Vec::with_capacity(usize::from(crate::mesh_mtu::IPV6_MINIMUM_MTU) + 4),
+            filter: Arc::clone(&self.filter),
         }
     }
 
@@ -275,6 +280,7 @@ impl MacUtun {
         MacUtunRx {
             fd: self.fd.clone(),
             mtu: self.mtu.subscribe().into(),
+            filter: Arc::clone(&self.filter),
         }
     }
 
@@ -289,11 +295,15 @@ struct MacUtunTx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
     frame: Vec<u8>,
+    filter: Arc<PacketFilter>,
 }
 
 impl IpSend for MacUtunTx {
     async fn send(&mut self, packet: Packet<Ip>) -> io::Result<()> {
-        let packet = packet.into_bytes();
+        let mut packet = packet.into_bytes();
+        if !self.filter.check(packet.buf_mut(), Direction::MeshToHost) {
+            return Ok(());
+        }
         let family = utun_family(packet.as_ref())?;
         if packet.len() > usize::from(self.mtu.get()) {
             return Err(io::ErrorKind::InvalidData.into());
@@ -317,6 +327,7 @@ impl IpSend for MacUtunTx {
 struct MacUtunRx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
+    filter: Arc<PacketFilter>,
 }
 
 impl IpRecv for MacUtunRx {
@@ -324,8 +335,8 @@ impl IpRecv for MacUtunRx {
         &'a mut self,
         pool: &mut PacketBufPool,
     ) -> io::Result<impl Iterator<Item = Packet<Ip>> + Send + 'a> {
-        let mut packet = pool.get();
         loop {
+            let mut packet = pool.get();
             let mut ready = self.fd.readable().await?;
             let result =
                 ready.try_io(|fd| read(fd.get_ref(), &mut packet[..]).map_err(io::Error::from));
@@ -337,6 +348,9 @@ impl IpRecv for MacUtunRx {
                     packet.truncate(length);
                     parse_utun_payload(packet.as_ref(), self.mtu.get())?;
                     packet.buf_mut().advance(4);
+                    if !self.filter.check(packet.buf_mut(), Direction::HostToMesh) {
+                        continue;
+                    }
                     let packet = packet
                         .try_into_ip()
                         .map_err(|_| io::ErrorKind::InvalidData)?;
@@ -576,34 +590,13 @@ impl Default for SavedState {
 }
 
 /// How this node enforces D164 access rules, as `mesh status` reports it.
-///
-/// The Mac node has no packet filter yet (#265 slice 3), so it cannot narrow
-/// what a peer may reach. Until it can, it fails closed: see [`installed_peers`].
-pub const ENFORCEMENT: &str = "unavailable";
+pub const ENFORCEMENT: &str = "userspace";
 
-/// The peers this node may connect to while it cannot enforce access rules.
-///
-/// The coordinator also distributes a peer when only the opposite direction is
-/// granted (`inbound` is `None`) or when the grant is narrowed to ports. A
-/// `WireGuard` peer would reach every port on this Mac in both cases, so only a
-/// peer that may open connections to every port here (`inbound` is `All`) is
-/// installed. The coordinator is always installed: every node may reach it
-/// (D164). Its own inbound policy is not checked, so the server host can reach
-/// every port on this Mac, which a Linux node would deny without an arrow.
-/// The owner accepted that gap until the slice-3 filter (#265, J162 F1), and
-/// `mesh status` says so. The cost is that an arrow from this Mac to a node
-/// without the reverse arrow does not work until enforcement arrives.
-fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
-    config.peers.iter().filter_map(|(node, policy)| {
-        (config.server == Some(*node)
-            || matches!(policy.inbound, crate::policy::rules::TrafficPolicy::All))
-        .then_some(policy)
-    })
-}
-
-/// Return only the installed peers' host addresses that belong on the utun interface.
+/// Return every configured peer address for the utun; the packet filter applies its grants.
 fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
-    installed_peers(config)
+    config
+        .peers
+        .values()
         .flat_map(|policy| {
             [
                 IpAddr::V4(policy.peer.addresses.ipv4),
@@ -635,7 +628,7 @@ impl PathBudgets {
         let mut route_mtus = BTreeMap::new();
         let mut peer_mtus = Vec::new();
         if let Some(config) = config {
-            for policy in installed_peers(config) {
+            for policy in config.peers.values() {
                 let mtu = probe.mesh_mtu(policy.peer.endpoint);
                 route_mtus.insert(IpAddr::V4(policy.peer.addresses.ipv4), mtu);
                 route_mtus.insert(IpAddr::V6(policy.peer.addresses.ipv6), mtu);
@@ -917,7 +910,7 @@ fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
 /// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let mut peers = Vec::new();
-    for policy in installed_peers(config) {
+    for policy in config.peers.values() {
         peers.extend(peer_for_policy(policy)?);
     }
     Ok(peers)
@@ -1221,6 +1214,10 @@ impl PendingWorker {
         routes: BTreeSet<IpAddr>,
         budgets: PathBudgets,
     ) -> io::Result<Self> {
+        let filter = Arc::new(match config.as_ref() {
+            Some(config) => PacketFilter::new(config, MeshProxyIngress::default())?,
+            None => PacketFilter::empty(),
+        });
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (gate_tx, gate_rx) = sync::sync_channel(1);
         let (ready_tx, ready_rx) = sync::sync_channel(1);
@@ -1239,7 +1236,7 @@ impl PendingWorker {
                 // The listener's guard gets its own copy; the device takes `private_key` below.
                 let guard_key = private_key.clone();
                 let initialized = runtime.block_on(async move {
-                    let utun = MacUtun::from_open(open)?;
+                    let utun = MacUtun::from_open(open, filter)?;
                     let (factory, port) = bind_udp(requested_port, guard_key).await?;
                     let info = RuntimeInfo {
                         interface: utun.name().to_owned(),
@@ -1617,6 +1614,7 @@ impl RuntimeState {
         config: Config,
         budgets: PathBudgets,
     ) -> io::Result<RuntimeInfo> {
+        let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         if self
             .config
             .as_ref()
@@ -1635,6 +1633,11 @@ impl RuntimeState {
                     .ok_or(io::ErrorKind::NotConnected)?
                     .to_owned();
                 self.refresh_unchanged_mesh_mtus(budgets).await?;
+                self.utun
+                    .as_ref()
+                    .ok_or(io::ErrorKind::NotConnected)?
+                    .filter
+                    .publish_policy(policy);
                 self.config = Some(config);
                 return Ok(RuntimeInfo {
                     interface,
@@ -1705,6 +1708,7 @@ impl RuntimeState {
         budgets: PathBudgets,
         rollback_on_failure: bool,
     ) -> io::Result<RuntimeInfo> {
+        let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let interface = utun.name().to_owned();
         #[cfg(feature = "mesh-dns")]
@@ -1832,6 +1836,7 @@ impl RuntimeState {
         // The receive guard follows only snapshots the live device fully accepted. A failure
         // above has restored (or, for an authority replacement, stopped) the old peers.
         self.admission.write().await.set_peers(admitted);
+        utun.filter.publish_policy(policy);
         let readdressed = walks::readdressed(old_config.as_ref(), &config);
         self.config = Some(config);
         for key in readdressed {
@@ -3352,9 +3357,9 @@ mod tests {
         }
     }
 
-    /// D164 deny-by-default must hold while the Mac has no packet filter (#265 P1-2).
+    /// GotaTun installs granted peers even when the grant is one-way or port-narrowed.
     #[test]
-    fn peers_without_full_inbound_access_are_not_installed() {
+    fn peers_with_one_way_and_port_narrowed_access_are_installed() {
         let mut config = config();
         config.peers = BTreeMap::from([
             // The coordinator is reachable by every node, whatever its inbound grant.
@@ -3375,13 +3380,15 @@ mod tests {
             ),
         ]);
 
-        assert_eq!(installed_keys(&config), BTreeSet::from([[11; 32], [4; 32]]));
+        assert_eq!(
+            installed_keys(&config),
+            BTreeSet::from([[11; 32], [4; 32], [5; 32], [6; 32]])
+        );
         let routes = route_addresses(&config);
-        for absent in [5, 6] {
-            assert!(!routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, absent))));
+        for installed in [4, 5, 6, 11] {
+            assert!(routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, installed))));
         }
-        assert!(routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4))));
-        assert_eq!(super::ENFORCEMENT, "unavailable");
+        assert_eq!(super::ENFORCEMENT, "userspace");
     }
 
     /// Revoking a peer's arrow removes it from the installed peer set.
@@ -3412,8 +3419,14 @@ mod tests {
         let applied = applied.expect("complete revision");
 
         assert!(applied.peers.contains_key(&NodeId(4)));
-        assert!(installed_keys(&applied).is_empty());
-        assert!(route_addresses(&applied).is_empty());
+        assert_eq!(installed_keys(&applied), BTreeSet::from([[2; 32]]));
+        assert_eq!(
+            route_addresses(&applied),
+            BTreeSet::from([
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4)),
+                IpAddr::V6("fd01::4".parse().expect("peer IPv6")),
+            ])
+        );
     }
 
     /// A restored lower-revision snapshot replaces peers from the later state.
@@ -4985,4 +4998,5 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(paths.len(), directories.len());
     }
+
 }
