@@ -8,6 +8,7 @@ import { expect, test, type Page } from "playwright/test";
 import { decodeMuxedFrame, encodeMuxedFrame } from "../../../packages/protocol/src/codec";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** The two hosts the routed server lists; ids are canonical UUIDs because the page refuses any other id. */
 const HOSTS = [
   { id: "11111111-2222-3333-4444-555555555555", name: "worker-one" },
   { id: "22222222-3333-4444-5555-666666666666", name: "worker-two" },
