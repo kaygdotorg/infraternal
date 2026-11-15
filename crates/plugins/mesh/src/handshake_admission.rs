@@ -1397,6 +1397,36 @@ mod tests {
         );
     }
 
+    /// J754 P3 (#483): an endpoint that is both configured and confirmed (the usual case in a
+    /// quiet mesh) takes one share of the reserve, not two. With 250 peers so listed the share is
+    /// the reserve over 250, two key agreements, not one.
+    #[test]
+    fn an_endpoint_in_both_lists_takes_one_share() {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let peer = [0x66; 32];
+        admission.set_peers([PublicKey(
+            *X25519PublicKey::from(&StaticSecret::from(peer)).as_bytes(),
+        )]);
+        let known: Vec<_> = (0..250).map(|index| own_network(20, index)).collect();
+        admission.set_configured_endpoints(known.iter().copied());
+        admission.set_confirmed_endpoints(known.iter().copied());
+        let now = Instant::now();
+        spend_unknown_share(&admission, now);
+        let granted = initiation(peer);
+        let share = super::reserve_share(250);
+        assert_eq!(share, 2);
+        for _ in 0..share {
+            assert_eq!(
+                admission.check(&Packet::copy_from(&granted), known[0], now),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            admission.check(&Packet::copy_from(&granted), known[0], now),
+            Err(Refusal::NodeBudget)
+        );
+    }
+
     /// CPU per received initiation under a flood (J572, J648, #483); run by hand, it asserts nothing.
     ///
     /// `cargo test -p infraternal-plugin-mesh --features agent --release --lib
