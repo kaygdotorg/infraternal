@@ -2752,7 +2752,12 @@ mod candidate_tests {
     async fn an_ungranted_peer_never_learns_a_private_guess() {
         let (store, [_, _, _, c]) = mesh().await;
         let (d, _) = store
-            .attach("d", PublicKey([5; 32]), Some(at("100.100.7.9:10254")), false)
+            .attach(
+                "d",
+                PublicKey([5; 32]),
+                Some(at("100.100.7.9:10254")),
+                false,
+            )
             .await
             .unwrap();
         sqlx::query("UPDATE mesh_dataplane SET default_policy='deny' WHERE singleton=1")
@@ -2765,8 +2770,16 @@ mod candidate_tests {
             .unwrap();
         let view = store.config(c).await.unwrap();
         let policy = &view.peers[&d];
-        assert_eq!(policy.outbound, TrafficPolicy::None, "fixture: the pair is denied");
-        assert_eq!(policy.inbound, TrafficPolicy::None, "fixture: the pair is denied");
+        assert_eq!(
+            policy.outbound,
+            TrafficPolicy::None,
+            "fixture: the pair is denied"
+        );
+        assert_eq!(
+            policy.inbound,
+            TrafficPolicy::None,
+            "fixture: the pair is denied"
+        );
         let private: Vec<SocketAddr> = tries(&view, d)
             .into_iter()
             .filter(|address| crate::candidates::is_lan(address.ip()))
@@ -2784,11 +2797,19 @@ mod candidate_tests {
     async fn a_granted_peer_still_learns_a_private_guess() {
         let (store, [_, _, _, c]) = mesh().await;
         let (d, _) = store
-            .attach("d", PublicKey([5; 32]), Some(at("192.168.1.9:10254")), false)
+            .attach(
+                "d",
+                PublicKey([5; 32]),
+                Some(at("192.168.1.9:10254")),
+                false,
+            )
             .await
             .unwrap();
         let view = store.config(c).await.unwrap();
-        assert!(view.peers[&d].has_network_access(), "fixture: allow by default");
+        assert!(
+            view.peers[&d].has_network_access(),
+            "fixture: allow by default"
+        );
         assert_eq!(tries(&view, d), [at("192.168.1.9:10254")]);
     }
 

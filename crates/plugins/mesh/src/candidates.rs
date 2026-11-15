@@ -538,7 +538,12 @@ mod tests {
         ] {
             assert!(is_private_scope(private.parse().unwrap()), "{private}");
         }
-        for public in ["203.0.113.4", "100.128.0.1", "2001:db8::1", "::ffff:203.0.113.4"] {
+        for public in [
+            "203.0.113.4",
+            "100.128.0.1",
+            "2001:db8::1",
+            "::ffff:203.0.113.4",
+        ] {
             assert!(!is_private_scope(public.parse().unwrap()), "{public}");
         }
     }

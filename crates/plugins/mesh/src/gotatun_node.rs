@@ -738,8 +738,8 @@ fn kept_address(
     relay: Option<SocketAddr>,
 ) -> Option<SocketAddr> {
     let at = engine_at?;
-    let listed = !peer.candidates.is_empty()
-        && (peer.endpoint == Some(at) || peer.candidates.contains(&at));
+    let listed =
+        !peer.candidates.is_empty() && (peer.endpoint == Some(at) || peer.candidates.contains(&at));
     (relay == Some(at) || listed).then_some(at)
 }
 
@@ -1852,6 +1852,7 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
 /// Checks the two rules that keep a peer where the engine already sends (J699 P3-1, P3-3).
 #[cfg(test)]
 mod keep_tests {
+    #![allow(clippy::expect_used)]
     use super::{kept_address, on_relay};
     use crate::{
         dataplane::Peer,
@@ -1859,8 +1860,9 @@ mod keep_tests {
     };
     use std::net::SocketAddr;
 
+    /// Parse a fixture socket address.
     fn at(address: &str) -> SocketAddr {
-        address.parse().unwrap()
+        address.parse().expect("fixture address")
     }
 
     /// A walking peer whose list is `first` then `rest`.
@@ -1870,8 +1872,8 @@ mod keep_tests {
             previous_key: None,
             previous_active: false,
             addresses: Addresses {
-                ipv4: "10.254.0.1".parse().unwrap(),
-                ipv6: "fd01::1".parse().unwrap(),
+                ipv4: "10.254.0.1".parse().expect("peer IPv4"),
+                ipv6: "fd01::1".parse().expect("peer IPv6"),
             },
             endpoint: Some(at(first)),
             candidates: rest.iter().map(|address| at(address)).collect(),
