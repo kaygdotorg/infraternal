@@ -358,6 +358,8 @@ pub struct Updater {
     required_space: u64,
     /// The largest image accepted. Tests lower it to cut a download off midway.
     max_image: u64,
+    /// The check period before backoff (15 minutes; see [`Updater::with_period`]).
+    period: Duration,
 }
 
 /// How a check ended, for the caller and the state file.
@@ -416,7 +418,17 @@ impl Updater {
             settings,
             required_space: MAX_IMAGE + RESERVE,
             max_image: MAX_IMAGE,
+            period: PERIOD,
         }
+    }
+
+    /// Check every `period` instead of every 15 minutes (the backoff still doubles it).
+    /// Only the server's `staging-trust` hook uses this, so a root staging proof does
+    /// not wait a quarter of an hour per step.
+    #[must_use]
+    pub fn with_period(mut self, period: Duration) -> Self {
+        self.period = period;
+        self
     }
 
     /// Change the free-space requirement and the image bound (tests only use this to
@@ -811,7 +823,7 @@ impl Updater {
                         status_of(&self.directory, &self.current).failures.max(1)
                     }
                 };
-                wait = delay(failures, random());
+                wait = delay_from(self.period, failures, random());
             }
         })
     }
@@ -833,9 +845,19 @@ impl Updater {
 /// `random` so many servers never check in step.
 #[must_use]
 pub fn delay(failures: u32, random: u64) -> Duration {
-    const BASE: u64 = 15 * 60;
+    delay_from(PERIOD, failures, random)
+}
+
+/// The normal check period.
+const PERIOD: Duration = Duration::from_mins(15);
+
+/// [`delay`] with another base period (see [`Updater::with_period`]).
+fn delay_from(period: Duration, failures: u32, random: u64) -> Duration {
     const CAP: u64 = 6 * 60 * 60;
-    let base = BASE.saturating_mul(1u64 << failures.min(10)).min(CAP);
+    let base = period
+        .as_secs()
+        .saturating_mul(1u64 << failures.min(10))
+        .min(CAP);
     // random % 401 picks a point in -20 %..=+20 % in steps of 0.1 %.
     let spread = random % 401;
     Duration::from_millis(base * (800 + spread))

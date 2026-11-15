@@ -55,7 +55,11 @@ async fn fetch(
     let url = url::Url::parse(address).map_err(|_| DownloadError::Network)?;
     let name = url.host_str().ok_or(DownloadError::Network)?;
     let port = url.port_or_known_default().ok_or(DownloadError::Network)?;
-    let plaintext_fixture = cfg!(test) && url.scheme() == "http" && name == "127.0.0.1";
+    // Plain HTTP only to loopback, and only in tests and `staging-trust` builds (a root
+    // staging proof serves its signed releases from a loopback channel). Signatures
+    // are checked the same way either way.
+    let plaintext_fixture =
+        cfg!(any(test, feature = "staging-trust")) && url.scheme() == "http" && name == "127.0.0.1";
     if (!plaintext_fixture && url.scheme() != "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -68,8 +72,7 @@ async fn fetch(
         .await
         .map_err(|_| DownloadError::Network)?
         .map_err(|_| DownloadError::Network)?;
-    #[cfg(test)]
-    if url.scheme() == "http" && name == "127.0.0.1" {
+    if plaintext_fixture {
         return receive(socket, &url, destination, max, progress).await;
     }
     if url.scheme() != "https" || url.username() != "" || url.password().is_some() {

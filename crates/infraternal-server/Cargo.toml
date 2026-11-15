@@ -67,7 +67,8 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 futures-util.workspace = true
-nix.workspace = true
+# The update quiet window reads the coarse monotonic clock (#211 S4).
+nix = { workspace = true, features = ["time"] }
 infraternal-protocol.workspace = true
 infraternal-plugin-mesh = { version = "0.1.0", path = "../plugins/mesh", optional = true, default-features = false, features = ["server"] }
 url.workspace = true

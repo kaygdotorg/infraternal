@@ -2134,6 +2134,8 @@ where
         } if stream_id != 0 && stream_id % 2 == 1 => {
             #[cfg(test)]
             addhost_timeline("attach_received");
+            // An attach in progress keeps the update quiet window open (D251).
+            crate::update_activity::note();
             if attachments.contains_key(&stream_id) || attachments.len() >= MAX_ATTACHMENTS {
                 return Err(());
             }
@@ -2421,6 +2423,8 @@ where
             Ok(())
         }
         Frame::Input { in_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
+            // Typing keeps the update quiet window open (D251); one relaxed store.
+            crate::update_activity::note();
             let attachment = attachments.get_mut(&stream_id).ok_or(())?;
             let end = in_seq
                 .checked_add(u64::try_from(bytes.len()).map_err(|_| ())?)
