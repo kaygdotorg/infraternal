@@ -1697,7 +1697,8 @@ export class TerminalClient {
     }
     this.creditAvailable -= bytes.byteLength;
     this.receivedOutSeq = sequence;
-    this.staleWatch?.reset();
+    // A repaint with no output past the replay fence is not the program redrawing (D309, #521).
+    this.staleWatch?.repainted(sequence);
 
     // A snapshot replaces the parser's prior mode state before later live bytes are scanned.
     this.synchronizedOutput.reset();
