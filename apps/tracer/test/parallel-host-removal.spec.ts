@@ -24,7 +24,7 @@ interface Fixture {
 }
 
 /** Routes the removal endpoints and a two-host list, then opens the product. */
-async function open(page: Page, options: { held?: boolean } = {}): Promise<Fixture> {
+async function open(page: Page, options: { held?: boolean; theme: string }): Promise<Fixture> {
   await page.request.post("/__mock/reset");
   const calls: string[] = [];
   let open = true;
@@ -80,7 +80,7 @@ async function open(page: Page, options: { held?: boolean } = {}): Promise<Fixtu
     server.onMessage((message) => socket.send(message));
   });
   const metadata = page.waitForResponse((response) => response.url().endsWith("/remote/hosts/actions"));
-  await page.goto("/?mock=1&proto=product&fresh=1&bg=none");
+  await page.goto(`/?mock=1&proto=product&fresh=1&bg=none&theme=${options.theme}`);
   await (await metadata).finished();
   await expect.poll(() => Boolean(push)).toBe(true);
   return { calls, release, expire: () => { open = false; } };
@@ -94,13 +94,13 @@ async function remove(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: "Remove", exact: true }).click();
 }
 
-for (const width of [1440, 393]) {
-  test.describe(`parallel removal at ${width}`, () => {
+for (const [width, theme] of [[1440, "ink"], [1440, "paper"], [393, "ink"], [393, "paper"]] as const) {
+  test.describe(`parallel removal at ${width} ${theme}`, () => {
     test.use({ viewport: { width, height: width < 500 ? 852 : 900 }, deviceScaleFactor: width < 500 ? 3 : 2, hasTouch: width < 500, isMobile: width < 500 });
 
     /** The owner's report: a second host's removal must start while the first is still waiting on its answer. */
     test("two hosts are removed at the same time and each says so once", async ({ page }) => {
-      const fixture = await open(page, { held: true });
+      const fixture = await open(page, { held: true, theme });
       await remove(page, HOSTS[0].name);
       await expect.poll(() => fixture.calls).toContain(`finish:${HOSTS[0].id}`);
       await remove(page, HOSTS[1].name);
@@ -108,18 +108,28 @@ for (const width of [1440, 393]) {
       await expect(page.locator(".ui-toast").filter({ hasText: "still running" })).toHaveCount(0);
       fixture.release();
       for (const host of HOSTS) await expect(page.locator(".ui-toast").filter({ hasText: `${host.name} was removed.` })).toHaveCount(1);
-      await page.screenshot({ animations: "disabled", path: tracerEvidencePath("parallel-removal", `${width}-two-done.png`) });
+      await page.screenshot({ animations: "disabled", path: tracerEvidencePath("parallel-removal", `${width}-${theme}-two-done.png`) });
     });
 
     /** The same host is never reviewed twice while its removal is running, and the person is told why. */
     test("the same host cannot be removed twice at once", async ({ page }) => {
-      const fixture = await open(page, { held: true });
+      const fixture = await open(page, { held: true, theme });
       await remove(page, HOSTS[0].name);
       await expect.poll(() => fixture.calls).toContain(`finish:${HOSTS[0].id}`);
       await remove(page, HOSTS[0].name);
       await expect(page.locator(".ui-toast").filter({ hasText: `${HOSTS[0].name} is already being removed.` })).toBeVisible();
       expect(fixture.calls.filter((call) => call === `start:${HOSTS[0].id}`)).toHaveLength(1);
       fixture.release();
+    });
+
+    /** When the server's own limit of eight is reached it answers 429, and the person is told to wait, not to sign in again. */
+    test("a full server asks the person to wait", async ({ page }) => {
+      await open(page, { theme });
+      await page.unroute("**/remote/hosts/remove/start");
+      await page.route("**/remote/hosts/remove/start", (route) => route.fulfill({ status: 429 }));
+      await remove(page, HOSTS[0].name);
+      await expect(page.locator(".ui-toast").filter({ hasText: "Too many host removals are running at once. Wait a moment, then try again." })).toBeVisible();
+      await page.screenshot({ animations: "disabled", path: tracerEvidencePath("parallel-removal", `${width}-${theme}-server-full.png`) });
     });
 
     /** One closed admin window, two removals, one passkey prompt; both finish after it. */
@@ -129,7 +139,7 @@ for (const width of [1440, 393]) {
       const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
       const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
       await cdp.send("WebAuthn.addCredential", { authenticatorId, credential: { credentialId: Buffer.from("j746-platform-credential").toString("base64"), isResidentCredential: true, rpId: "localhost", privateKey: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"), userHandle: "AQID", signCount: 0 } });
-      const fixture = await open(page);
+      const fixture = await open(page, { theme });
       fixture.expire();
       await remove(page, HOSTS[0].name);
       await remove(page, HOSTS[1].name);
@@ -137,7 +147,7 @@ for (const width of [1440, 393]) {
       await expect(page.getByRole("button", { name: "Confirm with passkey", exact: true })).toBeVisible();
       // Give a wrongly separate second prompt time to appear before counting.
       await expect.poll(() => fixture.calls.filter((call) => call === "reauth:start").length).toBeGreaterThan(0);
-      await page.screenshot({ animations: "disabled", path: tracerEvidencePath("parallel-removal", `${width}-one-prompt.png`) });
+      await page.screenshot({ animations: "disabled", path: tracerEvidencePath("parallel-removal", `${width}-${theme}-one-prompt.png`) });
       await expect(page.getByRole("button", { name: "Confirm with passkey", exact: true })).toHaveCount(1);
       await page.getByRole("button", { name: "Confirm with passkey", exact: true }).click();
       for (const host of HOSTS) await expect(page.locator(".ui-toast").filter({ hasText: `${host.name} was removed.` })).toHaveCount(1);
