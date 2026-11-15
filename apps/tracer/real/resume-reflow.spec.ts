@@ -138,6 +138,8 @@ test("a live resize without a reconnect keeps streaming and adds no repaint", as
   const { server, context, page, connections } = await wrappedSession(browser, 393);
   try {
     const live = connections.at(-1)!;
+    // A new session is spawned at a placeholder size its opener never saw: opening it needs no repaint either.
+    expect(live.snapshots).toBe(0);
     const before = live.snapshots;
     const count = connections.length;
     await page.setViewportSize({ width: 1440, height: 852 });
