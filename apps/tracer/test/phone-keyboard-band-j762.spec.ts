@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * No dark band around the phone keyboard (#510, J762). A state from the iPhone Simulator, modelled here by
+ * No dark band around the phone keyboard (#510, J762). Two states from the iPhone Simulator, each modelled here by
  * shrinking `visualViewport` the way iOS does (the layout viewport keeps its size; only the visual one gets shorter):
  *
- * 1. When a terminal window ends while the keyboard is up (a shell that exits), its keyboard watcher stops with it, so
+ * 1. While the keyboard is up, the screen is fitted to the visible area, so the strip behind Safari's own accessory bar
+ *    belongs to the page behind the screen: `html`. It used to be a fixed dark `#101113`, a black strip on a light theme.
+ *    It now follows the theme background.
+ * 2. When a terminal window ends while the keyboard is up (a shell that exits), its keyboard watcher stops with it, so
  *    the keyboard-sized height it had put on the shared screen stayed forever: a band under the page after the
  *    keyboard closed. Disposing a terminal now hands the screen back at full height.
  *
@@ -55,6 +58,19 @@ async function capture(page: Page, name: string, theme: string): Promise<void> {
 }
 
 for (const theme of ["light", "dark"] as const) {
+  test(`with the keyboard up, the page behind the screen has the theme's colour (${theme})`, async ({ page }) => {
+    await installFakeViewport(page);
+    await open(page, theme);
+    await focusTerminal(page);
+    await setKeyboard(page, KEYBOARD);
+    // sleep: the keyboard watcher re-reads 120 ms after the event; the fitted state is what this check wants to see
+    await page.waitForTimeout(400);
+    const up = await geometry(page);
+    expect(up.bottom, "the screen is fitted to the visible area").toBeLessThan(up.innerHeight - 100);
+    expect(up.rootBg, "the strip behind the accessory bar is the theme background, not a fixed dark").toBe(up.screenBg);
+    await capture(page, "keyboard-up", theme);
+  });
+
   test(`a window that ends while the keyboard is up leaves no band after the keyboard closes (${theme})`, async ({ page }) => {
     await installFakeViewport(page);
     await open(page, theme);
