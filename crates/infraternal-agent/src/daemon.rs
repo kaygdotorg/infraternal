@@ -2703,6 +2703,11 @@ mod key_repaint_tests;
 #[path = "daemon_replay_fence_tests.rs"]
 mod replay_fence_tests;
 
+/// Staged raw output survives the end of its shim link (#477).
+#[cfg(test)]
+#[path = "daemon_link_end_tests.rs"]
+mod link_end_tests;
+
 /// A relay and the real writer together: output a key repaint passes keeps its credit and order.
 #[cfg(test)]
 #[path = "daemon_writer_credit_tests.rs"]
