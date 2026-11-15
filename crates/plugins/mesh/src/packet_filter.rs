@@ -6,8 +6,9 @@
 //! is never grown while packets are checked:
 //! - **Flows:** 256 per direction ([`FLOWS_PER_DIRECTION`]), 512 slots of 104 bytes. When a
 //!   direction is full, a new flow first reclaims expired and revoked entries. Then it evicts
-//!   that direction's least recently seen flow that is not an established TCP connection; an
-//!   established connection is never evicted.
+//!   that direction's least recently seen flow that is not an established TCP connection. Only
+//!   when every flow left is established does it evict one, the oldest that has been silent
+//!   for at least [`TCP_ESTABLISHED_EVICTABLE_IDLE`]. A live connection is never evicted.
 //! - **Timeouts** follow Linux conntrack's defaults: established TCP 5 days, opening 60 s,
 //!   closing 120 s, closed 10 s; UDP 30 s unreplied and 120 s replied; other protocols 60 s.
 //! - **Revocation:** every packet of a tracked flow is checked against the grants published
@@ -105,12 +106,25 @@ pub(crate) enum Direction {
 // lived under the kernel firewall lives the same way under this filter. A long timeout cannot
 // keep a revoked grant alive: [`PacketFilter::publish_policy`] retires every flow the new
 // snapshot no longer permits, whatever its age. Table pressure is handled by
-// [`FlowShard::evict_idle`], which never evicts an established connection.
+// [`FlowShard::evict_idle`], which evicts an established connection only after an hour of
+// silence, and only from a full direction.
 
 /// Keep an established TCP connection through long idle periods: 5 days, conntrack's
 /// `ESTABLISHED` timeout. An idle SSH session, a database pool or a keep-alive HTTP connection
 /// with no keep-alive traffic must still carry its next packet hours later.
 const TCP_ESTABLISHED_TIMEOUT: Duration = Duration::from_hours(120);
+/// How long an established TCP connection must be silent before a full direction may evict it
+/// to admit a new flow: 1 hour (J721, #265).
+///
+/// Why: when a peer loses power or leaves the network, its connections end without a FIN or
+/// RST the filter could see. Under the 5-day timeout alone, a peer that went silent holding a
+/// full quota of connections could open no new connection from its side for 5 days (J718 P2).
+/// An hour is longer than any keep-alive a live connection sends (Linux TCP sends its first
+/// keepalive after 2 h only when enabled; SSH and databases that want a long-idle connection
+/// to survive set keep-alives in minutes). It is used only under quota pressure, so an idle
+/// connection survives for the full 5 days unless its peer pair is actually full. Rejected:
+/// going back to short timeouts, which cut long-idle connections that have room (J672 P1).
+const TCP_ESTABLISHED_EVICTABLE_IDLE: Duration = Duration::from_hours(1);
 /// Expire a TCP flow whose three-way handshake has not finished: its SYN is unanswered, or its
 /// SYN-ACK has not been acknowledged yet (half-open). Conntrack's `SYN_RECV` timeout, 60 s. (Its
 /// `SYN_SENT` is 120 s; a SYN retransmitted after this expiry simply opens the flow again.)
@@ -142,8 +156,10 @@ const OTHER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// stop this host connecting to the peer, nor the owner's mesh SSH arriving from elsewhere on
 /// the mesh (J617 P2, #265). When a direction's quota is full, a new flow in that direction
 /// first reclaims expired entries and then evicts that direction's least recently seen flow
-/// that is not an established TCP connection (see [`FlowShard::evict_idle`]), so closed
-/// connections and finished UDP exchanges never cut a peer off (J592 P1-3).
+/// that is not an established TCP connection, or else its oldest established connection silent
+/// for [`TCP_ESTABLISHED_EVICTABLE_IDLE`] (see [`FlowShard::evict_idle`]), so closed
+/// connections, finished UDP exchanges and connections whose peer vanished never cut a peer off
+/// for long (J592 P1-3, J718 P2).
 const FLOWS_PER_DIRECTION: usize = 256;
 /// Slots in each peer's fixed table: room for both directions' full quotas at once, so a
 /// direction under its quota always finds a free slot.
@@ -715,7 +731,7 @@ impl PacketFilter {
         if !shard.insert(entry, slot_start) {
             shard.reclaim(now, policy);
             let inserted = shard.insert(entry, slot_start)
-                || (shard.evict_idle(direction) && shard.insert(entry, slot_start));
+                || (shard.evict_idle(direction, now) && shard.insert(entry, slot_start));
             if !inserted {
                 return false;
             }
@@ -1617,33 +1633,38 @@ impl FlowShard {
         }
     }
 
-    /// Free the slot of `direction`'s least recently seen flow that is not an established TCP
-    /// connection, when that direction's full quota refuses a new flow.
+    /// Free one slot of `direction` when its full quota refuses a new flow: its least recently
+    /// seen flow that is not an established TCP connection, or else its least recently seen
+    /// established connection that has been silent for [`TCP_ESTABLISHED_EVICTABLE_IDLE`].
     ///
     /// Closed and half-closed connections, unanswered SYNs, half-open connections (SYN-ACK
-    /// without the final ACK) and UDP or ICMP exchanges are all candidates; recency protects
+    /// without the final ACK) and UDP or ICMP exchanges always go first; recency protects
     /// active ones. Only flows opened in the same direction are candidates, so one side's new
-    /// flows never evict the other side's. An established connection is never evicted: whoever
-    /// holds [`FLOWS_PER_DIRECTION`] of them in one direction stops only new flows opened from
-    /// that same side of this peer pair. The other direction keeps its own quota, so this host
-    /// can still connect to the peer and the peer's held inbound connections cannot lock this
-    /// host out (J617 P2, #265). Returns whether a slot was freed. The scan is O(slots) and runs
+    /// flows never evict the other side's: the peer's held inbound connections cannot lock this
+    /// host out (J617 P2, #265). A live established connection is never evicted. One silent
+    /// for an hour is evicted only when nothing else is left. Its peer most likely vanished
+    /// without a FIN or RST, and keeping it would refuse that side's new connections for the
+    /// 5-day timeout (J718 P2). Returns whether a slot was freed. The scan is O(slots) and runs
     /// only when the quota is full.
-    fn evict_idle(&mut self, direction: Direction) -> bool {
+    fn evict_idle(&mut self, direction: Direction, now: Instant) -> bool {
+        // Ranked by (established, last seen): every unestablished flow sorts before every
+        // established one, and the oldest of each kind first.
         let victim = self
             .slots
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| match slot {
-                FlowSlot::Occupied(entry)
-                    if entry.initiated == direction && !entry.established() =>
-                {
-                    Some((entry.last_seen, index))
+                FlowSlot::Occupied(entry) if entry.initiated == direction => {
+                    let established = entry.established();
+                    (!established
+                        || now.saturating_duration_since(entry.last_seen)
+                            >= TCP_ESTABLISHED_EVICTABLE_IDLE)
+                        .then_some((established, entry.last_seen, index))
                 }
                 FlowSlot::Empty | FlowSlot::Removed | FlowSlot::Occupied(_) => None,
             })
             .min();
-        let Some((_, index)) = victim else {
+        let Some((_, _, index)) = victim else {
             return false;
         };
         self.remove(index);
@@ -2316,7 +2337,7 @@ mod tests {
         Direction, FLOW_SLOTS_PER_PEER, FLOW_SLOTS_PER_PEER_HASH, FLOWS_PER_DIRECTION,
         FRAGMENT_IDLE_TIMEOUT, FRAGMENTS_PER_PEER, FlowSlot, FragmentCoverage, FragmentSlot,
         PER_PEER_MEMORY_BUDGET, PacketFilter, PeerAccess, PeerFlows, TCP_CLOSED_TIMEOUT,
-        TCP_ESTABLISHED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
+        TCP_ESTABLISHED_EVICTABLE_IDLE, TCP_ESTABLISHED_TIMEOUT, UDP, UDP_IDLE_TIMEOUT,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -4474,5 +4495,103 @@ mod tests {
             "the RSS measurement failed:\n{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// Connections that ended where the filter could not see it (the peer lost power, or its
+    /// host timed out without a RST on the wire) do not lock the peer out for the 5-day
+    /// established timeout (J718 P2, #265; J718's red test). With a full inbound quota of such
+    /// connections, a new one is still refused for the first hour of silence, because they may
+    /// be live and idle. After that, it evicts the oldest silent connection, and only that one.
+    #[test]
+    fn silent_established_connections_give_way_after_an_hour_only_when_full() {
+        let filter = PacketFilter::new(
+            &config(grant(Protocol::Tcp, 443), TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let start = Instant::now();
+        let quota = u16::try_from(FLOWS_PER_DIRECTION).expect("quota");
+        for index in 0..quota {
+            let port = 20_000 + index;
+            // Port 20,000 is the oldest; later ones were seen a millisecond apart.
+            let at = start + Duration::from_millis(u64::from(index));
+            let mut syn = tcp4(PEER4, LOCAL4, port, 443, SYN);
+            let mut syn_ack = tcp4(LOCAL4, PEER4, 443, port, SYN_ACK);
+            let mut ack = tcp4(PEER4, LOCAL4, port, 443, ACK);
+            assert!(filter.check_at(&mut syn, Direction::MeshToHost, at));
+            assert!(filter.check_at(&mut syn_ack, Direction::HostToMesh, at));
+            assert!(filter.check_at(&mut ack, Direction::MeshToHost, at));
+        }
+        // One connection stays live: it carries a packet just before the hour is up.
+        let live_at = start + TCP_ESTABLISHED_EVICTABLE_IDLE - Duration::from_secs(1);
+        let mut live = tcp4(PEER4, LOCAL4, 20_001, 443, ACK);
+        assert!(filter.check_at(&mut live, Direction::MeshToHost, live_at));
+
+        let mut too_soon = tcp4(PEER4, LOCAL4, 50_000, 443, SYN);
+        assert!(
+            !filter.check_at(&mut too_soon, Direction::MeshToHost, live_at),
+            "a connection silent for under an hour was evicted"
+        );
+        let day = start + Duration::from_secs(86_400);
+        let mut fresh = tcp4(PEER4, LOCAL4, 50_001, 443, SYN);
+        assert!(
+            filter.check_at(&mut fresh, Direction::MeshToHost, day),
+            "a day after {quota} connections went silent, the peer still cannot open a new one"
+        );
+        // Only the oldest silent connection (20,000) made room. The one that carried a packet
+        // later (20,001) and every younger one are still admitted.
+        let mut evicted = tcp4(PEER4, LOCAL4, 20_000, 443, ACK);
+        assert!(!filter.check_at(&mut evicted, Direction::MeshToHost, day));
+        for port in [20_001, 20_002, 20_000 + quota - 1] {
+            let mut kept = tcp4(PEER4, LOCAL4, port, 443, ACK);
+            assert!(
+                filter.check_at(&mut kept, Direction::MeshToHost, day),
+                "connection {port} was evicted too"
+            );
+        }
+        let mut later = tcp4(PEER4, LOCAL4, 50_004, 443, SYN);
+        assert!(
+            filter.check_at(
+                &mut later,
+                Direction::MeshToHost,
+                start + Duration::from_secs(4 * 86_400)
+            ),
+            "4 days after the connections went silent, the peer still cannot open a new one"
+        );
+    }
+
+    /// A full direction still evicts an unestablished flow before any established
+    /// connection, however long that connection has been silent (J721, #265).
+    #[test]
+    fn unestablished_flows_go_before_silent_established_ones() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::All, TrafficPolicy::None),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let start = Instant::now();
+        let quota = u16::try_from(FLOWS_PER_DIRECTION).expect("quota");
+        for index in 0..quota - 1 {
+            let port = 20_000 + index;
+            let mut syn = tcp4(PEER4, LOCAL4, port, 443, SYN);
+            let mut syn_ack = tcp4(LOCAL4, PEER4, 443, port, SYN_ACK);
+            let mut ack = tcp4(PEER4, LOCAL4, port, 443, ACK);
+            assert!(filter.check_at(&mut syn, Direction::MeshToHost, start));
+            assert!(filter.check_at(&mut syn_ack, Direction::HostToMesh, start));
+            assert!(filter.check_at(&mut ack, Direction::MeshToHost, start));
+        }
+        // A UDP flow opened last, and seen more recently than every connection.
+        let udp_at = start + Duration::from_hours(2);
+        let mut udp = udp4(PEER4, LOCAL4, 5_353, 5_353);
+        assert!(filter.check_at(&mut udp, Direction::MeshToHost, udp_at));
+        let mut fresh = tcp4(PEER4, LOCAL4, 50_000, 443, SYN);
+        assert!(filter.check_at(&mut fresh, Direction::MeshToHost, udp_at));
+        let mut udp_again = udp4(LOCAL4, PEER4, 5_353, 5_353);
+        assert!(
+            !filter.check_at(&mut udp_again, Direction::HostToMesh, udp_at),
+            "the unestablished UDP flow should have been evicted first"
+        );
+        let mut oldest = tcp4(PEER4, LOCAL4, 20_000, 443, ACK);
+        assert!(filter.check_at(&mut oldest, Direction::MeshToHost, udp_at));
     }
 }
