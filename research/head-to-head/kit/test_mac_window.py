@@ -290,8 +290,12 @@ class BuildHarnessTest(unittest.TestCase):
 
     def test_harness_test_is_in_the_checkout(self) -> None:
         """The ignored `mac_bench_device` test the windows run is on this branch, not elsewhere."""
-        source = (self.ROOT / "crates/plugins/mesh/src/macos_node.rs").read_text()
+        source = (self.ROOT / "crates/plugins/mesh/src/macos_node/tests/bench_device.rs").read_text()
         self.assertIn("fn mac_bench_device()", source)
+        tests = (self.ROOT / "crates/plugins/mesh/src/macos_node.rs").read_text()
+        self.assertIn("mod bench_device;", tests)
+        window = (self.ROOT / "research/head-to-head/kit/mac/mac-window.sh").read_text()
+        self.assertIn("--exact macos_node::tests::bench_device::mac_bench_device", window)
 
     def test_builds_only_from_the_checkout(self) -> None:
         """No git worktree of another commit, and the pin build uses the lock file as committed."""
