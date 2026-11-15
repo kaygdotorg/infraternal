@@ -99,6 +99,42 @@ class LinuxSideSecretsTest(unittest.TestCase):
                 self.assertEqual((nbs / name).stat().st_mode & 0o777, 0o600, name)
 
 
+class ExtraEnvTest(unittest.TestCase):
+    """PIN_ENV / CAND_ENV reach the root harness shell as data, never as shell syntax."""
+
+    def render(self, entries: str):
+        """Run extra-env.sh on `entries`."""
+        return subprocess.run(["bash", str(MAC / "extra-env.sh"), entries], capture_output=True, text=True)
+
+    def test_values_are_data_when_sourced(self) -> None:
+        """Sourcing the output sets the variables literally and runs nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "pwned"
+            run = self.render(f"J614_CREDITS=32 EVIL=$(>{marker});>{marker} Q=a'b\"c`d`")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            probe = subprocess.run(
+                ["bash", "-c", 'set -a; eval "$1"; set +a; printf "%s|%s|%s" "$J614_CREDITS" "$EVIL" "$Q"', "_", run.stdout],
+                capture_output=True,
+                text=True,
+            )
+            self.assertFalse(marker.exists(), "an env value executed")
+            self.assertEqual(probe.stdout, f"32|$(>{marker});>{marker}|a'b\"c`d`")
+
+    def test_malformed_entries_fail_closed(self) -> None:
+        """A token that is not NAME=value, or has a bad name, prints nothing and exits 1."""
+        for bad in ("rm -rf x", "A=1 ;ls", "1A=2", "A-B=1"):
+            with self.subTest(bad=bad):
+                run = self.render(bad)
+                self.assertEqual(run.returncode, 1)
+                self.assertEqual(run.stdout, "")
+
+    def test_window_does_not_interpolate_env_into_the_root_shell(self) -> None:
+        """The root `bash -c` takes paths as arguments and no longer carries `$2` in its command."""
+        text = (MAC / "mac-window.sh").read_text()
+        self.assertIn("extra-env.sh", text)
+        self.assertNotRegex(text, r"bash -c \"[^\n]*\$2 exec")
+
+
 class PinCheckTest(unittest.TestCase):
     """`check-pins.sh` refuses a Mac window whose clients are not the pinned versions."""
 

@@ -13,6 +13,9 @@ Run from a fresh checkout of dev; never from a hand-edited copy (owner rule: lat
 | `mac-run.sh` | the counterbalanced run: one window per Williams order, lock per window, then the report |
 | `mac_pool.py` | `orders` (Williams design) and `report` (pooled, per-window ratios to the baseline) |
 | `build-harness.sh` | builds the pin and candidate Mac harness from this checkout (`harness <name> [<gotatun-rev>]`), and `j421net` from `../../tools/j421net` |
+| `check-pins.sh` | refuses a window whose Tailscale/NetBird version differs from `pins.txt` |
+| `swap-gotatun-rev.sh` | candidate rev swap; fails unless `Cargo.lock` moved only in gotatun |
+| `extra-env.sh` | quotes `PIN_ENV`/`CAND_ENV` into the harness's root-only env file |
 | `lnx-side.sh` | the Linux peer's helper; copy it to `/opt/j461c/lnx-side.sh` on the peer after a change |
 
 ## Prerequisites
