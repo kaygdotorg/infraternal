@@ -27,6 +27,8 @@ const FIELDS: ReadonlyArray<[string, string, string]> = [
   ["recovery username", "./recovery.ts", 'id="recovery-username"'],
   ["recovery word", "./recovery.ts", 'aria-label="Word ${i + 1}"'],
   ["private key", "./canvas/addhost/wizard.ts", 'data-secret="key"'],
+  ["docs search", "../site-search.ts", 'type="search" role="combobox"'],
+  ["app palette search", "./core-screen.ts", 'id="palette-input"'],
   ["add-host prototype secret", "./add-host-prototype.ts", 'aria-label="SSH key or password"'],
 ];
 

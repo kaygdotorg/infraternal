@@ -23,7 +23,8 @@ const SIZES = [
 async function asPhone(page: Page): Promise<void> {
   const source = await (await page.request.get("/docs/docs.css")).text();
   const css = /@media \(pointer: coarse\)\s*\{\s*(:root\s*\{[^}]*\})\s*\}/.exec(source)?.[1] ?? "";
-  expect(css, "docs.css has a pointer: coarse rule").toContain("--ui-size-body: 0.9375rem");
+  expect(css, "docs.css has a pointer: coarse rule").toContain("--ui-base: 1");
+  expect(css, "the coarse rule gives rows the 44 px touch size").toContain("--row: 2.75rem");
   const reading = await (await page.request.get("/docs/doc.css")).text();
   // Every `@media (pointer: coarse)` block of doc.css, so the 44 px rows and larger hit areas are the real rules.
   const coarse = [...reading.matchAll(/@media \(pointer: coarse\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)].map((m) => m[1]).join("\n");

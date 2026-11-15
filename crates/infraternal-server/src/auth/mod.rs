@@ -116,6 +116,10 @@ pub enum Error {
     Database(#[from] infraternal_db::Error),
     #[error("migration failed")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    /// The database file was named by a relative path (see
+    /// `open_session_database`). Start the server with an absolute `--data`.
+    #[error("the database path must be absolute")]
+    RelativeDatabase,
     #[error("ceremony failed")]
     Webauthn,
     #[error("serialization failed")]
@@ -354,6 +358,10 @@ impl Auth {
     }
 }
 
+/// The file name prefix sqlx gives an in-memory database (`sqlite::memory:`):
+/// `file:sqlx-in-memory-N`. See [`open_session_database`].
+const SQLX_IN_MEMORY: &str = "file:sqlx-in-memory-";
+
 /// Open the D379 rusqlite pool (`infraternal-db`) on the same file as `pool`,
 /// or `None` when `pool` is not a database file on disk (#473, slice 2).
 ///
@@ -365,28 +373,55 @@ impl Auth {
 /// connections still serve everything else, and each reader costs a thread
 /// and its page cache.
 ///
-/// Only an absolute path to an existing regular file that is already in WAL
-/// mode qualifies:
-/// - sqlx names an in-memory database `file:sqlx-in-memory-N`, which SQLite
-///   would otherwise read as a relative file name and create in the working
-///   directory, and an in-memory database cannot run in WAL mode anyway.
-/// - The pool switches every file it opens to WAL, and that setting is stored
-///   in the file. The server's own database is WAL from `open_database`; a
-///   file the caller keeps in another journal mode (some tests use a
-///   rollback journal on purpose, to make a read wait on a lock) must stay as
-///   it is, so its session statements stay on sqlx.
+/// Which databases get the pool:
+/// - **In-memory** (sqlx names it `file:sqlx-in-memory-N`): no pool, quietly.
+///   SQLite would read that name as a relative file and create it in the
+///   working directory, and an in-memory database cannot run in WAL mode
+///   anyway. These are test databases.
+/// - **A relative path: refused** with [`Error::RelativeDatabase`]. The pool reopens
+///   the path on each of its threads, so a relative name would follow any
+///   later change of directory, and falling back to sqlx would silently bring
+///   back the unbounded-WAL slide (J696 P3). The server opens its database by
+///   an absolute path (`runtime::open_database`), so only a caller that
+///   skips that reaches this.
+/// - **An absolute path to a regular file in WAL mode**: the pool.
+/// - **Anything else stays on sqlx, with a warning.** The pool switches every
+///   file it opens to WAL, and that setting is stored in the file. The
+///   server's own database is WAL from `open_database`; a file the caller
+///   keeps in another journal mode (some tests use a rollback journal on
+///   purpose, to make a read wait on a lock) must stay as it is.
 async fn open_session_database(pool: &SqlitePool) -> Result<Option<infraternal_db::Database>> {
     let options = pool.connect_options();
     let path = options.get_filename();
-    let on_disk = path.is_absolute()
-        && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file());
-    if !on_disk {
+    if path
+        .to_str()
+        .is_some_and(|name| name.starts_with(SQLX_IN_MEMORY))
+    {
+        return Ok(None);
+    }
+    if !path.is_absolute() {
+        tracing::error!(
+            path = %path.display(),
+            "the server database path must be absolute; start the server with an absolute --data folder"
+        );
+        return Err(Error::RelativeDatabase);
+    }
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+        tracing::warn!(
+            path = %path.display(),
+            "the database is not a regular file; session statements stay on sqlx"
+        );
         return Ok(None);
     }
     let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
         .fetch_one(pool)
         .await?;
     if !mode.eq_ignore_ascii_case("wal") {
+        tracing::warn!(
+            path = %path.display(),
+            journal_mode = %mode,
+            "the database is not in WAL mode; session statements stay on sqlx"
+        );
         return Ok(None);
     }
     let db = infraternal_db::Database::open(
