@@ -577,15 +577,59 @@ pub async fn elevate(
             }),
         });
     }
-    if let Some(session) = session {
-        let _ = nix::sys::signal::killpg(session, nix::sys::signal::Signal::SIGKILL);
-    }
-    let _ = child.wait().await;
+    end_session(child, master, session).await;
     Ok(Try {
         outcome,
         typed,
         elevated: None,
     })
+}
+
+/// How long [`end_session`] waits for the elevation command to exit once its
+/// terminal is hung up. A command that is hung up and killed exits in
+/// milliseconds; this only stops a stuck one from holding the try open.
+const REAP_BOUND: Duration = Duration::from_secs(5);
+
+/// End a try that didn't start the relay: hang up the terminal, kill the
+/// session, and wait a bounded time for the command to exit (J716 A).
+///
+/// Why the hangup comes first: sudo (and possibly doas or su) runs with real
+/// uid 0 for part of its life, and then this account may not signal it, so
+/// `killpg` fails with `EPERM` exactly when the try needs to end. Closing
+/// the master is different: the kernel hangs up the session's terminal and
+/// signals its leader itself, with no permission check, and a pending read
+/// of the password fails at once. So the master is closed first; `killpg`
+/// then ends whatever in the session it may still signal (anything that
+/// ignored the hangup). Each wait is bounded so a try always ends: when the
+/// kill was refused and the command outlives the first wait, the kill is
+/// tried once more (sudo is back at the account's uid outside its short
+/// root-uid windows), and a command still running after that is left to
+/// `kill_on_drop` and tokio's reaper of orphaned children.
+///
+/// A cancelled try (the caller drops the `elevate` future) gets the same
+/// hangup: `master` is declared after `child` in `elevate`, so it is
+/// dropped, and the terminal hung up, before the child's `kill_on_drop`.
+async fn end_session(
+    mut child: tokio::process::Child,
+    master: infraternal_shim::readiness::Registration<OwnedFd>,
+    session: Option<nix::unistd::Pid>,
+) {
+    drop(master);
+    let kill = || {
+        session.map_or(Ok(()), |session| {
+            nix::sys::signal::killpg(session, nix::sys::signal::Signal::SIGKILL)
+        })
+    };
+    // Ok or ESRCH: killed, or already gone. EPERM: a member runs with real
+    // uid 0 right now and only the hangup reaches it; any other error leaves
+    // the hangup as the only way too.
+    let refused = !matches!(kill(), Ok(()) | Err(nix::errno::Errno::ESRCH));
+    if tokio::time::timeout(REAP_BOUND, child.wait()).await.is_ok() || !refused {
+        return;
+    }
+    if kill().is_ok() {
+        let _ = tokio::time::timeout(REAP_BOUND, child.wait()).await;
+    }
 }
 
 #[cfg(test)]
