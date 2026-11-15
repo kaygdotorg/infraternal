@@ -37,7 +37,13 @@ wanted() { [[ -z "${QA_PHASES:-}" || " $QA_PHASES " == *" $1 "* ]]; }
 run() { wanted "$1" || return 0; ./run.sh run "$theme-$1" "$2" || true; }
 
 # 1. Sign in. With a session already stored this only proves the app opens signed in; without one it does the passkey ceremony.
-run signin "$fresh|tapif~Continue with passkey~5|tapsbif~Use Passkey/Use Selected Passkey~6|face|wait~6|shot~console|exists~Console~console-visible~contains"
+run signin "$fresh|tapif~Continue with passkey~5|tapsbif~Use Passkey/Use Selected Passkey~6|face|wait~6|shot~console|exists~Show hosts/Console~console-visible~contains"
+
+# 1a. Pick the theme. An account that has chosen a theme ignores the device's light/dark setting and `?theme=` (D352, D390), so
+# a dark run must pick a dark theme in the app: the palette's colour rows are named by theme ("Mocha" dark, "Latte" light).
+# The report measures the picture, so a run that stayed in the wrong theme fails instead of passing as dark.
+case "$theme" in dark) pick=Mocha;; *) pick=Latte;; esac
+run theme "$fresh|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|type~$pick|wait~2|return|wait~3|shot~theme-picked"
 
 # 1b. Unlock host connections. After a server restart (or a new session) the host CA is locked until one passkey tap, and a
 # locked host is offline: its shell opens but takes no input. The palette row exists only while the CA is locked.
