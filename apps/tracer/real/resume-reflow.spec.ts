@@ -118,8 +118,15 @@ for (const [from, to] of [[393, 1440], [1440, 393]] as const) test(`a session re
     await page.screenshot({ path: tracerEvidencePath(`j751-reopened-${from}-to-${to}.png`) });
     const resize = current.order.indexOf(sizes(current)[0]!);
     expect(resize).toBeGreaterThanOrEqual(0);
-    // The last thing that painted the screen is a host repaint taken after the tab reported its new size.
-    expect(current.order.lastIndexOf("snapshot")).toBeGreaterThan(resize);
+    if (to > from) {
+      // The last thing that painted the screen is a host repaint taken after the tab reported its new size.
+      expect(current.order.lastIndexOf("snapshot")).toBeGreaterThan(resize);
+    } else {
+      // The old tab typed last, so it still owns the session's wider size and this tab's size is only staged (D74).
+      // A repaint at the wider size would pile up in this tab's last column, and D74's scale-to-fit does not exist
+      // yet, so the replay stays as before (#521).
+      expect(current.snapshots).toBe(0);
+    }
   } finally { await context.close(); await server.dispose(); }
 });
 
