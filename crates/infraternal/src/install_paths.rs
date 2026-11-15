@@ -475,9 +475,14 @@ pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
     }
 }
 
-/// Remove `link` only if it is a symlink that still points at our binary; report whether it did.
+/// Remove `link` only if it is a symlink to exactly `binary`; report whether it did.
 ///
-/// Uninstall calls this so a link someone re-pointed to another program stays.
+/// Uninstall calls this so a link someone re-pointed to another program
+/// stays. Unlike publishing, which re-points a link to any older release of
+/// ours, removal is exact (D395: "only if it still points at our binary"):
+/// a link to another release or a developer checkout belongs to that
+/// install. A dangling link to exactly `binary` still counts, because
+/// uninstall may delete the binary first.
 #[cfg_attr(
     not(test),
     expect(
@@ -487,7 +492,7 @@ pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
 )]
 pub fn remove_link(link: &Path, binary: &Path) -> io::Result<bool> {
     if std::fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
-        && points_at_ours(link, binary)
+        && link_target(link).as_deref() == Some(binary)
     {
         std::fs::remove_file(link)?;
         return Ok(true);
