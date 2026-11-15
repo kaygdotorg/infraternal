@@ -18,6 +18,14 @@
 //! request ([`Admission::Explicit`], for a D295 rollback or a deliberate channel switch
 //! by S4/S5) may stage those. No admission ever skips the signature check.
 //!
+//! **Withdrawn releases (J725 P2-1).** A staged release is kept only while the channel
+//! still announces it. When a periodic check finds the pointer naming anything else
+//! (the running version again after a yanked build, another version, or nothing), the
+//! staged release is removed and [`UpdateState::removed`] says why. A yanked build is
+//! still validly signed, so the signature alone can never decide this. S4 must apply
+//! only what [`Updater::confirm_staged`] returns: it repeats this check against the
+//! pointer at apply time and holds the folder lock until the switch is done.
+//!
 //! **Layout.** Everything lives in `<data>/updates/`, a directory owned by the server's
 //! user with no group or other access (the timer only runs for root, so it is
 //! root-only in production):
@@ -183,6 +191,10 @@ pub const REMOVED_UNVERIFIED: &str = "the staged release failed verification";
 /// Why a staged release the periodic guard would no longer stage was removed.
 pub const REMOVED_NOT_NEWER: &str =
     "the staged release is no longer newer than the running version";
+/// Why a staged release was removed when its channel stopped announcing it.
+pub const REMOVED_WITHDRAWN: &str = "the channel no longer offers this release";
+/// [`Updater::confirm_staged`]'s refusal when nothing verified is staged.
+pub const NOTHING_STAGED: &str = "no verified release is staged";
 
 /// One counter for every updater in this process. Each state write bumps it, and
 /// subscribers re-read their own server's `state.json`, so a change in another
@@ -327,7 +339,7 @@ impl Updater {
         if !enabled {
             return Err("release unavailable");
         }
-        let lock = Locked::open(&self.directory)?;
+        let lock = Locked::wait(&self.directory).await?;
         let mut state = status_of(&self.directory, &self.current);
         channel.clone_into(&mut state.channel);
         let result = tokio::time::timeout(
@@ -394,9 +406,19 @@ impl Updater {
             .await?
             else {
                 state.available = None;
+                if let Some(withdrawn) = staged.take() {
+                    retire(lock, state, Some(withdrawn), REMOVED_WITHDRAWN)?;
+                }
                 return Ok(Outcome::Empty);
             };
             state.available = Some(version.clone());
+            // The channel is authoritative: a staged release it no longer announces
+            // (yanked, replaced, or the pointer moved back) must never be applied.
+            if admission == Admission::Forward
+                && let Some(withdrawn) = staged.take_if(|staged| *staged != version)
+            {
+                retire(lock, state, Some(withdrawn), REMOVED_WITHDRAWN)?;
+            }
             version
         };
         if guard(&self.current, &version, admission)? == Verdict::Same {
@@ -488,6 +510,64 @@ impl Updater {
         if self.inspect_staged(&lock, &mut state).await.is_ok() && state != before {
             let _ = lock.write_state(&state);
         }
+    }
+
+    /// The apply-time re-check S4 must use (J725 P2-1): confirm that the staged release
+    /// is still verified and still the one the channel announces, and keep the folder
+    /// locked until the returned [`Confirmed`] is dropped.
+    ///
+    /// S4 applies only `confirmed.image()`, and only while it holds `confirmed`, so no
+    /// periodic check can replace or remove `staged/` between this check and the
+    /// switch. A release the channel withdrew is removed here as well, with the reason
+    /// recorded, even if a periodic check has not seen the withdrawal yet.
+    /// # Errors
+    /// [`NOTHING_STAGED`] when no verified release is staged; the release plugin is
+    /// off; the pointer cannot be fetched or verified; or `"the channel no longer offers
+    /// the staged release"`.
+    pub async fn confirm_staged(&self) -> Result<Confirmed, &'static str> {
+        let lock = Locked::wait(&self.directory).await?;
+        let mut state = status_of(&self.directory, &self.current);
+        let result = tokio::time::timeout(CHECK_LIMIT, self.confirm_locked(&lock, &mut state))
+            .await
+            .unwrap_or(Err("the update check exceeded its time limit"));
+        lock.write_state(&state)?;
+        let version = result?;
+        Ok(Confirmed {
+            image: self.directory.join("staged").join(&self.artifact),
+            version,
+            _lock: lock,
+        })
+    }
+
+    /// The body of [`Updater::confirm_staged`], run under the folder lock.
+    async fn confirm_locked(
+        &self,
+        lock: &Locked,
+        state: &mut UpdateState,
+    ) -> Result<String, &'static str> {
+        let Some(staged) = self.inspect_staged(lock, state).await? else {
+            return Err(NOTHING_STAGED);
+        };
+        let (enabled, channel) = (self.settings)().await?;
+        if !enabled {
+            return Err("release unavailable");
+        }
+        let download = lock.download()?;
+        let announced = crate::latest::fetch_metadata(
+            self.engine.as_ref(),
+            &self.origin,
+            &download.path,
+            &channel,
+        )
+        .await?;
+        state.available.clone_from(&announced);
+        if announced.as_deref() == Some(staged.as_str())
+            && guard(&self.current, &staged, Admission::Forward) == Ok(Verdict::Stage)
+        {
+            return Ok(staged);
+        }
+        retire(lock, state, Some(staged), REMOVED_WITHDRAWN)?;
+        Err("the channel no longer offers the staged release")
     }
 
     /// Start the periodic check: one task that sleeps between checks (no polling).
@@ -687,6 +767,31 @@ fn open_private(path: &Path) -> Result<std::fs::File, &'static str> {
     Ok(file)
 }
 
+/// A staged release [`Updater::confirm_staged`] just re-verified against the channel.
+/// While it lives, the update folder stays locked, so the staged files cannot change.
+pub struct Confirmed {
+    /// The confirmed version.
+    version: String,
+    /// `updates/staged/<image>`, verified under the lock this value holds.
+    image: PathBuf,
+    /// Held until the caller has switched (or given up).
+    _lock: Locked,
+}
+
+impl Confirmed {
+    /// The confirmed release version.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The verified image to switch to.
+    #[must_use]
+    pub fn image(&self) -> &Path {
+        &self.image
+    }
+}
+
 /// An exclusive lock on `updates/`, held for one whole check.
 struct Locked {
     directory: PathBuf,
@@ -712,6 +817,16 @@ impl Locked {
     /// waiting for another check to finish.
     fn open(directory: &Path) -> Result<Self, &'static str> {
         Self::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+    }
+
+    /// [`Locked::open`] on the blocking pool, so waiting for another check (or for S4,
+    /// which holds the lock through a whole switch) never stalls an async worker that
+    /// serves terminals.
+    async fn wait(directory: &Path) -> Result<Self, &'static str> {
+        let directory = directory.to_owned();
+        tokio::task::spawn_blocking(move || Self::open(&directory))
+            .await
+            .map_err(|_| "the update folder is unavailable")?
     }
 
     /// Like [`Locked::open`] but gives up at once if a check holds the lock.

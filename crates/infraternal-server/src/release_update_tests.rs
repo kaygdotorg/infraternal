@@ -8,12 +8,14 @@
 //! and interrupted downloads are cleaned up; a full disk is refused before the
 //! download; a newer release replaces the staged one; the timer stages on its own; the
 //! state is visible through `release.update.status`; and a `staged/` found on disk is
-//! re-verified (or removed) before use.
+//! re-verified (or removed) before use; and a release the channel withdraws is removed,
+//! both by the periodic check and by S4's apply-time confirmation.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::release_payload::tests::{Bucket, Release};
 use infraternal_plugin_release::update::{
-    Admission, Outcome, REMOVED_UNVERIFIED, UpdateState, Updater, status,
+    Admission, NOTHING_STAGED, Outcome, REMOVED_UNVERIFIED, REMOVED_WITHDRAWN, UpdateState,
+    Updater, status,
 };
 use std::{os::unix::fs::PermissionsExt, sync::atomic::Ordering};
 
@@ -478,5 +480,96 @@ async fn unsafe_staged_folders_are_removed_at_start_without_being_followed() {
     let saved = wait_for_state(&release, OLD, &mut changes, |saved| saved.staged.is_none()).await;
     task.abort();
     assert_eq!(saved.removed.unwrap().reason, REMOVED_UNVERIFIED);
+    assert_eq!(leftovers(&release), ["state.json"]);
+}
+
+/// A release the channel withdraws is removed, never kept for S4 (J725 P2-1): the edge
+/// pointer moves back to the running version (a yanked build), then to nothing.
+#[tokio::test]
+async fn a_withdrawn_release_is_removed_and_the_state_says_why() {
+    let (release, bucket) = channel(NEW);
+    let old = Release::with_version(4096, OLD);
+    bucket.files.lock().unwrap().extend(old.files.clone());
+    let updater = updater_with_trust(
+        &release,
+        &bucket.origin,
+        OLD,
+        &format!("{}{}", release.trust, old.trust),
+    );
+    assert_eq!(
+        updater.check(None, Admission::Forward).await,
+        Ok(Outcome::Staged(NEW.into()))
+    );
+    // The owner yanks NEW: the pointer names the running version again.
+    point(&bucket, OLD);
+    assert_eq!(
+        updater.check(None, Admission::Forward).await,
+        Ok(Outcome::Current(OLD.into()))
+    );
+    let saved = state(&release, OLD);
+    assert_eq!(saved.staged, None);
+    assert_eq!(saved.available.as_deref(), Some(OLD));
+    let removed = saved.removed.unwrap();
+    assert_eq!(
+        (removed.version.as_deref(), removed.reason.as_str()),
+        (Some(NEW), REMOVED_WITHDRAWN)
+    );
+    assert_eq!(leftovers(&release), ["state.json"]);
+    // Staged again, then the channel stops announcing anything at all.
+    point(&bucket, NEW);
+    assert!(updater.check(None, Admission::Forward).await.is_ok());
+    bucket
+        .files
+        .lock()
+        .unwrap()
+        .remove("/releases/channels/edge.json");
+    assert_eq!(
+        updater.check(None, Admission::Forward).await,
+        Ok(Outcome::Empty)
+    );
+    assert_eq!(state(&release, OLD).staged, None);
+    assert_eq!(leftovers(&release), ["state.json"]);
+}
+
+/// S4's apply-time check confirms only a staged release the channel still announces,
+/// and removes one it withdrew even before a periodic check noticed (J725 P2-1).
+#[tokio::test]
+async fn apply_time_confirmation_refuses_a_withdrawn_release() {
+    let (release, bucket) = channel(NEW);
+    // OLD is published too, so the pointer can move back to a verifiable release.
+    let old = Release::with_version(4096, OLD);
+    bucket.files.lock().unwrap().extend(old.files.clone());
+    let updater = updater_with_trust(
+        &release,
+        &bucket.origin,
+        OLD,
+        &format!("{}{}", release.trust, old.trust),
+    );
+    assert_eq!(updater.confirm_staged().await.err(), Some(NOTHING_STAGED));
+    assert!(updater.check(None, Admission::Forward).await.is_ok());
+    {
+        let confirmed = updater.confirm_staged().await.unwrap();
+        assert_eq!(confirmed.version(), NEW);
+        assert_eq!(
+            std::fs::read(confirmed.image()).unwrap(),
+            release.files[&format!("/releases/{NEW}/{}", artifact())]
+        );
+        // While S4 holds the confirmation no check can touch staged/.
+        let racing = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            updater.check(None, Admission::Forward),
+        )
+        .await;
+        assert!(racing.is_err(), "a check waits for the confirmation's lock");
+    }
+    // Withdrawn between the last periodic check and the apply.
+    point(&bucket, OLD);
+    assert_eq!(
+        updater.confirm_staged().await.err(),
+        Some("the channel no longer offers the staged release")
+    );
+    let saved = state(&release, OLD);
+    assert_eq!(saved.staged, None);
+    assert_eq!(saved.removed.unwrap().reason, REMOVED_WITHDRAWN);
     assert_eq!(leftovers(&release), ["state.json"]);
 }
