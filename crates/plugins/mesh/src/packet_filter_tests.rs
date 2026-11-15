@@ -2089,11 +2089,22 @@ fn revoked_flows_skipped_by_the_sweep_free_their_quota_on_demand() {
         .get(&NodeId(2))
         .cloned()
         .expect("peer cell");
-    {
-        // Hold the table as a packet worker would, so the sweep skips it.
-        let _busy = cell.table.lock().expect("table");
-        filter.publish_policy(prepared);
-    }
+    // Hold the table as a packet worker would, so the sweep skips it. The publish runs on
+    // its own thread: a sweep that waited for the table would otherwise deadlock this test
+    // instead of failing it (J750 P3 2). The timeout only detects that wait.
+    let busy = cell.table.lock().expect("table");
+    let published = std::thread::scope(|scope| {
+        let (done, publish_finished) = std::sync::mpsc::channel();
+        let filter = &filter;
+        scope.spawn(move || {
+            filter.publish_policy(prepared);
+            done.send(()).expect("report publish");
+        });
+        let finished = publish_finished.recv_timeout(Duration::from_secs(30));
+        drop(busy);
+        finished
+    });
+    assert!(published.is_ok(), "the sweep waited for a busy table");
     assert_eq!(
         filter.with_table(NodeId(2), |table| table.map(|shard| shard.initiated)),
         Some([usize::from(quota), 0]),
