@@ -143,6 +143,27 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_names: BTreeMap<NodeId, String>,
 }
+impl PeerPolicy {
+    /// Whether this peer's grants allow at least one network packet in either direction.
+    ///
+    /// The `GotaTun` node workers (Linux and macOS) install, and let through the handshake
+    /// admission guard, only peers for which this is true. A peer with no access gets no device
+    /// entry, so the node neither answers its handshakes nor keeps a session alive toward it
+    /// (#93478, J781, #483). The kernel engine keeps its complete inventory instead.
+    #[must_use]
+    pub fn has_network_access(&self) -> bool {
+        /// Whether one direction's rule allows at least one packet tuple.
+        fn allows_any(policy: &TrafficPolicy) -> bool {
+            match policy {
+                TrafficPolicy::All => true,
+                TrafficPolicy::Ports(ports) => !ports.is_empty(),
+                TrafficPolicy::None => false,
+            }
+        }
+        allows_any(&self.inbound) || allows_any(&self.outbound)
+    }
+}
+
 impl Config {
     /// Whether the Access policy lets `peer` start a TCP/22 connection to
     /// this node: the check mesh SSH makes on every connection (#221).

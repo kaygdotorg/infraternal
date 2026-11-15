@@ -177,6 +177,7 @@ fn restore_records_no_engine_for_another_nodes_kernel_link() {
     );
 }
 
+/// A restored `GotaTun` node keeps its tunnel device and advertised listener port.
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
 fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
@@ -187,6 +188,10 @@ fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
     let result = (|| {
         let mut first = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let identity = first.up()?;
+        assert_eq!(
+            identity.port, 10_254,
+            "the default mesh UDP listener is stable"
+        );
         let link = index();
         // A TUN opens with a 500-packet transmit queue; the engine needs 1,024 (#260 J88e).
         let first_queue = (
@@ -201,6 +206,10 @@ fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
         let mut restarted = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
         let restored = restarted.up()?;
         assert_eq!(restored.public_key, identity.public_key);
+        assert_eq!(
+            restored.port, identity.port,
+            "restart preserves the listener port"
+        );
         assert_eq!(
             index(),
             link,
@@ -231,6 +240,75 @@ fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
     }
     fs::remove_dir_all(state).unwrap();
     result.unwrap();
+}
+
+/// A busy default listener selects a durable fallback that can be reused by the next process.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn occupied_default_listener_falls_back_and_reuses_its_actual_port() -> std::io::Result<()> {
+    assert!(
+        std::env::var_os("INFRATERNAL_MESH_PORT").is_none(),
+        "the test exercises the automatic default, without an operator override"
+    );
+    let state = private_state("gotatun-port-fallback");
+    let occupied = std::net::UdpSocket::bind("0.0.0.0:10254")?;
+    let result = (|| {
+        let mut first = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
+        // Root restore starts the enabled node and binds before returning.
+        let restored_port = first.listen_port().unwrap();
+        assert_ne!(
+            restored_port, 10_254,
+            "the occupied default selects a fallback"
+        );
+        let identity = first.up()?;
+        assert_eq!(
+            identity.port, restored_port,
+            "up reports the bound listener"
+        );
+        assert_eq!(
+            first.listen_port(),
+            Some(identity.port),
+            "host policy reads the actual bound fallback port"
+        );
+        assert_ne!(
+            identity.port, 10_254,
+            "the occupied default selected a fallback"
+        );
+        assert_ne!(
+            identity.port, 0,
+            "the active listener reports its actual port"
+        );
+        let recorded: u16 = serde_json::from_slice(&fs::read(state.join("mesh-listen-port.json"))?)
+            .map_err(std::io::Error::other)?;
+        assert_eq!(
+            recorded, identity.port,
+            "fallback is durable before publication"
+        );
+        drop(first);
+
+        let mut restarted = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
+        let restored = restarted.up()?;
+        assert_eq!(
+            restarted.listen_port(),
+            Some(restored.port),
+            "host policy reads the persisted actual port after restart"
+        );
+        assert_eq!(
+            restored.port, identity.port,
+            "restart reuses the saved fallback"
+        );
+        restarted.down()?;
+        assert_eq!(restarted.listen_port(), None);
+        Ok::<_, std::io::Error>(())
+    })();
+
+    drop(occupied);
+    if Device::owned_tun().unwrap_or(false) {
+        let _ = Device::delete();
+    }
+    fs::remove_dir_all(state)?;
+    result?;
+    Ok(())
 }
 
 /// A failed `GotaTun` replay keeps the accepted coordinator configuration.
