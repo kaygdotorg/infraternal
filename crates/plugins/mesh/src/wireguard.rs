@@ -1460,6 +1460,11 @@ impl EndpointBooks {
     /// say whether anything that can move our endpoint differs from what was known. An
     /// incomplete read counts as a change, which costs an extra announcement, never a missed
     /// one.
+    ///
+    /// Known limit: every overflow re-dumps every route table, even when the route book is
+    /// `untracked` (past 65,536 routes). A host carrying a full BGP table would re-dump about a
+    /// million routes per overflow cycle under sustained churn; a mesh node is not that host.
+    /// If it matters, skip the route dump while untracked.
     fn resync(&mut self, interface_index: u32) -> bool {
         let (fresh, complete) = Self::dump(interface_index);
         let changed = !complete

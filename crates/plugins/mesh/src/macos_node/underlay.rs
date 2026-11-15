@@ -30,7 +30,17 @@
 //! **Lost messages.** macOS drops a routing message silently when the socket's buffer is full;
 //! there is no `ENOBUFS` to read. The buffer is sized for a large apply's own route echoes, and
 //! the worker calls [`UnderlayMonitor::resync`] after each apply, when the burst it caused may
-//! have pushed a real change out: the books are rebuilt and any difference is announced.
+//! have pushed a real change out: the address and link books are rebuilt and any difference in
+//! them is announced. The resync does not compare routes and drops the route book, so a default
+//! route or gateway change lost to a full buffer during an apply is not announced; the 25 s
+//! keepalive still covers it, and it takes more than about 6,500 messages in one apply.
+//!
+//! **Known limit: real Wi-Fi Macs (unmeasured).** Links are judged by `IFF_UP | IFF_RUNNING`
+//! and addresses include link-local ones. `awdl0` and `llw0` can come and go with AirDrop and
+//! Continuity, with their `fe80::` addresses, and each flip announces. That costs one keepalive
+//! per live session, at most 4 per second; nothing is published beyond existing endpoints. The
+//! Mac VM has no Wi-Fi, so its idle window cannot show it. If a real Wi-Fi Mac announces on
+//! these, the fix is to ignore links that carry only link-local addresses.
 
 use crate::underlay_announce::{AnnouncementWaiter, ChangeBook, UnderlayAnnounce};
 use nix::{
