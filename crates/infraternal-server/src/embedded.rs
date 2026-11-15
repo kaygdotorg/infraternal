@@ -45,9 +45,11 @@ const PREPARATION_CALL_BIT: u32 = 1 << 31;
 const RETIREMENT_CALL_BIT: u32 = 1 << 30;
 const BACKGROUND_CALL_BITS: u32 = PREPARATION_CALL_BIT | RETIREMENT_CALL_BIT;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
-// A default 1MiB grant can arrive in 256 bulk PTY frames while forwarding awaits I/O.
-// Credits bound payload bytes; frame slots separately bound small outputs and notices.
-const OUTPUT_CAPACITY: usize = 256;
+/// Each browser stream's output queue, bounded in bytes tied to the credit window [D381, #477].
+#[path = "embedded_output_queue.rs"]
+mod output_queue;
+use output_queue::{OUTPUT_QUEUE_SLOTS, OutputQueue};
+/// The most unspent output credit one browser stream may hold; it also sizes the queue cap.
 const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 // Bounded actor input queues backpressure each attachment forwarding worker.
 const INPUT_CAPACITY: usize = 4;
@@ -736,7 +738,7 @@ impl EmbeddedAgent {
         stream_id: u32,
         monitored: bool,
     ) -> Result<TerminalAttachment, AgentError> {
-        let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
+        let (output_tx, output) = mpsc::channel(OUTPUT_QUEUE_SLOTS);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
         let (input_credit, input_acked) = watch::channel(last_in_seq);
         let id = self
@@ -890,6 +892,8 @@ enum Command {
     },
 }
 
+/// The host-link actor's state for one browser attachment: its cursors, retained unacknowledged
+/// input, granted output credit, route liveness, and the byte-bounded queue its output goes to.
 struct AttachmentState {
     session_id: [u8; 16],
     stream_id: u32,
@@ -908,7 +912,8 @@ struct AttachmentState {
     // The same actor tick owns the lease; a Pong never needs a payload forwarder.
     route: Option<Liveness>,
     proof_rebind_pending: bool,
-    output: mpsc::Sender<TerminalOutput>,
+    // Every send goes through the byte-bounded queue so its ledger sees each item.
+    output: OutputQueue,
 }
 
 enum Peer {
@@ -2407,7 +2412,7 @@ async fn process_command(
                     replaying: false,
                     route: monitored.then(Liveness::new),
                     proof_rebind_pending: false,
-                    output,
+                    output: output.into(),
                 },
             );
             let _ = reply.send(Ok((attachment_id, stream_id)));

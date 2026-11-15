@@ -32,6 +32,13 @@ fn repeated_tiny_credit_pauses_preserve_shell_progress() {
     probe("scripts/verify-agent-snapshot.py");
 }
 
+/// A browser that resumes on the same stream id after a mid-flood key repaint gets its replay
+/// from its own cursor, not from the old attachment's repaint cursor (#477).
+#[test]
+fn reattached_stream_replays_from_its_cursor_after_a_key_repaint() {
+    probe("scripts/verify-agent-reattach-replay.py");
+}
+
 #[test]
 fn two_writers_keep_independent_ack_and_exact_input_after_restart() {
     probe("scripts/verify-agent-multi.py");
