@@ -170,3 +170,86 @@ async fn mac_listener_passes_initiations_from_installed_keys() {
         sender.local_addr().expect("sender address").port()
     );
 }
+
+/// J781 finding 3 (#483, #515): a peer whose grants allow no traffic either way gets no reply
+/// from the Mac, as on Linux.
+///
+/// The worker builds its device peers with `peers_for_config` and installs `installed_keys` of
+/// them into the listener's guard, at start and after every accepted apply. This does the same
+/// with a snapshot holding one granted peer and one peer without network access, then sends
+/// the denied key's initiation before the granted one's: the first datagram `GotaTun` reads
+/// must be the granted peer's, because the guard dropped the other.
+#[tokio::test]
+async fn mac_guard_drops_initiations_from_a_peer_without_network_access() {
+    use crate::{
+        handshake_admission::flood_fairness::initiation_to,
+        policy::{
+            model::{Addresses, NodeId, PublicKey},
+            rules::TrafficPolicy,
+        },
+    };
+    use gotatun::{packet::PacketBufPool, udp::UdpRecv as _, x25519::PublicKey as X25519PublicKey};
+    const GRANTED: [u8; 32] = [0x66; 32];
+    const DENIED: [u8; 32] = [0x77; 32];
+    let mut config = super::config();
+    let template = config.peers.values().next().cloned().expect("fixture peer");
+    config.peers.clear();
+    for (node, secret, access) in [
+        (4_u8, GRANTED, TrafficPolicy::All),
+        (5_u8, DENIED, TrafficPolicy::None),
+    ] {
+        let mut policy = template.clone();
+        policy.peer.key = PublicKey(*X25519PublicKey::from(&StaticSecret::from(secret)).as_bytes());
+        policy.peer.addresses = Addresses {
+            ipv4: Ipv4Addr::new(10, 254, 0, node),
+            ipv6: std::net::Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, node.into()),
+        };
+        policy.peer.endpoint = Some(SocketAddr::from(([192, 0, 2, node], 51_820)));
+        policy.inbound = access.clone();
+        policy.outbound = access;
+        config.peers.insert(NodeId(node.into()), policy);
+    }
+    let peers = super::super::peers_for_config(&config).expect("convert peers");
+    let (mut factory, port) = super::super::bind_udp(
+        crate::listen_port::Request {
+            port: 0,
+            allow_fallback: true,
+        },
+        StaticSecret::from([0x31; 32]),
+    )
+    .await
+    .expect("listener");
+    factory
+        .admission
+        .write()
+        .await
+        .install(super::super::installed_keys(&peers), &peers);
+    let (_send, mut receive) = factory
+        .bind(&UdpTransportFactoryParams { addr: None, port })
+        .await
+        .expect("bound listener");
+    let node_public = X25519PublicKey::from(&StaticSecret::from([0x31; 32]));
+    let denied = initiation_to(node_public, DENIED);
+    let granted = initiation_to(node_public, GRANTED);
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender");
+    let node = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    sender
+        .send_to(&denied, node)
+        .expect("send denied initiation");
+    sender
+        .send_to(&granted, node)
+        .expect("send granted initiation");
+    let mut pool = PacketBufPool::new(4);
+    let (packet, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        receive.recv_from(&mut pool),
+    )
+    .await
+    .expect("the Mac listener dropped the granted peer's initiation too")
+    .expect("receive");
+    assert!(
+        packet.as_ref() != denied.as_slice(),
+        "the Mac guard passed an initiation from a peer without network access"
+    );
+    assert_eq!(packet.as_ref(), granted.as_slice());
+}
