@@ -66,6 +66,11 @@ pub const UNHEALTHY: &str = "the new release failed its health check";
 pub const STOPPED_IN_TRIAL: &str = "the new release stopped during its health check";
 /// Why A paused B when B's exec failed and A came back without B running.
 pub const DID_NOT_START: &str = "the new release could not start";
+/// Recorded when the previous release runs again but could not put its database copy
+/// back yet: the marker stays, so its next start tries again, and the new release
+/// stays paused.
+pub const RESTORE_PENDING: &str =
+    "the previous release runs again, but its database copy could not be restored yet";
 /// Why a marker that names neither the running image nor its predecessor was dropped.
 pub const INTERRUPTED: &str = "the update was interrupted by a different server binary";
 
@@ -333,8 +338,15 @@ pub fn resume(
             },
         };
         // B never ran after a failed exec, so the database is still A's own.
-        if pending.phase != Phase::Switching {
-            restore_database(data, &updates.join("previous").join(DATABASE))?;
+        if pending.phase != Phase::Switching
+            && let Err(failed) = restore_database(data, &updates.join("previous").join(DATABASE))
+        {
+            // Never leave B eligible: without the pause the timer would stage and apply
+            // it again at once. The marker stays, so the next start retries the restore.
+            state.applied = Some(record(&pending.to_version, UNDONE, Some(RESTORE_PENDING)));
+            state.paused = Some(pending.to_version.clone());
+            lock.write_state(&state)?;
+            return Err(failed);
         }
         remove_entry(&lock, &updates.join("releases").join(&pending.to_version))?;
         state.applied = Some(record(&pending.to_version, UNDONE, Some(reason)));
@@ -347,6 +359,13 @@ pub fn resume(
     remove_pending(&lock)?;
     lock.write_state(&state)?;
     Ok(Resume::Finished(outcome))
+}
+
+/// Whether a switch is in flight here (`pending.json` exists). A server never starts
+/// another switch until the last one is committed or undone.
+#[must_use]
+pub fn in_flight(data: &Path) -> bool {
+    std::fs::symlink_metadata(data.join("updates").join(PENDING)).is_ok()
 }
 
 /// Make B the release that starts (its health check passed): point `current` at

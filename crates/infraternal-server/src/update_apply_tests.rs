@@ -108,3 +108,51 @@ fn the_running_path_is_the_configured_executable() {
     assert!(path.is_absolute());
     assert!(!path.to_string_lossy().starts_with("/memfd:"));
 }
+
+/// The D295 copy is a private (0600) file that holds the database's rows, whatever the
+/// umask; the undo only restores a private copy (found on the root proof, #211 S4).
+#[tokio::test]
+async fn the_database_copy_is_private_and_complete() {
+    use std::os::unix::fs::PermissionsExt;
+    // A file database on one connection, as the server's own: each pooled in-memory
+    // connection would be a separate, empty database.
+    let source = std::env::temp_dir().join(format!("source-{}.sqlite", uuid::Uuid::new_v4()));
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&source)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE t(x TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO t VALUES('kept')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let folder = std::env::temp_dir().join(format!("copy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&folder).unwrap();
+    let copy = folder.join("database.sqlite");
+    copy_database(&pool, &copy).await.unwrap();
+    assert_eq!(
+        std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let copied =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&copy))
+            .await
+            .unwrap();
+    let (value,): (String,) = sqlx::query_as("SELECT x FROM t")
+        .fetch_one(&copied)
+        .await
+        .unwrap();
+    assert_eq!(value, "kept");
+    copied.close().await;
+    pool.close().await;
+    let _ = std::fs::remove_dir_all(&folder);
+    let _ = std::fs::remove_file(&source);
+}

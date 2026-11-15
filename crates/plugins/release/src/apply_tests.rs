@@ -375,3 +375,49 @@ fn a_marker_with_a_bad_version_is_ignored() {
     );
     assert!(!data.updates().join(PENDING).exists());
 }
+
+/// A copy that cannot be restored (here: not private) never leaves B eligible: B is
+/// paused and recorded, the marker stays, and the next start, once the copy is usable,
+/// finishes the undo. Found on the root proof (#211 S4): `VACUUM INTO` wrote 0644.
+#[test]
+fn a_failed_restore_pauses_the_new_release_and_retries_at_the_next_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = Data::new();
+    write_file(&data.0.join(DATABASE), b"written-by-b");
+    let previous = data.updates().join("previous");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&previous)
+        .unwrap();
+    write_file(&previous.join(DATABASE), b"a-copy");
+    std::fs::set_permissions(
+        previous.join(DATABASE),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    data.mark(Phase::Trial);
+    assert!(in_flight(&data.0));
+    assert!(resume(&data.0, A, || Ok("aa".repeat(32))).is_err());
+    let state = data.state();
+    assert_eq!(state.paused.as_deref(), Some(B));
+    assert_eq!(
+        state.applied.unwrap().reason.as_deref(),
+        Some(RESTORE_PENDING)
+    );
+    assert!(in_flight(&data.0), "the marker stays for the retry");
+    assert_eq!(
+        std::fs::read(data.0.join(DATABASE)).unwrap(),
+        b"written-by-b"
+    );
+    std::fs::set_permissions(
+        previous.join(DATABASE),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        resume(&data.0, A, || Ok("aa".repeat(32))),
+        Ok(Resume::Finished(UNDONE))
+    );
+    assert_eq!(std::fs::read(data.0.join(DATABASE)).unwrap(), b"a-copy");
+    assert!(!in_flight(&data.0));
+}

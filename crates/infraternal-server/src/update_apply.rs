@@ -232,7 +232,7 @@ async fn quiet_window(
             tokio::time::sleep(quiet.saturating_sub(idle)).await;
             continue;
         }
-        match switch_once(updater, pool, artifact, quiet).await {
+        match switch_once(updater, pool, data, artifact, quiet).await {
             // The restart loop is about to exec the new release.
             Ok(()) => return std::future::pending().await,
             Err(Retry::Soon) => {}
@@ -256,9 +256,15 @@ enum Retry {
 async fn switch_once(
     updater: &Updater,
     pool: &sqlx::SqlitePool,
+    data: &Path,
     artifact: &'static str,
     quiet: Duration,
 ) -> Result<(), Retry> {
+    // One switch at a time: a marker left by an unfinished undo keeps everything else
+    // waiting, so a failure can never turn into a loop of switches.
+    if apply::in_flight(data) {
+        return Err(Retry::Later("an earlier update switch has not finished"));
+    }
     let confirmed = updater.confirm_staged().await.map_err(Retry::Later)?;
     if crate::update_activity::idle_for() < quiet {
         return Err(Retry::Soon);
@@ -280,17 +286,8 @@ async fn switch_once(
         Retry::Later(reason)
     };
     // D295: one online copy of the database, right before the switch.
-    let copy = switch.database_copy();
-    let Some(copy_text) = copy.to_str() else {
-        return Err(give_up(switch, "the database copy path is not text"));
-    };
-    if sqlx::query("VACUUM INTO ?")
-        .bind(copy_text)
-        .execute(pool)
-        .await
-        .is_err()
-    {
-        return Err(give_up(switch, "the database copy could not be written"));
+    if let Err(reason) = copy_database(pool, &switch.database_copy()).await {
+        return Err(give_up(switch, reason));
     }
     let pending = Pending {
         phase: Phase::Switching,
@@ -339,6 +336,28 @@ async fn switch_once(
         )),
         Err(_) => Err(Retry::Later("the restart control dropped the switch")),
     }
+}
+
+/// Write the D295 database copy to `path` with `VACUUM INTO`, then make it private (0600).
+///
+/// SQLite creates the file with the process umask, but the copy holds everything the
+/// database holds, and the undo restores only a private file. Its folder (`previous/`,
+/// 0700) keeps it unreachable to anyone else in between.
+/// # Errors
+/// The path is not text, or the copy could not be written or made private.
+pub(crate) async fn copy_database(
+    pool: &sqlx::SqlitePool,
+    path: &Path,
+) -> Result<(), &'static str> {
+    use std::os::unix::fs::PermissionsExt;
+    let text = path.to_str().ok_or("the database copy path is not text")?;
+    sqlx::query("VACUUM INTO ?")
+        .bind(text)
+        .execute(pool)
+        .await
+        .map_err(|_| "the database copy could not be written")?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| "the database copy could not be made private")
 }
 
 /// The new release's trial: health within [`TRIAL_LIMIT`], then commit or undo.
