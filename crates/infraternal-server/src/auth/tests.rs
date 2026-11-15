@@ -2174,8 +2174,12 @@ where
     let next = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match socket.next().await {
-                // RFC Pong is transport housekeeping, never authority-bearing output.
-                Some(Ok(Message::Pong(_))) => {}
+                // RFC Ping and Pong are transport housekeeping, never
+                // authority-bearing output. The server's liveness probe is an
+                // RFC Ping due every 25 ms once the last one is answered, so
+                // when logout takes longer than that (a loaded host), a probe
+                // can arrive before the close (J785, #525).
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                 // A protocol heartbeat already in flight cannot prove closure.
                 // Continue to actual WebSocket closure; every data/reply frame
                 // remains a failure, including an undrained input acknowledgment.
@@ -2217,6 +2221,19 @@ where
         matches!(next, None | Some(Ok(Message::Close(_)) | Err(_))),
         "unexpected frame while awaiting WebSocket closure (stream,type,ack,close): {diagnostic:?}"
     );
+}
+
+/// J785 (#525): a transport probe (an RFC Ping) that arrives while logout is
+/// still closing the socket is not output after logout. Before the fix, the
+/// closure check failed on it with "unexpected frame … None" whenever logout
+/// took longer than one 25 ms probe tick, which a loaded gate host does.
+#[tokio::test]
+async fn socket_closure_check_skips_a_transport_probe_before_the_close() {
+    let mut socket = futures_util::stream::iter(vec![
+        Ok::<_, tokio_tungstenite::tungstenite::Error>(Message::Ping(Bytes::from_static(b"probe"))),
+        Ok(Message::Close(None)),
+    ]);
+    assert_socket_closed(&mut socket).await;
 }
 
 async fn read_partial_terminal<S>(socket: &mut S) -> (Vec<u8>, bool)
