@@ -12,6 +12,13 @@
 //! polling loop. Offline or refused checks only record the reason in the update state
 //! and log at debug level, so an offline server stays quiet.
 //!
+//! **Faults and refusals (J725 P3-2).** Only faults back off: the network or builds
+//! host failing, the disk, and a release that fails verification. A policy refusal (the
+//! guard refuses an older or another channel's release, or updates are switched off) is
+//! a normal answer: it is recorded in [`UpdateState::refused`], leaves `last_error` and
+//! `failures` alone, and the next check stays 15 minutes away. A server on the stable
+//! setting running an edge build therefore keeps checking at the normal pace.
+//!
 //! **Guard (J685 P3-3).** The periodic check ([`Admission::Forward`]) stages only a
 //! strictly newer version on the running version's own channel. The same version does
 //! nothing; an older version or another channel's release is refused. Only an explicit
@@ -164,9 +171,13 @@ pub struct UpdateState {
     pub last_check: Option<i64>,
     /// When the timer will check next.
     pub next_check: Option<i64>,
-    /// Why the last check failed or what it refused; `None` after a clean check.
+    /// Why the last check failed (a fault: network, disk or verification); `None` after
+    /// a check that reached an answer.
     pub last_error: Option<String>,
-    /// Failed checks in a row; drives the backoff.
+    /// What the guard refused at the last check (an older or another channel's release);
+    /// a normal answer, never counted as a failure.
+    pub refused: Option<String>,
+    /// Failed checks in a row; drives the backoff. Refusals never count.
     pub failures: u32,
     /// The last staged release the updater removed without applying it, and why.
     pub removed: Option<Removed>,
@@ -193,6 +204,9 @@ pub const REMOVED_NOT_NEWER: &str =
     "the staged release is no longer newer than the running version";
 /// Why a staged release was removed when its channel stopped announcing it.
 pub const REMOVED_WITHDRAWN: &str = "the channel no longer offers this release";
+/// The refusal when the release plugin is switched off (or its channel setting is
+/// unusable): the check does nothing and the timer keeps its normal pace.
+pub const UPDATES_OFF: &str = "updates are turned off in the release settings";
 /// [`Updater::confirm_staged`]'s refusal when nothing verified is staged.
 pub const NOTHING_STAGED: &str = "no verified release is staged";
 
@@ -284,6 +298,25 @@ pub enum Outcome {
     Current(String),
     /// This release is staged (now, or already by an earlier check).
     Staged(String),
+    /// The periodic check reached an answer the policy refuses (the guard refused the
+    /// release, or updates are off). Not a failure: it never backs off the timer.
+    Refused(&'static str),
+}
+
+/// Why a check stopped without an [`Outcome`], which decides whether it backs off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    /// The network, builds host, disk or verifier failed: counts toward the backoff.
+    Fault(&'static str),
+    /// The policy said no (the guard, a malformed request): never counts.
+    Refusal(&'static str),
+}
+
+/// Every plain reason from the I/O and verify helpers is a fault.
+impl From<&'static str> for Stop {
+    fn from(reason: &'static str) -> Self {
+        Self::Fault(reason)
+    }
 }
 
 impl Updater {
@@ -325,19 +358,29 @@ impl Updater {
     /// Run one check and record it in the update state.
     ///
     /// `target` asks for one exact version instead of the channel's newest (an explicit
-    /// rollback); `admission` decides what the guard allows. Returns what happened.
+    /// rollback); `admission` decides what the guard allows. Returns what happened. A
+    /// periodic ([`Admission::Forward`]) check that the policy refuses, or that finds
+    /// updates switched off, returns [`Outcome::Refused`], not an error.
     /// # Errors
-    /// A fixed public reason: the plugin is off, the state folder is unsafe, the
-    /// network or builds host failed, the release is refused by the guard or the
-    /// verifier, or the disk is too full. The same reason is saved as `last_error`.
+    /// A fixed public reason: the state folder is unsafe, the network or builds host
+    /// failed, the verifier refused the release, or the disk is too full (saved as
+    /// `last_error`, counted in `failures`); and for an explicit request, a refusal by
+    /// the guard or the switch (saved as `refused`, never counted).
     pub async fn check(
         &self,
         target: Option<&str>,
         admission: Admission,
     ) -> Result<Outcome, &'static str> {
-        let (enabled, channel) = (self.settings)().await?;
+        let refuse = |reason| match admission {
+            Admission::Forward => Ok(Outcome::Refused(reason)),
+            Admission::Explicit => Err(reason),
+        };
+        let (enabled, channel) = match (self.settings)().await {
+            Ok(settings) => settings,
+            Err(reason) => return refuse(reason),
+        };
         if !enabled {
-            return Err("release unavailable");
+            return refuse(UPDATES_OFF);
         }
         let lock = Locked::wait(&self.directory).await?;
         let mut state = status_of(&self.directory, &self.current);
@@ -347,20 +390,31 @@ impl Updater {
             self.check_locked(&lock, &channel, target, admission, &mut state),
         )
         .await
-        .unwrap_or(Err("the update check exceeded its time limit"));
+        .unwrap_or(Err(Stop::Fault("the update check exceeded its time limit")));
         state.last_check = Some(now());
-        match &result {
+        match result {
             Ok(_) => {
                 state.last_error = None;
+                state.refused = None;
                 state.failures = 0;
             }
-            Err(reason) => {
-                state.last_error = Some((*reason).to_owned());
+            Err(Stop::Fault(reason)) => {
+                state.last_error = Some(reason.to_owned());
                 state.failures = state.failures.saturating_add(1);
+            }
+            Err(Stop::Refusal(reason)) => {
+                // The builds host answered: the transport is fine, so the backoff resets.
+                state.last_error = None;
+                state.refused = Some(reason.to_owned());
+                state.failures = 0;
             }
         }
         lock.write_state(&state)?;
-        result
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(Stop::Fault(reason)) => Err(reason),
+            Err(Stop::Refusal(reason)) => refuse(reason),
+        }
     }
 
     /// The body of [`Updater::check`], run while holding the folder lock: sweep leftovers, fetch and guard the release, check space, download, verify and publish.
@@ -371,7 +425,7 @@ impl Updater {
         target: Option<&str>,
         admission: Admission,
         state: &mut UpdateState,
-    ) -> Result<Outcome, &'static str> {
+    ) -> Result<Outcome, Stop> {
         lock.sweep()?;
         let mut staged = self.inspect_staged(lock, state).await?;
         // A staged release the periodic guard would no longer admit (it is the running
@@ -386,7 +440,7 @@ impl Updater {
         let download = lock.download()?;
         let version = if let Some(version) = target {
             if infraternal_plugin_api::release_version::channel(version).is_none() {
-                return Err("the release version is malformed");
+                return Err(Stop::Refusal("the release version is malformed"));
             }
             crate::latest::fetch_signed(
                 self.engine.as_ref(),
@@ -421,14 +475,16 @@ impl Updater {
             }
             version
         };
-        if guard(&self.current, &version, admission)? == Verdict::Same {
+        if guard(&self.current, &version, admission).map_err(Stop::Refusal)? == Verdict::Same {
             return Ok(Outcome::Current(version));
         }
         if staged.as_deref() == Some(version.as_str()) {
             return Ok(Outcome::Staged(version));
         }
         if free_space(&self.directory)? < self.required_space {
-            return Err("there is not enough free disk space to stage the update");
+            return Err(Stop::Fault(
+                "there is not enough free disk space to stage the update",
+            ));
         }
         self.engine
             .download(
@@ -451,7 +507,9 @@ impl Updater {
                 .await
                 .map_err(|_| "release verification could not finish")??;
         if signed != version {
-            return Err("the signed release version does not match the requested one");
+            return Err(Stop::Fault(
+                "the signed release version does not match the requested one",
+            ));
         }
         lock.publish(download)?;
         state.staged = Some(version.clone());
@@ -550,7 +608,7 @@ impl Updater {
         };
         let (enabled, channel) = (self.settings)().await?;
         if !enabled {
-            return Err("release unavailable");
+            return Err(UPDATES_OFF);
         }
         let download = lock.download()?;
         let announced = crate::latest::fetch_metadata(
@@ -590,6 +648,7 @@ impl Updater {
             loop {
                 self.record_next(wait);
                 tokio::time::sleep(wait).await;
+                // Refusals and "updates off" are `Ok(Refused)`: they keep the normal pace.
                 let failures = match self.check(None, Admission::Forward).await {
                     Ok(outcome) => {
                         tracing::debug!(?outcome, "update check finished");

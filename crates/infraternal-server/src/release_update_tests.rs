@@ -9,13 +9,14 @@
 //! download; a newer release replaces the staged one; the timer stages on its own; the
 //! state is visible through `release.update.status`; and a `staged/` found on disk is
 //! re-verified (or removed) before use; and a release the channel withdraws is removed,
-//! both by the periodic check and by S4's apply-time confirmation.
+//! both by the periodic check and by S4's apply-time confirmation; policy refusals and
+//! "updates off" never back off the timer.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::release_payload::tests::{Bucket, Release};
 use infraternal_plugin_release::update::{
-    Admission, NOTHING_STAGED, Outcome, REMOVED_UNVERIFIED, REMOVED_WITHDRAWN, UpdateState,
-    Updater, status,
+    Admission, NOTHING_STAGED, Outcome, REMOVED_UNVERIFIED, REMOVED_WITHDRAWN, UPDATES_OFF,
+    UpdateState, Updater, status,
 };
 use std::{os::unix::fs::PermissionsExt, sync::atomic::Ordering};
 
@@ -197,28 +198,33 @@ async fn the_running_version_is_left_alone() {
     assert_eq!(state(&release, NEW).staged, None);
 }
 
-/// An older release and another channel's release are refused by the periodic check; an explicit rollback stages the older one, and the next periodic check removes it.
+/// An older release and another channel's release are refused by the periodic check (a normal answer, not a failure); an explicit rollback stages the older one, and the next periodic check removes it.
 #[tokio::test]
 async fn older_and_cross_channel_releases_need_an_explicit_request() {
     let (release, bucket) = channel(OLD);
     let forward = updater(&release, &bucket.origin, NEW);
     assert_eq!(
         forward.check(None, Admission::Forward).await,
-        Err("the release is older than the running version")
+        Ok(Outcome::Refused(
+            "the release is older than the running version"
+        ))
     );
     assert_eq!(image_requests(&bucket), 4, "no image is downloaded");
     assert_eq!(leftovers(&release), ["state.json"]);
     let saved = state(&release, NEW);
     assert_eq!(saved.staged, None);
     assert_eq!(
-        saved.last_error.as_deref(),
+        saved.refused.as_deref(),
         Some("the release is older than the running version")
     );
+    assert_eq!((saved.last_error, saved.failures), (None, 0));
     // A stable server never takes an edge release on its own.
     let stable = updater(&release, &bucket.origin, "0.1.0");
     assert_eq!(
         stable.check(None, Admission::Forward).await,
-        Err("the release is on another channel; switching channels needs an explicit update")
+        Ok(Outcome::Refused(
+            "the release is on another channel; switching channels needs an explicit update"
+        ))
     );
     // An explicit rollback to the exact older version stages it, still verified.
     assert_eq!(
@@ -226,7 +232,10 @@ async fn older_and_cross_channel_releases_need_an_explicit_request() {
         Ok(Outcome::Staged(OLD.into()))
     );
     // The next periodic check removes a staged release it would not have chosen.
-    assert!(forward.check(None, Admission::Forward).await.is_err());
+    assert!(matches!(
+        forward.check(None, Admission::Forward).await,
+        Ok(Outcome::Refused(_))
+    ));
     assert_eq!(state(&release, NEW).staged, None);
     assert_eq!(leftovers(&release), ["state.json"]);
 }
@@ -572,4 +581,80 @@ async fn apply_time_confirmation_refuses_a_withdrawn_release() {
     assert_eq!(saved.staged, None);
     assert_eq!(saved.removed.unwrap().reason, REMOVED_WITHDRAWN);
     assert_eq!(leftovers(&release), ["state.json"]);
+}
+
+/// Policy refusals and switched-off updates are not failures (J725 P3-2): repeated
+/// refusals keep `failures` at 0 and the timer at its normal 15-minute pace, while an
+/// explicit request still gets the refusal as an error.
+#[tokio::test]
+async fn refusals_and_disabled_updates_never_back_off() {
+    let (release, bucket) = channel(NEW);
+    // An edge build on a server whose setting is stable once stable publishes.
+    let stable = Release::with_version(4096, "0.2.0");
+    bucket.files.lock().unwrap().extend(stable.files.clone());
+    bucket.files.lock().unwrap().insert(
+        "/releases/channels/stable.json".into(),
+        b"{\"version\":\"0.2.0\"}".to_vec(),
+    );
+    let on_stable = Updater::new(
+        &release.root,
+        bucket.origin.clone(),
+        OLD.into(),
+        artifact().into(),
+        Arc::new(Engine {
+            trust: Some(format!("{}{}", release.trust, stable.trust)),
+        }),
+        Arc::new(|| Box::pin(async { Ok((true, "stable".to_owned())) })),
+    );
+    for _ in 0..3 {
+        assert!(matches!(
+            on_stable.check(None, Admission::Forward).await,
+            Ok(Outcome::Refused(_))
+        ));
+    }
+    let saved = state(&release, OLD);
+    assert_eq!((saved.failures, saved.last_error), (0, None));
+    assert!(saved.refused.is_some());
+    // The timer keeps its normal pace after a refusal: wait for the note it writes after
+    // its own check (times are whole seconds, so compare the gap, not the stamps).
+    let mut changes = infraternal_plugin_release::update::changes();
+    let task = Arc::new(on_stable).spawn_after(std::time::Duration::ZERO);
+    let saved = wait_for_state(&release, OLD, &mut changes, |saved| {
+        saved
+            .next_check
+            .zip(saved.last_check)
+            .is_some_and(|(next, last)| next > last + 60)
+    })
+    .await;
+    task.abort();
+    let wait = saved.next_check.unwrap() - saved.last_check.unwrap();
+    assert!((11 * 60..=19 * 60).contains(&wait), "{wait}");
+    assert_eq!(saved.failures, 0);
+    // An explicit request still reports the refusal to its caller, uncounted.
+    let explicit = updater(&release, &bucket.origin, NEW);
+    assert_eq!(
+        explicit
+            .check(Some("not-a-version"), Admission::Explicit)
+            .await,
+        Err("the release version is malformed")
+    );
+    assert_eq!(state(&release, NEW).failures, 0);
+    // Updates switched off: a refusal, nothing touched, nothing counted.
+    let off = Updater::new(
+        &release.root,
+        bucket.origin.clone(),
+        OLD.into(),
+        artifact().into(),
+        Arc::new(Engine {
+            trust: Some(release.trust.clone()),
+        }),
+        Arc::new(|| Box::pin(async { Ok((false, "edge".to_owned())) })),
+    );
+    let requests = image_requests(&bucket);
+    assert_eq!(
+        off.check(None, Admission::Forward).await,
+        Ok(Outcome::Refused(UPDATES_OFF))
+    );
+    assert_eq!(image_requests(&bucket), requests, "no request while off");
+    assert_eq!(state(&release, OLD).failures, 0);
 }
