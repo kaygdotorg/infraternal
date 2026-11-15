@@ -1757,7 +1757,58 @@ fn reload_systemd(systemctl: &Path, removed_unit: &Path) -> Result<(), PolicyErr
 /// # Errors
 /// Returns an error when the role files are unsafe or the merged nft update fails.
 pub fn set_mesh_listener(udp_port: Option<u16>) -> Result<Option<String>, PolicyError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(paths) = TEST_POLICY_PATHS.with(|current| current.borrow().clone()) {
+        return set_mesh_listener_at(&paths, None, udp_port);
+    }
     set_mesh_listener_at(&HostFirewallPaths::system(), None, udp_port)
+}
+
+// Node-level namespace tests drive `set_mesh_listener` through a real mesh node,
+// which always asks for the fixed system layout; they point it at a private root.
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    /// The private policy layout a test on this thread asked the mesh listener to use, if any.
+    static TEST_POLICY_PATHS: RefCell<Option<HostFirewallPaths>> = const { RefCell::new(None) };
+}
+
+/// A test-only redirect of [`set_mesh_listener`]'s policy files to a private layout.
+///
+/// A mesh node opens and closes its listener through [`set_mesh_listener`],
+/// which reads the fixed `/var/lib/infraternal` role files. A privileged
+/// namespace test that brings up a real node installs this guard with
+/// [`HostFirewallPaths::under`] a private root, so the node's own calls
+/// update the test's host table and never read or write the machine's.
+/// Only the current thread is affected, and dropping the guard restores the
+/// previous layout. The nft it runs is still found by [`discover_nft`], so a
+/// test pairs this with [`NftTestPathOverride`].
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct HostFirewallPathsTestOverride {
+    /// The previous thread-local layout, restored when the guard leaves scope.
+    previous: Option<HostFirewallPaths>,
+}
+
+/// Test-only constructor for the policy layout redirect.
+#[cfg(any(test, feature = "test-support"))]
+impl HostFirewallPathsTestOverride {
+    /// Send this thread's [`set_mesh_listener`] calls to `paths` until the guard is dropped.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn install(paths: &HostFirewallPaths) -> Self {
+        let previous = TEST_POLICY_PATHS.with(|current| current.replace(Some(paths.clone())));
+        Self { previous }
+    }
+}
+
+/// Restore the previous layout without affecting another test thread.
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for HostFirewallPathsTestOverride {
+    /// Put back an earlier redirect after this test ends.
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        TEST_POLICY_PATHS.with(|current| *current.borrow_mut() = previous);
+    }
 }
 
 /// Record the mesh listener below the supplied layout, using the given nft executable.

@@ -4283,6 +4283,12 @@ mod tests {
 #[path = "node_rotation_tests.rs"]
 mod rotation_tests;
 
+/// Namespace proofs that a `GotaTun` node opens and closes its host listener without any
+/// firewall tool (#483, D384, D386).
+#[cfg(test)]
+#[path = "node_host_listener_tests.rs"]
+mod host_listener_tests;
+
 /// Root-only measurement of live traffic across a same-content coordinator restart (#382 P2-c).
 #[cfg(test)]
 #[path = "node_restart_continuity_bench.rs"]
