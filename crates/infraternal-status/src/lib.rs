@@ -492,6 +492,10 @@ pub struct RecordedServer {
     pub data: Option<PathBuf>,
     /// The absolute `--web-root` folder, when the unit names one.
     pub web_root: Option<PathBuf>,
+    /// A RELATIVE `--data` or `--web-root` value the unit holds (a hand edit; the
+    /// installer only writes absolute ones). Never resolved, only reported, so
+    /// `server init` can refuse to replace a unit it cannot reproduce [#516].
+    pub relative: Vec<(String, PathBuf)>,
 }
 
 /// Read the server unit `<name>.service` in `scope`, the one `server init`
@@ -517,9 +521,18 @@ pub fn recorded_server_unit(roots: &Roots, scope: Scope, name: &str) -> Option<R
         return None;
     }
     let words = effective_exec_words(directory, &file)?;
+    let web_root = option(&words, "--web-root");
+    let relative = [
+        ("--data", unit.data.clone()),
+        ("--web-root", web_root.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, value)| Some((flag.to_owned(), value.filter(|path| path.is_relative())?)))
+    .collect();
     Some(RecordedServer {
         data: unit.data.filter(|path| path.is_absolute()),
-        web_root: option(&words, "--web-root").filter(|path| path.is_absolute()),
+        web_root: web_root.filter(|path| path.is_absolute()),
+        relative,
     })
 }
 

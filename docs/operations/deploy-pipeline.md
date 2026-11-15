@@ -40,7 +40,7 @@ context, never a partial check or aggregate status. The base commit's status
 list was empty during this job; no guessed CI context is enabled by default.
 
 Completed bundles contain both host payloads, the x86 server copy, `VERSION`,
-`SOURCE`, `GATE`, the web directory and exhaustive `SHA256SUMS`. Directory
+`SOURCE`, `GATE`, the web directory and the exhaustive `BUILDSUMS`. Directory
 publication is atomic; the last ten complete bundles are kept. Deploy's flock
 pins its selected local bundle against pruning. Build hashes attest local
 integrity; they do not replace release signatures.
@@ -49,10 +49,11 @@ integrity; they do not replace release signatures.
 
 Signing is external to this pipeline. The operator publishes the exact built
 `VERSION` and binary bytes using the existing release procedure, then supplies
-its public `MANIFEST` and `MANIFEST.sig` beside the cached artifacts. These two
-late public metadata files are excluded from the builder's integrity list.
-The bundle's identity must match the signed manifest and pinned public trust
-anchors; signing a different rebuild cannot admit the cached bytes. Neither
+the release's public `SHA256SUMS` and `SHA256SUMS.sig`, exactly as the signer
+Worker wrote them, beside the cached artifacts. These two late public metadata
+files are excluded from the builder's own integrity list, `BUILDSUMS` (#211).
+The bundle's `VERSION` and images must match the signed checksums and pinned
+public trust anchors; signing a different rebuild cannot admit the cached bytes. Neither
 script contacts a provider management API or a credential store.
 
 The current production image also needs matching signed metadata beside its
@@ -203,7 +204,7 @@ failure, capacity and pruning; those tests do not replace perf-VM acceptance.
    This job has not installed that service.
 3. Publish only the reviewed, gated dev candidate through the production
    release procedure in `docs/operations/release.md`. Place the returned public
-   `MANIFEST` and `MANIFEST.sig` beside the **same bytes** in its local build
+   `SHA256SUMS` and `SHA256SUMS.sig` beside the **same bytes** in its local build
    cache. Production signing remains external. Never carry the staging feature,
    marker, test key or fixture artifacts into that cache.
 4. Before the first administrative cut-over, confirm the production service

@@ -50,9 +50,9 @@ class DeploymentTests(unittest.TestCase):
         return directory
 
     def sums(self, directory):
-        (directory / "SHA256SUMS").write_text("".join(
+        (directory / "BUILDSUMS").write_text("".join(
             hashlib.sha256(file.read_bytes()).hexdigest() + "  " + str(file.relative_to(directory)) + "\n"
-            for file in sorted(directory.rglob("*")) if file.is_file() and file.name != "SHA256SUMS"))
+            for file in sorted(directory.rglob("*")) if file.is_file() and file.name != "BUILDSUMS"))
 
     def test_checksums_reject_unlisted_changed_traversal_and_symlink_files(self):
         directory = self.bundle()
@@ -64,7 +64,7 @@ class DeploymentTests(unittest.TestCase):
         (directory / "web/index.html").write_text("tampered")
         with self.assertRaises(ValueError):
             remote.checksums(directory)
-        (directory / "SHA256SUMS").write_text("0" * 64 + "  ../outside\n")
+        (directory / "BUILDSUMS").write_text("0" * 64 + "  ../outside\n")
         with self.assertRaises(ValueError):
             remote.checksums(directory)
         (directory / "link").symlink_to(directory / "VERSION")
@@ -77,14 +77,14 @@ class DeploymentTests(unittest.TestCase):
         self.assertIsNone(deploy.archive(directory, output))
         output.seek(0)
         with tarfile.open(fileobj=output) as bundle:
-            self.assertEqual(set(bundle.getnames()), {"VERSION", "SHA256SUMS", "web/index.html"})
+            self.assertEqual(set(bundle.getnames()), {"VERSION", "BUILDSUMS", "web/index.html"})
             self.assertEqual(bundle.extractfile("web/index.html").read(), b"new web")
 
     def test_signed_metadata_bounds_fail_before_verification(self):
         directory = self.bundle()
-        (directory / "MANIFEST").write_bytes(b"manifest")
-        (directory / "MANIFEST.sig").write_bytes(b"signature")
-        for name, limit in (("MANIFEST", 65536), ("MANIFEST.sig", 1024), ("VERSION", 128)):
+        (directory / "SHA256SUMS").write_bytes(b"checksums")
+        (directory / "SHA256SUMS.sig").write_bytes(b"signature")
+        for name, limit in (("SHA256SUMS", 65536), ("SHA256SUMS.sig", 1024), ("VERSION", 128)):
             original = (directory / name).read_bytes()
             (directory / name).write_bytes(b"x" * (limit + 1))
             with patch.object(remote.subprocess, "run") as verify:
@@ -167,7 +167,7 @@ class DeploymentTests(unittest.TestCase):
         old = self.root / "old"
         old.mkdir()
         (old / "infraternal").write_bytes(b"old binary")
-        for name in ("MANIFEST", "MANIFEST.sig", "VERSION"):
+        for name in ("SHA256SUMS", "SHA256SUMS.sig", "VERSION"):
             (old / name).write_text("fixture metadata")
         web = self.root / "web"
         web.mkdir()
@@ -188,7 +188,7 @@ class DeploymentTests(unittest.TestCase):
                 remote.apply(config)
             rollback = restart.call_args_list[1].args[1]
             self.assertEqual(rollback.read_bytes(), (old / "infraternal").read_bytes())
-            self.assertTrue((rollback.parent / "MANIFEST.sig").is_file())
+            self.assertTrue((rollback.parent / "SHA256SUMS.sig").is_file())
         self.assertEqual((self.root / "web/index.html").read_text(), "old web")
 
     def test_web_only_failure_restores_web_without_restart(self):

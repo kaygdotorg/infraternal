@@ -45,11 +45,23 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
         csr_der: &[u8],
         now: i64,
     ) -> Result<SignedCertificate, RemoteEnrollmentError> {
-        let expected_key_digest = self
-            .store
-            .preflight(token, host, mode, now)
-            .await
-            .map_err(|_| RemoteEnrollmentError)?;
+        // A root upgrade's successor joins the same way, with a token its
+        // promotion issued instead of the host's invitation (D376, #399).
+        // Its certificate is recorded as a successor, not as the host.
+        let (expected_key_digest, successor) =
+            match self.store.preflight(token, host, mode, now).await {
+                Ok(digest) => (digest, false),
+                Err(_) if mode == Mode::Rootful => (
+                    Some(
+                        self.store
+                            .preflight_successor(token, host, now)
+                            .await
+                            .map_err(|_| RemoteEnrollmentError)?,
+                    ),
+                    true,
+                ),
+                Err(_) => return Err(RemoteEnrollmentError),
+            };
         let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
         let public_key = csr
             .key()
@@ -60,7 +72,11 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
             .as_ref()
             .is_some_and(|expected| memcmp::eq(expected, actual_key_digest.as_slice()));
         if !matches {
-            let _ = self.store.consume_refused(token, host, mode, now).await;
+            // A successor token dies with its promotion; only an invitation
+            // is spent here.
+            if !successor {
+                let _ = self.store.consume_refused(token, host, mode, now).await;
+            }
             return Err(RemoteEnrollmentError);
         }
         #[cfg(test)]
@@ -91,10 +107,17 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
                 certificate_started.elapsed().as_secs_f64() * 1000.0
             );
         }
-        self.store
-            .redeem(token, host, mode, now, &certificate.record)
-            .await
-            .map_err(|_| RemoteEnrollmentError)?;
+        if successor {
+            self.store
+                .redeem_successor(token, host, now, &certificate.record)
+                .await
+                .map_err(|_| RemoteEnrollmentError)?;
+        } else {
+            self.store
+                .redeem(token, host, mode, now, &certificate.record)
+                .await
+                .map_err(|_| RemoteEnrollmentError)?;
+        }
         Ok(certificate)
     }
 

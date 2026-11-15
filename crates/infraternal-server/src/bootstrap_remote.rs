@@ -2300,6 +2300,8 @@ mod tests {
         .await
         .expect("invitation was not committed within the test hang bound");
     }
+    /// Automatic cleanup acts only on the exact failed setup record of this
+    /// server's host: another owner, account or mode is refused.
     #[tokio::test]
     async fn automatic_cleanup_requires_the_exact_failed_server_host_binding() {
         let f = fixture(true).await;
@@ -2367,6 +2369,13 @@ mod tests {
                 .await
                 .unwrap()
         );
+        // Since D376 the database refuses this flip outside an enrolled
+        // promotion; drop that guard here to model a host row of another
+        // mode, which the binding check below must still refuse.
+        sqlx::query("DROP TRIGGER remote_hosts_mode_write_once")
+            .execute(&f.pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE remote_hosts SET mode='rootful',execution_uid=0 WHERE id=?")
             .bind(f.prior.as_bytes().as_slice())
             .execute(&f.pool)

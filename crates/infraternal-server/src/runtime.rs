@@ -353,8 +353,11 @@ async fn serve_inner(
     auth.checkpoint_recovery_clock()
         .await
         .map_err(ServerError::Auth)?;
-    // Last, after every request has ended: finish the D379 pool's queued
-    // writes and fold its WAL into the main file (#473).
+    // Last: finish the D379 pool's queued writes and fold its WAL into the
+    // main file (#473). The listener has stopped, but `select!` only dropped
+    // the serve future: connection tasks it spawned may still be running. A
+    // request still in flight then gets the pool's `Closed` (a 503, or a
+    // socket renewal that silently doesn't happen), which is harmless at exit.
     auth.close_database().await;
     result
 }
@@ -472,6 +475,16 @@ async fn remote_router(
         .retire_unfinished_bootstraps()
         .await
         .map_err(ServerError::Storage)?;
+    // No promotion driver survives a restart either: abandon every live
+    // promotion, which bars its handover; the host's relay has rolled back
+    // by itself, and a joined successor uninstalls itself (D376, R4, R5).
+    enrollment_store
+        .sweep_promotions(
+            unix_seconds().map_err(|_| ServerError::InvalidConfiguration)?,
+            true,
+        )
+        .await
+        .map_err(|_| ServerError::InvalidConfiguration)?;
     let ca_api = ca_router(
         remote.as_ref(),
         &auth,
@@ -621,6 +634,15 @@ async fn build_router_core(
     // An injected actor's caller owns node-worker startup. Production starts
     // the process and binds admitted node workers after persisted switches load.
     let owns_node_workers = supplied_agent.is_none();
+    // The periodic update check (#211 S3) belongs to the production process only. It
+    // starts nothing outside root release builds and never applies a release.
+    #[cfg(feature = "release")]
+    if owns_node_workers {
+        drop(crate::release_latest::start_updates(
+            pool.clone(),
+            &config.data_dir,
+        ));
+    }
     #[cfg(feature = "remote")]
     let observed_server_ip = remote
         .as_ref()
@@ -651,6 +673,25 @@ async fn build_router_core(
     .await?;
     #[cfg(feature = "remote")]
     let auth_api_issuer = issuer.clone();
+    // A root upgrade's endpoints (D376, #399) share the issuer, the host
+    // registry and the promotion ledger.
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let privilege_api = match issuer.clone() {
+        Some(issuer) => Some(crate::host_privilege_http::router(
+            auth.clone(),
+            crate::host_promotion::Promotions::new(
+                enrollment_store.clone(),
+                pool.clone(),
+                hosts.clone(),
+                issuer,
+                crate::bootstrap_runtime::promotion_payload(&config.data_dir)?,
+                "/proc/self/exe".into(),
+                config.data_dir.join("privilege"),
+            )
+            .map_err(|_| ServerError::InvalidConfiguration)?,
+        )),
+        None => None,
+    };
     #[cfg(all(feature = "ssh", feature = "remote"))]
     let integration = issuer.map(|issuer| (issuer, hosts.clone()));
     #[cfg(all(feature = "ssh", not(feature = "remote")))]
@@ -742,6 +783,11 @@ async fn build_router_core(
         .merge(ca_api);
     #[cfg(feature = "remote")]
     let app = app.merge(remote_api).merge(action_api);
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let app = match privilege_api {
+        Some(privilege_api) => app.merge(privilege_api),
+        None => app,
+    };
     #[cfg(feature = "ssh")]
     let warmup = Some(bootstrap.clone());
     #[cfg(not(feature = "ssh"))]
@@ -851,10 +897,21 @@ fn remove_setup_token_socket_or_warn(data_dir: &Path, operation: &'static str) {
     }
 }
 
+/// Open (creating it if needed) the server's SQLite database in `data_dir`,
+/// with the sqlx pool the server has always used.
+///
+/// The database file's path is made absolute here, once, at start (J696 P3,
+/// #473): `server --data ./x` and the CLI's `./data` default arrive relative,
+/// and `Auth::new` refuses a relative database path rather than silently
+/// keeping the session statements off the D379 pool. Only the database path
+/// is resolved: the setup-token socket keeps the folder as given, because a
+/// Unix socket path is capped at 108 bytes and a relative one is shorter.
+/// `std::path::absolute` doesn't touch the disk or follow symlinks.
 async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerError> {
     std::fs::create_dir_all(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
     set_private_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
-    let database = data_dir.join("infraternal.sqlite");
+    let database = std::path::absolute(data_dir.join("infraternal.sqlite"))
+        .map_err(|_| ServerError::InvalidConfiguration)?;
     let options = SqliteConnectOptions::new()
         .filename(database)
         .create_if_missing(true)
@@ -1190,6 +1247,10 @@ mod tests {
         }
     }
 
+    /// The production sqlx pool hands out an idle connection without first
+    /// pinging its worker: a child process freezes the worker, and checking
+    /// out the idle connection must still succeed at once, while a real query
+    /// on it is refused by the frozen worker.
     #[tokio::test]
     async fn idle_sqlite_checkout_does_not_wait_for_a_worker_health_probe() {
         const CHILD: &str = "INFRATERNAL_SQLITE_CHECKOUT_CHILD";
@@ -1259,6 +1320,38 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// J696 P3 (#473): with `server --data ./x` (and the `./data` default)
+    /// the database file is opened by its absolute path, resolved once at
+    /// start, so `Auth::new` accepts it and the session statements run on the
+    /// D379 pool instead of silently staying on sqlx.
+    #[tokio::test]
+    async fn a_relative_data_dir_opens_the_database_by_its_absolute_path() {
+        let data_dir = PathBuf::from("target").join(format!("relative-{}", uuid::Uuid::new_v4()));
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("open the database in a relative folder");
+        let file = pool.connect_options().get_filename().to_owned();
+        let auth = crate::auth::Auth::new(pool.clone(), "localhost", "https://localhost:443")
+            .await
+            .expect("auth accepts the resolved database");
+        let on_pool = auth.sessions_on_pool();
+        auth.shutdown_recovery_clock()
+            .await
+            .expect("stop the recovery checkpoint writer");
+        auth.close_database().await;
+        drop(auth);
+        pool.close().await;
+        std::fs::remove_dir_all(&data_dir).expect("remove the relative data folder");
+        assert_eq!(
+            file,
+            std::env::current_dir()
+                .expect("working directory")
+                .join(&data_dir)
+                .join("infraternal.sqlite")
+        );
+        assert!(on_pool, "the session statements must run on the pool");
     }
 
     #[tokio::test]
@@ -1563,7 +1656,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(zeroblob(32),?,zeroblob(32),zeroblob(32),?,?)")
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(zeroblob(32),?1,zeroblob(32),zeroblob(32),?2,?3,(SELECT execution_uid FROM remote_hosts WHERE id=?1))")
             .bind(host.as_bytes().as_slice()).bind(now-604_800).bind(now).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,'owner')")
             .bind(host.as_bytes().as_slice())

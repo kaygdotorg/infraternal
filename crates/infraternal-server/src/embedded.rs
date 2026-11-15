@@ -32,6 +32,10 @@ use tokio::{
 const CONTROL_STREAM: u32 = 0;
 // Callers await bounded command capacity; output never waits on a browser receiver.
 const COMMAND_CAPACITY: usize = 64;
+/// Largest input of a `privilege.*` call: one pump of relay bytes, base64 in
+/// JSON (D376, #399). Matches the infraternal agent's own bound for these
+/// actions and stays under the protocol's 4 MiB frame.
+pub(crate) const PRIVILEGE_INPUT_BYTES: usize = 2 * 1024 * 1024;
 // Trusted lifecycle requests have their own mailbox and never consume ordinary
 // command or pending-call quota. Only authorized host removal can produce them.
 // Call ids are opaque u32 values on the wire. Only opportunistic login
@@ -647,6 +651,39 @@ impl EmbeddedAgent {
             .await
             .map_err(|_| AgentError::Unavailable)?;
         result.await.map_err(|_| AgentError::Unavailable)?
+    }
+
+    /// Calls one of the rootless infraternal agent's `privilege.*` actions of
+    /// a root upgrade (D376, #399).
+    ///
+    /// Separate from [`Self::call`] because `privilege.pump` carries relay
+    /// bytes (install steps and the payload) and so needs up to
+    /// [`PRIVILEGE_INPUT_BYTES`]; every other action keeps the 8 KiB bound.
+    /// The infraternal agent routes these outside its plugin worker.
+    pub(crate) async fn privilege_call(
+        &self,
+        action_id: &'static str,
+        input_json: Vec<u8>,
+    ) -> Result<Vec<u8>, AgentError> {
+        if !action_id.starts_with("privilege.") || input_json.len() > PRIVILEGE_INPUT_BYTES {
+            return Err(AgentError::Rejected);
+        }
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::Call {
+                action_id: action_id.to_owned(),
+                input_json,
+                reply,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)?
+    }
+
+    /// Stand in for an agent census in tests of code that reads it.
+    #[cfg(test)]
+    pub(crate) fn set_session_inventory_for_test(&self, state: SessionInventoryState) {
+        self.session_inventory.send_replace(state);
     }
 
     /// Watch the latest authoritative live-shim set reported by this infraternal agent.

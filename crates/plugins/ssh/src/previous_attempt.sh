@@ -45,7 +45,7 @@ setup_lock_descriptor() {
  setup_lock_birth=$process_start_ticks
  setup_lock_epoch=
  # The lease record dates the lock only when it names this holder. Any other
- # holder, such as the parent guard's, is dated by its own start (#305).
+ # holder, such as the setup guard's, is dated by its own start (#305).
  if parse_setup_lease "$base/.bootstrap-lock/lease" && [ "$setup_lease_pid" = "$setup_candidate" ]; then
   setup_lease_epoch=$(stat -c '%Y' "$base/.bootstrap-lock/lease" 2>/dev/null || :)
   case "$setup_lease_epoch" in ''|*[!0-9]*) :;; *) setup_lock_epoch=$setup_lease_epoch;; esac
@@ -92,7 +92,7 @@ report_setup_lock() {
    setup_candidate=${setup_process##*/}
    [ "$setup_candidate" != "$$" ] || continue
    if [ -d "$setup_stage" ] && setup_lock_descriptor "$setup_candidate" "$setup_process/fd/7" "$setup_stage"; then break; fi
-   if [ -n "${parent:-}" ] && setup_lock_descriptor "$setup_candidate" "$setup_process/fd/9" "$parent"; then break; fi
+   if [ -n "${sg:-}" ] && setup_lock_descriptor "$setup_candidate" "$setup_process/fd/9" "$sg"; then break; fi
   done
  fi
  setup_lock_attempt=$(setup_attempt "$setup_stage")
