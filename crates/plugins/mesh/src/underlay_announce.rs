@@ -194,7 +194,66 @@ pub(crate) const COALESCE_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Bound each coalesced kind of work (route refreshes and endpoint scans) to four runs a second.
 pub(crate) const COALESCE_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Paused-clock tests of the coalescing.
+/// What an underlay listener last saw of the host's network facts (addresses, routes, links),
+/// so a notification that only repeats a known fact is not counted as a change (#483 J633 P1).
+///
+/// Kernels send notifications for refreshes as well as for changes: Linux sends `RTM_NEWADDR`
+/// for every lifetime refresh (DHCP renewals, IPv6 router advertisements), and a route can be
+/// re-installed with only its lifetime changed. Each listener reduces a notification to a key
+/// (what the fact is) and a value (the parts of it that can move our endpoint, never its
+/// lifetime), and asks the book whether that is news. Both platforms use this one comparison.
+///
+/// A fact the book has not seen counts, so a book that starts empty (or is rebuilt after lost
+/// notifications) costs at most one extra announcement per fact, never a missed one.
+#[derive(Debug)]
+pub(crate) struct ChangeBook<K, V> {
+    known: std::collections::HashMap<K, V>,
+}
+
+impl<K, V> Default for ChangeBook<K, V> {
+    fn default() -> Self {
+        Self {
+            known: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Two books are equal when they hold the same facts; a listener compares a fresh read of the
+/// host with what it has seen to find changes it may have missed.
+impl<K: Eq + std::hash::Hash, V: PartialEq> PartialEq for ChangeBook<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.known == other.known
+    }
+}
+
+impl<K: Eq + std::hash::Hash, V: Eq> Eq for ChangeBook<K, V> {}
+
+impl<K: Eq + std::hash::Hash, V: PartialEq> ChangeBook<K, V> {
+    /// Record that `key` exists with `value`. Returns whether that is a change: a new key or a
+    /// different value. The same key with the same value (a refresh) is not.
+    pub(crate) fn present(&mut self, key: K, value: V) -> bool {
+        if self.known.get(&key) == Some(&value) {
+            return false;
+        }
+        self.known.insert(key, value);
+        true
+    }
+
+    /// Record that `key` is gone. A removal always counts, known or not: the book may have
+    /// missed the fact's arrival (it started empty, or notifications were lost).
+    pub(crate) fn absent(&mut self, key: &K) -> bool {
+        self.known.remove(key);
+        true
+    }
+
+    /// How many facts the book holds; the host's own address, route or link count.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.known.len()
+    }
+}
+
+/// Paused-clock tests of the coalescing and unit tests of the change book.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -281,5 +340,21 @@ mod tests {
             !waiter.schedule.is_armed(),
             "no timer may be armed while nothing changed"
         );
+    }
+
+    /// A refresh repeats a known fact and is not a change; a new value, a new key or any
+    /// removal is.
+    #[test]
+    fn the_book_counts_changes_not_refreshes() {
+        let mut book = super::ChangeBook::<u8, u32>::default();
+        assert!(book.present(1, 7), "a new fact is a change");
+        assert!(!book.present(1, 7), "the same fact again is a refresh");
+        assert!(
+            book.present(1, 8),
+            "a new value for a known fact is a change"
+        );
+        assert!(book.absent(&1), "a removal is a change");
+        assert!(book.absent(&2), "a removal the book never saw still counts");
+        assert_eq!(book.len(), 0);
     }
 }

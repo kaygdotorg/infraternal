@@ -1680,8 +1680,9 @@ type AddressKey = (u32, u8, u8, Option<IpAddr>, Option<IpAddr>);
 /// addresses needs `CAP_NET_ADMIN`, so its size is the host's own address count.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AddressBook {
-    /// Each known address's flags (`IFA_FLAGS`, or the header's 8-bit flags without it).
-    known: std::collections::HashMap<AddressKey, u32>,
+    /// Each known address's flags (`IFA_FLAGS`, or the header's 8-bit flags without it), in the
+    /// change book both platforms share.
+    known: crate::underlay_announce::ChangeBook<AddressKey, u32>,
 }
 
 impl AddressBook {
@@ -1737,10 +1738,9 @@ impl AddressBook {
         }
         let key = (index, family, prefix, local, address);
         if present {
-            Ok(self.known.insert(key, flags) != Some(flags))
+            Ok(self.known.present(key, flags))
         } else {
-            self.known.remove(&key);
-            Ok(true)
+            Ok(self.known.absent(&key))
         }
     }
 }
