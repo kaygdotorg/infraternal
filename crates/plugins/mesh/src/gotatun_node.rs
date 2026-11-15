@@ -1103,12 +1103,9 @@ impl RuntimeState {
             .map(|policy| active_peer_key(&policy.peer))
             .collect();
         self.relayed.retain(|key, _| members.contains(key));
-        let mut wanted = crate::candidate_walks::walking_peers(
-            config
-                .peers
-                .values()
-                .filter(|policy| policy.has_network_access()),
-        );
+        // `walking_peers` keeps only peers with network access, the ones `peers_for_config`
+        // installs.
+        let mut wanted = crate::candidate_walks::walking_peers(config.peers.values());
         if !self.walks.prepare(&wanted) {
             return;
         }

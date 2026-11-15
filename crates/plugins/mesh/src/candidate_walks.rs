@@ -67,17 +67,23 @@ pub(crate) fn active_peer_key(peer: &Peer) -> PublicKey {
     }
 }
 
-/// The peers that walk, by device key: of the peers the engine `installed`, those with a first
-/// address and a candidate list after it.
+/// The peers that walk, by device key: of the peers the engine `installed`, those with network
+/// access ([`PeerPolicy::has_network_access`]), a first address and a candidate list after it.
 ///
-/// Each engine passes the peers it really installs (Linux: any network access; macOS: the
-/// server and peers with full inbound access), so a walk never moves a peer the device lacks.
+/// Both `GotaTun` engines (Linux and macOS) install exactly the peers with network access, and
+/// pass them here. The access check is repeated here so the rule holds in one place for every
+/// caller: a walk never sends handshakes toward a peer whose grants allow no packet, even if a
+/// caller passes every configured peer (J781 finding 3, #515, #483).
 pub(crate) fn walking_peers<'a>(
     installed: impl IntoIterator<Item = &'a PeerPolicy>,
 ) -> BTreeMap<PublicKey, Peer> {
     installed
         .into_iter()
-        .filter(|policy| policy.peer.endpoint.is_some() && !policy.peer.candidates.is_empty())
+        .filter(|policy| {
+            policy.has_network_access()
+                && policy.peer.endpoint.is_some()
+                && !policy.peer.candidates.is_empty()
+        })
         .map(|policy| (active_peer_key(&policy.peer), policy.peer.clone()))
         .collect()
 }
