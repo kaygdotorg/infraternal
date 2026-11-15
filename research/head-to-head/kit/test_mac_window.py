@@ -4,8 +4,12 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -47,6 +51,51 @@ class WindowScriptTest(unittest.TestCase):
         text = (MAC / "mac-window.sh").read_text()
         self.assertIn("chmod 600 $d/env", text)
         self.assertNotIn("--private-key", text)
+
+
+class LinuxSideSecretsTest(unittest.TestCase):
+    """`lnx-side.sh coord-up` keeps the throwaway NetBird password and PAT out of argv."""
+
+    def test_no_secret_reaches_any_argv(self) -> None:
+        """Run the NetBird setup block with logging `python3`/`curl` shims and read their argv log."""
+        lines = (MAC / "lnx-side.sh").read_text().splitlines()
+        start = next(i for i, l in enumerate(lines) if l.strip() == "umask 077")
+        end = next(i for i, l in enumerate(lines) if "> $S/nbs/setupkey" in l)
+        block = "\n".join(lines[start : end + 1])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state" / "nbs").mkdir(parents=True)
+            shims = root / "shims"
+            shims.mkdir()
+            argv_log = root / "argv.log"
+            # curl shim: records argv, reads a `-H @file` header file, answers by URL.
+            (shims / "curl").write_text(
+                "#!/bin/bash\n"
+                f'echo "curl $*" >> {argv_log}\n'
+                'case "$*" in *api/setup-keys*) echo \'{"key":"SETUPKEY"}\' ;;'
+                " *) echo '{\"personal_access_token\":\"PATSECRET123\"}' ;; esac\n"
+            )
+            (shims / "python3").write_text(
+                f'#!/bin/bash\necho "python3 $*" >> {argv_log}\nexec {sys.executable} "$@"\n'
+            )
+            for shim in shims.iterdir():
+                shim.chmod(0o755)
+            script = root / "block.sh"
+            script.write_text(f"set -u\nS={root}/state\nIP=127.0.0.1\n{block}\n")
+            env = {"PATH": f"{shims}:{os.environ['PATH']}"}
+            run = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            argv = argv_log.read_text()
+            nbs = root / "state" / "nbs"
+            password = json.loads((nbs / "setup.json").read_text())["password"]
+            self.assertTrue(password.startswith("J461-"))
+            self.assertNotIn(password, argv)
+            self.assertNotIn("PATSECRET123", argv)
+            self.assertIn("-H @", argv)
+            self.assertEqual((nbs / "auth.hdr").read_text(), "Authorization: Token PATSECRET123\n")
+            self.assertEqual((nbs / "setupkey").read_text().strip(), "SETUPKEY")
+            for name in ("setup.json", "pat", "auth.hdr", "setupkey"):
+                self.assertEqual((nbs / name).stat().st_mode & 0o777, 0o600, name)
 
 
 class BuildHarnessTest(unittest.TestCase):

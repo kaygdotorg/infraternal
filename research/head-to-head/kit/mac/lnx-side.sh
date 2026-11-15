@@ -71,11 +71,16 @@ EOF
   $BIN/headscale -c $S/hs/config.yaml users create j461c >/dev/null 2>&1
   uid=$($BIN/headscale -c $S/hs/config.yaml users list -o json | python3 -c 'import json,sys; print([u["id"] for u in json.load(sys.stdin) if u["name"]=="j461c"][0])')
   $BIN/headscale -c $S/hs/config.yaml preauthkeys create --user "$uid" --reusable --expiration 4h -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' > $S/hs/authkey
+  # No secret goes into argv (repo rule; `ps` shows argv to every user): the password reaches
+  # python3 on stdin (printf is a builtin, so it never becomes an argv either), and the PAT reaches
+  # curl as a header FILE (`-H @file`). The files are created 0600 under umask 077.
+  umask 077
   pw="J461-$(head -c 18 /dev/urandom | base64 | tr -d '/+=')"
-  python3 -c 'import json,sys; print(json.dumps({"email":"j461c@j461c.invalid","password":sys.argv[1],"name":"j461c","create_pat":True,"pat_expire_in":1}))' "$pw" > $S/nbs/setup.json
+  printf '%s' "$pw" | python3 -c 'import json,sys; print(json.dumps({"email":"j461c@j461c.invalid","password":sys.stdin.read(),"name":"j461c","create_pat":True,"pat_expire_in":1}))' > $S/nbs/setup.json
   curl -s -X POST -H 'Content-Type: application/json' --data @$S/nbs/setup.json http://$IP:8081/api/setup | python3 -c 'import json,sys; print(json.load(sys.stdin)["personal_access_token"])' > $S/nbs/pat
   printf '{"name":"j461c","type":"reusable","expires_in":86400,"auto_groups":[],"usage_limit":0}' > $S/nbs/sk.json
-  curl -s -X POST -H "Authorization: Token $(cat $S/nbs/pat)" -H 'Content-Type: application/json' --data @$S/nbs/sk.json http://$IP:8081/api/setup-keys | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' > $S/nbs/setupkey
+  printf 'Authorization: Token %s\n' "$(cat $S/nbs/pat)" > $S/nbs/auth.hdr
+  curl -s -X POST -H @$S/nbs/auth.hdr -H 'Content-Type: application/json' --data @$S/nbs/sk.json http://$IP:8081/api/setup-keys | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' > $S/nbs/setupkey
   [ -s $S/hs/authkey ] && [ -s $S/nbs/setupkey ] && echo COORD_OK || echo COORD_FAIL
   ;;
 secret) case $1 in hs) cat $S/hs/authkey ;; nb) cat $S/nbs/setupkey ;; esac ;;
