@@ -270,3 +270,56 @@ fn gotatun_down_then_up_keeps_the_optional_guard_and_reopens_the_listener() {
     let second = up_and_apply(&mut node, &host, 2);
     down_and_check_closed(&mut node, &host, second);
 }
+
+/// A host write that would cut sshd off is refused even when it only closes the mesh, and the
+/// node keeps that cleanup pending instead of forgetting it.
+///
+/// This keeps the intent of dev's `kernel_firewall_cleanup_failure_reports_stopping…` test,
+/// which the D386 merge retired because an unmarked mesh table no longer makes cleanup fail.
+/// Here sshd moves to 2222 while the saved server policy admits only 22, so the J671 check
+/// refuses the listener close at `mesh.down`: the old table (SSH on 22 and the mesh listener)
+/// stays, status reads `Stopping`, and a reconnect does not restart the mesh. Once sshd is back
+/// on 22, a second `mesh.down` finishes the close.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn a_refused_listener_close_reports_stopping_and_keeps_explicit_off() {
+    let host = ServerHost::new();
+    let mut plugin = crate::node_actions::MeshNodePlugin::from_node(
+        Node::default().with_engine(EngineKind::GotaTun),
+    );
+    let call = |plugin: &mut crate::node_actions::MeshNodePlugin, action: &str| {
+        infraternal_plugin_api::AgentPlugin::call(plugin, action, b"{}")
+    };
+    let identity: Value =
+        serde_json::from_slice(&call(&mut plugin, "mesh.up").expect("mesh up")).expect("JSON");
+    let port = u16::try_from(identity["port"].as_u64().expect("bound port")).expect("UDP port");
+    assert_eq!(host.admits_mesh(port), (true, true));
+    {
+        let _moved = SshdPortsTestOverride::install(&[SshdPort::dual_stack(2222)]);
+        assert!(
+            call(&mut plugin, "mesh.down").is_err(),
+            "closing the listener would leave a table that drops sshd on 2222"
+        );
+        let status: Value =
+            serde_json::from_slice(&call(&mut plugin, "mesh.status").expect("status"))
+                .expect("JSON");
+        assert_eq!(status["state"], "Stopping");
+        assert_eq!(
+            host.admits_mesh(port),
+            (true, true),
+            "a refused write leaves the old table in place"
+        );
+        assert!(host.admits_ssh());
+        assert_eq!(
+            call(&mut plugin, "mesh.identity").expect("reconnect"),
+            b"null",
+            "a reconnect keeps the explicit off"
+        );
+    }
+    let down: Value =
+        serde_json::from_slice(&call(&mut plugin, "mesh.down").expect("finish the close"))
+            .expect("JSON");
+    assert_eq!(down["state"], "Off");
+    assert_eq!(host.admits_mesh(port), (false, false));
+    assert!(host.admits_ssh());
+}
