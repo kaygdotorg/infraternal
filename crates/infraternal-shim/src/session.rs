@@ -1515,15 +1515,12 @@ fn handle<'a>(
             // This viewer has just attached and is reporting its size. Its raw
             // replay was written at the session's size, so if the viewer has
             // another one, whatever part of it has already gone out lands on
-            // the wrong rows. That holds whether this Resize applies now or is
-            // only staged until the viewer types (another writer still owns
-            // the geometry). Repaint the engine instead: it has reflowed if the
-            // size applied, and otherwise paints at its own size with absolute
-            // positions. A live viewer's own resize reflows its screen locally
-            // and needs no repaint.
+            // the wrong rows; a live viewer's own resize instead reflows its
+            // screen locally and needs no repaint (#521).
+            let session_size = (config.cols, config.rows);
             let replay_wrong_size = std::mem::take(&mut p.replay_awaits_size)
                 && cursors.viewer_sized
-                && (cols, rows) != (config.cols, config.rows);
+                && (cols, rows) != session_size;
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
                 let applied = p.resize(pty, terminal, ring, config)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
@@ -1532,7 +1529,16 @@ fn handle<'a>(
                     cursors.viewer_sized = true;
                 }
             }
-            if replay_wrong_size {
+            // If the size applied, the engine has reflowed to this viewer and
+            // its repaint fits exactly. If it is only staged (another writer
+            // still owns the geometry, D74), the repaint keeps the session's
+            // size with absolute positions: that fits a viewer at least as
+            // large, but piles up in the last column of a smaller one. D74
+            // leaves smaller viewers to scaling, which the client does not do
+            // yet, so they keep the raw replay as before.
+            let applied_here = (config.cols, config.rows) == (cols, rows);
+            let fits = cols >= session_size.0 && rows >= session_size.1;
+            if replay_wrong_size && (applied_here || fits) {
                 p.request = Some(Request::Snapshot);
             }
         }
