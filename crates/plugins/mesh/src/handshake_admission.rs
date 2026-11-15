@@ -27,9 +27,12 @@
 //! those key agreements skip the source and network budgets. Past its share, or once the
 //! reserve is spent, a known endpoint is held to the same budgets as any other source. A
 //! refused key agreement at a known endpoint (a spoofed source or a stale key: the real peer's
-//! key is installed) uses up that endpoint's share for the rest of the window. Past any budget
-//! an initiation is dropped silently: ungranted keys still never get a reply, and a flood costs
-//! one MAC1 check per packet, as it did before the guard existed.
+//! key is installed) uses up that endpoint's share for the rest of the window. Replacing an
+//! endpoint list keeps each endpoint's count, and an endpoint new to the lists starts the window
+//! spent, so a list change never refills a share before the window ends (J754, #483): a member
+//! that roams its own endpoint four times a second cannot renew a spoofer's shares. Past any
+//! budget an initiation is dropped silently: ungranted keys still never get a reply, and a flood
+//! costs one MAC1 check per packet, as it did before the guard existed.
 //!
 //! The total per-source budget is twice `GotaTun`'s own per-source limit, so a granted peer's
 //! burst still reaches `GotaTun`'s cookie reply and its MAC2 retry, as without the guard.
@@ -325,8 +328,9 @@ enum Charge {
 /// [`UNKNOWN_SOURCE_BUDGET`], so together they stay within [`NODE_BUDGET`]. `sources` and
 /// `networks` hold at most [`UNKNOWN_SOURCE_BUDGET`] entries each, because an entry is inserted
 /// only when it spends from the unknown share, and everything resets together. `endpoints` has
-/// one counter per known endpoint. Their memory is therefore bounded whatever a flood sends
-/// (measured by the flood bench).
+/// one counter per known endpoint slot, kept the same length as the two endpoint lists by
+/// [`PeerAdmission`]'s setters (a slot past its end, which never happens, gets no reserve). Their
+/// memory is therefore bounded whatever a flood sends (measured by the flood bench).
 #[derive(Debug, Default)]
 struct Budget {
     window_start: Option<Instant>,
@@ -337,23 +341,25 @@ struct Budget {
     sources: HashMap<SourceKey, Spend>,
     networks: HashMap<NetworkKey, Spend>,
     /// Each known endpoint's spend from the reserve this window, indexed by its slot. A count
-    /// at or above the endpoint's share means "no more from the reserve this window".
+    /// at or above the endpoint's share means "no more from the reserve this window". A list
+    /// replacement carries every count over to the endpoint's new slot (see
+    /// [`carried_counts`]), so only the window's start refills them.
     endpoints: Vec<u8>,
 }
 
 impl Budget {
     /// Spend one key agreement for `source` at `now`, or say which budget is used up.
     ///
-    /// `known` is the source's slot when it is exactly a known peer endpoint, and
-    /// `known_endpoints` how many slots there are. A known endpoint within its
-    /// [`reserve_share`] spends from the reserve and skips the source and network budgets;
+    /// `known` is the source's slot when it is exactly a known peer endpoint, and `share` the
+    /// current [`reserve_share`]. A known endpoint within its share spends from the reserve and
+    /// skips the source and network budgets;
     /// every other initiation, a known endpoint past its share included, is held to its source's
     /// and network's budgets and to [`UNKNOWN_SOURCE_BUDGET`].
     fn spend(
         &mut self,
         source: SocketAddr,
         known: Option<usize>,
-        known_endpoints: usize,
+        share: u8,
         now: Instant,
     ) -> Result<Charge, Refusal> {
         if self
@@ -367,16 +373,9 @@ impl Budget {
             self.networks.clear();
             self.endpoints.fill(0);
         }
-        if self.endpoints.len() != known_endpoints {
-            // The endpoint lists were replaced: slots moved, so start their counts afresh. Only
-            // the coordinator or authenticated traffic replaces them, never a flood.
-            self.endpoints.clear();
-            self.endpoints.resize(known_endpoints, 0);
-            self.endpoints.shrink_to_fit();
-        }
         if let Some(slot) = known
             && let Some(spent) = self.endpoints.get_mut(slot)
-            && *spent < reserve_share(known_endpoints)
+            && *spent < share
             && self.reserved < RESERVED_BUDGET
         {
             *spent += 1;
@@ -433,6 +432,63 @@ impl Budget {
     }
 }
 
+/// Both sorted endpoint lists, as [`PeerAdmission`] lays out their slots: every configured
+/// endpoint first, then every confirmed one.
+#[derive(Clone, Copy)]
+struct Lists<'a> {
+    configured: &'a [EndpointKey],
+    confirmed: &'a [EndpointKey],
+}
+
+/// A forward-only position in one sorted endpoint list, for merge-joins.
+struct Cursor<'a> {
+    keys: &'a [EndpointKey],
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    /// Start at the beginning of `keys`.
+    fn new(keys: &'a [EndpointKey]) -> Self {
+        Self { keys, at: 0 }
+    }
+
+    /// The index of `key` in the list, when it is there. Callers ask in ascending key order,
+    /// so the cursor only moves forward and a whole join is linear.
+    fn find(&mut self, key: &EndpointKey) -> Option<usize> {
+        while self.keys.get(self.at).is_some_and(|here| here < key) {
+            self.at += 1;
+        }
+        (self.keys.get(self.at) == Some(key)).then_some(self.at)
+    }
+}
+
+/// The reserve counts for the slots of `new`, carried over from `counts`, the slots of `old`.
+///
+/// An endpoint in either old list keeps the count of its old slot, wherever it moves. An
+/// endpoint in neither starts at `share`: spent for the rest of the window, so replacing a list
+/// never hands out reserve the window had not already granted. A count missing from `counts`
+/// (it is shorter than `old`'s slots only if a caller broke the layout) also counts as new. One
+/// pass over each list, because every list is sorted (a merge-join, not a lookup per key).
+fn carried_counts(old: Lists<'_>, counts: &[u8], new: Lists<'_>, share: u8) -> Vec<u8> {
+    let mut carried = Vec::with_capacity(new.configured.len() + new.confirmed.len());
+    for list in [new.configured, new.confirmed] {
+        let mut configured = Cursor::new(old.configured);
+        let mut confirmed = Cursor::new(old.confirmed);
+        carried.extend(list.iter().map(|key| {
+            configured
+                .find(key)
+                .or_else(|| {
+                    confirmed
+                        .find(key)
+                        .map(|index| old.configured.len() + index)
+                })
+                .and_then(|slot| counts.get(slot).copied())
+                .unwrap_or(share)
+        }));
+    }
+    carried
+}
+
 /// Holds the live mesh identities allowed to reach `GotaTun`'s handshake cookie limiter.
 ///
 /// The peer list changes only after the device accepts a snapshot, while both key checks follow
@@ -449,6 +505,9 @@ pub(crate) struct PeerAdmission {
     configured_endpoints: Vec<EndpointKey>,
     /// The endpoints `GotaTun` confirmed from installed peers' authenticated traffic, sorted.
     confirmed_endpoints: Vec<EndpointKey>,
+    /// The [`reserve_share`] for the current lists, worked out when a list changes so the
+    /// receive path does no division.
+    share: u8,
     /// Spent before every key agreement. A plain mutex: it is held for one map update and
     /// never across an `.await`.
     budget: Mutex<Budget>,
@@ -470,6 +529,7 @@ impl PeerAdmission {
             peers: BTreeSet::new(),
             configured_endpoints: Vec::new(),
             confirmed_endpoints: Vec::new(),
+            share: reserve_share(0),
             budget: Mutex::default(),
             #[cfg(test)]
             key_agreements: std::sync::atomic::AtomicU32::new(0),
@@ -500,8 +560,11 @@ impl PeerAdmission {
         &mut self,
         endpoints: impl IntoIterator<Item = SocketAddr>,
     ) {
-        self.configured_endpoints = endpoint_list(endpoints);
-        self.forget_reserve_spend();
+        let configured = endpoint_list(endpoints);
+        if configured != self.configured_endpoints {
+            let old = std::mem::replace(&mut self.configured_endpoints, configured);
+            self.carry_reserve_spend(Some(&old), None);
+        }
     }
 
     /// Replace the endpoints `GotaTun` confirmed from installed peers' authenticated traffic.
@@ -513,23 +576,46 @@ impl PeerAdmission {
         &mut self,
         endpoints: impl IntoIterator<Item = SocketAddr>,
     ) {
-        self.confirmed_endpoints = endpoint_list(endpoints);
-        self.forget_reserve_spend();
+        let confirmed = endpoint_list(endpoints);
+        if confirmed != self.confirmed_endpoints {
+            let old = std::mem::replace(&mut self.confirmed_endpoints, confirmed);
+            self.carry_reserve_spend(None, Some(&old));
+        }
     }
 
-    /// Start every known endpoint's reserve count afresh after a list replacement: the slots
-    /// moved, so old counts would land on other endpoints. [`Budget::spend`] also resizes the
-    /// counters when the number of slots changes, so a list replaced without this call is never
-    /// out of bounds; this call keeps a same-length replacement exact too.
-    fn forget_reserve_spend(&mut self) {
-        let slots = self.known_endpoints();
+    /// Move every known endpoint's reserve count to its slot in the current lists, and work out
+    /// the new share. `old_configured` and `old_confirmed` are the lists just replaced; `None`
+    /// means that list did not change.
+    ///
+    /// A list change must never add reserve capacity within a window (J754 P2, #483): a mesh
+    /// member can change its own confirmed endpoint four times a second, and if a change
+    /// refilled the counts, every spoofed endpoint would get a fresh share each time. So a count
+    /// follows its endpoint, and an endpoint new to the lists starts spent until the window
+    /// ends; a real peer that just moved waits at most one second for its share and still has
+    /// the unknown share meanwhile. Runs only when a list really changed, never per packet.
+    fn carry_reserve_spend(
+        &mut self,
+        old_configured: Option<&[EndpointKey]>,
+        old_confirmed: Option<&[EndpointKey]>,
+    ) {
+        self.share =
+            reserve_share(self.configured_endpoints.len() + self.confirmed_endpoints.len());
         let budget = self
             .budget
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner);
-        budget.endpoints.clear();
-        budget.endpoints.resize(slots, 0);
-        budget.endpoints.shrink_to_fit();
+        budget.endpoints = carried_counts(
+            Lists {
+                configured: old_configured.unwrap_or(&self.configured_endpoints),
+                confirmed: old_confirmed.unwrap_or(&self.confirmed_endpoints),
+            },
+            &budget.endpoints,
+            Lists {
+                configured: &self.configured_endpoints,
+                confirmed: &self.confirmed_endpoints,
+            },
+            self.share,
+        );
     }
 
     /// Whether `source` is exactly a known peer endpoint.
@@ -552,11 +638,6 @@ impl PeerAdmission {
                     .ok()
                     .map(|index| self.configured_endpoints.len() + index)
             })
-    }
-
-    /// How many known endpoint slots there are (see [`Self::known_slot`]).
-    fn known_endpoints(&self) -> usize {
-        self.configured_endpoints.len() + self.confirmed_endpoints.len()
     }
 
     /// Replace the local identity after `GotaTun` accepts a key rotation.
@@ -606,7 +687,7 @@ impl PeerAdmission {
             .budget
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .spend(source, known, self.known_endpoints(), now)?;
+            .spend(source, known, self.share, now)?;
         #[cfg(test)]
         self.key_agreements
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -807,7 +888,13 @@ mod tests {
     /// node budget, and for a bad MAC1 add none at all, for a flood far larger than any budget.
     #[test]
     fn refusals_past_any_budget_run_no_key_agreement() {
-        let admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        // Known endpoints for the last part, listed before the window starts: an endpoint that
+        // joins the lists mid-window starts it spent.
+        let known: Vec<_> = (0..NODE_BUDGET - UNKNOWN_SOURCE_BUDGET + 10_000)
+            .map(|index| own_network(20, index))
+            .collect();
+        admission.set_configured_endpoints(known.iter().copied());
         let flood = initiation([0x55; 32]);
         let now = Instant::now();
         let one_source = source("198.51.100.7:40000");
@@ -850,11 +937,6 @@ mod tests {
             "a spoofed-source flood past the unknown-source share caused X25519 work"
         );
         // A flood that spoofs known endpoints exactly can spend the reserve, and no more.
-        let known: Vec<_> = (0..NODE_BUDGET - UNKNOWN_SOURCE_BUDGET + 10_000)
-            .map(|index| own_network(20, index))
-            .collect();
-        let mut admission = admission;
-        admission.set_configured_endpoints(known.iter().copied());
         for (index, spoofed) in known.iter().enumerate() {
             let verdict = admission.check(&Packet::copy_from(&flood), *spoofed, now);
             if index < (NODE_BUDGET - UNKNOWN_SOURCE_BUDGET) as usize {
@@ -1353,18 +1435,17 @@ mod tests {
         );
 
         // Limiter memory at its bound: the per-window maps full, and known endpoints for
-        // D393's 1,000 peers (one configured and one confirmed each).
-        let admission = PeerAdmission::new(StaticSecret::from(NODE));
-        let now = Instant::now();
-        for index in 0..UNKNOWN_SOURCE_BUDGET {
-            let _ = admission.check(&Packet::copy_from(&flood), own_network(18, index), now);
-        }
-        let mut admission = admission;
+        // D393's 1,000 peers (one configured and one confirmed each), listed before the window.
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
         let known: Vec<_> = (0..NODE_BUDGET)
             .map(|index| own_network(20, index))
             .collect();
         admission.set_configured_endpoints(known.iter().copied());
         admission.set_confirmed_endpoints(known.iter().copied());
+        let now = Instant::now();
+        for index in 0..UNKNOWN_SOURCE_BUDGET {
+            let _ = admission.check(&Packet::copy_from(&flood), own_network(18, index), now);
+        }
         for spoofed in &known {
             let _ = admission.check(&Packet::copy_from(&flood), *spoofed, now);
         }
