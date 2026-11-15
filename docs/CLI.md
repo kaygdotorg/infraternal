@@ -132,8 +132,10 @@ The move:
   message names only those files), when an old folder entry would take one
   of those reserved names, when
   the old folder is a symlink, a mount point, inside the target (or the other
-  way round) or owned by another user, or when a unit line other than
-  `ExecStart` names the old folder;
+  way round) or owned by another user, when a unit line other than
+  `ExecStart` names the old folder, or when the install itself would be
+  refused (for example the host firewall finds a port sshd uses that no
+  `--host-firewall-allow` rule admits): those checks run before the move;
 - gives a folder it creates mode 0700;
 - is idempotent and crash-safe. The unit is the only pointer to the live
   folder, so there is never a second live copy. A marker file
