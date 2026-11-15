@@ -391,3 +391,136 @@ fn a_peer_that_typed_before_resizing_gets_no_repaint() {
         "a live resize keeps streaming raw output"
     );
 }
+
+/// A command long enough to wrap after [`PROMPT`] at every width the sweep
+/// writes at (the whole line is 100 columns), and whose output wraps too in
+/// the narrowest viewers.
+const LONG_COMMAND: &[u8] = b"echo j792-the-quick-brown-fox-jumps-over-the-lazy-dog-0123456789";
+
+/// What bash's line editor writes for `line` echoed from column 0 of a
+/// `cols`-wide terminal. Each time the cursor reaches the right margin with
+/// more to come, it prints a space to force the wrap and `\r` to the new
+/// row's start, then overwrites that space with the next character. Those
+/// two bytes are what make the replay wrong at any other width: elsewhere
+/// the space does not wrap, and `\r` returns to the start of the same row.
+fn echoed_at(cols: u16, line: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(line.len() * 2);
+    for (index, byte) in line.iter().enumerate() {
+        out.push(*byte);
+        let written = index + 1;
+        if written % usize::from(cols) == 0 && written < line.len() {
+            out.extend_from_slice(b" \r");
+        }
+    }
+    out
+}
+
+/// The session's whole output when a long command was typed at `cols`: the
+/// wrapped prompt and command, the command's output and the next prompt.
+fn long_command_at(cols: u16) -> Vec<u8> {
+    let echoed = echoed_at(cols, &[PROMPT, LONG_COMMAND].concat());
+    let printed = &LONG_COMMAND[b"echo ".len()..];
+    [echoed.as_slice(), b"\r\n", printed, b"\r\n", PROMPT].concat()
+}
+
+/// Widths the sweep writes at: the prompt itself wraps at 30, J745's 42
+/// wraps only the command, and 80 is a desktop terminal.
+const WRITTEN_AT: [u16; 3] = [30, 42, 80];
+
+/// The reopen widths for output written at `cols`: narrower (20 wraps even
+/// the prompt, `cols - 5` is a small shrink) and wider (`cols + 3` is
+/// J745's small growth, `cols * 2` a phone tab reopened on a desktop).
+fn reopened_at(cols: u16) -> [u16; 4] {
+    [20, cols - 5, cols + 3, cols * 2]
+}
+
+/// Reopens a session whose long command was written at `written` columns in
+/// a new tab `reopened` columns wide, the size applying because no other
+/// writer owns the geometry. Returns a description of the mismatch if the
+/// viewer does not end on the shim's screen, or if no repaint replaced the
+/// replay.
+fn applied_reopen_mismatch(written: u16, reopened: u16) -> Option<String> {
+    let mut session = Session::new(written, 24);
+    session.output(&long_command_at(written));
+    let mut tab = peer();
+    let mut viewer = Terminal::new(reopened, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    session.deliver(&mut tab, &mut viewer);
+    session.resize(&mut tab, reopened, 24);
+    let repaint = session.deliver(&mut tab, &mut viewer);
+    screen_mismatch(&viewer, &session.terminal, repaint.is_some())
+        .map(|why| format!("{written} -> {reopened} cols: {why}"))
+}
+
+/// Reopens a session whose long command was written at `written` columns in
+/// a new, wider tab while the old tab's writer still owns the size (D74), so
+/// the new tab's Resize is only staged. The repaint keeps the session's size;
+/// the browser paints it into its own, wider grid.
+fn staged_wider_reopen_mismatch(written: u16, reopened: u16) -> Option<String> {
+    let mut session = Session::new(written, 24);
+    session.output(&long_command_at(written));
+    session.cursors.active_writer = Some(0);
+    session.cursors.select(1, (reopened, 24, 0, 0)).unwrap();
+    let mut tab = peer();
+    tab.writer = Some(1);
+    let mut viewer = Terminal::new(reopened, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    session.deliver(&mut tab, &mut viewer);
+    session.resize(&mut tab, reopened, 24);
+    let repainted = matches!(tab.request.take(), Some(Request::Snapshot));
+    if repainted {
+        tab.snapshot(&session.terminal, session.ring.head())
+            .unwrap();
+        let frames = Decoder::default().feed(&tab.pending).unwrap();
+        let [Frame::Snapshot(_, bytes) | Frame::SnapshotWithFlags(_, 1, bytes)] = frames.as_slice()
+        else {
+            panic!("expected one Snapshot, got {frames:?}");
+        };
+        viewer = Terminal::new(reopened, 24).unwrap();
+        viewer.process(bytes);
+    }
+    screen_mismatch(&viewer, &session.terminal, repainted)
+        .map(|why| format!("{written} -> {reopened} cols (staged): {why}"))
+}
+
+/// Why `viewer` is not showing `shim`'s screen, or `None` when it is and a
+/// repaint replaced the replay. Compares the two screens painted cell by
+/// cell, as [`assert_same_visible_screen`] does, without panicking, so a
+/// sweep can report every failing width at once.
+fn screen_mismatch(viewer: &Terminal, shim: &Terminal, repainted: bool) -> Option<String> {
+    let seen = String::from_utf8_lossy(&viewer.approximate_snapshot()).into_owned();
+    let held = String::from_utf8_lossy(&shim.approximate_snapshot()).into_owned();
+    if seen != held {
+        return Some(format!("viewer shows {seen:?}, shim holds {held:?}"));
+    }
+    (!repainted).then(|| "screen matched by chance, but no repaint was sent".to_owned())
+}
+
+/// Sweep of #521 over widths: a wrapped prompt and command written at 30, 42
+/// and 80 columns, reopened narrower and wider in a tab whose size applies.
+/// Every reopen must end on the shim's reflowed screen. Each case is listed
+/// when it fails, so a regression at one width cannot hide behind another.
+#[test]
+fn reopening_at_any_other_width_shows_the_shim_screen() {
+    let failures: Vec<String> = WRITTEN_AT
+        .iter()
+        .flat_map(|&written| reopened_at(written).map(|reopened| (written, reopened)))
+        .filter_map(|(written, reopened)| applied_reopen_mismatch(written, reopened))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The same sweep for J745's real case: the old tab typed last and keeps the
+/// size, so the new, wider tab's size is only staged. Narrower staged reopens
+/// keep the raw replay until D74's scaling exists (see
+/// `reopening_narrower_while_another_writer_owns_the_size_keeps_the_raw_replay`).
+#[test]
+fn reopening_wider_at_any_width_while_another_writer_owns_the_size_repaints() {
+    let failures: Vec<String> = WRITTEN_AT
+        .iter()
+        .flat_map(|&written| reopened_at(written).map(|reopened| (written, reopened)))
+        .filter(|(written, reopened)| reopened > written)
+        .filter_map(|(written, reopened)| staged_wider_reopen_mismatch(written, reopened))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
