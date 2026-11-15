@@ -599,12 +599,20 @@ impl PacketFilter {
         let Some(first_range) = FragmentRange::from_fragment(fragment, parsed.packet_end) else {
             return false;
         };
+        let Some(judged_end) = parsed
+            .header_end
+            .checked_sub(fragment.data_offset)
+            .and_then(|end| u16::try_from(end).ok())
+        else {
+            return false;
+        };
         shard.insert_fragment(
             FragmentEntry {
                 key: fragment.key,
                 flow,
                 direction,
                 last_seen: now,
+                judged_end,
             },
             fragment_start(fragment.key, direction),
             now,
@@ -642,6 +650,9 @@ impl PacketFilter {
         };
         if fragment.expired(now) {
             shard.remove_fragment(fragment_index);
+            return false;
+        }
+        if fragment_packet.offset_bytes < usize::from(fragment.judged_end) {
             return false;
         }
         let Some((flow_index, _)) = shard.find(fragment.flow, flow_start(fragment.flow)) else {
@@ -1319,6 +1330,12 @@ struct FragmentEntry {
     flow: FlowKey,
     direction: Direction,
     last_seen: Instant,
+    /// How far into the fragmentable part the first fragment's judged headers reach: every
+    /// IPv6 extension header after the Fragment header, plus the transport header. A later
+    /// fragment that starts before this offset overlaps bytes the filter already judged (the
+    /// TCP flags, the ports) and is refused (RFC 1858, RFC 5722; J718 P3, #265). Linux and XNU
+    /// discard such overlaps on their own; this keeps the filter from relying on that.
+    judged_end: u16,
 }
 
 /// One half-open byte range covered by fragments of the same datagram.
@@ -1824,6 +1841,10 @@ struct ParsedPacket {
     key: FlowKey,
     tcp_flags: Option<u8>,
     transport_offset: usize,
+    /// Packet index just past the last header byte the filter judged: the whole TCP header,
+    /// the UDP header, the ICMP header, or an ICMP error's quoted ports. A later fragment that
+    /// starts before it would rewrite judged bytes (see [`FragmentEntry::judged_end`]).
+    header_end: usize,
     packet_end: usize,
     related: Option<FlowKey>,
     version: u8,
@@ -2004,7 +2025,10 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
         // A later TCP fragment that starts inside the minimum TCP header could rewrite the
         // first fragment's flags after the filter judged them (RFC 1858's overlapping-fragment
         // attack). Every first fragment carries the whole header (see below), so a real later
-        // fragment never starts this early (J672 P2, #265).
+        // fragment never starts this early (J672 P2, #265). This cheap check needs no state.
+        // It sees only fragments whose next header is TCP. The complete guard, which also
+        // covers IPv6 extension headers before TCP and every judged header, is
+        // `FragmentEntry::judged_end` in `allow_fragment`.
         if protocol == TCP && fragment.offset_bytes < TCP_MIN_HEADER {
             return None;
         }
@@ -2018,6 +2042,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
             },
             tcp_flags: None,
             transport_offset: offset,
+            header_end: offset,
             packet_end,
             related: None,
             version,
@@ -2026,7 +2051,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
         });
     }
 
-    let (source_port, destination_port, tcp_flags, related, icmp) = match protocol {
+    let (source_port, destination_port, tcp_flags, related, icmp, header_end) = match protocol {
         TCP => {
             // Every TCP packet the filter judges carries its whole TCP header, options
             // included, a first fragment too. A first fragment cut short of the flags would
@@ -2047,6 +2072,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                 Some(packet[offset + 13]),
                 None,
                 IcmpKind::NotIcmp,
+                offset + header_len,
             )
         }
         UDP => {
@@ -2064,6 +2090,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                 None,
                 None,
                 IcmpKind::NotIcmp,
+                offset + 8,
             )
         }
         ICMP | ICMPV6 => {
@@ -2079,8 +2106,8 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
             if (protocol == ICMP && matches!(kind, 3 | 11 | 12))
                 || (protocol == ICMPV6 && matches!(kind, 1..=4))
             {
-                let related = parse_quoted_flow(packet, offset + 8, packet_end)?;
-                (0, 0, None, Some(related), IcmpKind::NotIcmp)
+                let (related, quoted_end) = parse_quoted_flow(packet, offset + 8, packet_end)?;
+                (0, 0, None, Some(related), IcmpKind::NotIcmp, quoted_end)
             } else if (protocol == ICMP && kind == 8 && code == 0)
                 || (protocol == ICMPV6 && kind == 128 && code == 0)
             {
@@ -2093,6 +2120,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                     None,
                     None,
                     IcmpKind::EchoRequest,
+                    offset + 8,
                 )
             } else if (protocol == ICMP && kind == 0 && code == 0)
                 || (protocol == ICMPV6 && kind == 129 && code == 0)
@@ -2106,12 +2134,13 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
                     None,
                     None,
                     IcmpKind::EchoReply,
+                    offset + 8,
                 )
             } else {
-                (0, 0, None, None, IcmpKind::Stateless)
+                (0, 0, None, None, IcmpKind::Stateless, offset + 4)
             }
         }
-        _ => (0, 0, None, None, IcmpKind::NotIcmp),
+        _ => (0, 0, None, None, IcmpKind::NotIcmp, offset),
     };
 
     Some(ParsedPacket {
@@ -2124,6 +2153,7 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
         },
         tcp_flags,
         transport_offset: offset,
+        header_end,
         packet_end,
         related,
         version,
@@ -2133,7 +2163,10 @@ fn parse_packet(packet: &[u8]) -> Option<ParsedPacket> {
 }
 
 /// Read a quoted first packet tuple from an ICMP error for conntrack-related admission.
-fn parse_quoted_flow(packet: &[u8], offset: usize, outer_end: usize) -> Option<FlowKey> {
+///
+/// Also returns the packet index just past the quoted ports, the last byte this judgement
+/// read.
+fn parse_quoted_flow(packet: &[u8], offset: usize, outer_end: usize) -> Option<(FlowKey, usize)> {
     if offset + 20 > outer_end {
         return None;
     }
@@ -2209,13 +2242,16 @@ fn parse_quoted_flow(packet: &[u8], offset: usize, outer_end: usize) -> Option<F
     if protocol != TCP && protocol != UDP {
         return None;
     }
-    Some(FlowKey {
-        source,
-        destination,
-        source_port: read_u16(packet, transport)?,
-        destination_port: read_u16(packet, transport + 2)?,
-        protocol,
-    })
+    Some((
+        FlowKey {
+            source,
+            destination,
+            source_port: read_u16(packet, transport)?,
+            destination_port: read_u16(packet, transport + 2)?,
+            protocol,
+        },
+        transport + 4,
+    ))
 }
 
 /// Translate an IP protocol number into the only port-bearing grant protocols.
@@ -4593,5 +4629,78 @@ mod tests {
         );
         let mut oldest = tcp4(PEER4, LOCAL4, 20_000, 443, ACK);
         assert!(filter.check_at(&mut oldest, Direction::MeshToHost, udp_at));
+    }
+
+    /// An IPv6 first fragment of a reply on an established outbound connection, whose
+    /// fragmentable part starts with an 8-byte destination-options header: IPv6 | Fragment
+    /// (next 60, offset 0, more) | Destination options (next TCP) | TCP ACK (20 bytes) | 4
+    /// bytes of data. The judged headers end 28 bytes into the fragmentable part.
+    fn ipv6_first_fragment_behind_destination_options(identification: u32) -> Vec<u8> {
+        let mut first = vec![0_u8; 40 + 8 + 32];
+        first[0] = 0x60;
+        first[4..6].copy_from_slice(&40_u16.to_be_bytes());
+        first[6] = 44;
+        first[7] = 64;
+        first[8..24].copy_from_slice(&PEER6.octets());
+        first[24..40].copy_from_slice(&LOCAL6.octets());
+        first[40] = 60;
+        first[42..44].copy_from_slice(&1_u16.to_be_bytes());
+        first[44..48].copy_from_slice(&identification.to_be_bytes());
+        first[48] = 6;
+        first[50] = 1; // PadN, filling the header's 6 option bytes.
+        first[51] = 4;
+        first[56..58].copy_from_slice(&443_u16.to_be_bytes());
+        first[58..60].copy_from_slice(&40_000_u16.to_be_bytes());
+        first[68] = 0x50;
+        first[69] = ACK;
+        first
+    }
+
+    /// A later IPv6 fragment of `first` at `offset` bytes into the fragmentable part, with 16
+    /// bytes of payload whose byte 5 is a SYN flag (where TCP's flags sit if it starts at 16).
+    fn ipv6_later_fragment(first: &[u8], offset: u16) -> Vec<u8> {
+        let mut later = vec![0_u8; 40 + 8 + 16];
+        later[..40].copy_from_slice(&first[..40]);
+        later[4..6].copy_from_slice(&24_u16.to_be_bytes());
+        later[40] = 60;
+        later[42..44].copy_from_slice(&((offset / 8) << 3).to_be_bytes());
+        later[44..48].copy_from_slice(&first[44..48]);
+        later[48 + 5] = SYN;
+        later
+    }
+
+    /// The overlap guard covers every header the filter judged, IPv6 extension headers
+    /// included (J718 P3, #265; J718's red test). When a destination-options header comes
+    /// before TCP, a later fragment's next header is 60, not TCP, so the parser's stateless
+    /// TCP check never runs. A later fragment at offset 16 would overwrite the TCP flags, at
+    /// byte 21, after they were judged. It is refused. One that starts past the headers, at
+    /// offset 32, still passes.
+    #[test]
+    fn ipv6_later_fragments_cannot_overlap_headers_behind_destination_options() {
+        let filter = PacketFilter::new(
+            &config(TrafficPolicy::None, grant(Protocol::Tcp, 443)),
+            MeshProxyIngress::default(),
+        )
+        .expect("compile policy");
+        let now = Instant::now();
+        let mut open6 = tcp6(LOCAL6, PEER6, 40_000, 443, SYN);
+        let mut accept6 = tcp6(PEER6, LOCAL6, 443, 40_000, SYN_ACK);
+        let mut ack6 = tcp6(LOCAL6, PEER6, 40_000, 443, ACK);
+        assert!(filter.check_at(&mut open6, Direction::HostToMesh, now));
+        assert!(filter.check_at(&mut accept6, Direction::MeshToHost, now));
+        assert!(filter.check_at(&mut ack6, Direction::HostToMesh, now));
+
+        let mut first = ipv6_first_fragment_behind_destination_options(21);
+        let mut overlapping = ipv6_later_fragment(&first, 16);
+        let mut following = ipv6_later_fragment(&first, 32);
+        assert!(filter.check_at(&mut first, Direction::MeshToHost, now));
+        assert!(
+            !filter.check_at(&mut overlapping, Direction::MeshToHost, now),
+            "a later fragment overlapping the TCP flags behind destination options was admitted"
+        );
+        assert!(
+            filter.check_at(&mut following, Direction::MeshToHost, now),
+            "a later fragment past the judged headers was refused"
+        );
     }
 }
