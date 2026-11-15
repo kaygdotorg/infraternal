@@ -1340,6 +1340,7 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             .and_then(|unit| unit.data.as_deref()),
         scope,
         &environment,
+        &roots,
         name,
     ) {
         Ok(relocation) => relocation,
@@ -1435,6 +1436,7 @@ fn plan_server_data_move(
     recorded: Option<&Path>,
     scope: install_paths::Scope,
     environment: &install_paths::Environment,
+    roots: &infraternal_status::Roots,
     name: &str,
 ) -> Result<Option<install_move::Relocation>, String> {
     let Some(recorded) = recorded.filter(|_| !explicit_data) else {
@@ -1442,8 +1444,22 @@ fn plan_server_data_move(
     };
     let target =
         install_paths::server_data_dir(scope, environment).map_err(|error| error.to_string())?;
-    let unit = install::unit_path(scope == install_paths::Scope::User, name)
-        .map_err(|error| error.to_string())?;
+    // Rewrite the unit the recorded folder was read from, found the way
+    // `recorded_server_unit` finds it, so reading and rewriting never disagree.
+    let file = format!("{name}.service");
+    let directories: Vec<&PathBuf> = match scope {
+        install_paths::Scope::System => roots.system_units.iter().collect(),
+        install_paths::Scope::User => roots.user_units.iter().collect(),
+    };
+    let unit = match directories
+        .into_iter()
+        .map(|directory| directory.join(&file))
+        .find(|path| path.exists())
+    {
+        Some(path) => path,
+        None => install::unit_path(scope == install_paths::Scope::User, name)
+            .map_err(|error| error.to_string())?,
+    };
     install_move::plan(recorded, &target, &unit).map_err(|error| error.to_string())
 }
 
