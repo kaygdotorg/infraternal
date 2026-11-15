@@ -875,4 +875,93 @@ mod tests {
         assert!(!link.exists() && std::fs::symlink_metadata(&link).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// Uninstall removes only a link to exactly this binary, never one to another release (J719 P2).
+    #[test]
+    fn uninstall_removes_only_a_link_to_this_exact_binary() {
+        let root = scratch("unlink");
+        let ours = root.join("data/infraternal/bin/infraternal");
+        let older = root.join("data/infraternal/old/infraternal");
+        let checkout = root.join("src/infraternal/live");
+        let link = root.join("bin/infraternal");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        for other in [&older, &checkout] {
+            std::os::unix::fs::symlink(other, &link).unwrap();
+            assert!(!remove_link(&link, &ours).unwrap(), "{}", other.display());
+            assert_eq!(&std::fs::read_link(&link).unwrap(), other);
+            std::fs::remove_file(&link).unwrap();
+        }
+        // Dangling but exact still counts as ours: the binary was removed first.
+        std::os::unix::fs::symlink(&ours, &link).unwrap();
+        assert!(remove_link(&link, &ours).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Relative targets are normalised (`..` too), and odd things at the link path are handled (J719 P3).
+    #[test]
+    fn relative_dangling_and_directory_links_are_judged_by_their_real_target() {
+        let root = scratch("relink");
+        let binary = root.join("data/infraternal/bin/infraternal");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "elf").unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("infraternal");
+
+        // A relative link through `..` to exactly this binary is current, and uninstall removes it.
+        std::os::unix::fs::symlink("../data/infraternal/bin/../bin/infraternal", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Current(link.clone())
+        );
+        assert!(remove_link(&link, &binary).unwrap());
+
+        // A relative link to an older release of ours is re-pointed.
+        std::os::unix::fs::symlink("../data/infraternal/old/../old/infraternal", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Repointed(link.clone())
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), binary);
+        std::fs::remove_file(&link).unwrap();
+
+        // `..` that leaves the install folder is not ours, even if a name matches.
+        std::os::unix::fs::symlink("../data/infraternal/../elsewhere/infraternal", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Foreign(link.clone())
+        );
+        std::fs::remove_file(&link).unwrap();
+
+        // A dangling link of ours (its release was deleted) is re-pointed.
+        std::os::unix::fs::symlink(root.join("data/infraternal/gone/infraternal"), &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Repointed(link.clone())
+        );
+        std::fs::remove_file(&link).unwrap();
+
+        // A dangling foreign link stays exactly as it was.
+        std::os::unix::fs::symlink("/nonexistent/other-tool", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Foreign(link.clone())
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("/nonexistent/other-tool")
+        );
+        assert!(!remove_link(&link, &binary).unwrap());
+        std::fs::remove_file(&link).unwrap();
+
+        // A directory at the link path is foreign and survives publish and uninstall.
+        std::fs::create_dir(&link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Foreign(link.clone())
+        );
+        assert!(!remove_link(&link, &binary).unwrap());
+        assert!(link.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
