@@ -80,7 +80,7 @@ start_product() {
   if ! bash "$here/extra-env.sh" "$2" | sudo tee -a $d/env >/dev/null; then log "FAIL $E: bad extra environment [$2]"; return; fi
   sudo chmod 600 $d/env
   # Paths arrive as positional arguments ($1..$3), so nothing is re-parsed by the root shell.
-  sudo bash -c 'echo $$ > "$1/pid"; set -a; . "$1/env"; set +a; exec "$2" --ignored --exact macos_node::tests::bench_device::mac_bench_device --test-threads=1 --nocapture >> "$3" 2>&1' _ "$d" "$BIN/$1" "$EV/$E/engine-mac.log" &
+  sudo bash -c 'echo $$ > "$1/pid"; set -a; . "$1/env"; set +a; exec "$2" --ignored --exact macos_node::tests::mac_bench_device --test-threads=1 --nocapture >> "$3" 2>&1' _ "$d" "$BIN/$1" "$EV/$E/engine-mac.log" &
   for _ in $(seq 1 100); do sudo test -s $d/tun && break; sleep 0.1; done
   MPIDS=$(sudo cat $d/pid); GIF=$(sudo cat $d/tun 2>/dev/null)
   local out; out=$(echo "$kb $pa" | L start gotatun $ME); echo "$out" > $EV/$E/linux-start.txt

@@ -3123,10 +3123,10 @@ mod tests {
 
     /// Real-Mac authority refresh proofs with encrypted traffic and kernel MTU checks.
     mod authority_mtu;
-    /// The ignored J461 bench harness for the exact Mac data path (#260).
-    mod bench_device;
     /// The Mac UDP listener: socket reuse and the handshake admission guard.
     mod listener;
+    /// A failed retirement save leaves a peer-free deny snapshot, written before the worker fence.
+    mod retirement;
     /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
     mod walks;
 
@@ -3670,190 +3670,6 @@ mod tests {
         );
         assert_eq!(accepted, Some(replacement.clone()));
         assert_eq!(runtime, vec![current, replacement]);
-    }
-
-    /// A failed retirement save must not leave the old snapshot enabled for restart.
-    #[test]
-    fn failed_retirement_does_not_preserve_a_persisted_peer_rollback() {
-        let mut current = config();
-        current.version = 11;
-        let mut restored = current.clone();
-        restored.version = 2;
-        restored.peers.clear();
-        let directory =
-            std::env::temp_dir().join(format!("infraternal-j330-mac-{}", std::process::id()));
-        fs::create_dir(&directory).expect("state directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("private state directory");
-        let state_path = directory.join(PUBLIC_STATE);
-        write_public_state(
-            &state_path,
-            &SavedState {
-                enabled: true,
-                config: Some(current.clone()),
-                routes: route_addresses(&current),
-                interface: Some("utun-test".to_owned()),
-                port: 51820,
-                ..SavedState::default()
-            },
-        )
-        .expect("accepted snapshot");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
-            .expect("make state directory unwritable");
-        let identity = Identity {
-            public_key: current.local_key.expect("bound key"),
-            port: 51820,
-            compact_access: true,
-            #[cfg(feature = "mesh-dns")]
-            dns_names: false,
-            key_rotation: false,
-            authority_epoch: true,
-        };
-        let applied_configs = Arc::new(Mutex::new(Vec::new()));
-        let mut node = Node {
-            enabled: true,
-            worker: Some(recording_worker(Arc::clone(&applied_configs))),
-            store: None,
-            identity: Some(identity),
-            config: Some(current.clone()),
-            authority_reset_pending: false,
-            pending: None,
-            routes: route_addresses(&current),
-            interface: Some("utun-test".to_owned()),
-            port: 51820,
-            path: Some(state_path.clone()),
-            binding: None,
-        };
-        let result = chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B)
-            .into_iter()
-            .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
-        let saved = read_public_state(&state_path)
-            .expect("read saved state")
-            .expect("saved state exists");
-        let runtime_configs = applied_configs.lock().expect("recorded configs").clone();
-        let stopped_after_failure = !node.enabled && node.worker.is_none();
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("restore state directory permissions");
-        node.down().expect("stop test worker");
-        fs::remove_dir_all(&directory).expect("remove state directory");
-
-        assert!(
-            result.is_err(),
-            "the injected persistence failure was ignored"
-        );
-        assert_eq!(
-            runtime_configs.len(),
-            0,
-            "a failed durable checkpoint must not apply a partial replacement"
-        );
-        assert!(
-            stopped_after_failure,
-            "a failed durable checkpoint must stop the runtime"
-        );
-        // The unwritable directory also blocks the authority record, so the epoch may still read
-        // as the old one. That is safe: the saved snapshot is peer-free, and the next server
-        // snapshot counts as an authority change (#382 P2).
-        assert!(
-            saved
-                .config
-                .as_ref()
-                .is_some_and(|config| config.peers.is_empty()
-                    && config.default_policy == DefaultPolicy::Deny),
-            "a failed replacement must leave a peer-free deny snapshot: {saved:?}"
-        );
-        assert!(
-            !saved.enabled
-                || saved
-                    .config
-                    .as_ref()
-                    .is_none_or(|config| config.peers.is_empty()),
-            "a restart could restore the retired peer: {saved:?}"
-        );
-    }
-
-    /// The peer-free authority state is durable before the worker hears about the new authority.
-    #[test]
-    fn mac_retirement_persists_deny_state_before_worker_fence() {
-        let current = config();
-        let directory = std::env::temp_dir().join(format!(
-            "infraternal-j363-mac-retirement-order-{}",
-            std::process::id()
-        ));
-        fs::create_dir(&directory).expect("state directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("private state directory");
-        let state_path = directory.join(PUBLIC_STATE);
-        write_public_state(
-            &state_path,
-            &SavedState {
-                enabled: true,
-                config: Some(current.clone()),
-                routes: route_addresses(&current),
-                interface: Some("utun-test".to_owned()),
-                port: 51820,
-                ..SavedState::default()
-            },
-        )
-        .expect("persist original peer-bearing snapshot");
-        let identity = Identity {
-            public_key: current.local_key.expect("bound key"),
-            port: 51820,
-            compact_access: true,
-            #[cfg(feature = "mesh-dns")]
-            dns_names: false,
-            key_rotation: false,
-            authority_epoch: true,
-        };
-        let at_fence = Arc::new(Mutex::new(None));
-        let observed = Arc::clone(&at_fence);
-        let hook_path = state_path.clone();
-        let mut node = Node {
-            enabled: true,
-            worker: Some(recording_worker_with_replace_hook(
-                Arc::new(Mutex::new(Vec::new())),
-                move |_| {
-                    let saved = read_public_state(&hook_path)
-                        .expect("read state when worker retirement begins")
-                        .expect("state exists when worker retirement begins");
-                    *observed.lock().expect("retirement state lock") = Some(saved);
-                },
-            )),
-            identity: Some(identity),
-            store: None,
-            config: Some(current.clone()),
-            authority_reset_pending: false,
-            pending: None,
-            routes: route_addresses(&current),
-            interface: Some("utun-test".to_owned()),
-            port: 51820,
-            path: Some(state_path),
-            binding: None,
-        };
-
-        // The production replacement path: persist the reset, then hand the worker the
-        // complete new snapshot. Read the disk between the two steps.
-        let mut replacement = current.clone();
-        replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
-        node.prepare_authority_replacement(&replacement)
-            .expect("persist the new authority's reset");
-        let saved_before_worker = read_public_state(&directory.join(PUBLIC_STATE))
-            .expect("read state before the worker is told")
-            .expect("state exists before the worker is told");
-        let worker_touched_peers = at_fence.lock().expect("replacement state lock").is_some();
-        node.down().expect("stop test worker");
-        fs::remove_dir_all(directory).expect("remove state directory");
-
-        assert!(
-            !worker_touched_peers,
-            "the worker was told before the reset was durable"
-        );
-        let denied = saved_before_worker
-            .config
-            .expect("retained denied snapshot");
-        assert_eq!(denied.authority_epoch.as_deref(), Some(AUTHORITY_EPOCH_B));
-        assert!(denied.peers.is_empty(), "retired peers were persisted");
-        assert_eq!(denied.default_policy, DefaultPolicy::Deny);
-        assert!(saved_before_worker.authority_reset_pending);
     }
 
     /// A changed authority retires its old rotation journal but keeps the active interface marker.
@@ -4999,4 +4815,110 @@ mod tests {
         assert_eq!(paths.len(), directories.len());
     }
 
+    /// Decode a 64-character hex `WireGuard` key from the bench environment.
+    fn bench_key(name: &str) -> [u8; 32] {
+        let hex = std::env::var(name).expect("bench key variable");
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex key"))
+            .collect();
+        bytes.try_into().expect("32-byte key")
+    }
+
+    /// J461 bench harness (#260): the exact Mac data path (this module's `MacUtun` reader and
+    /// writer, the bound UDP factory, the pinned `GotaTun` device on a current-thread runtime, as
+    /// `Node` builds it) with one static peer and no coordinator, so the macOS send and receive
+    /// cells can be measured against other engines on the same link.
+    ///
+    /// Root only (utun). Environment: `J461_PRIVATE_HEX`, `J461_PEER_PUBLIC_HEX`,
+    /// `J461_ENDPOINT` (peer `ip:port`), `J461_PORT`, `J461_ADDR` and `J461_PEER_ADDR` (tunnel
+    /// IPv4 addresses), `J461_IFNAME_FILE` (the utun name is written there once up) and `J461_STOP` (the
+    /// device stops when that file appears). Run with
+    /// `cargo test --release --features agent --lib mac_bench_device -- --ignored`.
+    #[test]
+    #[ignore = "bench harness: root, a live peer and the J461_* environment"]
+    fn mac_bench_device() {
+        use gotatun::{
+            device::{DeviceBuilder, Peer as WireGuardPeer},
+            x25519::{PublicKey as WgPublicKey, StaticSecret},
+        };
+        let var = |name: &str| std::env::var(name).expect("bench variable");
+        let port: u16 = var("J461_PORT").parse().expect("port");
+        let endpoint: std::net::SocketAddr = var("J461_ENDPOINT").parse().expect("endpoint");
+        let peer_addr: IpAddr = var("J461_PEER_ADDR").parse().expect("peer address");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        // The worker's packet filter, compiled from a one-peer snapshot that grants the bench
+        // peer every port both ways, so the filter's per-packet cost is part of the measurement
+        // and nothing is dropped. An empty filter would deny all traffic.
+        let mut snapshot = config();
+        snapshot.addresses.ipv4 = var("J461_ADDR").parse().expect("tunnel IPv4");
+        let peer_key = bench_key("J461_PEER_PUBLIC_HEX");
+        for policy in snapshot.peers.values_mut() {
+            policy.peer.key = PublicKey(peer_key);
+            policy.peer.addresses.ipv4 = var("J461_PEER_ADDR").parse().expect("peer IPv4");
+            policy.peer.endpoint = Some(endpoint);
+        }
+        let filter = std::sync::Arc::new(
+            crate::packet_filter::PacketFilter::new(
+                &snapshot,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
+        runtime.block_on(async {
+            let utun = super::MacUtun::from_open(super::OpenUtun::open().expect("utun"), filter)
+                .expect("register utun");
+            // The worker's socket, with its handshake guard admitting the one bench peer.
+            let private_key = StaticSecret::from(bench_key("J461_PRIVATE_HEX"));
+            let (factory, port) = super::bind_udp(
+                crate::listen_port::Request {
+                    port,
+                    allow_fallback: false,
+                },
+                private_key.clone(),
+            )
+            .await
+            .expect("bind");
+            factory
+                .admission
+                .write()
+                .await
+                .set_peers([PublicKey(peer_key)]);
+            let mut peer = WireGuardPeer::new(WgPublicKey::from(peer_key))
+                .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
+            peer.endpoint = Some(endpoint);
+            peer.keepalive = Some(25);
+            let device = DeviceBuilder::new()
+                .with_udp(factory)
+                .with_private_key(private_key)
+                .with_listen_port(port)
+                .with_ip_pair(utun.sender(), utun.receiver())
+                .with_peers(vec![peer])
+                .build()
+                .await
+                .expect("device");
+            utun.set_mtu(1280);
+            let status = std::process::Command::new("/sbin/ifconfig")
+                .args([
+                    utun.name(),
+                    "inet",
+                    &var("J461_ADDR"),
+                    &peer_addr.to_string(),
+                ])
+                .args(["mtu", "1280", "up"])
+                .status()
+                .expect("ifconfig");
+            assert!(status.success(), "ifconfig failed");
+            fs::write(var("J461_IFNAME_FILE"), utun.name()).expect("publish the utun name");
+            let stop = PathBuf::from(var("J461_STOP"));
+            while !stop.exists() {
+                // sleep: poll the stop file
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            device.stop().await;
+        });
+    }
 }
