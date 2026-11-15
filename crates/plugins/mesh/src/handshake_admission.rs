@@ -1369,6 +1369,34 @@ mod tests {
         );
     }
 
+    /// J754 P3 (#483): a spoofer sending a stranger's key from k known endpoints costs the
+    /// reserve exactly k key agreements per window, because a refusal ends that endpoint's share.
+    /// Past that, each one is an ordinary source with its own refused budget.
+    #[test]
+    fn a_refused_key_agreement_ends_the_endpoints_share() {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let spoofed: Vec<_> = (0..5).map(|k| own_network(20, k)).collect();
+        admission
+            .set_configured_endpoints(spoofed.iter().copied().chain([source("203.0.113.9:51000")]));
+        let flood = initiation([0x55; 32]);
+        let now = Instant::now();
+        for from in &spoofed {
+            for _ in 0..300 {
+                let _ = admission.check(&Packet::copy_from(&flood), *from, now);
+            }
+        }
+        let reserved = admission.budget.lock().expect("budget lock").reserved;
+        assert_eq!(
+            reserved, 5,
+            "one reserve key agreement per spoofed endpoint"
+        );
+        assert_eq!(
+            key_agreements(&admission),
+            5 * (1 + REFUSED_SOURCE_BUDGET),
+            "each endpoint then spends only its own source's refused budget"
+        );
+    }
+
     /// CPU per received initiation under a flood (J572, J648, #483); run by hand, it asserts nothing.
     ///
     /// `cargo test -p infraternal-plugin-mesh --features agent --release --lib
