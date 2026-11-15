@@ -394,7 +394,9 @@ async fn write_message(
 /// stream and a resumed browser reattaches the same stream id, the new relay
 /// replays from the browser's cursor, which is usually far below the old one.
 /// [`Message::Attached`] therefore starts a clean slate, and priority messages
-/// from any other attachment neither move the cursor nor reach the wire.
+/// from an older attachment neither move the cursor nor reach the wire. A
+/// newer attachment's priority message starts that clean slate itself when it
+/// overtakes its own marker.
 #[derive(Default)]
 struct ReplaceCursors {
     /// Stream id to (current attachment id, exclusive covered cursor if any).
@@ -403,9 +405,18 @@ struct ReplaceCursors {
 
 impl ReplaceCursors {
     /// A new attachment (or cursor rewind) owns `stream` from here on, with nothing covered yet.
+    ///
+    /// The marker rides the bulk FIFO, so the same attachment's priority frames may already
+    /// have reached the writer and adopted it (see [`Self::cover`]). Attachment ids only grow,
+    /// so an entry that already holds this id or a newer one is kept with its covered cursor:
+    /// resetting it would let the rewound replay queued behind the marker reach the wire after
+    /// a Snapshot that already covers it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn attach(&mut self, stream: u32, attachment: u64) {
-        self.streams.insert(stream, (attachment, None));
+        let entry = self.streams.entry(stream).or_insert((attachment, None));
+        if entry.0 < attachment {
+            *entry = (attachment, None);
+        }
     }
 
     /// The stream closed: drop its state so a later stream with the same id starts clean.
@@ -415,15 +426,24 @@ impl ReplaceCursors {
 
     /// Record that `attachment` covered `stream`'s raw output below `through`.
     ///
-    /// Returns false for a stale attachment: its frame must not be written,
-    /// because the browser is now attached through a different relay whose
-    /// credit and cursor it knows nothing about. A stream with no recorded
+    /// Returns false for a stale (older) attachment: its frame must not be
+    /// written, because the browser is now attached through a different relay
+    /// whose credit and cursor it knows nothing about. A stream with no recorded
     /// attachment adopts this one (writers fed without markers, such as tests
     /// and the native bound relay before its first marker).
+    ///
+    /// A newer attachment than the recorded one also adopts the stream. Its
+    /// `Attached` marker is still queued behind earlier bulk output (#477, J730):
+    /// the relay has already charged credit for this frame and moved its cursor,
+    /// so dropping it would lose the key's echo and leak credit. Ids come from
+    /// [`next_attachment`], which only grows, so "newer" means "the live one".
     fn cover(&mut self, stream: u32, attachment: u64, through: u64) -> bool {
         let entry = self.streams.entry(stream).or_insert((attachment, None));
-        if entry.0 != attachment {
+        if entry.0 > attachment {
             return false;
+        }
+        if entry.0 < attachment {
+            *entry = (attachment, None);
         }
         entry.1 = Some(entry.1.map_or(through, |cursor| cursor.max(through)));
         true
@@ -673,6 +693,104 @@ mod tests {
             kinds,
             vec!["ack 3".to_string(), "output 150+50".to_string()]
         );
+    }
+
+    /// A cursor rewind's `Attached` marker waits in the bulk FIFO behind earlier output, while
+    /// the same (live, newer) attachment's key Ack and Snapshot overtake it on the priority lane.
+    /// The relay has already charged credit for that Snapshot and moved its cursor to its `seq`,
+    /// so both frames must reach the wire, and the marker must not undo their covered cursor
+    /// (#477, J730 review P2).
+    #[tokio::test]
+    async fn a_live_attachments_repaint_survives_overtaking_its_own_marker() {
+        let (channel, messages, priority, mut frames, task) = held_writer();
+        // Attachment 1 owns stream 4 and its first Output is being written (held).
+        messages.send(Message::Attached(4, 1)).await.unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(0, vec![b'a'; 100])))
+            .await
+            .unwrap();
+        channel.started.acquire().await.unwrap().forget();
+        // Still queued in the bulk FIFO: a sibling's flood, the rewind's marker, and the
+        // rewound replay, which the live repaint below already covers.
+        messages
+            .send(Message::Shim(9, Shim::Output(0, b"sibling flood".to_vec())))
+            .await
+            .unwrap();
+        messages.send(Message::Attached(4, 2)).await.unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(50, vec![b'r'; 200])))
+            .await
+            .unwrap();
+        // Attachment 2 (the live one) commits a key repaint before its marker is applied.
+        priority
+            .send(PriorityMessage::InputAck {
+                stream: 4,
+                attachment: 2,
+                seq: 7,
+                output_cursor: 250,
+            })
+            .await
+            .unwrap();
+        priority
+            .send(PriorityMessage::Snapshot {
+                stream: 4,
+                attachment: 2,
+                seq: 250,
+                bytes: b"screen".to_vec(),
+                approximate: false,
+                notice: None,
+            })
+            .await
+            .unwrap();
+        channel.release.add_permits(1);
+        drop(messages);
+        drop(priority);
+        task.await.unwrap().unwrap();
+        let mut kinds = vec![];
+        while let Ok(frame) = frames.try_recv() {
+            kinds.push(match decoded(&frame) {
+                (4, infraternal_protocol::Frame::Snapshot { out_seq, .. }) => {
+                    format!("snapshot {out_seq}")
+                }
+                (4, infraternal_protocol::Frame::Ack { in_seq_acked }) => {
+                    format!("ack {in_seq_acked}")
+                }
+                (4, infraternal_protocol::Frame::Output { out_seq, bytes }) => {
+                    format!("output {out_seq}+{}", bytes.len())
+                }
+                (stream, _) => format!("other {stream}"),
+            });
+        }
+        // The rewound replay ends at 250, inside the Snapshot, so it is trimmed away rather
+        // than sent behind the Snapshot as an output gap.
+        assert_eq!(
+            kinds,
+            vec![
+                "output 0+100".to_string(),
+                "ack 7".to_string(),
+                "snapshot 250".to_string(),
+                "other 9".to_string(),
+            ]
+        );
+    }
+
+    /// The marker of an attachment whose priority frames already adopted the stream keeps
+    /// their covered cursor, and an older marker never takes the stream back (#477, J730).
+    #[test]
+    fn a_late_marker_keeps_the_cursor_its_own_attachment_covered() {
+        let mut cursors = ReplaceCursors::default();
+        cursors.attach(4, 1);
+        assert!(cursors.cover(4, 2, 250));
+        cursors.attach(4, 2);
+        assert_eq!(cursors.through(4), Some(250));
+        cursors.attach(4, 1);
+        assert_eq!(cursors.through(4), Some(250));
+        assert!(
+            !cursors.cover(4, 1, 900),
+            "an older attachment's frame was written"
+        );
+        cursors.attach(4, 3);
+        assert_eq!(cursors.through(4), None);
     }
 
     /// Decode one captured mux frame so the test checks the real writer's wire order.
