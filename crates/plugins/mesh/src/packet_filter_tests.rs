@@ -2185,7 +2185,7 @@ fn silent_established_connections_give_way_after_an_hour_only_when_full() {
         assert!(filter.check_at(&mut ack, Direction::MeshToHost, at));
     }
     // One connection stays live: it carries a packet just before the hour is up.
-    let live_at = start + TCP_ESTABLISHED_EVICTABLE_IDLE - Duration::from_secs(1);
+    let live_at = start + TCP_ESTABLISHED_EVICTABLE_IDLE.saturating_sub(Duration::from_secs(1));
     let mut live = tcp4(PEER4, LOCAL4, 20_001, 443, ACK);
     assert!(filter.check_at(&mut live, Direction::MeshToHost, live_at));
 
@@ -2194,7 +2194,7 @@ fn silent_established_connections_give_way_after_an_hour_only_when_full() {
         !filter.check_at(&mut too_soon, Direction::MeshToHost, live_at),
         "a connection silent for under an hour was evicted"
     );
-    let day = start + Duration::from_secs(86_400);
+    let day = start + Duration::from_hours(24);
     let mut fresh = tcp4(PEER4, LOCAL4, 50_001, 443, SYN);
     assert!(
         filter.check_at(&mut fresh, Direction::MeshToHost, day),
@@ -2216,7 +2216,7 @@ fn silent_established_connections_give_way_after_an_hour_only_when_full() {
         filter.check_at(
             &mut later,
             Direction::MeshToHost,
-            start + Duration::from_secs(4 * 86_400)
+            start + Duration::from_hours(96)
         ),
         "4 days after the connections went silent, the peer still cannot open a new one"
     );
