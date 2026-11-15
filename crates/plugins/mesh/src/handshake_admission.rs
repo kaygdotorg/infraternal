@@ -1601,8 +1601,9 @@ mod flood_fairness {
         };
         admission.set_peers(
             std::iter::once(key(0x66)).chain((1..=spoofing.others).map(|k| {
-                // Up to 255 distinct granted keys; more peers reuse them, which changes nothing here.
-                key(u8::try_from(k % 255).expect("fits").wrapping_add(0x80))
+                // Seeds 0x80..=0xfe (peer 1 is 0x81), never the stranger's or peer 0's; more
+                // than 127 peers reuse them, which changes nothing here.
+                key(0x80 + u8::try_from(k % 127).expect("fits"))
             })),
         );
         admission.set_configured_endpoints(
