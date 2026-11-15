@@ -856,7 +856,6 @@ pub(crate) async fn request_uninstall(
         UninstallReply::Refused | UninstallReply::Lost => ("unreachable", Vec::new()),
     }
 }
-/// The machine part of a stored `account@machine` address, as people name the host.
 /// Take one of the removal service's bounded work permits, or say the service is busy.
 ///
 /// Running out of permits is "try again in a moment" (`Throttled`, 429), never `Denied`: a 403 tells the browser the
@@ -870,6 +869,7 @@ fn admit(
         .map_err(|_| crate::auth::Error::Throttled)
 }
 
+/// The machine part of a stored `account@machine` address, as people name the host.
 fn display_name(address: &str) -> &str {
     address
         .rsplit_once('@')
