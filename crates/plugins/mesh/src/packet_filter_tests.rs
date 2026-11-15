@@ -2128,7 +2128,8 @@ fn revoked_flows_skipped_by_the_sweep_free_their_quota_on_demand() {
         let filter = &filter;
         scope.spawn(move || {
             filter.publish_policy(prepared);
-            done.send(()).expect("report publish");
+            // After a timeout the receiver is gone; the assert below reports the failure.
+            done.send(()).ok();
         });
         let finished = publish_finished.recv_timeout(Duration::from_secs(30));
         drop(busy);
