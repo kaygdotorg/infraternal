@@ -80,6 +80,9 @@ pub(crate) fn authority_replacement_crash_checkpoint() {
     }
 }
 
+/// The routing-socket listener that announces underlay changes to live sessions (#483).
+mod underlay;
+
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, MacUtunTx, MacUtunRx)>;
 
 /// A temporary Mac rotation key that clears its private bytes when dropped.
@@ -1491,9 +1494,33 @@ struct RuntimeState {
     dns_integration: crate::dns_integration::DnsIntegration,
 }
 
-/// Applies queued requests on the Mac worker and stops cleanly when its queue closes.
+/// Applies queued requests on the Mac worker, announces underlay changes to live sessions, and
+/// stops cleanly when its queue closes.
+///
+/// The worker owns the node's one routing-socket listener ([`underlay::UnderlayAnnouncer`]) for
+/// as long as its utun lives (#483 J707 P2-3). When an announcement is due, `GotaTun` sends one
+/// keepalive to each peer with a live session, so a peer follows our new address within tens of
+/// milliseconds instead of at our next 25 s keepalive (D392). Applies write host routes while the
+/// socket is not read, so each is followed by a resync.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
-    while let Some(command) = commands.recv().await {
+    let mut announcer = state
+        .utun
+        .as_ref()
+        .map(|utun| underlay::UnderlayAnnouncer::start(utun.name()));
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            () = announcement_due(announcer.as_mut()) => {
+                if let Some(device) = &state.device {
+                    let sessions = device.request_keepalives().await;
+                    tracing::debug!(sessions, "underlay changed; live sessions announce our endpoint");
+                }
+                continue;
+            }
+        };
+        let Some(command) = command else {
+            break;
+        };
         match command {
             WorkerCommand::Apply {
                 config,
@@ -1501,6 +1528,9 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 reply,
             } => {
                 let result = state.apply(*config, budgets).await;
+                if let Some(announcer) = announcer.as_mut() {
+                    announcer.resync();
+                }
                 let _ = reply.send(result);
             }
             WorkerCommand::ReplaceAuthority {
@@ -1509,6 +1539,9 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 reply,
             } => {
                 let result = state.replace_authority(*config, budgets).await;
+                if let Some(announcer) = announcer.as_mut() {
+                    announcer.resync();
+                }
                 let _ = reply.send(result);
             }
             WorkerCommand::SetPrivateKey { private_key, reply } => {
@@ -1527,6 +1560,14 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
         }
     }
     let _ = state.stop().await;
+}
+
+/// When `announcer` next has an announcement due, or never without one (no utun).
+async fn announcement_due(announcer: Option<&mut underlay::UnderlayAnnouncer>) {
+    match announcer {
+        Some(announcer) => announcer.due().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl RuntimeState {
