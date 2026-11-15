@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -169,16 +170,87 @@ class BuildHarnessTest(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[3]
     SCRIPT = MAC / "build-harness.sh"
 
+    def fixture(self, tmp: Path, lock_edit: str) -> tuple[Path, Path]:
+        """A copy of the real mesh Cargo.toml and Cargo.lock plus a `cargo` shim.
+
+        The shim stands in for `cargo metadata`: it rewrites the lock the way a real
+        re-resolution would, with `lock_edit` as the python body deciding what moves.
+        """
+        src = tmp / "src"
+        (src / "crates/plugins/mesh").mkdir(parents=True)
+        shutil.copy(self.ROOT / "crates/plugins/mesh/Cargo.toml", src / "crates/plugins/mesh/Cargo.toml")
+        shutil.copy(self.ROOT / "Cargo.lock", src / "Cargo.lock")
+        shim = tmp / "cargo"
+        shim.write_text(
+            f"#!{sys.executable}\nimport re\nt = open('Cargo.lock').read()\n{lock_edit}\n"
+            "open('Cargo.lock', 'w').write(t)\n"
+        )
+        shim.chmod(0o755)
+        return src, shim
+
+    def swap(self, src: Path, shim: Path, rev: str = "abcdef1234567"):
+        """Run swap-gotatun-rev.sh on the fixture."""
+        return subprocess.run(
+            ["bash", str(MAC / "swap-gotatun-rev.sh"), str(src), rev],
+            env={**os.environ, "CARGO": str(shim)},
+            capture_output=True,
+            text=True,
+        )
+
+    GOOD_LOCK = (
+        "t = re.sub(r'(gotatun\\?rev=)[0-9a-f]+#[0-9a-f]+', r'\\g<1>abcdef1234567#abcdef1234567', t)"
+    )
+
     def test_candidate_rev_edit_hits_exactly_the_gotatun_line(self) -> None:
-        """The script's `sed` swaps the rev on the one `gotatun = ` line and nothing else."""
-        toml = (self.ROOT / "crates/plugins/mesh/Cargo.toml").read_text()
-        match = re.search(r"^gotatun = .*$", toml, re.M)
-        self.assertIsNotNone(match, "mesh Cargo.toml has no gotatun dependency line")
-        self.assertEqual(len(re.findall(r'^gotatun = .*\brev = "[0-9a-f]+"', toml, re.M)), 1)
-        sed = re.search(r"sed -E -i '' \"(/\^gotatun = /s/[^\"]*)\"", self.SCRIPT.read_text())
-        self.assertIsNotNone(sed, "the rev edit moved: update this test")
-        sample = re.sub(r'rev = "[0-9a-f]+"', 'rev = "abcdef1"', match.group(0))
-        self.assertIn('rev = "abcdef1"', sample)
+        """The script's own `sed` swaps the rev on the one `gotatun = ` line and nothing else."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), self.GOOD_LOCK)
+            toml = src / "crates/plugins/mesh/Cargo.toml"
+            before = toml.read_text().splitlines()
+            run = self.swap(src, shim)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            after = toml.read_text().splitlines()
+            self.assertEqual(len(before), len(after))
+            changed = [(b, a) for b, a in zip(before, after) if b != a]
+            self.assertEqual(len(changed), 1)
+            self.assertTrue(changed[0][0].startswith("gotatun = "))
+            self.assertIn('rev = "abcdef1234567"', changed[0][1])
+            self.assertEqual(re.sub(r'rev = "[0-9a-f]+"', "", changed[0][0]), re.sub(r'rev = "[0-9a-f]+"', "", changed[0][1]))
+
+    def test_lock_change_limited_to_gotatun_passes(self) -> None:
+        """A re-resolution that only moves the gotatun entry is accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), self.GOOD_LOCK)
+            run = self.swap(src, shim)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("abcdef1234567", (src / "Cargo.lock").read_text())
+
+    def test_lock_drift_outside_gotatun_fails(self) -> None:
+        """A dependency version that moved too (here `serde`) makes the swap fail and names it."""
+        drift = self.GOOD_LOCK + (
+            "\nt = re.sub(r'(name = \"serde\"\\nversion = \")[0-9.]+', r'\\g<1>0.0.1', t, count=1)"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), drift)
+            run = self.swap(src, shim)
+            self.assertEqual(run.returncode, 2)
+            self.assertIn("LOCK_DRIFT", run.stderr)
+            self.assertIn("serde", run.stderr)
+
+    def test_bad_rev_and_missing_gotatun_line_fail(self) -> None:
+        """A non-hex rev, or a Cargo.toml with no matching line, never reaches cargo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), self.GOOD_LOCK)
+            self.assertEqual(self.swap(src, shim, "main; rm -rf /").returncode, 2)
+            toml = src / "crates/plugins/mesh/Cargo.toml"
+            toml.write_text(re.sub(r"^gotatun = ", "gotatun_x = ", toml.read_text(), flags=re.M))
+            self.assertEqual(self.swap(src, shim).returncode, 2)
+
+    def test_build_script_uses_the_swap_and_stays_locked(self) -> None:
+        """build-harness.sh delegates the candidate edit to the verified swap and always builds --locked."""
+        text = self.SCRIPT.read_text()
+        self.assertIn("swap-gotatun-rev.sh", text)
+        self.assertNotRegex(text, r"LOCKED=\s*$")
 
     def test_harness_test_is_in_the_checkout(self) -> None:
         """The ignored `mac_bench_device` test the windows run is on this branch, not elsewhere."""

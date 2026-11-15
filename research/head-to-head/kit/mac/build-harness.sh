@@ -56,13 +56,13 @@ case ${1:?harness|j421net|daemons} in
     COPY=
     trap 'rm -rf "$TARGET" $COPY' EXIT
     if [ -n "$REV" ]; then
-      [[ $REV =~ ^[0-9a-f]{7,40}$ ]] || { echo "gotatun rev must be 7-40 hex digits: $REV" >&2; exit 2; }
-      COPY=$HOME/worktrees/h2h-mac-src-$NAME; SRC=$COPY; LOCKED=
+      COPY=$HOME/worktrees/h2h-mac-src-$NAME; SRC=$COPY
       rm -rf "$COPY"; mkdir -p "$COPY"
-      # tar keeps the copy exact and skips build output; the lock file is re-resolved for gotatun only.
+      # tar keeps the copy exact and skips build output. swap-gotatun-rev.sh replaces the rev,
+      # re-resolves the lock and FAILS unless Cargo.lock changed only in the gotatun entry, so the
+      # candidate build can use --locked like the pin and differs from it in GotaTun alone.
       (cd "$root" && tar --exclude=./target --exclude=./node_modules --exclude=./.git -cf - .) | tar -xf - -C "$COPY"
-      sed -E -i '' "/^gotatun = /s/rev = \"[0-9a-f]+\"/rev = \"$REV\"/" "$COPY/$MESH_TOML"
-      grep -q "rev = \"$REV\"" "$COPY/$MESH_TOML" || { echo "could not set the gotatun rev in $MESH_TOML" >&2; exit 2; }
+      PATH="$TC:$PATH" RUSTC="$TC/rustc" bash "$here/swap-gotatun-rev.sh" "$COPY" "$REV"
     fi
     cd "$SRC"
     PATH="$TC:$PATH" RUSTC="$TC/rustc" CC=/usr/bin/clang CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$TARGET" \
