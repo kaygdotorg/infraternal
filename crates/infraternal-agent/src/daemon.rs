@@ -856,6 +856,17 @@ fn publish_session_snapshot(
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
 pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
+    run_with_mesh_state(fd, state, None).await
+}
+
+/// Run the trusted embedded channel with separate session and Mesh state paths.
+/// # Errors
+/// Rejects an invalid fd, unsafe state, malformed wire requests and resource limits.
+pub async fn run_with_mesh_state(
+    fd: i32,
+    state: Option<PathBuf>,
+    mesh_state: Option<PathBuf>,
+) -> io::Result<()> {
     // The launch isolation wrapper closes fd 3 before exec. Other inherited
     // descriptors need their own audited CLOEXEC boundary before being supported.
     if fd != 3 {
@@ -863,12 +874,19 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     }
     let socket = Socket::inherited(fd)?;
     let state = sessions::state(state)?;
-    let service = crate::plugin_control::Service::start(
-        &state,
-        crate::plugins::ExecutionMode::Embedded,
-        None,
-    )
-    .await?;
+    let service = match mesh_state.as_deref() {
+        Some(mesh_state) => {
+            crate::plugin_control::Service::start_with_mesh_state(&state, mesh_state).await?
+        }
+        None => {
+            crate::plugin_control::Service::start(
+                &state,
+                crate::plugins::ExecutionMode::Embedded,
+                None,
+            )
+            .await?
+        }
+    };
     run_channel::<false>(
         &socket,
         state,

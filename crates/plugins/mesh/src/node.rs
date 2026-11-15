@@ -1068,6 +1068,17 @@ impl Default for Node {
         }
     }
 }
+
+#[cfg(test)]
+impl Node {
+    /// Build an in-memory node with a known public identity for action-output tests.
+    pub(crate) fn with_identity_for_action_test(identity: Identity) -> Self {
+        Self {
+            identity: Some(identity),
+            ..Self::default()
+        }
+    }
+}
 impl Node {
     /// Ensure the active node has a listener for exact owned peer-route deletions.
     /// # Errors

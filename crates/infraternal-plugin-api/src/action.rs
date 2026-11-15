@@ -407,6 +407,8 @@ pub enum CliHandler {
     RemoteAgent,
     /// Request a CA-preserving server replacement.
     ServerRestart,
+    /// Read the running server's public Mesh identity through its owner-only control socket.
+    ServerMeshStatus,
     /// Remove a host using fresh administrator proof.
     RemoveHost,
     /// Answer a private SSH authentication prompt.

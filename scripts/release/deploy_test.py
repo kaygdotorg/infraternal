@@ -11,6 +11,7 @@ import io
 import os
 from pathlib import Path
 import socket
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -105,6 +106,341 @@ class DeploymentTests(unittest.TestCase):
             with closing(sqlite3.connect(self.root / "backup/infraternal.sqlite")) as saved:
                 self.assertEqual(saved.execute("SELECT value FROM state").fetchall(), [("retained",)])
             self.assertEqual(live.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+
+    def test_pre_upgrade_snapshot_copies_only_the_database_allowlist(self):
+        """Keep D295 snapshots limited to SQLite when new state files appear."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+        (data / "future-state.secret").write_bytes(b"synthetic-future-secret")
+        (mesh / "future-mesh-secret").write_bytes(b"synthetic-future-mesh-secret")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = sorted(
+            path.relative_to(destination).as_posix()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
+        self.assertEqual(saved_files, ["infraternal.sqlite"])
+
+    def test_pre_upgrade_snapshot_never_copies_embedded_mesh_private_key(self):
+        """Keep the server's Mesh identity outside pre-upgrade snapshots."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+        private_key = mesh / "mesh-private-key"
+        private_key.write_bytes(b"synthetic-private-key")
+        private_key.chmod(0o600)
+        os.link(private_key, data / "backup-selected-config")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = [
+            path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ]
+        self.assertFalse(
+            any(b"synthetic-private-key" in saved for saved in saved_files),
+            "pre-upgrade snapshots must not contain Mesh private-key bytes",
+        )
+
+    def test_pre_upgrade_snapshot_excludes_mesh_rotation_journal_and_aliases(self):
+        """Keep the private rotation journal out of snapshots, even through a hard link."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+
+        journal = mesh / "mesh-key-rotation.bin"
+        journal.write_bytes(b"synthetic-rotation-secret")
+        journal.chmod(0o600)
+        os.link(journal, data / "backup-selected-journal")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = [
+            path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ]
+        self.assertFalse(
+            any(b"synthetic-rotation-secret" in saved for saved in saved_files),
+            "pre-upgrade snapshots must not contain Mesh rotation secrets",
+        )
+
+    def test_pre_upgrade_snapshot_excludes_crash_left_mesh_secret_staging_copies(self):
+        """Keep key and journal staging copies out of snapshots after an abrupt stop."""
+        data = self.root / "data"
+        mesh = data / "mesh"
+        mesh.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(data / "infraternal.sqlite")) as database:
+            database.execute("CREATE TABLE state(value TEXT)")
+            database.commit()
+
+        staging = {
+            ".mesh-private-key.migrate-4242-nonce.new": b"synthetic-migration-key-copy",
+            "mesh-private-key.4242.new": b"synthetic-writer-key-copy",
+            ".mesh-key-rotation.bin.migrate-4242-nonce.new": b"synthetic-migration-journal-copy",
+            "mesh-key-rotation.4242.new": b"synthetic-writer-journal-copy",
+        }
+        for index, (name, secret) in enumerate(staging.items()):
+            path = mesh / name
+            path.write_bytes(secret)
+            path.chmod(0o600)
+            os.link(path, data / f"backup-selected-secret-{index}")
+
+        destination = self.root / "backup"
+        remote.backup(data, destination)
+
+        saved_files = [
+            path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ]
+        self.assertFalse(
+            any(secret in saved for saved in saved_files for secret in staging.values()),
+            "pre-upgrade snapshots must omit crash-left Mesh secret staging copies",
+        )
+
+    def test_d295_rollback_restores_latest_mesh_state_before_old_binary_starts(self):
+        """Make the old binary's legacy Mesh path ready before a warm rollback."""
+        root = self.root / "deployment"
+        release = root / "releases" / "candidate"
+        release.mkdir(parents=True)
+        (release / "infraternal").write_bytes(b"candidate")
+        (release / "web").mkdir()
+        (release / "web/index.html").write_text("new web")
+
+        old_release = self.root / "old-release"
+        old_release.mkdir()
+        old_binary = old_release / "infraternal"
+        old_binary.write_bytes(b"c4")
+        for name, value in (("SHA256SUMS", b"sums"),
+                            ("SHA256SUMS.sig", b"signature"),
+                            ("VERSION", b"edge-20261012T000000Z\n")):
+            (old_release / name).write_bytes(value)
+
+        data = self.root / "data"
+        data.mkdir()
+        with closing(sqlite3.connect(data / "infraternal.sqlite")):
+            pass
+        (data / "restart").mkdir()
+        web = self.root / "web"
+        web.mkdir()
+        (web / "index.html").write_text("old web")
+        legacy = self.root / "run/infraternal"
+        legacy.mkdir(parents=True, mode=0o700)
+        legacy_key = legacy / "mesh-private-key"
+        legacy_public = legacy / "mesh-public.json"
+        legacy_key.write_bytes(b"old-key")
+        legacy_key.chmod(0o600)
+
+        observed_by_old_binary = []
+
+        def restart_for_test(_data, binary, rollback=False):
+            if binary == release / "infraternal":
+                self.assertFalse(rollback, "candidate upgrade must use the normal restart path")
+                mesh = data / "mesh"
+                mesh.mkdir(mode=0o700)
+                # The candidate copies the owned legacy identity and keeps the legacy copy.
+                shutil.copy2(legacy_key, mesh / "mesh-private-key")
+                # It then rotates its durable key; the legacy mirror is stale until a handoff.
+                (mesh / "mesh-private-key").write_bytes(b"latest-candidate-key")
+                (mesh / "mesh-public.json").write_bytes(b'{"enabled":true}')
+            else:
+                if rollback:
+                    mesh = data / "mesh"
+                    legacy_key.write_bytes((mesh / "mesh-private-key").read_bytes())
+                    legacy_public.write_bytes((mesh / "mesh-public.json").read_bytes())
+                observed_by_old_binary.append(
+                    (
+                        legacy_key.read_bytes() if legacy_key.exists() else None,
+                        legacy_public.read_bytes() if legacy_public.exists() else None,
+                    )
+                )
+
+        config = {
+            "root": root,
+            "sha": "candidate",
+            "data": data,
+            "binary": old_binary,
+            "web": web,
+            "pid": 1234,
+            "web_only": False,
+        }
+        with (patch.object(remote.os, "geteuid", return_value=0),
+              patch.object(remote, "checksums"),
+              patch.object(remote, "verify_signed"),
+              patch.object(remote, "healthy", side_effect=[True, False, True]),
+              patch.object(remote, "same_image", return_value=True),
+              patch.object(remote, "endpoint", return_value=(1, 1)),
+              patch.object(remote, "restart", side_effect=restart_for_test) as restart_requested,
+              patch.object(remote, "wait_for_success")):
+            with self.assertRaisesRegex(ValueError, "deployment refused"):
+                remote.apply(config)
+
+        self.assertEqual(
+            observed_by_old_binary,
+            [(b"latest-candidate-key", b'{"enabled":true}')],
+            "the previous binary must see latest Mesh identity and public state at the legacy path",
+        )
+        self.assertTrue(
+            restart_requested.call_args_list[1].kwargs.get("rollback"),
+            "warm rollback must request the server's writer-quiesced Mesh handoff",
+        )
+
+    def test_previous_binary_restarted_after_candidate_failure_keeps_mesh_identity(self):
+        """J595 P1: a cold return to the previous build must not mint a new Mesh identity.
+
+        The candidate copies /run/infraternal into data/mesh as its server starts. If it then
+        exits (a later start step fails, or it crashes), no live process can answer the warm
+        rollback handoff. The unit's ExecStart still names the previous release during the D295
+        window, so systemd's Restart=on-failure starts the previous build, which reads only the
+        legacy path. A cold rollback (stop, point the unit back, start), a reboot onto the
+        previous build, or `server restart --binary <old>` without `--rollback` take the same
+        path. The previous build must still find the same key at the legacy path.
+
+        What this test proves: deploy_remote.py's failure path leaves the legacy path alone and
+        does not depend on the candidate emptying it. What it cannot prove: the stub below plays
+        the candidate's migration with `shutil.copy2`, so it is green by construction on that
+        point (J628). The proof that the real binary copies and never moves is in Rust, in
+        crates/infraternal-server/src/embedded_mesh_state.rs:
+        `copies_legacy_mesh_identity_before_first_durable_start` (asserts "runtime key stays")
+        and `a_previous_build_started_cold_finds_the_same_identity` (a reboot under the new
+        build, then the runtime path holds the same key again).
+        """
+        root = self.root / "deployment"
+        release = root / "releases" / "candidate"
+        release.mkdir(parents=True)
+        (release / "infraternal").write_bytes(b"candidate")
+        (release / "web").mkdir()
+        (release / "web/index.html").write_text("new web")
+
+        old_release = self.root / "old-release"
+        old_release.mkdir()
+        old_binary = old_release / "infraternal"
+        old_binary.write_bytes(b"c4")
+        for name, value in (("SHA256SUMS", b"sums"),
+                            ("SHA256SUMS.sig", b"signature"),
+                            ("VERSION", b"edge-20261012T000000Z\n")):
+            (old_release / name).write_bytes(value)
+
+        data = self.root / "data"
+        data.mkdir()
+        with closing(sqlite3.connect(data / "infraternal.sqlite")):
+            pass
+        (data / "restart").mkdir()
+        web = self.root / "web"
+        web.mkdir()
+        (web / "index.html").write_text("old web")
+        legacy = self.root / "run/infraternal"
+        legacy.mkdir(parents=True, mode=0o700)
+        legacy_key = legacy / "mesh-private-key"
+        legacy_key.write_bytes(b"old-key")
+        legacy_key.chmod(0o600)
+
+        seen_by_previous_build = []
+
+        def previous_build_starts():
+            # The previous build knows only the legacy path; with no key there it mints one.
+            if not legacy_key.exists():
+                legacy_key.write_bytes(b"fresh-key-minted-by-previous-build")
+            seen_by_previous_build.append(legacy_key.read_bytes())
+
+        def restart_for_test(_data, binary, rollback=False):
+            if binary == release / "infraternal":
+                # The candidate adopts during its server start, then exits before health. Since
+                # J598 adoption copies and never empties the legacy path (the Rust tests
+                # `a_previous_build_started_cold_finds_the_same_identity` and
+                # `copies_legacy_mesh_identity_before_first_durable_start` pin the binary side).
+                mesh = data / "mesh"
+                mesh.mkdir(mode=0o700)
+                shutil.copy2(legacy_key, mesh / "mesh-private-key")
+                # Restart=on-failure runs the unit's unchanged ExecStart: the previous build.
+                previous_build_starts()
+                return
+            # The previous build cannot read the rollback bit and refuses the frame.
+            raise ValueError("warm verified replacement refused")
+
+        config = {
+            "root": root,
+            "sha": "candidate",
+            "data": data,
+            "binary": old_binary,
+            "web": web,
+            "pid": 1234,
+            "web_only": False,
+        }
+        with (patch.object(remote.os, "geteuid", return_value=0),
+              patch.object(remote, "checksums"),
+              patch.object(remote, "verify_signed"),
+              patch.object(remote, "healthy", return_value=True),
+              patch.object(remote, "same_image", return_value=True),
+              patch.object(remote, "endpoint", return_value=(1, 1)),
+              patch.object(remote, "restart", side_effect=restart_for_test),
+              patch.object(remote, "wait_for_success",
+                           side_effect=ValueError("candidate exited before its health check"))):
+            with self.assertRaises(ValueError):
+                remote.apply(config)
+
+        self.assertEqual(
+            seen_by_previous_build,
+            [b"old-key"],
+            "the previous build restarted after a candidate failure must keep the Mesh identity",
+        )
+
+    def test_rollback_restart_signals_handoff_and_refusal(self):
+        """Mark rollback on the private control frame and stop if handoff is refused."""
+        data = self.root
+        (data / "restart").mkdir()
+        requested = []
+        binary = Path("/old/infraternal")
+        payload = os.fsencode(binary)
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(data / "restart/control.sock"))
+            server.listen()
+            server.settimeout(2)
+
+            def refuse_handoff():
+                try:
+                    peer, _ = server.accept()
+                except socket.timeout:
+                    return
+                with peer:
+                    requested.append(peer.recv(4098))
+                    peer.sendall(b"REFUSED\n")
+
+            worker = threading.Thread(target=refuse_handoff)
+            worker.start()
+            try:
+                try:
+                    with self.assertRaisesRegex(ValueError, "refused"):
+                        remote.restart(data, binary, rollback=True)
+                except TypeError as error:
+                    self.fail(f"rollback handoff is not available on the restart path: {error}")
+            finally:
+                worker.join(3)
+
+        self.assertFalse(worker.is_alive(), "the control fixture must finish")
+        self.assertEqual(len(requested), 1, "the rollback request reaches the server")
+        frame = requested[0]
+        encoded_length = int.from_bytes(frame[:2], "big")
+        self.assertEqual(encoded_length & 0x7FFF, len(payload))
+        self.assertEqual(encoded_length & 0x8000, 0x8000, "the request carries rollback intent")
+        self.assertEqual(frame[2:], payload)
 
     def test_ca_status_refuses_redirect_without_forwarding_session(self):
         seen = []
