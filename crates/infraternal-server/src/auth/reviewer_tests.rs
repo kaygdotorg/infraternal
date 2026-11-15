@@ -1,10 +1,15 @@
 //! Independent disk-SQLite recovery authority probes; diagnostics contain only outcomes.
 use super::*;
 
+/// An owner with a registered passkey and recovery words, on a fresh WAL
+/// database file under `target/recovery-probes`. Returns the fixture and the
+/// database path, so a test can reopen the file as a restarted server would.
 async fn disk_fixture() -> (Fixture, PathBuf) {
     std::fs::create_dir_all("target/recovery-probes").unwrap();
-    let path =
-        PathBuf::from("target/recovery-probes").join(format!("review-{}.sqlite", Uuid::new_v4()));
+    // Absolute: `Auth::new` refuses a relative database path (J696 P3, #473).
+    let path = std::path::absolute("target/recovery-probes")
+        .unwrap()
+        .join(format!("review-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(4)
         .connect_with(
