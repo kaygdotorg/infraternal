@@ -754,11 +754,9 @@ fn copy_into_place(from: &Path, to: &Path) -> Result<(), MoveError> {
         .file_name()
         .ok_or_else(|| MoveError("the target has no folder name".to_owned()))?
         .to_string_lossy();
-    let staging = to.with_file_name(format!(".{name}.partial-{}", std::process::id()));
-    if fs::symlink_metadata(&staging).is_ok() {
-        fs::remove_dir_all(&staging)
-            .map_err(|error| MoveError::io("removing", &staging, &error))?;
-    }
+    let prefix = format!(".{name}.partial-");
+    remove_stale_staging(to, &prefix)?;
+    let staging = to.with_file_name(format!("{prefix}{}", std::process::id()));
     let result = copy_tree(from, &staging)
         .map_err(|error| {
             MoveError(format!(
@@ -782,6 +780,31 @@ fn copy_into_place(from: &Path, to: &Path) -> Result<(), MoveError> {
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// Remove staging folders an interrupted copy left beside `to`.
+///
+/// They hold a copy of the data, the mesh key included, that no unit points
+/// at. Only real folders (not links or files) whose name starts with
+/// `prefix` are ours; the old folder is never among them because it is not a
+/// hidden sibling of the target.
+fn remove_stale_staging(to: &Path, prefix: &str) -> Result<(), MoveError> {
+    let Some(parent) = to.parent() else {
+        return Ok(());
+    };
+    let entries = fs::read_dir(parent).map_err(|error| MoveError::io("reading", parent, &error))?;
+    for entry in entries.filter_map(Result::ok) {
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(prefix))
+            && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if ours {
+            let path = entry.path();
+            fs::remove_dir_all(&path).map_err(|error| MoveError::io("removing", &path, &error))?;
+        }
+    }
+    Ok(())
 }
 
 /// Copy a folder tree, keeping modes (and owners, as root); sockets are skipped.
