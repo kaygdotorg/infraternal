@@ -30,7 +30,8 @@ import { SynchronizedOutput } from "./synchronized-output";
 
 /** How many terminals have been made on this page; names each one's remote-copy notice. */
 let remoteCopyCount = 0;
-const INITIAL_CREDIT = 1024 * 1024;
+/** The relay keeps 64 KiB of this opening grant for a key-triggered repaint. */
+const INITIAL_CREDIT = 1024 * 1024 + 64 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;
@@ -120,7 +121,8 @@ export interface TerminalHooks {
   onSessionGone?: (status?: number) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
-  onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint) => void;
+  /** Called after bytes paint; the kind lets paint probes reset when a full screen replaces raw output. */
+  onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint, kind?: "output" | "snapshot") => void;
 }
 
 export type InputModifierState = "off" | "armed" | "locked";
@@ -1032,6 +1034,11 @@ export class TerminalClient {
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
     this.stopKeyboardWatch?.();
+    // The watcher may be the only thing that would have undone the keyboard-sized height it put on the shared screen. A window
+    // that ends with the keyboard up (a shell that exits) then left the screen short for good: a band under the page.
+    // Any terminal still open re-fits within one trigger (focus change, viewport event or its settle re-read).
+    this.screen.style.height = "";
+    this.screen.style.transform = "";
     this.inputResendNotice?.dispose();
     this.remoteCopyNotice?.dispose();
     this.clipboardWrites.reset();
@@ -1092,6 +1099,11 @@ export class TerminalClient {
     };
   }
 
+  /**
+   * Handles one frame for this terminal's stream: acknowledgments, output and repaints for the screen, terminal
+   * notices (reconnects, replay fences, approximate screens, exits), liveness pings and stream closes. A frame that
+   * breaks the wire contract fails the connection, which then reconnects.
+   */
   private handleTerminalFrame(frame: WireFrame, message: Uint8Array, receivedAt: number): void {
     if (!this.attached) {
       this.protocolFailure("server sent terminal data before AttachTerm");
@@ -1148,8 +1160,14 @@ export class TerminalClient {
             if (this.config.status.textContent === LINK_DOUBT_STATUS) this.setStatus("");
             this.config.hooks?.onLinkDoubt?.(false);
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
-            this.setStatus("Reconnected. The screen may be slightly out of date.");
-            this.config.hooks?.onApproximate?.();
+            // Only a repaint that completes a reattach follows a reconnect. On a live,
+            // confirmed attachment an approximate repaint is the host skipping flood
+            // output for a key (D381) or a credit catch-up: the session never dropped,
+            // so saying "Reconnected" would be untrue (#477).
+            if (!this.attachmentConfirmed) {
+              this.setStatus("Reconnected. The screen may be slightly out of date.");
+              this.config.hooks?.onApproximate?.();
+            }
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
           } else if (notice.type === "terminal.replay_complete") {
@@ -1688,10 +1706,16 @@ export class TerminalClient {
     this.drainOutput();
   }
 
+  /** Accepts a repaint only against free or replaced output credit, then drops the queued screen it supersedes. */
   private acceptSnapshot(sequence: bigint, bytes: Uint8Array): void {
     performance.mark(`sw:snapshot:${this.streamId}`);
     performance.mark(`sw:snapshot:${this.streamId}`);
-    if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable) {
+    // A replacement may borrow the credit in queued raw bytes: accepting it
+    // drops that tail (and any pending Snapshot), while an active write returns
+    // its credit when its paint callback finishes. Keep the transaction within
+    // the bytes being replaced plus the credit already free on this stream.
+    const replaceable = this.outputQueue.length + (this.pendingSnapshot?.bytes.byteLength ?? 0);
+    if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable + replaceable) {
       this.protocolFailure("server sent a stale snapshot or exceeded output credit");
       return;
     }
@@ -1715,6 +1739,7 @@ export class TerminalClient {
     this.drainOutput();
   }
 
+  /** Drain queued terminal writes in order, returning each frame's credit after its render callback paints it. */
   private drainOutput(): void {
     this.wakeTerminal();
     if (this.synchronizedOutput.holdsPaint) return;
@@ -1755,7 +1780,7 @@ export class TerminalClient {
         this.releaseReplayResponsesAfterPaint();
         this.snapshotWriteInFlight = false;
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
-        this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
+        this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq, "snapshot");
         snapshot.bytes.fill(0);
         this.returnCredit(snapshot.bytes.byteLength);
         this.drainOutput();
@@ -1845,11 +1870,16 @@ export class TerminalClient {
           for (const segment of regions!) {
             const length = Math.min(segment.byteLength, consumed - hookOffset);
             if (length <= 0) break;
-            this.config.hooks?.onPaintedOutput?.(segment.subarray(0, length), paintedAt, writeSequence + BigInt(hookOffset));
+            this.config.hooks?.onPaintedOutput?.(
+              segment.subarray(0, length),
+              paintedAt,
+              writeSequence + BigInt(hookOffset),
+              "output",
+            );
             hookOffset += length;
           }
         } else {
-          this.config.hooks?.onPaintedOutput?.(region!.subarray(0, consumed), paintedAt, writeSequence);
+          this.config.hooks?.onPaintedOutput?.(region!.subarray(0, consumed), paintedAt, writeSequence, "output");
         }
         this.outputQueue.consume(consumed);
         this.outputWriteLength = 0;
