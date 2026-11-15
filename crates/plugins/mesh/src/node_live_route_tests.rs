@@ -1106,3 +1106,53 @@ fn repair_of_a_present_route_keeps_its_budget() {
         "the repair changed no route, so nothing is rewritten"
     );
 }
+
+/// J780 (#483): a full inventory check looks an underlay up only for a peer whose route is
+/// missing.
+///
+/// The check runs every 30 s and after every notification overflow, under the route-state lock.
+/// It used to derive a budget for every installed peer first (a socket and two route-netlink
+/// requests each), so at 4,096 peers on a starved thread it held the lock for 37-107 s with
+/// nothing to repair. With nothing missing it now looks nothing up; with one route missing it
+/// looks up that one peer's path, once, and re-adds the route.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn a_full_check_looks_up_only_peers_with_missing_routes() {
+    use crate::mesh_mtu::ROUTE_LOOKUPS;
+    let (peers, learned) = review_scale_mesh(64);
+    let state = Mutex::new(PeerRouteState::default());
+    let link = Device::active_link()
+        .expect("read the mesh link")
+        .expect("the marked TUN holds the shared name");
+    {
+        let mut route_state = lock_route_state(&state);
+        route_state.set_peers(&peers);
+        route_state.link = Some(link);
+    }
+    assert_eq!(
+        update_live_peer_endpoints(&state, &learned).expect("first"),
+        64
+    );
+    let full_check = || {
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
+        repair_accepted_routes(&link, &mut lock_route_state(&state), None).expect("full check");
+        ROUTE_LOOKUPS.with(std::cell::Cell::get)
+    };
+    assert_eq!(
+        full_check(),
+        0,
+        "nothing is missing, so nothing is looked up"
+    );
+    let deleted = format!("{}/32", peers[5].addresses.ipv4);
+    review_route_command(&["route", "del", &deleted, "dev", "infraternal0"]);
+    assert_eq!(
+        full_check(),
+        1,
+        "only the peer with a missing route is looked up"
+    );
+    assert!(
+        review_route_command(&["route", "show", "exact", &deleted]).contains("proto 250"),
+        "the missing route is back"
+    );
+    assert_eq!(full_check(), 0);
+}

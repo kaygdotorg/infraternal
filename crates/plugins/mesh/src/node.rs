@@ -368,16 +368,25 @@ fn repair_accepted_routes(
     };
     let mut first_error = None;
     let mut repaired = BTreeSet::new();
+    // Budgets are derived only for peers with a missing route, through one probe for the whole
+    // pass. Deriving one for every installed peer cost a socket and two route-netlink requests
+    // per peer on every inventory check, under the route-state lock, even with nothing missing:
+    // 37-107 s at 4,096 peers on a starved worker thread (#483 J780).
+    let mut probe = crate::mesh_mtu::EndpointProbe::default();
     for peer in state.peers.values() {
+        let addresses = [
+            IpAddr::V4(peer.addresses.ipv4),
+            IpAddr::V6(peer.addresses.ipv6),
+        ];
+        if !addresses.iter().any(|address| missing.contains(address)) {
+            continue;
+        }
         let mtu = state
             .overrides
             .get(&peer.key)
             .copied()
-            .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint));
-        for address in [
-            IpAddr::V4(peer.addresses.ipv4),
-            IpAddr::V6(peer.addresses.ipv6),
-        ] {
+            .unwrap_or_else(|| probe.mesh_mtu(peer.endpoint));
+        for address in addresses {
             if !missing.contains(&address) {
                 continue;
             }
