@@ -494,3 +494,49 @@ async fn an_exit_during_a_key_repaint_delivers_the_output_its_ack_passed() {
         "the exit notice comes last"
     );
 }
+
+/// A shim that refuses the key's capture ends the stream with a Close. The output the key's
+/// `InputAck` passed still reaches the client first (#477, J799).
+#[tokio::test]
+async fn a_refused_capture_during_a_key_repaint_delivers_the_output_its_ack_passed() {
+    let mut fixture = start().await;
+    spend_the_window_behind_a_held_socket(&mut fixture).await;
+    type_a_key(&mut fixture).await;
+    sessions::send(&mut fixture.peer, &Shim::Error(3, "refused".into()))
+        .await
+        .unwrap();
+    // sleep: nothing observable marks the relay queueing its Close behind the held socket.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fixture.socket.open();
+    let wire = drain(&mut fixture).await;
+    stop(&mut fixture).await;
+
+    assert_eq!(
+        received_raw(&wire),
+        WINDOW_END,
+        "every charged byte reaches the client: {wire:?}"
+    );
+    assert_eq!(wire.last(), Some(&Seen::Other), "the Close comes last");
+}
+
+/// The shim link fails while a key's repaint is outstanding. The output the key's `InputAck`
+/// passed still reaches the client (#477, J799).
+#[tokio::test]
+async fn a_failed_link_during_a_key_repaint_delivers_the_output_its_ack_passed() {
+    use tokio::io::AsyncWriteExt;
+    let mut fixture = start().await;
+    spend_the_window_behind_a_held_socket(&mut fixture).await;
+    type_a_key(&mut fixture).await;
+    fixture.peer.shutdown().await.unwrap();
+    // sleep: nothing observable marks the relay handling the failed link behind the held socket.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fixture.socket.open();
+    let wire = drain(&mut fixture).await;
+    stop(&mut fixture).await;
+
+    assert_eq!(
+        received_raw(&wire),
+        WINDOW_END,
+        "every charged byte reaches the client: {wire:?}"
+    );
+}

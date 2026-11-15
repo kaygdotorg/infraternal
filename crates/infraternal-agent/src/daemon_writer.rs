@@ -1176,6 +1176,169 @@ mod tests {
         assert_eq!(cursors.len(), 1, "the replacement attachment 7 was dropped");
     }
 
+    /// Bytes a committed repaint drops are refunded only to the ledger that charged them: output
+    /// queued before a newer attachment's marker belongs to the older ledger, which a rewind
+    /// reset or a gone relay no longer counts, so nobody gets it back (#477, J799).
+    #[test]
+    fn refunds_go_only_to_the_ledger_that_charged_the_bytes() {
+        let mut cursors = ReplaceCursors::default();
+        let (old, old_refunds) = refunds();
+        let (new, new_refunds) = refunds();
+        cursors.attach(4, 1, old);
+        // Attachment 2's repaint overtakes its marker and adopts the stream.
+        assert!(cursors.commit(4, 2, 250));
+        // Attachment 1's queued output, ahead of attachment 2's marker.
+        assert!(cursors.admit(4, 100, vec![b'o'; 100]).unwrap().is_none());
+        cursors.attach(4, 2, new);
+        // Attachment 2's own rewound replay, behind its marker.
+        assert!(cursors.admit(4, 50, vec![b'r'; 200]).unwrap().is_none());
+        // Its tail past the repaint is written, and only the covered part is refunded.
+        assert!(matches!(
+            cursors.admit(4, 250, vec![b't'; 10]).unwrap(),
+            Some(Shim::Output(250, bytes)) if bytes.len() == 10
+        ));
+        assert_eq!(old_refunds.bytes.load(Ordering::Acquire), 0);
+        assert_eq!(new_refunds.bytes.load(Ordering::Acquire), 200);
+    }
+
+    /// Start a writer whose stream 4 (attachment 1, refunded to the returned cell) has a key
+    /// Ack holding its raw output below 300, and hold three frames there: `0+100`, `100+100`
+    /// and `200+200`. A sibling frame written after them proves the writer has taken them.
+    async fn writer_holding_three_frames() -> (
+        mpsc::Sender<Message>,
+        mpsc::Sender<PriorityMessage>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+        JoinHandle<io::Result<()>>,
+        RefundReceiver,
+    ) {
+        let (messages, priority, mut frames, task) =
+            open_writer(Message::Shim(9, Shim::Output(0, b"sibling".to_vec()))).await;
+        let (cell, refunded) = refunds();
+        messages.send(Message::Attached(4, 1, cell)).await.unwrap();
+        priority
+            .send(PriorityMessage::InputAck {
+                stream: 4,
+                attachment: 1,
+                seq: 1,
+                output_cursor: 300,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            decoded(&frames.recv().await.unwrap()),
+            (4, infraternal_protocol::Frame::Ack { in_seq_acked: 1 })
+        ));
+        for (seq, length) in [(0, 100), (100, 100), (200, 200)] {
+            messages
+                .send(Message::Shim(4, Shim::Output(seq, vec![b'h'; length])))
+                .await
+                .unwrap();
+        }
+        messages
+            .send(Message::Shim(9, Shim::Output(7, b"later".to_vec())))
+            .await
+            .unwrap();
+        assert!(matches!(
+            decoded(&frames.recv().await.unwrap()),
+            (9, infraternal_protocol::Frame::Output { out_seq: 7, .. })
+        ));
+        (messages, priority, frames, task, refunded)
+    }
+
+    /// The key's Snapshot settles what its Ack held: covered bytes are dropped and refunded
+    /// (including a covered prefix), and the uncovered rest follows the Snapshot (#477, J799).
+    #[tokio::test]
+    async fn a_committed_repaint_settles_the_output_its_ack_held() {
+        let (messages, priority, mut frames, task, mut refunded) =
+            writer_holding_three_frames().await;
+        priority
+            .send(PriorityMessage::Snapshot {
+                stream: 4,
+                attachment: 1,
+                seq: 300,
+                bytes: b"screen".to_vec(),
+                approximate: false,
+                notice: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            decoded(&frames.recv().await.unwrap()),
+            (
+                4,
+                infraternal_protocol::Frame::Snapshot { out_seq: 300, .. }
+            )
+        ));
+        drop(messages);
+        drop(priority);
+        task.await.unwrap().unwrap();
+        assert_eq!(outputs(&mut frames), vec![(4, 300, 100)]);
+        assert_eq!(refunded.next().await, 300);
+    }
+
+    /// A relay that abandons its key repaint releases what the key's Ack held: every frame is
+    /// written, in order, ahead of later output, and nothing is refunded (#477, J799).
+    #[tokio::test]
+    async fn a_released_cover_writes_the_held_output_in_order() {
+        let (messages, priority, mut frames, task, refunded) = writer_holding_three_frames().await;
+        priority
+            .send(PriorityMessage::Release {
+                stream: 4,
+                attachment: 1,
+            })
+            .await
+            .unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(400, vec![b'n'; 50])))
+            .await
+            .unwrap();
+        drop(messages);
+        drop(priority);
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            outputs(&mut frames),
+            vec![(4, 0, 100), (4, 100, 100), (4, 200, 200), (4, 400, 50)]
+        );
+        assert_eq!(refunded.bytes.load(Ordering::Acquire), 0);
+    }
+
+    /// A stream never holds more than [`HELD_LIMIT`] raw frames: past it the writer gives up the
+    /// pending cover and writes them all, in order (#477, J799).
+    #[tokio::test]
+    async fn held_output_past_its_limit_is_written_in_order() {
+        let (messages, priority, mut frames, task) =
+            open_writer(Message::Shim(9, Shim::Output(0, b"sibling".to_vec()))).await;
+        messages
+            .send(Message::Attached(4, 1, no_refunds()))
+            .await
+            .unwrap();
+        priority
+            .send(PriorityMessage::InputAck {
+                stream: 4,
+                attachment: 1,
+                seq: 1,
+                output_cursor: 1_000_000,
+            })
+            .await
+            .unwrap();
+        frames.recv().await.unwrap();
+        let count = HELD_LIMIT + 2;
+        for frame in 0..count {
+            messages
+                .send(Message::Shim(
+                    4,
+                    Shim::Output(frame as u64 * 10, vec![b'h'; 10]),
+                ))
+                .await
+                .unwrap();
+        }
+        drop(messages);
+        drop(priority);
+        task.await.unwrap().unwrap();
+        let expected: Vec<_> = (0..count).map(|frame| (4, frame as u64 * 10, 10)).collect();
+        assert_eq!(outputs(&mut frames), expected);
+    }
+
     /// The marker of an attachment whose priority frames already adopted the stream keeps
     /// their covered cursor, and an older marker never takes the stream back (#477, J730).
     #[test]
