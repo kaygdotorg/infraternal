@@ -312,7 +312,9 @@ enum Charge {
     Reserve(usize),
     /// Paid from the unknown share by this source and its network.
     Shared {
+        /// The source whose budget paid, charged again if the key agreement is refused.
         source: SourceKey,
+        /// That source's network, charged the same way.
         network: NetworkKey,
     },
 }
