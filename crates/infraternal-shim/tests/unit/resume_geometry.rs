@@ -20,6 +20,13 @@
 //! before an earlier resize. Every session is spawned at 80x24 and resized by
 //! its first viewer, so repainting there would make every reload approximate.
 //! It becomes cheap once shell snapshots can be exact (owner question, #521).
+//!
+//! Second known gap, from D74: while a disconnected tab that typed last still
+//! owns the size, a new tab's size is only staged. If the new tab is smaller
+//! than the session in either dimension (narrower, or wider but shorter), it
+//! keeps the raw replay and can show the wrapped tail over the prompt until
+//! it types and its size applies. Closing it needs D74's scaling in the
+//! client or an owner change to D74 (#521).
 use super::*;
 
 /// The prompt J745 saw, 36 columns wide; with `echo j` it fills 42 columns.
@@ -389,6 +396,55 @@ fn a_peer_that_typed_before_resizing_gets_no_repaint() {
     assert!(
         tab.request.is_none(),
         "a live resize keeps streaming raw output"
+    );
+}
+
+/// The attach-time size check runs once. A tab whose Resize at attach
+/// matched the session's size (raw replay kept) is a live viewer from then
+/// on: when it is resized later, it reflows its own screen, and a repaint
+/// would only make that live resize lossy (#521).
+#[test]
+fn a_live_resize_after_a_same_size_reopen_gets_no_repaint() {
+    let mut session = Session::new(42, 24);
+    session.output(&typed_at_42());
+    let mut tab = peer();
+    let mut viewer = Terminal::new(42, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    session.deliver(&mut tab, &mut viewer);
+    session.resize(&mut tab, 42, 24);
+    assert!(tab.request.is_none(), "an unchanged size needs no repaint");
+    viewer.resize(45, 24).unwrap();
+    session.resize(&mut tab, 45, 24);
+    assert!(
+        tab.request.is_none(),
+        "a later live resize keeps streaming raw output"
+    );
+    session.deliver(&mut tab, &mut viewer);
+    assert_eq!(viewer.screen_difference(&session.terminal), 0);
+}
+
+/// Part of the D74 gap: the old tab still owns 42x24 and the new tab is
+/// wider but shorter (60x20, a phone turned to landscape). The repaint keeps
+/// the session's 24 rows with absolute positions, so its bottom rows, where
+/// the prompt and cursor usually are, would pile up on the viewer's last
+/// row. Until D74's scaling exists (or a disconnected typist gives up the
+/// size), this viewer keeps the raw replay, as a narrower one does (#521).
+#[test]
+fn reopening_wider_but_shorter_while_another_writer_owns_the_size_keeps_the_raw_replay() {
+    let mut session = Session::new(42, 24);
+    session.output(&typed_at_42());
+    session.cursors.active_writer = Some(0);
+    session.cursors.select(1, (60, 20, 0, 0)).unwrap();
+    let mut tab = peer();
+    tab.writer = Some(1);
+    let mut viewer = Terminal::new(60, 20).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    session.resize(&mut tab, 60, 20);
+    assert_eq!((session.config.cols, session.config.rows), (42, 24));
+    assert!(
+        tab.request.is_none(),
+        "a staged viewer with fewer rows keeps the replay"
     );
 }
 
