@@ -1184,8 +1184,9 @@ pub(crate) struct RouteMonitor {
     underlay: std::sync::Arc<UnderlayWatch>,
     /// Woken for every change that can move our own endpoint as peers see it.
     announce: std::sync::Arc<crate::gotatun_node::UnderlayAnnounce>,
-    /// The host's addresses outside the mesh link, to tell a real address change from a refresh.
-    addresses: AddressBook,
+    /// The host's addresses, routes and policy outside the mesh link, to tell a real change from
+    /// a lifetime refresh.
+    books: EndpointBooks,
 }
 
 impl RouteMonitor {
@@ -1200,8 +1201,9 @@ impl RouteMonitor {
     /// address must reach peers before they can send to it.
     ///
     /// Opening wakes `announce` once: nothing reported what changed while no listener ran. The
-    /// current addresses are read after the subscription exists (see [`AddressBook::dump`]); if
-    /// that read fails, the book starts empty and each address counts once when next refreshed.
+    /// current addresses and routes are read after the subscription exists (see
+    /// [`EndpointBooks::dump`]); if a read fails, that book starts empty and each entry counts
+    /// once when next refreshed.
     /// # Errors
     /// Returns socket, bind, or interface lookup errors before the node becomes active.
     fn open(
@@ -1236,7 +1238,7 @@ impl RouteMonitor {
             buffer: vec![0; netlink::DATAGRAM_BYTES],
             underlay,
             announce,
-            addresses: AddressBook::dump(interface_index).unwrap_or_default(),
+            books: EndpointBooks::dump(interface_index).0,
         })
     }
 
@@ -1307,11 +1309,7 @@ impl RouteMonitor {
                     if deleted.is_none() {
                         deleted = deleted_mesh_peer_route(&message, self.interface_index)?;
                     }
-                    change |= classify_underlay_change(
-                        &mut self.addresses,
-                        &message,
-                        self.interface_index,
-                    )?;
+                    change |= self.books.observe(&message, self.interface_index)?;
                 }
                 // Bump before waking the repair, so no refresh misses a change in this datagram.
                 if change.route_budgets {
@@ -1331,11 +1329,12 @@ impl RouteMonitor {
     /// the listener knows may be stale.
     ///
     /// Everything still queued predates the loss and is discarded, because applying an old
-    /// "address added" after a fresh dump could book an address the lost notifications had
-    /// removed, and the next real re-add would then look like a refresh. The address book is
-    /// read again. Any lost notification may have moved our endpoint, so the announce wakes,
-    /// route budgets are re-derived, and the caller asks for a full inventory check, since a
-    /// lost notification may have been a deleted peer route.
+    /// "added" after a fresh dump could book an address or route the lost notifications had
+    /// removed, and the next real re-add would then look like a refresh. The books are then read
+    /// again, and the announce wakes only if the host's addresses, routes, rules or nexthops
+    /// differ from what the listener last knew (D81: a storm that ends where it started moved
+    /// nothing). Route budgets are always re-derived, and the caller asks for a full inventory
+    /// check, since a lost notification may have been a deleted peer route.
     fn lost_notifications(&mut self) {
         // Bounded, so a storm that refills the queue as fast as it drains cannot hold us here.
         for _ in 0..LOST_NOTIFICATION_DRAIN_LIMIT {
@@ -1348,9 +1347,10 @@ impl RouteMonitor {
                 Err(_) => break,
             }
         }
-        self.addresses.lost_notifications(self.interface_index);
         self.underlay.changed();
-        self.announce.changed();
+        if self.books.resync(self.interface_index) {
+            self.announce.changed();
+        }
     }
 }
 
@@ -1374,26 +1374,295 @@ impl std::ops::BitOrAssign for UnderlayChange {
     }
 }
 
-/// Classify one notification: whether it moves peer route budgets, our own endpoint, or both.
+/// What the route listener knows about the host outside the mesh link: its addresses, its
+/// routes, and whether its policy rules and nexthop objects are as last read. Together they
+/// tell a change that can move our endpoint from a refresh that moved nothing (#483, D81).
+#[derive(Debug, Default)]
+struct EndpointBooks {
+    /// The host's interface addresses and their flags.
+    addresses: AddressBook,
+    /// The host's routes, by what decides where they send.
+    routes: RouteBook,
+    /// A fingerprint of the host's policy rules and nexthop objects as last dumped, or `None`
+    /// once a rule or nexthop notification arrived since (or the dump failed). Only overflow
+    /// recovery reads it: rule and nexthop notifications always announce, so between dumps the
+    /// listener only needs to know that the fingerprint is stale.
+    policy: Option<u64>,
+}
+
+impl EndpointBooks {
+    /// Read the host's current addresses, routes, rules and nexthops. Open the subscription
+    /// first: a change between the two is then either in the dump or delivered after it.
+    ///
+    /// Never fails: a book whose read fails starts empty, and the returned flag is false, so a
+    /// caller comparing against it knows the read was incomplete.
+    fn dump(interface_index: u32) -> (Self, bool) {
+        let addresses = AddressBook::dump(interface_index);
+        let routes = RouteBook::dump(interface_index);
+        let policy = policy_fingerprint();
+        let complete = addresses.is_ok() && routes.is_ok() && policy.is_some();
+        (
+            Self {
+                addresses: addresses.unwrap_or_default(),
+                routes: routes.unwrap_or_default(),
+                policy,
+            },
+            complete,
+        )
+    }
+
+    /// Classify one notification: whether it moves peer route budgets, our own endpoint, or both.
+    ///
+    /// Everything that moves a route budget can also move our endpoint: a new route or rule can
+    /// pick another source address or interface, and Linux installs an address's connected
+    /// route only after it announces the address (J561 measured a keepalive sent on the address
+    /// notice alone failing with `ENETUNREACH`), so the route notice must announce again. A
+    /// route notice announces only when the [`RouteBook`] says the route really changed: an
+    /// IPv6 router advertisement handled in user space re-installs the default route with a new
+    /// lifetime every time (#483 J707 P2). An address change moves the endpoint only; route
+    /// budgets follow the routes it brings. Our own link never counts.
+    /// # Errors
+    /// Returns `InvalidData` for a truncated link, address or route message.
+    fn observe(
+        &mut self,
+        message: &netlink::Message<'_>,
+        interface_index: u32,
+    ) -> io::Result<UnderlayChange> {
+        let route_budgets = is_underlay_change(message, interface_index)?;
+        let address = self.addresses.observe(message, interface_index)?;
+        let endpoint = match message.kind {
+            RTM_NEWROUTE | RTM_DELROUTE => self.routes.observe(message, interface_index)?,
+            RTM_NEWLINK | RTM_DELLINK => {
+                if route_budgets {
+                    self.routes
+                        .forget_link(netlink::u32_at(message.payload, 4)?);
+                }
+                route_budgets
+            }
+            RTM_NEWNEXTHOP | RTM_DELNEXTHOP => {
+                self.routes.forget_link(0);
+                self.policy = None;
+                true
+            }
+            RTM_NEWRULE | RTM_DELRULE => {
+                self.policy = None;
+                true
+            }
+            _ => route_budgets,
+        };
+        Ok(UnderlayChange {
+            route_budgets,
+            endpoint: endpoint || address,
+        })
+    }
+
+    /// Notifications were lost (`ENOBUFS`), so the books may miss changes: read them again and
+    /// say whether anything that can move our endpoint differs from what was known. An
+    /// incomplete read counts as a change, which costs an extra announcement, never a missed
+    /// one.
+    fn resync(&mut self, interface_index: u32) -> bool {
+        let (fresh, complete) = Self::dump(interface_index);
+        let changed = !complete
+            || self.policy.is_none()
+            || fresh.policy != self.policy
+            || fresh.addresses != self.addresses
+            || fresh.routes != self.routes;
+        *self = fresh;
+        changed
+    }
+}
+
+/// Hash the host's policy rules and nexthop objects as the kernel dumps them, or `None` if a
+/// dump fails. Neither carries lifetimes or counters, so equal state hashes equal. Kernels
+/// without nexthop objects (before 5.3) refuse that dump; they have none to hash.
+fn policy_fingerprint() -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut socket = Socket::open(SockProtocol::NetlinkRoute).ok()?;
+    socket
+        .visit(RTM_GETRULE, NLM_F_DUMP, &[0; 12], |reply| {
+            reply.hash(&mut hasher);
+            Ok(())
+        })
+        .ok()?;
+    0xff_u8.hash(&mut hasher);
+    match socket.visit(RTM_GETNEXTHOP, NLM_F_DUMP, &[0; 8], |reply| {
+        reply.hash(&mut hasher);
+        Ok(())
+    }) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(nix::libc::EOPNOTSUPP) => {}
+        Err(_) => return None,
+    }
+    Some(hasher.finish())
+}
+
+/// The host's routes outside the mesh link, as the kernel last reported them (#483 J707 P2).
 ///
-/// Everything that moves a route budget can also move our endpoint: a new route or rule can pick
-/// another source address or interface, and Linux installs an address's connected route only
-/// after it announces the address (J561 measured a keepalive sent on the address notice alone
-/// failing with `ENETUNREACH`), so the route notice must announce again. An address change moves
-/// the endpoint only; route budgets follow the routes it brings. Our own link never counts.
-/// # Errors
-/// Returns `InvalidData` for a truncated link, address or route message.
-fn classify_underlay_change(
-    addresses: &mut AddressBook,
-    message: &netlink::Message<'_>,
-    interface_index: u32,
-) -> io::Result<UnderlayChange> {
-    let route_budgets = is_underlay_change(message, interface_index)?;
-    let address = addresses.observe(message, interface_index)?;
-    Ok(UnderlayChange {
-        route_budgets,
-        endpoint: route_budgets || address,
-    })
+/// The kernel sends `RTM_NEWROUTE` for a new route and also when a route is replaced by an
+/// identical one with a new lifetime. A user-space IPv6 router-advertisement client (the
+/// default on many server distributions) does that to its default route on every
+/// advertisement, so counting every route notice woke every live session per advertisement.
+/// The book keys each route by what identifies it to the kernel (family, table, destination and
+/// source prefixes, type of service, metric, and whether it is a cached exception) and keeps a
+/// fingerprint of what decides where it sends: its type, gateway or `via`, output link,
+/// preferred source, router preference, nexthop flags, nexthop object or multipath set, and
+/// encapsulation. Lifetimes (`RTA_EXPIRES`, `RTA_CACHEINFO`), metrics such as the MTU, and the
+/// protocol that installed the route are left out: none of them moves our endpoint.
+///
+/// Both are kept as 64-bit hashes, about 24 bytes a route, so the book costs kilobytes on a
+/// normal host. A router with a full table would cost more, so past [`ROUTE_BOOK_LIMIT`]
+/// routes the book stops tracking and every route notice counts again, as before the book
+/// existed.
+///
+/// IPv4 removes the routes of a link that goes down without telling anyone, so a link notice
+/// forgets the routes out of that link; the next time one is added, it counts. Routes that
+/// leave through several links or a nexthop object are forgotten on any link or nexthop
+/// notice, for the same reason.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RouteBook {
+    /// Route identity hash → (its one output link, or 0 when it leaves through a nexthop object
+    /// or several links; the fingerprint of where it sends). Siblings added to one route
+    /// (multipath appends) fold into one fingerprint.
+    known: std::collections::HashMap<u64, (u32, u64)>,
+    /// Set once the host had more than [`ROUTE_BOOK_LIMIT`] routes: then every notice counts.
+    untracked: bool,
+}
+
+/// The most routes a [`RouteBook`] tracks, about 3 MB at the limit. Far above a mesh node's
+/// own few dozen routes; a host past it is a router carrying a large table.
+const ROUTE_BOOK_LIMIT: usize = 65_536;
+
+impl RouteBook {
+    /// Read every current route outside the mesh link, in every table and both families.
+    /// # Errors
+    /// Returns socket, dump (including an interrupted dump) or malformed-reply errors.
+    fn dump(interface_index: u32) -> io::Result<Self> {
+        let mut book = Self::default();
+        Socket::open(SockProtocol::NetlinkRoute)?.visit(
+            RTM_GETROUTE,
+            NLM_F_DUMP,
+            &[0; 12],
+            |reply| book.record(true, 0, reply, interface_index).map(|_| ()),
+        )?;
+        Ok(book)
+    }
+
+    /// Record one route notification and say whether it changed a route outside the mesh link.
+    /// # Errors
+    /// Returns `InvalidData` for a truncated route message.
+    fn observe(
+        &mut self,
+        message: &netlink::Message<'_>,
+        interface_index: u32,
+    ) -> io::Result<bool> {
+        self.record(
+            message.kind == RTM_NEWROUTE,
+            message.flags,
+            message.payload,
+            interface_index,
+        )
+    }
+
+    /// Apply one `rtmsg` payload with its netlink `flags`: an add, refresh or replace when
+    /// `present`, a removal otherwise. Returns whether it changed anything.
+    ///
+    /// A removal always counts and forgets the whole route, siblings included, so a later add
+    /// of any of them counts too. A replace (`NLM_F_REPLACE`, which every kernel replace
+    /// notice carries) changes something only if the fingerprint differs; that is the
+    /// lifetime-refresh case. A notice for a known route without `NLM_F_REPLACE` and with
+    /// another fingerprint is a sibling joining a multipath route.
+    fn record(
+        &mut self,
+        present: bool,
+        flags: u16,
+        payload: &[u8],
+        interface_index: u32,
+    ) -> io::Result<bool> {
+        use std::hash::{Hash, Hasher};
+        let header = payload.get(..12).ok_or(io::ErrorKind::InvalidData)?;
+        if !matches!(header[0], 2 | 10) {
+            // Multicast route tables (in a dump only) and other families carry no endpoint.
+            return Ok(false);
+        }
+        let route_flags = netlink::u32_at(header, 8)?;
+        let mut table = u32::from(header[4]);
+        let (mut destination, mut source, mut priority) = (None, None, None);
+        let (mut link, mut fanout) = (None, false);
+        let mut target = std::collections::hash_map::DefaultHasher::new();
+        // The type and the nexthop flags that make a route unusable or bind it to its link.
+        (header[7], route_flags & RTNH_LIVENESS_FLAGS).hash(&mut target);
+        for field in netlink::attributes(&payload[12..])? {
+            match field.kind {
+                RTA_DST => destination = Some(field.payload),
+                RTA_SRC => source = Some(field.payload),
+                RTA_PRIORITY => priority = Some(field.payload),
+                RTA_TABLE => table = netlink::u32_at(field.payload, 0)?,
+                RTA_OIF => {
+                    let index = netlink::u32_at(field.payload, 0)?;
+                    if index == interface_index {
+                        return Ok(false);
+                    }
+                    link = Some(index);
+                    (field.kind, index).hash(&mut target);
+                }
+                RTA_MULTIPATH | RTA_NH_ID => {
+                    fanout = true;
+                    (field.kind, field.payload).hash(&mut target);
+                }
+                RTA_GATEWAY | RTA_PREFSRC | RTA_VIA | RTA_PREF | RTA_ENCAP_TYPE | RTA_ENCAP => {
+                    (field.kind, field.payload).hash(&mut target);
+                }
+                _ => {}
+            }
+        }
+        let mut identity = std::collections::hash_map::DefaultHasher::new();
+        (header[0], header[1], header[2], header[3], table).hash(&mut identity);
+        (destination, source, priority).hash(&mut identity);
+        (route_flags & RTM_F_CLONED).hash(&mut identity);
+        let (identity, target) = (identity.finish(), target.finish());
+        let link = if fanout { 0 } else { link.unwrap_or(0) };
+        if self.untracked {
+            return Ok(true);
+        }
+        if !present {
+            self.known.remove(&identity);
+            return Ok(true);
+        }
+        let known_count = self.known.len();
+        match self.known.entry(identity) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let (known_link, known_target) = *entry.get();
+                if known_target == target {
+                    entry.insert((link, target));
+                    Ok(false)
+                } else if flags & NLM_F_REPLACE != 0 {
+                    entry.insert((link, target));
+                    Ok(true)
+                } else {
+                    let folded = known_target.wrapping_add(target);
+                    entry.insert((if known_link == link { link } else { 0 }, folded));
+                    Ok(true)
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                if known_count >= ROUTE_BOOK_LIMIT {
+                    self.known = std::collections::HashMap::new();
+                    self.untracked = true;
+                } else {
+                    entry.insert((link, target));
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// Forget the routes out of `link`, and every route that leaves through several links or a
+    /// nexthop object, so their next add counts. `link` 0 forgets only the latter.
+    fn forget_link(&mut self, link: u32) {
+        self.known
+            .retain(|_, (known_link, _)| *known_link != 0 && *known_link != link);
+    }
 }
 
 /// One interface address as the kernel identifies it: link, family, prefix length, the local
@@ -1409,7 +1678,7 @@ type AddressKey = (u32, u8, u8, Option<IpAddr>, Option<IpAddr>);
 /// becoming deprecated) or a removal can move our endpoint, so only those count. The book is
 /// seeded from a dump when the listener opens and rebuilt after lost notifications. Adding host
 /// addresses needs `CAP_NET_ADMIN`, so its size is the host's own address count.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct AddressBook {
     /// Each known address's flags (`IFA_FLAGS`, or the header's 8-bit flags without it).
     known: std::collections::HashMap<AddressKey, u32>,
@@ -1423,9 +1692,12 @@ impl AddressBook {
     /// Returns socket, dump or malformed-reply errors.
     fn dump(interface_index: u32) -> io::Result<Self> {
         let mut book = Self::default();
-        Socket::open(SockProtocol::NetlinkRoute)?.visit(RTM_GETADDR, 0x300, &[0; 8], |reply| {
-            book.record(true, reply, interface_index).map(|_| ())
-        })?;
+        Socket::open(SockProtocol::NetlinkRoute)?.visit(
+            RTM_GETADDR,
+            NLM_F_DUMP,
+            &[0; 8],
+            |reply| book.record(true, reply, interface_index).map(|_| ()),
+        )?;
         Ok(book)
     }
 
@@ -1470,13 +1742,6 @@ impl AddressBook {
             self.known.remove(&key);
             Ok(true)
         }
-    }
-
-    /// Notifications were lost (`ENOBUFS`), so the book may miss changes: read it again. If
-    /// that fails too, start empty; each known address then counts once more when refreshed,
-    /// which costs an extra announcement, never a missed one.
-    fn lost_notifications(&mut self, interface_index: u32) {
-        *self = Self::dump(interface_index).unwrap_or_default();
     }
 }
 
@@ -1680,6 +1945,63 @@ const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
 /// `IFA_FLAGS`: the full 32-bit address flags; the header holds only the low 8 bits.
 const IFA_FLAGS: u16 = 8;
+/// `RTM_NEWLINK`: a link appeared or changed.
+const RTM_NEWLINK: u16 = 16;
+/// `RTM_DELLINK`: a link was removed.
+const RTM_DELLINK: u16 = 17;
+/// `RTM_NEWROUTE`: a route was added, replaced or refreshed.
+const RTM_NEWROUTE: u16 = 24;
+/// `RTM_DELROUTE`: a route was removed.
+const RTM_DELROUTE: u16 = 25;
+/// `RTM_GETROUTE`: asks for the route table (with [`NLM_F_DUMP`]).
+const RTM_GETROUTE: u16 = 26;
+/// `RTM_NEWRULE`: a policy rule was added.
+const RTM_NEWRULE: u16 = 32;
+/// `RTM_DELRULE`: a policy rule was removed.
+const RTM_DELRULE: u16 = 33;
+/// `RTM_GETRULE`: asks for the policy rules (with [`NLM_F_DUMP`]).
+const RTM_GETRULE: u16 = 34;
+/// `RTM_NEWNEXTHOP`: a nexthop object was added or replaced.
+const RTM_NEWNEXTHOP: u16 = 104;
+/// `RTM_DELNEXTHOP`: a nexthop object was removed.
+const RTM_DELNEXTHOP: u16 = 105;
+/// `RTM_GETNEXTHOP`: asks for the nexthop objects (with [`NLM_F_DUMP`]).
+const RTM_GETNEXTHOP: u16 = 106;
+/// `NLM_F_REPLACE`: on a route notice, the route replaced an existing one with the same key.
+const NLM_F_REPLACE: u16 = 0x100;
+/// `NLM_F_DUMP` (`NLM_F_ROOT | NLM_F_MATCH`): return every object of the requested kind.
+const NLM_F_DUMP: u16 = 0x300;
+/// `RTM_F_CLONED`: the route is a cached exception (a learned path MTU or redirect).
+const RTM_F_CLONED: u32 = 0x200;
+/// `RTNH_F_DEAD | RTNH_F_ONLINK | RTNH_F_LINKDOWN`: the nexthop flags in `rtm_flags` that make a
+/// route unusable or bind it to its link. The offload and trap flags are hardware bookkeeping.
+const RTNH_LIVENESS_FLAGS: u32 = 0x1 | 0x4 | 0x10;
+/// `RTA_DST`: the route's destination prefix.
+const RTA_DST: u16 = 1;
+/// `RTA_SRC`: the route's source prefix (IPv6 source routing).
+const RTA_SRC: u16 = 2;
+/// `RTA_OIF`: the route's output link index.
+const RTA_OIF: u16 = 4;
+/// `RTA_GATEWAY`: the route's next-hop address.
+const RTA_GATEWAY: u16 = 5;
+/// `RTA_PRIORITY`: the route's metric.
+const RTA_PRIORITY: u16 = 6;
+/// `RTA_PREFSRC`: the source address the route prefers.
+const RTA_PREFSRC: u16 = 7;
+/// `RTA_MULTIPATH`: the route's nexthops when it has several.
+const RTA_MULTIPATH: u16 = 9;
+/// `RTA_TABLE`: the route's table, when it does not fit the header's 8 bits.
+const RTA_TABLE: u16 = 15;
+/// `RTA_VIA`: a next hop in another address family.
+const RTA_VIA: u16 = 18;
+/// `RTA_PREF`: the IPv6 router preference from a router advertisement.
+const RTA_PREF: u16 = 20;
+/// `RTA_ENCAP_TYPE`: the lightweight tunnel encapsulation type.
+const RTA_ENCAP_TYPE: u16 = 21;
+/// `RTA_ENCAP`: the lightweight tunnel encapsulation.
+const RTA_ENCAP: u16 = 22;
+/// `RTA_NH_ID`: the nexthop object the route uses.
+const RTA_NH_ID: u16 = 30;
 /// Subscribes to IPv4 unicast route changes in the main route table.
 const RTMGRP_IPV4_ROUTE: u32 = 0x40;
 /// Subscribes to IPv6 unicast route changes in the main route table.
@@ -2346,10 +2668,130 @@ mod endpoint_announce_tests {
     }
 
     /// Classify one notification for a node whose mesh link is index 7.
-    fn endpoint(book: &mut AddressBook, kind: u16, payload: &[u8]) -> bool {
-        classify_underlay_change(book, &message(kind, payload), 7)
-            .unwrap()
-            .endpoint
+    fn endpoint(book: &mut EndpointBooks, kind: u16, payload: &[u8]) -> bool {
+        book.observe(&message(kind, payload), 7).unwrap().endpoint
+    }
+
+    /// Like [`endpoint`], for a notice carrying netlink `flags` (such as `NLM_F_REPLACE`).
+    fn endpoint_flagged(book: &mut EndpointBooks, kind: u16, flags: u16, payload: &[u8]) -> bool {
+        let mut notice = message(kind, payload);
+        notice.flags = flags;
+        book.observe(&notice, 7).unwrap().endpoint
+    }
+
+    /// An `rtmsg` notice payload for an IPv6 default route via `gateway` on link `link` with
+    /// `metric`, installed by a router advertisement and expiring in `expires` seconds, laid out
+    /// as the kernel sends it (with `RTA_CACHEINFO` and `RTA_EXPIRES`).
+    fn default_route_v6(gateway: Ipv6Addr, link: u32, metric: u32, expires: u32) -> Vec<u8> {
+        // family, dst_len, src_len, tos, table main, protocol ra (9), scope universe, unicast.
+        let mut payload = vec![10, 0, 0, 0, 254, 9, 0, 1, 0, 0, 0, 0];
+        netlink::attribute(&mut payload, RTA_TABLE, &254_u32.to_ne_bytes()).unwrap();
+        netlink::attribute(&mut payload, RTA_PRIORITY, &metric.to_ne_bytes()).unwrap();
+        netlink::attribute(&mut payload, RTA_GATEWAY, &gateway.octets()).unwrap();
+        netlink::attribute(&mut payload, RTA_OIF, &link.to_ne_bytes()).unwrap();
+        // RTA_CACHEINFO: clntref, lastuse, expires (in clock ticks), error, used, id, ts, tsage.
+        let mut cache = Vec::new();
+        for value in [0, 5, expires.saturating_mul(100), 0, 0, 0, 0, 0] {
+            cache.extend(value.to_ne_bytes());
+        }
+        netlink::attribute(&mut payload, 12, &cache).unwrap();
+        netlink::attribute(&mut payload, 23, &u64::from(expires).to_ne_bytes()).unwrap();
+        netlink::attribute(&mut payload, 20, &[0]).unwrap();
+        payload
+    }
+
+    /// #483 J707 P2 (D81): a router advertisement handled in user space re-installs the default
+    /// route with only a new lifetime, and the kernel reports it as a replacing `RTM_NEWROUTE`.
+    /// Nothing moved, so nothing is announced. A new gateway, another link, another metric and
+    /// a removal are real changes, and so is a route that comes back after its link went down
+    /// (IPv4 drops a downed link's routes without a notice).
+    #[test]
+    fn a_route_lifetime_refresh_is_not_a_change() {
+        let mut book = EndpointBooks::default();
+        let router: Ipv6Addr = "fe80::1".parse().unwrap();
+        let other: Ipv6Addr = "fe80::2".parse().unwrap();
+        let first = default_route_v6(router, 3, 1024, 1800);
+        assert!(
+            endpoint(&mut book, RTM_NEWROUTE, &first),
+            "a new route counts"
+        );
+        assert!(
+            !endpoint_flagged(
+                &mut book,
+                RTM_NEWROUTE,
+                NLM_F_REPLACE,
+                &default_route_v6(router, 3, 1024, 1700)
+            ),
+            "a router advertisement's lifetime refresh must not wake every live session"
+        );
+        assert!(
+            endpoint_flagged(
+                &mut book,
+                RTM_NEWROUTE,
+                NLM_F_REPLACE,
+                &default_route_v6(other, 3, 1024, 1700)
+            ),
+            "a new default gateway moves our endpoint"
+        );
+        assert!(
+            endpoint_flagged(
+                &mut book,
+                RTM_NEWROUTE,
+                NLM_F_REPLACE,
+                &default_route_v6(other, 4, 1024, 1700)
+            ),
+            "the default route moving to another link moves our endpoint"
+        );
+        assert!(
+            endpoint(
+                &mut book,
+                RTM_NEWROUTE,
+                &default_route_v6(other, 4, 512, 1700)
+            ),
+            "a route with another metric is another route"
+        );
+        let mut link = [0_u8; 16];
+        link[4..8].copy_from_slice(&4_u32.to_ne_bytes());
+        assert!(endpoint(&mut book, RTM_NEWLINK, &link));
+        assert!(
+            endpoint(
+                &mut book,
+                RTM_NEWROUTE,
+                &default_route_v6(other, 4, 512, 1600)
+            ),
+            "a route re-added after its link changed counts: IPv4 drops them silently"
+        );
+        assert!(endpoint(
+            &mut book,
+            RTM_DELROUTE,
+            &default_route_v6(other, 4, 512, 1600)
+        ));
+        assert!(
+            endpoint(
+                &mut book,
+                RTM_NEWROUTE,
+                &default_route_v6(other, 4, 512, 1600)
+            ),
+            "a removed route that comes back counts"
+        );
+    }
+
+    /// Past [`ROUTE_BOOK_LIMIT`] routes the book stops tracking, and every route notice counts
+    /// again, refreshes included: memory stays bounded and no change is ever missed.
+    #[test]
+    fn a_route_book_past_its_limit_counts_every_notice() {
+        let mut book = RouteBook::default();
+        for index in 0..=u32::try_from(ROUTE_BOOK_LIMIT).unwrap() {
+            let mut payload = vec![2, 32, 0, 0, 254, 3, 0, 1, 0, 0, 0, 0];
+            netlink::attribute(&mut payload, RTA_DST, &index.to_be_bytes()).unwrap();
+            netlink::attribute(&mut payload, RTA_OIF, &3_u32.to_ne_bytes()).unwrap();
+            assert!(book.record(true, 0, &payload, 7).unwrap());
+        }
+        assert!(book.untracked && book.known.is_empty());
+        let mut payload = vec![2, 32, 0, 0, 254, 3, 0, 1, 0, 0, 0, 0];
+        netlink::attribute(&mut payload, RTA_DST, &1_u32.to_be_bytes()).unwrap();
+        netlink::attribute(&mut payload, RTA_OIF, &3_u32.to_ne_bytes()).unwrap();
+        assert!(book.record(true, NLM_F_REPLACE, &payload, 7).unwrap());
     }
 
     /// J633 P1/P2: a policy rule or nexthop swap that moves our source address must announce
@@ -2357,7 +2799,7 @@ mod endpoint_announce_tests {
     /// the #489 J609 VPN case.
     #[test]
     fn rule_and_nexthop_changes_announce() {
-        let mut book = AddressBook::default();
+        let mut book = EndpointBooks::default();
         for (kind, payload) in [
             (32, [0_u8; 12].as_slice()),
             (33, [0_u8; 12].as_slice()),
@@ -2375,7 +2817,7 @@ mod endpoint_announce_tests {
     /// apply at 1,000 peers would wake every live session.
     #[test]
     fn own_link_changes_never_announce() {
-        let mut book = AddressBook::default();
+        let mut book = EndpointBooks::default();
         let mesh_address = address(7, IpAddr::from([100, 64, 0, 1]), 32, 0x80, u32::MAX);
         assert!(!endpoint(&mut book, RTM_NEWADDR, &mesh_address));
         assert!(!endpoint(&mut book, RTM_DELADDR, &mesh_address));
@@ -2393,7 +2835,7 @@ mod endpoint_announce_tests {
     /// detection, and a removal are real changes.
     #[test]
     fn an_address_lifetime_refresh_is_not_a_change() {
-        let mut book = AddressBook::default();
+        let mut book = EndpointBooks::default();
         let v4 = IpAddr::from([10, 9, 0, 2]);
         let v6: IpAddr = "2001:db8::2".parse().unwrap();
         assert!(endpoint(
@@ -2588,6 +3030,83 @@ mod endpoint_announce_tests {
                 "200",
             ]);
         }));
+    }
+
+    /// A namespace whose underlay `d0` also has an IPv6 default route via `2001:db8::1` that a
+    /// router advertisement installed, expiring in 1,800 s, with the listener drained.
+    fn namespace_with_ra_default_route() -> Listener {
+        let mut listener = namespace();
+        ip(&[
+            "-6",
+            "route",
+            "add",
+            "default",
+            "via",
+            "2001:db8::1",
+            "dev",
+            "d0",
+            "proto",
+            "ra",
+            "metric",
+            "1024",
+            "expires",
+            "1800",
+        ]);
+        listener.pump();
+        listener.announce.take_for_test();
+        listener
+    }
+
+    /// Replace the IPv6 default route with one via `gateway`, expiring in `expires` seconds, as
+    /// a user-space router-advertisement client does on every advertisement.
+    fn replace_ra_default_route(gateway: &str, expires: &str) {
+        ip(&[
+            "-6", "route", "replace", "default", "via", gateway, "dev", "d0", "proto", "ra",
+            "metric", "1024", "expires", expires,
+        ]);
+    }
+
+    /// #483 J707 P2 (D81), end to end: a lifetime-only replace of the IPv6 default route (what
+    /// systemd-networkd does on every router advertisement) announces nothing. Before the route
+    /// book every such replace woke every live session.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_ra_default_route_refresh_does_not_announce() {
+        let mut listener = namespace_with_ra_default_route();
+        for expires in ["1700", "1600", "1500"] {
+            replace_ra_default_route("2001:db8::1", expires);
+            listener.pump();
+            assert!(
+                !listener.announce.take_for_test(),
+                "the lifetime refresh to {expires} s announced"
+            );
+        }
+    }
+
+    /// The same replace with a new gateway is a real change and announces.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_ra_default_gateway_change_announces() {
+        let mut listener = namespace_with_ra_default_route();
+        replace_ra_default_route("2001:db8::3", "1700");
+        listener.pump();
+        assert!(listener.announce.take_for_test());
+    }
+
+    /// IPv4 drops a downed link's routes without a notice, so a default route a DHCP client
+    /// re-adds after the link comes back must still count as new.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_default_route_back_after_link_down_announces() {
+        let mut listener = namespace();
+        ip(&["route", "add", "default", "via", "10.9.0.1", "dev", "d0"]);
+        ip(&["link", "set", "d0", "down"]);
+        ip(&["link", "set", "d0", "up"]);
+        listener.pump();
+        listener.announce.take_for_test();
+        ip(&["route", "add", "default", "via", "10.9.0.1", "dev", "d0"]);
+        listener.pump();
+        assert!(listener.announce.take_for_test());
     }
 
     /// Read for 300 ms, through overflow recoveries too (they end a wait with `Reconcile`), and
