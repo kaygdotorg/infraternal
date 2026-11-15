@@ -30,6 +30,18 @@ pub mod logins;
 mod native_dispatch;
 pub mod plugin_control;
 pub mod plugins;
+/// The rootless infraternal agent's control actions for its own root upgrade (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_agent;
+/// Becoming root once with the person's password for a root upgrade (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_elevate;
+/// The short-lived root relay that runs a root upgrade's install steps (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_relay_host;
+/// The root infraternal agent retiring the rootless install it replaced (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_take_over;
 // Shim census exists only on the local terminal platform; portable control has no PTYs.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_exits;

@@ -560,7 +560,7 @@ async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
         .execute(&f.auth.pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,zeroblob(32),zeroblob(32),?,?)")
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,zeroblob(32),zeroblob(32),?3,?4,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
         .bind(host.as_bytes().repeat(2)).bind(host.as_bytes().as_slice()).bind(now - 604_800 + i64::from(valid) * 3600).bind(now + i64::from(valid) * 3600).execute(&f.auth.pool).await.unwrap();
     sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,1,1,'pending')")
         .bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();

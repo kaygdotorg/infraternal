@@ -24,6 +24,7 @@
 //!   `Auth::session` on the prepared file, whichever driver this build's
 //!   `Auth` uses for it (sqlx before D379 slice 2, the pool after). It first
 //!   stores the real token hashes, so run it on a fresh copy as well.
+//!   `DB_POOL_BENCH_OPS=<n>` sets the operations per task (default: as `bench`).
 //! - `db_pool_bench mem <sqlx|pool> <db>`: resident memory and threads, opened and warm.
 //! - `db_pool_bench startup <sqlx|pool> <db>`: open and validate every recorded migration.
 //! - `db_pool_bench migrate <sqlx|pool> <db>`: migrate an existing database (a
@@ -542,7 +543,13 @@ async fn bench_auth(tasks: usize, pace: Duration, path: &Path) {
     for handle in warm {
         handle.await.unwrap();
     }
-    let per_task = workload::ops_for("session", tasks);
+    // `DB_POOL_BENCH_OPS` overrides the operations per task, so a
+    // multi-task run lasts long enough to reach the pool's WAL limit and
+    // measure the steady state (J696 finding 2: 8 × 400 slides never did).
+    let per_task = std::env::var("DB_POOL_BENCH_OPS").ok().map_or_else(
+        || workload::ops_for("session", tasks),
+        |ops| ops.parse().expect("ops per task"),
+    );
     workload::io_mark();
     let start = Instant::now();
     let mut running = Vec::new();

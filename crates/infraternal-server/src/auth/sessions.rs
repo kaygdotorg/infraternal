@@ -13,9 +13,16 @@
 //!   `UPDATE … RETURNING` no longer races sqlx's other writers for SQLite's
 //!   write lock with busy sleeps inside this process's pool.
 //! - Every write commits through `COMMIT`, so the pool's WAL hook always runs
-//!   and the WAL is checkpointed off the request path. sqlx's
-//!   `fetch_optional` on `UPDATE … RETURNING` never reached SQLite's
-//!   auto-checkpoint, so this path used to grow the WAL without bound (J619).
+//!   and the WAL stays bounded. sqlx's `fetch_optional` on
+//!   `UPDATE … RETURNING` never reached SQLite's auto-checkpoint, so this path
+//!   used to grow the WAL without bound (J619). Background passes copy most
+//!   of the log off the request path, but the log only rewinds when a pass
+//!   finishes inside one gap between commits, which needs a gap longer than a
+//!   checkpoint's fsync. So a steady stream of slides, paced or not, still
+//!   reaches the pool's 8,000-page backstop: J696 measured that at 462 and
+//!   737 slides/s on backup01, where about one slide in 4,000 checkpoints
+//!   inline and takes 19–23 ms (sqlx defers a 180 ms checkpoint instead, and
+//!   keeps a 100 MB log).
 //! - The two reads run on the pool's read-only reader threads.
 //!
 //! The SQL text is unchanged. When `Auth` has no pool (in-memory test

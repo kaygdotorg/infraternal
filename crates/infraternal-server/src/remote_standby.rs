@@ -92,7 +92,9 @@ impl Admission {
     /// Transfer validated cleanup links away from normal handshake admission;
     /// their bounded per-host delivery lane owns the connection from here.
     pub(crate) fn release_cleanup_handshake(&mut self) {
-        if self.authority.cleanup_person().is_some() {
+        if self.authority.cleanup_person().is_some()
+            || self.authority.successor_authority().is_some()
+        {
             self.permits.take();
         }
     }
