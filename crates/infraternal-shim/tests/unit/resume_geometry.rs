@@ -342,3 +342,27 @@ fn opening_a_new_session_keeps_the_raw_replay() {
         "the opener's first size needs no repaint"
     );
 }
+
+#[test]
+fn reopening_narrower_while_another_writer_owns_the_size_keeps_the_raw_replay() {
+    // The old tab still owns the session's 45 columns, so the new 42-column
+    // tab's Resize is only staged. The engine's repaint is laid out for 45
+    // columns with absolute positions, which pile up in the last column of
+    // a narrower viewer. D74 leaves this to client-side scaling, which does
+    // not exist yet, so the replay stays as on dev (#521).
+    let mut session = Session::new(45, 24);
+    session.output(&typed_at_42());
+    session.cursors.active_writer = Some(0);
+    session.cursors.select(1, (42, 24, 0, 0)).unwrap();
+    let mut tab = peer();
+    tab.writer = Some(1);
+    let mut viewer = Terminal::new(42, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    session.resize(&mut tab, 42, 24);
+    assert_eq!((session.config.cols, session.config.rows), (45, 24));
+    assert!(
+        tab.request.is_none(),
+        "a smaller staged viewer keeps the replay"
+    );
+}
