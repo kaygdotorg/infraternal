@@ -421,6 +421,59 @@ impl Frame {
         Ok(frame)
     }
 }
+
+/// Put a fresh input reply before wholly unstarted raw `Output` while keeping earlier replies ordered.
+///
+/// A partially written frame cannot be moved without corrupting the wire
+/// stream. Other control frames are ordering fences, so this only crosses zero
+/// or more complete `InputAck`/`InputState` frames before the first unstarted
+/// `Output`. This also keeps liveness replies from waiting behind a flood.
+/// # Errors
+/// Returns the encoder error if the small reply frame cannot be encoded.
+pub(crate) fn insert_input_reply_before_unstarted_output(
+    wire: &mut Vec<u8>,
+    written: usize,
+    reply: &Frame,
+) -> io::Result<bool> {
+    if written != 0 || !matches!(reply, Frame::InputAck(_) | Frame::InputState(_, _)) {
+        return Ok(false);
+    }
+
+    let mut insertion = 0;
+    loop {
+        if insertion == wire.len() || wire.len() - insertion < 5 {
+            return Ok(false);
+        }
+        let body_len = u32::from_le_bytes(
+            wire[insertion..insertion + 4]
+                .try_into()
+                .map_err(|_| invalid())?,
+        ) as usize;
+        let Some(frame_end) = insertion
+            .checked_add(4)
+            .and_then(|n| n.checked_add(body_len))
+        else {
+            return Ok(false);
+        };
+        if body_len == 0 || body_len > MAX_FRAME || frame_end > wire.len() {
+            return Ok(false);
+        }
+        match FrameRef::decode(&wire[insertion + 4..frame_end])? {
+            FrameRef::Owned(Frame::InputAck(_) | Frame::InputState(_, _)) => insertion = frame_end,
+            FrameRef::Output(_, _) => break,
+            _ => return Ok(false),
+        }
+    }
+
+    let reply = reply.encode()?;
+    let old_len = wire.len();
+    wire.reserve(reply.len());
+    wire.resize(old_len + reply.len(), 0);
+    wire.copy_within(insertion..old_len, insertion + reply.len());
+    wire[insertion..insertion + reply.len()].copy_from_slice(&reply);
+    Ok(true)
+}
+
 /// Incremental stream decoder; callers must not feed more than one bounded frame at once.
 #[derive(Default)]
 pub struct Decoder {

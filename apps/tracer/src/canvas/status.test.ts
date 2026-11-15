@@ -134,3 +134,10 @@ test("ended strips name actual signals and preserve recorded ordinary exit codes
   expect(endedStripText(3)).toBe("Session ended · Exit 3");
   expect(endedStripText(129)).toBe("Session ended · Exit 129");
 });
+
+test("the account's connection limit is left to the page's own notice, not repeated per terminal (#523)", () => {
+  const { shown, say } = relay();
+  say("This account is open in too many browser tabs. Close the ones you don't need to connect.");
+  say("This tab paused so a newer tab could connect. It reconnects when you come back to it.");
+  expect(shown).toEqual([]);
+});

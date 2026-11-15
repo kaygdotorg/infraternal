@@ -854,7 +854,11 @@ pub fn approximate(handle: c.Terminal, buf: [*]u8, len: usize) callconv(lib.call
     }
     // Reserve footer space independently of clipping, and leave a parser in
     // ground state at the visible cursor before subsequent raw output resumes.
+    // The leading RIS reset the margins: restore them before the final cursor
+    // position (DECSTBM homes the cursor), or raw output after this repaint
+    // scrolls rows the program keeps outside its scroll region (#477).
     var footer = Writer.fixed(buf[w.end..len]);
+    regions(&footer, t) catch return 0;
     footer.print("\x1b[0m\x1b[?7h\x1b[?25{c}\x1b[{d};{d}H", .{ @as(u8, if (t.modes.get(.cursor_visible)) 'h' else 'l'), screen.cursor.y + 1, screen.cursor.x + 1 }) catch return 0;
     footer.writeAll(tail_buf[0..tail.end]) catch return 0;
     return w.end + footer.end;

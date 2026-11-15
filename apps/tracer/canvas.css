@@ -2,6 +2,8 @@
 
 /* The canvas replaces the single pane grid; the viewport clips, the layer pans. */
 .terminal-screen[data-canvas="on"] .panes { display: block; overflow: visible; }
+/* The startup notice (canvas/startup-notice.ts, #523) sits in the placeholder pane, whose frame is already its border. */
+.pane-card > .startup-notice { border: 0; }
 .canvas-viewport {
   /* `clip`, not `hidden`: a hidden box can still be scrolled by focus or scrollIntoView, which
      would shift every window under the canvas's own transform. Panning is the transform only. */
