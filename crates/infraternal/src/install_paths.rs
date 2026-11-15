@@ -386,6 +386,34 @@ pub fn path_link(scope: Scope, environment: &Environment) -> Result<Option<PathB
     }
 }
 
+/// Where the symlink `link` really points, as an absolute path with `.` and `..` resolved.
+///
+/// A relative target is taken from the link's own folder, as the kernel does.
+/// `..` is resolved lexically, without touching the disk, so a dangling link
+/// (its release deleted) still has a target to judge. Lexical resolution can
+/// differ from the kernel's only when a component of the target is itself a
+/// symlink to elsewhere; then the link is judged by the path it names, which
+/// errs on the side of calling it foreign. `None` means it is not a readable link.
+fn link_target(link: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(link).ok()?;
+    let joined = if target.is_absolute() {
+        target
+    } else {
+        link.parent()?.join(target)
+    };
+    let mut normal = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normal.pop();
+            }
+            other => normal.push(other),
+        }
+    }
+    Some(normal)
+}
+
 /// Whether the symlink `link` points at a release of ours.
 ///
 /// Ours means: exactly `binary`, or a file named `infraternal`, `live` or
@@ -393,14 +421,8 @@ pub fn path_link(scope: Scope, environment: &Environment) -> Result<Option<PathB
 /// release, old or new). That is how an update recognises the previous
 /// release's link and re-points it, while a link to `/usr/bin/other` is foreign.
 fn points_at_ours(link: &Path, binary: &Path) -> bool {
-    let Ok(target) = std::fs::read_link(link) else {
+    let Some(target) = link_target(link) else {
         return false;
-    };
-    let target = if target.is_absolute() {
-        target
-    } else {
-        link.parent()
-            .map_or(target.clone(), |dir| dir.join(&target))
     };
     if target == binary {
         return true;
@@ -425,7 +447,7 @@ fn points_at_ours(link: &Path, binary: &Path) -> bool {
 pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
     match std::fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            if std::fs::read_link(link)? == binary {
+            if link_target(link).as_deref() == Some(binary) {
                 return Ok(LinkOutcome::Current(link.to_owned()));
             }
             if !points_at_ours(link, binary) {
