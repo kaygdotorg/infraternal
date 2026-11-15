@@ -284,17 +284,12 @@ impl Peer {
     }
     /// Both explicit resizing and last-typist selection share refusal recovery.
     /// Accepted input stays owned by the shim even when native geometry is refused.
-    ///
-    /// Returns whether the size was applied. When it changes the columns or
-    /// rows, `geometry_seq` moves to the ring head: bytes before it were
-    /// written for another size and cannot be replayed raw (#521).
     fn resize(
         &mut self,
         pty: &mut Pty,
         terminal: &mut impl SessionTerminal,
         ring: &Ring,
         config: &mut Config,
-        geometry_seq: &mut u64,
     ) -> io::Result<bool> {
         let (cols, rows, px_w, px_h) = self.size;
         pty.resize(cols, rows, px_w, px_h)?;
@@ -329,9 +324,6 @@ impl Peer {
             // Control-only peers keep their ordered InputState fence; the
             // terminal provenance selects a notice on their next ReadFrom.
             return Ok(false);
-        }
-        if (config.cols, config.rows) != (cols, rows) {
-            *geometry_seq = ring.head();
         }
         config.cols = cols;
         config.rows = rows;
@@ -1450,7 +1442,7 @@ fn handle<'a>(
             // duplicate bytes cannot steal the last typist's terminal geometry.
             if cursors.active_writer != Some(writer) {
                 p.size = cursors.get(p.writer)?.requested_size;
-                let applied = p.resize(pty, terminal, ring, config, &mut cursors.geometry_seq)?;
+                let applied = p.resize(pty, terminal, ring, config)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = Some(writer);
@@ -1521,8 +1513,8 @@ fn handle<'a>(
             cursors.request_resize(p.writer, p.size)?;
             let replay_awaits_size = std::mem::take(&mut p.replay_awaits_size);
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
-                let geometry_seq = cursors.geometry_seq;
-                let applied = p.resize(pty, terminal, ring, config, &mut cursors.geometry_seq)?;
+                let before = (config.cols, config.rows);
+                let applied = p.resize(pty, terminal, ring, config)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = p.writer;
@@ -1532,7 +1524,7 @@ fn handle<'a>(
                 // it has already gone out is wrong at the new one. Repaint the
                 // reflowed engine instead; a live viewer's own resize reflows
                 // its screen locally and needs no repaint.
-                if replay_awaits_size && cursors.geometry_seq != geometry_seq {
+                if replay_awaits_size && before != (config.cols, config.rows) {
                     p.request = Some(Request::Snapshot);
                 }
             }
@@ -1540,12 +1532,13 @@ fn handle<'a>(
         Frame::ReadFrom(seq) if seq <= ring.head() => {
             // A new peer or a later request can replace the resize's queued
             // repaint. Lost native state must still be announced, even when
-            // raw bytes cover this viewer's cursor. Byte retention alone does
-            // not cover omitted output, nor bytes written before the last
-            // geometry change: those were laid out for another size, and a
-            // shell's line wrapping (print past the margin, then `\r`) lands
-            // on the wrong row at any other width (#521).
-            let raw = !terminal.requires_approximation() && seq >= cursors.geometry_seq;
+            // raw bytes cover this viewer's cursor; byte retention alone does
+            // not cover omitted output. Raw bytes are laid out for the size
+            // they were written at: the viewer's Resize right after this
+            // decides whether they still fit it (#521). Bytes from before an
+            // earlier resize are still replayed raw, because a repaint here
+            // would be approximate for every shell session, on every reload.
+            let raw = !terminal.requires_approximation();
             p.request = Some(if raw {
                 Request::Read(seq)
             } else {
