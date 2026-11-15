@@ -23,11 +23,17 @@ let page: Page;
 /**
  * The typed program. It draws `<K000001>`, `<K000002>`, ... on row 1, one write per key, and starts `yes` when it reads
  * `F`; the scroll region `ESC [2r` keeps `yes` off row 1. `bash -c` keeps it independent of the account's login shell.
+ * After token *n* it draws a reverse-video bar of *n* mod {@link BAR_MODULUS} cells, so the rendered row is
+ * 9 + (*n* mod 40) cells wide and a screenshot can tell which token is on screen (see {@link rowCells}).
  */
 const TOKEN_PROGRAM =
   "bash --norc -c 'stty raw -echo; printf \"\\033[2J\\033[2r\"; n=0; flood_pid=; while IFS= read -rsn1 c; do " +
   "if [ \"$c\" = F ]; then yes & flood_pid=$!; elif [ \"$c\" = S ]; then kill \"$flood_pid\" 2>/dev/null || :; wait \"$flood_pid\" 2>/dev/null || :; break; " +
-  "else n=$((n+1)); printf \"\\0337\\033[1;1H<K%06d>\\0338\" \"$n\"; fi; done; stty sane'";
+  "else n=$((n+1)); printf \"\\0337\\033[1;1H\\033[2K<K%06d>\\033[7m%*s\\033[0m\\0338\" \"$n\" \"$((n%40))\" \"\"; fi; done; stty sane'";
+/** Token *n*'s bar is *n* mod this many cells long; {@link TOKEN_PROGRAM} hard-codes the same 40. */
+const BAR_MODULUS = 40;
+/** A `<K000042>` token spans this many cells before its bar. */
+const TOKEN_CELLS = 9;
 /** Keep each probe key in one overwritten cell outside the independent flood scroll region. */
 const PAINT_PROGRAM =
   "bash --norc -c 'stty raw -echo; printf \"\\033[2J\\033[11r\\033[11;1HREADY\\n\"; flood_pid=; " +
@@ -146,9 +152,10 @@ const RECONNECT_STATUS = /Reconnect|Catching up|Connection lost|stopped respondi
 
 /**
  * How wide the ink at the start of the terminal's first text row is, in CSS pixels, measured on a screenshot of the
- * rendered page (the production build exposes no screen text). A `<K000042>` token at row 1, column 1 spans nine
- * cells; a lone `y` from flood output spans one, and one at the far end of the row is outside the measured 200 px. Pixels count as ink when they differ clearly from the row's background, so the
- * theme and font do not matter. The probe panel is hidden while measuring because it overlaps the terminal.
+ * rendered page (the production build exposes no screen text). Token *n* and its bar span 9 + (*n* mod 40) cells from
+ * column 1; flood output below row 1 is a `y` in column 1, so it never widens the measurement. Pixels count as ink
+ * when they differ clearly from the row's background, so the theme and font do not matter. The probe panel is hidden
+ * while measuring because it overlaps the terminal.
  */
 async function firstRowInkWidth(): Promise<number> {
   const panel = page.locator("#probe-panel");
@@ -167,7 +174,7 @@ async function firstRowInkWidth(): Promise<number> {
     let left = Infinity;
     let right = -Infinity;
     // Skip a 4 px frame so the host's border and rounded corners never count as text.
-    const end = Math.min(width - 4, Math.round(200 * window.devicePixelRatio));
+    const end = width - 4;
     for (let y = 4; y < height - 4; y++) for (let x = 4; x < end; x++) {
       const i = at(x, y);
       const distance = Math.abs(data[i]! - data[background]!) + Math.abs(data[i + 1]! - data[background + 1]!) + Math.abs(data[i + 2]! - data[background + 2]!);
@@ -178,6 +185,16 @@ async function firstRowInkWidth(): Promise<number> {
     // The screenshot is taken at the device pixel ratio; report CSS pixels.
     return right < left ? 0 : (right - left + 1) / window.devicePixelRatio;
   }, [...shot]);
+}
+
+/** The cell count a measured row width stands for, given the width of a row known to span `knownCells`. */
+function rowCells(width: number, knownWidth: number, knownCells: number): number {
+  return Math.round(width / (knownWidth / knownCells));
+}
+
+/** How many cells token `n` and its bar span on row 1 (see {@link TOKEN_PROGRAM}). */
+function tokenCells(n: number): number {
+  return TOKEN_CELLS + (n % BAR_MODULUS);
 }
 
 /** Finish when all requested keys paint, or surface the probe's own timeout with its partial trace. */
@@ -202,6 +219,15 @@ test("keys typed into a terminal that its own program floods keep showing on scr
   await typeKey(++typed);
   const quiet: number[] = [];
   for (let i = 0; i < KEYS; i++) quiet.push(await typeKey(++typed));
+  // Calibrate the cell width on the quiet screen: the last quiet token's row, read twice alike so it has painted.
+  // It also proves the screen showed that token, so a screen that freezes later shows it or a newer one.
+  let quietWidth = -1;
+  await expect.poll(async () => {
+    const previous = quietWidth;
+    quietWidth = await firstRowInkWidth();
+    return quietWidth > 40 && quietWidth === previous;
+  }, { timeout: FREEZE_MS, intervals: [100] }).toBe(true);
+  const quietToken = typed;
 
   const { output, stream } = terminalStream();
   const route = terminalBridge().id;
@@ -217,20 +243,28 @@ test("keys typed into a terminal that its own program floods keep showing on scr
 
   console.log(`SAME_SESSION_FLOOD keys=${KEYS} quiet_p50_ms=${p(quiet, 0.5).toFixed(1)} quiet_max_ms=${p(quiet, 1).toFixed(1)} ` +
     `flood_p50_ms=${p(flood, 0.5).toFixed(1)} flood_max_ms=${p(flood, 1).toFixed(1)} (bridge-observed, 150 ms each way)`);
-  // The keys reached the bridge; now the person must see them. The newest token is drawn on row 1 of the rendered
-  // terminal, on the route the flood started on, with no reconnect status (#477: these used to pass on a blank screen).
+  // The keys reached the bridge; now the person must see them. The newest token, by its bar's width, is drawn on row 1
+  // of the rendered terminal, on the route the flood started on, with no reconnect status (#477: these used to pass on
+  // a blank screen, and then on a screen frozen before the flood, J730). Its 10 cells differ from every token 21..40
+  // (30..49 cells) a frozen screen could still show.
   // A page screenshot takes about 2 s while the flood keeps the renderer busy, so allow the spec's freeze bound.
   let tokenWidth = 0;
-  await expect.poll(async () => (tokenWidth = await firstRowInkWidth()), { timeout: FREEZE_MS, intervals: [50, 100, 250] })
-    .toBeGreaterThan(40).catch(async (error: unknown) => {
+  const shown = () => rowCells(tokenWidth, quietWidth, tokenCells(quietToken));
+  await expect.poll(async () => {
+    tokenWidth = await firstRowInkWidth();
+    return shown();
+  }, { timeout: FREEZE_MS, intervals: [50, 100, 250] })
+    .toBe(tokenCells(typed)).catch(async (error: unknown) => {
       await page.screenshot({ path: test.info().outputPath("same-session-flood-no-token.png") });
-      console.error(`SAME_SESSION_FLOOD_NO_TOKEN last_token_row_ink_px=${tokenWidth.toFixed(1)}`);
+      console.error(`SAME_SESSION_FLOOD_NO_TOKEN last_token_row_ink_px=${tokenWidth.toFixed(1)} cells=${shown()} ` +
+        `want=${tokenCells(typed)} quiet_px=${quietWidth.toFixed(1)} quiet_cells=${tokenCells(quietToken)}`);
       throw error;
     });
   await page.screenshot({ path: test.info().outputPath("same-session-flood.png") });
   expect(activeTerminalBridge()?.id, "typing during the flood must not cost the browser its route").toBe(route);
   await expect(page.locator("#connection-status")).not.toHaveText(RECONNECT_STATUS);
-  console.log(`SAME_SESSION_FLOOD_SCREEN token_row_ink_px=${tokenWidth.toFixed(1)} route=${route}`);
+  console.log(`SAME_SESSION_FLOOD_SCREEN token_row_ink_px=${tokenWidth.toFixed(1)} cells=${shown()} ` +
+    `token=${typed} quiet_px=${quietWidth.toFixed(1)} route=${route}`);
   const bridge = terminalBridge();
   const beforeStop = bridge.outputBytesSeen ?? 0;
   await page.keyboard.press("S");
