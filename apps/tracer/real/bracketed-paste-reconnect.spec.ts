@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { enrol } from "./layout-devices";
+import { watchLayout } from "./layout-observer";
 import { startRealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 
@@ -75,7 +76,8 @@ test("a pasted multi-line command stays one bracketed paste after a reconnect re
   const done = join(scratch, "flooded");
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4857) });
   const context = await browser.newContext({ viewport: { width: 1440, height: 852 }, ignoreHTTPSErrors: true });
-  const page = await context.newPage();
+  // enrol() waits for the layout to settle, which it reads from the observer; it must watch before the first page.
+  const page = watchLayout(await context.newPage());
   const connections = observe(page);
   try {
     await enrol(page, server);
