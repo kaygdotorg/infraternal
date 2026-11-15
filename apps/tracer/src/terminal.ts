@@ -1032,6 +1032,11 @@ export class TerminalClient {
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
     this.stopKeyboardWatch?.();
+    // The watcher may be the only thing that would have undone the keyboard-sized height it put on the shared screen. A window
+    // that ends with the keyboard up (a shell that exits) then left the screen short for good: a band under the page.
+    // Any terminal still open re-fits within one trigger (focus change, viewport event or its settle re-read).
+    this.screen.style.height = "";
+    this.screen.style.transform = "";
     this.inputResendNotice?.dispose();
     this.remoteCopyNotice?.dispose();
     this.clipboardWrites.reset();
