@@ -102,6 +102,11 @@ pub(super) struct Inputs {
     /// order. This lets a partial PTY write credit only the writers whose bytes
     /// actually went out.
     segments: VecDeque<(u64, usize)>,
+    /// Output position where the terminal's current columns and rows took
+    /// effect; zero until the first size change. Output before it was laid
+    /// out for another size, so a viewer asking to replay from earlier gets
+    /// a Snapshot instead of raw bytes (#521).
+    pub(super) geometry_seq: u64,
     /// Most runs `segments` may hold. Bounds bookkeeping when writers alternate
     /// byte by byte.
     #[cfg(feature = "process-per-user")]
@@ -127,6 +132,7 @@ impl Inputs {
                 },
             )]),
             segments: VecDeque::new(),
+            geometry_seq: 0,
             #[cfg(feature = "process-per-user")]
             segment_limit: MAX_FRAME,
         }

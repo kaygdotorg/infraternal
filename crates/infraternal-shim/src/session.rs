@@ -178,6 +178,12 @@ struct Peer {
     exited_sent: bool,
     stopping: bool,
     request: Option<Request>,
+    /// True from a `ReadFrom` that started a raw replay of bytes already
+    /// written until this viewer's next `Resize`. Raw bytes are only right at
+    /// the size they were written for, and a viewer reports its size just
+    /// after attaching. If that size changes the geometry, the viewer gets a
+    /// Snapshot of the reflowed engine instead (#521).
+    replay_awaits_size: bool,
 }
 impl Peer {
     #[cfg(feature = "process-per-user")]
@@ -278,12 +284,17 @@ impl Peer {
     }
     /// Both explicit resizing and last-typist selection share refusal recovery.
     /// Accepted input stays owned by the shim even when native geometry is refused.
+    ///
+    /// Returns whether the size was applied. When it changes the columns or
+    /// rows, `geometry_seq` moves to the ring head: bytes before it were
+    /// written for another size and cannot be replayed raw (#521).
     fn resize(
         &mut self,
         pty: &mut Pty,
         terminal: &mut impl SessionTerminal,
         ring: &Ring,
         config: &mut Config,
+        geometry_seq: &mut u64,
     ) -> io::Result<bool> {
         let (cols, rows, px_w, px_h) = self.size;
         pty.resize(cols, rows, px_w, px_h)?;
@@ -318,6 +329,9 @@ impl Peer {
             // Control-only peers keep their ordered InputState fence; the
             // terminal provenance selects a notice on their next ReadFrom.
             return Ok(false);
+        }
+        if (config.cols, config.rows) != (cols, rows) {
+            *geometry_seq = ring.head();
         }
         config.cols = cols;
         config.rows = rows;
@@ -1105,6 +1119,7 @@ fn run_configured(
                             exited_sent: false,
                             stopping: false,
                             request: None,
+                            replay_awaits_size: false,
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
@@ -1435,7 +1450,7 @@ fn handle<'a>(
             // duplicate bytes cannot steal the last typist's terminal geometry.
             if cursors.active_writer != Some(writer) {
                 p.size = cursors.get(p.writer)?.requested_size;
-                let applied = p.resize(pty, terminal, ring, config)?;
+                let applied = p.resize(pty, terminal, ring, config, &mut cursors.geometry_seq)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = Some(writer);
@@ -1504,24 +1519,39 @@ fn handle<'a>(
             }
             p.size = (cols, rows, px_w, px_h);
             cursors.request_resize(p.writer, p.size)?;
+            let replay_awaits_size = std::mem::take(&mut p.replay_awaits_size);
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
-                let applied = p.resize(pty, terminal, ring, config)?;
+                let geometry_seq = cursors.geometry_seq;
+                let applied = p.resize(pty, terminal, ring, config, &mut cursors.geometry_seq)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = p.writer;
+                }
+                // This viewer has just attached and is reporting its size. Its
+                // raw replay was written for the old size, so whatever part of
+                // it has already gone out is wrong at the new one. Repaint the
+                // reflowed engine instead; a live viewer's own resize reflows
+                // its screen locally and needs no repaint.
+                if replay_awaits_size && cursors.geometry_seq != geometry_seq {
+                    p.request = Some(Request::Snapshot);
                 }
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
             // A new peer or a later request can replace the resize's queued
             // repaint. Lost native state must still be announced, even when
-            // raw bytes cover this viewer's cursor; byte retention alone does
-            // not cover state after historical resizes or omitted output.
-            p.request = Some(if terminal.requires_approximation() {
-                Request::Snapshot
-            } else {
+            // raw bytes cover this viewer's cursor. Byte retention alone does
+            // not cover omitted output, nor bytes written before the last
+            // geometry change: those were laid out for another size, and a
+            // shell's line wrapping (print past the margin, then `\r`) lands
+            // on the wrong row at any other width (#521).
+            let raw = !terminal.requires_approximation() && seq >= cursors.geometry_seq;
+            p.request = Some(if raw {
                 Request::Read(seq)
+            } else {
+                Request::Snapshot
             });
+            p.replay_awaits_size = raw && seq < ring.head();
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
         Frame::Signal(signal) => pty.signal_unless_exited(signal, exited)?,

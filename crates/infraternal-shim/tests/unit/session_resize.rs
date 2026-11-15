@@ -79,6 +79,7 @@ fn resize_refusal_session_probe() {
             exited_sent: false,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         if case == "control" {
             peer.cursor = None;

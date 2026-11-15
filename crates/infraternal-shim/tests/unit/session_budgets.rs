@@ -27,6 +27,7 @@ mod budgets {
             exited_sent: false,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         let frame = Frame::Output(13, vec![b'x'; 4096]);
         let expected = frame.encode().unwrap();
@@ -73,6 +74,7 @@ mod budgets {
             exited_sent: true,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         let mut terminal = Terminal::new(20, 4).unwrap();
         let ring = Ring::new(DEFAULT_CAPACITY);
@@ -163,6 +165,7 @@ mod budgets {
             exited_sent: false,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         let mut terminal = Terminal::new(200, 60).unwrap();
         let ring = Ring::new(DEFAULT_CAPACITY);

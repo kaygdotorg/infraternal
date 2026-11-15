@@ -132,6 +132,7 @@ fn peer() -> Peer {
         exited_sent: false,
         stopping: false,
         request: None,
+        replay_awaits_size: false,
     }
 }
 

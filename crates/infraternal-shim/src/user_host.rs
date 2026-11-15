@@ -773,6 +773,7 @@ impl Session {
                     exited_sent: false,
                     stopping: false,
                     request: None,
+                    replay_awaits_size: false,
                 };
                 peer.queue(&Frame::Hello {
                     version: 1,
@@ -1223,6 +1224,7 @@ mod tests {
             size: (session.config.cols, session.config.rows, 0, 0),
             cursor: Some(session.ring.head()),
             request: None,
+            replay_awaits_size: false,
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
