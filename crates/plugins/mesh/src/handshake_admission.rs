@@ -741,3 +741,242 @@ mod tests {
         }
     }
 }
+
+/// J713 (#483): a sustained, unspoofed, MAC1-valid flood against a granted peer's initiations.
+///
+/// A replayed initiation is free for anyone who knows the node's public key, so these tests
+/// simulate a whole `WireGuard` handshake attempt period (90 s) of one at 20,000 packets a second,
+/// on a simulated clock, while a granted peer retries every 5 s. They count how often the peer
+/// still gets through, and check that the flood never runs more key agreements than the node
+/// budget allows and that the limiter's maps stay small.
+#[cfg(test)]
+mod flood_fairness {
+    #![expect(
+        clippy::expect_used,
+        reason = "a broken fixture (bad address, key or lock) must stop the test loudly"
+    )]
+    use super::{NODE_BUDGET, PeerAdmission, Refusal};
+    use crate::policy::model::PublicKey;
+    use gotatun::{
+        noise::{Tunn, index_table::IndexTable, rate_limiter::RateLimiter},
+        packet::Packet,
+        x25519::{PublicKey as X25519PublicKey, StaticSecret},
+    };
+    use std::{
+        net::{IpAddr, Ipv6Addr, SocketAddr},
+        sync::{Arc, atomic::Ordering},
+        time::{Duration, Instant},
+    };
+
+    /// The node's fixed test identity.
+    const NODE: [u8; 32] = [0x31; 32];
+
+    /// The granted peer's fixed test identity.
+    const PEER: [u8; 32] = [0x66; 32];
+
+    /// How long each simulated flood lasts: `WireGuard`'s `REKEY_ATTEMPT_TIME`.
+    const FLOOD_SECONDS: u32 = 90;
+
+    /// One MAC1-valid initiation from `sender` to the node, with a fresh ephemeral key.
+    fn initiation(sender: [u8; 32]) -> Vec<u8> {
+        let node_public = X25519PublicKey::from(&StaticSecret::from(NODE));
+        let sender = StaticSecret::from(sender);
+        let sender_public = X25519PublicKey::from(&sender);
+        let mut tunn = Tunn::new(
+            sender,
+            node_public,
+            None,
+            None,
+            IndexTable::from_os_rng(),
+            Arc::new(RateLimiter::new(&sender_public, 100)),
+        );
+        tunn.format_handshake_initiation(false)
+            .expect("a MAC1-valid initiation")
+            .into_bytes()
+            .as_ref()
+            .to_vec()
+    }
+
+    /// Flood source `n` inside the IPv6 /48 `2001:db8:<network>::/48`: a different /64 per `n`.
+    fn v6_source(network: u16, n: u32) -> SocketAddr {
+        let [_, _, high, low] = n.to_be_bytes();
+        let ip = Ipv6Addr::new(
+            0x2001,
+            0xdb8,
+            network,
+            u16::from_be_bytes([high, low]),
+            0,
+            0,
+            0,
+            1,
+        );
+        SocketAddr::new(IpAddr::V6(ip), 40000)
+    }
+
+    /// The granted peer's source address in every simulation.
+    fn peer_source() -> SocketAddr {
+        "203.0.113.9:51000".parse().expect("test peer address")
+    }
+
+    /// The shape of one simulated flood.
+    #[derive(Clone, Copy)]
+    struct Flood {
+        /// Flood initiations per second, evenly spaced.
+        rate: u32,
+        /// How many IPv6 /48 networks the flood comes from.
+        networks: u16,
+        /// How many /64s inside each /48 the flood rotates over.
+        prefixes_per_network: u32,
+        /// When, into each second, the granted peer sends its initiation.
+        peer_offset_ms: u64,
+    }
+
+    /// What one simulated flood did.
+    struct Run {
+        /// Granted-peer initiations the guard admitted.
+        peer_admitted: u32,
+        /// Granted-peer initiations sent (one every 5 s).
+        peer_attempts: u32,
+        /// Key agreements the guard ran in total.
+        key_agreements: u32,
+        /// The most per-source entries the budget held at a window's end.
+        max_sources: usize,
+        /// The largest per-source map capacity seen.
+        max_capacity: usize,
+    }
+
+    /// Simulate `flood` for [`FLOOD_SECONDS`] while a granted peer retries every 5 s
+    /// (`WireGuard`'s `REKEY_TIMEOUT`).
+    fn simulate(flood: Flood) -> Run {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        admission.set_peers([PublicKey(
+            *X25519PublicKey::from(&StaticSecret::from(PEER)).as_bytes(),
+        )]);
+        let attacker = initiation([0x55; 32]);
+        let granted = initiation(PEER);
+        let start = Instant::now();
+        let mut run = Run {
+            peer_admitted: 0,
+            peer_attempts: 0,
+            key_agreements: 0,
+            max_sources: 0,
+            max_capacity: 0,
+        };
+        let sources = u32::from(flood.networks) * flood.prefixes_per_network;
+        let step = Duration::from_secs(1) / flood.rate.max(1);
+        let mut n = 0_u32;
+        let mut peer_tries = |admission: &PeerAdmission, at: Instant, run: &mut Run| {
+            run.peer_attempts += 1;
+            if admission.check(&Packet::copy_from(&granted), peer_source(), at) == Ok(()) {
+                run.peer_admitted += 1;
+            }
+        };
+        for second in 0..FLOOD_SECONDS {
+            let base = start + Duration::from_secs(u64::from(second));
+            let peer_at = base + Duration::from_millis(flood.peer_offset_ms);
+            let mut peer_done = second % 5 != 0;
+            for i in 0..flood.rate {
+                let at = base + step * i;
+                if !peer_done && at >= peer_at {
+                    peer_done = true;
+                    peer_tries(&admission, peer_at, &mut run);
+                }
+                let index = n % sources;
+                let network = u16::try_from(index / flood.prefixes_per_network)
+                    .expect("network index fits");
+                let from = v6_source(network, index % flood.prefixes_per_network);
+                let verdict = admission.check(&Packet::copy_from(&attacker), from, at);
+                assert_ne!(verdict, Ok(()), "a stranger was admitted");
+                n = n.wrapping_add(1);
+            }
+            if !peer_done {
+                peer_tries(&admission, peer_at, &mut run);
+            }
+            let budget = admission.budget.lock().expect("budget lock");
+            run.max_sources = run.max_sources.max(budget.sources.len());
+            run.max_capacity = run.max_capacity.max(budget.sources.capacity());
+        }
+        run.key_agreements = admission.key_agreements.load(Ordering::Relaxed);
+        run
+    }
+
+    /// Check the bounds every flood must keep, and print the run for the issue log.
+    fn report(name: &str, run: &Run) {
+        println!(
+            "J717 {name}: peer admitted {}/{} attempts, key agreements {} (cap {}), \
+             max sources {}, max map capacity {}",
+            run.peer_admitted,
+            run.peer_attempts,
+            run.key_agreements,
+            FLOOD_SECONDS * NODE_BUDGET,
+            run.max_sources,
+            run.max_capacity
+        );
+        assert!(
+            run.key_agreements <= FLOOD_SECONDS * NODE_BUDGET,
+            "{name}: the flood ran more key agreements than the node budget allows"
+        );
+        assert!(
+            run.max_sources <= NODE_BUDGET as usize,
+            "{name}: the per-source map outgrew the node budget"
+        );
+    }
+
+    /// J713 P2: 20,000 initiations a second from 16 /64s inside one /48, no spoofing, must not
+    /// starve a granted peer at an endpoint the node has never seen. The same flood from one
+    /// /64 is the control.
+    #[test]
+    fn a_multi_prefix_flood_from_one_network_does_not_starve_a_granted_peer() {
+        for offset in [10_u64, 100, 500, 900] {
+            let run = simulate(Flood {
+                rate: 20_000,
+                networks: 1,
+                prefixes_per_network: 16,
+                peer_offset_ms: offset,
+            });
+            report(&format!("16 /64s in one /48, offset {offset} ms"), &run);
+            assert_eq!(
+                run.peer_admitted, run.peer_attempts,
+                "a flood from one /48 starved a granted peer (offset {offset} ms)"
+            );
+        }
+        let control = simulate(Flood {
+            rate: 20_000,
+            networks: 1,
+            prefixes_per_network: 1,
+            peer_offset_ms: 500,
+        });
+        report("control, one /64", &control);
+        assert_eq!(
+            control.peer_admitted, control.peer_attempts,
+            "a single-/64 flood starved a granted peer"
+        );
+    }
+
+    /// After a flood stops, the very next window admits the peer.
+    #[test]
+    fn a_peer_is_admitted_right_after_a_flood_stops() {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        admission.set_peers([PublicKey(
+            *X25519PublicKey::from(&StaticSecret::from(PEER)).as_bytes(),
+        )]);
+        let attacker = initiation([0x55; 32]);
+        let now = Instant::now();
+        for n in 0..65_536 {
+            let network = u16::try_from(n / 256).expect("network index fits");
+            let _ = admission.check(&Packet::copy_from(&attacker), v6_source(network, n), now);
+        }
+        assert_eq!(
+            admission.check(&Packet::copy_from(&initiation(PEER)), peer_source(), now),
+            Err(Refusal::NodeBudget)
+        );
+        assert_eq!(
+            admission.check(
+                &Packet::copy_from(&initiation(PEER)),
+                peer_source(),
+                now + Duration::from_secs(1)
+            ),
+            Ok(())
+        );
+    }
+}
