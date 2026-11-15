@@ -46,6 +46,8 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
       case "denied": return { message: `You do not have access to ${hostName?.trim() || "this host"}. Ask an admin for access.`, sessionList: false, action: "none" };
       case "host_memory_unavailable": return { message: `${host} could not check its available memory. Try again.`, sessionList: false, action: "retry" };
       case "resource_unavailable": return { message: `${host} could not start a shell. Try again.`, sessionList: false, action: "retry" };
+      // A root upgrade (D376) holds the host's shells for a short while; it ends by itself, so name that and the way back (D393).
+      case "host_upgrading": return { message: `${host} is being upgraded and will be back shortly. Try again in a minute.`, sessionList: false, action: "retry" };
       // Offline, never enrolled, or cut off from the server all arrive as this one reason, so the sentence names the two
       // things a person can check; the network detail for an expert belongs in the docs, not here.
       case "unavailable": return { message: `${host} is offline or cannot reach this server. Check its network, then try again.`, sessionList: false, action: "retry" };

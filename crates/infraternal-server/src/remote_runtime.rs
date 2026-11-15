@@ -497,6 +497,16 @@ impl RemoteHosts {
         Ok(admission)
     }
 
+    /// True while a root upgrade of host `id` holds terminal admission closed (D393).
+    ///
+    /// The window is the promotion guard's lifetime, so it ends by itself when the upgrade commits,
+    /// rolls back, fails or is cancelled; there is no separate flag that could stick.
+    pub(crate) fn terminal_opens_closed(&self, id: Uuid) -> bool {
+        self.terminal_admission(id).is_ok_and(|admission| {
+            admission.state.load(AtomicOrdering::Acquire) & PROMOTION_ACTIVE != 0
+        })
+    }
+
     /// Refuse terminal opens while a promotion owns its admission window.
     pub(crate) fn admit_terminal_open(&self, id: Uuid) -> Result<TerminalOpenGuard, ()> {
         self.terminal_admission(id)?.admit()

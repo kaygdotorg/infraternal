@@ -1171,6 +1171,19 @@ async fn promotion_blocks_new_terminal_admission_until_its_guard_drops() {
     assert!(hosts.admit_terminal_open(host).is_ok());
 }
 
+/// D393: the server can tell an upgrade-closed host from any other refusal, and the state ends with the guard.
+#[tokio::test]
+async fn upgrade_window_is_visible_and_ends_with_its_guard() {
+    let hosts = RemoteHosts::default();
+    let host = Uuid::from_u128(0x524);
+    assert!(!hosts.terminal_opens_closed(host));
+    let promotion = hosts.block_terminal_opens(host).await.unwrap();
+    assert!(hosts.terminal_opens_closed(host));
+    assert!(!hosts.terminal_opens_closed(Uuid::from_u128(0x525)));
+    drop(promotion);
+    assert!(!hosts.terminal_opens_closed(host));
+}
+
 /// A promotion waits for open sessions admitted before it closed the host gate.
 #[tokio::test]
 async fn promotion_waits_for_an_admitted_terminal_open_to_finish() {

@@ -2975,6 +2975,14 @@ async fn open_terminal(
     let connect_timeout = state.terminal_connect_timeout;
     #[cfg(not(test))]
     let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
+    // An upgrade to root (D376) closes the host's admission, and the rootless link it replaces may drop
+    // meanwhile, so ask this first: the person is told the host is being upgraded (D393), not "offline".
+    #[cfg(feature = "remote")]
+    if host.is_some_and(|host| state.remote_hosts.terminal_opens_closed(host)) {
+        return Err(crate::embedded::AgentError::OpenRefused(
+            infraternal_plugin_api::admission::OpenRefusal::HostUpgrading,
+        ));
+    }
     let agent = terminal_agent(state, user_id, host)
         .await
         .map_err(|()| crate::embedded::AgentError::Unavailable)?;
@@ -2983,8 +2991,9 @@ async fn open_terminal(
         .map(|host| state.remote_hosts.admit_terminal_open(host))
         .transpose()
         .map_err(|()| {
+            // The window can close between the check above and this admission.
             crate::embedded::AgentError::OpenRefused(
-                infraternal_plugin_api::admission::OpenRefusal::Unavailable,
+                infraternal_plugin_api::admission::OpenRefusal::HostUpgrading,
             )
         })?;
     #[cfg(not(feature = "remote"))]
