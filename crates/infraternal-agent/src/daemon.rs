@@ -637,6 +637,17 @@ fn publish_session_snapshot(
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
 pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
+    run_with_mesh_state(fd, state, None).await
+}
+
+/// Run the trusted embedded channel with separate session and Mesh state paths.
+/// # Errors
+/// Rejects an invalid fd, unsafe state, malformed wire requests and resource limits.
+pub async fn run_with_mesh_state(
+    fd: i32,
+    state: Option<PathBuf>,
+    mesh_state: Option<PathBuf>,
+) -> io::Result<()> {
     // The launch isolation wrapper closes fd 3 before exec. Other inherited
     // descriptors need their own audited CLOEXEC boundary before being supported.
     if fd != 3 {
@@ -644,12 +655,19 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     }
     let socket = Socket::inherited(fd)?;
     let state = sessions::state(state)?;
-    let service = crate::plugin_control::Service::start(
-        &state,
-        crate::plugins::ExecutionMode::Embedded,
-        None,
-    )
-    .await?;
+    let service = match mesh_state.as_deref() {
+        Some(mesh_state) => {
+            crate::plugin_control::Service::start_with_mesh_state(&state, mesh_state).await?
+        }
+        None => {
+            crate::plugin_control::Service::start(
+                &state,
+                crate::plugins::ExecutionMode::Embedded,
+                None,
+            )
+            .await?
+        }
+    };
     run_channel::<false>(
         &socket,
         state,
@@ -1000,7 +1018,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                     let (call_id,result)=result?;
                     match result {
                         Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
-                        Err(_)=>reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                        Err(error)=>reply(&control,Message::Result(0,call_id,false,error.control_error_json()))?,
                     }
                 }
                 event=async {
@@ -1165,7 +1183,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             match plugin_calls.start(call_id, action_id, input_json, registry.context()) {
                                 Ok(Some(result)) => reply(&control, Message::Deferred(0, call_id, result))?,
                                 Ok(None) => {},
-                                Err(_) => reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                                Err(error) => reply(&control, Message::Result(0, call_id, false, error.control_error_json()))?,
                             }
                         }
                         // A registry-less reattach (#230) refuses actions as the image does.

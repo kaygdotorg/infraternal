@@ -17,13 +17,15 @@ test("a refused host facts action stops its recurring timer", async () => {
     clearTimeout(id: number): void { timers.delete(id); },
   } });
   let stop = (): void => {};
-  let calls = 0;
+  let factsCalls = 0;
+  let meshCalls = 0;
   try {
     // Model the actual Result(ok=false) emitted for a disabled or build-removed plugin.
     const connection = {
       isWelcomed: true,
-      call: async (): Promise<Record<string, unknown>> => {
-        calls++;
+      call: async (action: string): Promise<Record<string, unknown>> => {
+        if (action === "mesh.status") meshCalls++;
+        else factsCalls++;
         throw new ActionRefused(undefined, "action unavailable");
       },
     } as unknown as MuxConnection;
@@ -33,7 +35,8 @@ test("a refused host facts action stops its recurring timer", async () => {
     // Flush the read's rejected call and finally block without advancing a real clock.
     await Promise.resolve();
     await Promise.resolve();
-    expect(calls).toBe(1);
+    expect(factsCalls).toBe(1);
+    expect(meshCalls).toBe(1);
     expect(timers.size).toBe(0);
   } finally {
     stop();
@@ -111,6 +114,15 @@ test("two hosts' details differ: each window reads and shows its own host's syst
       isWelcomed: true, isOpen: true,
       call: async (action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> => {
         asked.push([action, input]);
+        if (action === "mesh.status") return {
+          state: "On",
+          enforcement: "userspace",
+          kernel_guard: {
+            state: "missing",
+            missing: ["forwarding drops"],
+            detail: "nft at /nix/store/test/bin/nft is not installed",
+          },
+        };
         return action === "remote.host.facts" ? WORKER_FACTS : SERVER_FACTS;
       },
     } as unknown as MuxConnection;
@@ -125,13 +137,34 @@ test("two hosts' details differ: each window reads and shows its own host's syst
     expect(row(server, "System")).toBe("AlmaLinux 10.2");
     expect(row(server, "CPU")).toBe("4 logical cores · Intel N100");
     expect(row(server, "Address", "connection")).toBe("server.example.invalid");
+    expect(row(server, "Mesh access rules", "connection")).toBe("Userspace packet filter");
+    expect(row(server, "Kernel guard", "connection")).toBe("Missing: forwarding drops; nft at /nix/store/test/bin/nft is not installed");
     expect(row(server, "Infraternal agent")).toBe("Embedded · root");
     expect(row(worker, "System")).toBe("Debian GNU/Linux 13");
     expect(row(worker, "CPU")).toBe("8 logical cores · Neoverse N1");
     expect(row(worker, "Address", "connection")).toBe("operator@worker.lan");
+    expect(row(worker, "Mesh access rules", "connection")).toBeUndefined();
     expect(row(worker, "Infraternal agent")).toBe("Remote · user");
     expect(worker.os).toBe("debian");
     for (const stop of stops) stop();
+  });
+});
+
+test("live host facts render while the independent mesh status request is still pending", async () => {
+  await withPage(async () => {
+    const connection = {
+      isWelcomed: true,
+      isOpen: true,
+      call: (action: string): Promise<Record<string, unknown>> => action === "mesh.status"
+        ? new Promise(() => {})
+        : Promise.resolve(SERVER_FACTS),
+    } as unknown as MuxConnection;
+    const source = createLiveDetails({ host: { name: "server" }, connection, roundTrip: () => undefined });
+    const rec = { model: { id: "w-own", kind: "terminal", host: "server" } } as unknown as WinRec;
+    const stop = source.open!(rec, () => {});
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(row(source.facts(rec), "System")).toBe("AlmaLinux 10.2");
+    stop();
   });
 });
 
