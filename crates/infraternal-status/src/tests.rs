@@ -6,7 +6,10 @@
 
 use std::{fs, path::Path};
 
-use super::{Activity, Kind, NodeStatus, Role, Roots, Scope, probe, server_data_directory};
+use super::{
+    Activity, Kind, NodeStatus, RecordedServer, Role, Roots, Scope, probe, recorded_server_unit,
+    server_data_directory,
+};
 
 const IDS: [&str; 8] = [
     "release", "server", "agent", "mesh", "host", "relay", "backup", "ssh",
@@ -204,6 +207,7 @@ fn installed_system_server_data_comes_from_its_effective_execstart() {
     );
 }
 
+/// Keeps status tied to the embedded server's public mesh snapshot.
 #[test]
 fn production_server_is_a_running_server_with_two_mesh_peers() {
     let fixture = Fixture::new();
@@ -225,6 +229,31 @@ fn production_server_is_a_running_server_with_two_mesh_peers() {
     assert_eq!(state(&status, "release").0, "Ready");
     assert_eq!(state(&status, "relay").0, "Not available yet");
     assert_eq!(state(&status, "backup").0, "Not available yet");
+}
+
+/// The embedded server node reads its snapshot beside the durable server data directory.
+#[test]
+fn server_mesh_status_prefers_the_durable_embedded_snapshot() {
+    let fixture = Fixture::new();
+    let data = fixture.root.join("var-lib/infraternal");
+    fixture.write(
+        "etc/infraternal-server.service",
+        &format!(
+            "[Service]\nExecStart=/opt/infraternal server --data {}\n",
+            data.display()
+        ),
+    );
+    fixture.write("var-lib/infraternal/infraternal.sqlite", "");
+    fixture.write("var-lib/infraternal/mesh/mesh-public.json", MESH);
+    fixture.write(
+        "run/mesh-public.json",
+        r#"{"enabled":true,"config":{"peers":{"7":{},"8":{},"9":{}}}}"#,
+    );
+    fixture.write("net/infraternal0/.keep", "");
+
+    let status = fixture.status(&[(Scope::System, "infraternal-server.service")]);
+
+    assert_eq!(state(&status, "mesh"), ("Running", "peers: 2"));
 }
 
 #[test]
@@ -826,4 +855,72 @@ fn configured_role_state_table_controls_headline_and_exit() {
             );
         }
     }
+}
+
+/// `server init` re-runs read the unit they would overwrite: its effective
+/// `--data` and `--web-root`, drop-ins included, in the matching scope only [#516].
+#[test]
+fn recorded_server_unit_reads_the_named_unit_in_its_own_scope() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "etc/infraternal-server.service",
+        "[Service]\nExecStart=\"/usr/bin/infraternal\" \"server\" \"--data\" \"/srv/old\"\n",
+    );
+    fixture.write(
+        "etc/infraternal-server.service.d/data.conf",
+        "[Service]\nExecStart=\nExecStart=\"/usr/bin/infraternal\" \"server\" \"--data\" \"/srv/custom state\" \"--web-root\" \"/srv/web\"\n",
+    );
+    fixture.write(
+        "user/infraternal-server.service",
+        "[Service]\nExecStart=\"/home/u/infraternal\" \"server\" \"--data\" \"/home/u/data\"\n",
+    );
+    let roots = fixture.roots();
+    assert_eq!(
+        recorded_server_unit(&roots, Scope::System, "infraternal-server"),
+        Some(RecordedServer {
+            data: Some("/srv/custom state".into()),
+            web_root: Some("/srv/web".into()),
+            relative: Vec::new(),
+        })
+    );
+    assert_eq!(
+        recorded_server_unit(&roots, Scope::User, "infraternal-server"),
+        Some(RecordedServer {
+            data: Some("/home/u/data".into()),
+            web_root: None,
+            relative: Vec::new(),
+        })
+    );
+    assert_eq!(recorded_server_unit(&roots, Scope::System, "other"), None);
+}
+
+/// Agents, foreign programs and relative recorded paths never count as a recorded server.
+#[test]
+fn recorded_server_unit_ignores_agents_foreign_programs_and_relative_paths() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "etc/a.service",
+        "[Service]\nExecStart=/usr/bin/infraternal agent --data /srv/agent\n",
+    );
+    fixture.write(
+        "etc/b.service",
+        "[Service]\nExecStart=/usr/bin/other server --data /srv/b\n",
+    );
+    fixture.write(
+        "etc/c.service",
+        "[Service]\nExecStart=/usr/bin/infraternal server --data rel --web-root web\n",
+    );
+    let roots = fixture.roots();
+    assert_eq!(recorded_server_unit(&roots, Scope::System, "a"), None);
+    assert_eq!(recorded_server_unit(&roots, Scope::System, "b"), None);
+    assert_eq!(
+        recorded_server_unit(&roots, Scope::System, "c"),
+        Some(RecordedServer {
+            relative: vec![
+                ("--data".to_owned(), "rel".into()),
+                ("--web-root".to_owned(), "web".into())
+            ],
+            ..RecordedServer::default()
+        })
+    );
 }

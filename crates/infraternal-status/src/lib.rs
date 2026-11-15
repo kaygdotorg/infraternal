@@ -14,8 +14,8 @@
 //!    two observations per unit, four concurrent `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
 //!    other manager's units are still readable.
-//! 3. Read mesh facts from the public snapshot the mesh writes next to the
-//!    runtime state, and the kernel's interface list under `/sys`.
+//! 3. Read mesh facts from the host agent's `--state` snapshot or the embedded
+//!    server snapshot under `<server --data>/mesh`, plus the kernel interface list.
 //!
 //! Headline/exit contract for configured roles (D299/D303). A retained server
 //! database establishes the server role even when its unit is masked/missing.
@@ -447,26 +447,12 @@ pub fn server_data_directory(roots: &Roots) -> Option<PathBuf> {
     None
 }
 
-/// Classify a unit by its effective `ExecStart`.
-fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) -> Option<Unit> {
-    // A mask erases ExecStart, but canonical installer names still identify
-    // their configured role. Never guess the role of a masked custom name.
-    if fs::canonicalize(dir.join(name)).is_ok_and(|path| path == Path::new("/dev/null")) {
-        let kind = match name {
-            "infraternal-server.service" => Kind::Server,
-            "infraternal-agent.service" => Kind::Agent,
-            _ => return None,
-        };
-        return Some(Unit {
-            scope,
-            name: name.to_owned(),
-            kind,
-            data: None,
-            state: None,
-            masked: true,
-            query_error: None,
-        });
-    }
+/// The words of a unit's effective `ExecStart`: the unit file, then its
+/// `.conf` drop-ins in file-name order, the last non-empty value winning.
+///
+/// Returns `None` when the unit is unreadable or its command cannot be split
+/// without guessing (see [`exec_words`]).
+fn effective_exec_words(dir: &Path, name: &str) -> Option<Vec<String>> {
     let mut exec: Option<String> = None;
     let mut apply = |text: &str| {
         for line in text.lines() {
@@ -495,7 +481,82 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
             apply(&text);
         }
     }
-    let words = exec.as_deref().and_then(exec_words)?;
+    exec.as_deref().and_then(exec_words)
+}
+
+/// What an installed server unit already records, so a re-run of
+/// `server init` can keep it instead of choosing new folders [#516, D395].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecordedServer {
+    /// The absolute `--data` folder, when the unit names one.
+    pub data: Option<PathBuf>,
+    /// The absolute `--web-root` folder, when the unit names one.
+    pub web_root: Option<PathBuf>,
+    /// A RELATIVE `--data` or `--web-root` value the unit holds (a hand edit; the
+    /// installer only writes absolute ones). Never resolved, only reported, so
+    /// `server init` can refuse to replace a unit it cannot reproduce [#516].
+    pub relative: Vec<(String, PathBuf)>,
+}
+
+/// Read the server unit `<name>.service` in `scope`, the one `server init`
+/// would write, and return the folders it records.
+///
+/// System scope looks in the system unit directories in precedence order;
+/// user scope looks in the user's unit directory. Returns `None` when the unit
+/// is missing, masked, not an infraternal server, or unreadable. Relative
+/// recorded paths are dropped: the installer only ever writes absolute ones,
+/// and resolving one would depend on the caller's current directory.
+#[must_use]
+pub fn recorded_server_unit(roots: &Roots, scope: Scope, name: &str) -> Option<RecordedServer> {
+    let file = format!("{name}.service");
+    let directories: Vec<&PathBuf> = match scope {
+        Scope::System => roots.system_units.iter().collect(),
+        Scope::User => roots.user_units.iter().collect(),
+    };
+    let directory = directories
+        .into_iter()
+        .find(|directory| directory.join(&file).exists())?;
+    let unit = read_unit(scope, directory, &file, true)?;
+    if unit.kind != Kind::Server || unit.masked {
+        return None;
+    }
+    let words = effective_exec_words(directory, &file)?;
+    let web_root = option(&words, "--web-root");
+    let relative = [
+        ("--data", unit.data.clone()),
+        ("--web-root", web_root.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, value)| Some((flag.to_owned(), value.filter(|path| path.is_relative())?)))
+    .collect();
+    Some(RecordedServer {
+        data: unit.data.filter(|path| path.is_absolute()),
+        web_root: web_root.filter(|path| path.is_absolute()),
+        relative,
+    })
+}
+
+/// Classify a unit by its effective `ExecStart`.
+fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) -> Option<Unit> {
+    // A mask erases ExecStart, but canonical installer names still identify
+    // their configured role. Never guess the role of a masked custom name.
+    if fs::canonicalize(dir.join(name)).is_ok_and(|path| path == Path::new("/dev/null")) {
+        let kind = match name {
+            "infraternal-server.service" => Kind::Server,
+            "infraternal-agent.service" => Kind::Agent,
+            _ => return None,
+        };
+        return Some(Unit {
+            scope,
+            name: name.to_owned(),
+            kind,
+            data: None,
+            state: None,
+            masked: true,
+            query_error: None,
+        });
+    }
+    let words = effective_exec_words(dir, name)?;
     let program = Path::new(words.first()?);
     if require_infraternal && !is_infraternal_program(program) {
         return None;
@@ -727,6 +788,11 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
         .iter()
         .filter_map(|(unit, _)| unit.state.clone())
         .collect();
+    dirs.extend(units.iter().filter_map(|(unit, _)| {
+        (unit.kind == Kind::Server)
+            .then(|| unit.data.as_ref().map(|data| data.join("mesh")))
+            .flatten()
+    }));
     dirs.extend(roots.run_dir.clone());
     let mut unreadable = false;
     let mut found = false;

@@ -1205,6 +1205,123 @@ fn replace(data: &Path, bytes: &[u8], expected: Option<&Snapshot>) -> io::Result
 #[path = "remote_tests.rs"]
 mod tests;
 
+/// `--promotion-retire <host>`: retire this account's rootless installation
+/// after a root upgrade (D376, #399). Only the root infraternal agent starts
+/// this, as the account (see `infraternal_agent::privilege_take_over`).
+#[cfg(target_os = "linux")]
+pub(crate) fn promotion_retire_if_requested() -> Option<std::process::ExitCode> {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments
+        .get(1)
+        .is_none_or(|argument| argument != infraternal_agent::privilege_take_over::COMMAND)
+    {
+        return None;
+    }
+    let execute = || -> io::Result<()> {
+        let [_, _, host] = arguments.as_slice() else {
+            return Err(refused());
+        };
+        let home = std::env::var_os("HOME").map_or_else(|| "/".into(), PathBuf::from);
+        let uid = nix::unistd::Uid::effective().as_raw();
+        if uid == 0 {
+            return Err(refused());
+        }
+        let plan = infraternal_plugin_remote::uninstall::installation(
+            host.to_str().ok_or_else(refused)?,
+            &home,
+            uid,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        infraternal_agent::block_on_io(
+            &runtime,
+            Box::pin(infraternal_plugin_remote::uninstall::retire_for_promotion(
+                &plan, &home, uid,
+            )),
+        )
+    };
+    Some(if execute().is_ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    })
+}
+
+/// `--promotion-abandon <host> <transaction>`: put the host back after an
+/// abandoned root upgrade (D376, #399, J465 P1). Only the root agent starts
+/// this, in its own transient unit (`infraternal_agent::privilege_take_over::abandon`).
+///
+/// Roll back only an open journal with this transaction id, then remove only
+/// the committed installation whose durable marker still names that id.
+/// Exit 75 means the request was stale and safely changed nothing; the caller
+/// uses that result to leave a later root daemon running.
+#[cfg(all(feature = "ssh", target_os = "linux"))]
+pub(crate) fn promotion_abandon_if_requested() -> Option<std::process::ExitCode> {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments
+        .get(1)
+        .is_none_or(|argument| argument != infraternal_agent::privilege_take_over::ABANDON_COMMAND)
+    {
+        return None;
+    }
+    let execute = || -> io::Result<bool> {
+        let [_, _, host, transaction] = arguments.as_slice() else {
+            return Err(refused());
+        };
+        if !nix::unistd::Uid::effective().is_root() {
+            return Err(refused());
+        }
+        let host =
+            uuid::Uuid::try_parse(host.to_str().ok_or_else(refused)?).map_err(|_| refused())?;
+        let transaction = uuid::Uuid::try_parse(transaction.to_str().ok_or_else(refused)?)
+            .map_err(|_| refused())?;
+        let rollback =
+            infraternal_plugin_ssh::install::Installation::root_rollback_script(host, transaction);
+        let rolled = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&rollback)
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("HOME", "/root")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .current_dir("/")
+            .stdin(std::process::Stdio::null())
+            .status()?;
+        let rolled_back = match rolled.code() {
+            Some(75) => false,
+            Some(0) => true,
+            _ => return Err(io::Error::other("transaction-bound rollback failed")),
+        };
+        let home = std::path::PathBuf::from("/root");
+        let plan = infraternal_plugin_remote::uninstall::installation(
+            &host.simple().to_string(),
+            &home,
+            0,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let cleaned =
+            runtime.block_on(infraternal_plugin_remote::uninstall::cleanup_for_promotion(
+                &plan,
+                &home,
+                0,
+                transaction,
+                infraternal_agent::plugins::KERNEL,
+            ))?;
+        Ok(rolled_back || cleaned)
+    };
+    Some(match execute() {
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        Ok(false) => std::process::ExitCode::from(
+            infraternal_agent::privilege_take_over::STALE_ABANDON_EXIT_CODE,
+        ),
+        Err(_) => std::process::ExitCode::FAILURE,
+    })
+}
+
 /// Host uninstall: the independent helper service, or the owner by hand (#235).
 ///
 /// `--bootstrap-uninstall` alone is the transient service the infraternal

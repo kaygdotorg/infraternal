@@ -999,7 +999,7 @@ export class Wizard {
         ${this.serverKey ? option("server", "Use this server's key", "SSH public key in ~/.ssh/authorized_keys. Add it to the host, then try again.") + reveal("server", `<div class="ah-keyblock" data-kv="server"></div><p class="ah-text">Add this line to <span class="ah-code">~/.ssh/authorized_keys</span> on ${name}, then choose Try again.${this.serverKey.locked ? " The server's key is locked until an administrator unlocks it with a passkey." : ""}</p>`) : ""}
         ${this.savedKey ? option("saved", `Use ${escapeHtml(this.savedKey.label)}`, "Unlocked with your passkey, used for this one connection.") : ""}
         ${option("key", "Use a key from your computer", "SSH private key. Sent once for this connection, not stored.")}
-        ${reveal("key", `<textarea class="ah-secret" data-secret="key" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Private key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" tabindex="-1"></textarea>
+        ${reveal("key", `<textarea class="ah-secret" data-secret="key" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-label="Private key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" tabindex="-1"></textarea>
           <input class="ah-input" data-secret="passphrase" ${ONE_OFF_SECRET_ATTRS} aria-label="Key passphrase, if it has one" placeholder="Passphrase, if the key has one" tabindex="-1" />`)}
         ${option("password", "Sign in with a password", "SSH password authentication. Sent once for this connection, not stored.")}
         ${reveal("password", `<input class="ah-account" type="text" autocomplete="username" value="${account}" readonly tabindex="-1" aria-label="Account" />

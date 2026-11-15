@@ -637,6 +637,17 @@ fn publish_session_snapshot(
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
 pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
+    run_with_mesh_state(fd, state, None).await
+}
+
+/// Run the trusted embedded channel with separate session and Mesh state paths.
+/// # Errors
+/// Rejects an invalid fd, unsafe state, malformed wire requests and resource limits.
+pub async fn run_with_mesh_state(
+    fd: i32,
+    state: Option<PathBuf>,
+    mesh_state: Option<PathBuf>,
+) -> io::Result<()> {
     // The launch isolation wrapper closes fd 3 before exec. Other inherited
     // descriptors need their own audited CLOEXEC boundary before being supported.
     if fd != 3 {
@@ -644,12 +655,19 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     }
     let socket = Socket::inherited(fd)?;
     let state = sessions::state(state)?;
-    let service = crate::plugin_control::Service::start(
-        &state,
-        crate::plugins::ExecutionMode::Embedded,
-        None,
-    )
-    .await?;
+    let service = match mesh_state.as_deref() {
+        Some(mesh_state) => {
+            crate::plugin_control::Service::start_with_mesh_state(&state, mesh_state).await?
+        }
+        None => {
+            crate::plugin_control::Service::start(
+                &state,
+                crate::plugins::ExecutionMode::Embedded,
+                None,
+            )
+            .await?
+        }
+    };
     run_channel::<false>(
         &socket,
         state,
@@ -956,6 +974,15 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
         let mut streams: HashMap<u32, Stream> = HashMap::new();
         let mut jobs: JoinSet<(u32, io::Result<()>)> = JoinSet::new();
         let mut renewals = JoinSet::new();
+        // A root upgrade's `privilege.*` calls have their own small lane, so
+        // a stuck relay can never hold up certificate renewal or terminal
+        // startup (J415 B4). Each call is also bounded in time. Builds
+        // without root upgrades keep it empty, which masks its select arm.
+        #[cfg_attr(not(all(feature = "remote", target_os = "linux")), allow(unused_mut))]
+        let mut privileges: JoinSet<(
+            u32,
+            io::Result<infraternal_plugin_api::ActionReply>,
+        )> = JoinSet::new();
         let mut opens: JoinSet<(
             u32,
             u32,
@@ -991,7 +1018,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                     let (call_id,result)=result?;
                     match result {
                         Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
-                        Err(_)=>reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                        Err(error)=>reply(&control,Message::Result(0,call_id,false,error.control_error_json()))?,
                     }
                 }
                 event=async {
@@ -1028,6 +1055,13 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                     let (call_id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| sessions::invalid("missing renewal task"))?.map_err(io::Error::other)?;
                     let (ok, json) = match result { Ok(json) => (true, json), Err(_) => (false, b"{}".to_vec()) };
                     reply(&control, Message::Result(0, call_id, ok, json))?;
+                }
+                result = join_privilege(&mut privileges), if !SESSION_ONLY && control_ready && !privileges.is_empty() => {
+                    let (call_id, result) = result.ok_or_else(|| sessions::invalid("missing privilege task"))?.map_err(io::Error::other)?;
+                    match result {
+                        Ok(reply_value) => reply(&control, Message::Deferred(0, call_id, reply_value))?,
+                        Err(_) => reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?,
+                    }
                 }
                 result = opens.join_next(), if !SESSION_ONLY && control_ready && !opens.is_empty() => {
                     // The private image never starts these jobs. Keep their result
@@ -1114,6 +1148,26 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
                             }
                         }
+                        // A root upgrade (D376, #399): only from the server's control
+                        // stream, outside the one-at-a-time plugin worker, because an
+                        // elevation takes seconds and the relay carries the payload.
+                        #[cfg(all(feature = "remote", target_os = "linux"))]
+                        Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && stream == 0 && crate::privilege_agent::ACTIONS.contains(&action_id) => {
+                            if input_json.len() > 2 * 1024 * 1024 || privileges.len() >= crate::privilege_agent::LANE {
+                                reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
+                            } else {
+                                let action = action_id.to_owned(); let state = state.clone(); let input = input_json.to_vec();
+                                privileges.spawn(async move {
+                                    let bound = if action == "privilege.abandon" {
+                                        crate::privilege_agent::ABANDON_CALL_BOUND
+                                    } else {
+                                        crate::privilege_agent::CALL_BOUND
+                                    };
+                                    let result = tokio::time::timeout(bound, crate::privilege_agent::execute(&action, &input, &state)).await;
+                                    (call_id, result.unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into())))
+                                });
+                            }
+                        }
                         Frame::Call {call_id, action_id: "terminal.startup", input_json} if !SESSION_ONLY && plugins.is_some() && stream == 0 => {
                             if input_json.len() > 8192 || renewals.len() >= 4 {
                                 reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
@@ -1129,7 +1183,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             match plugin_calls.start(call_id, action_id, input_json, registry.context()) {
                                 Ok(Some(result)) => reply(&control, Message::Deferred(0, call_id, result))?,
                                 Ok(None) => {},
-                                Err(_) => reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                                Err(error) => reply(&control, Message::Result(0, call_id, false, error.control_error_json()))?,
                             }
                         }
                         // A registry-less reattach (#230) refuses actions as the image does.
@@ -2033,4 +2087,13 @@ pub(crate) async fn run_bound_terminal_opened_mode(
     allow_priming: bool,
 ) -> io::Result<()> {
     run_bound_terminal_mode(channel, state, allow_priming, receive, opening).await
+}
+
+/// The next finished `privilege.*` call. On builds without root upgrades
+/// the lane stays empty, so its select arm is always masked off.
+async fn join_privilege(
+    privileges: &mut JoinSet<(u32, io::Result<infraternal_plugin_api::ActionReply>)>,
+) -> Option<Result<(u32, io::Result<infraternal_plugin_api::ActionReply>), tokio::task::JoinError>>
+{
+    privileges.join_next().await
 }

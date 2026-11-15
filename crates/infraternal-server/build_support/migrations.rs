@@ -1,4 +1,5 @@
-//! Generates compact static `SQLx` migration data with checksums of the unchanged source files [19,243].
+//! Generates compact static migration data with checksums of the unchanged source files [19,243]:
+//! the `SQLx` `Migrator` the server runs today, and the same list for the D379 runner.
 use sha2::{Digest, Sha384};
 use std::{fmt::Write as _, fs, io, path::Path};
 
@@ -29,6 +30,14 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
         files.push((version, name, entry.path()));
     }
     files.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    // The same list for the D379 rusqlite runner (`infraternal_db::Migration`). Only tests and
+    // benchmarks include it during slice 1; it carries the same compacted SQL and original checksums.
+    let mut runner = String::from(
+        "/// The migrations for `infraternal_db::migrate`, generated from the same files as `MIGRATIONS`.\n\
+         // Timestamp versions read as YYYYMMDDHHMMSS (D347); digit separators would hide that.\n\
+         #[allow(clippy::unreadable_literal, dead_code)]\n\
+         pub(crate) static RUNNER_MIGRATIONS: &[infraternal_db::Migration] = &[\n",
+    );
     let mut generated = String::from(
         "/// Static executable SQL; checksums identify the immutable original migration sources.\n\
          // Timestamp versions read as YYYYMMDDHHMMSS (D347); digit separators would hide that.\n\
@@ -52,11 +61,30 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
         let sql = fs::read_to_string(&path)?;
         let checksum = Sha384::digest(sql.as_bytes());
         let no_tx = sql.starts_with("-- no-transaction");
+        // The D379 runner applies every migration inside a transaction with its
+        // history row; it has no "no-transaction" mode yet, so it would wrap such a
+        // migration where sqlx would not (J632 finding 6, #473). Refuse it at build
+        // time until the runner supports it, instead of letting the two runners differ.
+        if no_tx {
+            return Err(io::Error::other(format!(
+                "migration {name} starts with `-- no-transaction`, which the D379 runner \
+                 (infraternal_db::migrate) does not support yet; remove the marker or add \
+                 no-transaction support to the runner first (#473)"
+            )));
+        }
         let executable = compact_sql::compact(&sql);
         writeln!(generated,
             "sqlx::migrate::Migration {{ version: {}, description: std::borrow::Cow::Borrowed({description:?}), migration_type: sqlx::migrate::MigrationType::{kind}, sql: std::borrow::Cow::Borrowed({executable:?}), checksum: std::borrow::Cow::Borrowed(&{:?}), no_tx: {no_tx} }},",
             grouped(version), &checksum[..]).map_err(io::Error::other)?;
+        // Down migrations never run forward; the previous runner skips them too.
+        if kind != "ReversibleDown" {
+            writeln!(runner,
+                "infraternal_db::Migration {{ version: {}, description: {description:?}, sql: {executable:?}, checksum: &{:?} }},",
+                grouped(version), &checksum[..]).map_err(io::Error::other)?;
+        }
     }
+    runner.push_str("];\n");
+    fs::write(output.join("runner_migrations.rs"), runner)?;
     generated.push_str("] ), ..sqlx::migrate::Migrator::DEFAULT };\n");
     fs::write(output.join("compact_migrations.rs"), generated)
 }

@@ -155,3 +155,28 @@ test("a reported system with no platform mark still names the header and shows n
   expect(facts.os).toBeUndefined();
   expect(facts.title).toBe("Alpine Linux");
 });
+
+test("the Connection tab names every missing kernel guard protection and the tool path", () => {
+  const input: Parameters<typeof detailsFacts>[0] = {
+    ...FULL,
+    mesh: {
+      state: "On",
+      enforcement: "userspace",
+      kernelGuard: {
+        state: "missing",
+        missing: [
+          "mesh-address anti-spoofing on non-mesh interfaces",
+          "forwarding drops",
+          "public TCP/80 and TCP/443 gate",
+        ],
+        detail: "nft at /usr/sbin/nft was not found as a root-owned executable",
+      },
+    },
+  };
+  const rows = new Map(detailsFacts(input).sections[1]!.rows.map(({ key, value }) => [key, value]));
+
+  expect(rows.get("Mesh access rules")).toBe("Userspace packet filter");
+  expect(rows.get("Kernel guard")).toBe(
+    "Missing: mesh-address anti-spoofing on non-mesh interfaces, forwarding drops, public TCP/80 and TCP/443 gate; nft at /usr/sbin/nft was not found as a root-owned executable",
+  );
+});

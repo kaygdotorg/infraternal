@@ -2,7 +2,7 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 
-test("remote admission refuses an x86 payload outside the signed manifest", async () => {
+test("remote admission refuses an x86 payload outside the signed checksums", async () => {
   const child = Bun.spawn(["python3", "-c", `
 import hashlib
 from pathlib import Path
@@ -31,10 +31,10 @@ with tempfile.TemporaryDirectory(dir=scratch) as temporary:
     # A reused remote directory has its own unsigned integrity list. Keep the
     # authenticated server intact while replacing only the installed payload.
     (release / "infraternal-x86_64-musl").write_bytes(b"superseded-payload")
-    (release / "SHA256SUMS").write_text("".join(
+    (release / "BUILDSUMS").write_text("".join(
         hashlib.sha256(file.read_bytes()).hexdigest() + "  " + str(file.relative_to(release)) + "\\n"
         for file in sorted(release.rglob("*")) if file.is_file()
-        and file.name not in {"SHA256SUMS", "MANIFEST", "MANIFEST.sig"}))
+        and file.name not in {"BUILDSUMS", "SHA256SUMS", "SHA256SUMS.sig"}))
     checksums(release)
     refused = False
     try:

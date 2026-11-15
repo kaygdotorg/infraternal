@@ -46,6 +46,8 @@ pub mod probe;
 pub mod process;
 mod prompt;
 mod prompt_image;
+/// Root install steps over a root upgrade's relay instead of SSH (D376, #399).
+pub mod relay_session;
 pub mod socket_connector;
 mod tasks;
 /// Authored remote consumption receipts for bootstrap payloads.

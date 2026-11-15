@@ -118,10 +118,26 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         };
         rows.push(("Data plane", format!("{engine}, {reason}")));
     }
+    if let Some(enforcement) = value.get("enforcement").and_then(Value::as_str) {
+        rows.push((
+            "Enforcement",
+            match enforcement {
+                "userspace" => "D164 access rules checked at both userspace TUN edges",
+                "kernel" => "D164 access rules checked by kernel WireGuard",
+                _ => return Err(PluginError::Rejected),
+            }
+            .to_owned(),
+        ));
+    }
     if let Some(detail) = value["proxy_containment"]["detail"].as_str() {
         rows.push(("Proxy", detail.to_owned()));
     }
-    let (tone, message) = engine_health(&value, &mut rows)?.unwrap_or((tone, message));
+    let guard_missing = render_kernel_guard(&value, &mut rows)?;
+    let (mut tone, mut message) = engine_health(&value, &mut rows)?.unwrap_or((tone, message));
+    if state == "On" && guard_missing {
+        tone = Tone::Attention;
+        "Mesh is on, but kernel-only protections are missing.".clone_into(&mut message);
+    }
     Ok(Presented {
         tone,
         message,
@@ -129,6 +145,38 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         next: next.into_iter().map(str::to_owned).collect(),
         data: value,
     })
+}
+
+/// Add the kernel guard's exact gaps and tool result to the status rows.
+fn render_kernel_guard(value: &Value, rows: &mut Vec<(&str, String)>) -> Result<bool, PluginError> {
+    let Some(guard) = value.get("kernel_guard").filter(|guard| !guard.is_null()) else {
+        return Ok(false);
+    };
+    let state = guard["state"].as_str().ok_or(PluginError::Rejected)?;
+    let missing = guard["missing"].as_array().ok_or(PluginError::Rejected)?;
+    let missing = missing
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(PluginError::Rejected)?;
+    let detail = guard["detail"].as_str().ok_or(PluginError::Rejected)?;
+    match state {
+        "installed" => {
+            if !missing.is_empty() {
+                return Err(PluginError::Rejected);
+            }
+            rows.push(("Kernel guard", detail.to_owned()));
+            Ok(false)
+        }
+        "pending" | "missing" | "failed" => {
+            rows.push((
+                "Kernel guard",
+                format!("missing: {}; {detail}", missing.join(", ")),
+            ));
+            Ok(true)
+        }
+        _ => Err(PluginError::Rejected),
+    }
 }
 
 /// The Mac node reports no engine health yet, so its status has no health rows.
@@ -387,6 +435,7 @@ fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginEr
     })
 }
 
+/// Checks that mesh actions produce readable status and peer summaries.
 #[cfg(test)]
 /// Tests the user-facing CLI presentation of Mesh status and peer rows.
 mod tests {
@@ -520,6 +569,47 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Status calls out every kernel-only protection when a `GotaTun` guard is unavailable.
+    #[test]
+    fn status_names_missing_kernel_only_protections() {
+        let value = serde_json::json!({
+            "state":"On",
+            "peer_count":1,
+            "enforcement":"userspace",
+            "kernel_guard":{
+                "state":"missing",
+                "missing":[
+                    "mesh-address anti-spoofing on non-mesh interfaces",
+                    "forwarding drops",
+                    "public TCP/80 and TCP/443 gate"
+                ],
+                "detail":"nft at /usr/sbin/nft and iptables-nft at /usr/sbin/iptables-nft were not found"
+            }
+        });
+        let shown = status(value, 160).expect("status");
+        assert!(matches!(shown.tone, Tone::Attention));
+        assert!(
+            shown
+                .message
+                .contains("kernel-only protections are missing")
+        );
+        assert!(shown.body.contains("Enforcement"));
+        assert!(shown.body.contains("userspace TUN edges"));
+        for protection in [
+            "mesh-address anti-spoofing on non-mesh interfaces",
+            "forwarding drops",
+            "public TCP/80 and TCP/443 gate",
+            "/usr/sbin/nft",
+            "/usr/sbin/iptables-nft",
+        ] {
+            assert!(
+                shown.body.contains(protection),
+                "missing {protection}: {}",
+                shown.body
+            );
+        }
     }
 
     #[test]

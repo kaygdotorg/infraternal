@@ -40,6 +40,10 @@ pub mod login_handoff;
 // receive refuses there, because host-login workers are Linux-only (D247).
 #[cfg(any(feature = "host-login", target_os = "macos"))]
 pub mod login_ready;
+/// A terminal no other process of the account can open, for the password
+/// of a root upgrade (#399, D274).
+#[cfg(target_os = "linux")]
+pub mod private_pty;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty;
 #[cfg(feature = "async-fd")]

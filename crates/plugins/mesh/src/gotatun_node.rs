@@ -40,8 +40,10 @@ use crate::listen_port::Request as ListenPortRequest;
 use crate::{
     dataplane::Config,
     gotatun_tun::LinuxTun,
+    packet_filter::{Direction, PacketFilter, PreparedPolicy},
     policy::{model::PublicKey, rules::TrafficPolicy},
 };
+use infraternal_mesh::proxy_ports::MeshProxyIngress;
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, LinuxPacketIo, LinuxPacketIo)>;
 type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
@@ -254,6 +256,7 @@ pub(crate) struct Engine {
     join: Option<JoinHandle<()>>,
     info: RuntimeInfo,
     health: Arc<Health>,
+    filter: Arc<PacketFilter>,
 }
 
 /// How long a stopped engine waits before it is rebuilt. A cause that persists, such as a deleted
@@ -321,9 +324,16 @@ impl Engine {
         local_public_key: PublicKey,
         requested_port: ListenPortRequest,
         config: Option<Config>,
+        proxy_ingress: &MeshProxyIngress,
         adopt: Option<u32>,
         route_endpoint_updater: RouteEndpointUpdater,
     ) -> io::Result<Self> {
+        crate::packet_filter::warn_about_sysctl_gaps();
+        let filter = Arc::new(match config.as_ref() {
+            Some(config) => PacketFilter::new(config, proxy_ingress.clone())?,
+            None => PacketFilter::empty(),
+        });
+        let worker_filter = Arc::clone(&filter);
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (commands, receiver) = mpsc::unbounded_channel();
         let health = Arc::new(Health::default());
@@ -347,6 +357,7 @@ impl Engine {
                     local_public_key,
                     requested_port,
                     config.as_ref(),
+                    worker_filter,
                     refused,
                     thp_disabled,
                     adopt,
@@ -403,6 +414,7 @@ impl Engine {
             join: Some(join),
             info,
             health,
+            filter,
         })
     }
 
@@ -435,6 +447,37 @@ impl Engine {
             })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
+    /// Compile a new snapshot before changing the firewall or accepted node state.
+    /// # Errors
+    /// Refuses duplicate peer addresses or an unindexable policy snapshot.
+    pub(crate) fn prepare_policy(
+        config: &Config,
+        proxy_ingress: MeshProxyIngress,
+    ) -> io::Result<PreparedPolicy> {
+        PacketFilter::prepare_policy(config, proxy_ingress)
+    }
+
+    /// Publish a previously compiled snapshot with one lock swap.
+    pub(crate) fn publish_policy(&self, policy: PreparedPolicy) {
+        self.filter.publish_policy(policy);
+    }
+
+    /// Test seam (#265 J618): judge one packet with the live filter, exactly as the packet
+    /// path would, so a namespace test can see which grants are published right now.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn check_packet(&self, packet: &mut [u8], direction: Direction) -> bool {
+        self.filter.check(packet, direction)
+    }
+
+    /// Stop admitting the listed peers' addresses before the peer set changes; see
+    /// [`PacketFilter::withdraw_peers`].
+    pub(crate) fn withdraw_peers(
+        &self,
+        withdrawn: &std::collections::BTreeSet<crate::policy::model::NodeId>,
+    ) {
+        self.filter.withdraw_peers(withdrawn);
     }
 
     /// Set the mesh MTU on the worker that owns the TUN and its packet-size watcher.
@@ -553,6 +596,7 @@ async fn initialize(
     local_public_key: PublicKey,
     requested_port: ListenPortRequest,
     config: Option<&Config>,
+    filter: Arc<PacketFilter>,
     refused: Arc<AtomicU64>,
     thp_disabled: bool,
     adopt: Option<u32>,
@@ -614,7 +658,7 @@ async fn initialize(
     let tx_queue_len = crate::wireguard::Device::raise_tx_queue_len(TUN_TX_QUEUE_LEN)
         .or_else(|_| crate::wireguard::Device::tx_queue_len())
         .unwrap_or(0);
-    let tun = LinuxPacketIo::new(tun);
+    let tun = LinuxPacketIo::new(tun, filter);
     let (factory, port) = bind_udp(requested_port, private_key.clone()).await?;
     let peers = config
         .map(peers_for_config)
@@ -1356,12 +1400,13 @@ async fn bind_udp(
 #[derive(Clone)]
 struct LinuxPacketIo {
     tun: LinuxTun,
+    filter: Arc<PacketFilter>,
 }
 
 impl LinuxPacketIo {
     /// Wrap the opened TUN for `GotaTun` packet delivery and its live MTU watcher.
-    fn new(tun: LinuxTun) -> Self {
-        Self { tun }
+    fn new(tun: LinuxTun, filter: Arc<PacketFilter>) -> Self {
+        Self { tun, filter }
     }
 
     /// Keep the link MTU and `GotaTun`'s packet-size watcher in step.
@@ -1381,8 +1426,28 @@ impl LinuxPacketIo {
     }
 }
 
+/// Check a typed `GotaTun` IP packet without copying its backing buffer.
+///
+/// `GotaTun` exposes mutable bytes on `Packet<[u8]>`, not `Packet<Ip>`. Converting to bytes and
+/// back is a zero-copy type cast; the filter owns the only packet parser and the second cast
+/// revalidates the type after a possible mesh SSH port rewrite.
+fn filter_ip_packet(
+    packet: Packet<Ip>,
+    filter: &PacketFilter,
+    direction: Direction,
+) -> Option<Packet<Ip>> {
+    let mut packet = packet.into_bytes();
+    if !filter.check(packet.buf_mut(), direction) {
+        return None;
+    }
+    packet.try_into_ip().ok()
+}
+
 impl IpSend for LinuxPacketIo {
     async fn send(&mut self, packet: Packet<Ip>) -> io::Result<()> {
+        let Some(packet) = filter_ip_packet(packet, &self.filter, Direction::MeshToHost) else {
+            return Ok(());
+        };
         let Some(packet) = self.local_service_hook(packet)? else {
             return Ok(());
         };
@@ -1395,7 +1460,10 @@ impl IpRecv for LinuxPacketIo {
         &'a mut self,
         pool: &mut PacketBufPool,
     ) -> io::Result<impl Iterator<Item = Packet<Ip>> + Send + 'a> {
-        self.tun.recv(pool).await
+        let packets = self.tun.recv(pool).await?;
+        let filter = &self.filter;
+        Ok(packets
+            .filter_map(move |packet| filter_ip_packet(packet, filter, Direction::HostToMesh)))
     }
 
     fn mtu(&self) -> MtuWatcher {
@@ -1699,8 +1767,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_rebuilds_the_device_after_a_fatal_error() {
         use super::{
-            EndpointRefreshSignal, Health, LinuxPacketIo, PendingDevice, RouteEndpointUpdater,
-            RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device, run_worker,
+            EndpointRefreshSignal, Health, LinuxPacketIo, PacketFilter, PendingDevice,
+            RouteEndpointUpdater, RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device,
+            run_worker,
         };
         use gotatun::x25519::StaticSecret;
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
@@ -1714,9 +1783,18 @@ mod tests {
         )
         .expect("TUN stand-in");
         let health = Arc::new(Health::default());
+        let config = one_peer_config(None);
+        let filter = Arc::new(
+            PacketFilter::new(
+                &config,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
         let tun = LinuxPacketIo::new(
             crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
                 .expect("TUN stand-in registers"),
+            filter,
         );
         let (factory, port) = bind_udp(
             Request {
@@ -1727,7 +1805,6 @@ mod tests {
         )
         .await
         .expect("engine socket");
-        let config = one_peer_config(None);
         let peers = peers_for_config(&config).expect("peers");
         let device = build_device(
             factory.clone(),
@@ -1829,6 +1906,52 @@ mod tests {
             #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         }
+    }
+
+    /// The Linux typed-packet adapter applies grants before returning packets to `GotaTun`.
+    #[test]
+    fn typed_ip_packets_pass_through_the_mesh_filter() {
+        use super::{Direction, PacketFilter, filter_ip_packet};
+        use gotatun::packet::Packet;
+
+        let config = one_peer_config(None);
+        let filter = PacketFilter::new(
+            &config,
+            infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+        )
+        .expect("compile filter");
+        let mut bytes = vec![0_u8; 40];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        bytes[8] = 64;
+        bytes[9] = 6;
+        bytes[12..16].copy_from_slice(&config.addresses.ipv4.octets());
+        bytes[16..20].copy_from_slice(
+            &"10.254.0.1"
+                .parse::<std::net::Ipv4Addr>()
+                .expect("peer")
+                .octets(),
+        );
+        bytes[20..22].copy_from_slice(&40_000_u16.to_be_bytes());
+        bytes[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        bytes[32] = 0x50;
+        bytes[33] = 0x02;
+
+        let mut packet = Packet::<[u8]>::default();
+        packet.buf_mut().extend_from_slice(&bytes);
+        let packet = packet.try_into_ip().expect("typed IP packet");
+        assert!(filter_ip_packet(packet, &filter, Direction::HostToMesh).is_some());
+
+        bytes[12..16].copy_from_slice(
+            &"10.254.0.99"
+                .parse::<std::net::Ipv4Addr>()
+                .expect("spoofed address")
+                .octets(),
+        );
+        let mut packet = Packet::<[u8]>::default();
+        packet.buf_mut().extend_from_slice(&bytes);
+        let packet = packet.try_into_ip().expect("typed spoofed IP packet");
+        assert!(filter_ip_packet(packet, &filter, Direction::HostToMesh).is_none());
     }
 
     #[test]
