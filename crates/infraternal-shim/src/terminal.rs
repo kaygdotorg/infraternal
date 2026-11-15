@@ -495,6 +495,10 @@ mod measurements;
 mod fidelity;
 
 #[cfg(test)]
+#[path = "../tests/unit/approximate_modes.rs"]
+mod approximate_modes;
+
+#[cfg(test)]
 #[path = "../tests/unit/resize_recovery.rs"]
 mod resize_recovery;
 

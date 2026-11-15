@@ -685,13 +685,21 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
             if (a.modes.get(mode) != b.modes.get(mode)) return 4000000 + @as(usize, tag.value);
         }
     }
+    // Input state outside the mode table decides what the viewer's keyboard
+    // and mouse send to the program, so both painters must carry it (#524):
+    // the effective mouse event and format, modifyOtherKeys, XTSHIFTESCAPE,
+    // and the live cursor's shape and charsets on the active screen.
+    if (a.flags.mouse_event != b.flags.mouse_event) return 6500000;
+    if (a.flags.mouse_format != b.flags.mouse_format) return 6500001;
+    if (a.flags.modify_other_keys_2 != b.flags.modify_other_keys_2) return 6600000;
+    if (a.flags.mouse_shift_capture != b.flags.mouse_shift_capture) return 6600001;
+    if (a.screens.active.cursor.cursor_style != b.screens.active.cursor.cursor_style) return 6600002;
+    if (!charsetEqual(a.screens.active.charset, b.screens.active.charset)) return 6600003;
     if (strict) {
         inline for (.{ "foreground", "background", "cursor" }) |name| {
             if (!std.meta.eql(@field(a.colors, name), @field(b.colors, name))) return 6400003;
         }
         if (!std.meta.eql(a.colors.palette.mask, b.colors.palette.mask)) return 6400004;
-        if (a.flags.mouse_event != b.flags.mouse_event) return 6500000;
-        if (a.flags.mouse_format != b.flags.mouse_format) return 6500001;
         if (a.flags.shell_redraws_prompt != b.flags.shell_redraws_prompt) return 6200002;
         if (!std.meta.eql(a.modes.saved, b.modes.saved)) return 6100000;
         if (a.previous_char != b.previous_char) return 6000000;
