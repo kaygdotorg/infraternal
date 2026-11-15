@@ -1289,7 +1289,8 @@ impl PendingWorker {
                         .transpose()?
                         .unwrap_or_default();
                     // The guard knows the first peers before the device receives anything.
-                    admission.write().await.set_peers(installed_keys(&peers));
+                    let keys = installed_keys(&peers);
+                    admission.write().await.install(keys, &peers);
                     let device = DeviceBuilder::new()
                         .with_udp(factory)
                         .with_private_key(private_key)
@@ -1741,6 +1742,7 @@ impl RuntimeState {
         validate_underlay_routes(&config, &new_routes)?;
         let peers = peers_for_config(&config)?;
         let admitted = installed_keys(&peers);
+        let admitted_endpoints: Vec<_> = peers.iter().filter_map(|peer| peer.endpoint).collect();
         let old_config = self.config.clone();
         let old_routes = self.routes.clone();
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -1857,7 +1859,10 @@ impl RuntimeState {
         }
         // The receive guard follows only snapshots the live device fully accepted. A failure
         // above has restored (or, for an authority replacement, stopped) the old peers.
-        self.admission.write().await.set_peers(admitted);
+        let mut admission = self.admission.write().await;
+        admission.set_peers(admitted);
+        admission.set_configured_endpoints(admitted_endpoints);
+        drop(admission);
         self.config = Some(config);
         Ok(RuntimeInfo {
             interface,

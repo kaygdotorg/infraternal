@@ -49,7 +49,12 @@ pub(crate) enum Refusal {
     /// The source already used its [`REFUSED_SOURCE_BUDGET`] or [`SOURCE_BUDGET`] this second;
     /// no key agreement ran.
     SourceBudget,
-    /// The node already used its [`NODE_BUDGET`] this second; no key agreement ran.
+    /// The source's network (IPv4 /24, IPv6 /48) already used its [`REFUSED_NETWORK_BUDGET`]
+    /// or [`NETWORK_BUDGET`] this second; no key agreement ran.
+    NetworkBudget,
+    /// The node already used the share of [`NODE_BUDGET`] this source may spend this second
+    /// ([`UNKNOWN_SOURCE_BUDGET`] for a source that is not a known peer endpoint); no key
+    /// agreement ran.
     NodeBudget,
     /// The key agreement ran and the sender's static key did not decrypt.
     Undecryptable,
@@ -71,17 +76,43 @@ pub(crate) const REFUSED_SOURCE_BUDGET: u32 = 100;
 /// bounds a granted peer's flood.
 pub(crate) const SOURCE_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
 
+/// Key agreements per second and network (IPv4 /24, IPv6 /48) that may end in a refusal.
+///
+/// One network can hold many sources: an IPv6 /48 is 65,536 /64s, and anyone with one routed
+/// prefix can send from all of them without spoofing. Two sources' worth means a flood from one
+/// network takes at most a fifth of [`UNKNOWN_SOURCE_BUDGET`], however many addresses it uses
+/// (J713, #483).
+pub(crate) const REFUSED_NETWORK_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
+
+/// Key agreements per second and network, admitted or not.
+///
+/// Twice [`REFUSED_NETWORK_BUDGET`], so peers behind one carrier NAT share room for a mass
+/// reconnect. Known peer endpoints are not counted here (see [`UNKNOWN_SOURCE_BUDGET`]).
+pub(crate) const NETWORK_BUDGET: u32 = 2 * REFUSED_NETWORK_BUDGET;
+
 /// Key agreements the guard runs per second for the whole node.
 ///
-/// It bounds floods from many (possibly spoofed) sources, and it bounds the per-source map: a
-/// source is recorded only when it spends from this budget. Sizing (J572, #483): one key
-/// agreement costs about 26 µs of CPU (the flood bench below, on dev-02, aarch64), so the guard
-/// spends at most about 2.6% of one core on them. A mesh of 4,096 hosts rekeys about 34 times a
-/// second (every two minutes per peer), and even if every peer reconnects at once, `WireGuard`'s
-/// five-second retry spreads 4,096 initiations over about four seconds of budget.
+/// It bounds floods from many (possibly spoofed) sources, and it bounds the per-window maps: a
+/// source or network is recorded only when it spends from this budget. Sizing (J572, #483): one
+/// key agreement costs about 26 µs of CPU (the flood bench below, on dev-02, aarch64), so the
+/// guard spends at most about 2.6% of one core on them. A mesh of 4,096 hosts rekeys about 34
+/// times a second (every two minutes per peer). If every peer reconnects at once from its known
+/// endpoint, `WireGuard`'s five-second retry spreads 4,096 initiations over about four seconds of
+/// this budget; that sizing assumes no flood is spending it at the same time (see
+/// [`UNKNOWN_SOURCE_BUDGET`] for what a flood leaves).
 pub(crate) const NODE_BUDGET: u32 = 1_000;
 
-/// How long one budget window lasts; both budgets refill at its start.
+/// The part of [`NODE_BUDGET`] that sources other than known peer endpoints may spend.
+///
+/// The rest is reserved: only a known endpoint (an endpoint the coordinator configured for a
+/// peer, or one `GotaTun` confirmed from a peer's authenticated traffic) may spend it, and such a
+/// source also skips the network budgets. A flood that does not spoof a peer's exact address and
+/// port can therefore never take a known peer's initiation away. Half, because new joins and
+/// peers at unknown endpoints still need room, and known endpoints alone use a few a second
+/// outside a mass reconnect.
+pub(crate) const UNKNOWN_SOURCE_BUDGET: u32 = NODE_BUDGET / 2;
+
+/// How long one budget window lasts; every budget refills at its start.
 const BUDGET_WINDOW: Duration = Duration::from_secs(1);
 
 /// Who a per-source budget belongs to. IPv6 is keyed by /64, because one host can use every
@@ -104,61 +135,151 @@ impl SourceKey {
             }
         }
     }
+
+    /// The network this source belongs to: its IPv4 /24 or its IPv6 /48.
+    fn network(self) -> NetworkKey {
+        match self {
+            Self::V4(address) => {
+                let mut network = [0; 3];
+                network.copy_from_slice(&address[..3]);
+                NetworkKey::V4(network)
+            }
+            Self::V6(prefix) => {
+                let mut network = [0; 6];
+                network.copy_from_slice(&prefix[..6]);
+                NetworkKey::V6(network)
+            }
+        }
+    }
 }
 
-/// One source's key agreements in the current window.
+/// Who a per-network budget belongs to: an IPv4 /24 or an IPv6 /48, the smallest blocks that
+/// providers usually route to one customer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum NetworkKey {
+    V4([u8; 3]),
+    V6([u8; 6]),
+}
+
+/// One source's, or one network's, key agreements in the current window.
 #[derive(Clone, Copy, Debug, Default)]
-struct SourceSpend {
-    /// Every key agreement this source caused.
+struct Spend {
+    /// Every key agreement it caused.
     total: u32,
     /// Those that admitted nobody.
     refused: u32,
 }
 
+/// An exact peer endpoint in a compact, sortable form: the IPv6 (or IPv4-mapped) address and
+/// the port, 18 bytes with no padding.
+type EndpointKey = [u8; 18];
+
+/// Turn a socket address into its [`EndpointKey`], treating IPv4 and IPv4-mapped IPv6 alike.
+fn endpoint_key(address: SocketAddr) -> EndpointKey {
+    let ip = match address.ip().to_canonical() {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+        IpAddr::V6(v6) => v6,
+    };
+    let mut key = [0; 18];
+    key[..16].copy_from_slice(&ip.octets());
+    key[16..].copy_from_slice(&address.port().to_be_bytes());
+    key
+}
+
+/// Sort and deduplicate endpoints into a list [`slice::binary_search`] can look up.
+fn endpoint_list(endpoints: impl IntoIterator<Item = SocketAddr>) -> Vec<EndpointKey> {
+    let mut list: Vec<_> = endpoints.into_iter().map(endpoint_key).collect();
+    list.sort_unstable();
+    list.dedup();
+    list.shrink_to_fit();
+    list
+}
+
+/// What one successful [`Budget::spend`] charged, so a refusal can be charged to the same place.
+#[derive(Clone, Copy, Debug)]
+struct Charge {
+    source: SourceKey,
+    /// `None` for a known endpoint, which is not charged to its network.
+    network: Option<NetworkKey>,
+}
+
 /// The key agreements spent in the current one-second window.
 ///
-/// Invariant: `sources` holds at most [`NODE_BUDGET`] entries, because a source is inserted only
-/// when it spends from the node budget, and both reset together. Its memory is therefore bounded
-/// (about 40 KiB at most) whatever a flood sends.
+/// Invariant: `sources` holds at most [`NODE_BUDGET`] entries and `networks` at most
+/// [`UNKNOWN_SOURCE_BUDGET`], because an entry is inserted only when it spends from the node
+/// budget, and everything resets together. Their memory is therefore bounded (about 40 KiB at
+/// most in all) whatever a flood sends.
 #[derive(Debug, Default)]
 struct Budget {
     window_start: Option<Instant>,
+    /// Key agreements spent this window by every source.
     node: u32,
-    sources: HashMap<SourceKey, SourceSpend>,
+    /// Those spent by sources that are not known endpoints.
+    unknown: u32,
+    sources: HashMap<SourceKey, Spend>,
+    networks: HashMap<NetworkKey, Spend>,
 }
 
 impl Budget {
     /// Spend one key agreement for `source` at `now`, or say which budget is used up.
-    fn spend(&mut self, source: IpAddr, now: Instant) -> Result<(), Refusal> {
+    ///
+    /// `known` says whether the source is a known peer endpoint: it may then spend the whole
+    /// node budget and skips the network budgets; otherwise it is held to
+    /// [`UNKNOWN_SOURCE_BUDGET`] and to its network's budgets.
+    fn spend(&mut self, source: IpAddr, known: bool, now: Instant) -> Result<Charge, Refusal> {
         if self
             .window_start
             .is_none_or(|start| now.saturating_duration_since(start) >= BUDGET_WINDOW)
         {
             self.window_start = Some(now);
             self.node = 0;
+            self.unknown = 0;
             self.sources.clear();
+            self.networks.clear();
         }
-        let key = SourceKey::of(source);
-        let spent = self.sources.get(&key).copied().unwrap_or_default();
+        let source = SourceKey::of(source);
+        let spent = self.sources.get(&source).copied().unwrap_or_default();
         if spent.refused >= REFUSED_SOURCE_BUDGET || spent.total >= SOURCE_BUDGET {
             return Err(Refusal::SourceBudget);
+        }
+        let network = (!known).then(|| source.network());
+        if let Some(network) = network {
+            let spent = self.networks.get(&network).copied().unwrap_or_default();
+            if spent.refused >= REFUSED_NETWORK_BUDGET || spent.total >= NETWORK_BUDGET {
+                return Err(Refusal::NetworkBudget);
+            }
+            if self.unknown >= UNKNOWN_SOURCE_BUDGET {
+                return Err(Refusal::NodeBudget);
+            }
         }
         if self.node >= NODE_BUDGET {
             return Err(Refusal::NodeBudget);
         }
         self.node += 1;
-        self.sources.entry(key).or_default().total += 1;
-        Ok(())
+        self.sources.entry(source).or_default().total += 1;
+        if let Some(network) = network {
+            self.unknown += 1;
+            self.networks.entry(network).or_default().total += 1;
+        }
+        Ok(Charge { source, network })
     }
 
-    /// Record that a key agreement `source` spent at `now` admitted nobody.
+    /// Record that the key agreement `charge` paid for at `now` admitted nobody.
     ///
     /// A window that rolled over between [`Self::spend`] and this call has nothing to correct.
-    fn refused(&mut self, source: IpAddr, now: Instant) {
+    fn refused(&mut self, charge: Charge, now: Instant) {
         if self
             .window_start
-            .is_some_and(|start| now.saturating_duration_since(start) < BUDGET_WINDOW)
-            && let Some(spent) = self.sources.get_mut(&SourceKey::of(source))
+            .is_none_or(|start| now.saturating_duration_since(start) >= BUDGET_WINDOW)
+        {
+            return;
+        }
+        if let Some(spent) = self.sources.get_mut(&charge.source) {
+            spent.refused += 1;
+        }
+        if let Some(spent) = charge
+            .network
+            .and_then(|network| self.networks.get_mut(&network))
         {
             spent.refused += 1;
         }
@@ -175,6 +296,12 @@ pub(crate) struct PeerAdmission {
     /// Checks MAC1 only; its own load limit is unused (see [`Self::check`]).
     mac1: RateLimiter,
     peers: BTreeSet<PublicKey>,
+    /// The endpoints the coordinator configured for installed peers, sorted. With
+    /// `confirmed_endpoints` these are the known endpoints that may spend the reserved part of
+    /// the node budget (see [`UNKNOWN_SOURCE_BUDGET`]).
+    configured_endpoints: Vec<EndpointKey>,
+    /// The endpoints `GotaTun` confirmed from installed peers' authenticated traffic, sorted.
+    confirmed_endpoints: Vec<EndpointKey>,
     /// Spent before every key agreement. A plain mutex: it is held for one map update and
     /// never across an `.await`.
     budget: Mutex<Budget>,
@@ -194,6 +321,8 @@ impl PeerAdmission {
             public_key,
             mac1,
             peers: BTreeSet::new(),
+            configured_endpoints: Vec::new(),
+            confirmed_endpoints: Vec::new(),
             budget: Mutex::default(),
             #[cfg(test)]
             key_agreements: std::sync::atomic::AtomicU32::new(0),
@@ -203,6 +332,47 @@ impl PeerAdmission {
     /// Replace the identities accepted by the most recently applied device snapshot.
     pub(crate) fn set_peers(&mut self, peers: impl IntoIterator<Item = PublicKey>) {
         self.peers = peers.into_iter().collect();
+    }
+
+    /// Replace the peers and their configured endpoints from the peer list the device just
+    /// accepted: [`Self::set_peers`] and [`Self::set_configured_endpoints`] in one step.
+    pub(crate) fn install(
+        &mut self,
+        keys: impl IntoIterator<Item = PublicKey>,
+        peers: &[gotatun::device::Peer],
+    ) {
+        self.set_peers(keys);
+        self.set_configured_endpoints(peers.iter().filter_map(|peer| peer.endpoint));
+    }
+
+    /// Replace the endpoints the coordinator configured for the installed peers.
+    ///
+    /// Call it with the same snapshot as [`Self::set_peers`]. Only exact addresses and ports
+    /// count, so a flood has to spoof one to share a peer's reserved budget.
+    pub(crate) fn set_configured_endpoints(
+        &mut self,
+        endpoints: impl IntoIterator<Item = SocketAddr>,
+    ) {
+        self.configured_endpoints = endpoint_list(endpoints);
+    }
+
+    /// Replace the endpoints `GotaTun` confirmed from installed peers' authenticated traffic.
+    ///
+    /// Use `GotaTun`'s `confirmed_endpoint`, never the send endpoint: an accepted initiation
+    /// moves the send endpoint before its sender proves anything, so a replayed initiation could
+    /// otherwise make an attacker's address known.
+    pub(crate) fn set_confirmed_endpoints(
+        &mut self,
+        endpoints: impl IntoIterator<Item = SocketAddr>,
+    ) {
+        self.confirmed_endpoints = endpoint_list(endpoints);
+    }
+
+    /// Whether `source` is exactly a known peer endpoint.
+    fn is_known_endpoint(&self, source: SocketAddr) -> bool {
+        let key = endpoint_key(source);
+        self.configured_endpoints.binary_search(&key).is_ok()
+            || self.confirmed_endpoints.binary_search(&key).is_ok()
     }
 
     /// Replace the local identity after `GotaTun` accepts a key rotation.
@@ -220,7 +390,8 @@ impl PeerAdmission {
     /// Decide whether one packet from `source`, received at `now`, may reach `GotaTun`.
     ///
     /// Non-initiation traffic always passes. An initiation must carry a valid MAC1 and then
-    /// fit both budgets before its sender's key is decrypted. `now` is a parameter so tests
+    /// fit its source's, its network's and the node's budgets before its sender's key is
+    /// decrypted. `now` is a parameter so tests
     /// control the clock.
     /// # Errors
     /// Returns why an initiation was kept away from `GotaTun`; the caller drops it silently.
@@ -246,10 +417,12 @@ impl PeerAdmission {
             return Err(Refusal::InvalidMac);
         };
         // The budget is spent only after MAC1, so junk cannot use up a granted peer's budget.
-        self.budget
+        let known = self.is_known_endpoint(source);
+        let charge = self
+            .budget
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .spend(source.ip(), now)?;
+            .spend(source.ip(), known, now)?;
         #[cfg(test)]
         self.key_agreements
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -262,7 +435,7 @@ impl PeerAdmission {
             self.budget
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .refused(source.ip(), now);
+                .refused(charge, now);
         }
         verdict
     }
@@ -355,7 +528,10 @@ mod tests {
         clippy::expect_used,
         reason = "a broken fixture (bad address, key or clock) must stop the test loudly"
     )]
-    use super::{NODE_BUDGET, PeerAdmission, REFUSED_SOURCE_BUDGET, Refusal, SOURCE_BUDGET};
+    use super::{
+        NODE_BUDGET, PeerAdmission, REFUSED_NETWORK_BUDGET, REFUSED_SOURCE_BUDGET, Refusal,
+        SOURCE_BUDGET, UNKNOWN_SOURCE_BUDGET,
+    };
     use crate::policy::model::PublicKey;
     use gotatun::{
         noise::{Tunn, index_table::IndexTable, rate_limiter::RateLimiter},
@@ -400,6 +576,13 @@ mod tests {
     /// Parse a test source address.
     fn source(text: &str) -> SocketAddr {
         text.parse().expect("test source address")
+    }
+
+    /// Source `index` in `<first>.x.y.7`: a different IPv4 /24 for every index below 65,536,
+    /// so only the per-node budgets apply.
+    fn own_network(first: u8, index: u32) -> SocketAddr {
+        let [_, _, high, low] = index.to_be_bytes();
+        SocketAddr::from(([first, high, low, 7], 40000))
     }
 
     /// J555 F1 (#483): the admission guard must not do unbounded X25519 work per source.
@@ -463,27 +646,43 @@ mod tests {
             "a source past its budget caused X25519 work"
         );
 
-        for index in 0..NODE_BUDGET - REFUSED_SOURCE_BUDGET {
-            let [_, _, high, low] = index.to_be_bytes();
-            let spoofed = SocketAddr::from(([198, 18, high, low], 40000));
+        // Spoofed sources, each in its own /24, until the unknown-source share is spent.
+        for index in 0..UNKNOWN_SOURCE_BUDGET - REFUSED_SOURCE_BUDGET {
             assert_eq!(
-                admission.check(&Packet::copy_from(&flood), spoofed, now),
+                admission.check(&Packet::copy_from(&flood), own_network(18, index), now),
                 Err(Refusal::UnknownKey)
             );
         }
-        assert_eq!(key_agreements(&admission), NODE_BUDGET);
+        assert_eq!(key_agreements(&admission), UNKNOWN_SOURCE_BUDGET);
         for index in 0..10_000_u32 {
-            let [_, _, high, low] = index.to_be_bytes();
-            let spoofed = SocketAddr::from(([198, 19, high, low], 40000));
             assert_eq!(
-                admission.check(&Packet::copy_from(&flood), spoofed, now),
+                admission.check(&Packet::copy_from(&flood), own_network(19, index), now),
                 Err(Refusal::NodeBudget)
             );
         }
         assert_eq!(
             key_agreements(&admission),
+            UNKNOWN_SOURCE_BUDGET,
+            "a spoofed-source flood past the unknown-source share caused X25519 work"
+        );
+        // A flood that spoofs known endpoints exactly can spend the reserve, and no more.
+        let known: Vec<_> = (0..NODE_BUDGET - UNKNOWN_SOURCE_BUDGET + 10_000)
+            .map(|index| own_network(20, index))
+            .collect();
+        let mut admission = admission;
+        admission.set_configured_endpoints(known.iter().copied());
+        for (index, spoofed) in known.iter().enumerate() {
+            let verdict = admission.check(&Packet::copy_from(&flood), *spoofed, now);
+            if index < (NODE_BUDGET - UNKNOWN_SOURCE_BUDGET) as usize {
+                assert_eq!(verdict, Err(Refusal::UnknownKey));
+            } else {
+                assert_eq!(verdict, Err(Refusal::NodeBudget));
+            }
+        }
+        assert_eq!(
+            key_agreements(&admission),
             NODE_BUDGET,
-            "a spoofed-source flood past the node budget caused X25519 work"
+            "a flood past the node budget caused X25519 work"
         );
 
         let mut forged = flood.clone();
@@ -611,8 +810,9 @@ mod tests {
         );
     }
 
-    /// A spoofed-source flood stops at the node budget without key agreement, and a granted
-    /// peer is admitted again once the window refills.
+    /// A spoofed-source flood stops at the unknown-source share without key agreement. A
+    /// granted peer at a known endpoint still gets in from the reserve, and one at an unknown
+    /// endpoint is admitted again once the window refills.
     #[test]
     fn the_node_budget_bounds_floods_from_many_sources() {
         let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
@@ -620,21 +820,30 @@ mod tests {
         admission.set_peers([PublicKey(
             *X25519PublicKey::from(&StaticSecret::from(peer)).as_bytes(),
         )]);
+        let known_source = source("192.0.2.44:51000");
+        admission.set_configured_endpoints([known_source]);
         let flood = initiation([0x55; 32]);
         let now = Instant::now();
-        for index in 0..NODE_BUDGET {
-            let [_, _, high, low] = index.to_be_bytes();
-            let spoofed = SocketAddr::from(([198, 18, high, low], 40000));
+        for index in 0..UNKNOWN_SOURCE_BUDGET {
             assert_eq!(
-                admission.check(&Packet::copy_from(&flood), spoofed, now),
+                admission.check(&Packet::copy_from(&flood), own_network(18, index), now),
                 Err(Refusal::UnknownKey)
             );
         }
+        assert_eq!(
+            admission.check(&Packet::copy_from(&flood), own_network(19, 0), now),
+            Err(Refusal::NodeBudget)
+        );
         let granted = initiation(peer);
         let peer_source = source("203.0.113.9:51000");
         assert_eq!(
             admission.check(&Packet::copy_from(&granted), peer_source, now),
             Err(Refusal::NodeBudget)
+        );
+        assert_eq!(
+            admission.check(&Packet::copy_from(&granted), known_source, now),
+            Ok(()),
+            "the reserve admits a granted peer at its known endpoint"
         );
         assert_eq!(
             admission.check(
@@ -644,6 +853,105 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    /// J713 (#483): many sources inside one network share that network's budget. Sixteen IPv6
+    /// /64s of one /48, or every address of one IPv4 /24, stop at [`REFUSED_NETWORK_BUDGET`]
+    /// refusals without key agreement; another network, and a known endpoint inside the flooded
+    /// one, are unaffected.
+    #[test]
+    fn sources_in_one_network_share_its_budget() {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let peer = [0x66; 32];
+        admission.set_peers([PublicKey(
+            *X25519PublicKey::from(&StaticSecret::from(peer)).as_bytes(),
+        )]);
+        let known_v6 = source("[2001:db8:77:ff::9]:51000");
+        let known_v4 = source("198.51.100.250:51000");
+        admission.set_configured_endpoints([known_v6, known_v4]);
+        let flood = initiation([0x55; 32]);
+        let now = Instant::now();
+        for index in 0..REFUSED_NETWORK_BUDGET {
+            let from = source(&format!("[2001:db8:77:{:x}::1]:40000", index % 16));
+            assert_eq!(
+                admission.check(&Packet::copy_from(&flood), from, now),
+                Err(Refusal::UnknownKey)
+            );
+        }
+        assert_eq!(
+            admission.check(
+                &Packet::copy_from(&flood),
+                source("[2001:db8:77:20::1]:1"),
+                now
+            ),
+            Err(Refusal::NetworkBudget),
+            "a fresh /64 in the same /48 shares the /48's budget"
+        );
+        for index in 0..REFUSED_NETWORK_BUDGET {
+            let from =
+                SocketAddr::from(([198, 51, 100, u8::try_from(index % 200).expect("fits")], 1));
+            assert_eq!(
+                admission.check(&Packet::copy_from(&flood), from, now),
+                Err(Refusal::UnknownKey)
+            );
+        }
+        assert_eq!(
+            admission.check(&Packet::copy_from(&flood), source("198.51.100.201:1"), now),
+            Err(Refusal::NetworkBudget),
+            "a fresh address in the same /24 shares the /24's budget"
+        );
+        assert_eq!(
+            admission.check(
+                &Packet::copy_from(&flood),
+                source("[2001:db8:78::1]:1"),
+                now
+            ),
+            Err(Refusal::UnknownKey),
+            "another /48 has its own budget"
+        );
+        let granted = initiation(peer);
+        assert_eq!(
+            admission.check(&Packet::copy_from(&granted), known_v6, now),
+            Ok(())
+        );
+        assert_eq!(
+            admission.check(
+                &Packet::copy_from(&granted),
+                source("[::ffff:198.51.100.250]:51000"),
+                now
+            ),
+            Ok(()),
+            "a known IPv4 endpoint matches its IPv4-mapped form"
+        );
+        assert_eq!(
+            admission.check(
+                &Packet::copy_from(&granted),
+                source("198.51.100.250:51001"),
+                now
+            ),
+            Err(Refusal::NetworkBudget),
+            "only the exact known port skips the network budget"
+        );
+    }
+
+    /// Endpoints `GotaTun` confirmed count as known exactly like configured ones, and each list
+    /// is replaced, not merged, by its next update.
+    #[test]
+    fn confirmed_endpoints_are_known_and_replaced() {
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let confirmed = source("192.0.2.77:41000");
+        assert!(!admission.is_known_endpoint(confirmed));
+        admission.set_confirmed_endpoints([confirmed]);
+        assert!(admission.is_known_endpoint(confirmed));
+        assert!(admission.is_known_endpoint(source("[::ffff:192.0.2.77]:41000")));
+        admission.set_configured_endpoints([source("192.0.2.78:41000")]);
+        assert!(
+            admission.is_known_endpoint(confirmed),
+            "configured updates keep confirmed ones"
+        );
+        admission.set_confirmed_endpoints([]);
+        assert!(!admission.is_known_endpoint(confirmed));
+        assert!(admission.is_known_endpoint(source("192.0.2.78:41000")));
     }
 
     /// CPU per received initiation under a flood (J572, J648, #483); run by hand, it asserts nothing.
@@ -829,6 +1137,8 @@ mod flood_fairness {
         prefixes_per_network: u32,
         /// When, into each second, the granted peer sends its initiation.
         peer_offset_ms: u64,
+        /// Whether the node knows the peer's source as one of its endpoints.
+        peer_endpoint_known: bool,
     }
 
     /// What one simulated flood did.
@@ -852,6 +1162,9 @@ mod flood_fairness {
         admission.set_peers([PublicKey(
             *X25519PublicKey::from(&StaticSecret::from(PEER)).as_bytes(),
         )]);
+        if flood.peer_endpoint_known {
+            admission.set_configured_endpoints([peer_source()]);
+        }
         let attacker = initiation([0x55; 32]);
         let granted = initiation(PEER);
         let start = Instant::now();
@@ -865,7 +1178,7 @@ mod flood_fairness {
         let sources = u32::from(flood.networks) * flood.prefixes_per_network;
         let step = Duration::from_secs(1) / flood.rate.max(1);
         let mut n = 0_u32;
-        let mut peer_tries = |admission: &PeerAdmission, at: Instant, run: &mut Run| {
+        let peer_tries = |admission: &PeerAdmission, at: Instant, run: &mut Run| {
             run.peer_attempts += 1;
             if admission.check(&Packet::copy_from(&granted), peer_source(), at) == Ok(()) {
                 run.peer_admitted += 1;
@@ -882,8 +1195,8 @@ mod flood_fairness {
                     peer_tries(&admission, peer_at, &mut run);
                 }
                 let index = n % sources;
-                let network = u16::try_from(index / flood.prefixes_per_network)
-                    .expect("network index fits");
+                let network =
+                    u16::try_from(index / flood.prefixes_per_network).expect("network index fits");
                 let from = v6_source(network, index % flood.prefixes_per_network);
                 let verdict = admission.check(&Packet::copy_from(&attacker), from, at);
                 assert_ne!(verdict, Ok(()), "a stranger was admitted");
@@ -933,6 +1246,7 @@ mod flood_fairness {
                 networks: 1,
                 prefixes_per_network: 16,
                 peer_offset_ms: offset,
+                peer_endpoint_known: false,
             });
             report(&format!("16 /64s in one /48, offset {offset} ms"), &run);
             assert_eq!(
@@ -945,11 +1259,53 @@ mod flood_fairness {
             networks: 1,
             prefixes_per_network: 1,
             peer_offset_ms: 500,
+            peer_endpoint_known: false,
         });
         report("control, one /64", &control);
         assert_eq!(
             control.peer_admitted, control.peer_attempts,
             "a single-/64 flood starved a granted peer"
+        );
+    }
+
+    /// A flood from 64 networks (16 /64s in each of 64 /48s) is too wide for the network
+    /// budgets: it spends the whole unknown-source share in every window. A granted peer at a
+    /// known endpoint still gets every initiation in from the reserve. One at an unknown endpoint
+    /// is the documented limit: it is admitted only when its initiation lands before the
+    /// share runs out (here, at a 10 ms offset, it does; at 500 ms it does not).
+    #[test]
+    fn a_wide_flood_cannot_take_the_reserve_from_a_known_endpoint() {
+        for offset in [10_u64, 100, 500, 900] {
+            let run = simulate(Flood {
+                rate: 20_000,
+                networks: 64,
+                prefixes_per_network: 16,
+                peer_offset_ms: offset,
+                peer_endpoint_known: true,
+            });
+            report(
+                &format!("64 /48s x 16 /64s, known endpoint, offset {offset} ms"),
+                &run,
+            );
+            assert_eq!(
+                run.peer_admitted, run.peer_attempts,
+                "a wide flood took the reserve from a known endpoint (offset {offset} ms)"
+            );
+        }
+        let unknown = simulate(Flood {
+            rate: 20_000,
+            networks: 64,
+            prefixes_per_network: 16,
+            peer_offset_ms: 500,
+            peer_endpoint_known: false,
+        });
+        report(
+            "64 /48s x 16 /64s, unknown endpoint, offset 500 ms",
+            &unknown,
+        );
+        assert_eq!(
+            unknown.peer_admitted, 0,
+            "the documented limit changed: update the module doc if an unknown endpoint now gets in"
         );
     }
 

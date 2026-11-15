@@ -740,6 +740,8 @@ async fn run_worker(
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
+    // The confirmed endpoints last handed to the admission guard's reserve.
+    let mut admitted_endpoints = BTreeMap::new();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -795,6 +797,9 @@ async fn run_worker(
             }
             _ = endpoint_scan.tick() => {
                 let endpoints = state.live_peer_endpoint_snapshot().await;
+                state
+                    .admit_confirmed_endpoints(&mut admitted_endpoints, &endpoints)
+                    .await;
                 let changed = observed_endpoints
                     .as_ref()
                     .is_some_and(|previous| previous != &endpoints);
@@ -819,6 +824,31 @@ async fn run_worker(
 }
 
 impl RuntimeState {
+    /// Give the admission guard the peers' confirmed endpoints when they changed since
+    /// `admitted`, so those exact sources keep the guard's reserved budget under a flood.
+    ///
+    /// Runs on the 250 ms endpoint scan. The guard's write lock is taken only on a change,
+    /// because the receive task takes its read lock for every initiation.
+    async fn admit_confirmed_endpoints(
+        &self,
+        admitted: &mut BTreeMap<PublicKey, Option<SocketAddr>>,
+        endpoints: &BTreeMap<PublicKey, Option<SocketAddr>>,
+    ) {
+        if admitted == endpoints {
+            return;
+        }
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        pending
+            .factory
+            .admission
+            .write()
+            .await
+            .set_confirmed_endpoints(endpoints.values().flatten().copied());
+        admitted.clone_from(endpoints);
+    }
+
     /// Read authenticated live endpoints and refresh their route budgets away from the runtime.
     ///
     /// Only active identities own host routes. The stable peer key is passed to the node so
@@ -1140,8 +1170,17 @@ impl RuntimeState {
                 return Err(error);
             }
         }
-        // The receive guard follows only snapshots the live device accepted.
-        admission.write().await.set_peers(admitted_peers);
+        // The receive guard follows only snapshots the live device accepted. The configured
+        // endpoints are the ones that snapshot installs: only active identities carry one.
+        let configured_endpoints = config
+            .peers
+            .values()
+            .filter(|policy| peer_has_network_access(policy))
+            .filter_map(|policy| policy.peer.endpoint);
+        let mut guard = admission.write().await;
+        guard.set_peers(admitted_peers);
+        guard.set_configured_endpoints(configured_endpoints);
+        drop(guard);
         self.config = Some(config);
         Ok(self.info.clone())
     }
@@ -1224,7 +1263,7 @@ async fn build_device(
     {
         let mut admission = admission.write().await;
         admission.set_private_key(private_key.clone());
-        admission.set_peers(admitted_peers);
+        admission.install(admitted_peers, &peers);
     }
     DeviceBuilder::new()
         .with_udp(factory)
