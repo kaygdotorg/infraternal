@@ -7,5 +7,8 @@ pub mod pointer;
 pub mod service;
 #[cfg(feature = "server")]
 mod socket;
+/// The server's own update check, download and staging (#211 S3).
+#[cfg(feature = "server")]
+pub mod update;
 #[cfg(feature = "server")]
 pub use socket::ReleasePlugin;

@@ -15,6 +15,8 @@ pub struct VerifiedLookup {
     state: PathBuf,
     origin: String,
     engine: Arc<dyn ReleaseEngine>,
+    /// Whether this server runs the update check, or why not; see [`VerifiedLookup::with_updates`].
+    updates: Result<(), &'static str>,
 }
 struct Staging {
     path: PathBuf,
@@ -69,6 +71,23 @@ pub trait ReleaseEngine: Send + Sync {
         sums: &[u8],
         signature: &[u8],
     ) -> Result<(), &'static str>;
+    /// Verify a whole release with the one signed-release verifier (#211 S1): the
+    /// signature over `sums`, the signed `version` file and the `image` named `name`
+    /// in `sums`. Returns the signed version. Used by the updater before it keeps a
+    /// download; builds without an image verifier refuse.
+    /// # Errors
+    /// Refuses an untrusted or malformed signature, a list without `VERSION` or
+    /// `name`, and any file that does not match its signed digest.
+    fn verify_image(
+        &self,
+        _version: &std::fs::File,
+        _image: &std::fs::File,
+        _name: &str,
+        _sums: &[u8],
+        _signature: &[u8],
+    ) -> Result<String, &'static str> {
+        Err("release images cannot be verified in this build")
+    }
 }
 /// Fixed public transport errors; no engine diagnostics enter plugin responses.
 pub enum DownloadError {
@@ -76,7 +95,8 @@ pub enum DownloadError {
     Refused(&'static str),
 }
 impl DownloadError {
-    fn reason(&self) -> &'static str {
+    /// The fixed public sentence for this failure, safe to show to the owner.
+    pub(crate) fn reason(&self) -> &'static str {
         match self {
             Self::Missing => "this version has no matching release file.",
             Self::Refused(reason) => reason,
@@ -94,81 +114,120 @@ impl VerifiedLookup {
             state,
             origin,
             engine,
+            updates: Err(NO_UPDATER),
         }
     }
 
+    /// Fetch and authenticate `channel`'s newest release metadata in a private, self-cleaning staging folder.
     async fn check(&self, channel: &str) -> Result<Value, &'static str> {
         if !matches!(channel, "stable" | "edge") {
             return Err("invalid release channel setting");
         }
         // Random private staging is owned by this future and removed even when a feature switch cancels it.
         let staging = Staging::new(&self.state).map_err(|_| "release check storage unavailable")?;
-        let pointer = staging.path.join("pointer.json");
-        let result = self
-            .engine
-            .download(
-                &format!("{}/releases/channels/{channel}.json", self.origin),
-                &pointer,
-                65536,
-            )
-            .await;
-        match result {
-            Err(DownloadError::Missing) => {
-                return Ok(if channel == "stable" {
-                    json!({"channel":channel,"state":"empty","message":STABLE_EMPTY,"next":EDGE_OPT_IN})
-                } else {
-                    json!({"channel":channel,"state":"empty","message":"no edge release yet"})
-                });
-            }
-            Err(error) => return Err(error.reason()),
-            Ok(()) => (),
-        }
-        let bytes = std::fs::read(&pointer).map_err(|_| "release pointer could not be read")?;
-        let version = crate::pointer::parse(&bytes, channel)?;
-        let base = format!("{}/releases/{version}", self.origin);
-        for (name, limit) in [
-            ("SHA256SUMS", 65536),
-            ("SHA256SUMS.sig", 1024),
-            ("VERSION", 128),
-        ] {
-            self.engine
-                .download(&format!("{base}/{name}"), &staging.path.join(name), limit)
-                .await
-                .map_err(|e| e.reason())?;
-        }
-        // Verification reads at most 64 KiB of manifest and 128 bytes of VERSION.
-        // Keep this bounded operation in the owning future: a detached blocking worker
-        // could outlive runtime disable and race staging cleanup [198].
-        let verified = (|| {
-            use std::{io::Read, os::unix::fs::OpenOptionsExt};
-            let sums = std::fs::read(staging.path.join("SHA256SUMS"))
-                .map_err(|_| "release manifest could not be read")?;
-            let signature = std::fs::read(staging.path.join("SHA256SUMS.sig"))
-                .map_err(|_| "release signature could not be read")?;
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-                .open(staging.path.join("VERSION"))
-                .map_err(|_| "release VERSION could not be read")?;
-            if !file
-                .metadata()
-                .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 128)
-            {
-                return Err("release VERSION is unsafe");
-            }
-            self.engine.verify_version(&file, &sums, &signature)?;
-            // Authentication preserves the offset. Read this same descriptor so pathname replacement cannot change identity.
-            let mut declared = Vec::with_capacity(128);
-            file.take(129)
-                .read_to_end(&mut declared)
-                .map_err(|_| "release VERSION could not be read")?;
-            if declared != format!("{version}\n").as_bytes() {
-                return Err("signed VERSION does not match the release pointer");
-            }
-            Ok(version)
-        })()?;
+        let Some(verified) =
+            fetch_metadata(self.engine.as_ref(), &self.origin, &staging.path, channel).await?
+        else {
+            return Ok(if channel == "stable" {
+                json!({"channel":channel,"state":"empty","message":STABLE_EMPTY,"next":EDGE_OPT_IN})
+            } else {
+                json!({"channel":channel,"state":"empty","message":"no edge release yet"})
+            });
+        };
         Ok(json!({"channel":channel,"state":"verified","version":verified}))
     }
+}
+
+/// Download a channel's pointer and the release's signed metadata into `directory`
+/// and authenticate the announced version.
+///
+/// `directory` must be a private folder the caller owns; this writes `pointer.json`,
+/// `SHA256SUMS`, `SHA256SUMS.sig` and `VERSION` into it and leaves them there, so the
+/// updater can keep the same verified files beside the image it stages. Returns
+/// `Ok(None)` when the channel has published nothing yet, otherwise the version whose
+/// signed `VERSION` matches the pointer.
+/// # Errors
+/// Fixed public reasons for transport failures, malformed pointers, another channel's
+/// pointer, unverifiable metadata and a signed `VERSION` that differs from the pointer.
+pub(crate) async fn fetch_metadata(
+    engine: &dyn ReleaseEngine,
+    origin: &str,
+    directory: &Path,
+    channel: &str,
+) -> Result<Option<String>, &'static str> {
+    let pointer = directory.join("pointer.json");
+    let result = engine
+        .download(
+            &format!("{origin}/releases/channels/{channel}.json"),
+            &pointer,
+            65536,
+        )
+        .await;
+    match result {
+        Err(DownloadError::Missing) => return Ok(None),
+        Err(error) => return Err(error.reason()),
+        Ok(()) => (),
+    }
+    let bytes = std::fs::read(&pointer).map_err(|_| "release pointer could not be read")?;
+    let version = crate::pointer::parse(&bytes, channel)?;
+    fetch_signed(engine, origin, directory, &version).await?;
+    Ok(Some(version))
+}
+
+/// Download one release's signed metadata (`SHA256SUMS`, `SHA256SUMS.sig`, `VERSION`)
+/// into the private folder `directory` and check that its signed `VERSION` is exactly
+/// `version`. The files stay in `directory` for the caller.
+/// # Errors
+/// Fixed public reasons for transport failures, unverifiable metadata and a signed
+/// `VERSION` that names another release.
+pub(crate) async fn fetch_signed(
+    engine: &dyn ReleaseEngine,
+    origin: &str,
+    directory: &Path,
+    version: &str,
+) -> Result<(), &'static str> {
+    let base = format!("{origin}/releases/{version}");
+    for (name, limit) in [
+        ("SHA256SUMS", 65536),
+        ("SHA256SUMS.sig", 1024),
+        ("VERSION", 128),
+    ] {
+        engine
+            .download(&format!("{base}/{name}"), &directory.join(name), limit)
+            .await
+            .map_err(|e| e.reason())?;
+    }
+    // Verification reads at most 64 KiB of manifest and 128 bytes of VERSION.
+    // Keep this bounded operation in the owning future: a detached blocking worker
+    // could outlive runtime disable and race staging cleanup [198].
+    (|| {
+        use std::{io::Read, os::unix::fs::OpenOptionsExt};
+        let sums = std::fs::read(directory.join("SHA256SUMS"))
+            .map_err(|_| "release manifest could not be read")?;
+        let signature = std::fs::read(directory.join("SHA256SUMS.sig"))
+            .map_err(|_| "release signature could not be read")?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(directory.join("VERSION"))
+            .map_err(|_| "release VERSION could not be read")?;
+        if !file
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 128)
+        {
+            return Err("release VERSION is unsafe");
+        }
+        engine.verify_version(&file, &sums, &signature)?;
+        // Authentication preserves the offset. Read this same descriptor so pathname replacement cannot change identity.
+        let mut declared = Vec::with_capacity(128);
+        file.take(129)
+            .read_to_end(&mut declared)
+            .map_err(|_| "release VERSION could not be read")?;
+        if declared != format!("{version}\n").as_bytes() {
+            return Err("signed VERSION does not match the release pointer");
+        }
+        Ok(())
+    })()
 }
 
 fn lock_directory(
@@ -275,6 +334,20 @@ fn cleanup_abandoned_staging(state: &Path) -> std::io::Result<()> {
     drop(state_lock);
     Ok(())
 }
+/// The status reason for a lookup whose server never said whether it runs the updater.
+const NO_UPDATER: &str = "this server does not run the update check";
+
+impl VerifiedLookup {
+    /// Say whether this server runs the update check (`Ok`) or why not (the reason from
+    /// [`crate::update::availability`]), so `release.update.status` can report it
+    /// plainly (J725 P3-4). Without this call the status reports updates as off.
+    #[must_use]
+    pub fn with_updates(mut self, updates: Result<(), &'static str>) -> Self {
+        self.updates = updates;
+        self
+    }
+}
+
 impl ReleaseLookup for VerifiedLookup {
     fn latest<'a>(&'a self, channel: &'a str) -> Operation<'a, Result<Value, &'static str>> {
         Box::pin(async move {
@@ -282,6 +355,22 @@ impl ReleaseLookup for VerifiedLookup {
                 .await
                 .map_err(|_| "release check exceeded its time limit")?
         })
+    }
+    /// The data folder's `updates/state.json`, read without a lock (#211 S3), plus
+    /// `mode` (`auto` or `off`) and `reason` (why it is off, else null).
+    fn update_status(&self) -> Result<Value, &'static str> {
+        let mut state = serde_json::to_value(crate::update::status(
+            &self.state,
+            infraternal_plugin_api::VERSION,
+        ))
+        .map_err(|_| "updates unavailable")?;
+        let (mode, reason) = match self.updates {
+            Ok(()) => ("auto", Value::Null),
+            Err(reason) => ("off", Value::String(reason.to_owned())),
+        };
+        state["mode"] = Value::String(mode.to_owned());
+        state["reason"] = reason;
+        Ok(state)
     }
 }
 
