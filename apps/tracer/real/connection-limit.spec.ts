@@ -10,34 +10,11 @@
  * own-host shell must still load the canvas with its toolbar and host list. Real server, no test double.
  */
 import { expect, test, type BrowserContext, type Page } from "playwright/test";
-import { WebSocket } from "ws";
-import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { tracerEvidencePath } from "../test/evidence-path";
 import { enrol, windows } from "./layout-devices";
 import { watchLayout } from "./layout-observer";
+import { ACCOUNT_SOCKETS, holdConnection } from "./held-connection";
 import { startRealServer, type RealServer } from "./server";
-
-/** The per-account cap in crates/infraternal-server/src/websocket.rs (`new_connection`). */
-const ACCOUNT_SOCKETS = 16;
-
-/** One welcomed protocol connection of the signed-in account that answers pings until `close` (a tab that stays open). */
-async function holdConnection(server: RealServer, context: BrowserContext): Promise<{ close(): void }> {
-  const cookie = (await context.cookies()).map((c) => `${c.name}=${c.value}`).join("; ");
-  const socket = new WebSocket(server.backend.replace("http:", "ws:") + "/v1/ws", { headers: { Origin: server.origin, Cookie: cookie } });
-  const decoder = new WebSocketFrameDecoder();
-  const send = (frame: Parameters<typeof encodeMuxedFrame>[1]): void => { socket.send(encodeMuxedFrame(0, frame)); };
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(Error("held connection was not welcomed")), 15_000);
-    socket.on("error", () => { clearTimeout(timer); reject(Error("held connection failed")); });
-    socket.on("close", () => { clearTimeout(timer); reject(Error("held connection closed before its welcome")); });
-    socket.on("message", (bytes) => decoder.feed(new Uint8Array(Buffer.from(bytes as Buffer)), (_stream, frame) => {
-      if (frame.type === "Hello") send({ type: "Hello", version: 1, caps: 0n, clientInfo: "connection-limit-spec" });
-      if (frame.type === "Ping") send({ ...frame, type: "Pong" });
-      if (frame.type === "Welcome") { clearTimeout(timer); resolve(); }
-    }));
-  });
-  return { close: () => { socket.close(1000, "spec done"); } };
-}
 
 /** Loads the app in a fresh tab of the signed-in context. */
 async function openTab(context: BrowserContext, server: RealServer, width: number, height: number): Promise<Page> {
