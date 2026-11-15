@@ -81,11 +81,22 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     }
 
     if options.dry_run {
+        // Every plan, firewall or not, starts with the folders the unit will
+        // use, so a system plan shows the D395 default or the folder a re-run
+        // keeps from the installed unit (#516, J692).
+        let folders = format!(
+            "Data folder: {}\n{}",
+            absolute(&args.data)?.display(),
+            match &args.web_root {
+                Some(web_root) => format!("Web folder: {}\n", absolute(web_root)?.display()),
+                None => String::new(),
+            },
+        );
         #[cfg(target_os = "linux")]
         if options.system {
             if args.host_firewall_off {
                 return Ok(format!(
-                    "Would clear the server host policy, remove only marked infraternal host table and loader state when no agent policy remains, and write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable --now {}.service\n",
+                    "{folders}Would clear the server host policy, remove only marked infraternal host table and loader state when no agent policy remains, and write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable --now {}.service\n",
                     path.display(),
                     unit,
                     options.name,
@@ -93,7 +104,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
             }
             let firewall = make_firewall_install(args)?;
             return Ok(format!(
-                "Would replace the hand-installed {FIREWALL_SERVICE} and take over inet infraternal_host.\nWould write {}:\n{}\nWould write {}:\n{}\nWould write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable {FIREWALL_SERVICE}\n  systemctl restart {FIREWALL_SERVICE}\n  {}\n",
+                "{folders}Would replace the hand-installed {FIREWALL_SERVICE} and take over inet infraternal_host.\nWould write {}:\n{}\nWould write {}:\n{}\nWould write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable {FIREWALL_SERVICE}\n  systemctl restart {FIREWALL_SERVICE}\n  {}\n",
                 host_firewall::SERVER_POLICY_PATH,
                 firewall.policy_json,
                 FIREWALL_UNIT_PATH,
@@ -104,12 +115,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
             ));
         }
         return Ok(format!(
-            "Data folder: {}\n{}Would write {}:\n{}\nWould run:\n  {}\n  {}\n",
-            absolute(&args.data)?.display(),
-            match &args.web_root {
-                Some(web_root) => format!("Web folder: {}\n", absolute(web_root)?.display()),
-                None => String::new(),
-            },
+            "{folders}Would write {}:\n{}\nWould run:\n  {}\n  {}\n",
             path.display(),
             unit,
             reload,
@@ -117,8 +123,14 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
         ));
     }
 
-    ensure_server_unit_writable(&path, unit.as_bytes(), options.force)?;
+    let unit_changed = ensure_server_unit_writable(&path, unit.as_bytes(), options.force)?;
     let systemctl = systemctl_program()?;
+    // Create the data folder private before the service first starts, only
+    // once the unit is accepted; an existing folder keeps its mode [#516].
+    // It comes before the host firewall is published: the server policy lives
+    // in `/var/lib/infraternal`, the D395 system data folder, and the policy
+    // writer would otherwise create that folder first with the default 0755.
+    super::install_paths::create_private_dir(&absolute(&args.data)?).map_err(InstallError::Io)?;
 
     #[cfg(target_os = "linux")]
     let firewall = if options.system {
@@ -160,10 +172,11 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
             },
         )?;
     }
-    write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?;
-    // Create the data folder private before the service first starts, only
-    // once the unit is accepted; an existing folder keeps its mode [#516].
-    super::install_paths::create_private_dir(&absolute(&args.data)?).map_err(InstallError::Io)?;
+    // A byte-identical installed unit is left untouched, so re-running init
+    // on an unchanged install rewrites nothing (#516, J692).
+    if unit_changed {
+        write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?;
+    }
 
     if !systemctl_command(&systemctl)
         .args(&scope_args)
@@ -358,13 +371,22 @@ fn firewall_install_confirmation(server_unit: &Path) -> String {
     )
 }
 
-/// Refuse a conflicting server unit before publishing the host policy.
-fn ensure_server_unit_writable(path: &Path, unit: &[u8], force: bool) -> Result<(), InstallError> {
+/// Refuse a conflicting server unit before publishing the host policy, and say whether it must be written.
+///
+/// Returns `false` when the installed unit already holds exactly these
+/// bytes (nothing to write), `true` when the unit is missing or `--force`
+/// replaces a different one. A different unit without `--force` is
+/// [`InstallError::ExistingUnit`].
+fn ensure_server_unit_writable(
+    path: &Path,
+    unit: &[u8],
+    force: bool,
+) -> Result<bool, InstallError> {
     match fs::read(path) {
-        Ok(existing) if existing == unit => Ok(()),
-        Ok(_) if force => Ok(()),
+        Ok(existing) if existing == unit => Ok(false),
+        Ok(_) if force => Ok(true),
         Ok(_) => Err(InstallError::ExistingUnit),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(InstallError::Io(error)),
     }
 }
@@ -715,6 +737,28 @@ mod tests {
         assert!(output.contains("host-firewall-server.json"));
         assert!(output.contains("Would replace the hand-installed infraternal-firewall.service"));
         assert!(output.contains("systemctl restart infraternal-firewall.service"));
+        assert!(
+            output.starts_with("Data folder: /"),
+            "a firewall plan names its data folder first (#516): {output}"
+        );
+    }
+
+    /// An identical installed unit needs no write; a missing or forced one does; a different one is refused.
+    #[test]
+    fn an_identical_server_unit_is_left_unwritten() {
+        let directory = std::env::temp_dir().join(format!("j731-unit-{}", std::process::id()));
+        fs::create_dir_all(&directory).expect("scratch folder");
+        let path = directory.join("infraternal-server.service");
+        assert!(ensure_server_unit_writable(&path, b"a", false).expect("missing unit"));
+        fs::write(&path, b"a").expect("installed unit");
+        assert!(!ensure_server_unit_writable(&path, b"a", false).expect("same unit"));
+        assert!(!ensure_server_unit_writable(&path, b"a", true).expect("same unit, forced"));
+        assert!(ensure_server_unit_writable(&path, b"b", true).expect("forced replacement"));
+        assert!(matches!(
+            ensure_server_unit_writable(&path, b"b", false),
+            Err(InstallError::ExistingUnit)
+        ));
+        fs::remove_dir_all(&directory).expect("remove scratch folder");
     }
 
     /// The dry run shows the folders the unit will use, as absolute paths.
@@ -838,6 +882,7 @@ mod tests {
         assert!(output.contains("marked infraternal host table and loader state"));
         assert!(output.contains("systemctl enable --now infraternal-server.service"));
         assert!(!output.contains("Would replace the hand-installed"));
+        assert!(output.starts_with("Data folder: /"), "{output}");
     }
 
     /// A scratch policy/unit pair plus a recording, scriptable systemctl for publish tests.
