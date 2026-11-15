@@ -252,3 +252,21 @@ fn gotatun_without_firewall_tools_opens_the_host_listener_on_up_and_closes_it_on
     let port = up_and_apply(&mut node, &host, 1);
     down_and_check_closed(&mut node, &host, port);
 }
+
+/// A `GotaTun` node turned off and on again in one process keeps the optional-guard mode:
+/// the second up reopens the listener and a snapshot applies with no firewall tool. A reset to
+/// the full kernel policy would leave the listener closed and fail the snapshot.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_down_then_up_keeps_the_optional_guard_and_reopens_the_listener() {
+    let host = ServerHost::new();
+    let mut node = Node::default().with_engine(EngineKind::GotaTun);
+    let first = up_and_apply(&mut node, &host, 1);
+    down_and_check_closed(&mut node, &host, first);
+    assert!(
+        node.kernel_guard_status().is_some(),
+        "a stopped GotaTun node keeps the optional-guard mode"
+    );
+    let second = up_and_apply(&mut node, &host, 2);
+    down_and_check_closed(&mut node, &host, second);
+}

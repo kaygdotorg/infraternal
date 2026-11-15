@@ -2572,7 +2572,10 @@ impl Node {
             self.remove_unshared_filter()?;
         }
         self.retire_routes()?;
-        self.firewall = Firewall::default();
+        // A fresh firewall keeps this node's engine mode: a `GotaTun` node that comes up again
+        // in this process must stay on the optional guard, not switch to the full kernel policy,
+        // which needs nft or iptables-nft (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
         self.gotatun = None;
@@ -2964,7 +2967,8 @@ impl Node {
         if let Err(error) = self.remove_unshared_filter() {
             first_error.get_or_insert(error);
         }
-        self.firewall = Firewall::default();
+        // Keep the engine's firewall mode for the next `up`, as `down` does (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.identity = None;
         self.owned = false;
