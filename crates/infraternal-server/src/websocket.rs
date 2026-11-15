@@ -2975,29 +2975,48 @@ async fn open_terminal(
     let connect_timeout = state.terminal_connect_timeout;
     #[cfg(not(test))]
     let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
-    // An upgrade to root (D376) closes the host's admission, and the rootless link it replaces may drop
-    // meanwhile, so ask this first: the person is told the host is being upgraded (D393), not "offline".
+    // A remote host is checked in this order: ownership, then the upgrade state, then the live link.
+    // - Ownership first: `host` comes from the browser, so the upgrade state (D393) is told only to
+    //   the host's owner. Anyone else gets the same `unavailable` as for a host that does not exist.
+    // - The upgrade state before the live link: a root upgrade (D376) can drop the rootless link it
+    //   replaces, and the owner should hear "being upgraded", not "offline".
+    // - Admission is the upgrade check itself (one atomic word, no separate pre-check that could
+    //   race), and its guard then holds the open inside the window until the row is persisted.
     #[cfg(feature = "remote")]
-    if host.is_some_and(|host| state.remote_hosts.terminal_opens_closed(host)) {
-        return Err(crate::embedded::AgentError::OpenRefused(
-            infraternal_plugin_api::admission::OpenRefusal::HostUpgrading,
-        ));
-    }
-    let agent = terminal_agent(state, user_id, host)
-        .await
-        .map_err(|()| crate::embedded::AgentError::Unavailable)?;
-    #[cfg(feature = "remote")]
-    let _terminal_admission = host
-        .map(|host| state.remote_hosts.admit_terminal_open(host))
-        .transpose()
-        .map_err(|()| {
-            // The window can close between the check above and this admission.
-            crate::embedded::AgentError::OpenRefused(
-                infraternal_plugin_api::admission::OpenRefusal::HostUpgrading,
-            )
-        })?;
+    let (agent, _terminal_admission) = match host {
+        None => (state.agent.clone(), None),
+        Some(host) => {
+            owns_remote_host(state, user_id, host)
+                .await
+                .map_err(|()| crate::embedded::AgentError::Unavailable)?;
+            let admission = state
+                .remote_hosts
+                .admit_terminal_open(host)
+                .map_err(|refused| {
+                    crate::embedded::AgentError::OpenRefused(match refused {
+                        crate::remote_runtime::AdmissionRefused::Upgrading => {
+                            infraternal_plugin_api::admission::OpenRefusal::HostUpgrading
+                        }
+                        crate::remote_runtime::AdmissionRefused::Unavailable => {
+                            infraternal_plugin_api::admission::OpenRefusal::Unavailable
+                        }
+                    })
+                })?;
+            let agent = state
+                .remote_hosts
+                .actor(host)
+                .await
+                .ok_or(crate::embedded::AgentError::Unavailable)?;
+            (agent, Some(admission))
+        }
+    };
     #[cfg(not(feature = "remote"))]
-    let _terminal_admission = ();
+    let (agent, _terminal_admission) = (
+        terminal_agent(state, user_id, host)
+            .await
+            .map_err(|()| crate::embedded::AgentError::Unavailable)?,
+        (),
+    );
     let person =
         uuid::Uuid::parse_str(user_id).map_err(|_| crate::embedded::AgentError::Rejected)?;
     #[cfg(feature = "ssh")]
@@ -3097,12 +3116,19 @@ async fn terminal_agent(
     let Some(host) = host else {
         return Ok(state.agent.clone());
     };
+    owns_remote_host(state, user, host).await?;
+    state.remote_hosts.actor(host).await.ok_or(())
+}
+
+/// `Ok` only when `user` owns remote host `host` and it is not revoked.
+///
+/// Run this before telling a person anything about a host the browser named: a host ID from the
+/// browser is untrusted, and a non-owner must learn nothing about it, not even that it exists.
+#[cfg(feature = "remote")]
+async fn owns_remote_host(state: &WebSocketState, user: &str, host: uuid::Uuid) -> Result<(), ()> {
     let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
         .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_|())?;
-    if !allowed {
-        return Err(());
-    }
-    state.remote_hosts.actor(host).await.ok_or(())
+    allowed.then_some(()).ok_or(())
 }
 
 /// The session's host for this account: `None` when the account has no such session,

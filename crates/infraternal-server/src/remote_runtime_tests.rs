@@ -1171,17 +1171,42 @@ async fn promotion_blocks_new_terminal_admission_until_its_guard_drops() {
     assert!(hosts.admit_terminal_open(host).is_ok());
 }
 
-/// D393: the server can tell an upgrade-closed host from any other refusal, and the state ends with the guard.
+/// D393: only the promotion guard's bit reads as "being upgraded", and it ends with the guard.
+///
+/// A full open counter and a poisoned admission map are refused too, but as `Unavailable`: a broken
+/// map must not tell every person that every host is being upgraded.
 #[tokio::test]
-async fn upgrade_window_is_visible_and_ends_with_its_guard() {
+async fn only_the_promotion_guard_refuses_as_upgrading() {
     let hosts = RemoteHosts::default();
     let host = Uuid::from_u128(0x524);
-    assert!(!hosts.terminal_opens_closed(host));
     let promotion = hosts.block_terminal_opens(host).await.unwrap();
-    assert!(hosts.terminal_opens_closed(host));
-    assert!(!hosts.terminal_opens_closed(Uuid::from_u128(0x525)));
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Upgrading)
+    );
+    assert!(hosts.admit_terminal_open(Uuid::from_u128(0x525)).is_ok());
     drop(promotion);
-    assert!(!hosts.terminal_opens_closed(host));
+    assert!(hosts.admit_terminal_open(host).is_ok());
+
+    let full = hosts.terminal_admission(host).unwrap();
+    full.state.store(OPEN_COUNT_MASK, AtomicOrdering::Release);
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Unavailable)
+    );
+    full.state.store(0, AtomicOrdering::Release);
+
+    let map = std::sync::Arc::clone(&hosts.8);
+    let poisoned = std::thread::spawn(move || {
+        let _held = map.lock().unwrap();
+        panic!("poison the admission map on purpose");
+    })
+    .join();
+    assert!(poisoned.is_err());
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Unavailable)
+    );
 }
 
 /// A promotion waits for open sessions admitted before it closed the host gate.
