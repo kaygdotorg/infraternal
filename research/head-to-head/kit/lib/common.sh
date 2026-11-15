@@ -225,6 +225,16 @@ h2h_scope_adopt() {
     log "moved PID $pid and its descendants ($(echo $members)) into ${rel##*/} on CPUs $cpus"
 }
 
+# Move node B of the in-app mesh onto side B's CPUs. READY is the JSON line lib/mesh_ix.py prints;
+# its "pids" list is [node A, node B]. B_PID is a process inside side B's namespace, which names
+# the side. A separate function (not inline in cases/mesh.sh) so a test can run it for real.
+h2h_adopt_mesh_node_b() {
+    local ready=$1 b_pid=$2 node_b
+    node_b=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pids"][1])' "$ready") \
+        || die "the mesh ready line has no node B pid: $ready"
+    h2h_scope_adopt "$node_b" "$(h2h_cpu_mask_for_pid "$b_pid")"
+}
+
 # Wait for a clean preflight, then sample process placement and scheduler delay
 # across the measured phase; setup activity is stored separately from load.
 h2h_cpu_audit_start() {

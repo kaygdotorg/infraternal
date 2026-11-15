@@ -149,7 +149,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     }
   }
   function renderEntry(): void {
-    body.innerHTML = `<label class="auth-label" for="recovery-username">username</label><input class="auth-input" id="recovery-username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" />
+    body.innerHTML = `<label class="auth-label" for="recovery-username">username</label><input class="auth-input" id="recovery-username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="32" />
       <p class="auth-label recovery-word-label">recovery words</p><ol class="auth-word-inputs"></ol><p class="auth-hint" id="recovery-word-error" role="status"></p>
       `;
     const identity = body.querySelector<HTMLInputElement>("#recovery-username")!;
@@ -158,7 +158,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
     const list = body.querySelector<HTMLOListElement>("ol")!;
     for (let i = 0; i < 24; i++) {
       const item = document.createElement("li");
-      item.innerHTML = `<span aria-hidden="true">${i + 1}</span><input aria-label="Word ${i + 1}" maxlength="8" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="recovery-word-error" />`;
+      item.innerHTML = `<span aria-hidden="true">${i + 1}</span><input aria-label="Word ${i + 1}" maxlength="8" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="recovery-word-error" />`;
       const input = item.querySelector<HTMLInputElement>("input")!;
       input.value = words[i]!;
       input.addEventListener("input", () => { words[i] = input.value.trim().toLowerCase(); validate(); });

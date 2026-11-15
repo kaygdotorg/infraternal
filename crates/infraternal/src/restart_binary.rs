@@ -181,11 +181,12 @@ impl std::ops::Deref for Opened {
 }
 
 /// Authenticate metadata and the sealed execution descriptor, never reopen the candidate.
+/// Uses the compiled-in D224 release keys.
 fn verify_release_fd(file: &File, path: &Path) -> io::Result<()> {
     verify_metadata(
         file,
         path,
-        infraternal_server::release_manifest::verify_release_manifest,
+        infraternal_server::release_verify::verify_release_identity,
     )
 }
 
@@ -226,38 +227,32 @@ fn public_bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// Checks the signed release metadata beside `path` against the sealed image `file`.
+///
+/// The metadata is exactly what the release pipeline publishes (#211 S1): the signer
+/// Worker's `SHA256SUMS` and `SHA256SUMS.sig`, and the `VERSION` file they list. The image
+/// must match this platform's artifact entry (see [`artifact_name`]). `VERSION` is copied
+/// into its own sealed image first, so the bytes checked are the bytes read. `verify`
+/// receives (version, image, artifact name, sums, signature); production passes the
+/// compiled-in trust and tests pass a throwaway key.
 fn verify_metadata(
     file: &File,
     path: &Path,
     verify: impl Fn(
+        &File,
         &File,
         &str,
         &[u8],
         &[u8],
     ) -> Result<String, infraternal_server::release_verify::ReleaseError>,
 ) -> io::Result<()> {
-    use std::os::unix::fs::FileExt;
     let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let manifest = public_bytes(&parent.join("MANIFEST"), 65536)?;
-    let signature = public_bytes(&parent.join("MANIFEST.sig"), 1024)?;
+    let sums = public_bytes(&parent.join("SHA256SUMS"), 65536)?;
+    let signature = public_bytes(&parent.join("SHA256SUMS.sig"), 1024)?;
     let version = public_file(&parent.join("VERSION"), 128)?;
     let version = crate::restart_image::Image::copy_limit(&version, parent, 128)?;
-    let identity = verify(&version.file, "VERSION", &manifest, &signature)
+    verify(&version.file, file, artifact_name(), &sums, &signature)
         .map_err(|_| io::ErrorKind::PermissionDenied)?;
-    let mut declared = vec![
-        0;
-        usize::try_from(version.file.metadata()?.len())
-            .map_err(|_| io::ErrorKind::InvalidData)?
-    ];
-    version.file.read_exact_at(&mut declared, 0)?;
-    if declared != format!("{identity}\n").as_bytes() {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
-    let image_identity = verify(file, artifact_name(), &manifest, &signature)
-        .map_err(|_| io::ErrorKind::PermissionDenied)?;
-    if image_identity != identity {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
     Ok(())
 }
 
@@ -311,3 +306,8 @@ pub(crate) fn test_opens() -> usize {
 #[cfg(test)]
 #[path = "restart_signature_audit_tests.rs"]
 mod audit_tests;
+
+/// Proves admission accepts exactly what the release signer Worker signs (#211 S1).
+#[cfg(test)]
+#[path = "restart_release_format_tests.rs"]
+mod release_format_tests;

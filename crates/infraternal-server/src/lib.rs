@@ -54,7 +54,6 @@ pub mod login_access;
 mod mesh_ssh;
 #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
 mod node_host;
-pub mod release_manifest;
 pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]

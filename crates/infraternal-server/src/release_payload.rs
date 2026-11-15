@@ -329,6 +329,10 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 impl ReleasePayload {
+    /// Checks a cached or staged release folder: private files, the signed `SHA256SUMS`,
+    /// the signed `VERSION` equal to this server's version, then the artifact `name`.
+    /// Returns `false` only for an optional artifact the signed list does not name.
+    /// `metadata_only` stops after the metadata, before the artifact is downloaded.
     // Conventional octal group/other permission masks make this audit explicit.
     #[allow(clippy::verbose_bit_mask)]
     async fn verify_cached(
@@ -448,6 +452,9 @@ impl ReleasePayload {
                     "the binary does not match the signed checksum."
                 }
                 crate::release_verify::ReleaseError::Read => "the binary could not be read.",
+                crate::release_verify::ReleaseError::Version => {
+                    "the signed release version is malformed."
+                }
             })
         })
         .await

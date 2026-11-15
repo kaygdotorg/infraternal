@@ -167,9 +167,7 @@ start_infraternal() {
     WATCH=$(python3 -c 'import json,sys; print(",".join(map(str, json.loads(sys.argv[1])["pids"])))' "$ready")
     # mesh_ix.py runs in side A's scope and starts node B from there; node B only
     # enters B's network namespace. Move it to side B's CPUs before any window (D348, J638).
-    local node_b
-    node_b=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["pids"][1])' "$ready")
-    h2h_scope_adopt "$node_b" "$(h2h_cpu_mask_for_pid "$B_PID")"
+    h2h_adopt_mesh_node_b "$ready" "$B_PID"
     TUN_A=infraternal0
     TUN_B=infraternal0
     note setup "$ready"

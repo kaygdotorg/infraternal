@@ -13,6 +13,8 @@
 #   scripts/real-device-qa check [--themes light,dark] [--phases "shell pill"] [--out DIR]
 #   scripts/real-device-qa mac-setup                # once: second QA server (stage2), host account 2, first-run owner in Mac Safari
 #   scripts/real-device-qa mac [--themes latte,mocha] [--out DIR]   # desktop Safari 1440 + phone-narrow DOM checks, signed in
+#   scripts/real-device-qa mac-shot-setup           # once per Mac VM: let /usr/sbin/screencapture record the screen (#500, J668)
+#   scripts/real-device-qa mac-shot [--url URL] [--out FILE.png]    # opens Safari on URL and takes a whole-screen picture
 #   scripts/real-device-qa teardown                 # remove everything created on dev-02, stop the QA units
 #
 # Why a copy of the server: a browser cannot be signed in to an existing account on a second device (the account key
@@ -179,6 +181,50 @@ cmd_mac() {
   echo "evidence: $out (log.txt = every MAC_RESULT and MAC_METRIC line; screenshots). Attach it to the issue; never commit it."
 }
 
+# Why a plain `ssh lume@... screencapture` fails with "could not create image from display" (J668, #500): the ssh login
+# runs in the Background launchd session, which has no window server, and even in the user's Aqua session the process
+# that asked for the picture needs a Screen Recording grant. So the picture is taken by a one-shot launchd agent in
+# the console user's session (`gui/<uid>`), run by /usr/sbin/screencapture itself, and the grant is a path entry for
+# that binary in the Mac VM's system privacy database. Both are VM-local; std's own keychain is never touched.
+# Both Mac-shot commands touch only our own Mac VM. The TCC grant edits that machine's system privacy database, so the
+# target must prove it is infraternal-macos-01-std before anything runs: a QA_MAC pointed at std itself (the Mac Studio,
+# whose privacy settings and keychain are the owner's) is refused (J680 P1).
+MAC_VM_HOST="infraternal-macos-01-std"
+mac_guard() {
+  local h; h="$(mac 'scutil --get LocalHostName 2>/dev/null || hostname -s')" || die "cannot reach $MAC"
+  [ "$h" = "$MAC_VM_HOST" ] || die "refusing: $MAC is '$h', not our Mac VM $MAC_VM_HOST"
+}
+
+cmd_mac_shot_setup() {
+  mac_guard
+  mac 'D="/Library/Application Support/com.apple.TCC/TCC.db"
+    n=$(sudo -n sqlite3 "$D" "select count(*) from access where service=\"kTCCServiceScreenCapture\" and client=\"/usr/sbin/screencapture\" and auth_value=2")
+    if [ "$n" = 0 ]; then
+      sudo -n sqlite3 "$D" "insert or replace into access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) values (\"kTCCServiceScreenCapture\", \"/usr/sbin/screencapture\", 1, 2, 4, 1, 0, strftime(\"%s\",\"now\"))"
+      sudo -n killall tccd 2>/dev/null || true
+    fi
+    echo "screencapture grant: present"'
+}
+
+cmd_mac_shot() {
+  local url="" out=""
+  while [ $# -gt 0 ]; do case "$1" in --url) url="$2"; shift 2;; --out) out="$2"; shift 2;; *) die "unknown option $1";; esac; done
+  out="${out:-$HOME/.cache/codex-scratch/real-device-qa/mac-shot-$(date -u +%Y%m%dT%H%M%SZ).png}"; mkdir -p "$(dirname "$out")"
+  mac_guard
+  if [ -n "$url" ]; then
+    case "$url" in https://*|http://*) ;; *) die "--url must start with http:// or https://";; esac
+    # The URL travels as a %q-quoted word, so quotes or ; in it can never become shell on the VM (J680 P3).
+    mac "open -a Safari $(printf '%q' "$url") && sleep 8"
+  fi
+  mac 'rm -f /tmp/qa-shot.png; L=org.kayg.qa.shot; P=/tmp/$L.plist; U=$(id -u)
+    printf "%s" "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Label</key><string>$L</string><key>ProgramArguments</key><array><string>/usr/sbin/screencapture</string><string>-x</string><string>/tmp/qa-shot.png</string></array><key>RunAtLoad</key><true/></dict></plist>" > $P
+    launchctl bootout gui/$U/$L 2>/dev/null; launchctl bootstrap gui/$U $P
+    for i in $(seq 1 20); do [ -s /tmp/qa-shot.png ] && break; sleep 1; done
+    launchctl bootout gui/$U/$L 2>/dev/null; rm -f $P; test -s /tmp/qa-shot.png' || die "no screenshot: run mac-shot-setup first"
+  mac 'cat /tmp/qa-shot.png && rm -f /tmp/qa-shot.png' > "$out"
+  echo "screenshot: $out"
+}
+
 cmd_teardown() {
   ssh "$DEV02" 'sudo -n systemctl stop qa-sshd 2>/dev/null; sudo -n userdel -r qa-device 2>/dev/null; sudo -n userdel -r qa-device2 2>/dev/null; sudo -n rm -f /usr/local/share/ca-certificates/qa-ca.crt; sudo -n update-ca-certificates --fresh >/dev/null 2>&1; echo dev-02 cleaned' || true
   ssh "$STAGING" 'sudo systemctl stop infraternal-qa-server infraternal-qa-proxy; echo QA units stopped (data kept in /var/lib/infraternal-qa)' || true
@@ -193,6 +239,8 @@ case "${1:-}" in
   check) shift; cmd_check "$@";;
   mac-setup) cmd_mac_setup;;
   mac) shift; cmd_mac "$@";;
+  mac-shot-setup) cmd_mac_shot_setup;;
+  mac-shot) shift; cmd_mac_shot "$@";;
   teardown) cmd_teardown;;
   *) sed -n 2,22p "$0"; exit 2;;
 esac

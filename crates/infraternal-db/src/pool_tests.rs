@@ -955,9 +955,22 @@ fn checkpoint_failures_are_rate_limited() {
 /// `close` runs what was already queued, then stops every thread, empties
 /// the WAL into the main file, and turns later calls on every clone into
 /// [`Error::Closed`] instead of hanging (J632 finding 5, #473).
+///
+/// A connection from outside the pool stays open across `close` (J681
+/// finding 3). Without it, the last pool connection to close would checkpoint
+/// and delete the WAL on its own, and the test would pass even with the
+/// writer's final TRUNCATE checkpoint removed. With it, only that checkpoint
+/// can empty the WAL, which is what a second process (the CLI, or another
+/// server during a handover) sees in production.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_finishes_queued_work_checkpoints_and_stops() {
     let (dir, db) = setup("close", Options::default()).await;
+    let outside = rusqlite::Connection::open(dir.db()).unwrap();
+    // Reading once maps the WAL index, so this connection really shares the
+    // log; it holds no transaction afterwards, so it never blocks TRUNCATE.
+    let _: i64 = outside
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
     for v in 0..50_i64 {
         db.write(move |tx| {
             tx.execute("INSERT INTO t (v) VALUES (?1)", [v])?;
@@ -1007,10 +1020,9 @@ async fn close_finishes_queued_work_checkpoints_and_stops() {
     assert_eq!(
         file_len(&wal_of(&dir.db())),
         0,
-        "close left WAL frames behind"
+        "close left WAL frames behind while another connection was open"
     );
-    let reopened = rusqlite::Connection::open(dir.db()).unwrap();
-    let count: i64 = reopened
+    let count: i64 = outside
         .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 51);
