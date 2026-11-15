@@ -51,6 +51,7 @@ import { createProductRows } from "./settings-rows/product-source";
 
 import type { CanvasStore } from "./model/store";
 import { watchPendingNotice } from "./pending-notice";
+import { mountStartupNotice, watchStartup } from "./startup-notice";
 
 /** How long the host list waits for the first terminal to settle before it starts on its own. */
 const HOSTS_FALLBACK_MS = 2000;
@@ -92,7 +93,11 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // name, so only root (execution uid 0) can be named; any other account shows the host alone until the server says it.
   const embedded: { name: string; user?: string; os?: HostPlatform } = { name: options.host.name };
   let canvasReady: (() => void) | undefined, osAsked = false;
+  // Until the layout arrives the page shows only the core screen's placeholder pane; if the first connection cannot be
+  // made, this says why in that pane instead of leaving it blank (#523). It ends on the first welcome.
+  const startup = watchStartup(mountStartupNotice(core.panes.querySelector<HTMLElement>(".pane-card") ?? core.panes, () => connection.connectNow()));
   const connection: MuxConnection = new MuxConnection({
+    onUnwelcomedClose: (reason) => startup.closed(reason),
     ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
     // Declared in the Hello of each socket, only while app windows are wanted (D208; off by default).
     desktop: appWindowsWanted,
@@ -215,7 +220,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId === id) canvas.cx.win.close(rec);
     canvas.flush();
   })).then((adapter) => { readyRemoval = adapter; });
+  const offStartup = connection.onWelcome(() => startup.welcomed());
   const saved = await store.load();
+  offStartup();
+  startup.dispose();
   if (options.isCurrent?.() === false) {
     disposed = true; offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
     throw Error("The signed-in screen changed while layout was loading.");

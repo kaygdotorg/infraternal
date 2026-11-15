@@ -114,6 +114,7 @@ export interface StreamHandler {
   onStatus(message: string): void;
 }
 
+/** How a page sets up its {@link MuxConnection}: the session it belongs to and the callbacks for what the page shows. */
 export interface ConnectionConfig {
   /** Original authenticated lifetime, supplied before the first WebSocket handshake. */
   sessionIncarnation?: string;
@@ -125,6 +126,12 @@ export interface ConnectionConfig {
   onRecoveryCompleted?: (message: string) => void;
   /** Connection state: true once a stream attached, false when the socket closes. */
   onConnectionChange?: (connected: boolean) => void;
+  /**
+   * A socket closed before the server welcomed it (refused, unreachable or dropped mid-handshake); `reason` is the
+   * close reason, if any. Untrusted text: compare it, never show it. The signed-in page uses this to say why its first
+   * connection fails instead of sitting blank (#523).
+   */
+  onUnwelcomedClose?: (reason: string | undefined) => void;
   /**
    * Asked at every socket open: true advertises the desktop video capability (bit 4, contracts/wire.md §9) in the
    * client's Hello, so the server may open app-window and screen streams on this socket. It is read at connect time,
@@ -503,6 +510,12 @@ export class MuxConnection {
     socket.close(4000, "tracer resume probe");
   }
 
+  /**
+   * Retries a connection that is waiting between attempts now, rather than at the end of its backoff (a person pressed
+   * "Try again"). A handshake already in flight is left alone, and a refusal's backoff still counts afterwards.
+   */
+  connectNow(): void { this.retryNow(true); }
+
   /** Closes the socket so the connection restarts (every stream re-attaches on the next welcome). */
   /** Closes the socket for a close the server named; `code` and `reason` are that close, for the console line. */
   forceClose(code?: number, reason?: string): void {
@@ -636,6 +649,7 @@ export class MuxConnection {
    * calls it: once the socket is retired, its later close event is ignored.
    */
   private noteClose(code: number | undefined, reason: string | undefined, by?: string): void {
+    if (!this.welcomed) this.config.onUnwelcomedClose?.(reason);
     const line = this.closeNotes.note(Date.now(), code, reason, this.retryAttempt, this.welcomed, by);
     if (line) console.warn(line);
     const due = this.closeNotes.summaryDue();

@@ -38,6 +38,7 @@ const KNOWN: Record<string, string> = {
   "the terminal stream sent an invalid protocol frame": "This window sent something the server did not understand, so the connection was closed.",
   "the server refused the terminal attachment": "The server would not open this terminal.",
   "the server refused to resume the connection": "The previous connection could not be restored. Your terminals will reconnect automatically.",
+  "this account has too many open connections": "This account is open in too many browser tabs. Close the ones you don't need to connect.",
   "the server stopped receiving connection replies": "The server stopped hearing from this browser.",
   "the server could not write to the connection": "The server could not send to this browser.",
   "the server could not continue the terminal stream": "The server could not continue this terminal.",
