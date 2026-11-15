@@ -2647,6 +2647,11 @@ mod key_repaint_tests;
 #[path = "daemon_replay_fence_tests.rs"]
 mod replay_fence_tests;
 
+/// A relay and the real writer together: output a key repaint passes keeps its credit and order.
+#[cfg(test)]
+#[path = "daemon_writer_credit_tests.rs"]
+mod writer_credit_tests;
+
 /// A server Close leaves no per-stream state in the shared writer (#477).
 #[cfg(test)]
 #[path = "daemon_close_forget_tests.rs"]
