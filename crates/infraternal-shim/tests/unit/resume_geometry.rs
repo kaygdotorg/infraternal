@@ -95,6 +95,7 @@ impl Session {
         )
         .unwrap();
     }
+    /// Sends the viewer's `Resize` to `cols` x `rows` from `peer`.
     fn resize(&mut self, peer: &mut Peer, cols: u16, rows: u16) {
         self.handle(
             peer,
@@ -204,6 +205,8 @@ fn reopen_at(cols: u16, start: &[u8]) -> (Session, Terminal, Option<Repaint>) {
     (session, viewer, repaint)
 }
 
+/// J745's case: a tab reopened wider than the 42 columns its output was
+/// written at shows the shim's reflowed screen, flagged approximate.
 #[test]
 fn reopening_wider_shows_the_shim_screen_not_the_old_width_bytes() {
     let (session, viewer, repaint) = reopen_at(45, b"");
@@ -213,6 +216,8 @@ fn reopening_wider_shows_the_shim_screen_not_the_old_width_bytes() {
     assert_eq!(repaint, Some(Repaint::Approximate));
 }
 
+/// A tab reopened narrower than the session, whose size applies, shows
+/// the shim's reflowed screen.
 #[test]
 fn reopening_narrower_shows_the_shim_screen() {
     let (session, viewer, repaint) = reopen_at(38, b"");
@@ -220,19 +225,19 @@ fn reopening_narrower_shows_the_shim_screen() {
     assert_eq!(repaint, Some(Repaint::Approximate));
 }
 
+/// After RIS the engine can export itself exactly, so the reopened viewer
+/// gets the full state, including the reflowed row's soft-wrap flag.
 #[test]
 fn reopening_wider_after_a_reset_restores_the_exact_state() {
-    // After RIS the engine can export itself exactly, so the reopened viewer
-    // gets the full state, including the reflowed row's soft-wrap flag.
     let (session, viewer, repaint) = reopen_at(45, b"\x1bc");
     assert_eq!(repaint, Some(Repaint::Exact));
     assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
+/// The common reconnect: nothing changed size, so the cheaper raw replay
+/// stays exact and no repaint is added to the resume path.
 #[test]
 fn reopening_at_the_same_size_keeps_the_raw_replay() {
-    // The common reconnect: nothing changed size, so the cheaper raw replay
-    // stays exact and no repaint is added to the resume path.
     let mut session = Session::new(42, 24);
     session.output(&typed_at_42());
     let mut tab = peer();
@@ -246,10 +251,10 @@ fn reopening_at_the_same_size_keeps_the_raw_replay() {
     assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
+/// No reconnect: the viewer received every byte at 42 columns, then both
+/// sides reflow the same engine state, so the screens still match.
 #[test]
 fn a_live_resize_reflows_without_a_repaint() {
-    // No reconnect: the viewer received every byte at 42 columns, then both
-    // sides reflow the same engine state, so the screens still match.
     let mut session = Session::new(42, 24);
     let mut tab = peer();
     let mut viewer = Terminal::new(42, 24).unwrap();
@@ -267,10 +272,10 @@ fn a_live_resize_reflows_without_a_repaint() {
     assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
+/// The session was resized while a tab was open (42 then 45 columns), and
+/// a new tab opens at a third size. Its Resize repaints the reflowed engine.
 #[test]
 fn reopening_at_a_new_size_after_an_earlier_resize_shows_the_shim_screen() {
-    // The session was resized while a tab was open (42 then 45 columns), and
-    // a new tab opens at a third size. Its Resize repaints the reflowed engine.
     let mut session = Session::new(42, 24);
     let mut live = peer();
     let mut live_view = Terminal::new(42, 24).unwrap();
@@ -290,12 +295,12 @@ fn reopening_at_a_new_size_after_an_earlier_resize_shows_the_shim_screen() {
     assert_same_visible_screen(&viewer, &session.terminal);
 }
 
+/// J745's case: the old tab typed last, so its writer still owns the
+/// geometry and the new tab's Resize is only staged until it types. The
+/// session stays at 42 columns while the new tab is 45 wide, so the raw
+/// replay must still be replaced, by the engine painted at its own size.
 #[test]
 fn reopening_wider_while_another_writer_owns_the_size_still_repaints() {
-    // J745's case: the old tab typed last, so its writer still owns the
-    // geometry and the new tab's Resize is only staged until it types. The
-    // session stays at 42 columns while the new tab is 45 wide, so the raw
-    // replay must still be replaced, by the engine painted at its own size.
     let mut session = Session::new(42, 24);
     session.output(&typed_at_42());
     session.cursors.active_writer = Some(0);
@@ -324,12 +329,12 @@ fn reopening_wider_while_another_writer_owns_the_size_still_repaints() {
     assert_same_visible_screen(&repainted, &session.terminal);
 }
 
+/// A session is spawned at the 80x24 placeholder and prints its first
+/// prompt before its opener reports a size. Nobody saw that width, so the
+/// opener keeps the cheap raw replay (and its shell redraws on SIGWINCH);
+/// a repaint here would be approximate on every new terminal.
 #[test]
 fn opening_a_new_session_keeps_the_raw_replay() {
-    // A session is spawned at the 80x24 placeholder and prints its first
-    // prompt before its opener reports a size. Nobody saw that width, so the
-    // opener keeps the cheap raw replay (and its shell redraws on SIGWINCH);
-    // a repaint here would be approximate on every new terminal.
     let mut session = Session::spawned(80, 24);
     session.output(PROMPT);
     let mut tab = peer();
@@ -343,13 +348,13 @@ fn opening_a_new_session_keeps_the_raw_replay() {
     );
 }
 
+/// The old tab still owns the session's 45 columns, so the new 42-column
+/// tab's Resize is only staged. The engine's repaint is laid out for 45
+/// columns with absolute positions, which pile up in the last column of
+/// a narrower viewer. D74 leaves this to client-side scaling, which does
+/// not exist yet, so the replay stays as on dev (#521).
 #[test]
 fn reopening_narrower_while_another_writer_owns_the_size_keeps_the_raw_replay() {
-    // The old tab still owns the session's 45 columns, so the new 42-column
-    // tab's Resize is only staged. The engine's repaint is laid out for 45
-    // columns with absolute positions, which pile up in the last column of
-    // a narrower viewer. D74 leaves this to client-side scaling, which does
-    // not exist yet, so the replay stays as on dev (#521).
     let mut session = Session::new(45, 24);
     session.output(&typed_at_42());
     session.cursors.active_writer = Some(0);

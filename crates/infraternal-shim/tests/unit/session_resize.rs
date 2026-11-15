@@ -45,6 +45,9 @@ fn native_resize_refusal_preserves_peer_and_pty() {
     }
 }
 
+/// Child-process probe for `native_resize_refusal_preserves_peer_and_pty`:
+/// runs one recovery case (chosen by `VT_SESSION_RECOVERY_CASE`) with an
+/// engine that refuses its allocations, then checks the peer and PTY go on.
 #[test]
 #[ignore = "isolated session probe invoked by its parent with a controlled shell profile"]
 // Keep the ordered refusal, notice and PTY continuation on the same peer.

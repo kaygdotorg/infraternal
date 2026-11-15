@@ -1,6 +1,8 @@
 //! Restart-safe input cursor and bounded acknowledgment regression checks [41].
 use super::*;
 
+/// Terminal query replies cannot use up the queue space held for typing that
+/// was deferred, so the typing still lands once it is retried.
 #[test]
 fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
     const REPLY: &[u8] = b"\x1b[1;1R";
@@ -127,6 +129,8 @@ fn trim_duplicates_gaps_overflow_and_capacity_are_transactional() {
     assert_eq!(cursors.written, 0);
 }
 
+/// A peer that negotiated queue deferral still has its input range checked
+/// before it is told to wait: a bad range is refused, not parked.
 #[test]
 fn negotiated_queue_deferral_validates_ranges_before_waiting() {
     let mut pty = Pty::spawn(Uid::effective().as_raw(), 80, 24).unwrap();
@@ -215,6 +219,8 @@ fn negotiated_queue_deferral_validates_ranges_before_waiting() {
     let _ = pty.child.wait();
 }
 
+/// Once a deferred frame completes, input that arrived behind it gets its
+/// own place in the queue rather than inheriting the finished one.
 #[test]
 fn a_completed_deferred_frame_gives_its_trailing_input_a_fresh_ticket() {
     struct Child(Pty);
@@ -370,6 +376,8 @@ fn new_frames_roundtrip_and_refuse_noncanonical_payloads() {
     }
 }
 
+/// A state probe and input arriving together report the same written-input
+/// acknowledgement, whichever of the two is handled first.
 #[test]
 fn coalesced_probe_and_input_preserve_the_written_ack_in_both_orders() {
     struct Child(Pty);
@@ -452,6 +460,8 @@ fn coalesced_probe_and_input_preserve_the_written_ack_in_both_orders() {
     }
 }
 
+/// A coalesced acknowledgement never replaces output that is only partly
+/// written, and the writer's input cursors survive losing the peer.
 #[test]
 fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss() {
     let (stream, _remote) = UnixStream::pair().unwrap();

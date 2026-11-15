@@ -155,6 +155,10 @@ enum InputReply {
     Ack,
     State,
 }
+/// One connection to this shim (a viewer through the agent, an owner or a
+/// cleanup link): its socket, decoder and queued output, the writer it types
+/// as, how far its output cursor has got, and the one request (raw read or
+/// Snapshot) waiting to be served.
 // Attachment, shared selection, exit delivery and cleanup are independent states.
 // Keep their valid combinations compact rather than imposing exclusive phases.
 #[allow(clippy::struct_excessive_bools)]
@@ -659,6 +663,9 @@ pub fn run_with_prestarted_login(
     run_configured(config, retention, group, Some(pty))
 }
 
+/// The shim's main loop once its PTY exists: accepts peers, moves PTY output
+/// into the engine, the ring and each peer's cursor, feeds peer frames to
+/// `handle`, and serves each peer's pending request when its queue drains.
 fn run_configured(
     mut config: Config,
     retention: Duration,
@@ -1369,6 +1376,11 @@ fn consume_peer(
     Ok((acknowledged_exit, used))
 }
 
+/// Applies one frame from peer `p` to the session: input, resizes, replay
+/// and Snapshot requests, writer selection, signals and exit. Returns true
+/// once the peer has acknowledged the exit and may be dropped. A raw replay
+/// is only served at the size it was written for; a viewer that reports
+/// another size right after attaching gets a Snapshot instead (#521).
 fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
@@ -1628,6 +1640,7 @@ fn invalid_request() -> io::Error {
 #[cfg(test)]
 #[path = "../tests/unit/session_resize.rs"]
 mod resize_checks;
+/// A reopened viewer sees the shim's screen, not bytes laid out for another width (#521).
 #[cfg(test)]
 #[path = "../tests/unit/resume_geometry.rs"]
 mod resume_geometry_checks;
