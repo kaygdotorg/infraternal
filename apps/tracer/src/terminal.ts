@@ -85,7 +85,7 @@ interface GhosttyActivityControls {
 /** How a terminal reports to the window that shows it: attach, output, disconnects, exit, refusals and session ids. All optional. */
 export interface TerminalHooks {
   /** Return true when a product surface presents the refusal and its session-list action. */
-  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction) => boolean;
+  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction, calm: boolean) => boolean;
   /** Only a public session id; writer/resume capabilities remain in memory. */
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
@@ -1252,7 +1252,7 @@ export class TerminalClient {
       this.openCallSent = false;
       if (!this.closed && this.conn.isOpen) {
         const refusal = terminalRefusal(error, this.config.hostName);
-        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action)) this.setStatus(refusal.message);
+        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action, refusal.calm === true)) this.setStatus(refusal.message);
       }
     });
   }

@@ -91,8 +91,10 @@ test("a host being upgraded to root says it will be back, with no address (D393)
   const upgrading = terminalRefusal(await refusal({ error: "terminal unavailable", reason: "host_upgrading" }), "build-01");
   expect(upgrading).toEqual({
     message: "build-01 is being upgraded and will be back shortly.",
-    sessionList: false, action: "retry",
+    sessionList: false, action: "retry", calm: true,
   });
+  // Only this self-clearing state is calm; an offline host is still a failure with the red cross.
+  expect((await import("../../terminal-refusal")).terminalRefusal(await refusal({ reason: "unavailable" }), "x").calm).toBeUndefined();
   expect(upgrading.message).not.toContain("offline");
   expect(terminalRefusal(await refusal({ reason: "host_upgrading" })).message).toStartWith("This host is being upgraded");
 });

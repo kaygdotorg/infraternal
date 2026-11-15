@@ -32,7 +32,7 @@ import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { beginInlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
-import { ICON_ALERT, ICON_X, icon } from "../../../../../packages/ui/src/icons";
+import { ICON_ALERT, ICON_INFO, ICON_X, icon } from "../../../../../packages/ui/src/icons";
 import { createSpinner } from "../../../../../packages/ui/src/spinner";
 import { Spring } from "../../../../../packages/ui/src/spring";
 import type { Ctx, WinRec } from "../context";
@@ -51,7 +51,7 @@ export interface SessionUiPart {
   closeManager(): void;
   arrived(rec: WinRec): void;
   /** The host refused this window's shell: the strip says why and offers the one action that helps. False when the window already has a session (the caller shows a toast). */
-  refused(rec: WinRec, message: string, action?: RefusalAction): boolean;
+  refused(rec: WinRec, message: string, action?: RefusalAction, calm?: boolean): boolean;
   /** The window has been connecting too long (`message`), or connects again (undefined): its strip says so, with a retry. */
   unreachable(rec: WinRec, message: string | undefined): void;
   /** Repaints an open manager (the inventory changed). */
@@ -93,11 +93,13 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     result: "ok" | "fail" | "ended" | "refused" | "unreachable";
     label: string;
     text: string;
+    /** A state that clears by itself: the leading mark is the shared info icon, never the red cross. */
+    calm?: boolean;
     action?: { label: string; icon: string; run: () => void };
     dismiss: { label: string; run: () => void };
   }
   /** Why the host would not start a shell in a window, in plain words, and the one action that helps, for the strip. */
-  const refusals = new WeakMap<WinRec, { message: string; action: RefusalAction }>();
+  const refusals = new WeakMap<WinRec, { message: string; action: RefusalAction; calm: boolean }>();
   /** Windows that have been connecting too long, with the sentence saying so. Cleared as soon as the window connects again. */
   const unreachables = new WeakMap<WinRec, string>();
   /** Windows that asked for a new shell and have not heard back: they claim a refusal even when they still show a session. */
@@ -120,8 +122,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     };
   };
   const closeStrip = (rec: WinRec): StripView["dismiss"] => ({ label: "Close window", run: () => cx.win.close(rec) });
-  const refusedStrip = (rec: WinRec, message: string, action: RefusalAction): StripView => ({
-    signature: `refused:${action}:${message}`, result: "refused", label: message, text: message,
+  const refusedStrip = (rec: WinRec, message: string, action: RefusalAction, calm: boolean): StripView => ({
+    signature: `refused:${action}:${calm ? "calm:" : ""}${message}`, result: "refused", label: message, text: message, ...(calm ? { calm } : {}),
     // One action at most: asking again, or a host that can do what this one cannot. "none" leaves only closing the window.
     ...(action === "retry" ? { action: { label: "Try again", icon: SESSION_ICON.again, run: () => newShell(rec) } }
       : action === "add-host" && cx.adapters.addHost ? { action: { label: "Add host", icon: ICON.plus, run: () => cx.adapters.addHost?.() } }
@@ -160,7 +162,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     paintLink(rec, exited, refusal?.message);
     let strip: HTMLElement | null = body.querySelector<HTMLElement>(".cl-sx-strip");
     const view: StripView | undefined = exited && s ? stripOf(rec, s)
-      : refusal && !s ? refusedStrip(rec, refusal.message, refusal.action)
+      : refusal && !s ? refusedStrip(rec, refusal.message, refusal.action, refusal.calm)
       : unreachable ? unreachableStrip(rec, unreachable) : undefined;
     if (view) {
       if (strip?.dataset.leaving !== undefined) { strip.remove(); strip = null; }
@@ -175,8 +177,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         strip.dataset.result = view.result;
         strip.setAttribute("aria-label", view.label);
         const mark = el("span", "ui-mark");
+        // A self-clearing state is information, not a failure: the shared info icon in the secondary colour (D393, owner 2026-11-15).
+        if (view.calm) { mark.classList.add("cl-sx-info"); mark.innerHTML = icon(ICON_INFO); }
         // Waiting is a neutral turning arc; only a real refusal or failure is a red cross.
-        mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : view.result === "unreachable" ? "busy" : "fail";
+        else mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : view.result === "unreachable" ? "busy" : "fail";
         const text = el("span", "cl-sx-strip-text", view.text);
         const nodes: HTMLElement[] = [mark, text];
         if (view.action) {
@@ -278,7 +282,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
    * back with the reason; a window that cannot start one says so instead of doing nothing.
    */
   const newShell = (rec: WinRec): void => {
-    if (!rec.binding?.openNew) { refusals.set(rec, { message: "This window cannot start a shell. Close it and open a new one.", action: "none" }); paint(rec); return; }
+    if (!rec.binding?.openNew) { refusals.set(rec, { message: "This window cannot start a shell. Close it and open a new one.", action: "none", calm: false }); paint(rec); return; }
     const s = recordOf(rec);
     refusals.delete(rec);
     asked.add(rec);
@@ -292,10 +296,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
    * A window with no session has nothing else to show, so it claims its own refusal (a window's first open is a request too);
    * one that still shows a session claims it only if it asked for the new shell itself.
    */
-  const refused = (rec: WinRec, message: string, action: RefusalAction = "retry"): boolean => {
+  const refused = (rec: WinRec, message: string, action: RefusalAction = "retry", calm = false): boolean => {
     const requested = asked.delete(rec);
     if (!requested && rec.model.sessionId) return false;
-    refusals.set(rec, { message, action });
+    refusals.set(rec, { message, action, calm });
     unreachables.delete(rec);
     paint(rec);
     return true;
