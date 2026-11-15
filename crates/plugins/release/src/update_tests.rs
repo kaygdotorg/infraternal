@@ -199,7 +199,17 @@ fn publishing_keeps_exactly_one_staged_release() {
     let lock = Locked::open(&updates).unwrap();
     for version in ["edge-20261114T000000Z", "edge-20261115T000000Z"] {
         let download = lock.download().unwrap();
-        std::fs::write(download.path.join("VERSION"), format!("{version}\n")).unwrap();
+        {
+            use std::{io::Write, os::unix::fs::OpenOptionsExt};
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(download.path.join("VERSION"))
+                .unwrap()
+                .write_all(format!("{version}\n").as_bytes())
+                .unwrap();
+        }
         lock.publish(download).unwrap();
         assert_eq!(staged_version(&updates).as_deref(), Some(version));
     }
@@ -218,5 +228,50 @@ fn publishing_keeps_exactly_one_staged_release() {
     drop(download);
     assert!(!path.exists());
     lock.retire_staged().unwrap();
+    assert_eq!(staged_version(&updates), None);
+}
+
+/// The unverified VERSION label is read only from a private folder and file of ours, never through a symlink (J725 P3-1).
+#[test]
+fn the_staged_label_is_never_read_through_links_or_from_shared_files() {
+    let scratch = Scratch::new();
+    let updates = scratch.0.join("updates");
+    let lock = Locked::open(&updates).unwrap();
+    let elsewhere = scratch.0.join("elsewhere");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&elsewhere)
+        .unwrap();
+    std::fs::write(elsewhere.join("VERSION"), "edge-20261114T000000Z\n").unwrap();
+    std::fs::set_permissions(
+        elsewhere.join("VERSION"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&elsewhere, updates.join("staged")).unwrap();
+    assert_eq!(
+        staged_version(&updates),
+        None,
+        "a symlinked staged/ is not read"
+    );
+    // Retiring a symlinked staged/ removes the link only, never what it points at.
+    lock.retire_staged().unwrap();
+    assert!(std::fs::symlink_metadata(updates.join("staged")).is_err());
+    assert!(elsewhere.join("VERSION").exists());
+    // A planted regular file named `staged` is removed too.
+    std::fs::write(updates.join("staged"), b"junk").unwrap();
+    lock.retire_staged().unwrap();
+    assert!(std::fs::symlink_metadata(updates.join("staged")).is_err());
+    // A group-readable VERSION in a private folder is not read.
+    std::fs::rename(&elsewhere, updates.join("staged")).unwrap();
+    assert_eq!(
+        staged_version(&updates).as_deref(),
+        Some("edge-20261114T000000Z")
+    );
+    std::fs::set_permissions(
+        updates.join("staged/VERSION"),
+        std::fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
     assert_eq!(staged_version(&updates), None);
 }

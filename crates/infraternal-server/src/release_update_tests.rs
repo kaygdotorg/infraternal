@@ -6,12 +6,15 @@
 //! cross-channel release is refused (and allowed only by an explicit request);
 //! tampered releases are refused; offline checks fail quietly with backoff; abandoned
 //! and interrupted downloads are cleaned up; a full disk is refused before the
-//! download; a newer release replaces the staged one; the timer stages on its own; and
-//! the state is visible through `release.update.status`.
+//! download; a newer release replaces the staged one; the timer stages on its own; the
+//! state is visible through `release.update.status`; and a `staged/` found on disk is
+//! re-verified (or removed) before use.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::release_payload::tests::{Bucket, Release};
-use infraternal_plugin_release::update::{Admission, Outcome, UpdateState, Updater, status};
+use infraternal_plugin_release::update::{
+    Admission, Outcome, REMOVED_UNVERIFIED, UpdateState, Updater, status,
+};
 use std::{os::unix::fs::PermissionsExt, sync::atomic::Ordering};
 
 /// The running version in most cases: older than the published release.
@@ -81,6 +84,47 @@ fn leftovers(release: &Release) -> Vec<String> {
 /// How many requests the bucket has answered (pointer, metadata and images).
 fn image_requests(bucket: &Bucket) -> usize {
     bucket.requests.load(Ordering::Relaxed)
+}
+
+/// Create `<root>/updates` as the updater would (0700), for tests that plant files in it.
+fn private_updates(release: &Release) -> std::path::PathBuf {
+    let updates = release.root.join("updates");
+    std::fs::create_dir(&updates).unwrap();
+    std::fs::set_permissions(&updates, std::fs::Permissions::from_mode(0o700)).unwrap();
+    updates
+}
+
+/// Write `bytes` to `path` as a private (0600) file, the way the downloader does.
+fn write_private(path: &std::path::Path, bytes: &[u8]) {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap()
+        .write_all(bytes)
+        .unwrap();
+}
+
+/// Wait (on state writes, never a fixed sleep) until the saved state satisfies `done`.
+async fn wait_for_state(
+    release: &Release,
+    current: &str,
+    changes: &mut tokio::sync::watch::Receiver<u64>,
+    done: impl Fn(&UpdateState) -> bool,
+) -> UpdateState {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let saved = state(release, current);
+            if done(&saved) {
+                break saved;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the state reached the expected shape")
 }
 
 /// A newer edge release is downloaded, verified and staged with private permissions, and a repeat check only re-reads metadata.
@@ -368,4 +412,71 @@ async fn the_timer_stages_on_its_own_and_status_reports_it() {
     assert_eq!(shown["available"], NEW);
     assert_eq!(shown["channel"], "edge");
     assert_eq!(shown["current"], infraternal_plugin_api::VERSION);
+}
+
+/// A `staged/` found on disk is re-verified before use, never taken on its word (J725
+/// P3-1): a planted folder with the right VERSION but an unsigned image is removed and
+/// the real release is downloaded and verified instead.
+#[tokio::test]
+async fn a_found_staged_folder_is_reverified_before_use() {
+    let (release, bucket) = channel(NEW);
+    let planted = private_updates(&release).join("staged");
+    std::fs::create_dir(&planted).unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o700)).unwrap();
+    write_private(&planted.join("VERSION"), format!("{NEW}\n").as_bytes());
+    write_private(&planted.join(artifact()), b"not a signed image");
+    let updater = updater(&release, &bucket.origin, OLD);
+    assert_eq!(
+        updater.check(None, Admission::Forward).await,
+        Ok(Outcome::Staged(NEW.into()))
+    );
+    assert_eq!(
+        image_requests(&bucket),
+        5,
+        "the image was fetched and verified"
+    );
+    assert_eq!(
+        std::fs::read(planted.join(artifact())).unwrap(),
+        release.files[&format!("/releases/{NEW}/{}", artifact())]
+    );
+    assert_eq!(state(&release, OLD).staged.as_deref(), Some(NEW));
+}
+
+/// When the timer starts it removes a symlinked or shared `staged/` without following it,
+/// and records why (J725 P3-1).
+#[tokio::test]
+async fn unsafe_staged_folders_are_removed_at_start_without_being_followed() {
+    let (release, bucket) = channel(NEW);
+    let updater = Arc::new(updater(&release, &bucket.origin, OLD));
+    assert!(updater.check(None, Admission::Forward).await.is_ok());
+    let folder = release.root.join("updates");
+    // A genuine, verified release, but reached through a symlink.
+    let elsewhere = release.root.join("elsewhere");
+    std::fs::rename(folder.join("staged"), &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, folder.join("staged")).unwrap();
+    let mut changes = infraternal_plugin_release::update::changes();
+    let task = Arc::clone(&updater).spawn_after(std::time::Duration::from_secs(3600));
+    let saved = wait_for_state(&release, OLD, &mut changes, |saved| saved.removed.is_some()).await;
+    task.abort();
+    assert_eq!(saved.staged, None);
+    assert_eq!(saved.removed.unwrap().reason, REMOVED_UNVERIFIED);
+    assert!(std::fs::symlink_metadata(folder.join("staged")).is_err());
+    assert!(
+        elsewhere.join(artifact()).exists(),
+        "the link target is untouched"
+    );
+    // The same release in place but group-readable is removed as well.
+    std::fs::rename(&elsewhere, folder.join("staged")).unwrap();
+    assert!(updater.check(None, Admission::Forward).await.is_ok());
+    assert_eq!(state(&release, OLD).staged.as_deref(), Some(NEW));
+    std::fs::set_permissions(
+        folder.join("staged"),
+        std::fs::Permissions::from_mode(0o750),
+    )
+    .unwrap();
+    let task = Arc::clone(&updater).spawn_after(std::time::Duration::from_secs(3600));
+    let saved = wait_for_state(&release, OLD, &mut changes, |saved| saved.staged.is_none()).await;
+    task.abort();
+    assert_eq!(saved.removed.unwrap().reason, REMOVED_UNVERIFIED);
+    assert_eq!(leftovers(&release), ["state.json"]);
 }

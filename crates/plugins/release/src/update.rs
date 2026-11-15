@@ -37,6 +37,13 @@
 //! Partial downloads are cleaned up, not resumed: release images are a few tens of
 //! megabytes, and a restarted download is simpler to prove correct than a resumed one.
 //!
+//! **`staged/` is never trusted as found (J725 P3-1).** Before any use (every check,
+//! and once when the timer starts) the folder must be a real directory owned by this
+//! user with no group or other access, and its files must pass the same signed-release
+//! verification that admitted them. Anything else is removed and the reason recorded
+//! in [`UpdateState::removed`]. Re-hashing a ~30 MB image costs tens of milliseconds
+//! once per check, off the async workers.
+//!
 //! **State.** [`UpdateState`] lives in `state.json` rather than the database because
 //! S4's D295 undo restores the pre-update database copy, and that restore must not
 //! erase the record of the update that was undone. Readers see either the old or the
@@ -153,7 +160,29 @@ pub struct UpdateState {
     pub last_error: Option<String>,
     /// Failed checks in a row; drives the backoff.
     pub failures: u32,
+    /// The last staged release the updater removed without applying it, and why.
+    pub removed: Option<Removed>,
 }
+
+/// A staged release the updater threw away, kept in the state so the owner can see why
+/// (S5 shows it). Cleared when another release is staged.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Removed {
+    /// The version the staged folder claimed, when it could be read. A folder that
+    /// failed verification reports its unverified claim here, only as a label.
+    pub version: Option<String>,
+    /// A fixed public reason, for example that it failed verification.
+    pub reason: String,
+    /// When it was removed, in Unix seconds.
+    pub at: i64,
+}
+
+/// Why a staged folder that failed its re-check was removed.
+pub const REMOVED_UNVERIFIED: &str = "the staged release failed verification";
+/// Why a staged release the periodic guard would no longer stage was removed.
+pub const REMOVED_NOT_NEWER: &str =
+    "the staged release is no longer newer than the running version";
 
 /// One counter for every updater in this process. Each state write bumps it, and
 /// subscribers re-read their own server's `state.json`, so a change in another
@@ -308,7 +337,6 @@ impl Updater {
         .await
         .unwrap_or(Err("the update check exceeded its time limit"));
         state.last_check = Some(now());
-        state.staged = staged_version(&self.directory);
         match &result {
             Ok(_) => {
                 state.last_error = None;
@@ -333,13 +361,15 @@ impl Updater {
         state: &mut UpdateState,
     ) -> Result<Outcome, &'static str> {
         lock.sweep()?;
+        let mut staged = self.inspect_staged(lock, state).await?;
         // A staged release the periodic guard would no longer admit (it is the running
         // version after an update, or the server moved past it) is removed.
         if admission == Admission::Forward
-            && let Some(staged) = staged_version(&self.directory)
-            && guard(&self.current, &staged, Admission::Forward) != Ok(Verdict::Stage)
+            && let Some(version) = staged.take_if(|version| {
+                guard(&self.current, version, Admission::Forward) != Ok(Verdict::Stage)
+            })
         {
-            lock.retire_staged()?;
+            retire(lock, state, Some(version), REMOVED_NOT_NEWER)?;
         }
         let download = lock.download()?;
         let version = if let Some(version) = target {
@@ -372,7 +402,7 @@ impl Updater {
         if guard(&self.current, &version, admission)? == Verdict::Same {
             return Ok(Outcome::Current(version));
         }
-        if staged_version(&self.directory).as_deref() == Some(version.as_str()) {
+        if staged.as_deref() == Some(version.as_str()) {
             return Ok(Outcome::Staged(version));
         }
         if free_space(&self.directory)? < self.required_space {
@@ -402,7 +432,62 @@ impl Updater {
             return Err("the signed release version does not match the requested one");
         }
         lock.publish(download)?;
+        state.staged = Some(version.clone());
+        state.removed = None;
         Ok(Outcome::Staged(version))
+    }
+
+    /// Re-check `staged/` before anything uses it (J725 P3-1) and return its verified
+    /// version, recording it as `state.staged`.
+    ///
+    /// The folder must be a real directory (never a symlink) owned by this user with
+    /// no group or other access, and its files must pass [`verify_staged`], which
+    /// opens each one without following links and checks owner, mode and link count.
+    /// A folder that fails is removed and recorded in `state.removed`. The caller
+    /// holds the folder lock, and `updates/` is private, so nothing can swap `staged/`
+    /// between this check and its use.
+    /// # Errors
+    /// The verifier task could not finish, or a failed folder could not be removed.
+    async fn inspect_staged(
+        &self,
+        lock: &Locked,
+        state: &mut UpdateState,
+    ) -> Result<Option<String>, &'static str> {
+        let path = self.directory.join("staged");
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            state.staged = None;
+            return Ok(None);
+        };
+        let verified = if private_directory(&metadata) {
+            let (engine, artifact) = (Arc::clone(&self.engine), self.artifact.clone());
+            let folder = path.clone();
+            tokio::task::spawn_blocking(move || verify_staged(engine.as_ref(), &folder, &artifact))
+                .await
+                .map_err(|_| "release verification could not finish")?
+                .ok()
+        } else {
+            None
+        };
+        if verified.is_none() {
+            let claimed = staged_version(&self.directory);
+            retire(lock, state, claimed, REMOVED_UNVERIFIED)?;
+        }
+        state.staged.clone_from(&verified);
+        Ok(verified)
+    }
+
+    /// Re-check `staged/` once when the timer starts, so a folder left by an older
+    /// server or planted while the server was down is never shown as ready. Skipped
+    /// when a check already holds the lock, since that check re-checks it anyway.
+    async fn inspect_at_start(&self) {
+        let Ok(lock) = Locked::try_open(&self.directory) else {
+            return;
+        };
+        let mut state = status_of(&self.directory, &self.current);
+        let before = state.clone();
+        if self.inspect_staged(&lock, &mut state).await.is_ok() && state != before {
+            let _ = lock.write_state(&state);
+        }
     }
 
     /// Start the periodic check: one task that sleeps between checks (no polling).
@@ -420,6 +505,7 @@ impl Updater {
     #[must_use = "abort the handle to stop the timer, or drop it to let it run"]
     pub fn spawn_after(self: Arc<Self>, first: Duration) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            self.inspect_at_start().await;
             let mut wait = first;
             loop {
                 self.record_next(wait);
@@ -495,13 +581,52 @@ fn status_of(directory: &Path, current: &str) -> UpdateState {
     state
 }
 
-/// The version in `staged/VERSION`, if a staged release is there. It was verified when
-/// it was staged; S4 verifies it again before using it.
+/// The version `staged/VERSION` claims, unverified: only a label for the state and
+/// tests. Anything that acts on the staged release uses [`Updater::inspect_staged`].
+/// A `staged/` that is not a private directory of ours, or a VERSION that is not a
+/// private regular file, reads as `None`.
 fn staged_version(directory: &Path) -> Option<String> {
-    let bytes = std::fs::read(directory.join("staged").join("VERSION")).ok()?;
+    use std::io::Read;
+    let folder = directory.join("staged");
+    if !std::fs::symlink_metadata(&folder).is_ok_and(|m| private_directory(&m)) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    open_private(&folder.join("VERSION"))
+        .ok()?
+        .take(129)
+        .read_to_end(&mut bytes)
+        .ok()?;
     let text = std::str::from_utf8(&bytes).ok()?.strip_suffix('\n')?;
     infraternal_plugin_api::release_version::channel(text)?;
     Some(text.to_owned())
+}
+
+/// Whether `metadata` (from `lstat`, so a symlink is never a directory) is a directory
+/// owned by this user with no group or other access.
+#[allow(clippy::verbose_bit_mask)]
+fn private_directory(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.is_dir()
+        && metadata.uid() == nix::unistd::geteuid().as_raw()
+        && metadata.mode() & 0o077 == 0
+}
+
+/// Remove `staged/` under `lock` and record what was removed and why in `state`.
+fn retire(
+    lock: &Locked,
+    state: &mut UpdateState,
+    version: Option<String>,
+    reason: &'static str,
+) -> Result<(), &'static str> {
+    lock.retire_staged()?;
+    state.staged = None;
+    state.removed = Some(Removed {
+        version,
+        reason: reason.to_owned(),
+        at: now(),
+    });
+    Ok(())
 }
 
 /// Bytes free for an unprivileged writer on the file system holding `directory`.
@@ -677,7 +802,14 @@ impl Locked {
         std::fs::rename(&staged, &retired)
             .map_err(|_| "the staged release could not be replaced")?;
         self.sync()?;
-        std::fs::remove_dir_all(&retired).map_err(|_| "the staged release could not be removed")
+        // A planted `staged` may be a file or a symlink: remove the entry itself and never
+        // follow it (`remove_dir_all` also removes a symlink without following it).
+        let removed = if std::fs::symlink_metadata(&retired).is_ok_and(|m| m.is_dir()) {
+            std::fs::remove_dir_all(&retired)
+        } else {
+            std::fs::remove_file(&retired)
+        };
+        removed.map_err(|_| "the staged release could not be removed")
     }
 
     /// Replace `staged/` with a verified download, keeping only one staged release.
