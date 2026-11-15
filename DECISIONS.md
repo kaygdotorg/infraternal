@@ -5026,6 +5026,13 @@ access (#341 B19).
        check runs as its own user with its own runtime directory, and prod
        backups leave the mesh private key out (or keep it 0600 and prune it).
        Owner: "agreed".
+       - **Amended 2026-11-15 (#489):** the check stays root inside an
+         isolated sandbox that cannot see the live data (its own network, an
+         empty `/run`, a read-only system, the live data folders hidden),
+         instead of a separate user, which would mean copying secrets to that
+         user. Prod backups keep `mesh/` at 0700, 3 kept, because the mesh key
+         moves into the data folder (#489). Asked about the separate user, the
+         owner, verbatim: "i mean it's just a script though? not a LLM".
      - **Tooling uses the latest code:** benchmark kits, harnesses and QA
        runners live on `dev` with their own tests in the gate. Hand-copied or
        stale-branch tools are not used. The owner, verbatim: "i don't know
@@ -5078,3 +5085,15 @@ access (#341 B19).
      - **The owner chose (b), verbatim:** "lock on restart, build auto-update directly".
      - **Until D251's auto-update reaches production,** each orchestrator deploy is a stop/start and the owner unlocks the CA afterwards. This is accepted, not a bug.
      - **No interim signing of hand deploys.** The effort goes into finishing D251 (#211): edge publication, quiet-window handoff and rollback. Once production updates itself, D217's rule ("deploys use the in-memory handoff") applies in full again.
+
+397. **GotaTun bounds its own queue, marking ECN first (owner, 2026-11-15, #260; serves the 2026-11-10 bufferbloat goal):**
+     - **Context:** behind a TUN device the kernel's TCP Small Queues cannot
+       see GotaTun's queue, so loaded flows park their whole window inside it
+       (J657/J691). J711 measured a queue-delay bound (1 ms target, 10 ms
+       interval) on backup01, 8 flows: on cubic, p99 22.4 → 6.16 ms (−72.5%)
+       with +4.7% Gbit/s and −2.7% CPU per Gbit (kernel WireGuard 4.36 ms);
+       on BBR it is neutral (8.8 → 8.9 ms).
+     - **Decision:** the bound ships on by default, marking ECN-capable
+       packets first and dropping only packets that cannot be marked, once
+       its final run (on top of the 512-slot build) holds those numbers. The
+       owner, verbatim: "agreed".
