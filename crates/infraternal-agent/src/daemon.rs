@@ -2578,7 +2578,18 @@ async fn terminal_run(
                 if let Some(session) = &mut session { session.read().await }
                 else { std::future::pending().await }
             }, if can_read_shim_frame(pending.as_ref(), pending_bulk.as_ref()) => {
-                match frame? {
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        // The link failed, but bytes the shim sent before it are
+                        // good and already charged: deliver them ahead of the
+                        // saved exit `terminal_mode` reports next (#477, J799).
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
+                        flush_staged(&tx, &mut pending_bulk).await?;
+                        return Err(error);
+                    }
+                };
+                match frame {
                     Shim::Output(..) if key_repaint_target.is_some() => {}
                     Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)
                         if key_repaint_target.is_some() && key_repaint_requested.is_none() => {}
