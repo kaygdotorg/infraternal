@@ -5086,3 +5086,14 @@ access (#341 B19).
      - **Until D251's auto-update reaches production,** each orchestrator deploy is a stop/start and the owner unlocks the CA afterwards. This is accepted, not a bug.
      - **No interim signing of hand deploys.** The effort goes into finishing D251 (#211): edge publication, quiet-window handoff and rollback. Once production updates itself, D217's rule ("deploys use the in-memory handoff") applies in full again.
 
+397. **GotaTun bounds its own queue, marking ECN first (owner, 2026-11-15, #260; serves the 2026-11-10 bufferbloat goal):**
+     - **Context:** behind a TUN device the kernel's TCP Small Queues cannot
+       see GotaTun's queue, so loaded flows park their whole window inside it
+       (J657/J691). J711 measured a queue-delay bound (1 ms target, 10 ms
+       interval) on backup01, 8 flows: on cubic, p99 22.4 → 6.16 ms (−72.5%)
+       with +4.7% Gbit/s and −2.7% CPU per Gbit (kernel WireGuard 4.36 ms);
+       on BBR it is neutral (8.8 → 8.9 ms).
+     - **Decision:** the bound ships on by default, marking ECN-capable
+       packets first and dropping only packets that cannot be marked, once
+       its final run (on top of the 512-slot build) holds those numbers. The
+       owner, verbatim: "agreed".
