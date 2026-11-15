@@ -1379,8 +1379,31 @@ fn deleted_mesh_peer_route(
     mesh_peer_route_destination(message.payload, interface_index)
 }
 
+/// Next-hop status bits the kernel adds to a route's `rtm_flags` when it reports it:
+/// `RTNH_F_DEAD` (1) and `RTNH_F_LINKDOWN` (16).
+///
+/// They describe the link's state, not the route: a route on a link without carrier is still
+/// installed, and the kernel reports it with `linkdown`. Counting them as a different route
+/// made every inventory check on a carrier-less mesh link report every peer route missing,
+/// "repair" each one (the exclusive add finds it and changes nothing) and forget every written
+/// budget, so the next refresh rewrote every peer (#525, the cause of the J552 receipt's
+/// `left: 4096, right: 0` on the test's carrier-less TUN).
+const NEXTHOP_STATUS_FLAGS: u32 = 1 | 16;
+
+/// Read a route message header's `rtm_flags` (bytes 8..12, native order).
+/// # Errors
+/// Returns `InvalidData` for a header shorter than 12 bytes.
+fn route_flags(header: &[u8]) -> io::Result<u32> {
+    let bytes = header.get(8..12).ok_or(io::ErrorKind::InvalidData)?;
+    Ok(u32::from_ne_bytes(
+        bytes.try_into().map_err(|_| io::ErrorKind::InvalidData)?,
+    ))
+}
+
 /// Decode the owned host-route shape shared by deletion events and actual kernel route dumps.
 /// Both paths require protocol 250, main table, exact host prefix, scope and original ifindex.
+/// The kernel's next-hop status bits ([`NEXTHOP_STATUS_FLAGS`]) are ignored; any other flag
+/// means a route this node did not write.
 fn mesh_peer_route_destination(payload: &[u8], interface_index: u32) -> io::Result<Option<IpAddr>> {
     let Some(header) = payload.get(..12) else {
         return Err(io::ErrorKind::InvalidData.into());
@@ -1396,7 +1419,7 @@ fn mesh_peer_route_destination(payload: &[u8], interface_index: u32) -> io::Resu
         || header[5] != RTPROT_INFRATERNAL
         || header[6] != scope
         || header[7] != 1
-        || header[8..12] != [0; 4]
+        || route_flags(header)? & !NEXTHOP_STATUS_FLAGS != 0
     {
         return Ok(None);
     }
@@ -2080,5 +2103,46 @@ mod underlay_change_tests {
         link[4..8].copy_from_slice(&7_u32.to_ne_bytes());
         assert!(!is_underlay_change(&message(16, &link), 7).unwrap());
         assert!(is_underlay_change(&message(16, &link), 8).unwrap());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod owned_route_tests {
+    //! Which reported routes count as this node's peer host routes (#525).
+    use super::*;
+
+    /// A peer route the kernel reports with `linkdown` (the mesh link has no carrier) or `dead`
+    /// is still ours and still installed: the inventory check must not call it missing. Any
+    /// other flag still marks a route this node did not write.
+    #[test]
+    fn link_state_flags_do_not_hide_an_installed_peer_route() {
+        let mut route = peer_route_payload(2, 32, &[10, 200, 0, 1], 7, Some(1408)).unwrap();
+        // `rtm_flags` sits at bytes 8..12 of the route header.
+        let expected = Some(IpAddr::V4(Ipv4Addr::new(10, 200, 0, 1)));
+        for status in [0_u32, 1, 16, 17] {
+            route[8..12].copy_from_slice(&status.to_ne_bytes());
+            assert_eq!(
+                mesh_peer_route_destination(&route, 7).unwrap(),
+                expected,
+                "rtm_flags {status:#x} is only link state"
+            );
+        }
+        // RTNH_F_ONLINK (4) and RTM_F_CLONED (0x200) are not link state.
+        for foreign in [4_u32, 0x200] {
+            route[8..12].copy_from_slice(&foreign.to_ne_bytes());
+            assert_eq!(mesh_peer_route_destination(&route, 7).unwrap(), None);
+        }
+        let mut route = peer_route_payload(
+            10,
+            128,
+            &[0xfd, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            7,
+            Some(1408),
+        )
+        .unwrap();
+        route[6] = 0; // The kernel reports IPv6 host routes with universe scope.
+        route[8..12].copy_from_slice(&16_u32.to_ne_bytes());
+        assert!(mesh_peer_route_destination(&route, 7).unwrap().is_some());
     }
 }
