@@ -123,8 +123,9 @@ The move:
 - moves into a target that already holds infraternal's own files and leaves
   them exactly where they are: in `/var/lib/infraternal` the host firewall's
   `host-firewall-*.json` policies (and their pending writes) and the root
-  infraternal agent's `bin/`, `agent/`, `state/`, `sessions/` and
-  `.bootstrap-lock`. The data then goes in through a hidden
+  infraternal agent's `bin/`, `agent/`, `state/` and `sessions/`, with the
+  hidden `.bootstrap-*`, `.superseded-*` and `.promotion-transaction` files
+  SSH setup and promotion keep there. The data then goes in through a hidden
   `.infraternal-incoming` folder, one rename per entry, and the folder keeps
   its mode;
 - refuses, changing nothing, when the target holds anything else (the
