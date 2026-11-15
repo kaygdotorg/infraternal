@@ -63,6 +63,7 @@ fn registry_routes_only_declared_actions() {
     );
 }
 
+/// Reject an oversized action body before the plugin can inspect it.
 #[test]
 fn registry_rejects_oversized_json_before_plugin_dispatch() {
     let mut registry = PluginRegistry::default();
@@ -73,6 +74,17 @@ fn registry_rejects_oversized_json_before_plugin_dispatch() {
     assert_eq!(
         registry.call("example.read", &oversized),
         Err(PluginError::MessageTooLarge)
+    );
+}
+
+/// The D346 refusal body names the fixed places Kernel `WireGuard` looks for nft, Nix included.
+#[test]
+fn kernel_firewall_refusal_names_the_required_tool_path() {
+    assert_eq!(
+        PluginError::KernelFirewallUnavailable
+            .control_error_json()
+            .as_slice(),
+        br#"{"error":"Kernel WireGuard requires a root-owned nft executable in /usr/sbin, /usr/bin, a root or system Nix profile, or the Nix store; none was usable or it could not apply its firewall rules."}"#,
     );
 }
 

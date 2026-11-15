@@ -1193,3 +1193,82 @@ fn j418_epochless_rollback_snapshot_is_adopted() {
         "the durable state must no longer claim the old epoch"
     );
 }
+
+/// A minimal IPv4 TCP SYN from `source` to `destination`:443, enough for the mesh filter to
+/// judge it (the filter does not check the TCP checksum).
+#[cfg(feature = "test-support")]
+fn j618_syn(source: std::net::Ipv4Addr, destination: std::net::Ipv4Addr) -> Vec<u8> {
+    let mut packet = vec![0; 40];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 6;
+    packet[12..16].copy_from_slice(&source.octets());
+    packet[16..20].copy_from_slice(&destination.octets());
+    packet[20..22].copy_from_slice(&40_000_u16.to_be_bytes());
+    packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+    packet[32] = 0x50;
+    packet[33] = 0x02;
+    packet
+}
+
+/// #265 J617 P2 (J618): when a full transaction fails after the engine took the new peer set,
+/// the old grants must not come back for an address the engine now gives to another node.
+///
+/// Node 2 holds 10.254.0.2 with an `All` inbound grant; the new snapshot removes it and gives
+/// that address to node 3 with no grants. The save fails, so the transaction rolls back.
+/// - When the rollback completes, the engine has node 2 back and so does the filter.
+/// - When the rollback stops before the engine gets its old peers back, node 3 holds the
+///   address in the engine, so the filter must not admit node 2's grants for it. Restoring the
+///   old policy first (J593) admitted node 3's packets under node 2's `All` grant.
+#[cfg(feature = "test-support")]
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn j618_failed_rollback_keeps_a_reused_address_off_its_old_owners_grants() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let identity = node.up().unwrap();
+    let old = j363_config(identity.public_key);
+    node.apply(old.clone()).unwrap();
+    let local: std::net::Ipv4Addr = "10.254.0.1".parse().unwrap();
+    let reused: std::net::Ipv4Addr = "10.254.0.2".parse().unwrap();
+    let admitted = |node: &Node| {
+        node.gotatun.as_ref().unwrap().check_packet(
+            &mut j618_syn(reused, local),
+            crate::packet_filter::Direction::MeshToHost,
+        )
+    };
+    assert!(admitted(&node), "node 2's grant admits its own address");
+
+    let mut moved = old.clone();
+    moved.version += 1;
+    let mut owner = moved.peers.remove(&NodeId(2)).unwrap();
+    owner.peer.key = Key::generate().unwrap().1;
+    owner.inbound = crate::policy::rules::TrafficPolicy::None;
+    owner.outbound = crate::policy::rules::TrafficPolicy::None;
+    moved.peers.insert(NodeId(3), owner);
+
+    let fail = |seam: &TransactionSeam| {
+        *seam.lock().unwrap() = Some(Box::new(|| Err(io::Error::other("J618 injected failure"))));
+    };
+    fail(&BEFORE_TRANSACTION_SAVE);
+    assert!(node.apply(moved.clone()).is_err(), "the save fails");
+    assert_eq!(node.config(), Some(&old));
+    let restored = admitted(&node);
+
+    fail(&BEFORE_TRANSACTION_SAVE);
+    fail(&BEFORE_ROLLBACK_ENGINE_APPLY);
+    assert!(node.apply(moved).is_err(), "the save and the rollback fail");
+    let while_engine_holds_new_owner = admitted(&node);
+    node.down().unwrap();
+
+    assert!(
+        restored,
+        "a completed rollback gives node 2 its address and grants back"
+    );
+    assert!(
+        !while_engine_holds_new_owner,
+        "node 3 holds 10.254.0.2 in the engine, but the filter admitted it under node 2's grants"
+    );
+}
