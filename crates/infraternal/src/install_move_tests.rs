@@ -588,3 +588,26 @@ fn a_real_second_filesystem_takes_the_copy_path() {
     println!("{}", outcome.describe(&relocation));
     let _ = fs::remove_dir_all(setup.new.parent().unwrap().parent().unwrap());
 }
+
+/// A copy interrupted by a crash leaves a staging folder (with the mesh key in
+/// it); the next copy removes every such stray copy, not only its own.
+#[test]
+fn a_stray_partial_copy_is_removed_by_the_next_copy() {
+    let setup = install();
+    let parent = setup.new.parent().unwrap().to_owned();
+    let stray = parent.join(".infraternal.partial-4242");
+    fs::create_dir_all(stray.join("mesh")).unwrap();
+    fs::write(stray.join("mesh/key"), b"mesh private key").unwrap();
+    let unrelated = parent.join(".infraternal.partial-notes");
+    fs::write(&unrelated, b"not a folder of ours").unwrap();
+    FORCE_COPY.with(|force| force.set(true));
+    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
+    let outcome = apply(&relocation, &Fake::running(), when());
+    FORCE_COPY.with(|force| force.set(false));
+    assert!(outcome.unwrap().copied);
+    assert!(!stray.exists(), "the stray copy of the key is gone");
+    assert!(
+        unrelated.exists(),
+        "a file that is not a staging folder stays"
+    );
+}
