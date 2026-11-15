@@ -479,6 +479,8 @@ fn finish(relocation: &Relocation, now: SystemTime, copied: bool) -> Outcome {
         warning: None,
     };
     if fs::symlink_metadata(&relocation.from).is_ok() {
+        // The marker went into the old folder before the copy; a leftover is finished.
+        let _ = fs::remove_file(relocation.from.join(MARKER));
         match set_aside(&relocation.from, now) {
             Ok(leftover) => outcome.leftover = Some(leftover),
             Err(error) => {
