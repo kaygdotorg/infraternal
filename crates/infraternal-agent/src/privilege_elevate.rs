@@ -1154,6 +1154,61 @@ mod tests {
         }
     }
 
+    /// J716 A, the real thing (#399, D376): a wrong sudo password is reported
+    /// as wrong, within the bound the infraternal agent uses.
+    ///
+    /// This one reaches PAM and spends one failed login, so it never runs by
+    /// default: it is ignored, and it also needs
+    /// `INFRATERNAL_WRONG_PASSWORD_PROOF=1`. Run it as a throwaway account
+    /// that is allowed sudo, with a password nobody types here, for example:
+    /// `sudo -u <throwaway> env INFRATERNAL_WRONG_PASSWORD_PROOF=1 <test
+    /// binary> --ignored --exact
+    /// privilege_elevate::tests::a_wrong_sudo_password_is_reported_as_wrong`.
+    /// The password typed is a fixed wrong one, so no secret is involved.
+    #[tokio::test]
+    #[ignore = "reaches PAM: run by hand as a throwaway account (see the doc comment)"]
+    async fn a_wrong_sudo_password_is_reported_as_wrong() {
+        /// The infraternal agent's own bound for one try (`ELEVATE_BOUND`).
+        const BOUND: Duration = Duration::from_secs(60);
+        if std::env::var_os("INFRATERNAL_WRONG_PASSWORD_PROOF").is_none_or(|on| on != "1") {
+            eprintln!("INFRATERNAL_WRONG_PASSWORD_PROOF is not 1; nothing to check");
+            return;
+        }
+        assert!(prompts_here(Way::Sudo), "no sudo that prompts this account");
+        let started = std::time::Instant::now();
+        let done = tokio::time::timeout(
+            BOUND * 2,
+            elevate(
+                Way::Sudo,
+                Some(b"infraternal-j723-not-the-password"),
+                &[0; 32],
+                [
+                    "/nonexistent/j723",
+                    &"0".repeat(64),
+                    "/nonexistent/j723.sock",
+                    "65534",
+                ],
+                BOUND,
+            ),
+        )
+        .await
+        .expect("elevate never returned")
+        .unwrap();
+        eprintln!(
+            "WRONG_PASSWORD_PROOF outcome={:?} typed={} elapsed_ms={}",
+            done.outcome,
+            done.typed,
+            started.elapsed().as_millis()
+        );
+        assert_eq!(done.outcome, Outcome::Wrong);
+        assert!(done.typed);
+        assert!(done.elevated.is_none());
+        assert!(
+            started.elapsed() < BOUND,
+            "the answer came only at the bound"
+        );
+    }
+
     /// The children of this process right now, from every thread's
     /// `/proc/self/task/<tid>/children` list.
     fn children() -> Vec<u32> {
