@@ -40,10 +40,17 @@ SEGMENT = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
 
 def signed_entries(text):
-    """Parse a signed SHA256SUMS strictly: every line is a digest, two spaces and a
-    bundle-relative name; traversal, absolute names and duplicates refuse the list."""
+    """Parse a signed SHA256SUMS exactly as the Rust verifier does (`release_verify.rs`
+    `checksum`), so deploy admission never passes a list `restart --binary` refuses
+    (J685 P3-1): a non-empty list of at most 64 KiB that ends in a newline, split on
+    newlines only (one trailing carriage return per line is dropped, as Rust's
+    `str::lines` does), where every line is a lowercase digest, two spaces and a
+    bundle-relative name. Traversal, absolute names and duplicates refuse the list."""
+    if not text or len(text.encode()) > 65536 or not text.endswith("\n"):
+        raise ValueError("invalid signed artifact list")
     entries = {}
-    for line in text.splitlines():
+    for line in text[:-1].split("\n"):
+        line = line.removesuffix("\r")
         value, separator, name = line.partition("  ")
         parts = name.split("/")
         if (not separator or not re.fullmatch(r"[0-9a-f]{64}", value) or name in entries
@@ -68,8 +75,9 @@ def verify_signed(directory, trust, image, complete=False):
                     "-s", str(signature)], input=sums, capture_output=True, check=True)
     entries = signed_entries(sums.decode())
     # The signed VERSION carries the identity; the channel comes from it [226].
-    version = (directory / "VERSION").read_text()
-    if not re.fullmatch(r"(edge-[0-9]{8}T[0-9]{6}Z|[0-9]+\.[0-9]+\.[0-9]+)\n", version):
+    # Read it once: the same bytes are checked here and hashed below (J685 P3-2).
+    version = (directory / "VERSION").read_bytes()
+    if not re.fullmatch(rb"(edge-[0-9]{8}T[0-9]{6}Z|[0-9]+\.[0-9]+\.[0-9]+)\n", version):
         raise ValueError("invalid signed version")
     required = {"VERSION", "infraternal-x86_64-musl"}
     if complete:
@@ -81,7 +89,9 @@ def verify_signed(directory, trust, image, complete=False):
     with image.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != entries["infraternal-x86_64-musl"]:
             raise ValueError("signed server image mismatch")
-    for name in required:
+    if hashlib.sha256(version).hexdigest() != entries["VERSION"]:
+        raise ValueError("signed artifact mismatch")
+    for name in required - {"VERSION"}:
         if name == "infraternal-x86_64-musl" and not complete:
             continue  # The retained executable was already authenticated above.
         artifact = directory / name
