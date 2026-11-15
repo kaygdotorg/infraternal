@@ -546,6 +546,12 @@ async fn healthz(address: SocketAddr) -> bool {
         .unwrap_or(false)
 }
 
+/// The trial's `/healthz` probe, for the root staging proof's own readiness waits.
+#[cfg(test)]
+pub(crate) async fn healthz_for_tests(address: SocketAddr) -> bool {
+    healthz(address).await
+}
+
 /// This process's executable path as the service started it, given back to it on an
 /// undo. After an earlier warm switch the kernel names the image a memfd, so the
 /// configured argv\[0\] is used then, the same rule the restart reload follows.

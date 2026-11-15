@@ -181,6 +181,22 @@ async fn wait_state(
     }
 }
 
+/// Wait until the server answers `/healthz` with 200 again. The update state flips as
+/// soon as a starting release writes it, which is before its listener is up.
+async fn serving(address: SocketAddr) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if crate::update_apply::healthz_for_tests(address).await {
+                return;
+            }
+            // sleep: the restarted listener is still coming up; poll it at 20 Hz.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the server answers /healthz again after the switch");
+}
+
 /// Whether the CA is unlocked, asked over the owner's HTTP session.
 async fn ca_unlocked(address: SocketAddr, session: &str) -> bool {
     post(address, session, "/remote/ca/status", json!({})).await["locked"] == false
@@ -476,6 +492,7 @@ async fn auto_update_applies_warm_and_undoes_a_bad_release() {
             .is_some_and(|applied| applied.version == bad && applied.outcome == "undone")
     })
     .await;
+    serving(address).await;
     let gap = downtime.take();
     assert_eq!(state.paused.as_deref(), Some(bad));
     assert_eq!(
@@ -564,6 +581,7 @@ async fn auto_update_applies_warm_and_undoes_a_bad_release() {
             .is_some_and(|applied| applied.version == good && applied.outcome == "applied")
     })
     .await;
+    serving(address).await;
     let gap = downtime.take();
     assert_eq!(running_digest(pid), good_image, "B runs");
     assert!(
