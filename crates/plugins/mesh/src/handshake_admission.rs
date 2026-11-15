@@ -51,7 +51,8 @@
 //!   coordinator, so an attacker on a network that allows spoofing can send from them. Each
 //!   spoofed endpoint takes at most its share of the reserve a second, and only one key
 //!   agreement when it sends a stranger's key; past that it is an ordinary source. While the
-//!   node knows at most [`RESERVED_BUDGET`] endpoints (both lists counted), the shares add up to
+//!   node knows at most [`RESERVED_BUDGET`] distinct endpoints (one configured and confirmed
+//!   both counts once, so with one endpoint per peer that is 500 peers), the shares add up to
 //!   no more than the reserve, so spoofing *other* endpoints, however many, never takes an
 //!   unspoofed known endpoint's initiation (J735's floods: 18 of 18). Spoofing a peer's own
 //!   exact address and port does: the peer then falls back to the unknown share like a new
@@ -173,7 +174,8 @@ pub(crate) const UNKNOWN_SOURCE_BUDGET: u32 = NODE_BUDGET / 2;
 pub(crate) const RESERVED_BUDGET: u32 = NODE_BUDGET - UNKNOWN_SOURCE_BUDGET;
 
 /// How many key agreements one known endpoint may spend from [`RESERVED_BUDGET`] per window
-/// while the node knows `known_endpoints` of them (configured and confirmed, counted apart).
+/// while the node knows `known_endpoints` distinct ones (an endpoint both configured and
+/// confirmed counts once, see [`distinct_endpoints`]).
 ///
 /// The reserve divided evenly, so all shares together never exceed it: whatever a flood does
 /// with the other endpoints, each one keeps its own. At least one, which a real peer's retry
@@ -489,6 +491,20 @@ fn carried_counts(old: Lists<'_>, counts: &[u8], new: Lists<'_>, share: u8) -> V
     carried
 }
 
+/// How many different endpoints `lists` holds: every configured one, plus each confirmed one
+/// that is not also configured. A peer whose confirmed endpoint is its configured one (the
+/// usual case in a quiet mesh) is one endpoint with one share, not two (J754 P3, #483). One
+/// merge-join pass, since both lists are sorted.
+fn distinct_endpoints(lists: Lists<'_>) -> usize {
+    let mut configured = Cursor::new(lists.configured);
+    let also_configured = lists
+        .confirmed
+        .iter()
+        .filter(|key| configured.find(key).is_some())
+        .count();
+    lists.configured.len() + lists.confirmed.len() - also_configured
+}
+
 /// Holds the live mesh identities allowed to reach `GotaTun`'s handshake cookie limiter.
 ///
 /// The peer list changes only after the device accepts a snapshot, while both key checks follow
@@ -598,8 +614,11 @@ impl PeerAdmission {
         old_configured: Option<&[EndpointKey]>,
         old_confirmed: Option<&[EndpointKey]>,
     ) {
-        self.share =
-            reserve_share(self.configured_endpoints.len() + self.confirmed_endpoints.len());
+        let current = Lists {
+            configured: &self.configured_endpoints,
+            confirmed: &self.confirmed_endpoints,
+        };
+        self.share = reserve_share(distinct_endpoints(current));
         let budget = self
             .budget
             .get_mut()
@@ -610,10 +629,7 @@ impl PeerAdmission {
                 confirmed: old_confirmed.unwrap_or(&self.confirmed_endpoints),
             },
             &budget.endpoints,
-            Lists {
-                configured: &self.configured_endpoints,
-                confirmed: &self.confirmed_endpoints,
-            },
+            current,
             self.share,
         );
     }
@@ -626,7 +642,9 @@ impl PeerAdmission {
 
     /// The slot of `source` among the known endpoints, when it is exactly one: its index in the
     /// configured list, or the configured list's length plus its index in the confirmed list.
-    /// Slots index the per-endpoint reserve counters in [`Budget`].
+    /// Slots index the per-endpoint reserve counters in [`Budget`]. A confirmed endpoint that is
+    /// also configured always resolves to its configured slot, so its confirmed slot is a spare
+    /// byte that is never spent and does not count toward the share.
     fn known_slot(&self, source: SocketAddr) -> Option<usize> {
         let key = endpoint_key(source);
         self.configured_endpoints
