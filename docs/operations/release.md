@@ -173,7 +173,10 @@ the channel still announces it: when the pointer moves to anything else (a yanke
 build, another version, or nothing), the staged release is removed and the state
 says why. S4 applies only what `Updater::confirm_staged` returns. That call
 re-checks the staged release against the pointer and holds the folder lock until
-the switch is done.
+the switch is done. When the pointer moves on to a *newer* release on the same
+channel, the staged release stays until the newer one is downloaded and replaces
+it, so a failed download never leaves nothing staged. At apply time such a
+release is refused as superseded, not withdrawn, and kept.
 
 Only faults back off: the network, the disk or a failed verification. A
 refusal (an older or another channel's release) is recorded as `refused` and
@@ -191,6 +194,76 @@ database restore does not erase it. Owners read it with the
 `mode`, which is `auto` or `off`, and `reason`, which says plainly why updates
 are off on this host: not a Linux server, a development build, the server not
 running as root, the release plugin switched off, or no valid channel set.
+
+## Applying an update and undoing it (#211 S4)
+
+Where the check runs, the server also applies what it staged, by itself, in a
+**quiet window**: nobody has typed into a terminal or attached one for 5 minutes
+(D251). No deadline forces it, so an update never interrupts typing. With the
+release plugin switched off nothing applies, not even an explicit stage. A
+release the channel withdrew, or one it superseded, is never applied.
+
+The switch is the same warm in-memory handoff as `infraternal server … restart
+--binary` (D217): one process (the PID stays the same), the CA handed over
+unlocked on a private stdin pipe, and live sessions continue in their own shim
+processes. If the CA is unlocked when the switch starts, whether by an earlier
+handoff or a passkey, the new release must receive it, or the switch is refused
+and nothing changes. Nothing in the runtime directory is touched, including the
+mesh key that production keeps in `/run`.
+
+Before the switch, the server:
+
+1. re-confirms the staged release against the channel (S3) and keeps the folder
+   locked until the exec;
+2. moves it to `<data>/updates/releases/<version>/` (a rename, so the file that
+   was verified is the file that runs; the switch re-checks its signature on a
+   sealed copy and never reopens it by path);
+3. copies its own image to `updates/previous/` and writes one database copy
+   beside it (`VACUUM INTO`, D295);
+4. writes `updates/pending.json`, naming both releases by the SHA-256 of their
+   images.
+
+**The trial.** The new release has 2 minutes to pass its health check. `/healthz`
+must answer 200 on its own listener, a write transaction must commit, and the CA
+must be unlocked if it was before. On a pass, `updates/current` (a symlink, the
+boot pointer) moves to `releases/<new>`. Other installed releases are removed,
+and `previous/` is kept until the next update, so S5's manual roll back can use
+it.
+
+**The undo (D295).** If the check fails or times out, the new release execs the
+previous image again, warm, and gives it back its own path. Before the database
+opens, the previous release puts the database copy back (removing the WAL and
+shared-memory files of the database it replaces) and records the update as
+`undone`. It also **pauses** that version, so the timer never stages it again.
+Data written during the trial is lost, as D295 accepts.
+
+- If the new release crashes or is killed during its trial, the service manager
+  starts the boot pointer, which still names the previous release. That start is
+  cold (D168): the CA stays locked until a passkey unlocks it. The previous release
+  still restores the copy and pauses the new version.
+- If the new release cannot even exec, the late-exec recovery brings the previous
+  release straight back. The database is untouched, because nothing else ran.
+- If the undo exec itself fails, the new release retries it 3 times. After that it
+  keeps serving, and the marker stays, so the previous release's next start still
+  restores the copy. It never exits on its own.
+
+`state.json` records the last switch as `applied` (`applied`, `undone` or
+`not-applied`, with a reason) and the paused version as `paused`.
+
+**For services to follow updates across cold starts,** start the server from
+`<data>/updates/current/infraternal-<arch>-musl` (S6 points the production unit
+there). A unit that starts a fixed path runs the updated release only until its
+next cold start.
+
+**Staging proof.** `staging-trust` builds (never production;
+`check-production-trust.py` refuses them) read three more variables:
+`INFRATERNAL_STAGING_BUILDS_ORIGIN` (a `http://127.0.0.1:` channel),
+`INFRATERNAL_STAGING_UPDATE_SECONDS` (first check, check period and quiet window)
+and `INFRATERNAL_STAGING_UNHEALTHY_VERSION` (that version fails its health
+check). The root proof
+`deploy_staging::update_staging::auto_update_applies_warm_and_undoes_a_bad_release`
+uses them to test a bad release, updates off, a withdrawn release and a good
+release on a real unit.
 
 # Add-host payloads
 
