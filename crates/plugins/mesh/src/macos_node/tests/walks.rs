@@ -164,7 +164,7 @@ impl Fixture {
 /// (no new handshake), counters not reset. Before J704 every snapshot re-installed every Mac
 /// peer, which dropped the session and sent each peer, idle or not, a fresh handshake.
 #[test]
-#[ignore = "Run on the macOS VM as root under the Mac lock."]
+#[ignore = "Run on the macOS VM with root privileges under the Mac lock."]
 fn an_unrelated_snapshot_keeps_an_idle_peers_session() {
     let mut fixture = Fixture::start(71);
     let live = fixture.live;
@@ -201,7 +201,7 @@ fn an_unrelated_snapshot_keeps_an_idle_peers_session() {
 /// An established peer republished at a new address gets a handshake there at once, not at its
 /// next keepalive up to 25 s later (J587's rebind case on Linux, `Device::rehandshake`).
 #[test]
-#[ignore = "Run on the macOS VM as root under the Mac lock."]
+#[ignore = "Run on the macOS VM with root privileges under the Mac lock."]
 fn a_readdressed_established_peer_handshakes_at_once() {
     let mut fixture = Fixture::start(72);
     let live = fixture.live;
@@ -239,7 +239,7 @@ fn a_readdressed_established_peer_handshakes_at_once() {
 /// walk step, and a later unrelated snapshot neither restarts the finished walk nor sends that
 /// peer another handshake.
 #[test]
-#[ignore = "Run on the macOS VM as root under the Mac lock."]
+#[ignore = "Run on the macOS VM with root privileges under the Mac lock."]
 fn a_dead_first_candidate_is_walked_to_a_live_one() {
     let mut fixture = Fixture::start(73);
     // A bound socket that never answers: the first candidate.
@@ -285,7 +285,7 @@ fn a_dead_first_candidate_is_walked_to_a_live_one() {
 /// peer on the address its walk found, so traffic flows on at once instead of waiting a walk
 /// step on the dead first candidate.
 #[test]
-#[ignore = "Run on the macOS VM as root under the Mac lock."]
+#[ignore = "Run on the macOS VM with root privileges under the Mac lock."]
 fn a_tail_change_keeps_a_found_peer_on_its_address() {
     let mut fixture = Fixture::start(74);
     let dead = UdpSocket::bind("127.0.0.1:0").expect("dead candidate");
