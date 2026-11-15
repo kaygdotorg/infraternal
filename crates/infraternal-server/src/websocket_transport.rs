@@ -133,6 +133,9 @@ struct Context {
     writer: Writer,
     lease: LeaseMutex<Liveness>,
     viewer_visibility: bool,
+    /// Shared with the account's socket list: the visibility the page reports is recorded there, so a newer tab of
+    /// the account can take over the longest-hidden one (#523, option B).
+    viewer: Arc<crate::account_sockets::Viewer>,
     fast_until: LeaseMutex<tokio::time::Instant>,
     // The first classified end wins so teardown cannot turn malformed input into an ordinary disconnect.
     ended: AtomicU8,
@@ -281,6 +284,7 @@ impl Transport {
         token: String,
         authority: super::websocket::probe_authority::Lease,
         viewer_visibility: bool,
+        viewer: Arc<crate::account_sockets::Viewer>,
     ) -> (impl Sink<Message, Error = axum::Error> + Unpin, Self) {
         let writer = Arc::new(Mutex::new(writer));
         let context = Arc::new(Context {
@@ -290,6 +294,7 @@ impl Transport {
             writer,
             lease: LeaseMutex::new(Liveness::answer_paced()),
             viewer_visibility,
+            viewer,
             fast_until: LeaseMutex::new(tokio::time::Instant::now() + FAST_PROBE_WINDOW),
             ended: AtomicU8::new(0),
             socket_close: LeaseMutex::new(SocketClose::default()),
@@ -549,6 +554,9 @@ async fn read(
                             // wakes its network stack and a phone's radio about 30 times a
                             // second at the answer-paced cadence [#317].
                             let hidden = visibility_notice(event_json);
+                            if let Some(hidden) = hidden {
+                                context.viewer.set_hidden(hidden);
+                            }
                             let updated = hidden.and_then(|hidden| {
                                 context
                                     .lease

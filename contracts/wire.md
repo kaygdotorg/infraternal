@@ -521,6 +521,20 @@ If the transport ended during suspension, wait until visible before reconnecting
 The notice cannot preserve a socket when the operating system closes it; use the
 ordinary resume window, then a fresh attach if that capability is refused (#244).
 
+An account holds at most 16 live browser sockets. When it is full, a new
+socket takes over the account's socket that has been hidden the longest (by
+this notice; a viewer that never reports visibility is never taken over),
+never a socket of another account. The server ends the taken-over socket with
+a control-stream `Close`, code 1000, reason
+`another tab of this account is using this connection`, and admits the new one
+once that socket's teardown has freed its place (bounded wait, 2 s). A viewer
+that receives it must not reconnect while hidden, or it would take another
+hidden viewer's place in turn; when visible it reconnects with its resume
+capability as usual. With no hidden socket to take, the new socket is upgraded
+only to be closed with code 1008, reason
+`this account has too many open connections`, sent before any Hello is read;
+the viewer's resume capability is unaffected by it (#523).
+
 On the browser route the server carries its probes as WebSocket Ping control
 frames, not muxed `Ping` frames (#317). The payload is 16 bytes: `nonce` then
 `sent_us`, each a little-endian u64, with `nonce == sent_us`. The browser

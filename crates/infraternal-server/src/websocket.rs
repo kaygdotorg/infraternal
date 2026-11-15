@@ -17,13 +17,14 @@ fn addhost_timeline(step: &'static str) {
     }
 }
 use crate::{
+    account_sockets::{AccountSlot, AccountSockets, TAKEOVER_WAIT, Viewer},
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
         ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
         CloseOwner, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION,
-        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE,
+        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER, TERMINAL_ROUTE_IDLE,
         classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
     },
 };
@@ -70,7 +71,8 @@ const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
 /// Live sockets one account may hold at once: one per open tab or app, so a person with many tabs or devices
-/// open reaches it. The upgrade permit (`user_permit`) and the database row count (`new_connection`) both enforce it.
+/// open reaches it. The account's slots (`account_sockets`, via `user_slot`) and the database row count (`new_connection`)
+/// both enforce it.
 const MAX_USER_CONNECTIONS: usize = 16;
 /// [`MAX_USER_CONNECTIONS`] as the row count `new_connection` and `resume_connection` compare against. Kept as its
 /// own literal because a `usize` to `i64` cast is refused by the lints; `connection_limit_constants_agree` holds the
@@ -182,7 +184,9 @@ pub(crate) struct WebSocketState {
     terminal_connect_timeout: Duration,
     connections: Arc<Semaphore>,
     authority: Arc<AuthorityLimits>,
-    users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
+    /// Each account's socket slots and viewers (`account_sockets`), weakly: an entry lives only while its account
+    /// has a socket.
+    users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<AccountSockets>>>>,
     session_changes: watch::Sender<u64>,
     close_logs: StreamCloseLog,
     queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
@@ -437,17 +441,36 @@ impl WebSocketState {
         move || AUTHORITY_READS - authority.reads.available_permits()
     }
 
-    /// Reserve per-user capacity before Hello. Weak entries disappear when the last socket drops.
-    fn user_permit(&self, user: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    /// The account's socket slots and viewers, made on first use. Weak entries disappear when the last socket drops.
+    fn account_sockets(&self, user: &str) -> Option<Arc<AccountSockets>> {
         let mut users = self.users.lock().ok()?;
-        users.retain(|_, semaphore| semaphore.strong_count() != 0);
-        let semaphore = users
+        users.retain(|_, account| account.strong_count() != 0);
+        let account = users
             .get(user)
             .and_then(std::sync::Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(Semaphore::new(MAX_USER_CONNECTIONS)));
-        let permit = semaphore.clone().try_acquire_owned().ok()?;
-        users.insert(user.to_owned(), Arc::downgrade(&semaphore));
-        Some(permit)
+            .unwrap_or_else(|| Arc::new(AccountSockets::new(MAX_USER_CONNECTIONS)));
+        users.insert(user.to_owned(), Arc::downgrade(&account));
+        Some(account)
+    }
+
+    /// Reserve per-user capacity before Hello. When the account is full, the new page takes over the socket of the
+    /// account's longest-hidden tab (owner decision B, #523); `None` only when no tab of the account is hidden or the
+    /// taken-over socket did not free its slot in time.
+    async fn user_slot(&self, user: &str) -> Option<AccountSlot> {
+        let account = self.account_sockets(user)?;
+        if let Some(slot) = account.try_slot() {
+            return Some(slot);
+        }
+        let slot = account.take_over_hidden(TAKEOVER_WAIT).await?;
+        self.close_logs.record(&CloseRecord::new(
+            CloseOwner::of(user),
+            CloseWho::Server,
+            TAKEN_OVER,
+            None,
+            NO_SESSION,
+            0,
+        ));
+        Some(slot)
     }
 }
 
@@ -492,7 +515,8 @@ pub(crate) fn router(state: WebSocketState) -> Router {
 }
 
 /// Admits a browser's WebSocket upgrade: same origin, a live session cookie, and room under the process-wide and
-/// per-account limits. An account over its limit is upgraded only to be told so (`refuse_over_limit`, #523).
+/// per-account limits. A full account makes room by taking over its longest-hidden tab (`user_slot`); with none to
+/// take, the page is upgraded only to be told so (`refuse_over_limit`, #523).
 async fn upgrade(
     State(state): State<Arc<WebSocketState>>,
     headers: HeaderMap,
@@ -519,9 +543,9 @@ async fn upgrade(
     let Ok(permit) = state.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Some(user_permit) = state.user_permit(&session.user_id) else {
-        // Over the account's limit, a bare 503 reaches the page only as a failed socket, so the page cannot say why
-        // and sat blank (#523). The upgrade goes through only to close at once with the limit's reason; the
+    let Some(user_slot) = state.user_slot(&session.user_id).await else {
+        // Over the account's limit with no hidden tab to take over. A bare 503 reaches the page only as a failed
+        // socket, so the page cannot say why and sat blank (#523). The upgrade goes through only to close at once with the limit's reason; the
         // process-wide permit above still bounds these refusals, and the socket never reads a frame.
         let user_id = session.user_id;
         return ws
@@ -537,8 +561,10 @@ async fn upgrade(
         .max_frame_size(MAX_SOCKET_BUFFER)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            let _user_permit = user_permit;
-            run_socket(socket, state, session.user_id, session_token, owner).await;
+            // Held until `run_socket` has marked the connection row inactive, so the freed slot and row go together.
+            let viewer = user_slot.viewer();
+            run_socket(socket, state, session.user_id, session_token, owner, viewer).await;
+            drop(user_slot);
         })
 }
 
@@ -598,6 +624,7 @@ async fn run_socket(
     user_id: String,
     session_token: String,
     owner: bool,
+    viewer: Arc<Viewer>,
 ) {
     // One absolute budget covers server Hello, authority reads, client Hello and Resume.
     // Starting a fresh five seconds after a slow initial write would retain admission too long.
@@ -776,6 +803,7 @@ async fn run_socket(
         session_token.clone(),
         proof_authority,
         viewer_visibility,
+        viewer.clone(),
     );
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
@@ -794,6 +822,13 @@ async fn run_socket(
         loop {
             transport.active(!attachments.is_empty());
             tokio::select! {
+                // A newer tab of this account took this hidden tab's place (#523, option B): end with that reason, so
+                // the page pauses instead of reconnecting while it stays hidden.
+                () = viewer.taken_over() => {
+                    teardown_reason = TAKEN_OVER;
+                    loop_result = Err(());
+                    break;
+                }
                 Some(_) = login_preparation.join_next(), if !login_preparation.is_empty() => {}
                 Some(reply) = plugins.recv() => {
                     let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
@@ -1138,6 +1173,9 @@ async fn run_socket(
                     &Frame::Close {
                         code: if authority_unavailable_known {
                             1013
+                        } else if teardown_reason == TAKEN_OVER {
+                            // Not a failure: the server ended the socket on purpose, for another tab of the account.
+                            1000
                         } else {
                             1011
                         },

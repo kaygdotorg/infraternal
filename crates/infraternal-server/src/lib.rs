@@ -3,6 +3,7 @@
 
 /// Shared compiled release identity; channel policy remains in the release plugin [225,226].
 pub use infraternal_plugin_api::{VERSION, release_version};
+mod account_sockets;
 pub mod auth;
 #[cfg(feature = "remote")]
 pub mod ca;
