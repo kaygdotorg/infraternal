@@ -25,6 +25,12 @@
 //! request ([`Admission::Explicit`], for a D295 rollback or a deliberate channel switch
 //! by S4/S5) may stage those. No admission ever skips the signature check.
 //!
+//! **Explicit stages hold (J725 P3-3).** A release staged by an explicit request is
+//! recorded as [`UpdateState::hold`]. Periodic checks leave it alone (they answer
+//! [`Outcome::Held`] without touching the network or `staged/`) until it is applied
+//! (the server runs that version) or cancelled ([`Updater::cancel_hold`]). It is still
+//! re-verified on every check, and a held folder that fails verification is removed.
+//!
 //! **Withdrawn releases (J725 P2-1).** A staged release is kept only while the channel
 //! still announces it. When a periodic check finds the pointer naming anything else
 //! (the running version again after a yanked build, another version, or nothing), the
@@ -181,6 +187,9 @@ pub struct UpdateState {
     pub failures: u32,
     /// The last staged release the updater removed without applying it, and why.
     pub removed: Option<Removed>,
+    /// A release staged by an explicit request (a D295 rollback or a channel switch).
+    /// Periodic checks keep it staged until it is applied or cancelled.
+    pub hold: Option<String>,
 }
 
 /// A staged release the updater threw away, kept in the state so the owner can see why
@@ -202,6 +211,8 @@ pub const REMOVED_UNVERIFIED: &str = "the staged release failed verification";
 /// Why a staged release the periodic guard would no longer stage was removed.
 pub const REMOVED_NOT_NEWER: &str =
     "the staged release is no longer newer than the running version";
+/// Why a held explicit stage was removed by [`Updater::cancel_hold`].
+pub const REMOVED_CANCELLED: &str = "the explicit update was cancelled";
 /// Why a staged release was removed when its channel stopped announcing it.
 pub const REMOVED_WITHDRAWN: &str = "the channel no longer offers this release";
 /// The refusal when the release plugin is switched off (or its channel setting is
@@ -298,6 +309,8 @@ pub enum Outcome {
     Current(String),
     /// This release is staged (now, or already by an earlier check).
     Staged(String),
+    /// An explicitly staged release is held; the periodic check left it alone.
+    Held(String),
     /// The periodic check reached an answer the policy refuses (the guard refused the
     /// release, or updates are off). Not a failure: it never backs off the timer.
     Refused(&'static str),
@@ -428,6 +441,17 @@ impl Updater {
     ) -> Result<Outcome, Stop> {
         lock.sweep()?;
         let mut staged = self.inspect_staged(lock, state).await?;
+        if let Some(held) = state.hold.clone() {
+            if staged.as_deref() != Some(held.as_str())
+                || guard(&self.current, &held, Admission::Explicit) == Ok(Verdict::Same)
+            {
+                // The held release is gone (it failed re-verification or was replaced),
+                // or it was applied and is now running: the hold has ended.
+                state.hold = None;
+            } else if admission == Admission::Forward {
+                return Ok(Outcome::Held(held));
+            }
+        }
         // A staged release the periodic guard would no longer admit (it is the running
         // version after an update, or the server moved past it) is removed.
         if admission == Admission::Forward
@@ -477,6 +501,11 @@ impl Updater {
         };
         if guard(&self.current, &version, admission).map_err(Stop::Refusal)? == Verdict::Same {
             return Ok(Outcome::Current(version));
+        }
+        if admission == Admission::Explicit {
+            // Set before the download: a failed attempt leaves no staged match, so the
+            // next check ends the hold; a successful one keeps it.
+            state.hold = Some(version.clone());
         }
         if staged.as_deref() == Some(version.as_str()) {
             return Ok(Outcome::Staged(version));
@@ -604,8 +633,17 @@ impl Updater {
         state: &mut UpdateState,
     ) -> Result<String, &'static str> {
         let Some(staged) = self.inspect_staged(lock, state).await? else {
+            state.hold = None;
             return Err(NOTHING_STAGED);
         };
+        // An explicit stage (S5 gates it behind the owner and a fresh passkey) was chosen
+        // by the owner, not the channel: it is applied as held, without the pointer.
+        if state.hold.as_deref() == Some(staged.as_str())
+            && guard(&self.current, &staged, Admission::Explicit) == Ok(Verdict::Stage)
+        {
+            return Ok(staged);
+        }
+        state.hold = None;
         let (enabled, channel) = (self.settings)().await?;
         if !enabled {
             return Err(UPDATES_OFF);
@@ -626,6 +664,21 @@ impl Updater {
         }
         retire(lock, state, Some(staged), REMOVED_WITHDRAWN)?;
         Err("the channel no longer offers the staged release")
+    }
+
+    /// Cancel a held explicit stage (a D295 rollback or a channel switch) before S4
+    /// applies it: the staged release is removed, the reason recorded and periodic
+    /// checks resume. Does nothing when no explicit stage is held.
+    /// # Errors
+    /// The update folder is unsafe or the staged release could not be removed.
+    pub async fn cancel_hold(&self) -> Result<(), &'static str> {
+        let lock = Locked::wait(&self.directory).await?;
+        let mut state = status_of(&self.directory, &self.current);
+        let Some(held) = state.hold.take() else {
+            return Ok(());
+        };
+        retire(&lock, &mut state, Some(held), REMOVED_CANCELLED)?;
+        lock.write_state(&state)
     }
 
     /// Start the periodic check: one task that sleeps between checks (no polling).

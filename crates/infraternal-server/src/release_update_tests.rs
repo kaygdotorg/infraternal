@@ -10,7 +10,8 @@
 //! state is visible through `release.update.status`; and a `staged/` found on disk is
 //! re-verified (or removed) before use; and a release the channel withdraws is removed,
 //! both by the periodic check and by S4's apply-time confirmation; policy refusals and
-//! "updates off" never back off the timer.
+//! "updates off" never back off the timer; and an explicit rollback holds until it is
+//! applied or cancelled.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::release_payload::tests::{Bucket, Release};
@@ -231,13 +232,68 @@ async fn older_and_cross_channel_releases_need_an_explicit_request() {
         forward.check(Some(OLD), Admission::Explicit).await,
         Ok(Outcome::Staged(OLD.into()))
     );
-    // The next periodic check removes a staged release it would not have chosen.
-    assert!(matches!(
-        forward.check(None, Admission::Forward).await,
-        Ok(Outcome::Refused(_))
-    ));
-    assert_eq!(state(&release, NEW).staged, None);
-    assert_eq!(leftovers(&release), ["state.json"]);
+    assert_eq!(state(&release, NEW).hold.as_deref(), Some(OLD));
+}
+
+/// An explicit rollback holds until it is applied or cancelled; periodic checks never
+/// wipe it (J725 P3-3).
+#[tokio::test]
+async fn an_explicit_rollback_holds_until_applied_or_cancelled() {
+    let (release, bucket) = channel(NEW);
+    let old = Release::with_version(4096, OLD);
+    bucket.files.lock().unwrap().extend(old.files.clone());
+    let trust = format!("{}{}", release.trust, old.trust);
+    let running_new = updater_with_trust(&release, &bucket.origin, NEW, &trust);
+    assert_eq!(
+        running_new.check(Some(OLD), Admission::Explicit).await,
+        Ok(Outcome::Staged(OLD.into()))
+    );
+    // Several periodic checks later it is still staged, untouched and offline-free.
+    let requests = image_requests(&bucket);
+    for _ in 0..3 {
+        assert_eq!(
+            running_new.check(None, Admission::Forward).await,
+            Ok(Outcome::Held(OLD.into()))
+        );
+    }
+    assert_eq!(
+        image_requests(&bucket),
+        requests,
+        "a held stage asks nothing"
+    );
+    let saved = state(&release, NEW);
+    assert_eq!(
+        (saved.staged.as_deref(), saved.hold.as_deref()),
+        (Some(OLD), Some(OLD))
+    );
+    // S4's confirmation applies the held release, though the channel points elsewhere.
+    assert_eq!(running_new.confirm_staged().await.unwrap().version(), OLD);
+    // Cancelled: removed with the reason, and periodic checks resume.
+    running_new.cancel_hold().await.unwrap();
+    let saved = state(&release, NEW);
+    assert_eq!((saved.staged, saved.hold), (None, None));
+    assert_eq!(
+        saved.removed.unwrap().reason,
+        infraternal_plugin_release::update::REMOVED_CANCELLED
+    );
+    assert_eq!(
+        running_new.check(None, Admission::Forward).await,
+        Ok(Outcome::Current(NEW.into()))
+    );
+    // Held again, then applied: once the server runs OLD the hold ends by itself.
+    assert!(
+        running_new
+            .check(Some(OLD), Admission::Explicit)
+            .await
+            .is_ok()
+    );
+    let running_old = updater_with_trust(&release, &bucket.origin, OLD, &trust);
+    assert_eq!(
+        running_old.check(None, Admission::Forward).await,
+        Ok(Outcome::Staged(NEW.into()))
+    );
+    let saved = state(&release, OLD);
+    assert_eq!((saved.staged.as_deref(), saved.hold), (Some(NEW), None));
 }
 
 /// A flipped image byte, an untrusted signing key and a swapped VERSION are all refused, and no download is kept.
