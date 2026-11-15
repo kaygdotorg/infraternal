@@ -92,15 +92,25 @@ enum Seen {
 
 /// One relay whose messages go through the real writer to a [`HeldSocket`], plus its fake shim.
 struct Fixture {
+    /// The test's private state root, removed by [`stop`].
     root: PathBuf,
+    /// The fake session's id.
     id: [u8; 16],
+    /// Where the relay connects its shim links.
     listener: tokio::net::UnixListener,
+    /// The fake shim's side of the current data link.
     peer: UnixStream,
+    /// Frame reader for `peer`.
     reader: Reader,
+    /// The client's commands to the relay; `None` once the test closes them.
     commands: Option<session_commands::Sender>,
+    /// The writer's held leg-B socket.
     socket: Arc<HeldSocket>,
+    /// Frames the writer put on the wire, in order.
     wire: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// The relay task.
     relay: Option<JoinHandle<io::Result<()>>>,
+    /// The writer task.
     writer: Option<JoinHandle<io::Result<()>>>,
 }
 

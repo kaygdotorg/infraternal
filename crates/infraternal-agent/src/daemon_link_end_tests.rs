@@ -25,12 +25,19 @@ const STAGED_SEQ: u64 = (FIFO_SLOTS * FRAME) as u64;
 
 /// A relay connected to a fake shim that supports session ownership, as real shims do.
 struct OwnedShim {
+    /// The test's private state root, removed by [`stop`].
     root: PathBuf,
+    /// The session's rendezvous socket, beside which an exit record is saved.
     path: PathBuf,
+    /// The fake shim's data link; dropping it fails the relay's link.
     data: Option<UnixStream>,
+    /// The fake shim's ownership link; dropping it is ownership EOF.
     owner: Option<UnixStream>,
+    /// The client's commands to the relay.
     commands: session_commands::Sender,
+    /// The relay's writer FIFO, which only [`drain`] reads.
     messages: mpsc::Receiver<Message>,
+    /// The relay task.
     relay: JoinHandle<io::Result<()>>,
 }
 
