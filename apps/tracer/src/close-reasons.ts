@@ -13,6 +13,13 @@
 export const CONNECTION_LIMIT_REASON = "this account has too many open connections";
 
 /**
+ * The reason the server sends when a newer tab of the same account took this hidden tab's connection, because the
+ * account was at its limit (stream_close.rs `TAKEN_OVER`, owner decision B on #523). The page pauses and connects
+ * again only once it is shown: reconnecting while hidden would take another hidden tab's place in turn.
+ */
+export const TAKEN_OVER_REASON = "another tab of this account is using this connection";
+
+/**
  * The reasons we recognise, each with the sentence a person reads. Several reasons can share a sentence. Add a new
  * server or infraternal agent reason here when one is added there; until then it shows the fallback.
  */
@@ -45,6 +52,7 @@ const KNOWN: Record<string, string> = {
   "the terminal stream sent an invalid protocol frame": "This window sent something the server did not understand, so the connection was closed.",
   "the server refused the terminal attachment": "The server would not open this terminal.",
   "the server refused to resume the connection": "The previous connection could not be restored. Your terminals will reconnect automatically.",
+  "another tab of this account is using this connection": "This tab paused so a newer tab could connect. It reconnects when you come back to it.",
   "this account has too many open connections": "This account is open in too many browser tabs. Close the ones you don't need to connect.",
   "the server stopped receiving connection replies": "The server stopped hearing from this browser.",
   "the server could not write to the connection": "The server could not send to this browser.",

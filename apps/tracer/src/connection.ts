@@ -20,7 +20,7 @@
  * closing the socket: an intermediary may never deliver its close event. Streams retain unacknowledged input.
  */
 import { noteWsMessage } from "./perf-activity";
-import { CloseNotes, CONNECTION_LIMIT_REASON, plainCloseReason } from "./close-reasons";
+import { CloseNotes, CONNECTION_LIMIT_REASON, plainCloseReason, TAKEN_OVER_REASON } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -133,6 +133,11 @@ export interface ConnectionConfig {
    */
   onUnwelcomedClose?: (reason: string | undefined) => void;
   /**
+   * The connection paused (`true`) because a newer tab of the account took its place, or resumed (`false`) on the
+   * next welcome. While paused it does not reconnect until the page is shown (#523, owner decision B).
+   */
+  onPausedChange?: (paused: boolean) => void;
+  /**
    * Asked at every socket open: true advertises the desktop video capability (bit 4, contracts/wire.md §9) in the
    * client's Hello, so the server may open app-window and screen streams on this socket. It is read at connect time,
    * so a person who turns the feature on needs the next connection for it to take effect; the flag is off by default.
@@ -217,6 +222,12 @@ export class MuxConnection {
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
+  /**
+   * Set when the server gave this tab's connection to a newer tab of the account (`TAKEN_OVER_REASON`); cleared by the
+   * next welcome. While set, nothing connects as long as the page is hidden: a hidden tab that reconnected would take
+   * the place of another hidden tab, which would then do the same.
+   */
+  private pausedForTakeover = false;
   private resumeSent = false;
   private serverVisibility = false;
   private attachedCount = 0;
@@ -521,6 +532,11 @@ export class MuxConnection {
   forceClose(code?: number, reason?: string): void {
     const socket = this.socket;
     if (!socket) return;
+    if (reason === TAKEN_OVER_REASON && !this.pausedForTakeover) {
+      // Before `disconnect`, so the reconnect it schedules already sees the pause.
+      this.pausedForTakeover = true;
+      this.config.onPausedChange?.(true);
+    }
     this.noteClose(code, reason, "the server");
     this.forgetRefusedResume(code, reason);
     this.disconnect(socket);
@@ -568,6 +584,8 @@ export class MuxConnection {
   private connect(): void {
     if (this.closed) return;
     this.clearRetryTimer();
+    // A paused tab waits to be shown; the visibility hint that `scheduleReconnect` installs brings it back.
+    if (this.pausedForTakeover && this.pageHidden()) { this.startRetryHintListeners(); return; }
     const resuming = [...this.streams.values()].some((s) => s.hasSession());
     this.status(resuming ? "Connection lost. Reconnecting…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -851,6 +869,7 @@ export class MuxConnection {
         if (this.refusalBackoff) this.retryAttempt = 0;
         this.refusalBackoff = false;
         this.welcomed = true;
+        if (this.pausedForTakeover) { this.pausedForTakeover = false; this.config.onPausedChange?.(false); }
         this.welcomedAt = performance.now();
         this.lastPongAt = this.welcomedAt;
         // A network change may have a different RTT; relearn before enforcing its deadline.
