@@ -19,7 +19,9 @@ Run from a fresh checkout of dev; never from a hand-edited copy (owner rule: lat
 
 - `$KIT_HOME` (default `/Users/Shared/h2h-mac`) with `bin/`: `j421net`, the harness binaries
   (`mesh-bench-pin`, `mesh-bench-cand`; override with `PIN_BIN`/`CAND_BIN`), `tailscale`,
-  `tailscaled`, `netbird` (pinned versions in `../../pins.txt`).
+  `tailscaled`, `netbird`: built by `build-harness.sh daemons` from the source tags pinned in
+  `../../pins.txt`; `mac-window.sh` runs `check-pins.sh` first and refuses (exit 4) when an installed
+  client reports another version.
 - The harness test `macos_node::tests::mac_bench_device` is in `macos_node.rs` of this checkout.
   Build both binaries from the checkout itself, under the Mac lock (the Mac disk is small: one
   build at a time, the script deletes its target): `build-harness.sh harness mesh-bench-pin`

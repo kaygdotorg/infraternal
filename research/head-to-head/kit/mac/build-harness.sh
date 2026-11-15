@@ -5,6 +5,7 @@
 #
 #   lockf -k /tmp/mac-bench.lock bash mac/build-harness.sh harness <name> [<gotatun-rev>]
 #   lockf -k /tmp/mac-bench.lock bash mac/build-harness.sh j421net
+#   lockf -k /tmp/mac-bench.lock bash mac/build-harness.sh daemons   # tailscale(d) + netbird, pinned
 #
 # `harness` builds the `infraternal-plugin-mesh` test binary (it carries the ignored
 # `mac_bench_device` test, the product's own Mac data path with one static peer) and copies it to
@@ -28,7 +29,23 @@ BIN=$J/bin; mkdir -p "$BIN"
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../../.." && pwd)
 MESH_TOML=crates/plugins/mesh/Cargo.toml
-case ${1:?harness|j421net} in
+case ${1:?harness|j421net|daemons} in
+  daemons)
+    # tailscale, tailscaled and netbird from the source tags pinned in pins.txt (sha256 checked),
+    # so check-pins.sh can refuse a window whose clients are another version.
+    PINS=$here/../../pins.txt; W=$(mktemp -d "${TMPDIR:-/tmp}/h2h-daemons.XXXXXX"); trap 'rm -rf "$W"' EXIT
+    for n in tailscale netbird; do
+      read -r url sha < <(awk -v n="$n-src" '$1 == n && $2 == "darwin-arm64" {print $3, $4}' "$PINS")
+      [ -n "$url" ] || { echo "no darwin-arm64 pin for $n" >&2; exit 1; }
+      curl -sSL -o "$W/$n.tgz" "$url"
+      [ "$(shasum -a 256 "$W/$n.tgz" | cut -d' ' -f1)" = "$sha" ] || { echo "sha256 mismatch for $n source" >&2; exit 1; }
+      mkdir "$W/$n" && tar -xzf "$W/$n.tgz" -C "$W/$n" --strip-components=1
+    done
+    export CGO_ENABLED=0 GOFLAGS=-trimpath
+    (cd "$W/tailscale" && go build -o "$BIN/tailscale" ./cmd/tailscale && go build -o "$BIN/tailscaled" ./cmd/tailscaled)
+    # NetBird reports "development" unless its release version is linked in.
+    (cd "$W/netbird" && go build -ldflags "-X github.com/netbirdio/netbird/version.version=$(awk '$1=="netbird-src"&&$2=="darwin-arm64"{print $3}' "$PINS" | sed -nE 's#.*/v([0-9.]+)\.tar\.gz#\1#p')" -o "$BIN/netbird" ./client)
+    bash "$here/check-pins.sh" "$PINS" "$BIN" tailscale netbird ;;
   j421net)
     cd "$here/../../tools/j421net" && CGO_ENABLED=0 go build -trimpath -o "$BIN/j421net" . && shasum -a 256 "$BIN/j421net" ;;
   harness)

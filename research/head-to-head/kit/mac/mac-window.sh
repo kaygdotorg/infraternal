@@ -31,6 +31,13 @@ BIN=$J/bin
 EV=$J/ev/$W
 R=$J/run   # per-window engine state on the Mac (root-owned files where engines write)
 mkdir -p "$EV"
+# Refuse before any side effect when a third-party client is not the pinned version (pins.txt).
+here=$(cd "$(dirname "$0")" && pwd)
+if ! pin_out=$(bash "$here/check-pins.sh" "$here/../../pins.txt" "$BIN" "$@"); then
+  echo "$pin_out" | tee -a "$EV/window.log"
+  echo "REFUSED: a client version differs from pins.txt (see $EV/window.log)" >&2; exit 4
+fi
+echo "$pin_out" >> "$EV/window.log"
 ME=${ME:-$(ipconfig getifaddr en0)}
 PEER=${PEER:?}; PSSH=${PSSH:?}
 LAN_SECS=${LAN_SECS:-15}; DIRS=${DIRS:-mac-tx mac-rx}
