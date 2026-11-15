@@ -760,6 +760,49 @@ fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof
         && link.owner.is_some_and(|owner| proof.accepts(owner))
 }
 
+/// Choose the port a restarted kernel node keeps on the link it adopted, and save it.
+///
+/// Kernel links outlive their process (D332), so restore finds the old port already bound.
+/// D391 still applies: an explicit `INFRATERNAL_MESH_PORT` binds exactly that port and fails if it
+/// is taken (J555 F3). Without an override, the node moves back to its saved or default port when
+/// that is free, the same as `GotaTun`, which binds on every start, and otherwise keeps the port it
+/// has as its fallback. A retained link from an older daemon may sit on the reserved 51820; it
+/// moves to a fresh port. The saved port follows `up`'s rule: a fallback is saved, an override
+/// saves the default, so removing the override later moves the node back.
+/// # Errors
+/// Reports a malformed override, a taken explicit port, kernel errors, or a failed state write.
+fn restore_kernel_listen_port(node: &Node, ifindex: u32, current: u16) -> io::Result<u16> {
+    let saved = node
+        .store
+        .as_ref()
+        .map(crate::node_state::Store::recorded_listen_port)
+        .transpose()?
+        .flatten();
+    let request = crate::listen_port::from_environment(saved)?;
+    let mut port = current;
+    if request.port != current {
+        match Device::set_listen_port(ifindex, request.port) {
+            Ok(()) => port = request.port,
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if port == 51820 {
+        port = Device::allocate_port(ifindex)?;
+    }
+    if let Some(store) = &node.store {
+        let keep = if request.allow_fallback {
+            port
+        } else {
+            crate::listen_port::DEFAULT_PORT
+        };
+        if saved != Some(keep) {
+            store.record_listen_port(keep)?;
+        }
+    }
+    Ok(port)
+}
+
 /// Recreate the `GotaTun` private-key file only from the durable rotation journal.
 ///
 /// A clean stop removes that file after stopping the userspace engine. During an open commit, a
@@ -1280,11 +1323,7 @@ impl Node {
             if public_key.0 == [0; 32] || port == 0 {
                 return Err(io::ErrorKind::NotConnected.into());
             }
-            // A retained interface from an older daemon may have selected the
-            // reserved port. Rebind its socket while preserving its private key.
-            if port == 51820 {
-                port = Device::allocate_port(link.ifindex)?;
-            }
+            port = restore_kernel_listen_port(&node, link.ifindex, port)?;
             node.identity = Some(Identity {
                 public_key,
                 port,
@@ -1295,6 +1334,8 @@ impl Node {
                 key_rotation: true,
                 authority_epoch: true,
             });
+            // The restored kernel socket's port is what the host input table admits (D386).
+            node.firewall.set_listen_port(Some(port))?;
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
@@ -1332,8 +1373,10 @@ impl Node {
     /// own, a live mesh link belongs to another running node whose policy the
     /// filter enforces (#260). An unmarked interface with the shared name
     /// counts as live: it may be another node's TUN before it is marked.
+    /// The same step closes the mesh listener this node opened in the host
+    /// input table, which a `GotaTun` node may hold without any kernel table.
     fn remove_unshared_filter(&mut self) -> io::Result<()> {
-        if !self.firewall.installed() {
+        if !self.firewall.installed() && !self.firewall.host_ingress_open() {
             return Ok(());
         }
         match Device::active_link() {
@@ -1456,6 +1499,14 @@ impl Node {
     #[must_use]
     pub fn active(&self) -> bool {
         self.identity.is_some()
+    }
+    /// Return the active UDP listener port advertised by this node's mesh identity.
+    ///
+    /// `None` means the data plane is stopped or has not bound a socket yet. The value is the
+    /// actual port after automatic fallback, so `mesh status` can report what peers should reach.
+    #[must_use]
+    pub fn listen_port(&self) -> Option<u16> {
+        self.identity.as_ref().map(|identity| identity.port)
     }
     /// Whether a retired authority still needs a complete snapshot from the enrolled server.
     #[must_use]
@@ -1841,6 +1892,13 @@ impl Node {
             self.ensure_route_repair()?;
             return Ok(identity);
         }
+        let saved_port = self
+            .store
+            .as_ref()
+            .map(crate::node_state::Store::recorded_listen_port)
+            .transpose()?
+            .flatten();
+        let listen_port = crate::listen_port::from_environment(saved_port)?;
         if self.engine_kind == EngineKind::GotaTun
             && let Some(store) = &self.store
         {
@@ -1870,7 +1928,17 @@ impl Node {
                 {
                     hook();
                 }
-                if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                let configure = Device::configure(created, public_key, &key, listen_port.port);
+                let configure = match configure {
+                    Err(error)
+                        if listen_port.allow_fallback
+                            && error.kind() == io::ErrorKind::AddrInUse =>
+                    {
+                        Device::configure(created, public_key, &key, 0)
+                    }
+                    result => result,
+                };
+                if let Err(error) = configure {
                     // Delete exactly the link this call created: `down` proves links by the
                     // shared name, which may no longer lead to ours (#260 J242).
                     let _ = Device::delete_ifindex(created);
@@ -1881,6 +1949,14 @@ impl Node {
                     let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    if let Some(store) = &self.store {
+                        let saved = if listen_port.allow_fallback {
+                            port
+                        } else {
+                            crate::listen_port::DEFAULT_PORT
+                        };
+                        store.record_listen_port(saved)?;
                     }
                     let client = Client::new()?;
                     let route_repair =
@@ -1904,6 +1980,8 @@ impl Node {
                             authority_epoch: true,
                         };
                         self.identity = Some(identity.clone());
+                        // The host input table admits exactly the port this socket bound (D386).
+                        self.firewall.set_listen_port(Some(identity.port))?;
                         Ok(identity)
                     }
                     Err(error) => {
@@ -1921,7 +1999,7 @@ impl Node {
                 let engine = Engine::start(
                     key.gotatun_secret()?,
                     public_key,
-                    0,
+                    listen_port,
                     None,
                     &self.proxy_ingress,
                     adopt,
@@ -1936,6 +2014,18 @@ impl Node {
                     let mut engine = engine;
                     let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
+                }
+                if let Some(store) = &self.store {
+                    let saved = if listen_port.allow_fallback {
+                        port
+                    } else {
+                        crate::listen_port::DEFAULT_PORT
+                    };
+                    if let Err(error) = store.record_listen_port(saved) {
+                        let mut engine = engine;
+                        let _ = engine.stop();
+                        return Err(error);
+                    }
                 }
                 let route_repair =
                     match RouteRepairWorker::start(Arc::clone(&self.peer_route_state)) {
@@ -1969,6 +2059,8 @@ impl Node {
                     authority_epoch: true,
                 };
                 self.identity = Some(identity.clone());
+                // The host input table admits exactly the port this socket bound (D386).
+                self.firewall.set_listen_port(Some(identity.port))?;
                 Ok(identity)
             }
         }
@@ -2564,7 +2656,10 @@ impl Node {
             self.remove_unshared_filter()?;
         }
         self.retire_routes()?;
-        self.firewall = Firewall::default();
+        // A fresh firewall keeps this node's engine mode: a `GotaTun` node that comes up again
+        // in this process must stay on the optional guard, not switch to the full kernel policy,
+        // which needs nft or iptables-nft (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
         self.gotatun = None;
@@ -2742,17 +2837,23 @@ impl Node {
     }
 
     /// Check that the live data plane contains exactly the keys in a same-content snapshot.
+    ///
+    /// `GotaTun` omits peers with no network access so their configured endpoints cannot receive
+    /// unsolicited handshakes. The kernel engine retains its complete peer inventory.
     fn runtime_peer_inventory_matches(&self, config: &Config) -> bool {
         let Ok(counters) = self.peer_counters() else {
             return false;
         };
         let installed: std::collections::BTreeSet<_> = counters.keys().copied().collect();
-        let desired: std::collections::BTreeSet<_> = config
-            .peers
-            .values()
-            .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
-            .flatten()
-            .collect();
+        let desired = match self.engine_kind {
+            EngineKind::GotaTun => crate::gotatun_node::peer_keys_with_network_access(config),
+            EngineKind::Kernel => config
+                .peers
+                .values()
+                .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
+                .flatten()
+                .collect(),
+        };
         installed == desired
     }
 
@@ -2956,7 +3057,8 @@ impl Node {
         if let Err(error) = self.remove_unshared_filter() {
             first_error.get_or_insert(error);
         }
-        self.firewall = Firewall::default();
+        // Keep the engine's firewall mode for the next `up`, as `down` does (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.identity = None;
         self.owned = false;
@@ -4274,6 +4376,12 @@ mod tests {
 #[cfg(test)]
 #[path = "node_rotation_tests.rs"]
 mod rotation_tests;
+
+/// Namespace proofs that a `GotaTun` node opens and closes its host listener without any
+/// firewall tool (#483, D384, D386).
+#[cfg(test)]
+#[path = "node_host_listener_tests.rs"]
+mod host_listener_tests;
 
 /// Root-only measurement of live traffic across a same-content coordinator restart (#382 P2-c).
 #[cfg(test)]

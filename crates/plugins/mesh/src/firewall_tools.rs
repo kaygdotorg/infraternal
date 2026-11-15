@@ -313,6 +313,10 @@ static CACHE: Mutex<[Option<PathBuf>; 5]> = Mutex::new([None, None, None, None, 
 /// # Errors
 /// Returns [`Missing`] naming the tool and every place searched.
 pub(crate) fn find(tool: Tool) -> Result<PathBuf, Missing> {
+    #[cfg(test)]
+    if HIDDEN_FOR_TEST.with(std::cell::Cell::get) {
+        return Err(Missing(tool));
+    }
     let lookup = Lookup::system();
     let mut cache = CACHE
         .lock()
@@ -324,6 +328,46 @@ pub(crate) fn find(tool: Tool) -> Result<PathBuf, Missing> {
     let found = lookup.find(tool, None);
     *slot = found.as_ref().ok().cloned();
     found
+}
+
+// Namespace tests prove what a node does on a host with no firewall tool at all.
+#[cfg(test)]
+std::thread_local! {
+    /// Whether [`find`] reports every tool missing on this test thread.
+    static HIDDEN_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A test-only guard under which [`find`] finds no tool on the current thread.
+///
+/// The privileged test runner marks the host's root-owned nft and iptables-nft
+/// as trusted, so a namespace test would otherwise always find them. Install
+/// this to model a host without any of them, for example a `GotaTun` node
+/// whose optional kernel guard cannot be installed. Dropping it restores the
+/// normal lookup. The process-wide cache is left alone, so later lookups on
+/// other threads are unaffected.
+#[cfg(test)]
+pub(crate) struct HiddenToolsForTest {
+    /// Whether tools were already hidden when this guard was installed.
+    previous: bool,
+}
+
+#[cfg(test)]
+impl HiddenToolsForTest {
+    /// Hide every firewall tool from [`find`] on this thread until the guard is dropped.
+    #[must_use]
+    pub(crate) fn install() -> Self {
+        Self {
+            previous: HIDDEN_FOR_TEST.with(|hidden| hidden.replace(true)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for HiddenToolsForTest {
+    /// Restore the lookup this thread had before the guard.
+    fn drop(&mut self) {
+        HIDDEN_FOR_TEST.with(|hidden| hidden.set(self.previous));
+    }
 }
 
 /// Lookup order, hop-by-hop trust checks and missing-tool messages, over private trees.

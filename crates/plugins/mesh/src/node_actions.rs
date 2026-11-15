@@ -46,6 +46,7 @@ pub const ACTIONS: &[ActionDef] = &[
         Effect::Read,
         &[
             "Read whether the mesh is on, its addresses, and which access rules apply.",
+            "Read the UDP port this machine is actually listening on.",
             "Read how this machine reaches its server: over the mesh, or over the enrolled port.",
             "With --json, data.public_key is the active public key only; the field is absent without a Mesh identity.",
         ],
@@ -660,7 +661,19 @@ impl AgentPlugin for MeshNodePlugin {
                     } else {
                         "Waiting"
                     };
-                    let mut status = json!({"state":state,"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node),"enforcement":access_enforcement(node),"kernel_guard":kernel_guard_status(node)});
+                    let mut status = json!({
+                        "state": state,
+                        "version": node.config().map(|config| config.version),
+                        "addresses": node.config().map(|config| config.addresses),
+                        "peer_count": node.config().map_or(0, |config| config.peers.len()),
+                        "default_policy": node.config().map(|config| config.default_policy),
+                        "udp_port": node.listen_port(),
+                        "server_link": self.server_link,
+                        "engine": engine_health(node),
+                        "engine_selection": engine_selection(node),
+                        "enforcement": access_enforcement(node),
+                        "kernel_guard": kernel_guard_status(node),
+                    });
                     // Public identity is useful for continuity checks; private key material never leaves the node.
                     if let Some(public_key) = node.interface_key() {
                         status["public_key"] = json!(public_key.0);
@@ -1116,6 +1129,10 @@ mod tests {
             status["server_link"],
             serde_json::to_value(&observed).expect("observed link")
         );
+        assert_eq!(
+            status["udp_port"], 10_254,
+            "mesh status reports the actual listener port"
+        );
         plugin.call("mesh.down", b"{}").expect("down");
         assert!(plugin.preferred_server().is_none());
         plugin.call("mesh.up", b"{}").expect("up");
@@ -1299,10 +1316,13 @@ mod tests {
             ])
         );
     }
-    /// Preserves explicit-off intent after failed kernel-firewall cleanup and reconnect.
+    /// D386 lets mesh cleanup remove a recreated table in the product-owned namespace.
+    ///
+    /// It runs on the kernel `WireGuard` engine, where nft holds the full peer policy (D346), so
+    /// the recreated table is the one the grants live in.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn kernel_firewall_cleanup_failure_reports_stopping_and_reconnect_keeps_explicit_off() {
+    fn mesh_down_removes_a_recreated_product_table_and_keeps_explicit_off() {
         use crate::{
             dataplane::DefaultPolicy,
             policy::model::{Addresses, NodeId},
@@ -1311,6 +1331,8 @@ mod tests {
             io::Write as _,
             process::{Command, Stdio},
         };
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = crate::host_firewall::discover_nft(None).expect("fixed-path nft fixture");
         let mut plugin = MeshNodePlugin::from_node(
             Node::default().with_engine(crate::gotatun_node::EngineKind::Kernel),
         );
@@ -1349,7 +1371,7 @@ mod tests {
                 &serde_json::to_vec(&chunk).expect("chunk"),
             )
             .expect("configure");
-        let mut child = Command::new("/usr/sbin/nft")
+        let mut child = Command::new(&nft)
             .args(["-f", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1363,19 +1385,24 @@ mod tests {
             .write_all(b"delete table inet infraternal_mesh\nadd table inet infraternal_mesh\n")
             .expect("fixture batch");
         assert!(child.wait().expect("fixture status").success());
-        assert!(plugin.call("mesh.down", b"{}").is_err());
+        let down: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.down", b"{}").expect("mesh down"))
+                .expect("JSON");
+        assert_eq!(down["state"], "Off");
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("status"))
                 .expect("JSON");
-        assert_eq!(status["state"], "Stopping");
+        assert_eq!(status["state"], "Off");
         assert!(
-            Command::new("/usr/sbin/nft")
-                .args(["delete", "table", "inet", "infraternal_mesh"])
+            !Command::new(&nft)
+                .args(["-j", "list", "table", "inet", "infraternal_mesh"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
-                .expect("fixture cleanup")
-                .success()
+                .expect("inspect product table")
+                .success(),
+            "D386 cleanup removes the product-owned table even without its old marker"
         );
-        plugin.call("mesh.down", b"{}").expect("finish cleanup");
         assert_eq!(
             plugin.call("mesh.identity", b"{}").expect("reconnect"),
             b"null"
