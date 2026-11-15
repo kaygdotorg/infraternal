@@ -62,6 +62,17 @@ pub use infraternal_plugin_mesh::api as mesh_api;
 mod api_actions;
 #[cfg(feature = "remote")]
 pub mod enrollment;
+/// The host activity log and the root upgrade's wait rule (D376, #399).
+pub mod host_activity;
+/// The server's side of a root upgrade over the rootless infraternal agent (D376, #399).
+#[cfg(all(feature = "ssh", feature = "remote"))]
+mod host_privilege;
+/// The browser's endpoints for a root upgrade (D376, #399).
+#[cfg(all(feature = "ssh", feature = "remote"))]
+mod host_privilege_http;
+/// Drives one root upgrade from begin to handover (D376, #399).
+#[cfg(all(feature = "ssh", feature = "remote"))]
+mod host_promotion;
 /// Server-scheduled host identity key rotation (#285).
 #[cfg(feature = "remote")]
 mod identity_rotation;
@@ -105,6 +116,9 @@ mod remote_standby;
 pub mod remote_standby_request;
 #[cfg(feature = "remote")]
 mod remote_startup;
+/// A root upgrade's successor lane and its outboxes (D376, #399).
+#[cfg(feature = "remote")]
+mod remote_successor;
 mod runtime;
 mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]

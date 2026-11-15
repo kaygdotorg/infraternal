@@ -59,10 +59,14 @@ fn lifetime_precedes_bind_and_survives_until_last_description_closes() {
     // may still hold a copy until it execs. Wait for that release.
     assert!(after_close(&false, || acquire(&fixture.state()).is_ok()));
 }
+/// While cleanup holds the install's setup guard file exclusively, a
+/// starting runtime waits for admission, and once cleanup has removed the
+/// installation it refuses to start instead of recreating it (#399).
 #[test]
 fn cleanup_admission_prevents_starting_even_if_runtime_lock_was_removed() {
     let fixture = Fixture::new();
-    let parent = File::open(&fixture.0).unwrap();
+    // Cleanup holds the install's setup guard file exclusively (#399).
+    let parent = crate::uninstall::open_setup_guard(&fixture.0.join("base")).unwrap();
     parent.try_lock().unwrap();
     let state = fixture.state();
     let (ready, started) = std::sync::mpsc::channel();

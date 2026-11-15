@@ -16,6 +16,9 @@ use uuid::Uuid;
 pub(crate) mod authority;
 #[path = "bootstrap_retirement.rs"]
 mod bootstrap_retirement;
+/// The durable record of upgrading a host to root (D376).
+#[path = "remote_promotion.rs"]
+pub(crate) mod promotion;
 pub use authority::HostAuthority;
 
 pub use infraternal_plugin_remote::enrollment::Mode;
@@ -427,18 +430,26 @@ impl EnrollmentStore {
             transaction.rollback().await?;
             return Err(EnrollmentError::Denied);
         }
-        sqlx::query(
+        // An invitation's certificate is the host's ordinary identity, for the
+        // uid the host row holds (J415 R1). The SELECT reads it in this write.
+        let inserted = sqlx::query(
             "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, \
-             public_key, not_before, not_after) VALUES (?, ?, ?, ?, ?, ?)",
+             public_key, not_before, not_after, role, execution_uid) \
+             SELECT ?, h.id, ?, ?, ?, ?, 'active', h.execution_uid FROM remote_hosts h WHERE h.id=?",
         )
         .bind(certificate.fingerprint.as_slice())
-        .bind(host.as_bytes().as_slice())
         .bind(certificate.issuer_fingerprint.as_slice())
         .bind(certificate.public_key.as_slice())
         .bind(certificate.not_before)
         .bind(certificate.not_after)
+        .bind(host.as_bytes().as_slice())
         .execute(&mut *transaction)
-        .await?;
+        .await?
+        .rows_affected();
+        if inserted != 1 {
+            transaction.rollback().await?;
+            return Err(EnrollmentError::Denied);
+        }
         transaction.commit().await?;
         self.2.publish();
         Ok(())

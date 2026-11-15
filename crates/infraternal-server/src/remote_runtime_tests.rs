@@ -198,7 +198,7 @@ async fn expired_identity(
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
         .bind(previous.record.fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(previous.record.issuer_fingerprint.as_slice())
@@ -1157,3 +1157,54 @@ async fn late_native_detach_after_peer_stop_keeps_the_control_connection() {
 
 #[path = "remote_ping_flood_tests.rs"]
 mod ping_flood;
+
+/// A promotion closes host terminal admission until its final census and handover finish.
+#[tokio::test]
+async fn promotion_blocks_new_terminal_admission_until_its_guard_drops() {
+    let hosts = RemoteHosts::default();
+    let host = Uuid::from_u128(0x522);
+
+    let promotion = hosts.block_terminal_opens(host).await.unwrap();
+    assert!(hosts.admit_terminal_open(host).is_err());
+
+    drop(promotion);
+    assert!(hosts.admit_terminal_open(host).is_ok());
+}
+
+/// A promotion waits for open sessions admitted before it closed the host gate.
+#[tokio::test]
+async fn promotion_waits_for_an_admitted_terminal_open_to_finish() {
+    let hosts = std::sync::Arc::new(RemoteHosts::default());
+    let host = Uuid::from_u128(0x523);
+    let in_flight = hosts.admit_terminal_open(host).unwrap();
+    let promotion_hosts = std::sync::Arc::clone(&hosts);
+    let (ready, mut promotion_ready) = tokio::sync::oneshot::channel();
+    let promotion = tokio::spawn(async move {
+        let guard = promotion_hosts.block_terminal_opens(host).await.unwrap();
+        let _ = ready.send(());
+        guard
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if hosts.admit_terminal_open(host).is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!promotion.is_finished());
+    assert!(promotion_ready.try_recv().is_err());
+
+    drop(in_flight);
+    tokio::time::timeout(Duration::from_secs(5), &mut promotion_ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let promotion = promotion.await.unwrap();
+    assert!(hosts.admit_terminal_open(host).is_err());
+    drop(promotion);
+    assert!(hosts.admit_terminal_open(host).is_ok());
+}

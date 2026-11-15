@@ -87,6 +87,8 @@ a:hover { text-decoration-color: currentColor; }
 .docs-col .doc h4 { margin: 1.75rem 0 0.5rem; font-size: 1em; font-weight: var(--fw-title); }
 .docs-col .doc .doc-body > h2:first-child { padding-top: 0; border-top: 0; }
 .docs-col .doc :target { scroll-margin-top: calc(var(--bar-h) + 1rem); }
+/* Under 40 rem the top bar is not sticky (site.css), so nothing covers the heading: it lands 1 rem from the top, not 82 px low (#482). */
+@media (max-width: 40rem) { .docs-col .doc :target { scroll-margin-top: 1rem; } }
 /* The measure: 68 characters of Maple Mono, about 720 px at the desktop size. */
 .docs-col .doc-head, .docs-col .doc-body { max-width: 68ch; }
 .docs-col .doc code { font-size: 0.88em; }
