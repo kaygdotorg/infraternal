@@ -51,7 +51,7 @@ import { createProductRows } from "./settings-rows/product-source";
 
 import type { CanvasStore } from "./model/store";
 import { watchPendingNotice } from "./pending-notice";
-import { mountStartupNotice, watchStartup } from "./startup-notice";
+import { mountStartupNotice, startupProblem, watchStartup } from "./startup-notice";
 
 /** How long the host list waits for the first terminal to settle before it starts on its own. */
 const HOSTS_FALLBACK_MS = 2000;
@@ -96,8 +96,13 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // Until the layout arrives the page shows only the core screen's placeholder pane; if the first connection cannot be
   // made, this says why in that pane instead of leaving it blank (#523). It ends on the first welcome.
   const startup = watchStartup(mountStartupNotice(core.panes.querySelector<HTMLElement>(".pane-card") ?? core.panes, () => connection.connectNow()));
+  // Set by a close that refused this socket for the account's connection limit, and read once by the link-lost check
+  // that follows it. The server checked the session before it counted the account's sockets, so that close needs no
+  // session check. Each refused retry would otherwise spend one, and a few pages over the limit used up the account's
+  // sign-in request budget: every load then failed with "Too many attempts" (#523 spec).
+  let limitRefused = false;
   const connection: MuxConnection = new MuxConnection({
-    onUnwelcomedClose: (reason) => startup.closed(reason),
+    onUnwelcomedClose: (reason) => { limitRefused = startupProblem(reason) === "limit"; startup.closed(reason); },
     ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
     // Declared in the Hello of each socket, only while app windows are wanted (D208; off by default).
     desktop: appWindowsWanted,
@@ -105,7 +110,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.onRecoveryCompleted ? { onRecoveryCompleted: options.onRecoveryCompleted } : {}),
     onConnectionChange: (connected) => {
       core.setConnection(connected);
-      if (!connected) options.onSessionCheck?.();
+      const sessionKnownValid = limitRefused;
+      limitRefused = false;
+      if (!connected && !sessionKnownValid) options.onSessionCheck?.();
       if (!connected || osAsked) return;
       osAsked = true;
       connection.call("host.facts.read", { includeLive: false }).then((facts) => {
