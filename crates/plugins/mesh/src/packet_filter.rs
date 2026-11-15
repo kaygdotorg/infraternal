@@ -18,7 +18,14 @@
 //!   flows. Its 64 fragment slots are allocated separately, the first time the peer fragments.
 //!   The table must fit the 72 KiB budget ([`PER_PEER_MEMORY_BUDGET`], checked at build time).
 //!   At D393's design scale of 1,000 peers with 10 of them active, the filter adds under
-//!   1 MiB. Compiling a policy allocates no tables, so publishing never doubles memory.
+//!   1 MiB. With all of D393's tested 4,096 peers active (one flow each) it adds 214 MiB, about
+//!   52 KiB per flow table (J750, #265; fragment tables would add about 15 KiB each). That is
+//!   the worst case and stays within the per-peer budget: each authenticated peer in the policy
+//!   gets at most one flow table and one fragment table, and only after a grant check passes.
+//!   Compiling a policy allocates no tables, so publishing never doubles memory.
+//! - **Freeing:** a table is freed only by the sweep after a publish, when it is empty or its
+//!   peer has left the policy. A peer that was busy once keeps its table, expired entries and
+//!   all, until the next publish finds it empty.
 //! - **Publishing** a policy swaps one pointer under the write lock, the only lock every packet
 //!   waits behind, so that lock is held for the same short time at 4,096 peers as at 4. The flow
 //!   tables live outside the policy, in [`PacketFilter::tables`], and survive the swap
