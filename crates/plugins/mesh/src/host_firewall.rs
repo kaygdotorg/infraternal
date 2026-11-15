@@ -47,7 +47,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 /// The only nft executable names this product checks without a configured path.
 ///
@@ -1334,6 +1334,18 @@ pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<(), PolicyError
     {
         return Err(PolicyError::UnsafePolicy(path.to_owned()));
     }
+    // A missing policy folder is created private (0700), never with the
+    // default 0755: on a host where `infraternal up` saves the agent policy
+    // before `server init --system`, this creates `/var/lib/infraternal`, the
+    // D395 data folder, and the server install keeps an existing folder's
+    // mode (J755). Folders that already exist keep theirs.
+    #[cfg(unix)]
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+        .map_err(PolicyError::Io)?;
+    #[cfg(not(unix))]
     fs::create_dir_all(parent).map_err(PolicyError::Io)?;
     validate_policy_directories(parent, path)?;
     match fs::symlink_metadata(path) {
@@ -2212,6 +2224,33 @@ mod tests {
         HOST_TABLE, MESH_UDP_DEFAULT_PORT, Policy, PolicyError, combine,
         host_table_removal_failure, render, update_mesh_listener,
     };
+
+    /// A missing policy folder is created 0700, so an agent-first host's `/var/lib/infraternal` is private (J755 P3-3).
+    ///
+    /// The scratch folder is not root-owned, so the write itself is refused
+    /// by the directory check after the folder exists; only the mode of the
+    /// folder it created matters here.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_policy_folder_is_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "j771-policy-folder-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let folder = root.join("var/lib/infraternal");
+        let _ =
+            super::write_policy_file(&folder.join("host-firewall-agent.json"), &Policy::default());
+        let mode = std::fs::metadata(&folder)
+            .expect("the policy writer creates its missing folder")
+            .permissions()
+            .mode();
+        std::fs::remove_dir_all(&root).expect("remove the scratch folder");
+        assert_eq!(mode & 0o777, 0o700);
+    }
 
     /// Applying the current mesh listener again leaves its policy unchanged and reports no work.
     #[test]

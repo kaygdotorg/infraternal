@@ -45,20 +45,91 @@ impl ReleaseEngine for Engine {
         crate::release_verify::verify_release_file(file, "VERSION", sums, signature)
             .map_err(|_| "release VERSION could not be verified")
     }
+    fn verify_image(
+        &self,
+        version: &std::fs::File,
+        image: &std::fs::File,
+        name: &str,
+        sums: &[u8],
+        signature: &[u8],
+    ) -> Result<String, &'static str> {
+        use crate::release_verify::ReleaseError;
+        #[cfg(test)]
+        let result = match &self.trust {
+            Some(trust) => crate::release_verify::verify_identity_with_trust(
+                version, image, name, sums, signature, trust,
+            ),
+            None => crate::release_verify::verify_release_identity(
+                version, image, name, sums, signature,
+            ),
+        };
+        #[cfg(not(test))]
+        let result =
+            crate::release_verify::verify_release_identity(version, image, name, sums, signature);
+        result.map_err(|error| match error {
+            ReleaseError::Signature | ReleaseError::Untrusted | ReleaseError::Invalid => {
+                "the release signature could not be verified"
+            }
+            ReleaseError::Checksums => "the signed checksums do not list this release image",
+            ReleaseError::Digest => "the release does not match its signed checksums",
+            ReleaseError::Read => "the downloaded release could not be read",
+            ReleaseError::Version => "the signed release version is malformed",
+        })
+    }
 }
+
+/// The builds host every release lookup and update check uses (D184).
+const ORIGIN: &str = "https://builds.infraternal.com";
+
+/// Start the server's periodic update check for the data folder `data` (#211 S3).
+///
+/// It runs only where an update could ever be applied: a pipeline release build
+/// (`INFRATERNAL_RELEASE_BUILD=1`, so the version is a real signed identity), running
+/// as root (the D295 switch replaces a root-owned binary, and the staging folder must
+/// be root-only), on a platform with a published server image. Everywhere else it
+/// returns `None` and starts nothing. The returned task sleeps between checks and is
+/// stopped by aborting it; it never applies a release.
+pub(crate) fn start_updates(
+    pool: sqlx::SqlitePool,
+    data: &Path,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let artifact = infraternal_plugin_release::update::availability(release_build()).ok()?;
+    let updater = infraternal_plugin_release::update::Updater::new(
+        data,
+        ORIGIN.into(),
+        infraternal_plugin_api::VERSION.into(),
+        artifact.into(),
+        Arc::new(Engine {
+            #[cfg(test)]
+            trust: None,
+        }),
+        infraternal_plugin_release::service::settings_reader(pool),
+    );
+    Some(Arc::new(updater).spawn())
+}
+/// Whether this binary is a pipeline release build (`INFRATERNAL_RELEASE_BUILD=1`).
+fn release_build() -> bool {
+    env!("INFRATERNAL_RELEASE_BUILD") == "1"
+}
+
 /// Bind declared release actions to an existing private state directory; never initialize a server.
 #[must_use]
 pub fn release_service(pool: sqlx::SqlitePool, state: &Path) -> ReleaseService {
     ReleaseService::new(
         pool,
-        Arc::new(VerifiedLookup::new(
-            state.to_owned(),
-            "https://builds.infraternal.com".into(),
-            Arc::new(Engine {
-                #[cfg(test)]
-                trust: None,
-            }),
-        )),
+        Arc::new(
+            VerifiedLookup::new(
+                state.to_owned(),
+                ORIGIN.into(),
+                Arc::new(Engine {
+                    #[cfg(test)]
+                    trust: None,
+                }),
+            )
+            .with_updates(
+                infraternal_plugin_release::update::availability(release_build()).map(|_| ()),
+            ),
+        ),
     )
 }
 pub(crate) async fn plugin(
@@ -83,3 +154,8 @@ pub(crate) async fn plugin(
 #[cfg(all(test, feature = "ssh"))]
 #[path = "release_latest_tests.rs"]
 mod tests;
+
+/// End-to-end update check and staging against a loopback test channel (#211 S3).
+#[cfg(all(test, feature = "ssh"))]
+#[path = "release_update_tests.rs"]
+mod update_tests;

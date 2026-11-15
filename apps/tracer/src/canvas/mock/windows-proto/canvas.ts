@@ -522,7 +522,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
       await new Promise((resolve) => window.setTimeout(resolve, mode === "slowfail" ? 1500 : 400));
       if (mode === "slowfail") return { state: "failed", message: "The host could not be removed. Sign in again, then try again." };
       if (mode === "fail" && attempts === 1) return { state: "failed", message: "The host could not be removed. Sign in again, then try again." };
-      if (mode === "refused") return { state: "refused", message: "Another host removal is still running. Try again in a moment." };
+      if (mode === "refused") return { state: "refused", message: "This host is already being removed." };
       return mode === "pending" ? { state: "pending", message: "Access revoked. It uninstalls infraternal as soon as it connects." } : { state: "removed", message: "The host was removed." };
     };
   })();

@@ -100,7 +100,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
                     path.display(),
                     unit,
                     options.name,
-                ));
+                ) + &link_plan(user)?);
             }
             let firewall = make_firewall_install(args)?;
             return Ok(format!(
@@ -112,7 +112,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
                 path.display(),
                 unit,
                 enable,
-            ));
+            ) + &link_plan(user)?);
         }
         return Ok(format!(
             "{folders}Would write {}:\n{}\nWould run:\n  {}\n  {}\n",
@@ -120,63 +120,18 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
             unit,
             reload,
             enable
-        ));
+        ) + &link_plan(user)?);
     }
 
-    let unit_changed = ensure_server_unit_writable(&path, unit.as_bytes(), options.force)?;
     let systemctl = systemctl_program()?;
-    // Create the data folder private before the service first starts, only
-    // once the unit is accepted; an existing folder keeps its mode [#516].
-    // It comes before the host firewall is published: the server policy lives
-    // in `/var/lib/infraternal`, the D395 system data folder, and the policy
-    // writer would otherwise create that folder first with the default 0755.
-    super::install_paths::create_private_dir(&absolute(&args.data)?).map_err(InstallError::Io)?;
-
-    #[cfg(target_os = "linux")]
-    let firewall = if options.system {
-        (!args.host_firewall_off)
-            .then(|| make_firewall_install(args))
-            .transpose()?
-    } else {
-        None
-    };
-
-    #[cfg(target_os = "linux")]
-    let firewall_removal_report = if options.system && args.host_firewall_off {
-        Some(
-            host_firewall::clear_role_from_config(PolicyRole::Server)
-                .map_err(|error| InstallError::HostFirewall(error.to_string()))?,
-        )
-    } else {
-        None
-    };
-
-    #[cfg(target_os = "linux")]
-    if let Some(firewall) = &firewall {
-        publish_firewall(
-            firewall,
-            &FirewallTargets {
-                policy: Path::new(host_firewall::SERVER_POLICY_PATH),
-                unit: Path::new(FIREWALL_UNIT_PATH),
-            },
-            &|path, policy| {
-                host_firewall::write_policy_file(path, policy)
-                    .map_err(|error| InstallError::Io(std::io::Error::other(error)))
-            },
-            &mut |arguments| {
-                Ok(systemctl_command(&systemctl)
-                    .args(arguments)
-                    .status()
-                    .map_err(InstallError::Io)?
-                    .success())
-            },
-        )?;
-    }
-    // A byte-identical installed unit is left untouched, so re-running init
-    // on an unchanged install rewrites nothing (#516, J692).
-    if unit_changed {
-        write_atomic(&path, unit.as_bytes()).map_err(InstallError::Io)?;
-    }
+    let (firewall, removal_report) = install_in_order(
+        &path,
+        unit.as_bytes(),
+        &absolute(&args.data)?,
+        options.force,
+        || plan_firewall(args, options),
+        |plan| publish_planned_firewall(plan, &systemctl),
+    )?;
 
     if !systemctl_command(&systemctl)
         .args(&scope_args)
@@ -196,18 +151,124 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     {
         return Err(InstallError::Systemctl);
     }
+    // Last, so a failed install never leaves a link to a service that is not there.
+    // A problem here is reported, not fatal: the service itself is already running.
+    // Every successful path reaches this line, the firewall ones included (J755).
+    eprintln!("{}", link_note(user));
+    Ok(match (firewall, removal_report) {
+        #[cfg(target_os = "linux")]
+        (FirewallPlan::Install(_), _) => firewall_install_confirmation(&path),
+        (_, Some(report)) => format!("{report}Installed and enabled {}\n", path.display()),
+        _ => format!("Installed and enabled {}\n", path.display()),
+    })
+}
+
+/// What a server install does to the host firewall, decided before anything is written.
+///
+/// Only a system install on Linux touches the host firewall (D392): it
+/// either publishes the server's default-drop policy or, with
+/// `--host-firewall-off`, clears the server role.
+enum FirewallPlan {
+    /// A user install, or a platform without the host firewall.
+    Untouched,
+    /// Publish this checked policy and its loader unit.
     #[cfg(target_os = "linux")]
-    if firewall.is_some() {
-        return Ok(firewall_install_confirmation(&path));
-    }
+    Install(FirewallInstall),
+    /// Clear the server role from the saved host policy.
     #[cfg(target_os = "linux")]
-    if let Some(report) = firewall_removal_report {
-        return Ok(format!(
-            "{report}Installed and enabled {}\n",
-            path.display()
-        ));
+    ClearServerRole,
+}
+
+/// Decide the firewall step and run its checks, the sshd admission check included, without side effects.
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
+fn plan_firewall(args: &ServerArgs, options: &InstallArgs) -> Result<FirewallPlan, InstallError> {
+    #[cfg(target_os = "linux")]
+    if options.system {
+        return Ok(if args.host_firewall_off {
+            FirewallPlan::ClearServerRole
+        } else {
+            FirewallPlan::Install(make_firewall_install(args)?)
+        });
     }
-    Ok(format!("Installed and enabled {}\n", path.display()))
+    let _ = (args, options);
+    Ok(FirewallPlan::Untouched)
+}
+
+/// Carry out a [`FirewallPlan`]; returns the removal report when the server role was cleared.
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unnecessary_wraps))]
+fn publish_planned_firewall(
+    plan: &FirewallPlan,
+    systemctl: &Path,
+) -> Result<Option<String>, InstallError> {
+    match plan {
+        FirewallPlan::Untouched => {
+            let _ = systemctl;
+            Ok(None)
+        }
+        #[cfg(target_os = "linux")]
+        FirewallPlan::ClearServerRole => host_firewall::clear_role_from_config(PolicyRole::Server)
+            .map(Some)
+            .map_err(|error| InstallError::HostFirewall(error.to_string())),
+        #[cfg(target_os = "linux")]
+        FirewallPlan::Install(firewall) => {
+            publish_firewall(
+                firewall,
+                &FirewallTargets {
+                    policy: Path::new(host_firewall::SERVER_POLICY_PATH),
+                    unit: Path::new(FIREWALL_UNIT_PATH),
+                },
+                &|path, policy| {
+                    host_firewall::write_policy_file(path, policy)
+                        .map_err(|error| InstallError::Io(std::io::Error::other(error)))
+                },
+                &mut |arguments| {
+                    Ok(systemctl_command(systemctl)
+                        .args(arguments)
+                        .status()
+                        .map_err(InstallError::Io)?
+                        .success())
+                },
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+/// Run a server install's file steps in the one order every path uses (#483, #516, J755).
+///
+/// 1. Decide whether the unit may be written ([`ensure_server_unit_writable`]).
+/// 2. `admit`: every check that can refuse, such as the host firewall's sshd
+///    admission check. It must have no side effects.
+/// 3. Create the data folder 0700 ([`create_private_dir`]; an existing
+///    folder keeps its mode).
+/// 4. `publish`: the host firewall's policy and loader.
+/// 5. Write the unit, only when its bytes changed.
+///
+/// So a refusal in 1 or 2 creates nothing, not even the data folder. The
+/// folder exists, private, before the firewall policy is saved, because the
+/// server policy lives in `/var/lib/infraternal` (D395) and the policy writer
+/// would otherwise create it. A failed folder or firewall step leaves no new
+/// unit, so no service starts without its data or its firewall. A
+/// byte-identical unit is never rewritten, so re-running init on an unchanged
+/// install keeps the file as it was (J692).
+///
+/// [`create_private_dir`]: super::install_paths::create_private_dir
+fn install_in_order<A, P>(
+    path: &Path,
+    unit: &[u8],
+    data: &Path,
+    force: bool,
+    admit: impl FnOnce() -> Result<A, InstallError>,
+    publish: impl FnOnce(&A) -> Result<P, InstallError>,
+) -> Result<(A, P), InstallError> {
+    let write_unit = ensure_server_unit_writable(path, unit, force)?;
+    let admitted = admit()?;
+    super::install_paths::create_private_dir(data).map_err(InstallError::Io)?;
+    let published = publish(&admitted)?;
+    if write_unit {
+        write_atomic(path, unit).map_err(InstallError::Io)?;
+    }
+    Ok((admitted, published))
 }
 
 /// Where a system server install publishes its host firewall policy and loader unit.
@@ -481,6 +542,51 @@ fn render_firewall_unit() -> Result<String, InstallError> {
     ))
 }
 
+/// The scope and binary the PATH link is made for, from the real environment.
+fn link_target(
+    user: bool,
+) -> Result<
+    (
+        super::install_paths::Scope,
+        super::install_paths::Environment,
+        PathBuf,
+    ),
+    InstallError,
+> {
+    let binary = env::current_exe()
+        .and_then(fs::canonicalize)
+        .map_err(InstallError::Io)?;
+    let scope = if user {
+        super::install_paths::Scope::User
+    } else {
+        super::install_paths::Scope::System
+    };
+    Ok((scope, super::install_paths::Environment::detect(), binary))
+}
+
+/// The dry-run line saying where the PATH link would go.
+fn link_plan(user: bool) -> Result<String, InstallError> {
+    let (scope, environment, binary) = link_target(user)?;
+    Ok(match super::install_paths::path_link(scope, &environment) {
+        Ok(Some(link)) => format!("Would link {} to {}\n", link.display(), binary.display()),
+        Ok(None) => format!(
+            "Would print the PATH line for {}\n",
+            binary.parent().unwrap_or(&binary).display()
+        ),
+        Err(error) => format!("Would not link: {error}\n"),
+    })
+}
+
+/// Publish the PATH link and describe the result in one sentence for the install output.
+fn link_note(user: bool) -> String {
+    let result = link_target(user).and_then(|(scope, environment, binary)| {
+        super::install_paths::link_for_install(scope, &binary, &environment)
+            .map(|outcome| outcome.describe(&binary))
+            .map_err(|error| InstallError::Io(std::io::Error::other(error.to_string())))
+    });
+    result.unwrap_or_else(|error| format!("Could not set up the `infraternal` command: {error}"))
+}
+
 fn validate_name(name: &str) -> Result<(), InstallError> {
     if name.is_empty()
         || name.len() > 64
@@ -741,6 +847,19 @@ mod tests {
             output.starts_with("Data folder: /"),
             "a firewall plan names its data folder first (#516): {output}"
         );
+        assert!(
+            ends_with_link_plan(&output),
+            "a system firewall plan ends with the PATH link (D395, J755): {output}"
+        );
+    }
+
+    /// Whether a dry-run plan's last line is one of [`link_plan`]'s answers.
+    fn ends_with_link_plan(output: &str) -> bool {
+        output.lines().last().is_some_and(|line| {
+            ["Would link ", "Would print the PATH line", "Would not link"]
+                .iter()
+                .any(|start| line.starts_with(start))
+        })
     }
 
     /// An identical installed unit needs no write; a missing or forced one does; a different one is refused.
@@ -883,6 +1002,7 @@ mod tests {
         assert!(output.contains("systemctl enable --now infraternal-server.service"));
         assert!(!output.contains("Would replace the hand-installed"));
         assert!(output.starts_with("Data folder: /"), "{output}");
+        assert!(ends_with_link_plan(&output), "{output}");
     }
 
     /// A scratch policy/unit pair plus a recording, scriptable systemctl for publish tests.
@@ -1052,5 +1172,129 @@ mod tests {
             !source.contains(path_lookup),
             "install.rs runs systemctl through PATH"
         );
+    }
+
+    /// A data folder that cannot be created leaves no unit behind; a refused re-run creates nothing.
+    #[test]
+    fn a_failed_data_folder_leaves_no_unit_and_a_refusal_creates_no_folder() {
+        let root = env::temp_dir().join(format!("unit-order-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("file");
+        fs::write(&blocker, "x").unwrap();
+        let unit = root.join("x.service");
+        let error = install_in_order(
+            &unit,
+            b"new",
+            &blocker.join("data"),
+            false,
+            || Ok(()),
+            |()| Ok(()),
+        );
+        assert!(matches!(error, Err(InstallError::Io(_))));
+        assert!(!unit.exists());
+
+        fs::write(&unit, "old").unwrap();
+        let data = root.join("data");
+        let error = install_in_order(&unit, b"new", &data, false, || Ok(()), |()| Ok(()));
+        assert!(matches!(error, Err(InstallError::ExistingUnit)));
+        assert!(!data.exists());
+        assert_eq!(fs::read_to_string(&unit).unwrap(), "old");
+        install_in_order(&unit, b"new", &data, true, || Ok(()), |()| Ok(())).unwrap();
+        assert_eq!(fs::read_to_string(&unit).unwrap(), "new");
+        assert!(data.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A refused firewall check creates no data folder, publishes nothing and writes no unit (J755 P3-1).
+    #[test]
+    fn a_refused_firewall_check_creates_no_data_folder() {
+        let root = env::temp_dir().join(format!("unit-order-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let unit = root.join("x.service");
+        let data = root.join("var/lib/infraternal");
+        let mut published = false;
+        let error = install_in_order(
+            &unit,
+            b"new",
+            &data,
+            false,
+            || -> Result<(), InstallError> {
+                Err(InstallError::HostFirewall("no ssh path".to_owned()))
+            },
+            |()| {
+                published = true;
+                Ok(())
+            },
+        );
+        assert!(matches!(error, Err(InstallError::HostFirewall(_))));
+        assert!(!published);
+        assert!(!data.exists(), "a refused install left {}", data.display());
+        assert!(!unit.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The firewall is published into a data folder that already exists with mode 0700 (c161b0897, J755 P3-4).
+    ///
+    /// The server policy lives in the D395 data folder; if the policy writer
+    /// ran first it would create the folder 0755. A failed publish also
+    /// leaves no unit.
+    #[cfg(unix)]
+    #[test]
+    fn the_firewall_is_published_into_a_private_data_folder_before_the_unit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = env::temp_dir().join(format!("unit-order-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let unit = root.join("x.service");
+        let data = root.join("var/lib/infraternal");
+        let error = install_in_order(
+            &unit,
+            b"new",
+            &data,
+            false,
+            || Ok(()),
+            |()| {
+                let mode = fs::metadata(&data)
+                    .map_err(InstallError::Io)?
+                    .permissions()
+                    .mode();
+                assert_eq!(
+                    mode & 0o777,
+                    0o700,
+                    "data folder mode when the firewall is published"
+                );
+                assert!(!unit.exists(), "the unit was written before the firewall");
+                fs::write(data.join("host-firewall-server.json"), "{}")
+                    .map_err(InstallError::Io)?;
+                Err::<(), _>(InstallError::Systemctl)
+            },
+        );
+        assert!(matches!(error, Err(InstallError::Systemctl)));
+        assert!(!unit.exists(), "a failed firewall publish left a unit");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Re-running init with a byte-identical unit never rewrites it (c161b0897, J692, J755 P3-4).
+    ///
+    /// `write_atomic` publishes by rename, so a rewrite gives the path a new
+    /// inode; an unchanged inode and mtime prove the file was left alone.
+    #[cfg(unix)]
+    #[test]
+    fn an_identical_unit_is_not_rewritten() {
+        use std::os::unix::fs::MetadataExt;
+        let root = env::temp_dir().join(format!("unit-order-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let unit = root.join("x.service");
+        let data = root.join("data");
+        install_in_order(&unit, b"same", &data, false, || Ok(()), |()| Ok(())).unwrap();
+        let before = fs::metadata(&unit).unwrap();
+        install_in_order(&unit, b"same", &data, false, || Ok(()), |()| Ok(())).unwrap();
+        let after = fs::metadata(&unit).unwrap();
+        assert_eq!(
+            (before.ino(), before.mtime_nsec()),
+            (after.ino(), after.mtime_nsec())
+        );
+        install_in_order(&unit, b"different", &data, true, || Ok(()), |()| Ok(())).unwrap();
+        assert_ne!(fs::metadata(&unit).unwrap().ino(), before.ino());
+        fs::remove_dir_all(root).unwrap();
     }
 }

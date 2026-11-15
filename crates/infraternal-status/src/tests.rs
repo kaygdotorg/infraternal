@@ -854,6 +854,7 @@ fn recorded_server_unit_reads_the_named_unit_in_its_own_scope() {
         Some(RecordedServer {
             data: Some("/srv/custom state".into()),
             web_root: Some("/srv/web".into()),
+            relative: Vec::new(),
         })
     );
     assert_eq!(
@@ -861,6 +862,7 @@ fn recorded_server_unit_reads_the_named_unit_in_its_own_scope() {
         Some(RecordedServer {
             data: Some("/home/u/data".into()),
             web_root: None,
+            relative: Vec::new(),
         })
     );
     assert_eq!(recorded_server_unit(&roots, Scope::System, "other"), None);
@@ -887,6 +889,12 @@ fn recorded_server_unit_ignores_agents_foreign_programs_and_relative_paths() {
     assert_eq!(recorded_server_unit(&roots, Scope::System, "b"), None);
     assert_eq!(
         recorded_server_unit(&roots, Scope::System, "c"),
-        Some(RecordedServer::default())
+        Some(RecordedServer {
+            relative: vec![
+                ("--data".to_owned(), "rel".into()),
+                ("--web-root".to_owned(), "web".into())
+            ],
+            ..RecordedServer::default()
+        })
     );
 }
