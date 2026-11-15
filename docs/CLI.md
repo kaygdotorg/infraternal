@@ -86,11 +86,11 @@ service records a path, they use `./data`. A setup-token command that cannot
 read its selected directory prints one line with the matching `sudo` command.
 
 `server init` never depends on the directory it runs in (D395). When the
-unit it would write already exists, init keeps that unit's `--data` and
-`--web-root` (or their absence), so a re-run on an unchanged install plans the
-same unit and changes nothing, even with `--force`. `--system` also reuses the
-data folder an installed system server records under another name, as before.
-Only a fresh install gets the new defaults: the server's data folder is
+unit it would write already exists, init keeps that unit's `--web-root` (or
+its absence), so a re-run on an unchanged install plans the same unit and
+changes nothing, even with `--force`. `--system` also reuses the data folder
+an installed system server records under another name, as before. The
+server's data folder is
 `$XDG_STATE_HOME/infraternal` (else `~/.local/state/infraternal`) per user on
 Linux, `/var/lib/infraternal` system-wide on Linux (D229), and
 `~/Library/Application Support/infraternal` or
@@ -104,6 +104,40 @@ the absolute path to pass instead. `--system` needs root, except with
 too. A real install creates a missing data folder with mode 0700.
 `--dry-run` prints the resolved `Data folder` and `Web folder` as absolute
 paths. The rules live in `crates/infraternal/src/install_paths.rs`.
+
+An existing install moves to the standard folder too (D395, amended
+2026-11-15). When the unit records a different `--data` and you do not pass
+`--data`, `server init` moves the whole data folder (database with its WAL and
+SHM files, identity, SSH trust, the mesh key and anything else in it) and
+rewrites every `ExecStart` path inside it, in the unit and its drop-ins. Pass
+`--data <current folder>` to keep a folder where it is. `--dry-run` prints the
+move first: the two folders, the method, and the unit files it rewrites.
+The move:
+
+- stops the service and starts it again afterwards (also when it is enabled);
+- renames the folder when both sides are on one filesystem; otherwise it
+  copies it, fsyncs and compares every file byte for byte, and only then
+  switches. The old folder is then kept read-only as
+  `<old>.moved-YYYYMMDD-HHMMSS` (UTC), and init prints the command that
+  removes it once the server works;
+- refuses, changing nothing, when the target exists and is not empty, when
+  the old folder is a symlink, a mount point, inside the target (or the other
+  way round) or owned by another user, or when a unit line other than
+  `ExecStart` names the old folder;
+- gives the new folder mode 0700;
+- is idempotent and crash-safe. The unit is the only pointer to the live
+  folder, so there is never a second live copy. A marker file
+  (`.infraternal-move`) in the moved folder lets the next run finish an
+  interrupted move; a failure before the switch puts the old folder and unit
+  back and restarts the old service.
+
+An install already at its standard folder, such as a system server in
+`/var/lib/infraternal`, is left exactly as it is. Sockets in `/run` are never
+touched. The server's updater (#211) is meant to call the same move while
+the service is stopped; `server restart --binary` keeps the service running
+and never moves the folder. On macOS, `server init` does not install a
+launchd service yet, so there is no macOS server install to move; the move
+itself works there the same way.
 
 ## Generated skills
 
