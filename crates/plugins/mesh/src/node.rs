@@ -632,6 +632,28 @@ pub static BEFORE_KERNEL_KEY: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>
 #[cfg(feature = "test-support")]
 pub static BEFORE_SETTLE_SAVE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
+/// A one-shot, fallible test step: set it to a closure, and the transaction runs (and clears) it
+/// at its seam; an `Err` fails the step the seam stands in front of.
+#[cfg(feature = "test-support")]
+pub type TransactionSeam = std::sync::Mutex<Option<Box<dyn FnOnce() -> io::Result<()> + Send>>>;
+/// Test seam (#265 J618): runs once in a full mesh transaction right before its disk save. An
+/// `Err` fails that save, so a namespace test can drive the rollback of a transaction that has
+/// already changed the engine's peers.
+#[cfg(feature = "test-support")]
+pub static BEFORE_TRANSACTION_SAVE: TransactionSeam = std::sync::Mutex::new(None);
+/// Test seam (#265 J618): runs once in a failed full transaction's rollback right before the
+/// `GotaTun` engine gets its old peers back. An `Err` fails that step, leaving the state a
+/// failed rollback leaves behind for the test to inspect.
+#[cfg(feature = "test-support")]
+pub static BEFORE_ROLLBACK_ENGINE_APPLY: TransactionSeam = std::sync::Mutex::new(None);
+/// Run and clear one of the fallible transaction test seams above; `Ok` when none is set.
+#[cfg(feature = "test-support")]
+fn run_transaction_seam(seam: &TransactionSeam) -> io::Result<()> {
+    seam.lock()
+        .ok()
+        .and_then(|mut hook| hook.take())
+        .map_or(Ok(()), |hook| hook())
+}
 /// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
 /// shared-filter decision, so a namespace test can start another installation in that window.
 #[cfg(feature = "test-support")]
@@ -1052,7 +1074,7 @@ impl Default for Node {
             routes: BTreeSet::new(),
             peer_route_state: Arc::default(),
             route_repair: None,
-            firewall: Firewall::default(),
+            firewall: Firewall::for_node(None, EngineKind::GotaTun),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
             kernel_owner: KernelProof::default(),
@@ -1065,6 +1087,17 @@ impl Default for Node {
             dns_integration: crate::dns_integration::DnsIntegration::default(),
             #[cfg(feature = "cutoff-measure")]
             refusing_at_ns: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Node {
+    /// Build an in-memory node with a known public identity for action-output tests.
+    pub(crate) fn with_identity_for_action_test(identity: Identity) -> Self {
+        Self {
+            identity: Some(identity),
+            ..Self::default()
         }
     }
 }
@@ -1112,6 +1145,7 @@ impl Node {
     pub fn with_engine(mut self, engine: EngineKind) -> Self {
         self.engine_kind = engine;
         self.engine_source = EngineSource::Code;
+        self.firewall = Firewall::for_node(self.firewall.backend(), engine);
         self
     }
 
@@ -1207,9 +1241,7 @@ impl Node {
                 AuthorityResetState::Stable
             },
             store: Some(store),
-            firewall: state
-                .backend
-                .map_or_else(Firewall::default, Firewall::for_backend),
+            firewall: Firewall::for_node(state.backend, engine_kind),
             ..Self::default()
         };
         // Both links outlive their process (D332). A live one is this installation's only under
@@ -1442,6 +1474,18 @@ impl Node {
         proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
         confirmed: bool,
     ) -> io::Result<()> {
+        let policy = if self.engine_kind == EngineKind::GotaTun
+            && self.active()
+            && let Some(config) = self.config.as_ref()
+        {
+            self.gotatun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+            Some(crate::gotatun_node::Engine::prepare_policy(
+                config,
+                proxy_ingress.clone(),
+            )?)
+        } else {
+            None
+        };
         // An unchanged snapshot still reaches the firewall: Traefik has just confirmed it, and
         // any source that lost a route since the last confirmation must lose its open flows.
         if self.active()
@@ -1449,6 +1493,12 @@ impl Node {
         {
             self.firewall
                 .apply_proxy_ingress(config, &proxy_ingress, confirmed)?;
+        }
+        if let Some(policy) = policy {
+            self.gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .publish_policy(policy);
         }
         self.proxy_ingress = proxy_ingress;
         Ok(())
@@ -1532,6 +1582,13 @@ impl Node {
             reason: self.engine_source.reason(),
         }
     }
+
+    /// Report the optional kernel-only guard that the `GotaTun` node currently has installed.
+    #[must_use]
+    pub(crate) fn kernel_guard_status(&self) -> Option<&crate::firewall::KernelGuardStatus> {
+        self.firewall.kernel_guard_status()
+    }
+
     /// Health of the running `GotaTun` engine; `None` under kernel `WireGuard` or when stopped.
     #[must_use]
     pub fn engine_health(&self) -> Option<crate::gotatun_node::EngineHealth> {
@@ -1866,6 +1923,7 @@ impl Node {
                     public_key,
                     0,
                     None,
+                    &self.proxy_ingress,
                     adopt,
                     route_endpoint_updater,
                 )?;
@@ -3267,6 +3325,16 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        let mut packet_policy = if self.engine_kind == EngineKind::GotaTun {
+            self.gotatun
+                .as_ref()
+                .map(|_| {
+                    crate::gotatun_node::Engine::prepare_policy(&config, self.proxy_ingress.clone())
+                })
+                .transpose()?
+        } else {
+            None
+        };
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         if self.config.is_some() {
             self.ensure_dns_resolver(config.addresses.ipv4)?;
@@ -3468,13 +3536,22 @@ impl Node {
                 crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
-            self.firewall.install_pending(&config)?;
+            // The same nodes keep the same addresses here, so the new grants can reach the
+            // packet path first: a revocation is enforced before the firewall, routes or the
+            // disk save run, not after them (J592 P2-5). A failure below republishes the old
+            // grants.
+            self.publish_gotatun_policy(packet_policy.take());
+            if let Err(error) = self.firewall.install_pending(&config) {
+                self.restore_gotatun_policy(&BTreeSet::new());
+                return Err(error);
+            }
             let configured_peers: Vec<_> = config
                 .peers
                 .values()
                 .map(|policy| policy.peer.clone())
                 .collect();
             if let Err(error) = self.install_peer_routes(&configured_peers, false) {
+                self.restore_gotatun_policy(&BTreeSet::new());
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3489,6 +3566,7 @@ impl Node {
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
             if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
+                self.restore_gotatun_policy(&BTreeSet::new());
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3544,6 +3622,15 @@ impl Node {
             crate::mesh_mtu::for_config(Some(&config)),
         );
         self.apply_fence(&fence, &config)?;
+        // The engine starts delivering a reused or moved address's packets for its new owner as
+        // soon as the peers change below. Withdraw the old owners from the packet path first,
+        // then publish the new policy right after the peer change, before routes, the firewall
+        // and the disk save (J592 P2-5). A failed transaction keeps them withdrawn until the
+        // engine has its old peers back (J617 P2).
+        let moved = self.moved_gotatun_peers(&config);
+        if let Some(engine) = self.gotatun.as_ref() {
+            engine.withdraw_peers(&moved);
+        }
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
         let mut previous_route_overrides = None;
@@ -3562,6 +3649,7 @@ impl Node {
             // link stays IPv6-safe; its final size follows the largest peer budget.
             self.set_mesh_mtu(ifindex, previous_mtu.max(requested_mtu))?;
             self.apply_peer_changes(&config, &changed, &retired_keys)?;
+            self.publish_gotatun_policy(packet_policy.take());
             // A full accepted snapshot also re-derives routes for unchanged peers: the endpoint
             // route or its egress link MTU may have changed since their last peer update.
             let configured_peers: Vec<_> = config
@@ -3588,6 +3676,10 @@ impl Node {
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
+            #[cfg(feature = "test-support")]
+            let saved = run_transaction_seam(&BEFORE_TRANSACTION_SAVE)
+                .and_then(|()| self.save_with_snapshot_base(Some(&config), true, snapshot_base));
+            #[cfg(not(feature = "test-support"))]
             let saved = self.save_with_snapshot_base(Some(&config), true, snapshot_base);
             if saved.is_err() {
                 self.routes = recorded;
@@ -3604,6 +3696,12 @@ impl Node {
             }
             // Saving can fail after the permissive policy transaction. Reinstall
             // the fence before rollback so any later error still denies NEW traffic.
+            // The packet path goes back to the accepted grants (or denies everything when there
+            // are none), whether or not the new policy was already published. The engine may
+            // still hold the new peer set, where a moved peer's old address can belong to
+            // another node, so the moved peers stay withdrawn until `apply(old)` below has
+            // succeeded. If any rollback step fails, they stay withdrawn (J617 P2).
+            self.restore_gotatun_policy(&moved);
             self.apply_fence(&fence, &config)?;
             if let Some(old) = &self.config {
                 if old.addresses != config.addresses {
@@ -3626,10 +3724,15 @@ impl Node {
                                 .collect::<Vec<_>>(),
                         )?;
                 } else {
+                    #[cfg(feature = "test-support")]
+                    run_transaction_seam(&BEFORE_ROLLBACK_ENGINE_APPLY)?;
                     self.gotatun
                         .as_ref()
                         .ok_or(io::ErrorKind::NotConnected)?
                         .apply(old.clone())?;
+                    // The engine has the accepted peers again, so their addresses mean what the
+                    // accepted grants say: give the moved peers their grants back.
+                    self.restore_gotatun_policy(&BTreeSet::new());
                 }
                 self.set_mesh_mtu(
                     mesh_mtu.0,
@@ -3679,6 +3782,61 @@ impl Node {
         self.publish_dns(dns_records)?;
         self.connection_cleanup_pending = true;
         self.finish_connection_cleanup()
+    }
+
+    /// Publish a precompiled `GotaTun` policy as soon as the engine's peers match it.
+    ///
+    /// Callers publish before the firewall, routes and disk save, so a narrowed grant is
+    /// enforced first; a failed transaction then calls [`Self::restore_gotatun_policy`].
+    fn publish_gotatun_policy(&self, policy: Option<crate::packet_filter::PreparedPolicy>) {
+        if let (Some(engine), Some(policy)) = (self.gotatun.as_ref(), policy) {
+            engine.publish_policy(policy);
+        }
+    }
+
+    /// Put the accepted config's grants back on the packet path after a failed transaction,
+    /// leaving out the `withheld` peers.
+    ///
+    /// `self.config` is still the accepted config here. When it cannot be compiled again, or
+    /// there is none, the filter denies everything rather than keep a half-applied snapshot.
+    /// `withheld` holds the accepted peers whose addresses the engine may currently give to
+    /// another node (see [`Self::moved_gotatun_peers`]); they are left out in the same atomic
+    /// publish, so there is no moment when their old grants match those addresses.
+    fn restore_gotatun_policy(&self, withheld: &BTreeSet<crate::policy::model::NodeId>) {
+        let Some(engine) = self.gotatun.as_ref() else {
+            return;
+        };
+        let restored = self
+            .config
+            .as_ref()
+            .and_then(|old| {
+                crate::gotatun_node::Engine::prepare_policy(old, self.proxy_ingress.clone()).ok()
+            })
+            .map_or_else(
+                crate::packet_filter::PacketFilter::deny_all_policy,
+                |policy| policy.without_peers(withheld),
+            );
+        engine.publish_policy(restored);
+    }
+
+    /// The accepted peers that `config` removes or moves to other addresses: once the engine
+    /// takes `config`'s peers, another node's packets may arrive from their old addresses, so
+    /// their grants must not be on the packet path. Empty without an accepted config or a
+    /// `GotaTun` engine.
+    fn moved_gotatun_peers(&self, config: &Config) -> BTreeSet<crate::policy::model::NodeId> {
+        let (Some(_), Some(old)) = (self.gotatun.as_ref(), self.config.as_ref()) else {
+            return BTreeSet::new();
+        };
+        old.peers
+            .iter()
+            .filter(|(node, previous)| {
+                config
+                    .peers
+                    .get(node)
+                    .is_none_or(|next| next.peer.addresses != previous.peer.addresses)
+            })
+            .map(|(node, _)| *node)
+            .collect()
     }
 
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
@@ -3788,6 +3946,21 @@ impl Retirement {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// The default `GotaTun` node treats its kernel-only guard as optional and reports its state.
+    #[test]
+    fn default_gotatun_node_treats_kernel_guard_as_optional() {
+        assert!(
+            Node::default().firewall.kernel_guard_status().is_some(),
+            "GotaTun must expose the optional kernel guard state"
+        );
+    }
+
+    /// Choosing kernel `WireGuard` keeps D346's required nft frontend selected.
+    #[test]
+    fn kernel_wireguard_node_selects_required_nft_frontend() {
+        let node = Node::default().with_engine(EngineKind::Kernel);
+        assert_eq!(node.firewall.backend(), Some(crate::firewall::Backend::Nft));
+    }
 
     /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
     #[test]

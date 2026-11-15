@@ -18,6 +18,9 @@ pub mod backend;
 
 pub mod proxy_ports;
 
+/// Shares exact-address mesh SSH listener ports with the GotaTun packet filter.
+pub mod mesh_ssh;
+
 #[cfg(feature = "relay")]
 pub mod discovery;
 

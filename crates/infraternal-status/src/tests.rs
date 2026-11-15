@@ -207,6 +207,7 @@ fn installed_system_server_data_comes_from_its_effective_execstart() {
     );
 }
 
+/// Keeps status tied to the embedded server's public mesh snapshot.
 #[test]
 fn production_server_is_a_running_server_with_two_mesh_peers() {
     let fixture = Fixture::new();
@@ -228,6 +229,31 @@ fn production_server_is_a_running_server_with_two_mesh_peers() {
     assert_eq!(state(&status, "release").0, "Ready");
     assert_eq!(state(&status, "relay").0, "Not available yet");
     assert_eq!(state(&status, "backup").0, "Not available yet");
+}
+
+/// The embedded server node reads its snapshot beside the durable server data directory.
+#[test]
+fn server_mesh_status_prefers_the_durable_embedded_snapshot() {
+    let fixture = Fixture::new();
+    let data = fixture.root.join("var-lib/infraternal");
+    fixture.write(
+        "etc/infraternal-server.service",
+        &format!(
+            "[Service]\nExecStart=/opt/infraternal server --data {}\n",
+            data.display()
+        ),
+    );
+    fixture.write("var-lib/infraternal/infraternal.sqlite", "");
+    fixture.write("var-lib/infraternal/mesh/mesh-public.json", MESH);
+    fixture.write(
+        "run/mesh-public.json",
+        r#"{"enabled":true,"config":{"peers":{"7":{},"8":{},"9":{}}}}"#,
+    );
+    fixture.write("net/infraternal0/.keep", "");
+
+    let status = fixture.status(&[(Scope::System, "infraternal-server.service")]);
+
+    assert_eq!(state(&status, "mesh"), ("Running", "peers: 2"));
 }
 
 #[test]
