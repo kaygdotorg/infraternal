@@ -6,7 +6,10 @@
 
 use std::{fs, path::Path};
 
-use super::{Activity, Kind, NodeStatus, Role, Roots, Scope, probe, server_data_directory};
+use super::{
+    Activity, Kind, NodeStatus, RecordedServer, Role, Roots, Scope, probe, recorded_server_unit,
+    server_data_directory,
+};
 
 const IDS: [&str; 8] = [
     "release", "server", "agent", "mesh", "host", "relay", "backup", "ssh",
@@ -826,4 +829,64 @@ fn configured_role_state_table_controls_headline_and_exit() {
             );
         }
     }
+}
+
+/// `server init` re-runs read the unit they would overwrite: its effective
+/// `--data` and `--web-root`, drop-ins included, in the matching scope only [#516].
+#[test]
+fn recorded_server_unit_reads_the_named_unit_in_its_own_scope() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "etc/infraternal-server.service",
+        "[Service]\nExecStart=\"/usr/bin/infraternal\" \"server\" \"--data\" \"/srv/old\"\n",
+    );
+    fixture.write(
+        "etc/infraternal-server.service.d/data.conf",
+        "[Service]\nExecStart=\nExecStart=\"/usr/bin/infraternal\" \"server\" \"--data\" \"/srv/custom state\" \"--web-root\" \"/srv/web\"\n",
+    );
+    fixture.write(
+        "user/infraternal-server.service",
+        "[Service]\nExecStart=\"/home/u/infraternal\" \"server\" \"--data\" \"/home/u/data\"\n",
+    );
+    let roots = fixture.roots();
+    assert_eq!(
+        recorded_server_unit(&roots, Scope::System, "infraternal-server"),
+        Some(RecordedServer {
+            data: Some("/srv/custom state".into()),
+            web_root: Some("/srv/web".into()),
+        })
+    );
+    assert_eq!(
+        recorded_server_unit(&roots, Scope::User, "infraternal-server"),
+        Some(RecordedServer {
+            data: Some("/home/u/data".into()),
+            web_root: None,
+        })
+    );
+    assert_eq!(recorded_server_unit(&roots, Scope::System, "other"), None);
+}
+
+/// Agents, foreign programs and relative recorded paths never count as a recorded server.
+#[test]
+fn recorded_server_unit_ignores_agents_foreign_programs_and_relative_paths() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "etc/a.service",
+        "[Service]\nExecStart=/usr/bin/infraternal agent --data /srv/agent\n",
+    );
+    fixture.write(
+        "etc/b.service",
+        "[Service]\nExecStart=/usr/bin/other server --data /srv/b\n",
+    );
+    fixture.write(
+        "etc/c.service",
+        "[Service]\nExecStart=/usr/bin/infraternal server --data rel --web-root web\n",
+    );
+    let roots = fixture.roots();
+    assert_eq!(recorded_server_unit(&roots, Scope::System, "a"), None);
+    assert_eq!(recorded_server_unit(&roots, Scope::System, "b"), None);
+    assert_eq!(
+        recorded_server_unit(&roots, Scope::System, "c"),
+        Some(RecordedServer::default())
+    );
 }

@@ -208,6 +208,52 @@ fn trust_namespace_hash_trailing_data_and_manifest_ambiguity_are_refused() {
     }
 }
 
+/// Lists the signer Worker writes name the license notices by bundle path (#419), so every
+/// real release has `licenses/libghostty-vt/<file>` lines. Those must parse; traversal and
+/// other non-canonical paths must still refuse the whole list, #211 S1.
+#[test]
+fn signed_lists_with_nested_notice_paths_are_parsed_and_traversal_is_refused() {
+    let line = |name: &str| format!("{}  {name}\n", "ab".repeat(32));
+    let real: String = [
+        "VERSION",
+        "infraternal-x86_64-musl",
+        "licenses/libghostty-vt/README.md",
+        "licenses/libghostty-vt/highway-BSD-3-Clause.txt",
+        "proxy-traefik-linux-amd64.json",
+    ]
+    .into_iter()
+    .map(line)
+    .collect();
+    assert_eq!(checksum("VERSION", real.as_bytes()), Ok([0xab; 32]));
+    assert_eq!(
+        checksum("infraternal-x86_64-musl", real.as_bytes()),
+        Ok([0xab; 32])
+    );
+    // Lookups stay plain file names; a nested entry is listed, never selected.
+    assert!(checksum("licenses/libghostty-vt/README.md", real.as_bytes()).is_err());
+    for bad in [
+        "licenses/../VERSION",
+        "/etc/passwd",
+        "licenses//README.md",
+        "licenses/./README.md",
+        "licenses/",
+        "./VERSION",
+        "licenses/libghostty-vt/README md",
+    ] {
+        let listed = format!("{real}{}", line(bad));
+        assert_eq!(
+            checksum("VERSION", listed.as_bytes()),
+            Err(ReleaseError::Checksums),
+            "{bad:?} must refuse the whole list"
+        );
+    }
+    let duplicate = format!("{real}{}", line("licenses/libghostty-vt/README.md"));
+    assert_eq!(
+        checksum("VERSION", duplicate.as_bytes()),
+        Err(ReleaseError::Checksums)
+    );
+}
+
 #[test]
 #[ignore = "run release-profile measurements in a weighted scope"]
 fn verification_twenty_megabytes_fifty_runs() {

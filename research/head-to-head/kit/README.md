@@ -101,6 +101,90 @@ result is never below 72 s, smoke keeps 4 s, and an explicit
 `H2H_LAN_MIN_PROBE_RATE` instead of weakening the guard. GotaTun rows keep the
 fixed 72 s.
 
+### Cross-engine head-to-head (J638)
+
+One hold compares different engines: `perf-all.sh --mixed --label HOLD --row
+TAG=ENGINE ...` runs two to four different engines, each once, in the given
+order. Each row is a calibration-shaped LAN window (8,000 probes, 1 and 8
+flows) inside one `perf-run`, followed by the usual restore check. Four rows
+fit the 17-minute hold cap (J629's took 13m15s). GotaTun and in-app rows need
+`--binary` and `--source`. Row engines are `gotatun`, `kernel-plain` (kernel
+WireGuard), `kernel` (NetBird with kernel WireGuard), `netbird-userspace`,
+`tailscale`, `infraternal` (in-app), `wireguard-go` and `underlay`.
+
+Give the holds a Williams Latin-square order:
+`python3 -I lib/latin_square.py G K N I` prints one order per hold. Every engine
+takes every position, and directly follows every other engine, equally often
+(n holds for an even n, 2n for an odd n). Pool the holds with `python3 -I
+lib/head_to_head.py CALIBRATION/calibration-spread.json HOLD...`. A difference
+counts only if every hold agrees in sign and the mean is larger than the GotaTun
+calibration spread for that metric. Run `perf-all.sh --calibration` first for
+that spread. A missing row is named, never zero.
+
+**Read Gbit/s per busy core first.** Kernel WireGuard queues its encryption and
+decryption with `queue_work_on()` on a CPU chosen round-robin from
+`cpu_online_mask` (`wg_cpumask_next_online`, drivers/net/wireguard/queueing.h).
+That work runs on per-CPU kworkers, which cpusets, the workqueue cpumask, RPS/XPS
+and IRQ affinity cannot move. So kernel WireGuard and NetBird's kernel mode also
+use the housekeeping CPUs 0 and 5: J629 measured them at 46–95% busy there,
+against 0–5% for userspace engines. Only offlining CPUs or isolcpus could stop
+that, and both are host changes. The kit measures instead. Every audited window
+writes `cpuset-*/cpu-split.json` (`lib/cpu_split.py`): busy % per CPU and busy
+cores on side A, side B and housekeeping (user+nice+system+irq+softirq; steal
+is reported separately). The pooled report divides Gbit/s by the whole machine's
+busy cores, and prints the split beside every row. Raw Gbit/s and loaded p99
+for the kernel engines therefore come with up to six cores behind them; the
+per-core figure is the fair comparison.
+
+Placement of each engine:
+- **In-app:** `lib/mesh_ix.py` runs in side A and starts both infraternal
+  nodes. Once the pair is up, `cases/mesh.sh` moves node B's process tree into
+  a new side-B scope (`h2h_scope_adopt`), verifies its CPU list and records it
+  in `cpuset-pids.tsv`. Before J638 node B stayed on side A's CPUs. J610's and
+  J618's in-app absolute numbers therefore had half the CPU budget; their A/B
+  deltas compared like with like and still stand.
+- **Tailscale and NetBird userspace:** each side's daemon runs in that side's
+  scope. Their coordination processes (test control and DERP, NetBird server)
+  run in `h2h-c`, which maps to side A, as for NetBird's kernel row. They are
+  idle once the path is direct.
+- **Load length:** these two rows, like in-app, size their load from the probe
+  count (`H2H_LAN_MIN_PROBE_RATE`, default 110/s). A daemon that slows ping
+  under load must not fail the outlived-load guard by design. GotaTun and the
+  kernel engines keep the fixed 72 s.
+
+### Bufferbloat profile (D381)
+
+`perf-all.sh --bufferbloat --profile fifo|fq_codel --label HOLD --row bare=underlay
+--row g=gotatun --binary g=PATH --source g=SHA --row k=kernel-plain --row w=wireguard-go`
+runs the home-router profile (`lib/bufferbloat.py`, first built by J512) in the
+D348 pinned runner, one profile per hold, in about six minutes. The topology is:
+endpoint A (home) → router namespace → endpoint B.
+- **Delay and shaping:** each endpoint egress adds 6 ms of netem delay. The
+  router shapes egress to A at 481.5 Mbit/s (download) and to B at
+  778.9 Mbit/s (upload): HTB, 32 KiB burst/cburst, 1,514-byte quantum.
+- **FIFO:** a 3,500,000-byte bfifo on each class, with no AQM (about 58 and
+  36 ms of queue at those rates).
+- **fq_codel:** target 5 ms, interval 100 ms, limit 10,000, ECN off. A
+  `flow hash` filter on the outer src, dst, proto and ports puts every tunnel
+  UDP tuple in one bucket, as on a physical router, instead of using the inner
+  hash a veth keeps.
+- **Underlay and TCP:** underlay GSO/GRO/TSO are off, the underlay MTU is
+  1,500 and tunnels use 1,420. The namespaces use TCP CUBIC, because BBR bounds
+  its own queue.
+- **Load:** each mode (idle, download, upload, both) runs 8 TCP flows per
+  loaded direction for `H2H_HOME_SECONDS` (default 12) plus a 6 s guard, with
+  100 Hz ICMP probes starting 2 s into the load. Tunnel rows also probe the
+  underlay at the same time.
+
+Results go to `OUT/home/results.json`: loss-aware p50 and p99 (losses rank as
+infinite RTT), goodput, and each mode's `cores_busy`. Every case also keeps
+`tc -s` qdisc and filter dumps. Compare each engine with `bare` in the same
+hold. With fq_codel, the inner probe shares the tunnel's outer flow with the
+bulk traffic, while the underlay probe has its own flow, so inner minus
+underlay is not only the engine's queue. This profile does not yet run
+Tailscale, NetBird or the in-app engine, and the matrix does not run it
+automatically.
+
 For each later candidate, repeat `--gotatun-binary ID=PATH` and
 `--source ID=FULL_SHA` on every command; add `--engine-label ID=LABEL` when
 the default label is not descriptive enough. The candidate receives the same

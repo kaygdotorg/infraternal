@@ -94,8 +94,10 @@ def build(repo, sha, cache, scratch, gate_mode="local", context=""):
         (staging / "VERSION").write_text(env["INFRATERNAL_RELEASE_VERSION"] + "\n")
         (staging / "SOURCE").write_text(sha + "\n")
         (staging / "GATE").write_text(json.dumps(gate) + "\n")
-        files = sorted(p for p in staging.rglob("*") if p.is_file() and p.name != "SHA256SUMS")
-        (staging / "SHA256SUMS").write_text("".join(f"{digest(p)}  {p.relative_to(staging)}\n" for p in files))
+        files = sorted(p for p in staging.rglob("*") if p.is_file() and p.name != "BUILDSUMS")
+        # BUILDSUMS is this host's own integrity list for the whole bundle. The release's
+        # signed SHA256SUMS and SHA256SUMS.sig are placed beside these bytes later (#211).
+        (staging / "BUILDSUMS").write_text("".join(f"{digest(p)}  {p.relative_to(staging)}\n" for p in files))
         # Directory publication is atomic; unsigned build hashes are never release signatures.
         staging.rename(cache / sha)
         private(scratch / "completed")
