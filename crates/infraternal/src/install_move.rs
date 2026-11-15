@@ -623,15 +623,21 @@ const INCOMING: &str = ".infraternal-incoming";
 /// writes in progress (`.host-firewall-*.pending`), whose loss would make the
 /// boot loader drop the host table; and the root infraternal agent's layout
 /// from `infraternal up` and SSH setup (`bin/`, `agent/`, `state/`,
-/// `sessions/`, `.bootstrap-lock`). A new file kept in `/var/lib/infraternal`
-/// by another part must be added here.
+/// `sessions/`), plus the hidden files SSH setup and promotion keep beside
+/// them: every `.bootstrap-*` (the setup lock folder, owner, ready and
+/// acquiring markers, transaction records and their `.tmp` writes), the
+/// `.superseded-*` records of a replaced unit, and `.promotion-transaction`
+/// (J803). A new file kept in `/var/lib/infraternal` by another part must be
+/// added here.
 fn is_reserved(name: &str) -> bool {
-    // Exact, case-sensitive names: these are written by our own code.
+    // Case-sensitive names and prefixes: these are written by our own code.
     let extension = |wanted: &str| Path::new(name).extension().is_some_and(|ext| ext == wanted);
     matches!(
         name,
-        "bin" | "agent" | "state" | "sessions" | ".bootstrap-lock"
-    ) || (name.starts_with("host-firewall-") && extension("json"))
+        "bin" | "agent" | "state" | "sessions" | ".promotion-transaction"
+    ) || name.starts_with(".bootstrap-")
+        || name.starts_with(".superseded-")
+        || (name.starts_with("host-firewall-") && extension("json"))
         || (name.starts_with(".host-firewall-") && extension("pending"))
 }
 
