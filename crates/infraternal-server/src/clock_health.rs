@@ -221,4 +221,36 @@ mod tests {
         health.observe(wall + later - Duration::from_millis(400), monotonic + later);
         assert!(!health.is_healthy());
     }
+
+    /// A healthy clock whose next sample comes more than [`MAX_SAMPLE_GAP`] later is untrusted again, even when
+    /// both clocks agree: the contract (`contracts/remote.md`, #285) resets health on any sample gap over five
+    /// seconds. Since the 1.25 s punctuality bound was removed (#525), this is the only upper bound on a gap, so
+    /// it needs its own check: the older test reaches its long gap from an already untrusted clock.
+    #[test]
+    fn a_consistent_sample_after_a_long_gap_resets_trust() {
+        let health = ClockHealth::default();
+        let wall = UNIX_EPOCH + Duration::from_hours(500_000);
+        let monotonic = Instant::now();
+        for second in 0..4 {
+            health.observe(
+                wall + Duration::from_secs(second),
+                monotonic + Duration::from_secs(second),
+            );
+        }
+        assert!(health.is_healthy());
+        // Exactly the bound still counts as a sample.
+        let at_bound = Duration::from_secs(3) + MAX_SAMPLE_GAP;
+        health.observe(wall + at_bound, monotonic + at_bound);
+        assert!(
+            health.is_healthy(),
+            "a gap of exactly the bound reset trust"
+        );
+        // One millisecond past it, with the clocks in perfect agreement, does not.
+        let past = at_bound + MAX_SAMPLE_GAP + Duration::from_millis(1);
+        health.observe(wall + past, monotonic + past);
+        assert!(
+            !health.is_healthy(),
+            "a sample gap over the bound kept the clock trusted"
+        );
+    }
 }
