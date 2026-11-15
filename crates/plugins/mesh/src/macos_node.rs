@@ -1,7 +1,7 @@
 //! Restores the Mac userspace Mesh node and its utun routes across daemon lifetimes.
 
 use crate::dataplane::Config;
-use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
+use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
 use bytes::Buf;
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
@@ -1190,6 +1190,10 @@ enum WorkerCommand {
     },
     Counters(sync::SyncSender<CounterMap>),
     Stop(sync::SyncSender<io::Result<()>>),
+    /// Hand a real-Mac test the worker's admission guard, so it can check what the guard
+    /// knows and flood it on a simulated clock.
+    #[cfg(test)]
+    Admission(sync::SyncSender<Arc<RwLock<PeerAdmission>>>),
 }
 
 struct Worker {
@@ -1343,6 +1347,7 @@ impl PendingWorker {
                     interface_mtu,
                     port: info.port,
                     admission,
+                    confirmed_feed: ConfirmedEndpointFeed::default(),
                     #[cfg(feature = "mesh-dns")]
                     dns_resolver,
                     #[cfg(feature = "mesh-dns")]
@@ -1549,7 +1554,8 @@ impl Drop for Worker {
     }
 }
 
-/// Reads per-peer statistics from the live device for the worker.
+/// Reads per-peer statistics from the live device for the worker: counters and the
+/// confirmed endpoints the admission guard learns from.
 mod peer_stats;
 
 /// Owns the live utun, peer-route MTUs, accepted snapshot and DNS resolver integration.
@@ -1565,6 +1571,8 @@ struct RuntimeState {
     port: u16,
     /// The receive guard; it follows the peers and key the live device accepted.
     admission: Arc<RwLock<PeerAdmission>>,
+    /// Feeds the endpoints `GotaTun` confirmed into `admission`'s known set (J736).
+    confirmed_feed: ConfirmedEndpointFeed,
     #[cfg(feature = "mesh-dns")]
     dns_resolver: Option<crate::dns::Resolver>,
     #[cfg(feature = "mesh-dns")]
@@ -1572,8 +1580,23 @@ struct RuntimeState {
 }
 
 /// Applies queued requests on the Mac worker and stops cleanly when its queue closes.
+///
+/// Between requests it scans the device's confirmed endpoints every
+/// [`peer_stats::CONFIRMED_ENDPOINT_SCAN`] for the admission guard, as the Linux worker does.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
-    while let Some(command) = commands.recv().await {
+    let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
+    confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            _ = confirmed_scan.tick() => {
+                state.admit_confirmed_endpoints().await;
+                continue;
+            }
+        };
+        let Some(command) = command else {
+            break;
+        };
         match command {
             WorkerCommand::Apply {
                 config,
@@ -1603,6 +1626,10 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 let result = state.stop().await;
                 let _ = reply.send(result);
                 return;
+            }
+            #[cfg(test)]
+            WorkerCommand::Admission(reply) => {
+                let _ = reply.send(Arc::clone(&state.admission));
             }
         }
     }
@@ -3114,6 +3141,8 @@ mod tests {
     mod authority_mtu;
     /// The Mac UDP listener: socket reuse and the handshake admission guard.
     mod listener;
+    /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
+    mod roamed_peer;
 
     use super::{
         Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, Worker, WorkerCommand,
@@ -3331,6 +3360,8 @@ mod tests {
                         let _ = reply.send(Ok(()));
                         break;
                     }
+                    // A recording worker has no guard; dropping the reply tells the asker so.
+                    WorkerCommand::Admission(_) => {}
                 }
             }
         });

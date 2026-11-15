@@ -1,5 +1,6 @@
 //! Reads the live Mac device's per-peer statistics on the worker: the counters the node
-//! reports to the coordinator.
+//! reports to the coordinator, and the endpoints `GotaTun` confirmed, which the worker's
+//! periodic scan hands to the handshake admission guard (J736).
 //!
 //! These run on the worker's current-thread runtime, which also carries the packet path, so each
 //! is one `peers()` read of the device and no blocking work.
@@ -7,10 +8,37 @@
 use super::{CounterMap, Counters, RuntimeState};
 use std::{
     io,
+    net::SocketAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// How often the Mac worker hands `GotaTun`'s confirmed endpoints to the admission guard: the
+/// period of the Linux worker's endpoint scan, so a roamed peer becomes known as fast on both.
+pub(super) const CONFIRMED_ENDPOINT_SCAN: Duration = Duration::from_millis(250);
+
 impl RuntimeState {
+    /// Give the admission guard the endpoints `GotaTun` confirmed for active installed peers.
+    ///
+    /// A peer that roamed (a NAT rebinding, a new network) is confirmed at its new address by
+    /// its first authenticated packet there, before the coordinator publishes that address.
+    /// Feeding it in lets the peer keep the guard's reserved budget under a flood (J717, J736).
+    /// Only keys with allowed IPs count, like the Linux scan: an overlap key that no longer
+    /// routes has no path to vouch for. With no device the list is emptied. The shared feed
+    /// takes the guard's write lock only on a change.
+    pub(super) async fn admit_confirmed_endpoints(&mut self) {
+        let endpoints: Vec<SocketAddr> = match self.device.as_ref() {
+            Some(device) => device
+                .read(async |read| read.peers().await)
+                .await
+                .into_iter()
+                .filter(|peer| !peer.peer.allowed_ips.is_empty())
+                .filter_map(|peer| peer.stats.confirmed_endpoint)
+                .collect(),
+            None => Vec::new(),
+        };
+        self.confirmed_feed.offer(&self.admission, endpoints).await;
+    }
+
     /// Read every installed peer's handshake time, byte counts and endpoint.
     /// # Errors
     /// Reports a stopped device.
