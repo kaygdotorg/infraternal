@@ -1689,6 +1689,28 @@ mod tests {
             per_packet(cpu, changes)
         );
 
+        // The confirmed-endpoint scan both workers run every 250 ms (J736): one offer of D393's
+        // 1,000 peers' unchanged endpoints, the steady-state cost per scan, and the feed's copy.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("bench runtime");
+        let guard = tokio::sync::RwLock::new(admission);
+        let mut feed = super::ConfirmedEndpointFeed::default();
+        assert!(runtime.block_on(feed.offer(&guard, known.iter().copied())));
+        let scans = 10_000_u32;
+        let cpu = thread_cpu();
+        for _ in 0..scans {
+            assert!(!runtime.block_on(feed.offer(&guard, known.iter().copied())));
+        }
+        let cpu = thread_cpu().saturating_sub(cpu);
+        println!(
+            "J736 confirmed-endpoint scan, {NODE_BUDGET} unchanged endpoints: {:.2} us CPU per \
+             scan ({:.4}% of one core at 4 scans/s), feed copy {} B",
+            per_packet(cpu, scans),
+            per_packet(cpu, scans) * 4.0 / 1e4,
+            feed.last.capacity() * size_of::<super::EndpointKey>()
+        );
+
         // Real-time floods.
         let packets = 200_000_u32;
         for (name, spoofed) in [("one source", false), ("65,536 spoofed sources", true)] {
