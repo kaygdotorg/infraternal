@@ -887,8 +887,8 @@ fn approximateScreen(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
             entered = true;
         }
     }
-    // An alternate screen with no flag set (a later 47/1047/1049 reset that
-    // left the screen) still has to be shown; 47 switches without side effects.
+    // Should the alternate screen be active with none of the three flags set,
+    // it still has to be shown; 47 switches without side effects.
     if (!entered) try w.writeAll("\x1b[?47h");
 }
 
