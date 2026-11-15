@@ -371,3 +371,23 @@ fn reopening_narrower_while_another_writer_owns_the_size_keeps_the_raw_replay() 
         "a smaller staged viewer keeps the replay"
     );
 }
+
+/// A peer that types after attaching is past its attach: its later Resize
+/// is a live resize (it reflows locally), not the attach-time size report,
+/// so it gets no repaint even though its replay was written at another
+/// size. Found by `real_shell_reconnect_resize_and_delivered_exit` (#521).
+#[test]
+fn a_peer_that_typed_before_resizing_gets_no_repaint() {
+    let mut session = Session::new(42, 24);
+    session.output(&typed_at_42());
+    let mut tab = peer();
+    let mut viewer = Terminal::new(42, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    session.handle(&mut tab, Frame::Input(b"x".to_vec()));
+    session.resize(&mut tab, 45, 24);
+    assert!(
+        tab.request.is_none(),
+        "a live resize keeps streaming raw output"
+    );
+}
