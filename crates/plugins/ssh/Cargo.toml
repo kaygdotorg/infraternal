@@ -12,6 +12,7 @@ session-bridge = ["dep:infraternal-agent"]
 [dependencies]
 infraternal-agent = { path = "../../infraternal-agent", version = "0.1.0", default-features = false, optional = true }
 infraternal-plugin-api.workspace = true
+infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
 infraternal-shim = { workspace = true, features = ["async-fd"] }
 nix = { workspace = true, features = ["uio"] }
 russh = { version = "=0.64.1", default-features = false, features = ["ring"] }

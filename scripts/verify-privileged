@@ -57,6 +57,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -76,6 +77,13 @@ TUN_PATHS = ('crates/infraternal-linux-tun/**', 'crates/plugins/mesh/src/gotatun
 
 # Exit status for "nothing to run": rust_run_gate prints SKIP for it.
 SKIP_EXIT = 77
+
+# The mesh firewall's fixed tool paths must be root-owned on the host before a test namespace
+# trusts them: inside it, host root appears as the overflow uid. The variable carries a
+# ':'-separated list of exactly the paths that passed (crates/plugins/mesh/src/firewall_tools.rs).
+FIREWALL_TOOL_PATHS = ('/usr/sbin/nft', '/usr/sbin/iptables-nft', '/usr/sbin/iptables-nft-restore',
+                       '/usr/sbin/ip6tables-nft', '/usr/sbin/ip6tables-nft-restore')
+TEST_ROOT_OWNED_NFT_ENV = 'INFRATERNA_TEST_ROOT_OWNED_NFT'
 
 # Path globs that put a change in an area. fnmatch's `*` already crosses
 # directories; `**` only reads clearer.
@@ -445,6 +453,33 @@ def memory_scope():
             '-p', f'MemoryMax={SANDBOX_MEMORY_MAX}', '-p', 'MemorySwapMax=0', '--']
 
 
+def root_owned_executable(path):
+    """Check a fixed tool path and its target before entering the uid-remapping sandbox."""
+    try:
+        link = os.lstat(path)
+        target = os.stat(path)
+    except OSError:
+        return False
+    return (link.st_uid == 0 and target.st_uid == 0 and stat.S_ISREG(target.st_mode)
+            and target.st_mode & 0o111 and not target.st_mode & 0o022)
+
+
+def sandbox_test_environment(root):
+    """Return the minimal test environment, marking firewall tools only after host ownership is verified."""
+    environment = {
+        'PATH': os.environ['PATH'],
+        'HOME': '/tmp',
+        'LANG': 'C.UTF-8',
+        'PYTHONPATH': str(root / 'scripts'),
+        'INFRATERNAL_TEST_STATE_ROOT': '/tmp/st',
+        'INFRATERNA_DNS_TEST_PARENT_NETNS': os.readlink('/proc/self/ns/net'),
+    }
+    verified = [path for path in FIREWALL_TOOL_PATHS if root_owned_executable(path)]
+    if verified:
+        environment[TEST_ROOT_OWNED_NFT_ENV] = ':'.join(verified)
+    return environment
+
+
 def _die_with_parent():
     """In the child, before exec: get SIGKILLed when the runner dies.
 
@@ -602,9 +637,7 @@ def run(root, selected, target):
         print('privileged integration: sandbox contained every planted escape', flush=True)
         # PYTHONPATH: some namespace tests load scripts/ helpers that import
         # their siblings. The parent netns lets the DNS test prove it left it.
-        base = {'PATH': os.environ['PATH'], 'HOME': '/tmp', 'LANG': 'C.UTF-8', 'PYTHONPATH': str(root / 'scripts'),
-                'INFRATERNAL_TEST_STATE_ROOT': '/tmp/st',
-                'INFRATERNAL_DNS_TEST_PARENT_NETNS': os.readlink('/proc/self/ns/net')}
+        base = sandbox_test_environment(root)
         runs, missing = plan(root, selected, binaries, base, scratch, target, scope)
         failed = [name if '(' in name else f'{name}: no test binary was built' for name in missing]
         print(f'privileged integration: {len(runs)} runs for areas={",".join(sorted(selected))}', flush=True)
