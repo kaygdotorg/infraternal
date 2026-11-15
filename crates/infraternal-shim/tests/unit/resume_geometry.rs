@@ -280,3 +280,37 @@ fn reopening_at_a_new_size_after_an_earlier_resize_shows_the_shim_screen() {
     assert!(session.deliver(&mut tab, &mut viewer).is_some());
     assert_same_visible_screen(&viewer, &session.terminal);
 }
+
+#[test]
+fn reopening_wider_while_another_writer_owns_the_size_still_repaints() {
+    // J745's case: the old tab typed last, so its writer still owns the
+    // geometry and the new tab's Resize is only staged until it types. The
+    // session stays at 42 columns while the new tab is 45 wide, so the raw
+    // replay must still be replaced, by the engine painted at its own size.
+    let mut session = Session::new(42, 24);
+    session.output(&typed_at_42());
+    session.cursors.active_writer = Some(0);
+    session.cursors.select(1, (45, 24, 0, 0)).unwrap();
+    let mut tab = peer();
+    tab.writer = Some(1);
+    let mut viewer = Terminal::new(45, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    session.resize(&mut tab, 45, 24);
+    assert_eq!(
+        (session.config.cols, session.config.rows),
+        (42, 24),
+        "staged, not applied"
+    );
+    assert!(matches!(tab.request.take(), Some(Request::Snapshot)));
+    tab.snapshot(&session.terminal, session.ring.head())
+        .unwrap();
+    let frames = Decoder::default().feed(&tab.pending).unwrap();
+    let [Frame::Snapshot(_, bytes) | Frame::SnapshotWithFlags(_, 1, bytes)] = frames.as_slice()
+    else {
+        panic!("expected one Snapshot, got {frames:?}");
+    };
+    let mut repainted = Terminal::new(45, 24).unwrap();
+    repainted.process(bytes);
+    assert_same_visible_screen(&repainted, &session.terminal);
+}
