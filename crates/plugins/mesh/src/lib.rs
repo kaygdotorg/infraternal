@@ -19,6 +19,10 @@ pub use socket::{MeshPlugin, parse_subscription};
 /// Public-only configuration shared by the coordinator and node component.
 pub mod dataplane;
 
+/// Owns the host input policy shared by the server and mesh node [D386].
+#[cfg(any(feature = "server", feature = "agent"))]
+pub mod host_firewall;
+
 /// Chooses the stable mesh UDP listener and its configured fallback behavior.
 mod listen_port;
 

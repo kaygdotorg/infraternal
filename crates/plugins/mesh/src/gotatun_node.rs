@@ -35,7 +35,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
+use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 use crate::{
     candidate_walks::{HANDSHAKE_WAIT, Observed, Walks, active_peer_key, kept_address},
@@ -822,6 +822,8 @@ async fn run_worker(
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
     // A restored configuration may already carry candidates; no session predates it.
     state.refresh_walks(&BTreeMap::new()).await;
+    // Hands the peers' confirmed endpoints to the admission guard's reserve on a change.
+    let mut confirmed_feed = ConfirmedEndpointFeed::default();
     loop {
         let next_walk = state.walks.next_due();
         tokio::select! {
@@ -884,6 +886,9 @@ async fn run_worker(
             }
             _ = endpoint_scan.tick() => {
                 let endpoints = state.live_peer_endpoint_snapshot().await;
+                state
+                    .admit_confirmed_endpoints(&mut confirmed_feed, &endpoints)
+                    .await;
                 let changed = observed_endpoints
                     .as_ref()
                     .is_some_and(|previous| previous != &endpoints);
@@ -911,6 +916,26 @@ async fn run_worker(
 }
 
 impl RuntimeState {
+    /// Give the admission guard the peers' confirmed endpoints through `feed`, so those exact
+    /// sources keep the guard's reserved budget under a flood.
+    ///
+    /// Runs on the 250 ms endpoint scan. The shared feed takes the guard's write lock only on a
+    /// change, because the receive task takes its read lock for every initiation.
+    async fn admit_confirmed_endpoints(
+        &self,
+        feed: &mut ConfirmedEndpointFeed,
+        endpoints: &BTreeMap<PublicKey, Option<SocketAddr>>,
+    ) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        feed.offer(
+            &pending.factory.admission,
+            endpoints.values().flatten().copied(),
+        )
+        .await;
+    }
+
     /// Read authenticated live endpoints and refresh their route budgets away from the runtime.
     ///
     /// Only active identities own host routes. The stable peer key is passed to the node so
@@ -1082,7 +1107,7 @@ impl RuntimeState {
             config
                 .peers
                 .values()
-                .filter(|policy| peer_has_network_access(policy)),
+                .filter(|policy| policy.has_network_access()),
         );
         if !self.walks.prepare(&wanted) {
             return;
@@ -1358,12 +1383,12 @@ impl RuntimeState {
             .peers
             .iter()
             .filter(|(id, policy)| {
-                peer_has_network_access(policy)
+                policy.has_network_access()
                     && self
                         .config
                         .as_ref()
                         .and_then(|old| old.peers.get(id))
-                        .is_none_or(|old| !peer_has_network_access(old) || old.peer != policy.peer)
+                        .is_none_or(|old| !old.has_network_access() || old.peer != policy.peer)
             })
             .map(|(_, policy)| {
                 let mut peers = peer_for_policy(policy)?;
@@ -1389,7 +1414,7 @@ impl RuntimeState {
             .peers
             .iter()
             .filter(|(id, policy)| {
-                peer_has_network_access(policy)
+                policy.has_network_access()
                     && policy.peer.endpoint.is_some()
                     && policy.peer.candidates.is_empty()
                     && self
@@ -1397,7 +1422,7 @@ impl RuntimeState {
                         .as_ref()
                         .and_then(|old| old.peers.get(id))
                         .is_some_and(|old| {
-                            peer_has_network_access(old)
+                            old.has_network_access()
                                 && old.peer.endpoint != policy.peer.endpoint
                         })
             })
@@ -1441,8 +1466,17 @@ impl RuntimeState {
                 return Err(error);
             }
         }
-        // The receive guard follows only snapshots the live device accepted.
-        admission.write().await.set_peers(admitted_peers);
+        // The receive guard follows only snapshots the live device accepted. The configured
+        // endpoints are the ones that snapshot installs: only active identities carry one.
+        let configured_endpoints = config
+            .peers
+            .values()
+            .filter(|policy| policy.has_network_access())
+            .filter_map(|policy| policy.peer.endpoint);
+        let mut guard = admission.write().await;
+        guard.set_peers(admitted_peers);
+        guard.set_configured_endpoints(configured_endpoints);
+        drop(guard);
         self.config = Some(config);
         for key in readdressed {
             let _ = self.rehandshake(key);
@@ -1531,7 +1565,7 @@ async fn build_device(
     {
         let mut admission = admission.write().await;
         admission.set_private_key(private_key.clone());
-        admission.set_peers(admitted_peers);
+        admission.install(admitted_peers, &peers);
     }
     DeviceBuilder::new()
         .with_udp(factory)
@@ -1708,7 +1742,7 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let peers = config
         .peers
         .values()
-        .filter(|peer| peer_has_network_access(peer))
+        .filter(|peer| peer.has_network_access())
         .map(peer_for_policy)
         .collect::<io::Result<Vec<_>>>()?;
     Ok(peers.into_iter().flatten().collect())
@@ -1777,28 +1811,14 @@ pub(crate) fn peer_keys_with_network_access(config: &Config) -> BTreeSet<PublicK
     config
         .peers
         .values()
-        .filter(|peer| peer_has_network_access(peer))
+        .filter(|peer| peer.has_network_access())
         .flat_map(policy_keys)
         .collect()
-}
-
-/// Tell whether either direction permits at least one network packet tuple.
-fn peer_has_network_access(peer: &crate::dataplane::PeerPolicy) -> bool {
-    has_network_access(&peer.inbound) || has_network_access(&peer.outbound)
 }
 
 /// Return identities whose effective network access permits traffic in at least one direction.
 fn admitted_peer_keys(config: &Config) -> BTreeSet<PublicKey> {
     peer_keys_with_network_access(config)
-}
-
-/// Tell whether a directional network rule allows at least one packet tuple.
-fn has_network_access(policy: &TrafficPolicy) -> bool {
-    match policy {
-        TrafficPolicy::All => true,
-        TrafficPolicy::Ports(ports) => !ports.is_empty(),
-        TrafficPolicy::None => false,
-    }
 }
 
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {

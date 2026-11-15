@@ -98,21 +98,6 @@ pub struct PeerPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_ssh: Option<bool>,
 }
-impl PeerPolicy {
-    /// Whether this peer may exchange any traffic with the node, in either direction. A peer
-    /// without it stays in snapshots (so a later grant changes only policy) but gets no packets,
-    /// and no more of the node's coordinates than an older node would (#515).
-    #[must_use]
-    pub fn has_network_access(&self) -> bool {
-        let open = |policy: &TrafficPolicy| match policy {
-            TrafficPolicy::All => true,
-            TrafficPolicy::Ports(ports) => !ports.is_empty(),
-            TrafficPolicy::None => false,
-        };
-        open(&self.inbound) || open(&self.outbound)
-    }
-}
-
 /// Coordinator-owned DNS identity used by mesh-only listeners and names [#266, #281].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +150,31 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_names: BTreeMap<NodeId, String>,
 }
+impl PeerPolicy {
+    /// Whether this peer's grants allow at least one network packet in either direction.
+    ///
+    /// The `GotaTun` node workers (Linux and macOS) install, and let through the handshake
+    /// admission guard, only peers for which this is true. A peer with no access gets no device
+    /// entry, so the node neither answers its handshakes nor keeps a session alive toward it
+    /// (#93478, J781, #483). The kernel engine keeps its complete inventory instead.
+    ///
+    /// A peer without access still stays in snapshots, so a later grant changes only policy, and
+    /// it learns no more of the node's coordinates than an older node would: no private
+    /// candidates, and no candidate walk toward it (#515).
+    #[must_use]
+    pub fn has_network_access(&self) -> bool {
+        /// Whether one direction's rule allows at least one packet tuple.
+        fn allows_any(policy: &TrafficPolicy) -> bool {
+            match policy {
+                TrafficPolicy::All => true,
+                TrafficPolicy::Ports(ports) => !ports.is_empty(),
+                TrafficPolicy::None => false,
+            }
+        }
+        allows_any(&self.inbound) || allows_any(&self.outbound)
+    }
+}
+
 impl Config {
     /// Whether the Access policy lets `peer` start a TCP/22 connection to
     /// this node: the check mesh SSH makes on every connection (#221).

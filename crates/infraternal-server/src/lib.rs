@@ -3,6 +3,8 @@
 
 /// Shared compiled release identity; channel policy remains in the release plugin [225,226].
 pub use infraternal_plugin_api::{VERSION, release_version};
+/// Each account's live browser sockets, and taking over the longest-hidden one when the account is full (#523).
+mod account_sockets;
 pub mod auth;
 #[cfg(feature = "remote")]
 pub mod ca;

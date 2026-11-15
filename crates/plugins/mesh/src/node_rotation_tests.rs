@@ -327,6 +327,7 @@ fn gotatun_owner_proof_rejects_a_candidate_before_commit_intent() {
 
 /// Checks address replacement, recovery fencing, and packet delivery in one backend scenario.
 fn check(backend: Backend) {
+    let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
     node.up().unwrap();
     let proposed = Addresses {

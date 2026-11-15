@@ -1334,6 +1334,8 @@ impl Node {
                 key_rotation: true,
                 authority_epoch: true,
             });
+            // The restored kernel socket's port is what the host input table admits (D386).
+            node.firewall.set_listen_port(Some(port))?;
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
@@ -1371,8 +1373,10 @@ impl Node {
     /// own, a live mesh link belongs to another running node whose policy the
     /// filter enforces (#260). An unmarked interface with the shared name
     /// counts as live: it may be another node's TUN before it is marked.
+    /// The same step closes the mesh listener this node opened in the host
+    /// input table, which a `GotaTun` node may hold without any kernel table.
     fn remove_unshared_filter(&mut self) -> io::Result<()> {
-        if !self.firewall.installed() {
+        if !self.firewall.installed() && !self.firewall.host_ingress_open() {
             return Ok(());
         }
         match Device::active_link() {
@@ -1976,6 +1980,8 @@ impl Node {
                             authority_epoch: true,
                         };
                         self.identity = Some(identity.clone());
+                        // The host input table admits exactly the port this socket bound (D386).
+                        self.firewall.set_listen_port(Some(identity.port))?;
                         Ok(identity)
                     }
                     Err(error) => {
@@ -2053,6 +2059,8 @@ impl Node {
                     authority_epoch: true,
                 };
                 self.identity = Some(identity.clone());
+                // The host input table admits exactly the port this socket bound (D386).
+                self.firewall.set_listen_port(Some(identity.port))?;
                 Ok(identity)
             }
         }
@@ -2648,7 +2656,10 @@ impl Node {
             self.remove_unshared_filter()?;
         }
         self.retire_routes()?;
-        self.firewall = Firewall::default();
+        // A fresh firewall keeps this node's engine mode: a `GotaTun` node that comes up again
+        // in this process must stay on the optional guard, not switch to the full kernel policy,
+        // which needs nft or iptables-nft (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
         self.gotatun = None;
@@ -3046,7 +3057,8 @@ impl Node {
         if let Err(error) = self.remove_unshared_filter() {
             first_error.get_or_insert(error);
         }
-        self.firewall = Firewall::default();
+        // Keep the engine's firewall mode for the next `up`, as `down` does (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.identity = None;
         self.owned = false;
@@ -4397,6 +4409,12 @@ mod tests {
 #[cfg(test)]
 #[path = "node_rotation_tests.rs"]
 mod rotation_tests;
+
+/// Namespace proofs that a `GotaTun` node opens and closes its host listener without any
+/// firewall tool (#483, D384, D386).
+#[cfg(test)]
+#[path = "node_host_listener_tests.rs"]
+mod host_listener_tests;
 
 /// Root-only measurement of live traffic across a same-content coordinator restart (#382 P2-c).
 #[cfg(test)]

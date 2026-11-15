@@ -1395,10 +1395,13 @@ mod tests {
             ])
         );
     }
-    /// Preserves explicit-off intent after failed kernel-firewall cleanup and reconnect.
+    /// D386 lets mesh cleanup remove a recreated table in the product-owned namespace.
+    ///
+    /// It runs on the kernel `WireGuard` engine, where nft holds the full peer policy (D346), so
+    /// the recreated table is the one the grants live in.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn kernel_firewall_cleanup_failure_reports_stopping_and_reconnect_keeps_explicit_off() {
+    fn mesh_down_removes_a_recreated_product_table_and_keeps_explicit_off() {
         use crate::{
             dataplane::DefaultPolicy,
             policy::model::{Addresses, NodeId},
@@ -1407,6 +1410,8 @@ mod tests {
             io::Write as _,
             process::{Command, Stdio},
         };
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = crate::host_firewall::discover_nft(None).expect("fixed-path nft fixture");
         let mut plugin = MeshNodePlugin::from_node(
             Node::default().with_engine(crate::gotatun_node::EngineKind::Kernel),
         );
@@ -1445,7 +1450,7 @@ mod tests {
                 &serde_json::to_vec(&chunk).expect("chunk"),
             )
             .expect("configure");
-        let mut child = Command::new("/usr/sbin/nft")
+        let mut child = Command::new(&nft)
             .args(["-f", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1459,19 +1464,24 @@ mod tests {
             .write_all(b"delete table inet infraternal_mesh\nadd table inet infraternal_mesh\n")
             .expect("fixture batch");
         assert!(child.wait().expect("fixture status").success());
-        assert!(plugin.call("mesh.down", b"{}").is_err());
+        let down: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.down", b"{}").expect("mesh down"))
+                .expect("JSON");
+        assert_eq!(down["state"], "Off");
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("status"))
                 .expect("JSON");
-        assert_eq!(status["state"], "Stopping");
+        assert_eq!(status["state"], "Off");
         assert!(
-            Command::new("/usr/sbin/nft")
-                .args(["delete", "table", "inet", "infraternal_mesh"])
+            !Command::new(&nft)
+                .args(["-j", "list", "table", "inet", "infraternal_mesh"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
-                .expect("fixture cleanup")
-                .success()
+                .expect("inspect product table")
+                .success(),
+            "D386 cleanup removes the product-owned table even without its old marker"
         );
-        plugin.call("mesh.down", b"{}").expect("finish cleanup");
         assert_eq!(
             plugin.call("mesh.identity", b"{}").expect("reconnect"),
             b"null"

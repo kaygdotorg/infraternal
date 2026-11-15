@@ -1,7 +1,7 @@
 //! Restores the Mac userspace Mesh node and its utun routes across daemon lifetimes.
 
 use crate::dataplane::Config;
-use crate::handshake_admission::{PeerAdmission, PeerAdmissionUdpReceiver};
+use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::packet_filter::{Direction, PacketFilter};
 use bytes::Buf;
 use gotatun::{
@@ -38,7 +38,6 @@ use std::{
     process::Command,
     sync::{Arc, mpsc as sync},
     thread::JoinHandle,
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::unix::AsyncFd;
 use tokio::{
@@ -776,7 +775,7 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
     result.and_then(|()| crate::node_state::write_authority(&authority_path(path), &authority))
 }
 
-/// Compare and replace one lower-revision full snapshot under the public-state directory lock.
+/// Compare and replace one lower-revision full snapshot under the mesh state update lock.
 ///
 /// This transaction is for a same-authority rollback only. Authority changes continue through
 /// the peer-free checkpoint path, which carries its own durable reset marker.
@@ -788,12 +787,8 @@ fn write_public_state_full_snapshot(
     expected: &Config,
 ) -> io::Result<()> {
     let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-        .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-        .map_err(|(_, error)| error)?;
+    // Not an exclusive directory lock: this node's own open Store holds a shared lease on it.
+    let _guard = crate::node_state::lock_mesh_state_update(parent)?;
     let previous = read_public_state(path)?.ok_or(io::ErrorKind::InvalidData)?;
     let old = previous.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
     let next = state.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
@@ -834,7 +829,9 @@ fn write_public_state_in_place(path: &Path, state: &SavedState) -> io::Result<()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
         .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+    // Shared: the node's own Store holds a shared lease here, and only migration locks it
+    // exclusively. The writer lock file can't be used, since this directory may be read-only.
+    let _lease = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockShared)
         .map_err(|(_, error)| error)?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -902,7 +899,18 @@ fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
     Ok(payload)
 }
 
-/// Convert every configured identity into GotaTun peers, keeping both rotation keys installed.
+/// The configured peers the Mac device installs: those whose grants allow some traffic.
+///
+/// A peer without network access gets no device entry, so the handshake guard refuses its key
+/// and the node keeps no session alive toward it, as on Linux (J781, #483, #515).
+fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
+    config
+        .peers
+        .values()
+        .filter(|policy| policy.has_network_access())
+}
+
+/// Convert every installed identity into GotaTun peers, keeping both rotation keys installed.
 ///
 /// Only the active overlap key gets routes and an endpoint, so the inactive key can accept an
 /// incoming handshake without competing to own the peer's host routes.
@@ -910,7 +918,7 @@ fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
 /// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let mut peers = Vec::new();
-    for policy in config.peers.values() {
+    for policy in installed_peers(config) {
         peers.extend(peer_for_policy(policy)?);
     }
     Ok(peers)
@@ -1187,6 +1195,10 @@ enum WorkerCommand {
     },
     Counters(sync::SyncSender<CounterMap>),
     Stop(sync::SyncSender<io::Result<()>>),
+    /// Hand a real-Mac test the worker's admission guard, so it can check what the guard
+    /// knows and flood it on a simulated clock.
+    #[cfg(test)]
+    Admission(sync::SyncSender<Arc<RwLock<PeerAdmission>>>),
 }
 
 struct Worker {
@@ -1289,7 +1301,8 @@ impl PendingWorker {
                         .transpose()?
                         .unwrap_or_default();
                     // The guard knows the first peers before the device receives anything.
-                    admission.write().await.set_peers(installed_keys(&peers));
+                    let keys = installed_keys(&peers);
+                    admission.write().await.install(keys, &peers);
                     let device = DeviceBuilder::new()
                         .with_udp(factory)
                         .with_private_key(private_key)
@@ -1345,6 +1358,7 @@ impl PendingWorker {
                     interface_mtu,
                     port: info.port,
                     admission,
+                    confirmed_feed: ConfirmedEndpointFeed::default(),
                     #[cfg(feature = "mesh-dns")]
                     dns_resolver,
                     #[cfg(feature = "mesh-dns")]
@@ -1551,6 +1565,10 @@ impl Drop for Worker {
     }
 }
 
+/// Reads per-peer statistics from the live device for the worker: counters and the
+/// confirmed endpoints the admission guard learns from.
+mod peer_stats;
+
 /// Owns the live utun, peer-route MTUs, accepted snapshot and DNS resolver integration.
 /// `route_mtus` mirrors installed metrics so a failed update can restore them.
 struct RuntimeState {
@@ -1569,6 +1587,8 @@ struct RuntimeState {
     port: u16,
     /// The receive guard; it follows the peers and key the live device accepted.
     admission: Arc<RwLock<PeerAdmission>>,
+    /// Feeds the endpoints `GotaTun` confirmed into `admission`'s known set (J736).
+    confirmed_feed: ConfirmedEndpointFeed,
     #[cfg(feature = "mesh-dns")]
     dns_resolver: Option<crate::dns::Resolver>,
     #[cfg(feature = "mesh-dns")]
@@ -1717,6 +1737,7 @@ impl RuntimeState {
         validate_underlay_routes(&config, &new_routes)?;
         let peers = peers_for_config(&config)?;
         let admitted = installed_keys(&peers);
+        let admitted_endpoints: Vec<_> = peers.iter().filter_map(|peer| peer.endpoint).collect();
         let old_config = self.config.clone();
         let old_routes = self.routes.clone();
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -1835,7 +1856,10 @@ impl RuntimeState {
         }
         // The receive guard follows only snapshots the live device fully accepted. A failure
         // above has restored (or, for an authority replacement, stopped) the old peers.
-        self.admission.write().await.set_peers(admitted);
+        let mut admission = self.admission.write().await;
+        admission.set_peers(admitted);
+        admission.set_configured_endpoints(admitted_endpoints);
+        drop(admission);
         utun.filter.publish_policy(policy);
         let readdressed = walks::readdressed(old_config.as_ref(), &config);
         self.config = Some(config);
@@ -1847,37 +1871,6 @@ impl RuntimeState {
             port: self.port,
             routes: new_routes,
         })
-    }
-
-    async fn counters(&self) -> io::Result<CounterMap> {
-        let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let peers = device.read(async |read| read.peers().await).await;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let mut counters = CounterMap::new();
-        for peer in peers {
-            let age = peer.stats.last_handshake.unwrap_or_default();
-            let timestamp = if peer.stats.last_handshake.is_some() {
-                now.checked_sub(age).unwrap_or_default()
-            } else {
-                Duration::ZERO
-            };
-            let key = crate::policy::model::PublicKey(*peer.peer.public_key.as_bytes());
-            counters.insert(
-                key,
-                Counters {
-                    persistent_keepalive_secs: peer.peer.keepalive.unwrap_or(0),
-                    handshake_secs: timestamp.as_secs(),
-                    #[cfg(feature = "relay")]
-                    handshake_nanos: timestamp.subsec_nanos(),
-                    received_bytes: u64::try_from(peer.stats.rx_bytes).unwrap_or(u64::MAX),
-                    sent_bytes: u64::try_from(peer.stats.tx_bytes).unwrap_or(u64::MAX),
-                    endpoint: peer.peer.endpoint,
-                },
-            );
-        }
-        Ok(counters)
     }
 
     /// Removes the host resolver route and listener before the Mac mesh device stops.
@@ -3127,6 +3120,8 @@ mod tests {
     mod listener;
     /// A failed retirement save leaves a peer-free deny snapshot, written before the worker fence.
     mod retirement;
+    /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
+    mod roamed_peer;
     /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
     mod walks;
 
@@ -3348,6 +3343,8 @@ mod tests {
                         let _ = reply.send(Ok(()));
                         break;
                     }
+                    // A recording worker has no guard; dropping the reply tells the asker so.
+                    WorkerCommand::Admission(_) => {}
                 }
             }
         });
@@ -4882,11 +4879,11 @@ mod tests {
             )
             .await
             .expect("bind");
-            factory
-                .admission
-                .write()
-                .await
-                .set_peers([PublicKey(peer_key)]);
+            {
+                let mut admission = factory.admission.write().await;
+                admission.set_peers([PublicKey(peer_key)]);
+                admission.set_configured_endpoints([endpoint]);
+            }
             let mut peer = WireGuardPeer::new(WgPublicKey::from(peer_key))
                 .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
             peer.endpoint = Some(endpoint);

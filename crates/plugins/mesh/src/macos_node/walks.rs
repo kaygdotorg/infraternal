@@ -18,7 +18,7 @@
 
 use super::{
     CounterMap, GotaDevice, RuntimeState, WireGuardPeer, WorkerCommand, X25519PublicKey,
-    installed_keys, peer_for_policy, peers_for_config,
+    installed_keys, installed_peers, peer_for_policy, peer_stats, peers_for_config,
 };
 use crate::{
     candidate_walks::{HANDSHAKE_WAIT, Observed, active_peer_key, kept_address, walking_peers},
@@ -33,24 +33,23 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
-/// The peers the Mac engine installs for `config`: every configured peer, in the order
-/// `peers_for_config` converts them. The D384 packet filter enforces each peer's grants at the
-/// utun (#265), so the Mac no longer leaves out peers it could not narrow; the walk bookkeeping
-/// must see exactly the peers the engine has.
-fn installed_peers(config: &Config) -> impl Iterator<Item = &PeerPolicy> {
-    config.peers.values()
-}
-
 /// Run the Mac worker: apply queued commands one at a time, step candidate walks when one is
 /// due, and reap finished handshake tasks. It stops cleanly when told to or when its queue
 /// closes.
 ///
 /// A walk reads the counters only after the reply to an apply has been sent, so a snapshot's
-/// caller never waits on it.
+/// caller never waits on it. Between commands it also scans the device's confirmed endpoints
+/// every [`peer_stats::CONFIRMED_ENDPOINT_SCAN`] for the admission guard, as the Linux worker
+/// does (J736, #483).
+///
+/// Every walk reads its peers through [`installed_peers`], the same filter
+/// [`peers_for_config`] installs with, so a peer without network access is never walked.
 pub(super) async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
     mut state: RuntimeState,
 ) {
+    let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
+    confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // A restored configuration may already carry candidates; no session predates it.
     state.refresh_walks(&BTreeMap::new()).await;
     loop {
@@ -96,7 +95,14 @@ pub(super) async fn run_worker(
                         let _ = reply.send(result);
                         return;
                     }
+                    #[cfg(test)]
+                    WorkerCommand::Admission(reply) => {
+                        let _ = reply.send(Arc::clone(&state.admission));
+                    }
                 }
+            }
+            _ = confirmed_scan.tick() => {
+                state.admit_confirmed_endpoints().await;
             }
             () = crate::candidate_walks::walk_due(next_walk), if next_walk.is_some() => {
                 state.step_walks().await;

@@ -20,7 +20,7 @@
  * closing the socket: an intermediary may never deliver its close event. Streams retain unacknowledged input.
  */
 import { noteWsMessage } from "./perf-activity";
-import { CloseNotes, plainCloseReason } from "./close-reasons";
+import { CloseNotes, CONNECTION_LIMIT_REASON, plainCloseReason, TAKEN_OVER_REASON } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
@@ -114,6 +114,7 @@ export interface StreamHandler {
   onStatus(message: string): void;
 }
 
+/** How a page sets up its {@link MuxConnection}: the session it belongs to and the callbacks for what the page shows. */
 export interface ConnectionConfig {
   /** Original authenticated lifetime, supplied before the first WebSocket handshake. */
   sessionIncarnation?: string;
@@ -125,6 +126,17 @@ export interface ConnectionConfig {
   onRecoveryCompleted?: (message: string) => void;
   /** Connection state: true once a stream attached, false when the socket closes. */
   onConnectionChange?: (connected: boolean) => void;
+  /**
+   * A socket closed before the server welcomed it (refused, unreachable or dropped mid-handshake); `reason` is the
+   * close reason, if any. Untrusted text: compare it, never show it. The signed-in page uses this to say why its first
+   * connection fails instead of sitting blank (#523).
+   */
+  onUnwelcomedClose?: (reason: string | undefined) => void;
+  /**
+   * The connection paused (`true`) because a newer tab of the account took its place, or resumed (`false`) on the
+   * next welcome. While paused it does not reconnect until the page is shown (#523, owner decision B).
+   */
+  onPausedChange?: (paused: boolean) => void;
   /**
    * Asked at every socket open: true advertises the desktop video capability (bit 4, contracts/wire.md §9) in the
    * client's Hello, so the server may open app-window and screen streams on this socket. It is read at connect time,
@@ -210,6 +222,12 @@ export class MuxConnection {
   private forcedDrop = false;
   private closed = false;
   private welcomed = false;
+  /**
+   * Set when the server gave this tab's connection to a newer tab of the account (`TAKEN_OVER_REASON`); cleared by the
+   * next welcome. While set, nothing connects as long as the page is hidden: a hidden tab that reconnected would take
+   * the place of another hidden tab, which would then do the same.
+   */
+  private pausedForTakeover = false;
   private resumeSent = false;
   private serverVisibility = false;
   private attachedCount = 0;
@@ -503,11 +521,22 @@ export class MuxConnection {
     socket.close(4000, "tracer resume probe");
   }
 
+  /**
+   * Retries a connection that is waiting between attempts now, rather than at the end of its backoff (a person pressed
+   * "Try again"). A handshake already in flight is left alone, and a refusal's backoff still counts afterwards.
+   */
+  connectNow(): void { this.retryNow(true); }
+
   /** Closes the socket so the connection restarts (every stream re-attaches on the next welcome). */
   /** Closes the socket for a close the server named; `code` and `reason` are that close, for the console line. */
   forceClose(code?: number, reason?: string): void {
     const socket = this.socket;
     if (!socket) return;
+    if (reason === TAKEN_OVER_REASON && !this.pausedForTakeover) {
+      // Before `disconnect`, so the reconnect it schedules already sees the pause.
+      this.pausedForTakeover = true;
+      this.config.onPausedChange?.(true);
+    }
     this.noteClose(code, reason, "the server");
     this.forgetRefusedResume(code, reason);
     this.disconnect(socket);
@@ -552,9 +581,12 @@ export class MuxConnection {
     for (const s of this.streams.values()) s.onStatus(message);
   }
 
+  /** Opens a new socket and sends its Hello (and Resume, while one is still valid); a paused hidden tab waits instead. */
   private connect(): void {
     if (this.closed) return;
     this.clearRetryTimer();
+    // A paused tab waits to be shown; the visibility hint that `scheduleReconnect` installs brings it back.
+    if (this.pausedForTakeover && this.pageHidden()) { this.startRetryHintListeners(); return; }
     const resuming = [...this.streams.values()].some((s) => s.hasSession());
     this.status(resuming ? "Connection lost. Reconnecting…" : "Connecting…");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -619,12 +651,17 @@ export class MuxConnection {
     };
   }
 
-  /** Server refusals retain backoff; a refused resume also forgets its capability before fresh attach (#244). */
+  /**
+   * Server refusals retain backoff; a refused resume also forgets its capability before fresh attach (#244).
+   * The account's connection limit is the exception for the capability: the server refuses it before it reads the
+   * Resume, so the connection is still resumable in its window, and forgetting it would turn the next successful
+   * connect into a fresh one that drops every terminal's writer (#523).
+   */
   private forgetRefusedResume(code: number | undefined, reason: string | undefined): void {
     if (this.welcomed || (code !== 1008 && reason !== "the server refused to resume the connection")) return;
     this.refusalBackoff = true;
     this.fastRecovery = false;
-    if (!this.resumeSent) return;
+    if (!this.resumeSent || reason === CONNECTION_LIMIT_REASON) return;
     this.credentials?.connectionId.fill(0);
     this.credentials?.resumeToken.fill(0);
     this.credentials = undefined;
@@ -636,6 +673,7 @@ export class MuxConnection {
    * calls it: once the socket is retired, its later close event is ignored.
    */
   private noteClose(code: number | undefined, reason: string | undefined, by?: string): void {
+    if (!this.welcomed) this.config.onUnwelcomedClose?.(reason);
     const line = this.closeNotes.note(Date.now(), code, reason, this.retryAttempt, this.welcomed, by);
     if (line) console.warn(line);
     const due = this.closeNotes.summaryDue();
@@ -807,6 +845,7 @@ export class MuxConnection {
   sessionIncarnation: string | undefined;
   terminalQueryReplies = false;
 
+  /** Handles one control-stream frame from the server: Hello, Welcome, results, events and the server's Close. */
   private control(frame: WireFrame): void {
     switch (frame.type) {
       case "Hello":
@@ -832,6 +871,7 @@ export class MuxConnection {
         if (this.refusalBackoff) this.retryAttempt = 0;
         this.refusalBackoff = false;
         this.welcomed = true;
+        if (this.pausedForTakeover) { this.pausedForTakeover = false; this.config.onPausedChange?.(false); }
         this.welcomedAt = performance.now();
         this.lastPongAt = this.welcomedAt;
         // A network change may have a different RTT; relearn before enforcing its deadline.
