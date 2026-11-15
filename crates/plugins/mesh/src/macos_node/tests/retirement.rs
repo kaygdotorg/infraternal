@@ -1,8 +1,9 @@
 //! A failed retirement save on the Mac never leaves the old, peer-carrying snapshot enabled for
 //! the next start (J330), and the deny state reaches disk before the worker is fenced.
 //!
-//! The first test makes the state directory read-only, so the atomic rename fails and the node
-//! falls back to its in-place write.
+//! The first two tests make the state directory read-only, so the atomic rename fails and the
+//! node falls back to its in-place write: once with no Store, and once with the node's Store open,
+//! as a running Mac node keeps it (J778).
 
 use super::{
     AUTHORITY_EPOCH_B, Arc, DefaultPolicy, Identity, Mutex, Node, PUBLIC_STATE, SavedState,
@@ -14,13 +15,47 @@ use std::os::unix::fs::PermissionsExt;
 /// A failed retirement save must not leave the old snapshot enabled for restart.
 #[test]
 fn failed_retirement_does_not_preserve_a_persisted_peer_rollback() {
+    failed_retirement_case(false);
+}
+
+/// The same failed retirement save with the node's own Store open, as on a running Mac node.
+///
+/// The Store holds a shared lease on the state directory for its whole life, so an in-place
+/// fallback that locks that directory exclusively waits on its own process forever (J778, after
+/// 26bc92ba5). The case runs on its own thread so a deadlock fails the test instead of hanging
+/// the suite.
+#[test]
+fn failed_retirement_with_an_open_store_does_not_deadlock() {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        failed_retirement_case(true);
+        let _ = done.send(());
+    });
+    match finished.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the in-place fallback deadlocked on the node's own store lease")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the failed retirement case panicked; see its message above")
+        }
+    }
+}
+
+/// Make the state directory read-only under a node holding a peer-carrying snapshot, apply a
+/// peer-free authority replacement, and check that the node stops with a peer-free deny
+/// snapshot on disk. With `open_store`, the node holds its Store (and so its directory lease)
+/// throughout, as `Node::restore` leaves a running Mac node.
+fn failed_retirement_case(open_store: bool) {
     let mut current = config();
     current.version = 11;
     let mut restored = current.clone();
     restored.version = 2;
     restored.peers.clear();
-    let directory =
-        std::env::temp_dir().join(format!("infraternal-j330-mac-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!(
+        "infraternal-j330-mac-{}-{open_store}",
+        std::process::id()
+    ));
     fs::create_dir(&directory).expect("state directory");
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .expect("private state directory");
@@ -37,6 +72,10 @@ fn failed_retirement_does_not_preserve_a_persisted_peer_rollback() {
         },
     )
     .expect("accepted snapshot");
+    // Opened while the directory is still private and writable, as at node start.
+    let store = open_store.then(|| {
+        crate::node_state::Store::open_for_macos(&directory).expect("open the node's store")
+    });
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
         .expect("make state directory unwritable");
     let identity = Identity {
@@ -52,7 +91,7 @@ fn failed_retirement_does_not_preserve_a_persisted_peer_rollback() {
     let mut node = Node {
         enabled: true,
         worker: Some(recording_worker(Arc::clone(&applied_configs))),
-        store: None,
+        store,
         identity: Some(identity),
         config: Some(current.clone()),
         authority_reset_pending: false,
