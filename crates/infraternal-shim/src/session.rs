@@ -1446,6 +1446,7 @@ fn handle<'a>(
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = Some(writer);
+                    cursors.viewer_sized = true;
                 }
             }
         }
@@ -1521,12 +1522,14 @@ fn handle<'a>(
             // positions. A live viewer's own resize reflows its screen locally
             // and needs no repaint.
             let replay_wrong_size = std::mem::take(&mut p.replay_awaits_size)
+                && cursors.viewer_sized
                 && (cols, rows) != (config.cols, config.rows);
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
                 let applied = p.resize(pty, terminal, ring, config)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = p.writer;
+                    cursors.viewer_sized = true;
                 }
             }
             if replay_wrong_size {
