@@ -178,6 +178,7 @@ mod tests {
     //! Reference counts preserve background truth across multiple windows; stale process identities never count.
     use super::*;
 
+    /// Keeps a nondumpable but authenticated process in the live session count.
     #[tokio::test]
     async fn nondumpable_process_keeps_its_authenticated_lifetime() {
         use std::{io::Read as _, process::Stdio};
@@ -191,8 +192,7 @@ mod tests {
             let _ = std::io::stdin().read_exact(&mut [0]);
             return;
         }
-        let root =
-            PathBuf::from("../../target").join(format!("nondumpable-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_state_root().join(format!("nondumpable-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let ready = root.join("ready");
         let path = root.join("socket");
@@ -246,9 +246,10 @@ mod tests {
         assert_eq!(count, 1, "a protected live process must remain counted");
     }
 
+    /// Counts background sessions only while their process identity remains live.
     #[tokio::test]
     async fn window_ownership_and_process_identity_bound_live_counts() {
-        let path = PathBuf::from("../../target").join(format!("l{}", uuid::Uuid::new_v4()));
+        let path = crate::test_state_root().join(format!("l{}", uuid::Uuid::new_v4()));
         fs::write(&path, b"").unwrap();
         let (peer, _remote) = tokio::net::UnixStream::pair().unwrap();
         let session = Session {
@@ -286,9 +287,10 @@ mod tests {
         assert_eq!(registry.context(), NodeContext::default());
     }
 
+    /// Keeps a session alive when its process-directory inode changes.
     #[tokio::test]
     async fn directory_inode_changes_do_not_retire_the_same_process() {
-        let root = PathBuf::from("../../target").join(format!("identity-{}", uuid::Uuid::new_v4()));
+        let root = crate::test_state_root().join(format!("identity-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let path = root.join("socket");
         fs::write(&path, b"").unwrap();

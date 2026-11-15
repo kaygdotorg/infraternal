@@ -9,9 +9,12 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Directory(PathBuf);
 impl Directory {
+    /// Creates one fixture directory beneath the configured short state root.
     fn new() -> Self {
-        Self(PathBuf::from(format!(
-            "../../target/as{}-{}",
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
+            .map_or_else(|| PathBuf::from("../../target"), PathBuf::from);
+        Self(root.join(format!(
+            "as{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         )))

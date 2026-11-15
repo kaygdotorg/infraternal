@@ -39,6 +39,17 @@ enum Record {
         /// Newly created enrollment directories own their private descendants.
         enrollment: bool,
     },
+    /// Keep a known prior firewall unit so an interrupted takeover can restore its exact inode.
+    Replacement {
+        /// The service pathname that may now contain the product unit.
+        path: PathBuf,
+        /// A hard link to the original unit, kept until the service transaction commits.
+        backup: PathBuf,
+        /// Original inode device number.
+        device: u64,
+        /// Original inode number.
+        inode: u64,
+    },
     /// Revoke a never-published staging inode's claim before a fallback creates a new inode.
     Unpublished {
         /// Relative destination whose prior claim is being revoked.
@@ -61,6 +72,8 @@ pub(super) struct Snapshot {
     pub(super) needs_root: bool,
     /// Entries stay in publication order so rollback visits children first.
     pub(super) created: Vec<Created>,
+    /// Replacements are restored before ordinary created paths are removed.
+    pub(super) replaced: Vec<super::Replaced>,
     /// The manager might already have started this run's service.
     pub(super) registered: bool,
     /// Committed installations must be managed normally, never recovered as partial installs.
@@ -152,8 +165,12 @@ fn allowed(path: &Path, enrollment: bool) -> bool {
         "etc/systemd",
         "etc/systemd/system",
         "etc/systemd/system/infraternal-agent.service",
+        "etc/systemd/system/infraternal-firewall.service",
         "etc/systemd/system/multi-user.target.wants",
         "etc/systemd/system/multi-user.target.wants/infraternal-agent.service",
+        "etc/systemd/system/network-pre.target.wants",
+        "etc/systemd/system/network-pre.target.wants/infraternal-firewall.service",
+        "var/lib/infraternal/host-firewall-agent.json",
     ];
     exact.contains(&value)
         || path
@@ -164,6 +181,18 @@ fn allowed(path: &Path, enrollment: bool) -> bool {
                 exact.contains(&parent.to_str().unwrap_or_default())
                     || parent.as_os_str().is_empty()
             })
+}
+
+/// Keep replacement recovery constrained to the known firewall unit and a sibling backup.
+fn allowed_replacement(path: &Path, backup: &Path) -> bool {
+    path == Path::new("etc/systemd/system/infraternal-firewall.service")
+        && backup.parent() == path.parent()
+        && backup.file_name().is_some_and(|name| {
+            name.as_encoded_bytes().starts_with(b".infraternal-up-")
+                && name.as_encoded_bytes().ends_with(b".pending")
+        })
+        && allowed(path, false)
+        && allowed(backup, false)
 }
 
 /// Decode complete records only; the producer always syncs a full line before its next operation.
@@ -203,6 +232,18 @@ fn snapshot(file: &mut File, root: &Path) -> io::Result<Snapshot> {
                     path: root.join(path),
                     identity: (device, inode),
                     enrollment,
+                });
+            }
+            Record::Replacement {
+                path,
+                backup,
+                device,
+                inode,
+            } if begun && !state.committed && allowed_replacement(&path, &backup) => {
+                state.replaced.push(super::Replaced {
+                    path: root.join(path),
+                    backup: root.join(backup),
+                    identity: (device, inode),
                 });
             }
             Record::Unpublished {
@@ -365,6 +406,32 @@ impl Journal {
         }
         self.append(&Record::Unpublished {
             path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    /// Record the original firewall unit before atomically publishing its product replacement.
+    pub(super) fn replacement(
+        &mut self,
+        path: &Path,
+        backup: &Path,
+        metadata: &fs::Metadata,
+    ) -> io::Result<()> {
+        let path = path
+            .strip_prefix(&self.root)
+            .map_err(|_| invalid())?
+            .to_owned();
+        let backup = backup
+            .strip_prefix(&self.root)
+            .map_err(|_| invalid())?
+            .to_owned();
+        if !allowed_replacement(&path, &backup) {
+            return Err(invalid());
+        }
+        self.append(&Record::Replacement {
+            path,
+            backup,
             device: metadata.dev(),
             inode: metadata.ino(),
         })

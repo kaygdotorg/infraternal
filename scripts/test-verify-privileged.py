@@ -104,6 +104,7 @@ class PrivilegedAreas(unittest.TestCase):
         """Cover production files, fixtures, shared manifests and harmless docs."""
         for path, expected in (
             ('crates/infraternal/src/install.rs', {'install'}),
+            ('crates/plugins/mesh/src/host_firewall.rs', {'mesh'}),
             ('crates/plugins/ssh/src/install/setup_scripts.rs', {'install'}),
             ('crates/plugins/remote/src/uninstall.rs', {'install'}),
             ('crates/plugins/proxy/src/cgroup.rs', {'proxy'}),
