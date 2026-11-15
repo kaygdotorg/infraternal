@@ -896,7 +896,18 @@ fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
     Ok(payload)
 }
 
-/// Convert every configured identity into GotaTun peers, keeping both rotation keys installed.
+/// The configured peers the Mac device installs: those whose grants allow some traffic.
+///
+/// A peer without network access gets no device entry, so the handshake guard refuses its key
+/// and the node keeps no session alive toward it, as on Linux (J781, #483, #515).
+fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
+    config
+        .peers
+        .values()
+        .filter(|policy| policy.has_network_access())
+}
+
+/// Convert every installed identity into GotaTun peers, keeping both rotation keys installed.
 ///
 /// Only the active overlap key gets routes and an endpoint, so the inactive key can accept an
 /// incoming handshake without competing to own the peer's host routes.
@@ -904,7 +915,7 @@ fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
 /// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let mut peers = Vec::new();
-    for policy in config.peers.values() {
+    for policy in installed_peers(config) {
         peers.extend(peer_for_policy(policy)?);
     }
     Ok(peers)
