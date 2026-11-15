@@ -86,11 +86,16 @@ async function open(page: Page, options: { held?: boolean; theme: string }): Pro
   return { calls, release, expire: () => { open = false; } };
 }
 
-/** Starts "Remove host: <name>" from the palette and confirms the first card. */
-async function remove(page: Page, name: string): Promise<void> {
+/** Picks "Remove host: <name>" in the palette. */
+async function pick(page: Page, name: string): Promise<void> {
   await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill(`Remove host: ${name}`);
   await page.getByRole("option").filter({ hasText: `Remove host: ${name}` }).click();
+}
+
+/** Picks the host and confirms the card that asks first. */
+async function remove(page: Page, name: string): Promise<void> {
+  await pick(page, name);
   await page.getByRole("button", { name: "Remove", exact: true }).click();
 }
 
@@ -116,7 +121,8 @@ for (const [width, theme] of [[1440, "ink"], [1440, "paper"], [393, "ink"], [393
       const fixture = await open(page, { held: true, theme });
       await remove(page, HOSTS[0].name);
       await expect.poll(() => fixture.calls).toContain(`finish:${HOSTS[0].id}`);
-      await remove(page, HOSTS[0].name);
+      // The refusal comes before any card: the person is told at once, and nothing is sent.
+      await pick(page, HOSTS[0].name);
       await expect(page.locator(".ui-toast").filter({ hasText: `${HOSTS[0].name} is already being removed.` })).toBeVisible();
       expect(fixture.calls.filter((call) => call === `start:${HOSTS[0].id}`)).toHaveLength(1);
       fixture.release();
