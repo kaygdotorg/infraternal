@@ -21,10 +21,10 @@ use crate::{
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
-        ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseOwner,
-        CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION, PROTOCOL_ERROR,
-        RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE, classify_terminal_close,
-        safe_agent_close_reason, safe_websocket_reason,
+        ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
+        CloseOwner, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION,
+        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE,
+        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
     },
 };
 use axum::{
@@ -69,7 +69,13 @@ const TERMINAL_QUERY_REPLIES: u64 = 1 << 3;
 const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
+/// Live sockets one account may hold at once: one per open tab or app, so a person with many tabs or devices
+/// open reaches it. The upgrade permit (`user_permit`) and the database row count (`new_connection`) both enforce it.
 const MAX_USER_CONNECTIONS: usize = 16;
+/// [`MAX_USER_CONNECTIONS`] as the row count `new_connection` and `resume_connection` compare against. Kept as its
+/// own literal because a `usize` to `i64` cast is refused by the lints; `connection_limit_constants_agree` holds the
+/// two equal.
+const MAX_USER_CONNECTION_ROWS: i64 = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -485,6 +491,8 @@ pub(crate) fn router(state: WebSocketState) -> Router {
         .with_state(Arc::new(state))
 }
 
+/// Admits a browser's WebSocket upgrade: same origin, a live session cookie, and room under the process-wide and
+/// per-account limits. An account over its limit is upgraded only to be told so (`refuse_over_limit`, #523).
 async fn upgrade(
     State(state): State<Arc<WebSocketState>>,
     headers: HeaderMap,
@@ -512,7 +520,17 @@ async fn upgrade(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Some(user_permit) = state.user_permit(&session.user_id) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        // Over the account's limit, a bare 503 reaches the page only as a failed socket, so the page cannot say why
+        // and sat blank (#523). The upgrade goes through only to close at once with the limit's reason; the
+        // process-wide permit above still bounds these refusals, and the socket never reads a frame.
+        let user_id = session.user_id;
+        return ws
+            .max_message_size(MAX_SOCKET_BUFFER)
+            .max_frame_size(MAX_SOCKET_BUFFER)
+            .on_upgrade(move |socket| async move {
+                let _permit = permit;
+                refuse_over_limit(socket, &state, &user_id).await;
+            });
     };
     ws.read_buffer_size(SOCKET_READ_CHUNK)
         .max_message_size(MAX_SOCKET_BUFFER)
@@ -524,11 +542,55 @@ async fn upgrade(
         })
 }
 
+/// Closes a socket the account has no room for with [`CONNECTION_LIMIT`] (code 1008), so the page can tell the
+/// person to close a tab they no longer need. The line is rate-limited per account like every other close.
+///
+/// The reason goes out twice: first as the protocol's own Close frame on the control stream, the way every other
+/// handshake refusal is sent, then as the WebSocket close. A browser reports a WebSocket close whose handshake the
+/// server did not wait out as 1006 with no reason (seen in Chromium on the #523 spec), so the page reads the protocol
+/// frame. The WebSocket close keeps the reason for other clients.
+async fn refuse_over_limit(mut socket: WebSocket, state: &WebSocketState, user_id: &str) {
+    state.close_logs.record(&CloseRecord::new(
+        CloseOwner::of(user_id),
+        CloseWho::Server,
+        CONNECTION_LIMIT,
+        None,
+        NO_SESSION,
+        0,
+    ));
+    let mut encode = Vec::new();
+    let _ = tokio::time::timeout(
+        CLOSE_TIMEOUT,
+        send_frame(
+            &mut socket,
+            CONTROL_STREAM,
+            &Frame::Close {
+                code: 1008,
+                reason: CONNECTION_LIMIT.client_text,
+            },
+            &mut encode,
+        ),
+    )
+    .await;
+    let close = axum::extract::ws::CloseFrame {
+        code: 1008,
+        reason: CONNECTION_LIMIT.client_text.into(),
+    };
+    let _ = tokio::time::timeout(
+        CLOSE_TIMEOUT,
+        send_message(&mut socket, Message::Close(Some(close))),
+    )
+    .await;
+}
+
 /// Socket upgrades use exactly the same cookie shape and request-wide uniqueness as HTTP auth.
 pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     crate::auth::cookies::session(headers).map(|cookie| cookie.token)
 }
 
+/// Runs one admitted socket: the handshake (Hello, then Welcome or Resume), then the loop that carries control and
+/// terminal frames until the browser goes, the session ends or the server closes it. A refused handshake closes with
+/// its reason (the account's limit, a refused resume or a refused attach).
 // Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.
 async fn run_socket(
     socket: WebSocket,
@@ -583,6 +645,7 @@ async fn run_socket(
 
     let mut pending_welcome = None;
     let mut resume_attempt = None;
+    let mut over_limit = false;
     let handshake = tokio::time::timeout_at(
         handshake_deadline,
         while_authorized_value(
@@ -600,6 +663,7 @@ async fn run_socket(
                 &session_token,
                 &mut pending_welcome,
                 &mut resume_attempt,
+                &mut over_limit,
             ),
         ),
     )
@@ -612,7 +676,9 @@ async fn run_socket(
         viewer_visibility,
     ))) = handshake
     else {
-        let reason = if resume_attempt.is_some() {
+        let reason = if over_limit {
+            CONNECTION_LIMIT
+        } else if resume_attempt.is_some() {
             RESUME_REFUSED
         } else {
             ATTACH_REFUSED
@@ -1651,6 +1717,7 @@ async fn handshake<S, K>(
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
     resume_attempt: &mut Option<[u8; 16]>,
+    over_limit: &mut bool,
 ) -> Result<([u8; 16], probe_authority::Lease, bool, u64, bool), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
@@ -1704,7 +1771,7 @@ where
             Some(pending_welcome),
         )
         .await
-        .map_err(|_| ())?
+        .map_err(|error| *over_limit = is_connection_limit(&error))?
     } else {
         new_connection(
             &state.pool,
@@ -1714,7 +1781,7 @@ where
             Some(pending_welcome),
         )
         .await
-        .map_err(|_| ())?
+        .map_err(|error| *over_limit = is_connection_limit(&error))?
     };
     // Retain rollback metadata outside the cancelled future, including the previous Resume token.
     *pending_welcome = Some(welcome);
@@ -1756,6 +1823,19 @@ struct Welcome {
     previous_expiry: Option<i64>,
 }
 
+/// The error `new_connection` returns when the account already holds its live connections.
+const CONNECTION_LIMIT_ERROR: &str = "connection limit reached";
+/// The resume refusal category for the same limit (`resume_connection`).
+const RESUME_CAPACITY_CHECK: &str = "connection_capacity";
+
+/// True when an admission error is the account's connection limit rather than an authority or storage failure, so
+/// the handshake closes with [`CONNECTION_LIMIT`], which the page can explain, instead of a bare refusal (#523).
+fn is_connection_limit(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Protocol(message) if message == CONNECTION_LIMIT_ERROR || message == RESUME_CAPACITY_CHECK)
+}
+
+/// Records a fresh connection for the account, inside the limit on live connections (then [`CONNECTION_LIMIT_ERROR`])
+/// and on retained resume rows, and returns its Welcome credentials.
 async fn new_connection(
     pool: &SqlitePool,
     user_id: &str,
@@ -1775,8 +1855,8 @@ async fn new_connection(
     .bind(user_id)
     .fetch_one(&mut *transaction)
     .await?;
-    if active >= 16 {
-        return Err(sqlx::Error::Protocol("connection limit reached".into()));
+    if active >= MAX_USER_CONNECTION_ROWS {
+        return Err(sqlx::Error::Protocol(CONNECTION_LIMIT_ERROR.into()));
     }
     let retained: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM websocket_connections WHERE active=1 OR expires_at>=?",
@@ -1865,8 +1945,8 @@ async fn resume_connection(
     .bind(user_id)
     .fetch_one(&mut *transaction)
     .await?;
-    if active >= 16 {
-        return Err(resume_refused("connection_capacity"));
+    if active >= MAX_USER_CONNECTION_ROWS {
+        return Err(resume_refused(RESUME_CAPACITY_CHECK));
     }
     let welcome = Welcome {
         connection_id,
@@ -3450,6 +3530,11 @@ fn unix_seconds() -> Result<i64, ()> {
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 mod writer_tests;
+
+/// Tests for the per-account connection limit (#523).
+#[cfg(test)]
+#[path = "websocket_limit_tests.rs"]
+mod connection_limit_tests;
 
 #[cfg(test)]
 #[path = "session_inventory_tests.rs"]

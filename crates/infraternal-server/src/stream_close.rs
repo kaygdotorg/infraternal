@@ -141,6 +141,14 @@ pub(crate) const ATTACH_UNOWNED: CloseReason = CloseReason::new(
     "unowned_session_attach",
     "the account has no such terminal session",
 );
+/// The account already has as many live connections as the server allows (`websocket::new_connection`).
+/// It gets its own words because the person can act on them: closing a tab they no longer need frees a
+/// connection. A bare refusal left the page blank, with nothing to say why (#523).
+pub(crate) const CONNECTION_LIMIT: CloseReason = CloseReason::new(
+    "auth_resume_refusal",
+    "account_connection_limit",
+    "this account has too many open connections",
+);
 /// The server refused to resume a connection.
 pub(crate) const RESUME_REFUSED: CloseReason = CloseReason::new(
     "auth_resume_refusal",
