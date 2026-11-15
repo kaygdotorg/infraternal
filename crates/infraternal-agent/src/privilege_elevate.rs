@@ -1027,6 +1027,82 @@ mod tests {
         );
     }
 
+    /// Whether `way` reaches its password prompt on this host, so a test can
+    /// drive it with no secret and stop there without anything running as
+    /// root. su needs a POSIX root shell; sudo and doas must be installed
+    /// and must *not* let this account in without a password (then the
+    /// snippet would run as root, which a test must never cause).
+    fn prompts_here(way: Way) -> bool {
+        let Some((program, _)) = command(way, MARK, ["", "", "", ""]) else {
+            return false;
+        };
+        match way {
+            Way::Su => {
+                root_shell_is_posix(&std::fs::read_to_string("/etc/passwd").unwrap_or_default())
+            }
+            Way::Sudo | Way::Doas => std::process::Command::new(program)
+                .args(["-n", "true"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| !status.success()),
+            Way::SudoNoPassword => false,
+        }
+    }
+
+    /// J716 A (#399, D274, D376): a sudo try ends within its bound, even when
+    /// sudo can't be signalled.
+    ///
+    /// sudo spends part of its life with real uid 0, and then this account
+    /// may not signal it: the `killpg` after the prompt fails with `EPERM`.
+    /// `elevate` must still end the try (by hanging up the terminal) instead
+    /// of waiting for sudo to give up on its own, which took more than 16
+    /// minutes in J716's runs. With a wrong password the same kill happens
+    /// at the second prompt, so a hang here is a "wrong password" that never
+    /// reaches the person (D376).
+    ///
+    /// No secret is used: sudo stops at its prompt, nothing reaches PAM, and
+    /// nothing runs as root. The limit is generous (it checks that the try
+    /// ends, not how fast).
+    #[tokio::test]
+    async fn a_sudo_try_ends_within_its_bound() {
+        /// The try's own bound, as `elevate` gets it.
+        const BOUND: Duration = Duration::from_secs(5);
+        /// Far past the bound plus the wait for the command to exit.
+        const LIMIT: Duration = Duration::from_secs(30);
+        if !prompts_here(Way::Sudo) {
+            eprintln!("no sudo that prompts this account here; nothing to check");
+            return;
+        }
+        for round in 0..5 {
+            let attempt = tokio::time::timeout(
+                LIMIT,
+                elevate(
+                    Way::Sudo,
+                    None,
+                    &[0; 32],
+                    [
+                        "/nonexistent/j723",
+                        &"0".repeat(64),
+                        "/nonexistent/j723.sock",
+                        "65534",
+                    ],
+                    BOUND,
+                ),
+            )
+            .await;
+            let Ok(done) = attempt else {
+                panic!(
+                    "try {round}: elevate on sudo was still running after {LIMIT:?} (bound {BOUND:?})"
+                );
+            };
+            let done = done.unwrap();
+            assert!(done.elevated.is_none());
+            assert_eq!(done.outcome, Outcome::Failed, "try {round}");
+        }
+    }
+
     /// The children of this process right now, from every thread's
     /// `/proc/self/task/<tid>/children` list.
     fn children() -> Vec<u32> {
