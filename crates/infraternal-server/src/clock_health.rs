@@ -11,6 +11,9 @@ use std::{
 /// The clock is sampled once a second.
 const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
 /// A longer gap between samples (a stalled or suspended process) resets health.
+///
+/// A shorter late sample does not: a busy runtime can run the sampler a few hundred
+/// milliseconds late, and that says nothing about the wall clock (#525).
 const MAX_SAMPLE_GAP: Duration = Duration::from_secs(5);
 /// How far the wall clock may move apart from the monotonic clock per sample.
 const MAX_DRIFT: Duration = Duration::from_millis(250);
@@ -96,8 +99,14 @@ impl ClockHealth {
         self.healthy.load(Ordering::Acquire).then_some(epoch)
     }
 
-    /// Accept a sample only if the wall clock moved forward by about one monotonic second. Three stable samples in a
-    /// row mark the clock healthy; any unstable one resets the count.
+    /// Accept a sample only if the wall clock moved forward by the same monotonic time, within [`MAX_DRIFT`], at
+    /// least about one sample period after the previous sample and at most [`MAX_SAMPLE_GAP`] after it. Three stable
+    /// samples in a row mark the clock healthy; any unstable one resets the count.
+    ///
+    /// Only the two clocks' agreement and the gap bound judge the clock. A sample the runtime ran late (a loaded host,
+    /// a busy single-threaded runtime) is still stable when both clocks moved alike: rejecting it used to mark the
+    /// clock untrusted for the next three seconds, and every certificate recovery in that window was denied (#525).
+    /// The lower bound stays, so three samples always span at least about two seconds of observation.
     fn observe(&self, wall: SystemTime, monotonic: Instant) {
         let mut samples = self
             .samples
@@ -112,7 +121,6 @@ impl ClockHealth {
                     let monotonic_delta = monotonic.checked_duration_since(old_monotonic)?;
                     let drift = duration_difference(wall_delta, monotonic_delta);
                     (monotonic_delta >= SAMPLE_PERIOD.saturating_sub(MAX_DRIFT)
-                        && monotonic_delta <= SAMPLE_PERIOD + MAX_DRIFT
                         && monotonic_delta <= MAX_SAMPLE_GAP
                         && drift <= MAX_DRIFT)
                         .then_some(())
@@ -180,5 +188,69 @@ mod tests {
             monotonic + Duration::from_secs(20),
         );
         assert!(!health.is_healthy());
+    }
+
+    /// A sampler tick the runtime ran late keeps a healthy clock healthy when both clocks moved alike (#525), but a
+    /// late tick whose wall time disagrees with monotonic time still resets it.
+    #[test]
+    fn a_late_sample_with_agreeing_clocks_keeps_the_clock_trusted() {
+        let health = ClockHealth::default();
+        let wall = UNIX_EPOCH + Duration::from_hours(500_000);
+        let monotonic = Instant::now();
+        for second in 0..4 {
+            health.observe(
+                wall + Duration::from_secs(second),
+                monotonic + Duration::from_secs(second),
+            );
+        }
+        assert!(health.is_healthy());
+        // 1.6 s instead of 1 s since the last sample, with both clocks agreeing.
+        let late = Duration::from_millis(4_600);
+        health.observe(wall + late, monotonic + late);
+        assert!(
+            health.is_healthy(),
+            "a late but consistent sample reset trust"
+        );
+        // The next tick comes one period after the late one, as the sampler's
+        // delayed interval schedules it.
+        let next = late + Duration::from_secs(1);
+        health.observe(wall + next, monotonic + next);
+        assert!(health.is_healthy());
+        // Late and inconsistent: the wall clock moved 400 ms less than monotonic time.
+        let later = next + Duration::from_millis(1_600);
+        health.observe(wall + later - Duration::from_millis(400), monotonic + later);
+        assert!(!health.is_healthy());
+    }
+
+    /// A healthy clock whose next sample comes more than [`MAX_SAMPLE_GAP`] later is untrusted again, even when
+    /// both clocks agree: the contract (`contracts/remote.md`, #285) resets health on any sample gap over five
+    /// seconds. Since the 1.25 s punctuality bound was removed (#525), this is the only upper bound on a gap, so
+    /// it needs its own check: the older test reaches its long gap from an already untrusted clock.
+    #[test]
+    fn a_consistent_sample_after_a_long_gap_resets_trust() {
+        let health = ClockHealth::default();
+        let wall = UNIX_EPOCH + Duration::from_hours(500_000);
+        let monotonic = Instant::now();
+        for second in 0..4 {
+            health.observe(
+                wall + Duration::from_secs(second),
+                monotonic + Duration::from_secs(second),
+            );
+        }
+        assert!(health.is_healthy());
+        // Exactly the bound still counts as a sample.
+        let at_bound = Duration::from_secs(3) + MAX_SAMPLE_GAP;
+        health.observe(wall + at_bound, monotonic + at_bound);
+        assert!(
+            health.is_healthy(),
+            "a gap of exactly the bound reset trust"
+        );
+        // One millisecond past it, with the clocks in perfect agreement, does not.
+        let past = at_bound + MAX_SAMPLE_GAP + Duration::from_millis(1);
+        health.observe(wall + past, monotonic + past);
+        assert!(
+            !health.is_healthy(),
+            "a sample gap over the bound kept the clock trusted"
+        );
     }
 }

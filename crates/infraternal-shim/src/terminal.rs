@@ -92,6 +92,16 @@ impl Terminal {
         self.engine.state_difference(&other.engine)
             + usize::from(self.pending != other.pending || self.dimensions != other.dimensions)
     }
+    /// Counts how far the screen a viewer would see differs from this one.
+    ///
+    /// Zero means the active screens match cell for cell, including size,
+    /// cursor and soft-wrap flags. Tests use it to compare what a viewer
+    /// rebuilt from the bytes the shim sent against the shim's own engine.
+    /// Unlike `research_state_difference`, it is available in every build.
+    #[cfg(test)]
+    pub(crate) fn screen_difference(&self, other: &Self) -> usize {
+        self.engine.difference(&other.engine)
+    }
     #[cfg(test)]
     pub(crate) fn allocation_fixture(engine: Engine, prefix: &[u8]) -> Self {
         let mut terminal = Self::new(80, 24).unwrap();

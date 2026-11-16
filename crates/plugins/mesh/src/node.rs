@@ -346,11 +346,10 @@ fn repair_accepted_routes(
     let mut first_error = None;
     let mut repaired = BTreeSet::new();
     for peer in state.peers.values() {
-        let mtu = state
-            .overrides
-            .get(&peer.key)
-            .copied()
-            .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint));
+        // Derived only for a peer with a missing route: the lookup is a netlink request made
+        // under the route-state lock, and an inventory check that finds nothing missing must not
+        // cost one per installed peer every interval (#525: 4,096 lookups on fresh sockets).
+        let mut mtu = None;
         for address in [
             IpAddr::V4(peer.addresses.ipv4),
             IpAddr::V6(peer.addresses.ipv6),
@@ -358,6 +357,13 @@ fn repair_accepted_routes(
             if !missing.contains(&address) {
                 continue;
             }
+            let mtu = *mtu.get_or_insert_with(|| {
+                state
+                    .overrides
+                    .get(&peer.key)
+                    .copied()
+                    .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint))
+            });
             // The re-added route has the configured budget; the next live refresh rewrites it.
             repaired.insert(peer.key);
             if let Err(error) = Device::repair_peer_route(link, peer, address, mtu) {

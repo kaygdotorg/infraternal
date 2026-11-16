@@ -936,3 +936,68 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
     );
     assert!(after.0.contains("mtu 1216"), "{after:?}");
 }
+
+/// #525: the route listener survives a burst of announcements that overflows its socket.
+///
+/// A node's first refresh at mesh scale writes thousands of peer routes, and the kernel
+/// announces every one to the listener. When the listener's receive buffer fills, the kernel
+/// drops the rest and records `ENOBUFS` as the socket's pending error, so poll reports POLLERR.
+/// The listener must treat that as the lost notification it is (bump the underlay watch and ask
+/// for a full inventory check), not as a dead socket: dropping it marks the watch unwatched, and
+/// every refresh re-derives every peer until the next inventory check opens a new one. That is
+/// what made `review_j552_steady_refresh_cost_at_4096_peers` flaky under load.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
+    use crate::policy::model::{Addresses, PublicKey};
+    use std::os::fd::AsFd;
+    review_route_command(&["link", "set", "lo", "up"]);
+    let link = review_marked_tun(PublicKey([0xee; 32]));
+    let underlay = Arc::new(crate::wireguard::UnderlayWatch::default());
+    let mut listener =
+        Device::route_monitor(&link, Arc::clone(&underlay)).expect("open the route listener");
+    underlay.set_watched(true);
+    let before = underlay.generation();
+    // 2,048 peers announce 4,096 routes while nobody reads: far more than the default
+    // receive buffer holds, so the kernel drops some and flags the overflow.
+    let peers: Vec<_> = (0_u16..2048)
+        .map(|index| {
+            let [high, low] = index.to_be_bytes();
+            let mut key = [0_u8; 32];
+            key[..2].copy_from_slice(&index.to_be_bytes());
+            key[31] = 1;
+            crate::dataplane::Peer {
+                key: PublicKey(key),
+                previous_key: None,
+                previous_active: false,
+                addresses: Addresses {
+                    ipv4: std::net::Ipv4Addr::new(10, 200, high, low),
+                    ipv6: format!("fd02::{:x}", index + 2).parse().expect("IPv6"),
+                },
+                endpoint: None,
+                candidates: Vec::new(),
+            }
+        })
+        .collect();
+    let routes: Vec<_> = peers.iter().map(|peer| (peer, 1408_u16)).collect();
+    Device::replace_peer_routes_on(&link, &routes).expect("write the route burst");
+    let (cancel_read, _cancel) = UnixStream::pair().expect("cancel stream");
+    let wake = listener.wait_for_deleted_peer_route(
+        cancel_read.as_fd(),
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+    assert!(
+        matches!(wake, Ok(crate::wireguard::RouteWake::Reconcile)),
+        "an overflow asks for an inventory check: {:?}",
+        wake.as_ref().map(|_| ()).map_err(ToString::to_string)
+    );
+    assert!(
+        underlay.generation().is_some(),
+        "the watch is still watched"
+    );
+    assert_ne!(
+        underlay.generation(),
+        before,
+        "the overflow moved the watch"
+    );
+}
