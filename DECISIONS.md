@@ -5051,7 +5051,10 @@ access (#341 B19).
        per Gbit and +3.68% loaded p99 against dev, consistent in all 8
        dev-vs-head holds. That is over the 3% performance gate. The filter is
        what lets a Nix-only host like prod enforce grants without depending
-       on the kernel firewall path. Memory is about 55 MB per 1,000 peers.
+       on the kernel firewall path. Memory is about 52 MB per 1,000 peers
+       with flows (the 52 KiB flow table each) and 68.7 MB when every
+       peer's fragment table is in use too (68,672 bytes per peer; J797,
+       #265; corrected by the owner on 2026-11-16, was "about 55 MB").
      - **Decision:** the owner chose, by quoting it, "Ship D384 now, then make
        the filter's hot path faster as a measured follow-up. Grants are
        enforced everywhere, and these security fixes land."
