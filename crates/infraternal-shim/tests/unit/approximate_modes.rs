@@ -93,6 +93,10 @@ const CASES: &[Case] = &[
     Case { name: "alternate screen 1049", setup: b"\x1b[5;7H\x1b[?1049hvim", later: b"\x1b[?1049lZ" },
     Case { name: "alternate screen 1047", setup: b"\x1b[?1047hless", later: b"\x1b[?1047lZ" },
     Case { name: "alternate screen 47", setup: b"\x1b[?47hmore", later: b"\x1b[?47lZ" },
+    // 1049 must be the switch when 1047 or 47 is also on: entered second,
+    // it would save the alternate screen's cursor, and its exit would put
+    // the cursor home instead of where the program left the shell.
+    Case { name: "alternate screen 1049 + 1047", setup: b"\x1b[5;7H\x1b[?1049h\x1b[?1047hvim", later: b"\x1b[?1049lZ" },
     Case { name: "mouse inside the alternate screen", setup: b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h", later: b"" },
     Case { name: "kitty keys on both screens", setup: b"\x1b[>1u\x1b[?1049h\x1b[>3u", later: b"\x1b[?1049l\x1b[<u" },
 ];
