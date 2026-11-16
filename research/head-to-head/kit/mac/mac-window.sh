@@ -22,7 +22,8 @@
 # (default /Users/Shared/h2h-mac: bin/ holds the executables, ev/ the evidence, run/ engine state),
 # ME (this Mac's LAN IP; default: en0), LAN_SECS (default 15), DIRS (default "mac-tx mac-rx"),
 # PIN_BIN / CAND_BIN (harness names in bin/; defaults mesh-bench-pin / mesh-bench-cand),
-# PIN_ENV / CAND_ENV (extra environment for that harness, e.g. "J614_CREDITS=32").
+# PIN_ENV / CAND_ENV (extra environment for that harness, e.g. "J614_CREDITS=32"), KIT_LINUX_PEER
+# (gotatun or kwg: the Linux side of the GotaTun engines) and LNX_SIDE (path of the peer helper).
 # No `set -e`: a failed case is recorded and the window goes on.
 set -uo pipefail
 W=$1; shift
@@ -44,7 +45,12 @@ LAN_SECS=${LAN_SECS:-15}; DIRS=${DIRS:-mac-tx mac-rx}
 SSHO=(-o BatchMode=yes)
 # The Linux VM is reached with the existing `claude` key and known_hosts, so ssh runs as claude.
 ssh() { sudo -n -u claude -i /usr/bin/ssh -o BatchMode=yes "$@"; }
-L() { ssh "${SSHO[@]}" "$PSSH" sudo -n bash /opt/j461c/lnx-side.sh "$@"; }
+# LNX_SIDE (J763): the peer helper to run, for a job's private copy (default the shared one).
+L() { ssh "${SSHO[@]}" "$PSSH" sudo -n bash "${LNX_SIDE:-/opt/j461c/lnx-side.sh}" "$@"; }
+# KIT_LINUX_PEER (J763): the Linux side of the GotaTun engines, `gotatun` (default) or `kwg`
+# (kernel WireGuard), so a Mac-send case can be judged against a receiver that is not the limit.
+LPEER=${KIT_LINUX_PEER:-gotatun}
+case $LPEER in gotatun|kwg) ;; *) echo "KIT_LINUX_PEER must be gotatun or kwg" >&2; exit 2;; esac
 
 log() { echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$EV/window.log"; }
 
@@ -83,7 +89,7 @@ start_product() {
   sudo bash -c 'echo $$ > "$1/pid"; set -a; . "$1/env"; set +a; exec "$2" --ignored --exact macos_node::tests::mac_bench_device --test-threads=1 --nocapture >> "$3" 2>&1' _ "$d" "$BIN/$1" "$EV/$E/engine-mac.log" &
   for _ in $(seq 1 100); do sudo test -s $d/tun && break; sleep 0.1; done
   MPIDS=$(sudo cat $d/pid); GIF=$(sudo cat $d/tun 2>/dev/null)
-  local out; out=$(echo "$kb $pa" | L start gotatun $ME); echo "$out" > $EV/$E/linux-start.txt
+  local out; out=$(echo "$kb $pa" | L start $LPEER $ME); echo "$out" > $EV/$E/linux-start.txt
   grep -q CONFIG_OK <<<"$out" || log "FAIL $E: linux side not configured"
   PEER_IP=172.30.42.2; MY_IP=172.30.42.1
   { echo "mac: product harness $1 env [$2], utun $GIF, MTU 1280"; shasum -a 256 $BIN/$1; } > $EV/$E/path-mac.txt
@@ -123,7 +129,7 @@ path_mac() {
     netbird) { $BIN/netbird version; echo "mac: netbird daemon, utun143, userspace WireGuard"; sudo env -i HOME=$R/nb/home NB_STATE_DIR=$R/nb/state $BIN/netbird status --daemon-addr unix://$R/nb/nb.sock -d; } >> $EV/$E/path-mac.txt 2>&1 ;;
     pin|cand) printf 'mac: product harness uses MacUtun (utun %s); no UAPI control socket\n' "$GIF" >> "$EV/$E/path-mac.txt" ;;
   esac
-  local LE=$E; is_gotatun $E && LE=gotatun
+  local LE=$E; is_gotatun $E && LE=$LPEER
   L path $LE > $EV/$E/path-linux.txt 2>&1
 }
 stop_mac() {
@@ -182,7 +188,7 @@ run_engine() {
 }
 
 trap '[ -n "${E:-}" ] && stop_mac; L cleanup > "$EV/linux-cleanup.txt" 2>&1' EXIT
-log "window $W order: $* (LAN ${LAN_SECS}s; dirs $DIRS) mac $ME <-> linux $PEER"
+log "window $W order: $* (LAN ${LAN_SECS}s; dirs $DIRS; GotaTun Linux side $LPEER) mac $ME <-> linux $PEER"
 log "underlay: $(sudo ping -c 20 -i 0.2 -q $PEER | tail -1)"
 if ! sudo ping -c 3 -t 3 -q $PEER >/dev/null; then log "ABORT: no ping to $PEER (bridge isolation back?)"; exit 3; fi
 log "coordination: $(L coord-up $PEER)"

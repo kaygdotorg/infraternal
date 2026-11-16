@@ -46,6 +46,7 @@ pub const ACTIONS: &[ActionDef] = &[
         Effect::Read,
         &[
             "Read whether the mesh is on, its addresses, and which access rules apply.",
+            "Read the UDP port this machine is actually listening on.",
             "Read how this machine reaches its server: over the mesh, or over the enrolled port.",
             "With --json, data.public_key is the active public key only; the field is absent without a Mesh identity.",
         ],
@@ -660,7 +661,19 @@ impl AgentPlugin for MeshNodePlugin {
                     } else {
                         "Waiting"
                     };
-                    let mut status = json!({"state":state,"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node),"enforcement":access_enforcement(node),"kernel_guard":kernel_guard_status(node)});
+                    let mut status = json!({
+                        "state": state,
+                        "version": node.config().map(|config| config.version),
+                        "addresses": node.config().map(|config| config.addresses),
+                        "peer_count": node.config().map_or(0, |config| config.peers.len()),
+                        "default_policy": node.config().map(|config| config.default_policy),
+                        "udp_port": node.listen_port(),
+                        "server_link": self.server_link,
+                        "engine": engine_health(node),
+                        "engine_selection": engine_selection(node),
+                        "enforcement": access_enforcement(node),
+                        "kernel_guard": kernel_guard_status(node),
+                    });
                     // Public identity is useful for continuity checks; private key material never leaves the node.
                     if let Some(public_key) = node.interface_key() {
                         status["public_key"] = json!(public_key.0);
@@ -1115,6 +1128,10 @@ mod tests {
         assert_eq!(
             status["server_link"],
             serde_json::to_value(&observed).expect("observed link")
+        );
+        assert_eq!(
+            status["udp_port"], 10_254,
+            "mesh status reports the actual listener port"
         );
         plugin.call("mesh.down", b"{}").expect("down");
         assert!(plugin.preferred_server().is_none());

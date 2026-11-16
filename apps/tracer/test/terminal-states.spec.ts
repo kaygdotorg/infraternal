@@ -35,6 +35,7 @@ const HOSTS = [
   { id: "11111111-1111-4111-8111-111111111111", name: "denied-host", user: "operator", online: true, os: "Debian", refusal: "forbidden" },
   { id: "22222222-2222-4222-8222-222222222222", name: "offline-host", user: "operator", online: false, os: "Debian", refusal: "unavailable" },
   { id: "33333333-3333-4333-8333-333333333333", name: "busy-host", user: "operator", online: true, os: "Debian", refusal: "host_memory_low", counters: { available_mib: 212, session_count: 9 } },
+  { id: "44444444-4444-4444-8444-444444444444", name: "upgrading-host", user: "operator", online: true, os: "Debian", refusal: "host_upgrading" },
 ];
 
 /** What the scripted socket does with the server's own `ssh.session.open`: pass it on, refuse it, or never answer. */
@@ -183,11 +184,27 @@ for (const viewport of VIEWPORTS) {
         await expect(offlineStrip.locator(".cl-sx-strip-text")).toHaveText("offline-host is offline or cannot reach this server. Check its network, then try again.");
         await expect(offlineStrip.getByRole("button", { name: "Try again" })).toBeVisible();
         expect(await offlineStrip.getByRole("button", { name: "Try again" }).locator("path").first().getAttribute("d"), "one retry icon").toBe(RETRY_ARC);
+        await expect(offlineStrip.locator(".ui-mark[data-mark='fail']"), "an offline host keeps the red cross").toHaveCount(1);
         await expectAligned(offline, offlineStrip);
         await shot(page, "offline");
         // Neither window spins: both read offline, not connecting.
         await expect(denied).not.toHaveAttribute("data-status", "connecting");
         await expect(offline).not.toHaveAttribute("data-status", "connecting");
+      });
+
+      test("a host being upgraded to root says it will be back, never offline (D393)", async ({ page }) => {
+        test.setTimeout(90_000);
+        await boot(page, "forward");
+        await expect(page.locator(".ui-window[data-kind='terminal']").first()).toHaveAttribute("data-status", "live", { timeout: 20_000 });
+        const upgrading = await openFromPalette(page, "upgrading-host");
+        const strip = upgrading.locator(".cl-sx-strip");
+        await expect(strip.locator(".cl-sx-strip-text")).toHaveText("upgrading-host is being upgraded and will be back shortly.");
+        await expect(strip.getByRole("button", { name: "Try again" })).toBeVisible();
+        // A self-clearing state is information, not a failure: the shared info icon, never the red cross (owner, 2026-11-15).
+        await expect(strip.locator(".ui-mark.cl-sx-info svg circle")).toHaveCount(1);
+        await expect(strip.locator(".ui-mark[data-mark='fail']")).toHaveCount(0);
+        await expectAligned(upgrading, strip);
+        await shot(page, "upgrading");
       });
 
       test("a host short of memory keeps a way to its sessions", async ({ page }) => {
