@@ -217,13 +217,15 @@ for (const viewport of VIEWPORTS) {
           toast.dismiss();
           toast.show({ message: "Not saved — keep this tab open", icon, duration: 0 });
         }, ICON_INFO);
-        const card = page.locator('.ui-toast[data-open="true"]');
+        // Name the notice this test raised: other toasts (an error that bare `dismiss()` spares) may be open beside it.
+        const card = page.locator('.ui-toast[data-open="true"]').filter({ hasText: "Not saved — keep this tab open" });
         await expect(card).toHaveCount(1);
         // The notice has stopped sliding in once its box stops moving.
         let last = "";
         await expect.poll(async () => { const now = JSON.stringify(await card.boundingBox()); const still = now === last; last = now; return still; }, { intervals: [100, 100, 200] }).toBe(true);
         const covered = await page.evaluate(() => {
-          const n = document.querySelector('.ui-toast[data-open="true"]')!.getBoundingClientRect();
+          const toast = [...document.querySelectorAll('.ui-toast[data-open="true"]')].find((node) => node.textContent?.includes("Not saved — keep this tab open"));
+          const n = toast!.getBoundingClientRect();
           const edges: string[] = [];
           for (const frame of document.querySelectorAll(".ui-window")) {
             const w = frame.getBoundingClientRect();
