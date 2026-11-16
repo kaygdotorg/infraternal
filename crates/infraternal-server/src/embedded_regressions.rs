@@ -138,6 +138,7 @@ async fn retirement_mailbox_bypasses_a_full_ordinary_command_queue() {
     ));
 }
 
+/// An unfunded, settled attachment on stream 2 whose output goes to the given channel.
 fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
     AttachmentState {
         session_id: [1; 16],
@@ -152,7 +153,7 @@ fn attachment(output: mpsc::Sender<TerminalOutput>) -> AttachmentState {
         replaying: false,
         route: None,
         proof_rebind_pending: false,
-        output,
+        output: output.into(),
     }
 }
 
@@ -1114,7 +1115,7 @@ async fn recovery_notices_preserve_order_credit_and_session_isolation() {
 #[tokio::test]
 async fn credited_bulk_output_survives_forwarder_io_pause() {
     let (mut link, _peer) = connection();
-    let (tx, mut rx) = mpsc::channel(OUTPUT_CAPACITY);
+    let (tx, mut rx) = mpsc::channel(OUTPUT_QUEUE_SLOTS);
     let mut state = attachment(tx);
     state.credit = 1024 * 1024;
     let mut attachments = HashMap::from([(1, state)]);
@@ -1148,6 +1149,226 @@ async fn credited_bulk_output_survives_forwarder_io_pause() {
             if out_seq == chunk*4096 && bytes.len()==4096)
         );
     }
+}
+
+/// The opening grant now carries a 64 KiB repaint reserve beside the 1 MiB bulk window; a healthy
+/// viewer that is briefly slow must not be retired when that whole grant arrives as 4 KiB frames (#477).
+#[tokio::test]
+async fn full_opening_grant_with_repaint_reserve_survives_forwarder_io_pause() {
+    const GRANT: u64 = 1024 * 1024 + 64 * 1024;
+    let (mut link, _peer) = connection();
+    let (tx, rx) = mpsc::channel(OUTPUT_QUEUE_SLOTS);
+    let mut state = attachment(tx);
+    state.credit = GRANT;
+    let mut attachments = HashMap::from([(1, state)]);
+    let mut routes = HashMap::from([(2, 1)]);
+    for chunk in 0..GRANT / 4096 {
+        assert!(
+            process_incoming(
+                Incoming::Output {
+                    stream_id: 2,
+                    out_seq: chunk * 4096,
+                    bytes: Bytes::from(vec![120; 4096]),
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new()
+            )
+            .await
+        );
+    }
+    assert!(
+        routes.contains_key(&2),
+        "the full credited grant retired a healthy I/O-paused viewer"
+    );
+    assert_eq!(rx.len() as u64, GRANT / 4096);
+    assert_eq!(attachments[&1].credit, 0);
+}
+
+/// The output channel a production attachment gets, so the queue-bound tests below exercise the shipped bound.
+fn production_output() -> (mpsc::Sender<TerminalOutput>, mpsc::Receiver<TerminalOutput>) {
+    mpsc::channel(OUTPUT_QUEUE_SLOTS)
+}
+
+/// Offers one raw Output frame to the relay exactly as the host link would deliver it.
+/// Returns whether the shared link survives; the caller checks `routes` to see whether the stream did.
+async fn offer_output(
+    link: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    out_seq: u64,
+    bytes: Bytes,
+) -> bool {
+    process_incoming(
+        Incoming::Output {
+            stream_id: 2,
+            out_seq,
+            bytes,
+        },
+        link,
+        attachments,
+        routes,
+        &mut HashMap::new(),
+    )
+    .await
+}
+
+/// A viewer that respects credit is never retired, however small the frames are (#477, D381).
+///
+/// Under a flood the host forwards whatever each PTY read returned, about 1 KiB on average, so the
+/// full opening grant (1 MiB bulk + 64 KiB repaint reserve) arrives as thousands of frames while the
+/// forwarder briefly awaits browser I/O. The bound that matters is bytes, and credit already holds
+/// queued bytes to the grant. The second half drains part of the queue, re-grants exactly what was
+/// drained, and refills, so a bound that forgot drained bytes would retire the stream here.
+#[tokio::test]
+async fn small_frames_within_credit_never_retire_a_paused_viewer() {
+    const GRANT: u64 = 1024 * 1024 + 64 * 1024;
+    const FRAME_LEN: usize = 256;
+    const FRAME: u64 = FRAME_LEN as u64;
+    let (mut link, _peer) = connection();
+    let (tx, mut rx) = production_output();
+    let mut state = attachment(tx);
+    state.credit = GRANT;
+    let mut attachments = HashMap::from([(1, state)]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut out_seq = 0;
+    for _ in 0..GRANT / FRAME {
+        assert!(
+            offer_output(
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                out_seq,
+                Bytes::from(vec![b'y'; FRAME_LEN])
+            )
+            .await
+        );
+        out_seq += FRAME;
+    }
+    assert!(
+        routes.contains_key(&2),
+        "small credited frames retired a healthy I/O-paused viewer"
+    );
+    assert_eq!(rx.len() as u64, GRANT / FRAME);
+    assert_eq!(attachments[&1].credit, 0);
+    // The viewer consumes half its queue and returns that credit; the relay must count it as gone.
+    let drained = GRANT / FRAME / 2;
+    for _ in 0..drained {
+        assert!(matches!(rx.try_recv(), Ok(TerminalOutput::Output { .. })));
+    }
+    for round in 0..4 {
+        attachments.get_mut(&1).unwrap().credit = drained * FRAME;
+        for _ in 0..drained {
+            assert!(
+                offer_output(
+                    &mut link,
+                    &mut attachments,
+                    &mut routes,
+                    out_seq,
+                    Bytes::from(vec![b'y'; FRAME_LEN])
+                )
+                .await
+            );
+            out_seq += FRAME;
+        }
+        assert!(
+            routes.contains_key(&2),
+            "refill round {round} retired a viewer whose queue never exceeded its grant"
+        );
+        for _ in 0..drained {
+            assert!(matches!(rx.try_recv(), Ok(TerminalOutput::Output { .. })));
+        }
+    }
+}
+
+/// A browser that keeps granting credit without reading its socket still hits a hard per-stream cap.
+///
+/// Credit alone cannot bound the queue against a peer that ignores it: the relay cannot tell a
+/// re-grant from real consumption. Each frame here is 1 MiB, well under the 4 MiB wire limit, so a
+/// bound counted in frames would let hundreds of MiB queue for one stream. The stream must be
+/// retired (1013, reattach replays from the last offset) before its queue holds more than the
+/// 8 MiB credit ceiling plus 1 MiB of headroom, and the shared host link must survive.
+#[tokio::test]
+async fn ignoring_credit_hits_the_hard_queue_cap() {
+    const FRAME_LEN: usize = 1024 * 1024;
+    const FRAME: u64 = FRAME_LEN as u64;
+    const CAP: u64 = 9 * 1024 * 1024;
+    let (mut link, _peer) = connection();
+    let (tx, rx) = production_output();
+    let mut attachments = HashMap::from([(1, attachment(tx))]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let payload = Bytes::from(vec![b'y'; FRAME_LEN]);
+    let mut out_seq = 0;
+    for _ in 0..64 {
+        if !routes.contains_key(&2) {
+            break;
+        }
+        // The dishonest viewer tops credit back up before every frame and never reads.
+        attachments.get_mut(&1).unwrap().credit = MAX_OUTPUT_CREDIT;
+        assert!(
+            offer_output(
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                out_seq,
+                payload.clone()
+            )
+            .await,
+            "retiring one stream must not drop the shared host link"
+        );
+        out_seq += FRAME;
+    }
+    assert!(
+        !routes.contains_key(&2),
+        "a peer ignoring credit queued 64 MiB on one stream"
+    );
+    assert!(
+        rx.len() as u64 * FRAME <= CAP,
+        "{} MiB queued before retirement",
+        rx.len()
+    );
+}
+
+/// Items that spend no credit (key acknowledgments, notices) cannot grow a paused queue without bound.
+///
+/// Every queued item is charged a fixed overhead on top of its payload, so a host that floods a
+/// paused viewer with empty-payload items reaches the same byte cap and only that stream retires.
+#[tokio::test]
+async fn uncredited_items_cannot_grow_a_paused_queue_without_bound() {
+    let (mut link, _peer) = connection();
+    let (tx, rx) = production_output();
+    let mut state = attachment(tx);
+    state.last_input_end = u64::MAX / 2;
+    let mut attachments = HashMap::from([(1, state)]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut acked = 0;
+    while routes.contains_key(&2) && acked < 1_000_000 {
+        acked += 1;
+        assert!(
+            process_incoming(
+                Incoming::Ack {
+                    stream_id: 2,
+                    in_seq_acked: acked,
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut HashMap::new()
+            )
+            .await
+        );
+    }
+    assert!(
+        !routes.contains_key(&2),
+        "a million uncredited items never filled the queue"
+    );
+    // 64 bytes charged per item against the 9 MiB cap.
+    assert!(
+        rx.len() <= 9 * 1024 * 1024 / 64,
+        "{} items queued",
+        rx.len()
+    );
 }
 
 /// Credit is a byte bound even when the downstream frame queue has spare slots.
@@ -1208,7 +1429,7 @@ async fn credited_output_queue_at_stream_capacity() {
     let mut routes = HashMap::new();
     let mut receivers = Vec::new();
     for id in 1..=128_u64 {
-        let (tx, rx) = mpsc::channel(OUTPUT_CAPACITY);
+        let (tx, rx) = mpsc::channel(OUTPUT_QUEUE_SLOTS);
         let stream_id = u32::try_from(id).unwrap() * 2;
         attachments.insert(
             id,
@@ -1330,6 +1551,60 @@ async fn unresponsive_child_is_killed_and_reaped_within_the_shutdown_bound() {
     assert!(
         result.is_ok(),
         "SIGTERM-resistant child must be SIGKILLed and reaped within the bound"
+    );
+}
+
+/// Reaps an embedded child when Tokio cancels its actor during server shutdown.
+#[test]
+fn runtime_shutdown_reaps_embedded_child_before_returning() {
+    use std::io::Read;
+
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf ready; exec sleep 60"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start a child that stays alive until signaled");
+    let mut ready = [0; 5];
+    child
+        .stdout
+        .take()
+        .expect("child readiness pipe")
+        .read_exact(&mut ready)
+        .expect("wait for child readiness");
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).expect("child PID"));
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a runtime for the embedded actor");
+    let (started, ready) = tokio::sync::oneshot::channel();
+    runtime.block_on(async move {
+        let (mut connection, _peer) = connection();
+        connection.pid = Some(pid);
+        tokio::spawn(async move {
+            let _connection = connection;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.expect("embedded actor entered its task");
+    });
+    runtime.shutdown_timeout(Duration::from_secs(4));
+
+    let result = nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
+    let reaped = matches!(
+        result,
+        Err(nix::errno::Errno::ECHILD)
+            | Ok(nix::sys::wait::WaitStatus::Exited(..) | nix::sys::wait::WaitStatus::Signaled(..),)
+    );
+    if !reaped {
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        let _ = nix::sys::wait::waitpid(pid, None);
+    }
+    let _ = child.wait();
+    assert!(
+        reaped,
+        "server runtime shutdown must stop and reap the embedded process before handoff"
     );
 }
 

@@ -1241,6 +1241,33 @@ mod tests {
         }))
     }
 
+    /// Whether `pid`, seen holding the private terminal while its program
+    /// already reads as a setuid elevation command, closes its descriptor
+    /// table (or exits) within `deadline`: `true` means it settled closed.
+    ///
+    /// `execve` of a setuid program points `/proc/<pid>/exe` at the new
+    /// program before it marks the process undumpable and switches its
+    /// credentials, so for a moment the table is still this account's to
+    /// read, with the terminal inherited across the exec (J785, #525: the
+    /// check failed at load ~65, when the scheduler stretches that moment).
+    /// That moment is the same process this account just forked, so it is no
+    /// wider than the fork-before-exec window the check already accepts. A
+    /// setuid program that really stays reachable keeps its table open and
+    /// still fails at the deadline.
+    fn settles_closed(pid: u32, deadline: Duration) -> bool {
+        let until = std::time::Instant::now() + deadline;
+        loop {
+            if holds_a_private_terminal(pid) != Some(true) {
+                return true;
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            // sleep: the kernel finishes a setuid exec on its own schedule; there is no event to wait on.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// J701 F1 (#399, D274, D376): the only processes that ever hold the
     /// password terminal are the infraternal agent (with its own fork before
     /// exec) and the setuid elevation command: su, sudo and doas, each one
@@ -1262,7 +1289,8 @@ mod tests {
     /// Any child whose table it can read and that holds the terminal must be
     /// running this very binary (the fork before exec), judged by its program
     /// read just before and just after its table; after the setuid program
-    /// is executed the table must be closed. It also checks it saw each
+    /// is executed the table must be closed (a setuid program caught in the
+    /// middle of its exec gets a moment to close it, see [`settles_closed`]). It also checks it saw each
     /// program it ran, so a scanner that sees nothing can't pass. It covers
     /// direct children only; the setuid program's own children run as root. (Run it alone: another test's private
     /// terminal could also be seen.)
@@ -1288,6 +1316,13 @@ mod tests {
             "this kernel has no /proc children lists; the check can't run"
         );
         let own = std::fs::read_link("/proc/self/exe").unwrap();
+        // The setuid programs these ways run, as `/proc/<pid>/exe` names
+        // them (symlinks resolved), for the mid-exec case in `settles_closed`.
+        let setuid_programs: Vec<std::path::PathBuf> = ways
+            .iter()
+            .filter_map(|way| command(*way, MARK, ["", "", "", ""]))
+            .filter_map(|(program, _)| std::fs::canonicalize(program).ok())
+            .collect();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let watching = stop.clone();
         let scanner = std::thread::spawn(move || {
@@ -1306,7 +1341,12 @@ mod tests {
                     let before = program();
                     if holds_a_private_terminal(pid) == Some(true) {
                         for exe in [before, program()].into_iter().flatten() {
-                            if exe != own {
+                            // A setuid command caught mid-exec closes its
+                            // table moments later; one that stays open fails.
+                            if exe != own
+                                && !(setuid_programs.contains(&exe)
+                                    && settles_closed(pid, Duration::from_secs(10)))
+                            {
                                 reachable_holders.insert(format!("{name} ({})", exe.display()));
                             }
                         }

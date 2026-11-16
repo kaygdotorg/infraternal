@@ -55,6 +55,13 @@ use std::{
     process::ExitCode,
 };
 
+#[cfg(all(
+    any(feature = "plugin-server", feature = "plugin-mesh"),
+    target_os = "linux"
+))]
+use infraternal_plugin_mesh::host_firewall;
+#[cfg(all(feature = "plugin-server", target_os = "linux"))]
+use infraternal_plugin_mesh::host_firewall::{AllowRule, Listener, Policy, Protocol};
 #[cfg(feature = "plugin-server")]
 use std::net::SocketAddr;
 
@@ -81,6 +88,18 @@ struct ServerArgs {
     tls_key: Option<PathBuf>,
     behind_proxy: bool,
     trusted_proxies: Vec<infraternal_server::ProxyNetwork>,
+    /// Interface restriction for the application listener's host firewall rule.
+    host_firewall_listen_interface: Option<String>,
+    /// Interface restriction for the remote listener's host firewall rule.
+    host_firewall_remote_interface: Option<String>,
+    /// Peer ranges permitted to use the remote listener.
+    host_firewall_remote_sources: Vec<String>,
+    /// Interfaces with an explicitly retained broad host input allowance.
+    host_firewall_accept_interfaces: Vec<String>,
+    /// Extra typed host input rules, including explicit administrator paths.
+    host_firewall_allow: Vec<String>,
+    /// Clear the server policy from the shared host table during a system install.
+    host_firewall_off: bool,
 }
 
 /// Options controlling a user or system service installation.
@@ -120,6 +139,13 @@ fn mesh_ssh_service(state: &std::path::Path) -> Option<infraternal_agent::plugin
 fn run_invocation() -> ExitCode {
     if harden_startup().is_err() {
         return ExitCode::FAILURE;
+    }
+    #[cfg(all(
+        any(feature = "plugin-server", feature = "plugin-mesh"),
+        target_os = "linux"
+    ))]
+    if let Some(result) = run_internal_host_firewall_command() {
+        return result;
     }
     // The macOS PTY child's private entry runs before any runtime or thread
     // exists: it drops privileges and execs the person's shell (D335, #328).
@@ -225,6 +251,40 @@ fn run_invocation() -> ExitCode {
     dispatch_selected_action(&registry, &selected, json_output)
 }
 
+/// Handle the systemd-only command that applies the root-owned saved host policy.
+#[cfg(all(
+    any(feature = "plugin-server", feature = "plugin-mesh"),
+    target_os = "linux"
+))]
+fn run_internal_host_firewall_command() -> Option<ExitCode> {
+    let mut arguments = std::env::args_os();
+    let _binary = arguments.next();
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("__host-firewall-apply")) {
+        return None;
+    }
+    if arguments.next().is_some() {
+        eprintln!("infraternal host firewall apply: unexpected argument");
+        return Some(ExitCode::FAILURE);
+    }
+    // Fails open: a saved table that would drop sshd's current ports is not
+    // enforced, and the unit fails so the journal says why (J671, #483).
+    let result = host_firewall::boot_apply_from_config();
+    match result {
+        Ok(report) => {
+            print!("{report}");
+            Some(ExitCode::SUCCESS)
+        }
+        Err(error @ host_firewall::PolicyError::FailedOpen { .. }) => {
+            eprintln!("<2>infraternal host firewall: {error}");
+            Some(ExitCode::FAILURE)
+        }
+        Err(error) => {
+            eprintln!("infraternal host firewall apply failed: {error}");
+            Some(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn dispatch_selected_action(
     registry: &ActionRegistry,
     selected: &cli::command_tree::SelectedCommand<'_>,
@@ -242,6 +302,9 @@ fn dispatch_selected_action(
 }
 
 // Keep feature-gated command handlers beside their registry mappings.
+/// Dispatch one registered action to its local, remote, or server handler.
+///
+/// Feature-gated handlers share this path so unavailable actions return the same CLI result.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -354,6 +417,7 @@ fn dispatch_action(
         }
         CliHandler::RemoteAgent
         | CliHandler::ServerRestart
+        | CliHandler::ServerMeshStatus
         | CliHandler::RemoveHost
         | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
     }
@@ -487,13 +551,10 @@ fn report_mesh_service_status_result(
     }
 }
 
-/// Says what `enforcement: unavailable` means for someone reading `mesh status`.
-///
-/// The server is named as something that can reach this Mac, not only as something
-/// the Mac connects to: until the slice-3 filter (#265), the coordinator's peer is
-/// installed without an inbound check, so the server host reaches every port here.
+/// Says where `mesh status` enforces network access on this Mac.
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
-const MESH_ENFORCEMENT_DETAILS: &str = "Access rules are not enforced on this Mac yet. Until they are, the server can reach every port on this Mac, and other peers connect only if they are allowed to reach every port on it.";
+const MESH_ENFORCEMENT_DETAILS: &str =
+    "Mesh access rules are enforced in the GotaTun userspace packet filter on this Mac.";
 
 /// The machine-readable `mesh status` fields; `enforcement` reports the access-rule gap (#265).
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
@@ -581,6 +642,7 @@ fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bo
 }
 
 #[cfg(all(feature = "remote", target_os = "linux"))]
+/// Run the `up` action with its server origin and typed host rules.
 fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let Some(server) = matches.get_one::<String>("server") else {
         return report_failure_as(
@@ -591,7 +653,16 @@ fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
             Exit::Usage,
         );
     };
-    up::run(server, json_output)
+    #[cfg(any(feature = "plugin-server", feature = "plugin-mesh"))]
+    let host_firewall_allow = matches
+        .get_many::<String>("host_firewall_allow")
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    #[cfg(not(any(feature = "plugin-server", feature = "plugin-mesh")))]
+    let host_firewall_allow = Vec::new();
+    up::run(server, &host_firewall_allow, json_output)
 }
 
 #[cfg(all(feature = "remote", target_os = "linux"))]
@@ -1179,6 +1250,7 @@ fn run_server(matches: &ArgMatches, json_output: bool) -> ExitCode {
 }
 
 #[cfg(feature = "plugin-server")]
+/// Return whether any server configuration option was supplied on the command line.
 fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
     [
         "listen",
@@ -1194,9 +1266,23 @@ fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
     .any(|name| matches.get_one::<String>(name).is_some())
         || matches.get_flag("behind_proxy")
         || matches.get_many::<String>("trusted_proxy").is_some()
+        || matches.get_many::<String>("host_firewall_allow").is_some()
+        || matches
+            .get_many::<String>("host_firewall_accept_interface")
+            .is_some()
+        || matches
+            .get_one::<String>("host_firewall_listen_interface")
+            .is_some()
+        || matches
+            .get_one::<String>("host_firewall_remote_interface")
+            .is_some()
+        || matches
+            .get_many::<String>("host_firewall_remote_source")
+            .is_some()
 }
 
 #[cfg(feature = "plugin-server")]
+/// Parse listener, proxy, persistence and host-policy options into server settings.
 fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
     let listen = matches.get_one::<String>("listen").map_or_else(
         || Ok(SocketAddr::from(([127, 0, 0, 1], 7443))),
@@ -1250,7 +1336,125 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
         tls_key: matches.get_one::<String>("tls_key").map(PathBuf::from),
         behind_proxy: matches.get_flag("behind_proxy"),
         trusted_proxies,
+        host_firewall_listen_interface: matches
+            .get_one::<String>("host_firewall_listen_interface")
+            .cloned(),
+        host_firewall_remote_interface: matches
+            .get_one::<String>("host_firewall_remote_interface")
+            .cloned(),
+        host_firewall_remote_sources: matches
+            .get_many::<String>("host_firewall_remote_source")
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        host_firewall_accept_interfaces: matches
+            .get_many::<String>("host_firewall_accept_interface")
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        host_firewall_allow: matches
+            .get_many::<String>("host_firewall_allow")
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        host_firewall_off: matches
+            .try_get_one::<bool>("host_firewall_off")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false),
     })
+}
+
+/// Convert server flags into a root-owned host firewall policy.
+#[cfg(all(feature = "plugin-server", target_os = "linux"))]
+fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
+    if args.behind_proxy == args.trusted_proxies.is_empty() {
+        return Err("--behind-proxy and --trusted-proxy must be configured together".to_owned());
+    }
+    let mut admin_rules = args
+        .host_firewall_allow
+        .iter()
+        .map(|value| {
+            value
+                .parse::<AllowRule>()
+                .map_err(|_| "host firewall allow rule is invalid".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Any TCP admin rule may be sshd's (it need not listen on 22); the live
+    // session, when there is one, is checked port-exactly at install time.
+    // Without one, the session's port is admitted from anywhere, as `up` does
+    // (J589): never pinned to the installer's address or interface.
+    if !admin_rules
+        .iter()
+        .any(|rule| rule.protocol == Protocol::Tcp)
+    {
+        let active_ssh = std::env::var("SSH_CONNECTION").map_err(|_| {
+            "set an explicit TCP --host-firewall-allow rule for sshd's port".to_owned()
+        })?;
+        admin_rules.push(
+            host_firewall::admin_rule_for_ssh_session(&active_ssh).map_err(|_| {
+                "the active SSH path could not be added to the host policy".to_owned()
+            })?,
+        );
+    }
+    if args.host_firewall_remote_interface.is_some() && args.remote.remote_listen.is_none()
+        || !args.host_firewall_remote_sources.is_empty() && args.remote.remote_listen.is_none()
+    {
+        return Err("remote host firewall settings need --remote-listen".to_owned());
+    }
+    let proxy_sources = if args.behind_proxy {
+        args.trusted_proxies
+            .iter()
+            .map(|network| network.to_string().parse())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "trusted proxy firewall source is invalid".to_owned())?
+    } else {
+        Vec::new()
+    };
+    let mut listeners = vec![Listener {
+        interface: args.host_firewall_listen_interface.clone(),
+        address: args.listen,
+        protocol: Protocol::Tcp,
+        sources: proxy_sources,
+    }];
+    if let Some(address) = args.remote.remote_listen {
+        let sources = args
+            .host_firewall_remote_sources
+            .iter()
+            .map(|source| {
+                source
+                    .parse()
+                    .map_err(|_| "remote host firewall source is invalid".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        listeners.push(Listener {
+            interface: args.host_firewall_remote_interface.clone(),
+            address,
+            protocol: Protocol::Tcp,
+            sources: sources.clone(),
+        });
+        listeners.push(Listener {
+            interface: args.host_firewall_remote_interface.clone(),
+            address,
+            protocol: Protocol::Udp,
+            sources,
+        });
+    }
+    let policy = Policy {
+        admin_rules,
+        accept_interfaces: args.host_firewall_accept_interfaces.clone(),
+        listeners,
+        mesh_enabled: false,
+        mesh_udp_port: None,
+    };
+    host_firewall::validate(&policy).map_err(|_| {
+        "host firewall policy needs valid rules and an explicit TCP admin path for sshd".to_owned()
+    })?;
+    Ok(policy)
 }
 
 /// Plan or perform `server init`: choose absolute folders, confirm, then install the service.
@@ -2373,23 +2577,25 @@ mod dispatch_tests {
     use super::mesh_status_result;
 
     #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    /// Mac mesh status reports that GotaTun enforces D164 rules in userspace.
     #[test]
-    fn mesh_status_reports_that_access_rules_are_not_enforced() {
+    fn mesh_status_reports_userspace_access_enforcement() {
         let data = super::mesh_status_data(infraternal_plugin_mesh::macos_service::Status {
             loaded: true,
             running: true,
             pid: Some(42),
         });
-        assert_eq!(data["enforcement"], "unavailable");
+        assert_eq!(data["enforcement"], "userspace");
         assert_eq!(data["running"], true);
+        assert!(super::MESH_ENFORCEMENT_DETAILS.contains("userspace packet filter"));
     }
 
-    /// J162 F1 (#265): the details must not hide that the server reaches every port here.
+    /// The Mac's visible status describes its active userspace access filter.
     #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
     #[test]
-    fn mesh_status_says_the_server_can_reach_every_port_on_this_mac() {
+    fn mesh_status_says_access_rules_are_enforced_on_this_mac() {
         assert!(
-            super::MESH_ENFORCEMENT_DETAILS.contains("the server can reach every port on this Mac"),
+            super::MESH_ENFORCEMENT_DETAILS.contains("userspace packet filter"),
             "{}",
             super::MESH_ENFORCEMENT_DETAILS
         );
@@ -2745,6 +2951,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             );
             let options = restart::Options {
                 binary: matches.get_one::<String>("binary").map(PathBuf::from),
+                rollback: matches.get_flag("rollback"),
             };
             return match tokio::runtime::Runtime::new() {
                 Ok(runtime) => restart::run(&runtime, &data, &options, json),
@@ -2755,6 +2962,14 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                     json,
                 ),
             };
+        }
+        #[cfg(all(feature = "plugin-server", feature = "remote"))]
+        if action.cli_handler == CliHandler::ServerMeshStatus {
+            let data = server_data_directory(
+                matches.get_one::<String>("data").map(String::as_str),
+                infraternal_status::Roots::detect,
+            );
+            return restart::mesh_status(&data, json);
         }
         if action.cli_handler == CliHandler::RemoveHost {
             let host = matches

@@ -19,6 +19,13 @@ pub use socket::{MeshPlugin, parse_subscription};
 /// Public-only configuration shared by the coordinator and node component.
 pub mod dataplane;
 
+/// Owns the host input policy shared by the server and mesh node [D386].
+#[cfg(any(feature = "server", feature = "agent"))]
+pub mod host_firewall;
+
+/// Chooses the stable mesh UDP listener and its configured fallback behavior.
+mod listen_port;
+
 pub mod configuration;
 
 pub mod access_updates;
@@ -53,6 +60,10 @@ pub mod iptables;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod firewall;
 
+/// Finds nft and the iptables-nft frontends at fixed, root-owned paths, Nix ones included [D384].
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub(crate) mod firewall_tools;
+
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_state;
 
@@ -67,6 +78,14 @@ pub mod gotatun_node;
 
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
+
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+/// Drops handshake initiations from ungranted keys before the userspace engine sees them.
+mod handshake_admission;
+
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+/// Enforces per-peer grants at both GotaTun TUN boundaries on Linux and macOS.
+mod packet_filter;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Derives per-peer mesh route MTUs and a shared IPv6-safe interface MTU.
