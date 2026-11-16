@@ -1808,6 +1808,12 @@ export class TerminalClient {
       this.pendingWriteCompletion = onSnapshotWritten;
       this.pendingWriteSynchronizedBatch = false;
       this.writeSuppressingTerminalResponses(snapshot.bytes, onSnapshotWritten);
+      // #528: `reset()` above wiped the canvas, and the render loop draws only in its own animation-frame callback.
+      // During a flood this drain runs from an earlier write's callback, which comes after the render loop in the
+      // same frame, so the browser would show the wiped canvas for a frame. Drawing the parsed repaint here, in the
+      // task that reset it, means a frame shows the old screen or the new one, never neither. The render loop then
+      // finds no dirty rows, so a repaint costs one full draw either way.
+      this.repaintAll();
       return;
     }
 
@@ -2318,6 +2324,10 @@ export class TerminalClient {
     this.wakeTerminal();
   }
 
+  /**
+   * Draws every row of the current terminal state into the canvas now, in this task. A no-op while the renderer is
+   * silenced (frozen or released surface) or a synchronized-output batch holds paint, through the render wrapper.
+   */
   private repaintAll(): void {
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
