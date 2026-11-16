@@ -2705,6 +2705,13 @@ mod startup_tests;
 
 /// First userspace entry protection applies equally to server and child modes.
 fn harden_startup() -> Result<(), nix::errno::Errno> {
+    // Record the transparent-huge-page policy we were started with before
+    // anything can change it: the mesh engine turns THP off for the whole
+    // infraternal agent, and the programs this process starts (shims, and
+    // through them people's shells) must get the original back (#522). Best
+    // effort: a kernel without the flag (before 3.15) leaves nothing to keep.
+    #[cfg(target_os = "linux")]
+    let _ = infraternal_shim::record_launcher_thp();
     #[cfg(target_os = "linux")]
     nix::sys::prctl::set_dumpable(false)?;
     #[cfg(target_os = "macos")]
