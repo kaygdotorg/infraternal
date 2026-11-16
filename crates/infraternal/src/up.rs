@@ -320,7 +320,12 @@ pub(crate) fn run(
         }
     };
     #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
-    let admin_rules = Vec::new();
+    let admin_rules = {
+        // This build has no host firewall, and its command line never offers
+        // the rules option, so the caller always passes an empty list.
+        let _ = host_firewall_allow;
+        Vec::new()
+    };
     // Find both privileged programs before an approval is requested, so a
     // missing or replaceable one never wastes the owner's passkey approval.
     let Ok(executable) = env::current_exe() else {

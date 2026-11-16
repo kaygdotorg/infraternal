@@ -13,7 +13,7 @@ use super::{
 use infraternal_plugin_mesh::host_firewall::{self, Policy};
 use std::{
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
@@ -722,6 +722,7 @@ impl Install {
 /// Read the hand unit without following a replacement symlink or allocating an unbounded file.
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 fn read_firewall_unit(path: &Path, expected: &fs::Metadata, owner: u32) -> io::Result<Vec<u8>> {
+    use std::io::Read;
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
