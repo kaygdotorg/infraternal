@@ -239,6 +239,13 @@ struct Handoff {
     key_pkcs8: Zeroizing<Vec<u8>>,
     key_digest: [u8; 32],
     /// Administrator allow rules persisted for the next boot.
+    ///
+    /// The handoff format is the same in every build, so the rules are always
+    /// carried and validated; only builds with the host firewall apply them.
+    #[cfg_attr(
+        not(any(feature = "plugin-mesh", feature = "plugin-server")),
+        allow(dead_code)
+    )]
     admin_rules: Vec<String>,
 }
 

@@ -192,6 +192,7 @@ struct Replaced {
 }
 
 /// Bound the hand unit read before checking whether it is the supported legacy loader.
+#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 const MAX_HAND_FIREWALL_UNIT_BYTES: u64 = 64 * 1024;
 
 /// Owns only new install paths until the service is confirmed active.
