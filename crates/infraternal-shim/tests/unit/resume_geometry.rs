@@ -580,3 +580,45 @@ fn reopening_wider_at_any_width_while_another_writer_owns_the_size_repaints() {
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The input modes a program left on when a tab reopened at another width:
+/// bracketed paste, cursor keys, keypad, focus events, SGR button mouse,
+/// modifyOtherKeys and a bar cursor, written after a short prompt that fits
+/// every width tried here, so no row soft-wraps and the whole oracle applies.
+const MODES: &[u8] = b"\x1b[?2004h\x1b[?1h\x1b=\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[>4;2m\x1b[6 q";
+
+/// #521's reopen repaint is the same approximate painter #524 fixed, so a tab
+/// reopened at another width must come back with the program's input modes,
+/// on the primary screen (a shell with bracketed paste) and inside a
+/// full-screen program, both wider and narrower. `screen_difference` is the
+/// non-strict oracle: every mode, the mouse event and format, key flags, the
+/// cursor's shape, charsets and the active screen's cells and cursor (#524).
+#[test]
+fn reopening_at_another_width_keeps_the_programs_input_modes() {
+    let mut failures = Vec::new();
+    for (name, screen) in [
+        ("shell", [PROMPT, MODES].concat()),
+        (
+            "full-screen program",
+            [PROMPT, b"\x1b[?1049h\x1b[>1u", MODES, b"\x1b[Hvim"].concat(),
+        ),
+    ] {
+        for cols in [38, 45] {
+            let mut session = Session::new(42, 24);
+            session.output(&screen);
+            let mut tab = peer();
+            let mut viewer = Terminal::new(cols, 24).unwrap();
+            session.handle(&mut tab, Frame::ReadFrom(0));
+            assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+            session.resize(&mut tab, cols, 24);
+            let repaint = session.deliver(&mut tab, &mut viewer);
+            let difference = viewer.screen_difference(&session.terminal);
+            if repaint != Some(Repaint::Approximate) || difference != 0 {
+                failures.push(format!(
+                    "{name} at {cols}: repaint {repaint:?}, difference {difference}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
