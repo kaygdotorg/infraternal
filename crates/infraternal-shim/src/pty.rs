@@ -23,7 +23,7 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
 };
 #[cfg(target_os = "linux")]
-use std::{os::unix::ffi::OsStrExt as _, path::Path};
+use std::{os::unix::ffi::OsStrExt as _, path::Path, sync::atomic::AtomicI32};
 
 // Broad TERM compatibility, true colour and the cooperative startup marker [D315].
 const TERMINAL_ENVIRONMENT: [(&str, &str); 3] = [
@@ -299,12 +299,13 @@ fn errno(error: nix::errno::Errno) -> io::Error {
 pub(crate) fn disable_shim_thp() -> io::Result<Option<nix::libc::c_int>> {
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: these prctl operations use scalar arguments only and retain
-        // no pointers. Read first: a launcher may already have disabled THP.
-        let inherited = unsafe { nix::libc::prctl(nix::libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) };
-        if inherited == -1 {
-            return Err(io::Error::last_os_error());
-        }
+        // The policy the shell gets is the one this process was started with.
+        // When startup recorded it (`record_launcher_thp`), use that record:
+        // something in this process may have turned THP off since (#522).
+        let inherited = match launcher_thp() {
+            Some(recorded) => recorded,
+            None => read_thp_disabled()?,
+        };
         set_thp_disabled(1)?;
         Ok(Some(inherited))
     }
@@ -331,6 +332,81 @@ fn set_thp_disabled(disabled: nix::libc::c_int) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Read this process's `PR_GET_THP_DISABLE` value: `0` when transparent huge
+/// pages may be used, bit 0 set when they are turned off, and bit 1 set for the
+/// kernel's "except where advised" mode.
+#[cfg(target_os = "linux")]
+fn read_thp_disabled() -> io::Result<nix::libc::c_int> {
+    // SAFETY: scalar-only process policy query; no pointers are involved.
+    let disabled = unsafe { nix::libc::prctl(nix::libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) };
+    if disabled == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(disabled)
+}
+
+/// The transparent-huge-page (THP) policy this process was started with, as
+/// `PR_GET_THP_DISABLE` reported it in [`record_launcher_thp`] (#522). `-1`
+/// until recorded.
+///
+/// Product processes may turn THP off for themselves later: the mesh engine
+/// does it for the whole infraternal agent when `GotaTun` starts. The kernel
+/// keeps that flag across `fork` and `execve`, so this record is what lets
+/// the programs a product process starts run with the policy they would have
+/// had without infraternal.
+#[cfg(target_os = "linux")]
+static LAUNCHER_THP: AtomicI32 = AtomicI32::new(-1);
+
+/// Remember the transparent-huge-page policy this process was started with,
+/// so the programs it starts get it back (#522). Returns the recorded value.
+///
+/// Call first thing in `main`, before anything can turn THP off. Only the
+/// first call records: a process that re-enters its startup (for example
+/// after a refused in-place restart) keeps the original launcher's policy,
+/// not the one it set for itself meanwhile.
+/// # Errors
+/// Returns the kernel's refusal; kernels before 3.15 have no such flag, and
+/// then nothing is recorded and children inherit as before.
+#[cfg(target_os = "linux")]
+pub(crate) fn record_launcher_thp() -> io::Result<nix::libc::c_int> {
+    let current = read_thp_disabled()?;
+    Ok(
+        match LAUNCHER_THP.compare_exchange(-1, current, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => current,
+            Err(recorded) => recorded,
+        },
+    )
+}
+
+/// The launcher's policy recorded by [`record_launcher_thp`], if it ran.
+#[cfg(target_os = "linux")]
+fn launcher_thp() -> Option<nix::libc::c_int> {
+    let recorded = LAUNCHER_THP.load(Ordering::Relaxed);
+    (recorded >= 0).then_some(recorded)
+}
+
+/// Run `exec`, which replaces this process's image, with the launcher's
+/// transparent-huge-page policy in place, so the new image records the
+/// original policy rather than an opt-out this process took (#522). If `exec`
+/// returns (the kernel refused the new image), this process's own policy is
+/// put back before returning its result. Without a record, `exec` just runs.
+///
+/// Errors while switching the policy are ignored: the new image then starts
+/// with this process's current policy, which is the behaviour without a record.
+#[cfg(target_os = "linux")]
+pub(crate) fn with_launcher_thp<T>(exec: impl FnOnce() -> T) -> T {
+    let Some(launcher) = launcher_thp() else {
+        return exec();
+    };
+    let own = read_thp_disabled().ok();
+    let _ = set_thp_disabled(launcher);
+    let result = exec();
+    if let Some(own) = own {
+        let _ = set_thp_disabled(own);
+    }
+    result
 }
 
 /// `PR_SET_THP_DISABLE` survives fork/exec. Undo only the shim's opt-out so
@@ -1010,11 +1086,24 @@ pub fn detach() -> io::Result<bool> {
 
 /// Install only async-signal-safe syscalls in the post-fork child. Ignored
 /// dispositions survive exec, so reset them as well as the inherited mask.
+///
+/// On Linux it also gives the child the transparent-huge-page policy this
+/// process was started with, when startup recorded one (#522): the infraternal
+/// agent runs with THP off once the mesh engine starts, and without this every
+/// shim, shell and program started afterwards would silently inherit that.
 pub(super) fn prepare_child(command: &mut Command) {
     // SAFETY: no captured state, allocation or locks after fork. The reset uses
     // only sigaction/sigprocmask and stack storage; errors abort this child's exec.
     unsafe {
         command.pre_exec(reset_child_signals);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(launcher) = launcher_thp() {
+        // SAFETY: the hook captures one integer and makes one prctl syscall
+        // with integer arguments; it neither allocates nor takes a lock.
+        unsafe {
+            command.pre_exec(move || set_thp_disabled(launcher));
+        }
     }
 }
 
@@ -1573,6 +1662,60 @@ fn reset_child_signals() -> io::Result<()> {
     nix::sys::signal::SigSet::empty()
         .thread_set_mask()
         .map_err(errno)
+}
+
+/// Programs a product process starts keep the transparent-huge-page policy the
+/// process was started with, even after it turned THP off for itself (#522).
+#[cfg(all(test, target_os = "linux"))]
+mod transparent_huge_page_tests {
+    use super::*;
+
+    /// What a started `/bin/sh` reads from its own kernel record: `1` means
+    /// THP may be used, `0` that it is off.
+    fn thp_enabled(mut command: Command) -> String {
+        let output = command
+            .args([
+                "-c",
+                "sed -n 's/^THP_enabled:[[:space:]]*//p' /proc/self/status",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// The test process plays the infraternal agent: started with THP allowed,
+    /// it records that at startup, then turns THP off for itself the way the
+    /// mesh engine does when `GotaTun` starts. A plain child inherits the
+    /// opt-out (the kernel's rule, and the bug on dev); a prepared child, which
+    /// is how shims and every other started program are launched, gets the
+    /// launcher's policy back. The shim's per-session step reports the recorded
+    /// policy for the shell, and an in-place restart execs with it and
+    /// restores the opt-out if the exec is refused.
+    #[test]
+    fn started_programs_get_the_launchers_policy_back() {
+        set_thp_disabled(0).unwrap();
+        assert_eq!(record_launcher_thp().unwrap(), 0);
+        set_thp_disabled(1).unwrap();
+        // Only the first record counts: re-entered startup keeps the original.
+        assert_eq!(record_launcher_thp().unwrap(), 0);
+        assert_eq!(thp_enabled(Command::new("/bin/sh")), "0");
+        let mut prepared = Command::new("/bin/sh");
+        prepare_child(&mut prepared);
+        assert_eq!(thp_enabled(prepared), "1");
+        assert_eq!(disable_shim_thp().unwrap(), Some(0));
+        assert_eq!(read_thp_disabled().unwrap() & 1, 1);
+        let during_exec = with_launcher_thp(read_thp_disabled).unwrap();
+        assert_eq!(
+            during_exec, 0,
+            "the new image starts with the launcher's policy"
+        );
+        assert_eq!(
+            read_thp_disabled().unwrap() & 1,
+            1,
+            "a refused exec keeps the opt-out"
+        );
+        set_thp_disabled(0).unwrap();
+    }
 }
 
 /// The standard-descriptor allowlist (#328 P1): a planted descriptor without
