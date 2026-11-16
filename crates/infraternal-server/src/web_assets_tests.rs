@@ -24,8 +24,89 @@ fn fixture() -> (PathBuf, Router) {
     ] {
         std::fs::write(root.join(name), bytes).unwrap();
     }
+    // The docs tree, flat as an instance serves it: the front page, one real page and the docs' own "not found" page.
+    std::fs::create_dir_all(root.join("docs/reference/keys")).unwrap();
+    std::fs::write(root.join("docs/index.html"), b"<html>docs home</html>").unwrap();
+    std::fs::write(
+        root.join("docs/reference/keys/index.html"),
+        b"<html>keys page</html>",
+    )
+    .unwrap();
+    std::fs::write(root.join("docs/404.html"), b"<html>docs not found</html>").unwrap();
     let app = router(root.clone());
     (root, app)
+}
+
+/// #527: a path under `/docs/` with no page is a `404` that carries the docs' own "not found" page, never the app
+/// shell (a blank page in Safari). Real docs pages stay `200`, app routes keep the shell (covered by the test above), and `HEAD` answers as `GET`.
+#[tokio::test]
+async fn missing_docs_pages_are_404_with_the_docs_page_not_the_app_shell() {
+    let (root, app) = fixture();
+    for path in [
+        "/docs/nonexistent-page/",
+        "/docs/nonexistent-page",
+        "/docs/user/reference/keys/",
+        "/docs/reference/nope/deeper/",
+        "/docs/missing.png",
+    ] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 404, "{path}");
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .as_bytes()
+                .starts_with(b"text/html"),
+            "{path}"
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-cache",
+            "{path}"
+        );
+        let length = response.headers()[header::CONTENT_LENGTH].clone();
+        let head = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head.status(), 404, "HEAD {path}");
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], length, "{path}");
+        assert!(
+            head.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        let body = String::from_utf8(
+            get(&app, path, &[])
+                .await
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("docs not found"), "{path}: {body}");
+    }
+    for (path, text) in [
+        ("/docs/", "docs home"),
+        ("/docs/reference/keys/", "keys page"),
+    ] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 200, "{path}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains(text), "{path}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// Verify negotiated encodings, case-insensitive Vary tokens and exact response lengths.
