@@ -1118,6 +1118,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   }
 }
 
+/**
+ * Answers one frame on a terminal stream: attaching to a session, the page's flow-control credit, its input and resizes.
+ * A frame the real server would refuse closes the socket with 1002 and a reason naming the rule, so a page that breaks the
+ * wire contract fails loudly instead of hanging.
+ */
 function handleTerminalFrame(connection: Connection, streamId: number, frame: WireFrame): void {
   switch (frame.type) {
     case "AttachTerm":
