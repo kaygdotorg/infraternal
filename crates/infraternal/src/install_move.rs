@@ -305,6 +305,18 @@ impl Relocation {
         self.rewrites.iter().map(|rewrite| rewrite.path.as_path())
     }
 
+    /// The text this move gives the unit file at `path`, or `None` when it leaves that file alone.
+    ///
+    /// `server init` checks the unit it is about to install against this
+    /// text before moving anything, so a re-run the install would refuse
+    /// moves nothing (J803).
+    pub fn unit_text_after(&self, path: &Path) -> Option<&str> {
+        self.rewrites
+            .iter()
+            .find(|rewrite| rewrite.path == path)
+            .map(|rewrite| rewrite.after.as_str())
+    }
+
     /// The plan in plain lines, for `--dry-run` and the confirmation.
     #[must_use]
     pub fn describe(&self) -> String {

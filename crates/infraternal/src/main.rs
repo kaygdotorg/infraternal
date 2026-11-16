@@ -1603,9 +1603,13 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             Some((relocation.describe(), relocation_json(relocation, None)))
         }
         Some(relocation) => {
-            // The install's own checks first, so a refusal (such as the host
-            // firewall finding no admitted sshd port) moves nothing (J803).
-            if let Err(error) = install::preflight(&args, &install_args) {
+            // The install's own checks first, so a refusal (the host firewall
+            // finding no admitted sshd port, or a changed unit without
+            // --force) moves nothing (J803).
+            let unit_after = install::unit_path(!install_args.system, name)
+                .ok()
+                .and_then(|path| relocation.unit_text_after(&path));
+            if let Err(error) = install::preflight(&args, &install_args, unit_after) {
                 return report_failure(
                     "server init",
                     "The data folder was not moved; the existing install is unchanged.",
