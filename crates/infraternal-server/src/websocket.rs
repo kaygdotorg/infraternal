@@ -435,7 +435,7 @@ impl WebSocketState {
     }
 
     /// Observe retained reads while socket tests control time around real storage.
-    #[cfg(all(test, feature = "remote"))]
+    #[cfg(test)]
     pub(crate) fn authority_read_monitor(&self) -> impl Fn() -> usize + 'static {
         let authority = Arc::clone(&self.authority);
         move || AUTHORITY_READS - authority.reads.available_permits()
