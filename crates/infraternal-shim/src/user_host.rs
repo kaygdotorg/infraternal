@@ -4,7 +4,7 @@
 //! person's login. A UID shared by people is never sufficient to select a host.
 use super::{
     CHUNK, Config, InputReply, Inputs, MAX_PEERS, Peer, Request, SessionTerminal, SocketPath,
-    consume_peer, shim_peer_uid_allowed, socket,
+    consume_peer, release_size_of_departed_typist, shim_peer_uid_allowed, socket,
 };
 use crate::{
     frame::{
@@ -687,8 +687,11 @@ impl Session {
         // Indices follow peer order. Decoder refusal and an immediate write
         // failure can name the same peer; retire it only once.
         retired.dedup();
-        for i in retired.into_iter().rev() {
-            self.peers.remove(i);
+        if !retired.is_empty() {
+            for i in retired.into_iter().rev() {
+                self.peers.remove(i);
+            }
+            release_size_of_departed_typist(&self.peers, &mut self.cursors);
         }
         if self.peers.is_empty() {
             self.peers = Vec::new();
@@ -922,10 +925,13 @@ impl Session {
                     })
                 });
         }
-        for i in (0..self.peers.len()).rev() {
-            if disconnects[i] {
-                self.peers.remove(i);
+        if disconnects.contains(&true) {
+            for i in (0..self.peers.len()).rev() {
+                if disconnects[i] {
+                    self.peers.remove(i);
+                }
             }
+            release_size_of_departed_typist(&self.peers, &mut self.cursors);
         }
         if self.peers.is_empty() {
             self.peers = Vec::new();

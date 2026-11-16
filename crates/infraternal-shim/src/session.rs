@@ -194,6 +194,36 @@ struct Peer {
     /// of the engine instead (#521).
     replay_awaits_size: bool,
 }
+/// Gives up the session size once the writer that owns it has no attached
+/// peer left (D74 as amended by the owner on 2026-11-16, #521).
+///
+/// D74 lets the device that typed last keep the session's size, but only
+/// while it is attached. A tab that reopens after that device left reports
+/// its size right after attaching. Clearing the owner here lets that
+/// `Resize` apply through the same path as a new session's first viewer, so
+/// the reopened tab gets the shim's screen reflowed to its own size instead
+/// of a replay laid out for a size it does not have (and the approximate
+/// repaint fits it exactly, rows included).
+///
+/// Call it after peers were removed. It walks the remaining peers once, so
+/// the attach and same-size resize paths cost nothing more. A link that
+/// still carries the owner's writer (an already attached replacement after a
+/// reconnect, or a shared link of the same writer) keeps the size. Nothing
+/// is resized here: the size changes only when a viewer next reports one or
+/// types, as D74 says ("the next device that reports a size takes it").
+pub(super) fn release_size_of_departed_typist<'a>(
+    peers: impl IntoIterator<Item = &'a Peer>,
+    cursors: &mut Inputs,
+) {
+    if let Some(owner) = cursors.active_writer
+        && !peers
+            .into_iter()
+            .any(|p| p.attached && p.writer == Some(owner))
+    {
+        cursors.active_writer = None;
+    }
+}
+
 impl Peer {
     #[cfg(feature = "process-per-user")]
     fn buffer_bytes(&self) -> usize {
@@ -951,8 +981,11 @@ fn run_configured(
                 Ok((true, _)) | Err(_) => retired.push(index),
             }
         }
-        for index in retired.into_iter().rev() {
-            peers.remove(index);
+        if !retired.is_empty() {
+            for index in retired.into_iter().rev() {
+                peers.remove(index);
+            }
+            release_size_of_departed_typist(&peers, &mut cursors);
         }
         if peers.iter().filter_map(|p| p.deferred).min() != oldest {
             // Successful admission (or malformed-peer removal) advances the
@@ -1378,10 +1411,13 @@ fn run_configured(
                 });
             disconnects[index] |= duplicate;
         }
-        for index in (0..peers.len()).rev() {
-            if disconnects[index] {
-                peers.remove(index);
+        if disconnects.contains(&true) {
+            for index in (0..peers.len()).rev() {
+                if disconnects[index] {
+                    peers.remove(index);
+                }
             }
+            release_size_of_departed_typist(&peers, &mut cursors);
         }
     }
 }
@@ -1657,8 +1693,9 @@ fn handle<'a>(
                 }
             }
             // If the size applied, the engine has reflowed to this viewer and
-            // its repaint fits exactly. If it is only staged (another writer
-            // still owns the geometry, D74), the repaint keeps the session's
+            // its repaint fits exactly. If it is only staged (the writer that
+            // owns the geometry is still attached, D74; a departed one gave it
+            // up in `release_size_of_departed_typist`), the repaint keeps the session's
             // size with absolute positions: that fits a viewer at least as
             // large, but piles up in the last column of a smaller one. D74
             // leaves smaller viewers to scaling, which the client does not do
