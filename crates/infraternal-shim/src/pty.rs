@@ -314,6 +314,10 @@ pub(crate) fn disable_shim_thp() -> io::Result<Option<nix::libc::c_int>> {
 }
 
 #[cfg(target_os = "linux")]
+/// Set this process's transparent-huge-page policy to a value
+/// `PR_GET_THP_DISABLE` reported: bit 0 turns THP off, bit 1 keeps the
+/// kernel's "except where advised" mode. Async-signal-safe, so it also serves
+/// as a pre-exec hook in a forked child.
 fn set_thp_disabled(disabled: nix::libc::c_int) -> io::Result<()> {
     // SAFETY: scalar-only process policy syscall, also safe in the post-fork
     // child; no allocation, locks or pointers are involved.
@@ -1655,6 +1659,9 @@ pub(super) fn prepare_independent_session(command: &mut Command) {
     }
 }
 
+/// Give a forked child the default disposition for every signal and an empty
+/// signal mask, so the program it execs never inherits the shim runtime's
+/// handlers or blocked signals. Uses only async-signal-safe calls.
 fn reset_child_signals() -> io::Result<()> {
     // SAFETY: zero initializes sigaction's storage; sigemptyset initializes its
     // mask before any syscall consumes it. All pointers refer to live stack data.

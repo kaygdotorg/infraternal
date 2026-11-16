@@ -682,6 +682,9 @@ impl Replacement {
     }
 }
 
+/// Replace this process with the checked `binary`, passing the same arguments
+/// and environment and `input` (or `/dev/null`) as stdin. Only returns when the
+/// kernel refused the exec, with the reason, so the caller can recover.
 fn execute_image(
     binary: &crate::restart_binary::Opened,
     input: Option<&std::os::unix::net::UnixStream>,
