@@ -512,12 +512,30 @@ async fn forwarded_before_stall(fixture: &mut Fixture, head: u64) -> u64 {
 /// The writer drops queued raw output that a key repaint covers, which the client therefore never
 /// receives and never returns credit for. The relay must get that credit back, or the client's
 /// window shrinks by up to a whole FIFO of frames for the rest of the attachment (#477, J799).
-///
-/// The client here returns exactly what reached it: the first frame and the repaint. Its whole
-/// bulk window is then free again, so the relay must forward a full window of new output.
 #[tokio::test]
 async fn a_key_repaint_that_drops_queued_output_keeps_the_whole_bulk_window() {
-    let mut fixture = start().await;
+    let fixture = start().await;
+    a_committed_key_repaint_keeps_the_whole_bulk_window(fixture).await;
+}
+
+/// The same refund on a primed relay, whose ledger and refund cell have already been replaced
+/// once by the server's opening cursor: the refund must reach the relay's current cell, not the
+/// one it attached with (#477; kills J799's surviving mutant "a cursor rewind keeps the old
+/// refund cell", J813).
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn a_primed_relays_key_repaint_keeps_the_whole_bulk_window() {
+    let fixture = start_primed().await;
+    a_committed_key_repaint_keeps_the_whole_bulk_window(fixture).await;
+}
+
+/// Spend the window behind the held socket, commit a key repaint over the queued flood, and
+/// check that the relay can then forward a full bulk window again.
+///
+/// The client returns exactly what reached it: the first frame and the repaint. Its whole bulk
+/// window is then free again, which the relay only knows if the writer refunded the dropped
+/// frames to the relay's current ledger.
+async fn a_committed_key_repaint_keeps_the_whole_bulk_window(mut fixture: Fixture) {
     spend_the_window_behind_a_held_socket(&mut fixture).await;
     type_a_key(&mut fixture).await;
     let head = WINDOW_END;
@@ -728,8 +746,7 @@ async fn a_relay_error_during_a_key_repaint_delivers_the_output_its_ack_passed()
 /// A cursor rewind resets the relay's ledger to the server's view, and the server's reissued
 /// credit already counts every byte that never reached it. Raw output the old attachment queued
 /// and the writer drops after the rewind must therefore not come back as a refund too, or the
-/// relay could overrun the client's window by up to a whole FIFO of frames (#477, J799's
-/// surviving mutant, killed by J813).
+/// relay could overrun the client's window by up to a whole FIFO of frames (#477, J813).
 ///
 /// The key repaint here commits only once the rewind has reset the ledger: the writer is still
 /// blocked on its first frame when the cursor command arrives, so it drops the eight queued
