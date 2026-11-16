@@ -457,6 +457,7 @@ mod input_ack_order_tests {
             exited_sent: false,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         (peer, client)
     }
