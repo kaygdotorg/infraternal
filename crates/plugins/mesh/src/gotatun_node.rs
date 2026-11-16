@@ -42,7 +42,7 @@ use crate::{
     dataplane::Config,
     gotatun_tun::LinuxTun,
     packet_filter::{Direction, PacketFilter, PreparedPolicy},
-    policy::{model::PublicKey, rules::TrafficPolicy},
+    policy::model::PublicKey,
 };
 use infraternal_mesh::proxy_ports::MeshProxyIngress;
 
