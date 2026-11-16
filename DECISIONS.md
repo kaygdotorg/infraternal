@@ -340,6 +340,13 @@ access (#341 B19).
     session, the size of the device that typed last wins (tmux's default
     `window-size latest`). The other devices show the same screen, scaled to
     fit.
+    - **Amended (owner, 2026-11-16, #521):** a device that typed last keeps
+      the size only while it is attached. Once it has disconnected, the next
+      device that reports a size takes it. Why: a reopened tab could not
+      take the size until it typed, so a narrower or shorter reopen (for
+      example a phone turned to landscape) kept a garbled replay (J792,
+      J795). Asked "D74: session size after a reopen", the owner chose,
+      verbatim: "Disconnected last typist gives up the size".
 75. **Nothing depends on the browser.** Each session, each SSH connection
     and each job starts and runs on the server side: in an agent, which can
     be the server's embedded agent. Hosts without an agent (routers,
