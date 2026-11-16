@@ -211,7 +211,7 @@ struct Peer {
 /// reconnect, or a shared link of the same writer) keeps the size. Nothing
 /// is resized here: the size changes only when a viewer next reports one or
 /// types, as D74 says ("the next device that reports a size takes it").
-pub(super) fn release_size_of_departed_typist<'a>(
+fn release_size_of_departed_typist<'a>(
     peers: impl IntoIterator<Item = &'a Peer>,
     cursors: &mut Inputs,
 ) {
