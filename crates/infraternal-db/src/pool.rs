@@ -324,6 +324,7 @@ impl Database {
         // committed before it starts, so kicks that arrive while one is
         // queued would only repeat it.
         let (kick, kicks) = sync_channel::<()>(1);
+        let turn = CheckpointTurn::default();
         let (writer, writer_jobs) = mpsc::channel::<Msg>(options.write_queue);
         let (ready, writer_exited) = spawn_worker(
             "db-writer".to_owned(),
@@ -331,12 +332,12 @@ impl Database {
             path.clone(),
             options.clone(),
             Arc::new(Mutex::new(writer_jobs)),
-            Some(kick),
+            Some((kick, turn.clone())),
         )?;
         ready.await.map_err(|_| Error::Closed)??;
         // After the writer, so the file exists and is already in WAL mode.
         let (ready, checkpointer_exited) =
-            spawn_checkpointer(path.clone(), options.clone(), kicks)?;
+            spawn_checkpointer(path.clone(), options.clone(), kicks, turn)?;
         ready.await.map_err(|_| Error::Closed)??;
 
         // Readers share one queue; whichever reader is free takes the next job.
@@ -634,15 +635,16 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// lock waits for the next job, takes it, and releases the lock before it
 /// runs the job, so the other readers can pick up the following ones.
 ///
-/// The writer gets `kick`, the checkpointer's wake-up channel, for its WAL
-/// hook (see [`install_checkpoint_hook`]); readers get `None`.
+/// The writer gets `kick`, the checkpointer's wake-up channel, and the
+/// [`CheckpointTurn`] it shares with the checkpointer, for its WAL hook (see
+/// [`install_checkpoint_hook`]); readers get `None`.
 fn spawn_worker(
     name: String,
     role: Role,
     path: PathBuf,
     options: Arc<Options>,
     jobs: Arc<Mutex<mpsc::Receiver<Msg>>>,
-    kick: Option<SyncSender<()>>,
+    kick: Option<(SyncSender<()>, CheckpointTurn)>,
 ) -> Result<(oneshot::Receiver<Result<(), Error>>, Exited), Error> {
     let (ready, opened) = oneshot::channel();
     let (exited, on_exit) = oneshot::channel::<()>();
@@ -653,8 +655,8 @@ fn spawn_worker(
             let _exited = exited;
             let opened = open_connection(&path, &options, role).and_then(|mut conn| {
                 install_transaction_guard(&mut conn)?;
-                if let Some(kick) = kick {
-                    install_checkpoint_hook(&mut conn, &options, kick)?;
+                if let Some((kick, turn)) = kick {
+                    install_checkpoint_hook(&mut conn, &options, kick, turn)?;
                 }
                 Ok(conn)
             });
@@ -720,7 +722,8 @@ fn final_checkpoint(conn: &Connection) {
 /// Below [`Options::checkpoint_pages`] it does nothing. From there it sends a
 /// wake-up without blocking (a full channel means a pass is already pending).
 /// At [`Options::checkpoint_limit_pages`] it checkpoints inline as the
-/// backstop. Installing a hook switches SQLite's own auto-checkpoint off,
+/// backstop, after waiting for its [`CheckpointTurn`] if the checkpointer
+/// thread is in the middle of a pass. Installing a hook switches SQLite's own auto-checkpoint off,
 /// because both use the same slot; `PRAGMA wal_autocheckpoint` then reads 0.
 ///
 /// The hook always reports success. Its result would become the result of
@@ -733,12 +736,14 @@ fn install_checkpoint_hook(
     conn: &mut Connection,
     options: &Options,
     kick: SyncSender<()>,
+    turn: CheckpointTurn,
 ) -> Result<(), Error> {
     let soft = c_int::try_from(options.checkpoint_pages).unwrap_or(c_int::MAX);
     let hard = c_int::try_from(options.checkpoint_limit_pages).unwrap_or(c_int::MAX);
     let mut failures = CheckpointFailures::new("inline");
     conn.wal_hook(Some(move |wal: &mut Wal, pages: c_int| {
         if pages >= hard {
+            let _turn = turn.take();
             failures.record(wal.checkpoint_v2(CheckpointMode::PASSIVE), Some(pages));
         } else if pages >= soft {
             let _ = kick.try_send(());
@@ -821,6 +826,33 @@ impl CheckpointFailures {
     }
 }
 
+/// Takes turns between this pool's two checkpoint paths: the checkpointer
+/// thread's passes and the writer's inline backstop (#525).
+///
+/// SQLite lets one connection checkpoint at a time; a PASSIVE checkpoint that
+/// finds another one running returns `SQLITE_BUSY` at once and copies nothing.
+/// Without turns, the backstop lost every race against a background pass: on
+/// a loaded host, where the checkpointer thread waits for CPU or for its
+/// fsync, every commit in the meantime hit the limit, got `BUSY` and moved
+/// on, and the WAL grew past [`Options::checkpoint_limit_pages`] (J773:
+/// 10,528 pages against 8,000 after 5,000 session slides at load 47). With
+/// turns, the backstop waits for the running pass to end and then copies the
+/// rest itself, as SQLite's own auto-checkpoint would, so the bound holds
+/// however slowly the thread runs. The writer waits only when the WAL is
+/// already at the limit, which is the backstop's job; below it, commits never
+/// touch the lock.
+#[derive(Clone, Default)]
+struct CheckpointTurn(Arc<Mutex<()>>);
+
+impl CheckpointTurn {
+    /// Wait until no other checkpoint path of this pool runs, and hold the
+    /// turn until the returned guard drops. A panic in a previous holder
+    /// leaves nothing to repair: the lock guards no data.
+    fn take(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Start the checkpointer thread: it opens its own connection, reports
 /// readiness, then runs one PASSIVE checkpoint per kick from the writer's WAL
 /// hook until the writer's connection (which owns the sending side) is gone.
@@ -830,10 +862,12 @@ impl CheckpointFailures {
 /// same time as the writer's commits, so its fsync is no longer on the write
 /// path. A failed pass is logged, rate-limited, and retried on the next kick;
 /// the inline backstop still bounds the WAL if this thread keeps failing.
+/// Each pass holds `turn`, so the backstop waits for it instead of failing.
 fn spawn_checkpointer(
     path: PathBuf,
     options: Arc<Options>,
     kicks: Receiver<()>,
+    turn: CheckpointTurn,
 ) -> Result<(oneshot::Receiver<Result<(), Error>>, Exited), Error> {
     let (ready, opened) = oneshot::channel();
     let (exited, on_exit) = oneshot::channel::<()>();
@@ -854,6 +888,7 @@ fn spawn_checkpointer(
             }
             let mut failures = CheckpointFailures::new("background");
             while kicks.recv().is_ok() {
+                let _turn = turn.take();
                 let outcome = conn.wal_checkpoint_v2(None::<&str>, CheckpointMode::PASSIVE);
                 failures.record(outcome, None);
             }

@@ -173,6 +173,8 @@ test("review: window disposal clears held input and rejects a stale resend actio
     terminal: { dispose() {} },
     conn: { streamAttached() {}, closeStream() { streamClosed += 1; } },
     inputResendNotice: { dispose() { noticeDisposed += 1; } },
+    // The keyboard fit the watcher left on the shared screen; disposal hands the screen back (#510).
+    screen: { style: { height: "516px", transform: "translateY(0px)" } },
   });
   try {
     globals.window = { removeEventListener() {} };
@@ -184,6 +186,9 @@ test("review: window disposal clears held input and rejects a stale resend actio
     expect(f.queue.length).toBe(0);
     expect(noticeDisposed).toBe(1);
     expect(streamClosed).toBe(1);
+    const screen = (f.client as unknown as { screen: { style: { height: string; transform: string } } }).screen;
+    expect(screen.style.height).toBe("");
+    expect(screen.style.transform).toBe("");
     staleAction.onSelect();
     expect(f.sent).toHaveLength(0);
   } finally {

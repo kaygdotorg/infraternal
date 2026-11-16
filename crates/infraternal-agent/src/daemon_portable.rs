@@ -19,13 +19,30 @@ use tokio::sync::mpsc;
 /// # Errors
 /// Refuses reserved descriptors, malformed frames and bounded overload.
 pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
+    run_with_mesh_state(fd, state, None).await
+}
+
+/// Run inherited control with a Mesh-only state path and the existing session state.
+/// # Errors
+/// Refuses reserved descriptors, malformed frames and bounded overload.
+pub async fn run_with_mesh_state(
+    fd: i32,
+    state: Option<PathBuf>,
+    mesh_state: Option<PathBuf>,
+) -> io::Result<()> {
     if fd != 3 {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     let socket = Socket::inherited(fd)?;
     let state = runtime_state(state)?;
-    let service =
-        crate::plugin_control::Service::start(&state, ExecutionMode::Embedded, None).await?;
+    let service = match mesh_state.as_deref() {
+        Some(mesh_state) => {
+            crate::plugin_control::Service::start_with_mesh_state(&state, mesh_state).await?
+        }
+        None => {
+            crate::plugin_control::Service::start(&state, ExecutionMode::Embedded, None).await?
+        }
+    };
     let registry = service.registry.clone();
     dispatch(&socket, registry, false, None, 0).await
 }
@@ -78,7 +95,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, _: Option<PathBuf>) -> i
         ),
     )?;
     drop(tx);
-    writer(channel, rx, None, false, false, false, 0).await
+    writer(channel, rx, None, None, false, false, false, 0).await
 }
 
 /// Dispatch the portable daemon's frames to the plugin registry and reply on `channel`.
@@ -122,7 +139,7 @@ async fn dispatch(
             tokio::select! {
                 result = calls.completed(), if calls.pending() => {
                     let (id, result) = result?;
-                    match result { Ok(result) => reply(&tx, Message::Deferred(0, id, result))?, Err(_) => reply(&tx, Message::Result(0, id, false, br#"{"error":"plugin action rejected"}"#.to_vec()))? }
+                    match result { Ok(result) => reply(&tx, Message::Deferred(0, id, result))?, Err(error) => reply(&tx, Message::Result(0, id, false, error.control_error_json()))? }
                 }
                 result = renewals.join_next(), if !renewals.is_empty() => {
                     let (id, result): (u32, io::Result<Vec<u8>>) = result.ok_or_else(|| io::Error::other("Renewal is unavailable."))?.map_err(io::Error::other)?;
@@ -144,7 +161,7 @@ async fn dispatch(
                         Frame::Call { call_id, action_id, input_json } => match calls.start(call_id,action_id,input_json,NodeContext::default()) {
                             Ok(Some(result)) => reply(&tx, Message::Deferred(0,call_id,result))?,
                             Ok(None) => {},
-                            Err(_) => reply(&tx,Message::Result(0,call_id,false,br#"{"error":"plugin action rejected"}"#.to_vec()))?,
+                            Err(error) => reply(&tx,Message::Result(0,call_id,false,error.control_error_json()))?,
                         },
                         _ => return Err(io::ErrorKind::InvalidData.into()),
                     }
@@ -153,7 +170,7 @@ async fn dispatch(
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(channel,rx,None,true,renewal.is_some(),crate::daemon_writer::supports_identity_rotation(renewal),wire_caps) => result }
+    tokio::select! { result = dispatch => result, result = writer(channel,rx,None,None,true,renewal.is_some(),crate::daemon_writer::supports_identity_rotation(renewal),wire_caps) => result }
 }
 
 // Native classification consumed AttachTerm while preserving its decoder;

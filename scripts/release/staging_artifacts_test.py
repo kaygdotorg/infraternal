@@ -93,6 +93,22 @@ class StagingArtifactsTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 verify_signed(directory, trust, directory / "infraternal", complete=True)
 
+    def test_signed_list_parser_is_as_strict_as_the_rust_verifier(self):
+        """`signed_entries` refuses what `release_verify.rs` refuses (J685 P3-1)."""
+        from deploy_remote import signed_entries
+        line = hashlib.sha256(b"v").hexdigest() + "  VERSION"
+        other = hashlib.sha256(b"x").hexdigest() + "  infraternal-x86_64-musl"
+        self.assertEqual(set(signed_entries(line + "\n" + other + "\n")), {"VERSION", "infraternal-x86_64-musl"})
+        # Rust's str::lines drops one carriage return before each newline (J685 P3-4).
+        self.assertEqual(set(signed_entries(line + "\r\n" + other + "\r\n")), {"VERSION", "infraternal-x86_64-musl"})
+        for separator in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(separator=repr(separator)), self.assertRaises(ValueError):
+                signed_entries(line + separator + other + "\n")
+        for text in ("", line, line + "\n" + other, line + "\n\n" + other + "\n", line + "\n" + line + "\n",
+                     line.upper() + "\n", line + " \n", "x" * 65537 + "\n"):
+            with self.subTest(text=text[:80]), self.assertRaises(ValueError):
+                signed_entries(text)
+
 
 if __name__ == "__main__":
     unittest.main()

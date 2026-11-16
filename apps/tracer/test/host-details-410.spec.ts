@@ -18,6 +18,20 @@ const OUT = tracerEvidencePath("host-details-410");
 const WORKER_ID = "22222222-3333-4444-8555-666666666666";
 /** Encodes a JSON reply body for a Result frame. */
 const reply = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+/** A real `mesh.status` shape for a running userspace filter with no optional kernel guard installed. */
+const MESH_STATUS = {
+  state: "On",
+  enforcement: "userspace",
+  kernel_guard: {
+    state: "missing",
+    missing: [
+      "mesh-address anti-spoofing on non-mesh interfaces",
+      "forwarding drops",
+      "public TCP/80 and TCP/443 gate",
+    ],
+    detail: "nft at /nix/store/j480-test-nft/bin/nft is not installed",
+  },
+};
 /** What the server's own agent reports: the machine the panel must show only for the server's own windows. */
 const SERVER_FACTS = { os: "AlmaLinux", version: "10.2", kernel: "6.12.0-124", architecture: "x86_64", cpuModel: "Intel N100", logicalCpus: 4, executionUid: 0, mode: "embedded", engines: [] };
 /** What the added host's agent reports: different in system, CPU, architecture and kind from the server's. */
@@ -25,7 +39,7 @@ const WORKER_FACTS = { os: "Debian GNU/Linux", version: "13", kernel: "6.12.57",
 /** The two review sizes: a desktop and a phone (name, viewport, pixel ratio). */
 const SIZES = [["desktop", { width: 1440, height: 900 }, 1], ["phone", { width: 393, height: 852 }, 2]] as const;
 
-/** Answers the socket's host-facts and host-list calls: the server's own facts, one added host, and that host's facts (or "host offline"). */
+/** Answers host-fact, host-list, and local mesh-status calls without a remote agent in the test double. */
 async function serve(page: Page, worker: { online: boolean }): Promise<{ asked: string[] }> {
   const asked: string[] = [];
   await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
@@ -34,6 +48,7 @@ async function serve(page: Page, worker: { online: boolean }): Promise<{ asked: 
     socket.onMessage((message) => {
       if (typeof message === "string") { server.send(message); return; }
       const { frame } = decodeMuxedFrame(message);
+      if (frame.type === "Call" && frame.actionId === "mesh.status") { asked.push("mesh.status"); send(frame.callId, true, MESH_STATUS); return; }
       if (frame.type === "Call" && frame.actionId === "host.facts.read") { asked.push("host.facts.read"); send(frame.callId, true, SERVER_FACTS); return; }
       if (frame.type === "Call" && frame.actionId === "remote.host.facts") {
         asked.push(`remote.host.facts ${JSON.parse(new TextDecoder().decode(frame.inputJson)).host_id}`);
@@ -142,6 +157,33 @@ for (const [name, viewport, scale] of SIZES) {
       await checkAlignment(page);
       await settle(page);
       await page.screenshot({ path: resolve(OUT, `added-host-offline-${name}-${theme}.png`) });
+      await context.close();
+    });
+  }
+}
+
+for (const [name, viewport, scale] of SIZES) {
+  for (const theme of ["ink", "paper"]) {
+    test(`server connection details name the missing mesh protections: ${name} ${theme}`, async ({ browser }) => {
+      test.setTimeout(120_000);
+      const context = await browser.newContext({ viewport, deviceScaleFactor: scale, ...(name === "phone" ? { hasTouch: true, isMobile: true } : {}) });
+      const page = await context.newPage();
+      const { asked } = await serve(page, { online: true });
+      await page.request.post("/__mock/reset");
+      await page.goto(`/?mock=1&proto=product&fresh=1&bg=none&theme=${theme}`);
+      const first = page.locator(".ui-window").first();
+      await expect(first.locator(".ui-window-host")).toHaveText(/\S/, slow);
+      await first.locator(".ui-window-pill").click();
+      await page.locator(".canvas-popover").getByRole("tab", { name: "Connection" }).click();
+
+      await expect(value(page, "Mesh access rules")).toHaveText("Userspace packet filter", slow);
+      await expect(value(page, "Kernel guard")).toHaveText(
+        "Missing: mesh-address anti-spoofing on non-mesh interfaces, forwarding drops, public TCP/80 and TCP/443 gate; nft at /nix/store/j480-test-nft/bin/nft is not installed",
+      );
+      expect(asked).toContain("mesh.status");
+      await checkAlignment(page);
+      await settle(page);
+      await page.screenshot({ path: resolve(OUT, `server-mesh-protection-${name}-${theme}.png`) });
       await context.close();
     });
   }
