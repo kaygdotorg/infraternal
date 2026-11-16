@@ -793,6 +793,11 @@ fn status_result(
         Activity::Unknown => CommandState::Unknown,
     };
     // A component without a runtime yet is not something this machine has.
+    // Only server builds with remote access append the CA row below.
+    #[cfg_attr(
+        not(all(feature = "remote", feature = "plugin-server")),
+        allow(unused_mut)
+    )]
     let mut components: Vec<_> = node
         .components
         .iter()
@@ -801,6 +806,10 @@ fn status_result(
         .collect();
     // People get the components table; the role id is a scripting detail.
     let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    #[cfg_attr(
+        not(all(feature = "remote", feature = "plugin-server")),
+        allow(unused_mut)
+    )]
     let mut rows: Vec<Vec<String>> = node
         .components
         .iter()

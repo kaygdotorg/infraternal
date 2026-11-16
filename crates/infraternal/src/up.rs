@@ -49,7 +49,12 @@ const MAX_HOST_FIREWALL_RULES: usize = 32;
 const MAX_HOST_FIREWALL_RULE_BYTES: usize = 256;
 const SERVICE_NAME: &str = "infraternal-agent.service";
 /// The shared boot unit that restores product-owned input rules before networking.
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+///
+/// Every build knows this name, even one without the mesh or server plugins
+/// that install the unit: an install journal left on disk by a build that did
+/// install it is recovered by whichever build runs `up` next, and that
+/// rollback must stop our unit or restart the administrator's restored one
+/// (#530).
 const HOST_FIREWALL_SERVICE: &str = "infraternal-firewall.service";
 const SERVICE_BINARY: &str = "/var/lib/infraternal/bin/infraternal";
 const SERVICE_DATA: &str = "/var/lib/infraternal/agent";
@@ -234,6 +239,13 @@ struct Handoff {
     key_pkcs8: Zeroizing<Vec<u8>>,
     key_digest: [u8; 32],
     /// Administrator allow rules persisted for the next boot.
+    ///
+    /// The handoff format is the same in every build, so the rules are always
+    /// carried and validated; only builds with the host firewall apply them.
+    #[cfg_attr(
+        not(any(feature = "plugin-mesh", feature = "plugin-server")),
+        allow(dead_code)
+    )]
     admin_rules: Vec<String>,
 }
 
@@ -315,7 +327,12 @@ pub(crate) fn run(
         }
     };
     #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
-    let admin_rules = Vec::new();
+    let admin_rules = {
+        // This build has no host firewall, and its command line never offers
+        // the rules option, so the caller always passes an empty list.
+        let _ = host_firewall_allow;
+        Vec::new()
+    };
     // Find both privileged programs before an approval is requested, so a
     // missing or replaceable one never wastes the owner's passkey approval.
     let Ok(executable) = env::current_exe() else {

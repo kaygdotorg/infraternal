@@ -412,6 +412,10 @@ impl Journal {
     }
 
     /// Record the original firewall unit before atomically publishing its product replacement.
+    ///
+    /// Only builds that take over the firewall unit write this record; every
+    /// build still reads it back, so rollback can restore the original.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
     pub(super) fn replacement(
         &mut self,
         path: &Path,
