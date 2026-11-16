@@ -1818,6 +1818,12 @@ fn admitted_peer_keys(config: &Config) -> BTreeSet<PublicKey> {
     peer_keys_with_network_access(config)
 }
 
+/// Turn a stored 32-byte private key into the engine's secret and this node's public key.
+///
+/// The raw bytes are copied into a zeroizing buffer, so the copy made for the conversion is
+/// wiped when it drops.
+/// # Errors
+/// Returns `InvalidData` when `bytes` is not exactly 32 bytes long.
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {
     let raw: [u8; 32] = bytes.try_into().map_err(|_| io::ErrorKind::InvalidData)?;
     let raw = zeroize::Zeroizing::new(raw);
