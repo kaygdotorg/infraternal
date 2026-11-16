@@ -114,6 +114,21 @@ struct InstallArgs {
     name: String,
 }
 
+/// The global allocator of static (musl) builds (#522, owner decision
+/// 2026-11-16): mimalloc.
+///
+/// One static binary serves every product role, so this applies to the
+/// server, the infraternal agent (and the `GotaTun` mesh engine inside it) and
+/// every per-session shim alike. musl's own allocator returns freed memory to
+/// the kernel eagerly and the next burst faults it in again, which ran
+/// `GotaTun` at about half of glibc's speed; mimalloc keeps freed memory for
+/// reuse and runs it at glibc's speed. glibc and macOS builds use the C
+/// library's allocator. Static builds also turn transparent huge pages off
+/// first thing (see `harden_startup`), which keeps mimalloc's arenas small.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     run_invocation()
 }
@@ -2710,8 +2725,15 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
     // infraternal agent, and the programs this process starts (shims, and
     // through them people's shells) must get the original back (#522). Best
     // effort: a kernel without the flag (before 3.15) leaves nothing to keep.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
     let _ = infraternal_shim::record_launcher_thp();
+    // Static builds (mimalloc, see `GLOBAL_ALLOCATOR`) then turn THP off for
+    // this whole process (#522): on a THP=`always` host mimalloc's arenas would
+    // be backed by 2 MiB pages, about five times an idle shim's memory, for no
+    // speed gain. The same call records the launcher's policy first, so started
+    // programs and an in-place restart still get it back.
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    let _ = infraternal_shim::disable_process_thp();
     #[cfg(target_os = "linux")]
     nix::sys::prctl::set_dumpable(false)?;
     #[cfg(target_os = "macos")]
