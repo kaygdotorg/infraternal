@@ -17,7 +17,9 @@
 #   lnx-side.sh stats                     "proc_cpu_ticks sys_busy_ticks pss_kib alive"
 #   lnx-side.sh stop                      stop the engine and the serve processes
 #   lnx-side.sh coord-down | cleanup      stop servers / remove everything this kit created
-# Engines: gotatun (bin/gotatun), tailscale, netbird. State: /run/j461c (tmpfs, root only).
+# Engines: gotatun (bin/gotatun), kwg (kernel WireGuard, the same keys and addresses as gotatun:
+# a Linux peer whose receive path is not one userspace thread, J763), tailscale, netbird.
+# State: /run/j461c (tmpfs, root only).
 set -uo pipefail
 D=/opt/j461c; BIN=$D/bin; S=/run/j461c
 mkdir -p $S $D/log $D/out; chmod 700 $S
@@ -99,6 +101,20 @@ start)
     printf 'get=1\n\n' | $BIN/j421net uapi /var/run/wireguard/j461cg.sock 2>/dev/null | grep -q '^listen_port=61820' && echo CONFIG_OK || echo CONFIG_FAIL
     ip addr add 172.30.42.2/32 peer 172.30.42.1 dev j461cg; ip link set j461cg mtu 1280 up
     echo "PEER_IP 172.30.42.2" ;;
+  kwg)
+    # Kernel WireGuard as the GotaTun engines' Linux side (J763): the Mac harness sends the same
+    # "private_key peer_public_key" hex pair; the kernel wants base64, and the private key goes
+    # through a root-only file (never argv), deleted once the interface holds it.
+    read -r priv peerpub
+    ip link del j461cg 2>/dev/null
+    ip link add j461cg type wireguard
+    ( umask 077; printf '%s' "$priv" | python3 -c 'import base64,sys; print(base64.b64encode(bytes.fromhex(sys.stdin.read().strip())).decode())' > $S/e/kwg.key )
+    pub64=$(printf '%s' "$peerpub" | python3 -c 'import base64,sys; print(base64.b64encode(bytes.fromhex(sys.stdin.read().strip())).decode())')
+    wg set j461cg listen-port 61820 private-key $S/e/kwg.key peer "$pub64" endpoint "$MAC:61820" persistent-keepalive 25 allowed-ips 172.30.42.1/32 \
+      && echo CONFIG_OK || echo CONFIG_FAIL
+    rm -f $S/e/kwg.key
+    ip addr add 172.30.42.2/32 peer 172.30.42.1 dev j461cg; ip link set j461cg mtu 1280 up
+    echo "PEER_IP 172.30.42.2" ;;
   tailscale)
     mkdir -p $S/ts
     setsid env TS_LOGS_DIR=$S/ts $BIN/tailscaled --statedir=$S/ts --socket=$S/ts/ts.sock --tun=ts-j461c --port=41642 > $D/log/tailscaled.log 2>&1 < /dev/null & echo $! >> $S/engine.pids
@@ -127,6 +143,7 @@ start)
 path)
   case $1 in
   gotatun) printf 'get=1\n\n' | $BIN/j421net uapi /var/run/wireguard/j461cg.sock | grep -E 'endpoint|last_handshake|rx_bytes|tx_bytes'; ip link show j461cg | head -1 ;;
+  kwg) wg show j461cg | grep -vE 'private key'; ip link show j461cg | head -1 ;;
   tailscale) $BIN/tailscale --socket=$S/ts/ts.sock status; ip link show ts-j461c | head -1 ;;
   netbird) $BIN/netbird status --daemon-addr unix://$S/nb/nb.sock -d; ip -d link show wt-j461c | head -3 ;;
   esac ;;
