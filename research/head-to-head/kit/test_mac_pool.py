@@ -40,6 +40,18 @@ class OrdersTest(unittest.TestCase):
         """An odd count doubles the design."""
         self.assertEqual(len(POOL.williams(["a", "b", "c"])), 6)
 
+    def test_repeat_runs_the_design_again(self) -> None:
+        """`orders --repeat 3` prints the two-engine design three times."""
+        import contextlib, io, sys
+        out = io.StringIO()
+        argv, sys.argv = sys.argv, ["mac_pool.py", "orders", "--repeat", "3", "pin", "cand"]
+        try:
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(POOL.main(), 0)
+        finally:
+            sys.argv = argv
+        self.assertEqual(out.getvalue().split(), ["pin,cand", "cand,pin"] * 3)
+
     def test_one_engine_is_refused(self) -> None:
         """A square needs two engines."""
         with self.assertRaises(ValueError):
@@ -87,6 +99,15 @@ class ReportTest(unittest.TestCase):
         """A case that never wrote its receipts is not counted."""
         with tempfile.TemporaryDirectory(prefix="j674-pool-") as tmp:
             self.assertIsNone(POOL.load(Path(tmp), "pin", "lan-mac-tx-1f"))
+
+    def test_a_window_listed_twice_is_refused(self) -> None:
+        """A reused window id would count one window twice, so the report refuses it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            window = Path(tmp) / "w1"
+            write_case(window, "pin", "lan-mac-tx-1f", 0.2, 1.0)
+            (window / "rows.tsv").write_text("0\tpin\n")
+            with self.assertRaises(SystemExit):
+                POOL.report("pin", [window, Path(tmp) / "x" / ".." / "w1"])
 
     def test_unknown_baseline_is_refused(self) -> None:
         """Naming a baseline no window ran stops the report."""

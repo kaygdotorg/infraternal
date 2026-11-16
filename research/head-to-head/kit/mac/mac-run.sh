@@ -7,14 +7,15 @@
 # One window per Williams order of the engines (mac_pool.py orders). The Mac lock is taken per
 # window and released between windows so another job can use the Mac. `SMOKE=1` runs one
 # window in the given engine order with 5 s cases: functional evidence only. Outputs:
-# $KIT_HOME/ev/<run-id>-w<N>/ and a pooled report at $KIT_HOME/ev/<run-id>-report.md.
+# $KIT_HOME/ev/<run-id>-w<N>/ (N counts every window, so a repeated order never reuses an id;
+# `REPEAT=4` runs the whole Williams design four times) and a pooled report at $KIT_HOME/ev/<run-id>-report.md.
 set -uo pipefail
 RUN=$1; shift
 here=$(cd "$(dirname "$0")" && pwd)
 J=${KIT_HOME:-/Users/Shared/h2h-mac}
 mkdir -p "$J/ev"
 if [ -n "${SMOKE:-}" ]; then orders=$(echo "$*" | tr ' ' ','); export LAN_SECS=${LAN_SECS:-5}
-else orders=$(python3 "$here/mac_pool.py" orders "$@"); fi
+else orders=$(python3 "$here/mac_pool.py" orders --repeat "${REPEAT:-1}" "$@"); fi
 i=0; wins=()
 for order in $orders; do
   i=$((i+1)); w="$RUN-w$i"

@@ -234,6 +234,24 @@ rust_check_cli_plugin_compile_out() {
     return "$failed"
 }
 
+# The "release feature sets" row (#530). Lints every package and feature
+# selection scripts/package-release ships, with warnings as errors. The clippy
+# row only sees the workspace's default features and the static builds row
+# only the default `infraternal`, so the host payload (no mesh, server or
+# desktop) went uncompiled until the release build failed on dev 6fe482d1e.
+# Linting for the build host is enough: the release targets differ only by
+# architecture, and no code here is conditional on it. Every set runs even
+# after one fails, so one log shows them all.
+rust_check_release_feature_sets() {
+    local failed=0
+    local release_server_cargo_args release_host_cargo_args release_session_cargo_args
+    source scripts/release/feature-sets || return 1
+    cargo clippy --locked "${release_server_cargo_args[@]}" -- -D warnings || failed=1
+    cargo clippy --locked "${release_host_cargo_args[@]}" -- -D warnings || failed=1
+    cargo clippy --locked "${release_session_cargo_args[@]}" -- -D warnings || failed=1
+    return "$failed"
+}
+
 # D244/#154 checks the shipping provider, never a GNU test executable or C probe.
 rust_check_static_key_memory() {
     local target="$1"
@@ -344,6 +362,7 @@ rust_verify_fast() {
     rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/*.zig
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
+    rust_run_gate "release feature sets" rust_check_release_feature_sets
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
     # The head-to-head kit is versioned here, so its own tests gate every change (#260); ~5 s.
