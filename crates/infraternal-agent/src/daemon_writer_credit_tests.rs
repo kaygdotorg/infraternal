@@ -122,7 +122,7 @@ const STREAM: u32 = 2;
 /// Start a relay and a writer the way the dispatcher wires them, with the socket held after the
 /// relay's two opening frames (its `InputAck` and its replay completion).
 async fn start() -> Fixture {
-    let wiring = launch(false).await;
+    let wiring = launch(false);
     let (peer, reader) = greet_relay(&wiring.listener, wiring.id, STREAM).await;
     let mut fixture = wiring.greeted(peer, reader);
     assert_eq!(next_seen(&mut fixture).await, Some(Seen::Ack(0)));
@@ -135,7 +135,7 @@ async fn start() -> Fixture {
 /// output; the socket is held after the same two opening frames as [`start`].
 #[cfg(feature = "remote")]
 async fn start_primed() -> Fixture {
-    let wiring = launch(true).await;
+    let wiring = launch(true);
     let (mut peer, _) = tokio::time::timeout(EVENT_GUARD, wiring.listener.accept())
         .await
         .expect("the primed relay did not connect to the fake shim")
@@ -251,7 +251,7 @@ impl Wiring {
 /// Wire a relay (primed or not) to the real writer over a [`HeldSocket`] that lets the relay's
 /// two opening frames through, through `terminal_mode` as the dispatcher does. The fake shim has
 /// not answered yet: the caller greets it.
-async fn launch(primed: bool) -> Wiring {
+fn launch(primed: bool) -> Wiring {
     let id = *uuid::Uuid::new_v4().as_bytes();
     let (root, path) = shim_rendezvous(id);
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
