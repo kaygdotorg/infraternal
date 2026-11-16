@@ -3814,6 +3814,10 @@ mod remote_removal_tests;
 mod terminal_refusal_tests;
 #[path = "tls_tests.rs"]
 mod tls_tests;
+/// D393: while a host is being upgraded, only its owner hears so; anyone else gets `unavailable`.
+#[cfg(feature = "remote")]
+#[path = "upgrade_refusal_tests.rs"]
+mod upgrade_refusal_tests;
 /// Keep the canonical public-status result documentation aligned with the HTTP boundary.
 #[tokio::test]
 async fn public_status_result_fields_are_listed_in_the_auth_contract() {
