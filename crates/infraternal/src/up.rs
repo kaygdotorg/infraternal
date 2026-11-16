@@ -49,7 +49,12 @@ const MAX_HOST_FIREWALL_RULES: usize = 32;
 const MAX_HOST_FIREWALL_RULE_BYTES: usize = 256;
 const SERVICE_NAME: &str = "infraternal-agent.service";
 /// The shared boot unit that restores product-owned input rules before networking.
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+///
+/// Every build knows this name, even one without the mesh or server plugins
+/// that install the unit: an install journal left on disk by a build that did
+/// install it is recovered by whichever build runs `up` next, and that
+/// rollback must stop our unit or restart the administrator's restored one
+/// (#530).
 const HOST_FIREWALL_SERVICE: &str = "infraternal-firewall.service";
 const SERVICE_BINARY: &str = "/var/lib/infraternal/bin/infraternal";
 const SERVICE_DATA: &str = "/var/lib/infraternal/agent";

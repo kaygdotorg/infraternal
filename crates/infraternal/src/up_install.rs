@@ -4,10 +4,10 @@
 //! Synced inode records precede publication; errors, signals and the next privileged
 //! attempt recover only those entries, leaving pre-existing paths alone.
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
-use super::{HOST_FIREWALL_SERVICE, host_firewall_systemd_unit};
+use super::host_firewall_systemd_unit;
 use super::{
-    PATH_BINARY, SERVICE_BINARY, SERVICE_NAME, check_directory, hash_stream, run_systemctl,
-    systemd_unit,
+    HOST_FIREWALL_SERVICE, PATH_BINARY, SERVICE_BINARY, SERVICE_NAME, check_directory, hash_stream,
+    run_systemctl, systemd_unit,
 };
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 use infraternal_plugin_mesh::host_firewall::{self, Policy};
@@ -782,7 +782,9 @@ impl Install {
                     .flatten()
                     .is_some_and(|metadata| entry.identity == (metadata.dev(), metadata.ino()))
         });
-        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        // Rollback is not feature-gated: it undoes what the journal records, and
+        // a journal written by a build with the host firewall code may be
+        // recovered by a host payload built without it (#530).
         let own_firewall_unit = self.created.iter().any(|entry| {
             entry.path
                 == self
@@ -798,7 +800,6 @@ impl Install {
         if self.registered && own_unit {
             run_systemctl(&self.systemctl, &["stop", SERVICE_NAME], None)?;
         }
-        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
         if self.registered
             && own_firewall_unit
             && let Err(error) =
