@@ -8,6 +8,10 @@
 //! of bytes have the same `ETag`, and a browser then reuses the *old* `main.js`, which imports chunk names that no
 //! longer exist (#500, J538). [`headers`] therefore replaces the validator for mutable files with one that also
 //! carries a fingerprint of the whole bundle, and answers `If-None-Match` itself.
+//!
+//! Two places have no app page behind them. A path with a file extension that the bundle lacks is a bare `404` (#518).
+//! A path under `/docs/` that has no page is a `404` that carries the docs' own "not found" page (`docs/404.html`,
+//! written by the docs build), because the app shell cannot render a docs address and shows a blank page (#527).
 
 use axum::{
     Router,
@@ -42,6 +46,16 @@ pub(crate) fn router(root: PathBuf) -> Router {
                 .precompressed_gzip(),
         )
         .layer(from_fn(missing_file_is_not_found));
+    // Under `/docs` the app shell is never the answer: the docs are plain pages, so a miss there is the docs' own
+    // "not found" page with a `404` status (#527). `ServeFile` handles `HEAD` and the encodings; the layer sets the status.
+    let docs_missing = ServeFile::new(root.join("docs/404.html"))
+        .precompressed_br()
+        .precompressed_gzip();
+    let index = Router::new()
+        .route_service("/docs", docs_missing.clone())
+        .route_service("/docs/{*rest}", docs_missing)
+        .layer(from_fn(status_not_found))
+        .fallback_service(index);
     Router::new()
         .fallback_service(
             ServeDir::new(root)
@@ -51,6 +65,17 @@ pub(crate) fn router(root: PathBuf) -> Router {
                 .fallback(index),
         )
         .layer(from_fn_with_state(fingerprint, headers))
+}
+
+/// Turns the answer of a docs "not found" page into a `404`, and keeps a `Range` request from cutting it short. The
+/// page is served as a file, so without this its status would be `200` and a cache or crawler would index it.
+async fn status_not_found(mut request: Request, next: Next) -> Response {
+    request.headers_mut().remove(header::RANGE);
+    let mut response = next.run(request).await;
+    if response.status().is_success() {
+        *response.status_mut() = StatusCode::NOT_FOUND;
+    }
+    response
 }
 
 /// Answers `404` for a request whose last path segment has a file extension, and lets every other path through to the
