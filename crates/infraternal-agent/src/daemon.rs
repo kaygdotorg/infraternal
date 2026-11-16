@@ -1971,6 +1971,16 @@ async fn terminal(
     result
 }
 
+/// Relay one terminal stream (see `terminal_run`), and when the relay fails, report the
+/// session's saved exit if it has one.
+///
+/// Before that report, a failed relay releases any raw output a key's acknowledgment still
+/// holds in the writer (#477, J813). Every way the relay's loop ends a pending key repaint on
+/// purpose sends its own release, but an error can end the loop anywhere: a shim reply it did
+/// not ask for, or a write to a shim that has just gone. Those held bytes were charged and the
+/// relay's cursor counts them, so without the release they would never reach the client, and
+/// the exit reported next would claim output the client never got. A release that finds
+/// nothing held writes nothing, so it is sent unconditionally.
 async fn terminal_mode(
     path: PathBuf,
     id: [u8; 16],
@@ -1982,7 +1992,9 @@ async fn terminal_mode(
     priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
 ) -> io::Result<()> {
-    match terminal_run(
+    let mut attachment = 0;
+    let release = priority.clone();
+    let result = terminal_run(
         path.clone(),
         id,
         stream,
@@ -1992,9 +2004,16 @@ async fn terminal_mode(
         tx.clone(),
         priority,
         primed,
+        &mut attachment,
     )
-    .await
-    {
+    .await;
+    if result.is_err() {
+        // The writer may be gone too; then there is nobody left to deliver to.
+        let _ = emit_priority(&release, PriorityMessage::Release { stream, attachment }).await;
+    }
+    // A bound terminal's writer stops taking priority messages once every sender is gone.
+    drop(release);
+    match result {
         Err(error) => {
             // EOF may occur in Hello, ownership confirmation or input-state
             // recovery before the steady-state select can observe owner EOF.
@@ -2008,6 +2027,9 @@ async fn terminal_mode(
     }
 }
 
+/// The relay loop of one terminal stream: shim output to the writer under the client's credit,
+/// client commands to the shim. `announced` tracks the attachment it last announced to the
+/// writer (see `terminal_mode`).
 async fn terminal_run(
     path: PathBuf,
     id: [u8; 16],
@@ -2018,13 +2040,16 @@ async fn terminal_run(
     tx: mpsc::Sender<Message>,
     priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
+    announced: &mut u64,
 ) -> io::Result<()> {
     // Announce this attachment before any of its frames. The writer then stops
     // trimming this stream's output by repaints of an earlier attachment that
     // reused the stream id (a resumed browser), and ignores that attachment's
-    // late priority frames (#477).
+    // late priority frames (#477). `announced` always holds the latest one, so
+    // `terminal_mode` can release what it holds if this relay fails.
     #[cfg_attr(not(feature = "remote"), allow(unused_mut))]
     let mut attachment = crate::daemon_writer::next_attachment();
+    *announced = attachment;
     // Raw bytes of this attachment that the writer drops under a key repaint
     // come back here as credit (#477, J799).
     let (refund_cell, mut refunds) = crate::daemon_writer::refunds();
@@ -2380,6 +2405,7 @@ async fn terminal_run(
                         // The rewind starts a new replay below any cursor an
                         // earlier key repaint covered: scope it afresh (#477).
                         attachment = crate::daemon_writer::next_attachment();
+                        *announced = attachment;
                         // The server's reissued credit already excludes
                         // anything the writer drops from before the rewind,
                         // so only the new ledger takes refunds.
