@@ -300,6 +300,6 @@ test("the build writes the docs' own 'not found' page, with absolute links, for 
     expect(html).toContain('<a href="/docs/">Docs home</a>');
     expect(html).toContain("data-open-search");
     // One file served at any depth: every address in it is absolute, never relative.
-    expect([...html.matchAll(/(?:href|src)="([^"]*)"/g)].map((match) => match[1]).filter((url) => !url.startsWith("/") && !url.startsWith("https://") && !url.startsWith("#"))).toEqual([]);
+    expect([...html.matchAll(/(?:href|src)="([^"]*)"/g)].map((match) => match[1] ?? "").filter((url) => !url.startsWith("/") && !url.startsWith("https://") && !url.startsWith("#"))).toEqual([]);
   } finally { await f.done(); }
 });
