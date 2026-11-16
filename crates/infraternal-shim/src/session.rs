@@ -159,6 +159,10 @@ enum InputReply {
     Ack,
     State,
 }
+/// One connection to this shim (a viewer through the agent, an owner or a
+/// cleanup link): its socket, decoder and queued output, the writer it types
+/// as, how far its output cursor has got, and the one request (raw read or
+/// Snapshot) waiting to be served.
 // Attachment, shared selection, exit delivery and cleanup are independent states.
 // Keep their valid combinations compact rather than imposing exclusive phases.
 #[allow(clippy::struct_excessive_bools)]
@@ -182,6 +186,13 @@ struct Peer {
     exited_sent: bool,
     stopping: bool,
     request: Option<Request>,
+    /// True from a `ReadFrom` that started a raw replay of bytes already
+    /// written until this viewer's next `Resize` or input. Raw bytes are only
+    /// right at the size they were written for, and a viewer reports its size
+    /// just after attaching, before it types. If that size differs from the
+    /// session's (once a viewer has ever sized it), the viewer gets a Snapshot
+    /// of the engine instead (#521).
+    replay_awaits_size: bool,
 }
 impl Peer {
     #[cfg(feature = "process-per-user")]
@@ -446,6 +457,7 @@ mod input_ack_order_tests {
             exited_sent: false,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         (peer, client)
     }
@@ -762,7 +774,10 @@ pub fn run_with_prestarted_login(
     run_configured(config, retention, group, Some(pty))
 }
 
-/// Run a PTY session with the selected output retention and optional prestarted PTY.
+/// The shim's main loop once its PTY exists (prestarted or not), with the
+/// selected output retention: accepts peers, moves PTY output into the engine,
+/// the ring and each peer's cursor, feeds peer frames to `handle`, and serves
+/// each peer's pending request when its queue drains.
 fn run_configured(
     mut config: Config,
     retention: Duration,
@@ -1209,6 +1224,7 @@ fn run_configured(
                             exited_sent: false,
                             stopping: false,
                             request: None,
+                            replay_awaits_size: false,
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
@@ -1472,6 +1488,11 @@ fn consume_peer(
     Ok((acknowledged_exit, used))
 }
 
+/// Applies one frame from peer `p` to the session: input, resizes, replay
+/// and Snapshot requests, writer selection, signals and exit. Returns true
+/// once the peer has acknowledged the exit and may be dropped. A raw replay
+/// is only served at the size it was written for; a viewer that reports
+/// another size right after attaching gets a Snapshot instead (#521).
 fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
@@ -1531,6 +1552,9 @@ fn handle<'a>(
             return Err(io::ErrorKind::WouldBlock.into());
         }
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
+        // Typing means this peer is past its attach (browsers report their
+        // size before any input), so a later Resize is a live one (#521).
+        p.replay_awaits_size = false;
         trace_host!(
             InputQueued,
             config.session,
@@ -1549,6 +1573,7 @@ fn handle<'a>(
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = Some(writer);
+                    cursors.viewer_sized = true;
                 }
             }
         }
@@ -1614,24 +1639,52 @@ fn handle<'a>(
             }
             p.size = (cols, rows, px_w, px_h);
             cursors.request_resize(p.writer, p.size)?;
+            // This viewer has just attached and is reporting its size. Its raw
+            // replay was written at the session's size, so if the viewer has
+            // another one, whatever part of it has already gone out lands on
+            // the wrong rows; a live viewer's own resize instead reflows its
+            // screen locally and needs no repaint (#521).
+            let session_size = (config.cols, config.rows);
+            let replay_wrong_size = std::mem::take(&mut p.replay_awaits_size)
+                && cursors.viewer_sized
+                && (cols, rows) != session_size;
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
                 let applied = p.resize(pty, terminal, ring, config)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = p.writer;
+                    cursors.viewer_sized = true;
                 }
+            }
+            // If the size applied, the engine has reflowed to this viewer and
+            // its repaint fits exactly. If it is only staged (another writer
+            // still owns the geometry, D74), the repaint keeps the session's
+            // size with absolute positions: that fits a viewer at least as
+            // large, but piles up in the last column of a smaller one. D74
+            // leaves smaller viewers to scaling, which the client does not do
+            // yet, so they keep the raw replay as before.
+            let applied_here = (config.cols, config.rows) == (cols, rows);
+            let fits = cols >= session_size.0 && rows >= session_size.1;
+            if replay_wrong_size && (applied_here || fits) {
+                p.request = Some(Request::Snapshot);
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
             // A new peer or a later request can replace the resize's queued
             // repaint. Lost native state must still be announced, even when
             // raw bytes cover this viewer's cursor; byte retention alone does
-            // not cover state after historical resizes or omitted output.
-            p.request = Some(if terminal.requires_approximation() {
-                Request::Snapshot
-            } else {
+            // not cover omitted output. Raw bytes are laid out for the size
+            // they were written at: the viewer's Resize right after this
+            // decides whether they still fit it (#521). Bytes from before an
+            // earlier resize are still replayed raw, because a repaint here
+            // would be approximate for every shell session, on every reload.
+            let raw = !terminal.requires_approximation();
+            p.request = Some(if raw {
                 Request::Read(seq)
+            } else {
+                Request::Snapshot
             });
+            p.replay_awaits_size = raw && seq < ring.head();
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
         Frame::Signal(signal) => pty.signal_unless_exited(signal, exited)?,
@@ -1702,6 +1755,10 @@ fn invalid_request() -> io::Error {
 #[cfg(test)]
 #[path = "../tests/unit/session_resize.rs"]
 mod resize_checks;
+/// A reopened viewer sees the shim's screen, not bytes laid out for another width (#521).
+#[cfg(test)]
+#[path = "../tests/unit/resume_geometry.rs"]
+mod resume_geometry_checks;
 
 #[cfg(test)]
 mod readiness_marker_checks {
