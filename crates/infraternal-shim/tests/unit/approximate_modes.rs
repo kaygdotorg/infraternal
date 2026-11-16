@@ -76,6 +76,10 @@ const CASES: &[Case] = &[
     Case { name: "colour scheme reports 2031", setup: b"\x1b[?2031h", later: b"" },
     Case { name: "in-band size reports 2048", setup: b"\x1b[?2048h", later: b"" },
     Case { name: "clipboard paste events 5522", setup: b"\x1b[?5522h", later: b"" },
+    // Modes that default on and a program turned off must be written as off.
+    Case { name: "send/receive off SRM 12", setup: b"\x1b[12l", later: b"" },
+    Case { name: "numlock keypad off 1035", setup: b"\x1b[?1035l", later: b"" },
+    Case { name: "visibility reports 2033", setup: b"\x1b[?2033h", later: b"" },
     Case { name: "modifyOtherKeys 2", setup: b"\x1b[>4;2m", later: b"" },
     Case { name: "mouse shift capture", setup: b"\x1b[>1s", later: b"" },
     Case { name: "cursor style bar", setup: b"\x1b[6 q", later: b"" },
@@ -204,5 +208,90 @@ fn mode_restore_costs_bytes_not_a_mode_list() {
     let per = started.elapsed() / 200;
     eprintln!(
         "J766 approximate repaint: plain 80x24 {plain_len} B, +2004 {shell_len} B, vim 200x50 {bytes} B in {per:?}"
+    );
+}
+
+/// The modes a full-screen program leaves on, plus enough cells and colour
+/// changes that the repaint is far larger than the mode tail.
+const BUSY_MODES: &[u8] = b"\x1b[?2004h\x1b[?1h\x1b[?66h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[>4;2m\x1b[>1u\x1b[>3u\x1b[6 q\x1b[?7l\x1b[2;23r";
+
+/// A repaint clipped to a small frame drops cells, never modes: the tail is
+/// reserved before any cell is written (#524). Clips the same screen to half
+/// its unclipped size, then clears both screens and compares everything
+/// else the oracle checks, so missing cells are expected and nothing more.
+#[test]
+fn a_clipped_repaint_drops_cells_not_modes() {
+    let mut host = reset_terminal(80, 24);
+    host.process(BUSY_MODES);
+    for row in 1..=24 {
+        host.process(format!("\x1b[{row};1H").as_bytes());
+        for col in 0..79 {
+            host.process(format!("\x1b[3{}m{}", col % 8, col % 10).as_bytes());
+        }
+    }
+    host.process(b"\x1b[0m\x1b[5;5H");
+    let full = host.approximate_snapshot();
+    let mut frame = vec![0; full.len() / 2];
+    let len = host.engine.approximate_snapshot(&mut frame);
+    assert!(
+        len > 0 && len < full.len(),
+        "clipped to {len} of {} bytes",
+        full.len()
+    );
+    let mut viewer = stale_viewer();
+    viewer.process(&frame[..len]);
+    host.process(b"\x1b[H\x1b[2J");
+    viewer.process(b"\x1b[H\x1b[2J");
+    assert_eq!(
+        approximate_mismatch(&host, &viewer),
+        0,
+        "a clipped repaint lost a mode"
+    );
+}
+
+/// The worst case for the mode tail's fixed buffer: a program that flips
+/// every mode a repaint restores away from its default, fills both Kitty
+/// stacks, designates every charset and sets margins with origin mode. The
+/// tail must still fit, or the repaint would fall back to a blank screen.
+/// Prints the tail's size for the record.
+#[test]
+fn a_program_that_flips_every_mode_still_gets_its_repaint() {
+    let every = [
+        b"\x1b[>31u\x1b[>30u\x1b[?1049h\x1b[?1047h\x1b[?47h".as_slice(),
+        b"\x1b[2h\x1b[4h\x1b[12l\x1b[20h",
+        b"\x1b[?1h\x1b[?4h\x1b[?5h\x1b[?7l\x1b[?8h\x1b[?12h\x1b[?25l\x1b[?40h\x1b[?45h\x1b[?66h\x1b[?67h",
+        b"\x1b[?9h\x1b[?1002h\x1b[?1003h\x1b[?1000h\x1b[?1005h\x1b[?1015h\x1b[?1016h\x1b[?1006h",
+        b"\x1b[?1004h\x1b[?1007l\x1b[?1035l\x1b[?1036l\x1b[?1039h\x1b[?1045h",
+        b"\x1b[?2004h\x1b[?2027h\x1b[?2031h\x1b[?2033h\x1b[?2048h\x1b[?5522h",
+        b"\x1b[>4;2m\x1b[>1s\x1b[2 q",
+        b"\x1b[>31u\x1b[>30u\x1b[>29u\x1b[>28u\x1b[>27u\x1b[>26u\x1b[>25u\x1b[>24u\x1b[>23u",
+        b"\x1b(0\x1b)0\x1b*A\x1b+0\x0e\x1b~",
+        b"\x1b[?69h\x1b[10;70s\x1b[5;20r\x1b[?6h\x1b[3;4H",
+    ]
+    .concat();
+    let mut host = reset_terminal(80, 24);
+    host.process(&every);
+    let repaint = host.approximate_snapshot();
+    let mut viewer = stale_viewer();
+    viewer.process(&repaint);
+    assert_eq!(
+        approximate_mismatch(&host, &viewer),
+        0,
+        "every mode flipped"
+    );
+    let later = b"qx\x1b[1;1HY\x1b[<u\x1b[?1049l\x1b[<uZ";
+    host.process(later);
+    viewer.process(later);
+    assert_eq!(
+        approximate_mismatch(&host, &viewer),
+        0,
+        "after later output"
+    );
+    let mut blank = reset_terminal(80, 24);
+    blank.process(b"\x1b[?1049h");
+    eprintln!(
+        "J824 every-mode repaint {} B, alternate-screen blank {} B",
+        repaint.len(),
+        blank.approximate_snapshot().len()
     );
 }
