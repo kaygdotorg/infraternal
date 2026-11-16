@@ -94,6 +94,8 @@ enum Seen {
 struct Fixture {
     /// The test's private state root, removed by [`stop`].
     root: PathBuf,
+    /// The session's rendezvous socket, beside which a test may save an exit record.
+    path: PathBuf,
     /// The fake session's id.
     id: [u8; 16],
     /// Where the relay connects its shim links.
@@ -120,6 +122,136 @@ const STREAM: u32 = 2;
 /// Start a relay and a writer the way the dispatcher wires them, with the socket held after the
 /// relay's two opening frames (its `InputAck` and its replay completion).
 async fn start() -> Fixture {
+    let wiring = launch(false).await;
+    let (peer, reader) = greet_relay(&wiring.listener, wiring.id, STREAM).await;
+    let mut fixture = wiring.greeted(peer, reader);
+    assert_eq!(next_seen(&mut fixture).await, Some(Seen::Ack(0)));
+    assert_eq!(next_seen(&mut fixture).await, Some(Seen::Event));
+    fixture
+}
+
+/// Start a relay and a writer the way a primed (standby) route wires them, the only kind of
+/// relay that takes the server's cursor rewinds. Its first delivered cursor, at 0, starts its
+/// output; the socket is held after the same two opening frames as [`start`].
+#[cfg(feature = "remote")]
+async fn start_primed() -> Fixture {
+    let wiring = launch(true).await;
+    let (mut peer, _) = tokio::time::timeout(EVENT_GUARD, wiring.listener.accept())
+        .await
+        .expect("the primed relay did not connect to the fake shim")
+        .unwrap();
+    sessions::send(&mut peer, &primed_hello(wiring.id))
+        .await
+        .unwrap();
+    let mut reader = Reader::default();
+    assert!(matches!(
+        read_shim(&mut reader, &mut peer).await,
+        Shim::Attach(_)
+    ));
+    assert_eq!(
+        read_shim(&mut reader, &mut peer).await,
+        Shim::SelectSharedWriter(STREAM)
+    );
+    assert_eq!(
+        read_shim(&mut reader, &mut peer).await,
+        Shim::InputStateRequest
+    );
+    sessions::send(&mut peer, &Shim::InputState(0, 0))
+        .await
+        .unwrap();
+    let mut fixture = wiring.greeted(peer, reader);
+    assert_eq!(next_seen(&mut fixture).await, Some(Seen::Ack(0)));
+    rewind(&mut fixture, 0).await;
+    assert_eq!(next_seen(&mut fixture).await, Some(Seen::Event));
+    fixture
+}
+
+/// The `Hello` the fake shim sends a primed relay on every link: a fresh session with no output.
+#[cfg(feature = "remote")]
+fn primed_hello(id: [u8; 16]) -> Shim {
+    use infraternal_shim::frame::{MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER};
+    Shim::Hello {
+        version: 1,
+        caps: SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER,
+        session: id,
+        pid: std::process::id(),
+        cols: 80,
+        rows: 24,
+        created: 0,
+        head: 0,
+        start: 0,
+    }
+}
+
+/// Send the server's cursor command to a primed relay, answer the geometry probe it opens, and
+/// check that its shim link then replays from `cursor`. The writer must be free to take the
+/// relay's new `Attached` marker by then.
+#[cfg(feature = "remote")]
+async fn rewind(fixture: &mut Fixture, cursor: u64) {
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Cursor(cursor))
+        .unwrap();
+    let (mut probe, _) = tokio::time::timeout(EVENT_GUARD, fixture.listener.accept())
+        .await
+        .expect("the cursor command did not probe the shim's replay geometry")
+        .unwrap();
+    sessions::send(&mut probe, &primed_hello(fixture.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::ReadFrom(cursor)
+    );
+}
+
+/// A relay wired to the real writer whose fake shim has not answered yet (see [`launch`]).
+struct Wiring {
+    /// The test's private state root.
+    root: PathBuf,
+    /// The session's rendezvous socket.
+    path: PathBuf,
+    /// The fake session's id.
+    id: [u8; 16],
+    /// Where the relay connects its shim links.
+    listener: tokio::net::UnixListener,
+    /// The client's commands to the relay.
+    commands: session_commands::Sender,
+    /// The writer's held leg-B socket.
+    socket: Arc<HeldSocket>,
+    /// Frames the writer put on the wire, in order.
+    wire: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// The relay task.
+    relay: JoinHandle<io::Result<()>>,
+    /// The writer task.
+    writer: JoinHandle<io::Result<()>>,
+}
+
+impl Wiring {
+    /// The fixture, once the fake shim has answered the relay's first link as `peer`.
+    fn greeted(self, peer: UnixStream, reader: Reader) -> Fixture {
+        Fixture {
+            root: self.root,
+            path: self.path,
+            id: self.id,
+            listener: self.listener,
+            peer,
+            reader,
+            commands: Some(self.commands),
+            socket: self.socket,
+            wire: self.wire,
+            relay: Some(self.relay),
+            writer: Some(self.writer),
+        }
+    }
+}
+
+/// Wire a relay (primed or not) to the real writer over a [`HeldSocket`] that lets the relay's
+/// two opening frames through, through `terminal_mode` as the dispatcher does. The fake shim has
+/// not answered yet: the caller greets it.
+async fn launch(primed: bool) -> Wiring {
     let id = *uuid::Uuid::new_v4().as_bytes();
     let (root, path) = shim_rendezvous(id);
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -145,25 +277,28 @@ async fn start() -> Fixture {
         )
         .await
     });
-    let relay = tokio::spawn(terminal_with_priority(
-        path, id, STREAM, 0, 0, receiver, tx, priority,
+    let relay = tokio::spawn(terminal_mode(
+        path.clone(),
+        id,
+        STREAM,
+        0,
+        0,
+        receiver,
+        tx,
+        priority,
+        primed,
     ));
-    let (peer, reader) = greet_relay(&listener, id, STREAM).await;
-    let mut fixture = Fixture {
+    Wiring {
         root,
+        path,
         id,
         listener,
-        peer,
-        reader,
-        commands: Some(commands),
+        commands,
         socket,
         wire,
-        relay: Some(relay),
-        writer: Some(writer),
-    };
-    assert_eq!(next_seen(&mut fixture).await, Some(Seen::Ack(0)));
-    assert_eq!(next_seen(&mut fixture).await, Some(Seen::Event));
-    fixture
+        relay,
+        writer,
+    }
 }
 
 /// Decode one captured mux frame.
@@ -342,6 +477,38 @@ async fn stop(fixture: &mut Fixture) {
     let _ = std::fs::remove_dir_all(&fixture.root);
 }
 
+/// Offer more new output from `head` than one bulk window, and count the raw bytes that reach
+/// the wire before the relay stalls for credit.
+async fn forwarded_before_stall(fixture: &mut Fixture, head: u64) -> u64 {
+    let chunk = 64 * 1024;
+    let frames = (BULK_CREDIT as usize + 2 * chunk) / chunk;
+    let peer = &mut fixture.peer;
+    let flood = async {
+        for frame in 0..frames {
+            let seq = head + (frame * chunk) as u64;
+            // The relay may detach once starved; later writes may then fail.
+            if sessions::send(peer, &Shim::Output(seq, vec![b'n'; chunk]))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    let wire = &mut fixture.wire;
+    let count = async {
+        let mut forwarded = 0_u64;
+        while let Ok(Some(bytes)) = tokio::time::timeout(QUIET, wire.recv()).await {
+            if let Seen::Output(_, length) = seen(&bytes) {
+                forwarded += length as u64;
+            }
+        }
+        forwarded
+    };
+    let ((), forwarded) = tokio::join!(flood, count);
+    forwarded
+}
+
 /// The writer drops queued raw output that a key repaint covers, which the client therefore never
 /// receives and never returns credit for. The relay must get that credit back, or the client's
 /// window shrinks by up to a whole FIFO of frames for the rest of the attachment (#477, J799).
@@ -372,34 +539,7 @@ async fn a_key_repaint_that_drops_queued_output_keeps_the_whole_bulk_window() {
     );
     return_credit(&mut fixture, FIRST_FRAME as u64 + SCREEN.len() as u64);
 
-    // Offer more new output than one window and count what reaches the wire before the relay
-    // stalls for credit.
-    let chunk = 64 * 1024;
-    let frames = (BULK_CREDIT as usize + 2 * chunk) / chunk;
-    let peer = &mut fixture.peer;
-    let flood = async {
-        for frame in 0..frames {
-            let seq = head + (frame * chunk) as u64;
-            // The relay may detach once starved; later writes may then fail.
-            if sessions::send(peer, &Shim::Output(seq, vec![b'n'; chunk]))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    };
-    let wire = &mut fixture.wire;
-    let count = async {
-        let mut forwarded = 0_u64;
-        while let Ok(Some(bytes)) = tokio::time::timeout(QUIET, wire.recv()).await {
-            if let Seen::Output(_, length) = seen(&bytes) {
-                forwarded += length as u64;
-            }
-        }
-        forwarded
-    };
-    let ((), forwarded) = tokio::join!(flood, count);
+    let forwarded = forwarded_before_stall(&mut fixture, head).await;
     stop(&mut fixture).await;
 
     assert_eq!(
@@ -548,5 +688,97 @@ async fn a_failed_link_during_a_key_repaint_delivers_the_output_its_ack_passed()
         received_raw(&wire),
         WINDOW_END,
         "every charged byte reaches the client: {wire:?}"
+    );
+}
+
+/// The relay can also end on an error of its own while a key's repaint is outstanding, here a
+/// shim state reply that no route proof asked for. The output the key's `InputAck` passed was
+/// charged and is good: it must still reach the client, ahead of the saved exit the relay then
+/// reports for the session, as on every other way a pending repaint ends (#477, J813).
+#[tokio::test]
+async fn a_relay_error_during_a_key_repaint_delivers_the_output_its_ack_passed() {
+    let mut fixture = start().await;
+    spend_the_window_behind_a_held_socket(&mut fixture).await;
+    type_a_key(&mut fixture).await;
+    infraternal_shim::ended::record(&fixture.path, 0, WINDOW_END).unwrap();
+    sessions::send(&mut fixture.peer, &Shim::InputState(1, 1))
+        .await
+        .unwrap();
+    // sleep: nothing observable marks the relay failing behind the held socket.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fixture.socket.open();
+    let wire = drain(&mut fixture).await;
+    stop(&mut fixture).await;
+
+    assert_eq!(
+        received_raw(&wire),
+        WINDOW_END,
+        "every charged byte reaches the client: {wire:?}"
+    );
+    let exit = wire.iter().position(|frame| *frame == Seen::Event);
+    let last_output = wire
+        .iter()
+        .rposition(|frame| matches!(frame, Seen::Output(..)));
+    assert!(
+        exit > last_output,
+        "the saved exit follows the session's last output: {wire:?}"
+    );
+}
+
+/// A cursor rewind resets the relay's ledger to the server's view, and the server's reissued
+/// credit already counts every byte that never reached it. Raw output the old attachment queued
+/// and the writer drops after the rewind must therefore not come back as a refund too, or the
+/// relay could overrun the client's window by up to a whole FIFO of frames (#477, J799's
+/// surviving mutant, killed by J813).
+///
+/// The key repaint here commits only once the rewind has reset the ledger: the writer is still
+/// blocked on its first frame when the cursor command arrives, so it drops the eight queued
+/// frames afterwards.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn a_cursor_rewind_takes_no_refund_for_output_queued_before_it() {
+    let mut fixture = start_primed().await;
+    spend_the_window_behind_a_held_socket(&mut fixture).await;
+    type_a_key(&mut fixture).await;
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Snapshot(WINDOW_END, SCREEN.to_vec()),
+    )
+    .await
+    .unwrap();
+    // sleep: nothing observable marks the relay queueing the repaint on the priority lane.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The client holds the first frame and the repaint, so the server rewinds to the repaint's
+    // cursor and reissues the client's whole window. The relay's new `Attached` marker waits
+    // behind the full FIFO until the socket opens.
+    let socket = fixture.socket.clone();
+    let rewound = async {
+        rewind(&mut fixture, WINDOW_END).await;
+        return_credit(&mut fixture, u64::from(BULK_CREDIT + REPAINT_CREDIT));
+    };
+    let open = async {
+        // sleep: let the relay reset its ledger and block on the full FIFO first.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        socket.open();
+    };
+    tokio::join!(rewound, open);
+    let wire = drain(&mut fixture).await;
+    assert_eq!(
+        wire,
+        vec![
+            Seen::Output(0, FIRST_FRAME),
+            Seen::Ack(1),
+            Seen::Snapshot(WINDOW_END, SCREEN.len()),
+            Seen::Event,
+        ],
+        "the repaint replaces the queued flood, then the rewound replay completes"
+    );
+
+    let forwarded = forwarded_before_stall(&mut fixture, WINDOW_END).await;
+    stop(&mut fixture).await;
+    assert_eq!(
+        forwarded,
+        u64::from(BULK_CREDIT),
+        "the reissued window alone funds output after a rewind"
     );
 }
