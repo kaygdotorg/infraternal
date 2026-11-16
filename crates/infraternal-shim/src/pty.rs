@@ -380,6 +380,28 @@ pub(crate) fn record_launcher_thp() -> io::Result<nix::libc::c_int> {
     )
 }
 
+/// Turn transparent huge pages (THP) off for this whole process, after
+/// recording the policy it was started with (#522). Returns the recorded
+/// launcher policy.
+///
+/// Static builds use mimalloc as the global allocator. On a THP=`always` host
+/// the kernel backs its arenas with 2 MiB pages, which multiplies an idle
+/// shim's memory by about five for no speed gain, so `main` calls this first,
+/// before the runtime allocates much or starts threads.
+///
+/// Invariant: the record is taken *before* the opt-out, so
+/// [`prepare_child`], [`disable_shim_thp`] and [`with_launcher_thp`] still hand
+/// people's shells and a restarted image the launcher's policy, not ours.
+/// # Errors
+/// Returns the kernel's refusal; kernels before 3.15 have no such flag, and
+/// then nothing is changed.
+#[cfg(target_os = "linux")]
+pub(crate) fn disable_process_thp() -> io::Result<nix::libc::c_int> {
+    let launcher = record_launcher_thp()?;
+    set_thp_disabled(1)?;
+    Ok(launcher)
+}
+
 /// The launcher's policy recorded by [`record_launcher_thp`], if it ran.
 #[cfg(target_os = "linux")]
 fn launcher_thp() -> Option<nix::libc::c_int> {
@@ -1715,6 +1737,70 @@ mod transparent_huge_page_tests {
             "a refused exec keeps the opt-out"
         );
         set_thp_disabled(0).unwrap();
+    }
+
+    /// Set in the environment of [`process_opt_out_fixture`]'s fresh process:
+    /// the launcher policy (`0` or `1`) it was started with.
+    const OPT_OUT_FIXTURE: &str = "INFRATERNAL_THP_OPT_OUT_FIXTURE";
+
+    /// Body of [`static_builds_opt_out_but_children_keep_the_launchers_policy`],
+    /// run in a fresh copy of the test binary so its startup record is the
+    /// first one, as in a real `main`. Without the fixture variable it does
+    /// nothing.
+    #[test]
+    fn process_opt_out_fixture() {
+        let Ok(launcher) = std::env::var(OPT_OUT_FIXTURE) else {
+            return;
+        };
+        let launcher: nix::libc::c_int = launcher.parse().unwrap();
+        assert_eq!(read_thp_disabled().unwrap(), launcher);
+        assert_eq!(disable_process_thp().unwrap(), launcher);
+        assert_eq!(read_thp_disabled().unwrap() & 1, 1, "the process opts out");
+        assert_eq!(
+            launcher_thp(),
+            Some(launcher),
+            "recorded before the opt-out"
+        );
+        let enabled = if launcher == 0 { "1" } else { "0" };
+        assert_eq!(thp_enabled(Command::new("/bin/sh")), "0");
+        let mut prepared = Command::new("/bin/sh");
+        prepare_child(&mut prepared);
+        assert_eq!(thp_enabled(prepared), enabled, "started programs");
+        assert_eq!(disable_shim_thp().unwrap(), Some(launcher), "PTY shells");
+        assert_eq!(with_launcher_thp(read_thp_disabled).unwrap(), launcher);
+    }
+
+    /// Static builds turn THP off first thing in `main` with
+    /// [`disable_process_thp`] (#522). Under a launcher that allows THP and
+    /// under one that turned it off, the process ends up with THP off, while
+    /// the programs it starts, the PTY shell's policy and a restarted image
+    /// all get the launcher's policy, because the record comes first.
+    #[test]
+    fn static_builds_opt_out_but_children_keep_the_launchers_policy() {
+        for launcher in [0, 1] {
+            let mut fixture = Command::new(std::env::current_exe().unwrap());
+            fixture
+                .args([
+                    "--exact",
+                    "pty::transparent_huge_page_tests::process_opt_out_fixture",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(OPT_OUT_FIXTURE, launcher.to_string());
+            // SAFETY: one prctl syscall with integer arguments; no allocation
+            // or lock after fork.
+            unsafe {
+                fixture.pre_exec(move || set_thp_disabled(launcher));
+            }
+            let output = fixture.output().unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "launcher {launcher}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
 

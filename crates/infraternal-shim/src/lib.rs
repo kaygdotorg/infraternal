@@ -94,6 +94,21 @@ pub fn record_launcher_thp() -> std::io::Result<i32> {
     pty::record_launcher_thp()
 }
 
+/// Turn transparent huge pages (THP) off for this whole process, after
+/// recording the launcher's policy with [`record_launcher_thp`] (#522).
+///
+/// Static builds call this first thing in `main`: with mimalloc as the global
+/// allocator, a THP=`always` host would otherwise back its arenas with 2 MiB
+/// pages. The programs this process starts still get the launcher's policy
+/// through [`prepare_child`], and an in-place restart through
+/// [`with_launcher_thp`]. Returns the recorded launcher policy.
+/// # Errors
+/// Returns the kernel's refusal; kernels before 3.15 have no such flag.
+#[cfg(target_os = "linux")]
+pub fn disable_process_thp() -> std::io::Result<i32> {
+    pty::disable_process_thp()
+}
+
 /// Run `exec`, a call that replaces this process's image (an in-place
 /// restart), with the launcher's THP policy recorded by
 /// [`record_launcher_thp`] in place, so the new image records that policy and
