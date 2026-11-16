@@ -359,8 +359,17 @@ async fn announced_within(
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "root: changes loopback addresses and routes on this Mac"]
 async fn the_kernel_reports_real_changes_only() {
+    // The utun's packet filter; this test sends no tunnel traffic, so its policy doesn't matter.
+    let filter = Arc::new(
+        crate::packet_filter::PacketFilter::new(
+            &crate::macos_node::tests::config(),
+            infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+        )
+        .expect("compile filter"),
+    );
     let utun = crate::macos_node::MacUtun::from_open(
         crate::macos_node::OpenUtun::open().expect("open a utun (root)"),
+        filter,
     )
     .expect("register the utun");
     let name = utun.name().to_owned();
@@ -454,10 +463,9 @@ fn harness_key(name: &str) -> [u8; 32] {
 #[test]
 #[ignore = "proof harness: root, a live peer and the J710_* environment"]
 fn mac_underlay_announce_device() {
-    use crate::macos_node::{BoundUdpFactory, MacUtun, OpenUtun};
+    use crate::macos_node::{MacUtun, OpenUtun};
     use gotatun::{
         device::{DeviceBuilder, Peer as WireGuardPeer},
-        udp::{UdpTransportFactory, UdpTransportFactoryParams, socket::UdpSocketFactory},
         x25519::{PublicKey, StaticSecret},
     };
     let var = |name: &str| std::env::var(name).expect("harness variable");
@@ -465,6 +473,23 @@ fn mac_underlay_announce_device() {
     let endpoint: std::net::SocketAddr = var("J710_ENDPOINT").parse().expect("endpoint");
     let peer_addr: IpAddr = var("J710_PEER_ADDR").parse().expect("peer address");
     let watch = std::env::var("J710_WATCH").as_deref() != Ok("off");
+    let peer_key = harness_key("J710_PEER_PUBLIC_HEX");
+    // The worker's packet filter, from a one-peer snapshot that grants the harness peer every
+    // port both ways (an empty filter would deny all tunnel traffic).
+    let mut snapshot = crate::macos_node::tests::config();
+    snapshot.addresses.ipv4 = var("J710_ADDR").parse().expect("tunnel IPv4");
+    for policy in snapshot.peers.values_mut() {
+        policy.peer.key = crate::policy::model::PublicKey(peer_key);
+        policy.peer.addresses.ipv4 = var("J710_PEER_ADDR").parse().expect("peer IPv4");
+        policy.peer.endpoint = Some(endpoint);
+    }
+    let filter = Arc::new(
+        crate::packet_filter::PacketFilter::new(
+            &snapshot,
+            infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+        )
+        .expect("compile filter"),
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -472,22 +497,31 @@ fn mac_underlay_announce_device() {
     runtime.block_on(async {
         let mut stop = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("SIGTERM handler");
-        let utun = MacUtun::from_open(OpenUtun::open().expect("utun")).expect("register utun");
-        let mut factory = UdpSocketFactory::default();
-        let params = UdpTransportFactoryParams { addr: None, port };
-        let (send, receive) = factory.bind(&params).await.expect("bind");
-        let factory = BoundUdpFactory {
-            send,
-            receive,
-            port,
-        };
-        let mut peer = WireGuardPeer::new(PublicKey::from(harness_key("J710_PEER_PUBLIC_HEX")))
+        let utun =
+            MacUtun::from_open(OpenUtun::open().expect("utun"), filter).expect("register utun");
+        // The worker's socket, with its handshake guard admitting the one harness peer.
+        let private_key = StaticSecret::from(harness_key("J710_PRIVATE_HEX"));
+        let (factory, port) = crate::macos_node::bind_udp(
+            crate::listen_port::Request {
+                port,
+                allow_fallback: false,
+            },
+            private_key.clone(),
+        )
+        .await
+        .expect("bind");
+        {
+            let mut admission = factory.admission.write().await;
+            admission.set_peers([crate::policy::model::PublicKey(peer_key)]);
+            admission.set_configured_endpoints([endpoint]);
+        }
+        let mut peer = WireGuardPeer::new(PublicKey::from(peer_key))
             .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
         peer.endpoint = Some(endpoint);
         peer.keepalive = Some(25);
         let device = DeviceBuilder::new()
             .with_udp(factory)
-            .with_private_key(StaticSecret::from(harness_key("J710_PRIVATE_HEX")))
+            .with_private_key(private_key)
             .with_listen_port(port)
             .with_ip_pair(utun.sender(), utun.receiver())
             .with_peers(vec![peer])

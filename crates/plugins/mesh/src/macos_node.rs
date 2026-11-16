@@ -3248,8 +3248,9 @@ mod tests {
             .collect()
     }
 
-    /// A one-peer configuration for the macOS node tests.
-    fn config() -> Config {
+    /// A one-peer configuration for the macOS node tests (the underlay proofs build their
+    /// packet filter from it too).
+    pub(super) fn config() -> Config {
         Config {
             authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
             local_key: Some(PublicKey([1; 32])),
