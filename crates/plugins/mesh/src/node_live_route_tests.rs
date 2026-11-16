@@ -1018,8 +1018,9 @@ fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
             "dev",
             "infraternal0",
         ]);
-        // sleep: lets the listener read the deletion and block on the lock this test holds;
-        // the overflow assertion below fails if it did not, so the delay cannot hide a bug.
+        // The overflow assertion below fails if the listener did not block, so the delay
+        // cannot hide a bug.
+        // sleep: lets the listener read the deletion and block on the lock this test holds.
         std::thread::sleep(std::time::Duration::from_millis(200));
         let burst: Vec<_> = peers[1..]
             .iter()
