@@ -484,7 +484,12 @@ fn session_whose_typist_left() -> Session {
 /// `Resize` after it, so the raw replay at 42x24 has already gone out.
 fn reopen_after_the_typist_left(cols: u16, rows: u16) -> (Session, Terminal, Option<Repaint>) {
     let mut session = session_whose_typist_left();
-    session.cursors.select(1, (cols, rows, 0, 0)).unwrap();
+    // A newly selected writer starts from the session's applied size; its
+    // first Resize stages the tab's actual geometry before applying it.
+    session
+        .cursors
+        .select(1, (session.config.cols, session.config.rows, 0, 0))
+        .unwrap();
     let mut tab = peer();
     tab.writer = Some(1);
     let mut viewer = Terminal::new(cols, rows).unwrap();
@@ -506,6 +511,9 @@ fn assert_took_the_size(cols: u16, rows: u16) {
         "the reopened tab takes the size"
     );
     assert_eq!(session.cursors.active_writer, Some(1));
+    let applied = session.cursors.get(Some(1)).unwrap();
+    assert_eq!(applied.requested_size, (cols, rows, 0, 0));
+    assert_eq!(applied.accepted_size, (cols, rows, 0, 0));
     assert_eq!(repaint, Some(Repaint::Approximate));
     assert_same_visible_screen(&viewer, &session.terminal);
 }
@@ -557,6 +565,46 @@ fn reopening_at_the_same_size_after_the_typist_left_keeps_the_raw_replay() {
     assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
+/// A departed typist may reconnect after a new writer has taken the size, but
+/// its stale resize stays staged while that newer writer remains attached.
+#[test]
+fn a_departed_typist_reconnecting_does_not_reclaim_an_attached_writers_size() {
+    let mut session = session_whose_typist_left();
+    session
+        .cursors
+        .select(1, (session.config.cols, session.config.rows, 0, 0))
+        .unwrap();
+    let mut current = peer();
+    current.writer = Some(1);
+    let mut current_view = Terminal::new(50, 30).unwrap();
+    session.handle(&mut current, Frame::ReadFrom(0));
+    session.deliver(&mut current, &mut current_view);
+    session.resize(&mut current, 50, 30);
+    assert_eq!(
+        session.deliver(&mut current, &mut current_view),
+        Some(Repaint::Approximate)
+    );
+    assert_eq!((session.config.cols, session.config.rows), (50, 30));
+    assert_eq!(session.cursors.active_writer, Some(1));
+
+    let mut returned = peer();
+    let mut returned_view = Terminal::new(42, 24).unwrap();
+    session.handle(&mut returned, Frame::ReadFrom(0));
+    session.deliver(&mut returned, &mut returned_view);
+    session.resize(&mut returned, 42, 24);
+
+    assert_eq!((session.config.cols, session.config.rows), (50, 30));
+    assert_eq!(session.cursors.active_writer, Some(1));
+    assert_eq!(
+        session.deliver(&mut returned, &mut returned_view),
+        None,
+        "the smaller reconnect stays on raw replay while its resize is staged"
+    );
+    let applied = session.cursors.get(Some(1)).unwrap();
+    assert_eq!(applied.requested_size, (50, 30, 0, 0));
+    assert_eq!(applied.accepted_size, (50, 30, 0, 0));
+}
+
 /// Only an attached link keeps the typist's size. A link of the same writer
 /// that has connected but not attached yet is not a device on the session.
 #[test]
@@ -576,8 +624,9 @@ fn a_link_that_has_not_attached_does_not_keep_the_size() {
 fn two_tabs_reopening_after_the_typist_left_both_show_the_shim_screen_when_the_smaller_reports_first()
  {
     let mut session = session_whose_typist_left();
-    session.cursors.select(1, (38, 24, 0, 0)).unwrap();
-    session.cursors.select(2, (50, 24, 0, 0)).unwrap();
+    let applied_before = (session.config.cols, session.config.rows, 0, 0);
+    session.cursors.select(1, applied_before).unwrap();
+    session.cursors.select(2, applied_before).unwrap();
     let (mut small, mut large) = (peer(), peer());
     small.writer = Some(1);
     large.writer = Some(2);
@@ -591,6 +640,13 @@ fn two_tabs_reopening_after_the_typist_left_both_show_the_shim_screen_when_the_s
     session.resize(&mut large, 50, 24);
     assert_eq!((session.config.cols, session.config.rows), (38, 24));
     assert_eq!(session.cursors.active_writer, Some(1));
+    assert_eq!(
+        session.cursors.get(Some(1)).unwrap().accepted_size,
+        (38, 24, 0, 0)
+    );
+    let staged_large = session.cursors.get(Some(2)).unwrap();
+    assert_eq!(staged_large.requested_size, (50, 24, 0, 0));
+    assert_eq!(staged_large.accepted_size, applied_before);
     assert_eq!(
         session.deliver(&mut small, &mut small_view),
         Some(Repaint::Approximate)
@@ -609,8 +665,9 @@ fn two_tabs_reopening_after_the_typist_left_both_show_the_shim_screen_when_the_s
 #[test]
 fn two_tabs_reopening_after_the_typist_left_the_larger_reporting_first_takes_the_size() {
     let mut session = session_whose_typist_left();
-    session.cursors.select(1, (38, 24, 0, 0)).unwrap();
-    session.cursors.select(2, (50, 24, 0, 0)).unwrap();
+    let applied_before = (session.config.cols, session.config.rows, 0, 0);
+    session.cursors.select(1, applied_before).unwrap();
+    session.cursors.select(2, applied_before).unwrap();
     let (mut small, mut large) = (peer(), peer());
     small.writer = Some(1);
     large.writer = Some(2);
@@ -624,6 +681,13 @@ fn two_tabs_reopening_after_the_typist_left_the_larger_reporting_first_takes_the
     session.resize(&mut small, 38, 24);
     assert_eq!((session.config.cols, session.config.rows), (50, 24));
     assert_eq!(session.cursors.active_writer, Some(2));
+    assert_eq!(
+        session.cursors.get(Some(2)).unwrap().accepted_size,
+        (50, 24, 0, 0)
+    );
+    let staged_small = session.cursors.get(Some(1)).unwrap();
+    assert_eq!(staged_small.requested_size, (38, 24, 0, 0));
+    assert_eq!(staged_small.accepted_size, applied_before);
     assert_eq!(
         session.deliver(&mut large, &mut large_view),
         Some(Repaint::Approximate)
