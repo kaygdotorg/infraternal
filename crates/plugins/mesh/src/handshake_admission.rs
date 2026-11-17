@@ -2453,9 +2453,7 @@ mod receive_stamp_tests {
     use super::{PeerAdmission, PeerAdmissionUdpReceiver, flood_fairness::initiation_to};
     use gotatun::{
         packet::PacketBufPool,
-        udp::{
-            UdpRecv, UdpTransportFactory, UdpTransportFactoryParams, socket::UdpSocketFactory,
-        },
+        udp::{UdpRecv, UdpTransportFactory, UdpTransportFactoryParams, socket::UdpSocketFactory},
         x25519::{PublicKey as X25519PublicKey, StaticSecret},
     };
     use std::{
@@ -2516,8 +2514,7 @@ mod receive_stamp_tests {
         std::thread::sleep(GAP);
         sender.send_to(&last, target).expect("send B");
 
-        let mut recv_buf =
-            <PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf::default();
+        let mut recv_buf = <PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf::default();
         let mut pool = PacketBufPool::new(8);
         let mut packets = Vec::new();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -2532,7 +2529,11 @@ mod receive_stamp_tests {
         .expect("A and B arrive");
 
         let sizes: Vec<usize> = packets.iter().map(|(packet, _)| packet.len()).collect();
-        assert_eq!(sizes, [64, 96], "the guard must drop exactly the initiation");
+        assert_eq!(
+            sizes,
+            [64, 96],
+            "the guard must drop exactly the initiation"
+        );
         let stamp_a = PeerAdmissionUdpReceiver::rx_timestamp_ns(&recv_buf, 0);
         let stamp_b = PeerAdmissionUdpReceiver::rx_timestamp_ns(&recv_buf, 1);
         assert!(
