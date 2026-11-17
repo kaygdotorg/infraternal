@@ -18,6 +18,10 @@
 //! the Snapshot. Each granted byte can fund at most one sent frame: a raw byte
 //! backs at most one replacement, and borrowed bytes become debt until credit
 //! returns. Returned credit pays repaint debt before it funds more output.
+//! Raw bytes that the leg-B writer drops because a key Snapshot replaces them
+//! never reach the client, so the client can never return their credit. The
+//! writer refunds them instead, and the daemon grants that refund exactly like
+//! returned credit (#477, J799; see `daemon_writer::Refunds`).
 //!
 //! Key repaints run only once the reserve is ACTIVE, that is once the client
 //! has proved it granted the bulk window plus the reserve (today the browser).
