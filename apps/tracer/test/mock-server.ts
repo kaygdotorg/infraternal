@@ -39,6 +39,13 @@ const MAX_HTTP_BODY = 32 * 1024;
 const MAX_MOCK_OUTPUT = 2 * 1024 * 1024;
 const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
+/**
+ * The most flow-control credit a page may hold on one attached terminal: the 1 MiB bulk window plus the 64 KiB repaint
+ * reserve the page grants at attach (`INITIAL_CREDIT` in src/terminal.ts, D381/#477). A grant that would push the total
+ * past this is a protocol error. When the page's window changes, change this with it: a stale cap makes the double close
+ * every connection at its first Credit (1002), and every window then reconnects in a loop (#529).
+ */
+const MAX_PAGE_CREDIT = 1024 * 1024 + 64 * 1024;
 const MAX_TRACE_EVENTS = 120_000;
 const MAX_ATTACH_HISTORY = 64;
 const DIST_ROOT = resolve(process.env.TRACER_DIST ?? resolve(import.meta.dirname, "../dist"));
@@ -1111,6 +1118,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   }
 }
 
+/**
+ * Answers one frame on a terminal stream: attaching to a session, the page's flow-control credit, its input and resizes.
+ * A frame the real server would refuse closes the socket with 1002 and a reason naming the rule, so a page that breaks the
+ * wire contract fails loudly instead of hanging.
+ */
 function handleTerminalFrame(connection: Connection, streamId: number, frame: WireFrame): void {
   switch (frame.type) {
     case "AttachTerm":
@@ -1157,7 +1169,7 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       }
       return;
     case "Credit":
-      if (!connection.attached || connection.credit > 1024 * 1024 - frame.bytes) {
+      if (!connection.attached || connection.credit > MAX_PAGE_CREDIT - frame.bytes) {
         connection.socket.close(1002, "invalid test-double credit");
         return;
       }

@@ -61,8 +61,10 @@ url = { workspace = true, optional = true }
 # (GOTATUN_BENCH_RX_INLINE_MAX=0 turns that off; Linux keeps it off). Connected
 # per-endpoint sends on macOS stay opt-in (GOTATUN_BENCH_MAC_CONNECTED=1): while
 # they bind, another local user can take over the WireGuard port, so they wait
-# for a design without that window.
-gotatun = { version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "398fa3c8e8715483a769074671b96e2b3e249196", default-features = false, features = ["device", "ring"], optional = true }
+# for a design without that window. With them off, the WireGuard socket is
+# refused (EADDRINUSE) when another socket already holds its port, the way it is
+# when the port is taken outright (#260, J827).
+gotatun = { version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "d79725c4ae814a827f72c81199c894ad8152a45b", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
