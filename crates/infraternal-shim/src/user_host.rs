@@ -1254,6 +1254,48 @@ mod tests {
         }
     }
 
+    /// An observed EOF releases the last typist before the next peer's size
+    /// report in the same readiness batch (D74, #521). Real sockets make the
+    /// departure and report ready together without a sleep or a timing race.
+    #[test]
+    fn departed_typist_eof_precedes_resize_in_the_same_poll_batch() {
+        let state = crate::fixture_state::fixture_state();
+        let mut config = Config::new([48; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let old = snapshot_peer(&mut session).unwrap();
+        let mut next = snapshot_peer(&mut session).unwrap();
+        session.peers[1].writer = Some(1);
+        session.cursors.select(1, (80, 24, 0, 0)).unwrap();
+        session.cursors.active_writer = Some(0);
+        session.cursors.viewer_sized = true;
+        drop(old);
+        next.write_all(
+            &Frame::Resize {
+                cols: 60,
+                rows: 20,
+                px_w: 0,
+                px_h: 0,
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+        session
+            .step(
+                PollFlags::empty(),
+                PollFlags::empty(),
+                &[PollFlags::POLLHUP, PollFlags::POLLIN],
+                false,
+            )
+            .unwrap();
+        assert_eq!((session.config.cols, session.config.rows), (60, 20));
+        assert_eq!(session.cursors.active_writer, Some(1));
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
     /// PPU-R3-2 (#205): the host pool follows the machine within its bounds.
     #[test]
     fn host_pool_scales_with_machine_memory_within_bounds() {
