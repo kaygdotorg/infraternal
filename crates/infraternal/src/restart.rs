@@ -682,6 +682,9 @@ impl Replacement {
     }
 }
 
+/// Replace this process with the checked `binary`, passing the same arguments
+/// and environment and `input` (or `/dev/null`) as stdin. Only returns when the
+/// kernel refused the exec, with the reason, so the caller can recover.
 fn execute_image(
     binary: &crate::restart_binary::Opened,
     input: Option<&std::os::unix::net::UnixStream>,
@@ -723,6 +726,13 @@ fn execute_image(
         // Execute exactly the checked inode; no pathname lookup occurs after
         // exporting the CA. O_CLOEXEC closes this fd in the successor.
         queue_reload()?;
+        // The new image records its launcher's transparent-huge-page policy
+        // at startup and gives it to the shells it starts. Hand it the policy
+        // this server was started with, not the opt-out the mesh engine took
+        // for this process; a refused exec gets the opt-out back (#522).
+        #[cfg(target_os = "linux")]
+        infraternal_shim::with_launcher_thp(|| binary.image.execute(&argv, &environment))?;
+        #[cfg(not(target_os = "linux"))]
         binary.image.execute(&argv, &environment)?;
         Ok(())
     };
