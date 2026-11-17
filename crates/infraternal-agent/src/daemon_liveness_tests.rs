@@ -169,7 +169,7 @@ async fn state_ack(input_first: bool) {
     // A relay first announces its attachment to the writer (#477).
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,
@@ -264,7 +264,7 @@ async fn detached_ping_preserves_written_ack_without_output_credit() {
     // A relay first announces its attachment to the writer (#477).
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,
@@ -415,7 +415,7 @@ async fn terminal_probe_waits_for_the_shim_fence_and_keeps_stream_identity() {
     // A relay first announces its attachment to the writer (#477).
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,

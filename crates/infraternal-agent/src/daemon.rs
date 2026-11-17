@@ -850,6 +850,44 @@ async fn emit_priority(
         .map_err(|_| io::ErrorKind::BrokenPipe.into())
 }
 
+/// Tell the writer this relay gave up its pending key repaint, so the raw output the key's
+/// acknowledgment held is written in order (#477, J799).
+///
+/// Call it wherever a pending repaint ends without its Snapshot: the starvation timer, a shim
+/// that cannot capture, and every exit or close. The relay's cursor already counts those bytes
+/// as sent, so without it the client misses them and the next replay starts after a gap. It
+/// rides the priority lane, so the writer applies it before anything this relay queues later.
+/// With no key repaint pending there is nothing held and nothing is sent.
+async fn release_key_cover(
+    priority: &mpsc::Sender<PriorityMessage>,
+    stream: u32,
+    attachment: u64,
+    key_repaint_target: Option<u64>,
+) -> io::Result<()> {
+    if key_repaint_target.is_none() {
+        return Ok(());
+    }
+    emit_priority(priority, PriorityMessage::Release { stream, attachment }).await
+}
+
+/// The relay's next command: the client's next one, or raw output the writer dropped under a
+/// key repaint, presented as the Credit the client can no longer send for it (#477, J799).
+///
+/// A refund is exactly a return of charged bytes, so it takes the same path as the client's
+/// own Credit: it pays repaint debt first, then refills the reserve and the bulk window. Only
+/// a relay whose reserve is ACTIVE sends key repaints, so a refund never lands in reserve
+/// setup, where a grant's meaning is still being worked out. Cancel-safe, like both sources.
+async fn next_command(
+    commands: &mut session_commands::Receiver,
+    refunds: &mut crate::daemon_writer::RefundReceiver,
+) -> Option<Command> {
+    tokio::select! {
+        biased;
+        command = commands.next() => command,
+        bytes = refunds.next() => Some(Command::Credit(bytes)),
+    }
+}
+
 /// Publishes the authoritative live-shim set without ever parking terminal dispatch on a slow writer.
 /// True establishes the ordered open fence; false leaves the census pending for retry.
 fn publish_session_snapshot(
@@ -1921,6 +1959,8 @@ async fn terminal(
                     };
                     emit(&forwarded, Message::Shim(stream, frame)).await?;
                 }
+                // Nothing is held without a real writer.
+                PriorityMessage::Release { .. } => {}
             }
         }
         Ok::<(), io::Error>(())
@@ -1931,6 +1971,16 @@ async fn terminal(
     result
 }
 
+/// Relay one terminal stream (see `terminal_run`), and when the relay fails, report the
+/// session's saved exit if it has one.
+///
+/// Before that report, a failed relay releases any raw output a key's acknowledgment still
+/// holds in the writer (#477, J813). Every way the relay's loop ends a pending key repaint on
+/// purpose sends its own release, but an error can end the loop anywhere: a shim reply it did
+/// not ask for, or a write to a shim that has just gone. Those held bytes were charged and the
+/// relay's cursor counts them, so without the release they would never reach the client, and
+/// the exit reported next would claim output the client never got. A release that finds
+/// nothing held writes nothing, so it is sent unconditionally.
 async fn terminal_mode(
     path: PathBuf,
     id: [u8; 16],
@@ -1942,7 +1992,9 @@ async fn terminal_mode(
     priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
 ) -> io::Result<()> {
-    match terminal_run(
+    let mut attachment = 0;
+    let release = priority.clone();
+    let result = terminal_run(
         path.clone(),
         id,
         stream,
@@ -1952,9 +2004,16 @@ async fn terminal_mode(
         tx.clone(),
         priority,
         primed,
+        &mut attachment,
     )
-    .await
-    {
+    .await;
+    if result.is_err() {
+        // The writer may be gone too; then there is nobody left to deliver to.
+        let _ = emit_priority(&release, PriorityMessage::Release { stream, attachment }).await;
+    }
+    // A bound terminal's writer stops taking priority messages once every sender is gone.
+    drop(release);
+    match result {
         Err(error) => {
             // EOF may occur in Hello, ownership confirmation or input-state
             // recovery before the steady-state select can observe owner EOF.
@@ -1968,6 +2027,9 @@ async fn terminal_mode(
     }
 }
 
+/// The relay loop of one terminal stream: shim output to the writer under the client's credit,
+/// client commands to the shim. `announced` tracks the attachment it last announced to the
+/// writer (see `terminal_mode`).
 async fn terminal_run(
     path: PathBuf,
     id: [u8; 16],
@@ -1978,14 +2040,20 @@ async fn terminal_run(
     tx: mpsc::Sender<Message>,
     priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
+    announced: &mut u64,
 ) -> io::Result<()> {
     // Announce this attachment before any of its frames. The writer then stops
     // trimming this stream's output by repaints of an earlier attachment that
     // reused the stream id (a resumed browser), and ignores that attachment's
-    // late priority frames (#477).
+    // late priority frames (#477). `announced` always holds the latest one, so
+    // `terminal_mode` can release what it holds if this relay fails.
     #[cfg_attr(not(feature = "remote"), allow(unused_mut))]
     let mut attachment = crate::daemon_writer::next_attachment();
-    emit(&tx, Message::Attached(stream, attachment)).await?;
+    *announced = attachment;
+    // Raw bytes of this attachment that the writer drops under a key repaint
+    // come back here as credit (#477, J799).
+    let (refund_cell, mut refunds) = crate::daemon_writer::refunds();
+    emit(&tx, Message::Attached(stream, attachment, refund_cell)).await?;
     // Install ownership before output requests can exhaust credit. Dropping this
     // guard on cancellation/ordered exit releases only this window, even when
     // several windows or daemon connections share a shim.
@@ -2299,13 +2367,14 @@ async fn terminal_run(
                     finished_peer = true;
                     continue;
                 }
+                release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
                 flush_staged(&tx, &mut pending_bulk).await?;
                 if recorded_end(&path, id, stream, &tx).await? {
                     return Ok(());
                 }
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
-            command = commands.next() => {
+            command = next_command(&mut commands, &mut refunds) => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
                     Command::Credit(bytes) => {
@@ -2336,10 +2405,16 @@ async fn terminal_run(
                         // The rewind starts a new replay below any cursor an
                         // earlier key repaint covered: scope it afresh (#477).
                         attachment = crate::daemon_writer::next_attachment();
+                        *announced = attachment;
+                        // The server's reissued credit already excludes
+                        // anything the writer drops from before the rewind,
+                        // so only the new ledger takes refunds.
+                        let (refund_cell, next_refunds) = crate::daemon_writer::refunds();
+                        refunds = next_refunds;
                         // Output the old attachment staged belongs before
                         // the marker, where the writer may still trim it.
                         flush_staged(&tx, &mut pending_bulk).await?;
-                        emit(&tx, Message::Attached(stream, attachment)).await?;
+                        emit(&tx, Message::Attached(stream, attachment, refund_cell)).await?;
                         pending = None;
                         deadline = None;
                         key_repaint_target = None;
@@ -2514,6 +2589,9 @@ async fn terminal_run(
                     None => false,
                 };
                 if !finished_peer {
+                    // The pending key repaint is abandoned: the client must
+                    // still get the output its Ack passed.
+                    release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
                     output.expire(Instant::now()); session = None; probe = None; pending = None;
                     key_repaint_target = None;
                     key_repaint_requested = None;
@@ -2526,7 +2604,18 @@ async fn terminal_run(
                 if let Some(session) = &mut session { session.read().await }
                 else { std::future::pending().await }
             }, if can_read_shim_frame(pending.as_ref(), pending_bulk.as_ref()) => {
-                match frame? {
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        // The link failed, but bytes the shim sent before it are
+                        // good and already charged: deliver them ahead of the
+                        // saved exit `terminal_mode` reports next (#477, J799).
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
+                        flush_staged(&tx, &mut pending_bulk).await?;
+                        return Err(error);
+                    }
+                };
+                match frame {
                     Shim::Output(..) if key_repaint_target.is_some() => {}
                     Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)
                         if key_repaint_target.is_some() && key_repaint_requested.is_none() => {}
@@ -2583,6 +2672,7 @@ async fn terminal_run(
                         }
                     }
                     Shim::Exited(status, final_seq) => {
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
                         flush_staged(&tx, &mut pending_bulk).await?;
                         exited(&tx, stream, id, status, final_seq, false).await?;
                         return Ok(());
@@ -2594,12 +2684,15 @@ async fn terminal_run(
                         let json = terminal_events::Notice::SnapshotUnavailable {
                             session_id: uuid::Uuid::from_bytes(id), seq: output.cursor(),
                         }.json()?;
-                        // The notice's seq already counts the staged bytes.
+                        // The notice's seq already counts the staged bytes,
+                        // and the bytes the key's Ack passed.
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
                         flush_staged(&tx, &mut pending_bulk).await?;
                         emit(&tx, Message::Event(stream, json)).await?;
                         session = None; probe = None;
                     }
                     Shim::Error(..) => {
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
                         flush_staged(&tx, &mut pending_bulk).await?;
                         emit(&tx, Message::Close(stream, "shim refused terminal request")).await?;
                         return Ok(());
@@ -2646,6 +2739,16 @@ mod key_repaint_tests;
 #[cfg(test)]
 #[path = "daemon_replay_fence_tests.rs"]
 mod replay_fence_tests;
+
+/// Staged raw output survives the end of its shim link (#477).
+#[cfg(test)]
+#[path = "daemon_link_end_tests.rs"]
+mod link_end_tests;
+
+/// A relay and the real writer together: output a key repaint passes keeps its credit and order.
+#[cfg(test)]
+#[path = "daemon_writer_credit_tests.rs"]
+mod writer_credit_tests;
 
 /// A server Close leaves no per-stream state in the shared writer (#477).
 #[cfg(test)]
