@@ -781,6 +781,22 @@ impl ConfirmedEndpointFeed {
     }
 }
 
+/// The batch buffer of [`PeerAdmissionUdpReceiver`]: the socket's own buffer, plus the kernel
+/// receive stamp of every packet the guard kept, in the same order as the packets.
+///
+/// `GotaTun`'s receive-queue bound (D397) asks for a packet's stamp by its index in the batch
+/// (`UdpRecv::rx_timestamp_ns`). The socket records stamps by the index each datagram had when
+/// it arrived, and the guard removes refused initiations from the batch, which moves later
+/// packets down. So the guard copies the stamps out when the batch arrives and moves them
+/// together with their packets. A stamp of 0 means "unknown" and leaves the packet unjudged.
+#[derive(Default)]
+pub(crate) struct AdmissionRecvBuf {
+    /// The socket's batch buffer, used only by the socket.
+    socket_buf: <GotaUdpSocket as UdpRecv>::RecvManyBuf,
+    /// `rx_stamps[i]` is the kernel receive time (ns) of `packets[i]` after the guard's pass.
+    rx_stamps: Vec<u64>,
+}
+
 /// Keeps the socket's batched receive path while filtering unregistered handshakes before `GotaTun`.
 pub(crate) struct PeerAdmissionUdpReceiver {
     socket: GotaUdpSocket,
@@ -812,7 +828,7 @@ impl PeerAdmissionUdpReceiver {
 }
 
 impl UdpRecv for PeerAdmissionUdpReceiver {
-    type RecvManyBuf = <GotaUdpSocket as UdpRecv>::RecvManyBuf;
+    type RecvManyBuf = AdmissionRecvBuf;
 
     /// Receive one packet and suppress any valid-MAC1 initiation from an unknown peer key.
     async fn recv_from(&mut self, pool: &mut PacketBufPool) -> io::Result<(Packet, SocketAddr)> {
@@ -825,6 +841,10 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
     }
 
     /// Preserve `GotaTun`'s socket batch receive and remove only rejected handshake initiations.
+    ///
+    /// Each packet's receive stamp moves with it (see [`AdmissionRecvBuf`]), so the queue bound
+    /// judges the packet it timed. Packets already in `packets` keep the stamps an earlier call
+    /// gave them; if that call failed part-way, the missing ones read as 0 (unknown).
     async fn recv_many_from(
         &mut self,
         recv_buf: &mut Self::RecvManyBuf,
@@ -832,7 +852,17 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
         packets: &mut Vec<(Packet, SocketAddr)>,
     ) -> io::Result<()> {
         let first_new_packet = packets.len();
-        self.socket.recv_many_from(recv_buf, pool, packets).await?;
+        let stamps = &mut recv_buf.rx_stamps;
+        stamps.resize(first_new_packet, 0);
+        self.socket
+            .recv_many_from(&mut recv_buf.socket_buf, pool, packets)
+            .await?;
+        // The socket indexes its stamps by position in `packets`, which is still the arrival
+        // order here. With the bound off it has none and every copy is 0.
+        stamps.extend(
+            (first_new_packet..packets.len())
+                .map(|index| GotaUdpSocket::rx_timestamp_ns(&recv_buf.socket_buf, index)),
+        );
         let mut read = first_new_packet;
         let mut write = first_new_packet;
         while read < packets.len() {
@@ -840,19 +870,29 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
             if self.admits(packet, *source).await {
                 if write != read {
                     packets.swap(write, read);
+                    stamps.swap(write, read);
                 }
                 write += 1;
             }
             read += 1;
         }
         packets.truncate(write);
+        stamps.truncate(write);
         Ok(())
+    }
+
+    /// The kernel receive time of `packets[index]` from the last batch, after the guard's
+    /// pass, or 0 if unknown. `GotaTun`'s queue bound reads it; without this override the
+    /// trait's default 0 would turn the bound off for every node (#260, D397).
+    fn rx_timestamp_ns(recv_buf: &Self::RecvManyBuf, index: usize) -> u64 {
+        recv_buf.rx_stamps.get(index).copied().unwrap_or(0)
     }
 
     /// Pass `GotaTun`'s idle-time release through to the socket, so an idle node gives its
     /// batch receive pages back. The trait's default does nothing, which would keep them.
+    /// The stamp list is a few hundred bytes at most, so it stays allocated.
     fn release_recv_buf(&self, recv_buf: &mut Self::RecvManyBuf) {
-        self.socket.release_recv_buf(recv_buf);
+        self.socket.release_recv_buf(&mut recv_buf.socket_buf);
     }
 
     /// Keep the underlying socket's UDP GRO support available to `GotaTun`.

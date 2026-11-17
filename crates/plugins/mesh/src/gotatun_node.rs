@@ -1,4 +1,21 @@
 //! Linux userspace mesh engine using the `GotaTun` device API and an owned TUN.
+//!
+//! ## The engine bounds its own queue (D397)
+//!
+//! A TUN device hides the engine's queue from the kernel's TCP Small Queues, so without a bound
+//! a loaded flow parks its whole congestion window inside the engine and every other packet on
+//! the link waits behind it. The pinned `GotaTun` therefore runs a `CoDel` controller on its Linux
+//! receive path: it measures each packet's time from the kernel's UDP receive stamp to the TUN
+//! write and, once that stays above 1 ms for 10 ms, marks ECN-capable packets CE and drops only
+//! packets of queue-heavy flows that can't be marked. Light flows (probes, keystrokes, DNS, pure
+//! ACKs) are exempt. On backup01 this took cubic 8-flow loaded p99 from 22.4 ms to about 6 ms
+//! (#260, J711 and J747).
+//!
+//! It is on by default. The one thing it needs from this crate: the socket wrapper in front of
+//! `GotaTun` (`PeerAdmissionUdpReceiver`) must hand each packet's receive stamp on with the
+//! packet, or the bound sees no stamps and never acts. For diagnosis, `GOTATUN_AQM=off` in
+//! the infraternal agent's environment turns it off (read once when the engine starts);
+//! `GOTATUN_AQM=drop` drops instead of marking. See `docs/user/40-mesh/index.md`.
 
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
