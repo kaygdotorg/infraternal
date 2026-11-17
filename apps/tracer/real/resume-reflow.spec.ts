@@ -11,6 +11,7 @@
  */
 import { expect, test, type Page } from "playwright/test";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
+import { installFrameSampler } from "./frame-sampler";
 import { enrol } from "./layout-devices";
 import { watchLayout } from "./layout-observer";
 import { startRealServer } from "./server";
@@ -157,5 +158,32 @@ test("a live resize without a reconnect keeps streaming and adds no repaint", as
     console.log("J751_LIVE_RESIZE_RECEIPT", JSON.stringify({ order: live.order }));
     expect(connections.length).toBe(count);
     expect(live.snapshots).toBe(before);
+  } finally { await context.close(); await server.dispose(); }
+});
+
+test("the repaint after a wider reopen replaces the screen within one painted frame (#528)", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const { server, context, page, connections } = await wrappedSession(browser, 393);
+  try {
+    const url = page.url();
+    const before = connections.length;
+    await page.goto("about:blank");
+    await page.setViewportSize({ width: 1440, height: 852 });
+    await page.goto(url);
+    // The canvas exists once the terminal mounts; sample every frame from there, before the replay and the repaint.
+    await page.locator('.cl[data-view="console"] .terminal-host canvas').waitFor();
+    await installFrameSampler(page, 1);
+    await page.evaluate(() => window.__repaintFrames!.arm(1));
+    await expect.poll(() => connections.length).toBeGreaterThan(before);
+    await expect.poll(() => connections.at(-1)?.fenceAt).toBeDefined();
+    // sleep: give the repaint answered after the fence time to arrive and paint before sampling stops.
+    await page.waitForTimeout(2_000);
+    const { samples } = await page.evaluate(() => { const frames = window.__repaintFrames!; frames.stop(); return { samples: frames.samples }; });
+    const firstInk = samples.findIndex((frame) => frame.ink > 0);
+    const blankAfter = samples.slice(Math.max(firstInk, 0)).filter((frame) => frame.ink === 0).length;
+    console.log("J751_REOPEN_FRAMES", JSON.stringify({ snapshots: connections.at(-1)!.snapshots, frames: samples.length, firstInk, blankAfter }));
+    expect(connections.at(-1)!.snapshots, "the wider reopen must repaint").toBeGreaterThan(0);
+    expect(firstInk, "the reopened screen must show ink").toBeGreaterThanOrEqual(0);
+    expect(blankAfter, "once the screen has shown text, no frame may be empty").toBe(0);
   } finally { await context.close(); await server.dispose(); }
 });
