@@ -517,7 +517,8 @@ impl Session {
         let mut wire_bytes = self.peer_bytes();
         let oldest = self.peers.iter().filter_map(|p| p.deferred).min();
         let mut retired = Vec::new();
-        for (i, p) in self.peers.iter_mut().enumerate() {
+        for i in 0..self.peers.len() {
+            let p = &mut self.peers[i];
             let mut before = p.buffer_bytes();
             // Healthy sockets need no writable-readiness round trip. Bound
             // each peer's work, including a partially transmitted repaint.
@@ -525,7 +526,7 @@ impl Session {
             let mut write_attempts = 4;
             if p.deferred.is_some() || !p.trailing.is_empty() {
                 let mut trailing = std::mem::take(&mut p.trailing);
-                match consume_peer(
+                if let Ok((false, used)) = consume_peer(
                     &trailing,
                     p,
                     &mut self.pty,
@@ -538,11 +539,14 @@ impl Session {
                     oldest.is_some() && p.deferred != oldest,
                     &mut self.next_deferred,
                 ) {
-                    Ok((false, used)) => {
-                        trailing.drain(..used);
-                        p.trailing = trailing;
-                    }
-                    _ => retired.push(i),
+                    trailing.drain(..used);
+                    p.trailing = trailing;
+                } else {
+                    retired.push(i);
+                    p.attached = false;
+                    wire_bytes = wire_bytes - before + p.buffer_bytes();
+                    release_size_of_departed_typist(&self.peers, &mut self.cursors);
+                    continue;
                 }
             }
             if p.caps & SEQUENCED_INPUT != 0
@@ -576,6 +580,9 @@ impl Session {
                 .is_err()
             {
                 retired.push(i);
+                p.attached = false;
+                wire_bytes = wire_bytes - before + p.buffer_bytes();
+                release_size_of_departed_typist(&self.peers, &mut self.cursors);
                 continue;
             }
             let current = p.buffer_bytes();
@@ -681,11 +688,15 @@ impl Session {
                 .is_err()
             {
                 retired.push(i);
+                p.attached = false;
             }
             wire_bytes = wire_bytes - before + p.buffer_bytes();
+            if retired.last() == Some(&i) {
+                // Flush failures also leave before a later buffered Resize.
+                release_size_of_departed_typist(&self.peers, &mut self.cursors);
+            }
         }
-        // Indices follow peer order. Decoder refusal and an immediate write
-        // failure can name the same peer; retire it only once.
+        // Indices follow peer order; retire each failed peer only once.
         retired.dedup();
         if !retired.is_empty() {
             for i in retired.into_iter().rev() {
@@ -912,6 +923,12 @@ impl Session {
                 }
             }
             disconnects[i] = disconnect;
+            if disconnect {
+                // The batch still uses the original indices. Detach now so a
+                // later size report sees only the owner's surviving links.
+                p.attached = false;
+                release_size_of_departed_typist(&self.peers, &mut self.cursors);
+            }
         }
         for i in 0..self.peers.len() {
             let p = &self.peers[i];
@@ -1292,6 +1309,130 @@ mod tests {
             .unwrap();
         assert_eq!((session.config.cols, session.config.rows), (60, 20));
         assert_eq!(session.cursors.active_writer, Some(1));
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    /// Dispatch order decides which report follows the last owner's departure.
+    /// Earlier reports stay staged; an attached replacement or shared link
+    /// preserves ownership, and two departing links release it only once both
+    /// have been observed. Real sockets exercise the reactor, not just `handle`.
+    #[test]
+    fn size_handover_follows_departures_in_poll_batch_order() {
+        for (writers, departures, reports, expected, owner) in [
+            (vec![1, 0], vec![1], vec![(0, 60, 20)], (80, 24), None),
+            (
+                vec![0, 1, 2],
+                vec![0],
+                vec![(1, 60, 20), (2, 50, 15)],
+                (60, 20),
+                Some(1),
+            ),
+            (
+                vec![1, 0, 2],
+                vec![1],
+                vec![(0, 60, 20), (2, 50, 15)],
+                (50, 15),
+                Some(2),
+            ),
+            (
+                vec![1, 2, 0],
+                vec![2],
+                vec![(0, 60, 20), (1, 50, 15)],
+                (80, 24),
+                None,
+            ),
+            (vec![0, 0, 1], vec![0], vec![(2, 60, 20)], (80, 24), Some(0)),
+            (vec![0, 1, 0], vec![0], vec![(1, 60, 20)], (80, 24), Some(0)),
+            (
+                vec![0, 0, 1],
+                vec![0, 1],
+                vec![(2, 60, 20)],
+                (60, 20),
+                Some(1),
+            ),
+        ] {
+            let state = crate::fixture_state::fixture_state();
+            let mut config = Config::new([49; 16], Uid::effective().as_raw());
+            config.state = Some(state.clone());
+            config.readiness = true;
+            let mut session = Session::new(config, 65536).unwrap();
+            let mut clients = Vec::new();
+            let mut flags = vec![PollFlags::empty(); writers.len()];
+            let shared_link = writers == [0, 0, 1] && departures.len() == 1;
+            for (index, writer) in writers.iter().enumerate() {
+                clients.push(Some(snapshot_peer(&mut session).unwrap()));
+                let peer = session.peers.last_mut().unwrap();
+                peer.writer = Some(*writer);
+                peer.shared_writer = shared_link && index == 1;
+                session.cursors.select(*writer, (80, 24, 0, 0)).unwrap();
+            }
+            session.cursors.active_writer = Some(0);
+            session.cursors.viewer_sized = true;
+            for index in departures {
+                drop(clients[index].take());
+                flags[index] = PollFlags::POLLHUP;
+            }
+            for (index, cols, rows) in reports {
+                clients[index]
+                    .as_mut()
+                    .unwrap()
+                    .write_all(
+                        &Frame::Resize {
+                            cols,
+                            rows,
+                            px_w: 0,
+                            px_h: 0,
+                        }
+                        .encode()
+                        .unwrap(),
+                    )
+                    .unwrap();
+                flags[index] = PollFlags::POLLIN;
+            }
+            session
+                .step(PollFlags::empty(), PollFlags::empty(), &flags, false)
+                .unwrap();
+            assert_eq!(
+                (session.config.cols, session.config.rows),
+                expected,
+                "writers={writers:?}"
+            );
+            assert_eq!(session.cursors.active_writer, owner, "writers={writers:?}");
+            drop(session);
+            std::fs::remove_dir_all(state).unwrap();
+        }
+    }
+
+    /// A malformed buffered frame retires its writer before the next viewer's
+    /// already-read Resize. Buffered dispatch uses the same D74 ordering as
+    /// readiness dispatch, without waiting for a second socket event.
+    #[test]
+    fn buffered_departure_precedes_the_next_peers_resize() {
+        let state = crate::fixture_state::fixture_state();
+        let mut config = Config::new([50; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let _old = snapshot_peer(&mut session).unwrap();
+        let _next = snapshot_peer(&mut session).unwrap();
+        session.peers[1].writer = Some(1);
+        session.cursors.select(1, (80, 24, 0, 0)).unwrap();
+        session.cursors.active_writer = Some(0);
+        session.cursors.viewer_sized = true;
+        session.peers[0].trailing = vec![0; 4];
+        session.peers[1].trailing = Frame::Resize {
+            cols: 60,
+            rows: 20,
+            px_w: 0,
+            px_h: 0,
+        }
+        .encode()
+        .unwrap();
+        session.housekeeping().unwrap();
+        assert_eq!((session.config.cols, session.config.rows), (60, 20));
+        assert_eq!(session.cursors.active_writer, Some(1));
+        assert_eq!(session.peers.len(), 1);
         drop(session);
         std::fs::remove_dir_all(state).unwrap();
     }

@@ -205,7 +205,8 @@ struct Peer {
 /// of a replay laid out for a size it does not have (and the approximate
 /// repaint fits it exactly, rows included).
 ///
-/// Call it after peers were removed. It walks the remaining peers once, so
+/// Call it as soon as a departure is observed, after marking that peer detached,
+/// or after removing peers. It walks the remaining attached peers once, so
 /// the attach and same-size resize paths cost nothing more. A link that
 /// still carries the owner's writer (an already attached replacement after a
 /// reconnect, or a shared link of the same writer) keeps the size. Nothing
@@ -956,12 +957,13 @@ fn run_configured(
         // fresh inputs cannot repeatedly consume it; duplicates need no space.
         let oldest = peers.iter().filter_map(|p| p.deferred).min();
         let mut retired = Vec::new();
-        for (index, p) in peers.iter_mut().enumerate() {
+        for index in 0..peers.len() {
+            let p = &mut peers[index];
             if p.deferred.is_none() && p.trailing.is_empty() {
                 continue;
             }
             let mut trailing = std::mem::take(&mut p.trailing);
-            match consume_peer(
+            if let Ok((false, used)) = consume_peer(
                 &trailing,
                 p,
                 &mut pty,
@@ -974,11 +976,14 @@ fn run_configured(
                 oldest.is_some() && p.deferred != oldest,
                 &mut next_deferred,
             ) {
-                Ok((false, used)) => {
-                    trailing.drain(..used);
-                    p.trailing = trailing;
-                }
-                Ok((true, _)) | Err(_) => retired.push(index),
+                trailing.drain(..used);
+                p.trailing = trailing;
+            } else {
+                retired.push(index);
+                // Buffered frames obey the same departure ordering as
+                // socket reads: the next peer must see the owner leave.
+                p.attached = false;
+                release_size_of_departed_typist(&peers, &mut cursors);
             }
         }
         if !retired.is_empty() {
@@ -1350,7 +1355,8 @@ fn run_configured(
         }
 
         let mut disconnects = [false; MAX_PEERS];
-        for (index, p) in peers.iter_mut().enumerate() {
+        for index in 0..peers.len() {
+            let p = &mut peers[index];
             let flags = ready.3[index];
             let mut disconnect = flags.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
             if p.deferred.is_some() && flags.contains(PollFlags::POLLHUP) {
@@ -1393,6 +1399,12 @@ fn run_configured(
                 }
             }
             disconnects[index] = disconnect;
+            if disconnect {
+                // Keep readiness indices stable until removal, but settle this
+                // departure before a later peer can report its size (D74).
+                p.attached = false;
+                release_size_of_departed_typist(&peers, &mut cursors);
+            }
         }
         // Coexisting ordinary/shared sockets use the same durable input cursor.
         // Replacement stays within a mode, including legacy writer zero. Decide
