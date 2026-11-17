@@ -1,0 +1,18 @@
+# The Cargo package and feature selections of every executable the release
+# bundle ships (#530). Source this file; it only defines arrays.
+#
+# scripts/package-release builds exactly these, and scripts/verify compiles
+# each of them in its "release feature sets" row. Keeping one list means a
+# feature set the release builds can never again be one the gate never
+# compiled: dev 6fe482d1e passed every gate but failed to build the host
+# payload, because code shared with the mesh and server plugins referred to a
+# name that only exists when one of them is built.
+
+# The server. `desktop` is not a default feature (#146): without it the server
+# neither advertises the desktop Hello capability nor links the app-window
+# relay, so Settings → Hosts → App windows stays hidden.
+release_server_cargo_args=(--package infraternal --features desktop)
+# The removable-component host payload: no mesh, server or desktop code.
+release_host_cargo_args=(--package infraternal --no-default-features --features plugin-host-facts,remote,ssh)
+# The early executable keeps only the verified shim and SSH bridge.
+release_session_cargo_args=(--package infraternal-session)
