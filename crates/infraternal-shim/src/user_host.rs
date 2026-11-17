@@ -1287,6 +1287,11 @@ mod tests {
         session.cursors.select(1, (80, 24, 0, 0)).unwrap();
         session.cursors.active_writer = Some(0);
         session.cursors.viewer_sized = true;
+        // Another test can fork while this socket is live. A close-on-exec
+        // duplicate can delay EOF until that child execs, so establish EOF on
+        // the connection itself. Keep an alias open to pin that distinction.
+        let _inherited_link = old.try_clone().unwrap();
+        old.shutdown(std::net::Shutdown::Both).unwrap();
         drop(old);
         next.write_all(
             &Frame::Resize {
@@ -1370,7 +1375,10 @@ mod tests {
             session.cursors.active_writer = Some(0);
             session.cursors.viewer_sized = true;
             for index in departures {
-                drop(clients[index].take());
+                let client = clients[index].take().unwrap();
+                // Establish EOF even if a parallel fork inherited this socket.
+                client.shutdown(std::net::Shutdown::Both).unwrap();
+                drop(client);
                 flags[index] = PollFlags::POLLHUP;
             }
             for (index, cols, rows) in reports {

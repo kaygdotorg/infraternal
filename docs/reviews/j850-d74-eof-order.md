@@ -24,3 +24,11 @@ The same-size resize/replay handler is unchanged. Ownership scans run on
 observed departures; no scan is added to a healthy reconnect or resize. Forgejo
 #521 records exact-head gates, repeated wire cases, geometry suites, mutations
 and same-size reconnect measurements. Raw receipts live outside the checkout.
+
+The full-suite EOF fixture explicitly shuts down each departing connection
+before injecting readiness. Closing a descriptor alone does not establish EOF
+while an alias remains open, including the brief alias held by another test's
+fork before exec. A retained alias pins this distinction in the original
+regression. The assertion and dispatch order are unchanged; no wait is added.
+Forgejo #521 retains the first gate failure and the held-descriptor red/green
+controls, as well as the test-only transplant onto unchanged dev production code.
