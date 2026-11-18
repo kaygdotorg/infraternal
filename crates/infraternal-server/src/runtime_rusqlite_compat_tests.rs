@@ -193,7 +193,7 @@ fn runner_list_matches_the_sqlx_list() {
     for (runner, sqlx) in RUNNER_MIGRATIONS.iter().zip(MIGRATIONS.iter()) {
         assert_eq!(runner.version, sqlx.version);
         assert_eq!(runner.description, sqlx.description);
-        assert_eq!(runner.sql, sqlx.sql);
+        assert_eq!(runner.sql, sqlx.sql.as_str());
         assert_eq!(runner.checksum, &*sqlx.checksum);
         // The runner always wraps a migration in a transaction; the build
         // script refuses `-- no-transaction` until it can do otherwise (#473).

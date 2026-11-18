@@ -670,7 +670,7 @@ async fn canceled_receipt_commit_is_not_lost_on_worker_replacement() {
         crate::rotation::drive(&store, &service, &rotating_channel, node, &identity, &live).await,
         None
     );
-    sqlx::query(&format!("CREATE TRIGGER pause_ack AFTER INSERT ON mesh_node_applied WHEN NEW.node_id={} BEGIN SELECT 1 WHERE 'a' COLLATE pause_receipt = 'b'; END", peer.0))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER pause_ack AFTER INSERT ON mesh_node_applied WHEN NEW.node_id={} BEGIN SELECT 1 WHERE 'a' COLLATE pause_receipt = 'b'; END", peer.0)))
         .execute(&pool).await.unwrap();
     let mut inner = Channel::candidate();
     Arc::get_mut(&mut inner).unwrap().identity_key = PublicKey([4; 32]);

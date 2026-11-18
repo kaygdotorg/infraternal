@@ -4077,10 +4077,12 @@ async fn review_sqlx_retention_session_commit_latency() {
                 connections.push(pool.acquire().await.unwrap());
             }
             for connection in &mut connections {
-                sqlx::query(&format!("PRAGMA journal_size_limit={limit}"))
-                    .execute(&mut **connection)
-                    .await
-                    .unwrap();
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "PRAGMA journal_size_limit={limit}"
+                )))
+                .execute(&mut **connection)
+                .await
+                .unwrap();
             }
             drop(connections);
             let (auth, token) = empty_with_pool(pool.clone()).await;
