@@ -1094,6 +1094,40 @@ fn j363_epoch_change_retires_old_rotation_journal() {
     );
 }
 
+/// A same-database coordinator restart must be able to finish the candidate it committed before its epoch changed.
+#[test]
+#[ignore = "Known bug #534: run explicitly to reproduce the missing finish receipt after a cold coordinator restart."]
+fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let identity = node.up().unwrap();
+    let old = j363_config(identity.public_key);
+    for chunk in crate::configuration::chunks(None, &old).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let operation = "00000000-0000-4000-8000-000000000534";
+    let candidate = node.prepare_rotation(operation, 1).unwrap();
+    node.commit_rotation(operation, 1).unwrap();
+    drop(node);
+
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    assert_eq!(restored.ensure().unwrap().unwrap().public_key, candidate);
+    let mut replacement = restored.config().unwrap().clone();
+    replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
+    replacement.version += 1;
+    for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+        restored.chunk(chunk).unwrap();
+    }
+    // The coordinator kept its SQLite rotation row across restart and still names this operation.
+    let finished = restored.finish_rotation(operation, 1);
+    restored.down().unwrap();
+    assert!(
+        finished.is_ok(),
+        "a cold coordinator restart stranded its persisted rotation finish: {finished:?}"
+    );
+}
+
 /// A new authority must stage the complete replacement before it changes live kernel peers.
 #[test]
 #[ignore = "Run as root inside a dedicated network namespace"]
