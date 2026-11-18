@@ -4063,6 +4063,72 @@ async fn session_slides_keep_the_wal_bounded() {
     );
 }
 
+/// Compare retained-WAL settings with J785's 5,000 session slides, alone and with a second indexed writer.
+/// Run explicitly on the performance VM; reported times include dispatch and the durable commit acknowledgment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Measurement only: run on the pinned performance VM"]
+async fn review_sqlx_retention_session_commit_latency() {
+    let _guard = SERIAL.lock().await;
+    for mixed in [false, true] {
+        for limit in [-1_i64, 8_388_608, 8_388_608, -1] {
+            let (pool, path) = disk_pool("review-retention").await;
+            let mut connections = Vec::new();
+            for _ in 0..8 {
+                connections.push(pool.acquire().await.unwrap());
+            }
+            for connection in &mut connections {
+                sqlx::query(&format!("PRAGMA journal_size_limit={limit}"))
+                    .execute(&mut **connection)
+                    .await
+                    .unwrap();
+            }
+            drop(connections);
+            let (auth, token) = empty_with_pool(pool.clone()).await;
+            let f = fixture_with_bootstrap(auth, token).await;
+            sqlx::raw_sql("CREATE TABLE review_receipt(id INTEGER PRIMARY KEY, revision INTEGER); CREATE INDEX review_receipt_revision ON review_receipt(revision); INSERT INTO review_receipt VALUES(1,0);")
+                .execute(&pool).await.unwrap();
+            let writer_pool = pool.clone();
+            let writer = tokio::spawn(async move {
+                let mut times = Vec::new();
+                if mixed {
+                    for revision in 1..=5_000 {
+                        let started = Instant::now();
+                        sqlx::query("UPDATE review_receipt SET revision=? WHERE id=1")
+                            .bind(revision)
+                            .execute(&writer_pool)
+                            .await
+                            .unwrap();
+                        times.push(started.elapsed().as_nanos());
+                    }
+                }
+                times
+            });
+            let mut times = Vec::new();
+            for n in 0..5_000 {
+                let started = Instant::now();
+                f.auth.session(&f.session, NOW + n).await.unwrap();
+                times.push(started.elapsed().as_nanos());
+            }
+            let mut sqlx_times = writer.await.unwrap();
+            times.sort_unstable();
+            sqlx_times.sort_unstable();
+            let wal = std::fs::metadata(format!("{}-wal", path.display()))
+                .unwrap()
+                .len();
+            println!(
+                "RETENTION_LATENCY mixed={mixed} limit={limit} slides=5000 slide_p50_ns={} slide_p99_ns={} sqlx_p50_ns={} sqlx_p99_ns={} wal_bytes={wal}",
+                times[2500],
+                times[4950],
+                sqlx_times.get(2500).copied().unwrap_or(0),
+                sqlx_times.get(4950).copied().unwrap_or(0)
+            );
+            f.auth.close_database().await;
+            pool.close().await;
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+}
+
 /// `path` written relative to the current directory: one `..` per component
 /// of the working directory, then `path` without its root. Opening it reaches
 /// the same file, but the name no longer says where it is.
