@@ -10,7 +10,7 @@
 //!
 //! **Why a routing socket (D81).** The kernel pushes every address, route and interface change
 //! to each `PF_ROUTE` socket as it happens, so an idle host costs no wakeup and nothing polls.
-//! SystemConfiguration's change notifications were rejected: they arrive later (configd reads
+//! The platform's configuration notifications were rejected: they arrive later (configd reads
 //! the same kernel events first), they need a run-loop thread of their own, and they miss
 //! routes nobody publishes to the dynamic store.
 //!
@@ -36,8 +36,8 @@
 //! keepalive still covers it, and it takes more than about 6,500 messages in one apply.
 //!
 //! **Known limit: real Wi-Fi Macs (unmeasured).** Links are judged by `IFF_UP | IFF_RUNNING`
-//! and addresses include link-local ones. `awdl0` and `llw0` can come and go with AirDrop and
-//! Continuity, with their `fe80::` addresses, and each flip announces. That costs one keepalive
+//! and addresses include link-local ones. `awdl0` and `llw0` can come and go during nearby-device
+//! discovery, with their `fe80::` addresses, and each flip announces. That costs one keepalive
 //! per live session, at most 4 per second; nothing is published beyond existing endpoints. The
 //! Mac VM has no Wi-Fi, so its idle window cannot show it. If a real Wi-Fi Mac announces on
 //! these, the fix is to ignore links that carry only link-local addresses.
