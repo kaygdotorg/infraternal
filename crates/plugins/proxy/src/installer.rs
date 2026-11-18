@@ -379,7 +379,8 @@ struct ArchiveStreamWriter<'a> {
 impl ArchiveStreamWriter<'_> {
     fn finish(self) -> io::Result<()> {
         if self.received != self.expected_size
-            || format!("{:x}", self.digest.finalize()) != self.expected_digest
+            || format!("{:x}", base16ct::HexDisplay(&self.digest.finalize()))
+                != self.expected_digest
         {
             return Err(invalid_data(
                 "component archive does not match its signed length and digest",
@@ -538,7 +539,7 @@ fn extract_allowlisted_executable<R: Read>(
         digest.update(&buffer[..count]);
     }
     if written != manifest.executable_size
-        || format!("{:x}", digest.finalize()) != manifest.executable_sha256
+        || format!("{:x}", base16ct::HexDisplay(&digest.finalize())) != manifest.executable_sha256
     {
         return Err(invalid_data(
             "Traefik executable does not match its signed digest",
@@ -685,7 +686,7 @@ fn hash_file(path: &Path) -> io::Result<String> {
         }
         digest.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(format!("{:x}", base16ct::HexDisplay(&digest.finalize())))
 }
 
 fn lock_store(root: &Path) -> io::Result<Flock<File>> {

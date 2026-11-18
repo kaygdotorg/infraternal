@@ -183,7 +183,7 @@ fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
     let nonce = rand::random::<[u8; 12]>();
     let aad = aad(user, kind);
     let mut key = [0; 32];
-    Hkdf::<sha2_next::Sha256>::new(Some(&salt), ikm)
+    Hkdf::<Sha256>::new(Some(&salt), ikm)
         .expand(&aad, &mut key)
         .unwrap();
     let ciphertext = Aes256Gcm::new_from_slice(&key)
@@ -214,7 +214,7 @@ fn unwrap_browser(
     let ciphertext = B64.decode(&wrap.ciphertext).unwrap();
     let aad = aad(user, kind);
     let mut key = [0; 32];
-    Hkdf::<sha2_next::Sha256>::new(Some(&salt), ikm)
+    Hkdf::<Sha256>::new(Some(&salt), ikm)
         .expand(&aad, &mut key)
         .unwrap();
     Aes256Gcm::new_from_slice(&key).unwrap().decrypt(
@@ -3646,7 +3646,7 @@ impl Auth {
 fn recovery_material(words: &str, kind: &str) -> [u8; 32] {
     let entropy = recovery_ikm(words);
     let mut output = [0; 32];
-    Hkdf::<sha2_next::Sha256>::new(None, &entropy)
+    Hkdf::<Sha256>::new(None, &entropy)
         .expand(
             format!("infraternal/recovery/{kind}/v2").as_bytes(),
             &mut output,

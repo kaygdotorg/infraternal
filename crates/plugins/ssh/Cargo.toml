@@ -10,6 +10,7 @@ license.workspace = true
 session-bridge = ["dep:infraternal-agent"]
 
 [dependencies]
+base16ct.workspace = true
 infraternal-agent = { path = "../../infraternal-agent", version = "0.1.0", default-features = false, optional = true }
 infraternal-plugin-api.workspace = true
 infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }

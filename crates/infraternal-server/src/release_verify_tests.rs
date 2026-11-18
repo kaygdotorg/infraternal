@@ -64,7 +64,11 @@ impl Fixture {
         );
         let payload = b"synthetic release payload\n";
         std::fs::write(root.join("payload"), payload).unwrap();
-        let sums = format!("{:x}  payload\n", Sha256::digest(payload)).into_bytes();
+        let sums = format!(
+            "{:x}  payload\n",
+            base16ct::HexDisplay(&Sha256::digest(payload))
+        )
+        .into_bytes();
         std::fs::write(root.join("SHA256SUMS"), &sums).unwrap();
         assert!(
             Command::new("ssh-keygen")
@@ -260,7 +264,11 @@ fn verification_twenty_megabytes_fifty_runs() {
     let fixture = Fixture::new("infraternal-release", "sha512");
     let payload = vec![0x42; 20 * 1024 * 1024];
     std::fs::write(fixture.root.join("payload"), &payload).unwrap();
-    let sums = format!("{:x}  payload\n", Sha256::digest(&payload)).into_bytes();
+    let sums = format!(
+        "{:x}  payload\n",
+        base16ct::HexDisplay(&Sha256::digest(&payload))
+    )
+    .into_bytes();
     // Measure the full verification hook. Generate a fresh signature for the enlarged manifest.
     let key = fixture.root.join("bench-key");
     assert!(

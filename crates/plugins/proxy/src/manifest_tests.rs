@@ -92,7 +92,10 @@ fn release_manifest_rejects_an_unbounded_archive_and_malformed_digest() {
 #[test]
 fn component_manifest_must_match_a_signed_checksum_entry() {
     let manifest_bytes = serde_json::to_vec(&manifest()).expect("manifest JSON");
-    let digest = format!("{:x}", Sha256::digest(&manifest_bytes));
+    let digest = format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(&manifest_bytes))
+    );
     let sums = format!("{digest}  proxy-traefik-linux-amd64.json\n");
 
     let checked = verify_component_manifest(
@@ -111,7 +114,10 @@ fn component_manifest_must_match_a_signed_checksum_entry() {
 #[test]
 fn component_manifest_refuses_a_bad_signature_or_unsigned_digest() {
     let manifest_bytes = serde_json::to_vec(&manifest()).expect("manifest JSON");
-    let digest = format!("{:x}", Sha256::digest(&manifest_bytes));
+    let digest = format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(&manifest_bytes))
+    );
     let sums = format!("{digest}  proxy-traefik-linux-amd64.json\n");
 
     assert!(

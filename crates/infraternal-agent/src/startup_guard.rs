@@ -179,7 +179,10 @@ fn contents(file: &File) -> io::Result<String> {
 }
 
 fn fingerprint(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+    format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(text.as_bytes()))
+    )
 }
 
 fn propose(home: &Path, path: &str, multiplexer: &str) -> io::Result<Option<Proposal>> {

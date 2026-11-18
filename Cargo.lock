@@ -2148,6 +2148,7 @@ dependencies = [
 name = "infraternal-agent"
 version = "0.1.0"
 dependencies = [
+ "base16ct",
  "base64 0.23.1",
  "bytes",
  "futures-util",
@@ -2165,7 +2166,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "socket2",
  "tokio",
  "tokio-openssl",
@@ -2321,6 +2322,7 @@ dependencies = [
 name = "infraternal-plugin-proxy"
 version = "0.1.0"
 dependencies = [
+ "base16ct",
  "base64 0.23.1",
  "flate2",
  "infraternal-mesh",
@@ -2330,7 +2332,7 @@ dependencies = [
  "openssl",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "tar",
  "tokio",
  "url",
@@ -2393,6 +2395,7 @@ dependencies = [
 name = "infraternal-plugin-ssh"
 version = "0.1.0"
 dependencies = [
+ "base16ct",
  "futures-util",
  "infraternal-agent",
  "infraternal-mesh",
@@ -2404,7 +2407,7 @@ dependencies = [
  "russh-sftp",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "tokio",
  "url",
  "uuid",
@@ -2427,6 +2430,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-server",
+ "base16ct",
  "base64 0.23.1",
  "bip39",
  "bytes",
@@ -2455,7 +2459,6 @@ dependencies = [
  "serde",
  "serde_cbor_2",
  "serde_json",
- "sha2 0.10.9",
  "sha2 0.11.1",
  "sqlx",
  "thiserror 2.0.21",

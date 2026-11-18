@@ -33,7 +33,7 @@ impl Fixture {
         );
         let sums = format!(
             "{:x}  fixture.json\n",
-            Sha256::digest(b"signed component manifest")
+            base16ct::HexDisplay(&Sha256::digest(b"signed component manifest"))
         )
         .into_bytes();
         let sums_path = root.join("SHA256SUMS");

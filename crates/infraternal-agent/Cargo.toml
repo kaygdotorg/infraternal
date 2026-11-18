@@ -20,6 +20,7 @@ mesh = ["dep:infraternal-plugin-mesh", "infraternal-plugin-mesh/mesh-dns"]
 proxy = ["dep:infraternal-plugin-proxy", "dep:tracing"]
 
 [dependencies]
+base16ct.workspace = true
 infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, features = ["source"], optional = true }
 infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", default-features = false, features = ["agent"], optional = true }
 

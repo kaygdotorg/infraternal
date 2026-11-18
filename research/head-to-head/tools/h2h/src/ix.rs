@@ -97,7 +97,7 @@ fn wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Value {
     let nonce: [u8; 12] = random();
     let aad = format!("infraternal/keywrap/v1|{user}|{kind}").into_bytes();
     let mut key = [0u8; 32];
-    Hkdf::<sha2_next::Sha256>::new(Some(&salt), ikm).expand(&aad, &mut key).unwrap();
+    Hkdf::<Sha256>::new(Some(&salt), ikm).expand(&aad, &mut key).unwrap();
     let ct = Aes256Gcm::new_from_slice(&key)
         .unwrap()
         .encrypt(Nonce::from_slice(&nonce), Payload { msg: dek, aad: &aad })
@@ -158,7 +158,7 @@ pub fn register(args: &Args) {
     input.extend_from_slice(&salt);
     let prf = {
         use hkdf::hmac::{Hmac, Mac};
-        let mut mac = <Hmac<sha2_next::Sha256> as hkdf::hmac::KeyInit>::new_from_slice(&prf_secret).unwrap();
+        let mut mac = <Hmac<Sha256> as hkdf::hmac::KeyInit>::new_from_slice(&prf_secret).unwrap();
         mac.update(&Sha256::digest(&input));
         mac.finalize().into_bytes().to_vec()
     };
@@ -197,7 +197,7 @@ pub fn register(args: &Args) {
     let recovery_entropy: [u8; 32] = random();
     let recovery = |kind: &str| {
         let mut out = [0u8; 32];
-        Hkdf::<sha2_next::Sha256>::new(None, &recovery_entropy).expand(format!("infraternal/recovery/{kind}/v2").as_bytes(), &mut out).unwrap();
+        Hkdf::<Sha256>::new(None, &recovery_entropy).expand(format!("infraternal/recovery/{kind}/v2").as_bytes(), &mut out).unwrap();
         out
     };
     let binding = cookies.first().cloned().unwrap_or_else(|| die("no ceremony cookie"));

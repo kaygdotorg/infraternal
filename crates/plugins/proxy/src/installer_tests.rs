@@ -113,15 +113,15 @@ fn verified_manifest(
                 .to_owned(),
         mirror_path:
             "components/0.1.0/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz".to_owned(),
-        archive_sha256: format!("{:x}", Sha256::digest(archive)),
+        archive_sha256: format!("{:x}", base16ct::HexDisplay(&Sha256::digest(archive))),
         archive_size: archive.len() as u64,
         executable: "traefik".to_owned(),
-        executable_sha256: format!("{:x}", Sha256::digest(executable)),
+        executable_sha256: format!("{:x}", base16ct::HexDisplay(&Sha256::digest(executable))),
         executable_size: executable.len() as u64,
         license: "MIT".to_owned(),
     };
     let bytes = serde_json::to_vec(&manifest).expect("manifest JSON");
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = format!("{:x}", base16ct::HexDisplay(&Sha256::digest(&bytes)));
     let checksums = format!("{digest}  proxy-traefik-linux-amd64.json\n");
     verify_component_manifest(
         &bytes,
@@ -304,15 +304,18 @@ fn offline_bundle_import_uses_the_signed_manifest_and_archive_path() {
                 .to_owned(),
         mirror_path:
             "components/0.1.0/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz".to_owned(),
-        archive_sha256: format!("{:x}", Sha256::digest(&archive)),
+        archive_sha256: format!("{:x}", base16ct::HexDisplay(&Sha256::digest(&archive))),
         archive_size: archive.len() as u64,
         executable: "traefik".to_owned(),
-        executable_sha256: format!("{:x}", Sha256::digest(executable)),
+        executable_sha256: format!("{:x}", base16ct::HexDisplay(&Sha256::digest(executable))),
         executable_size: executable.len() as u64,
         license: "MIT".to_owned(),
     };
     let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest JSON");
-    let digest = format!("{:x}", Sha256::digest(&manifest_bytes));
+    let digest = format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(&manifest_bytes))
+    );
     let checksums = format!("{digest}  proxy-traefik-linux-amd64.json\n");
     let state = TempState::new();
 

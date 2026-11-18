@@ -81,7 +81,7 @@ async fn bootstrap_server(binary: &std::path::Path) -> (UnlockFixture, X509, Shi
     assert_eq!(status, StatusCode::OK);
     let salt = B64.decode(start["ca"]["salt"].as_str().unwrap()).unwrap();
     let mut scoped = [0; 32];
-    Hkdf::<sha2_next::Sha256>::new(Some(&salt), &f.auth.dek)
+    Hkdf::<Sha256>::new(Some(&salt), &f.auth.dek)
         .expand(
             format!("infraternal/ca-wrap/v1|{}|1", f.auth.user).as_bytes(),
             &mut scoped,
