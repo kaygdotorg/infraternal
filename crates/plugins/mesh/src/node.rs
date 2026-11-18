@@ -346,11 +346,10 @@ fn repair_accepted_routes(
     let mut first_error = None;
     let mut repaired = BTreeSet::new();
     for peer in state.peers.values() {
-        let mtu = state
-            .overrides
-            .get(&peer.key)
-            .copied()
-            .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint));
+        // Derived only for a peer with a missing route: the lookup is a netlink request made
+        // under the route-state lock, and an inventory check that finds nothing missing must not
+        // cost one per installed peer every interval (#525: 4,096 lookups on fresh sockets).
+        let mut mtu = None;
         for address in [
             IpAddr::V4(peer.addresses.ipv4),
             IpAddr::V6(peer.addresses.ipv6),
@@ -358,6 +357,13 @@ fn repair_accepted_routes(
             if !missing.contains(&address) {
                 continue;
             }
+            let mtu = *mtu.get_or_insert_with(|| {
+                state
+                    .overrides
+                    .get(&peer.key)
+                    .copied()
+                    .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint))
+            });
             // The re-added route has the configured budget; the next live refresh rewrites it.
             repaired.insert(peer.key);
             if let Err(error) = Device::repair_peer_route(link, peer, address, mtu) {
@@ -758,6 +764,49 @@ fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof
     link.engine == EngineKind::GotaTun
         && !proof.is_empty()
         && link.owner.is_some_and(|owner| proof.accepts(owner))
+}
+
+/// Choose the port a restarted kernel node keeps on the link it adopted, and save it.
+///
+/// Kernel links outlive their process (D332), so restore finds the old port already bound.
+/// D391 still applies: an explicit `INFRATERNAL_MESH_PORT` binds exactly that port and fails if it
+/// is taken (J555 F3). Without an override, the node moves back to its saved or default port when
+/// that is free, the same as `GotaTun`, which binds on every start, and otherwise keeps the port it
+/// has as its fallback. A retained link from an older daemon may sit on the reserved 51820; it
+/// moves to a fresh port. The saved port follows `up`'s rule: a fallback is saved, an override
+/// saves the default, so removing the override later moves the node back.
+/// # Errors
+/// Reports a malformed override, a taken explicit port, kernel errors, or a failed state write.
+fn restore_kernel_listen_port(node: &Node, ifindex: u32, current: u16) -> io::Result<u16> {
+    let saved = node
+        .store
+        .as_ref()
+        .map(crate::node_state::Store::recorded_listen_port)
+        .transpose()?
+        .flatten();
+    let request = crate::listen_port::from_environment(saved)?;
+    let mut port = current;
+    if request.port != current {
+        match Device::set_listen_port(ifindex, request.port) {
+            Ok(()) => port = request.port,
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if port == 51820 {
+        port = Device::allocate_port(ifindex)?;
+    }
+    if let Some(store) = &node.store {
+        let keep = if request.allow_fallback {
+            port
+        } else {
+            crate::listen_port::DEFAULT_PORT
+        };
+        if saved != Some(keep) {
+            store.record_listen_port(keep)?;
+        }
+    }
+    Ok(port)
 }
 
 /// Recreate the `GotaTun` private-key file only from the durable rotation journal.
@@ -1280,11 +1329,7 @@ impl Node {
             if public_key.0 == [0; 32] || port == 0 {
                 return Err(io::ErrorKind::NotConnected.into());
             }
-            // A retained interface from an older daemon may have selected the
-            // reserved port. Rebind its socket while preserving its private key.
-            if port == 51820 {
-                port = Device::allocate_port(link.ifindex)?;
-            }
+            port = restore_kernel_listen_port(&node, link.ifindex, port)?;
             node.identity = Some(Identity {
                 public_key,
                 port,
@@ -1294,6 +1339,7 @@ impl Node {
                 // Kernel `WireGuard` rotates its key in place (#285, D166).
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
             });
             // The restored kernel socket's port is what the host input table admits (D386).
             node.firewall.set_listen_port(Some(port))?;
@@ -1460,6 +1506,14 @@ impl Node {
     #[must_use]
     pub fn active(&self) -> bool {
         self.identity.is_some()
+    }
+    /// Return the active UDP listener port advertised by this node's mesh identity.
+    ///
+    /// `None` means the data plane is stopped or has not bound a socket yet. The value is the
+    /// actual port after automatic fallback, so `mesh status` can report what peers should reach.
+    #[must_use]
+    pub fn listen_port(&self) -> Option<u16> {
+        self.identity.as_ref().map(|identity| identity.port)
     }
     /// Whether a retired authority still needs a complete snapshot from the enrolled server.
     #[must_use]
@@ -1845,6 +1899,13 @@ impl Node {
             self.ensure_route_repair()?;
             return Ok(identity);
         }
+        let saved_port = self
+            .store
+            .as_ref()
+            .map(crate::node_state::Store::recorded_listen_port)
+            .transpose()?
+            .flatten();
+        let listen_port = crate::listen_port::from_environment(saved_port)?;
         if self.engine_kind == EngineKind::GotaTun
             && let Some(store) = &self.store
         {
@@ -1874,7 +1935,17 @@ impl Node {
                 {
                     hook();
                 }
-                if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                let configure = Device::configure(created, public_key, &key, listen_port.port);
+                let configure = match configure {
+                    Err(error)
+                        if listen_port.allow_fallback
+                            && error.kind() == io::ErrorKind::AddrInUse =>
+                    {
+                        Device::configure(created, public_key, &key, 0)
+                    }
+                    result => result,
+                };
+                if let Err(error) = configure {
                     // Delete exactly the link this call created: `down` proves links by the
                     // shared name, which may no longer lead to ours (#260 J242).
                     let _ = Device::delete_ifindex(created);
@@ -1885,6 +1956,14 @@ impl Node {
                     let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    if let Some(store) = &self.store {
+                        let saved = if listen_port.allow_fallback {
+                            port
+                        } else {
+                            crate::listen_port::DEFAULT_PORT
+                        };
+                        store.record_listen_port(saved)?;
                     }
                     let client = Client::new()?;
                     let route_repair =
@@ -1906,6 +1985,7 @@ impl Node {
                             dns_names: cfg!(target_os = "linux"),
                             key_rotation: true,
                             authority_epoch: true,
+                            rotation_continuity: true,
                         };
                         self.identity = Some(identity.clone());
                         // The host input table admits exactly the port this socket bound (D386).
@@ -1927,7 +2007,7 @@ impl Node {
                 let engine = Engine::start(
                     key.gotatun_secret()?,
                     public_key,
-                    0,
+                    listen_port,
                     None,
                     &self.proxy_ingress,
                     adopt,
@@ -1942,6 +2022,18 @@ impl Node {
                     let mut engine = engine;
                     let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
+                }
+                if let Some(store) = &self.store {
+                    let saved = if listen_port.allow_fallback {
+                        port
+                    } else {
+                        crate::listen_port::DEFAULT_PORT
+                    };
+                    if let Err(error) = store.record_listen_port(saved) {
+                        let mut engine = engine;
+                        let _ = engine.stop();
+                        return Err(error);
+                    }
                 }
                 let route_repair =
                     match RouteRepairWorker::start(Arc::clone(&self.peer_route_state)) {
@@ -1973,6 +2065,7 @@ impl Node {
                     // available on the authenticated, enrollment-bound channel (#382, D166, D352).
                     key_rotation: true,
                     authority_epoch: true,
+                    rotation_continuity: true,
                 };
                 self.identity = Some(identity.clone());
                 // The host input table admits exactly the port this socket bound (D386).
@@ -2678,17 +2771,6 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
-        if self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
-            && chunk.index == 0
-            && chunk.from_version.is_none()
-            && self
-                .config
-                .as_ref()
-                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
-        {
-            self.validate_binding(&chunk)?;
-            self.retire_settled_authority_rotation()?;
-        }
         let result = self.stage(chunk);
         if let Err(error) = &result {
             self.pending = None;
@@ -2753,25 +2835,31 @@ impl Node {
     }
 
     /// Check that the live data plane contains exactly the keys in a same-content snapshot.
+    ///
+    /// `GotaTun` omits peers with no network access so their configured endpoints cannot receive
+    /// unsolicited handshakes. The kernel engine retains its complete peer inventory.
     fn runtime_peer_inventory_matches(&self, config: &Config) -> bool {
         let Ok(counters) = self.peer_counters() else {
             return false;
         };
         let installed: std::collections::BTreeSet<_> = counters.keys().copied().collect();
-        let desired: std::collections::BTreeSet<_> = config
-            .peers
-            .values()
-            .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
-            .flatten()
-            .collect();
+        let desired = match self.engine_kind {
+            EngineKind::GotaTun => crate::gotatun_node::peer_keys_with_network_access(config),
+            EngineKind::Kernel => config
+                .peers
+                .values()
+                .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
+                .flatten()
+                .collect(),
+        };
         installed == desired
     }
 
-    /// Persist the deny state and retire the old journal without touching live peers.
+    /// Persist the deny state and retire a superseded journal without touching live peers.
     ///
     /// This runs only after the new authority's complete snapshot has passed chunk validation.
     /// A process stop between persistence and replacement then restores no peers from the old
-    /// authority.
+    /// authority. An exact operation match retains its journal for commit or finish retries.
     /// # Errors
     /// Stops the owned runtime if the durable reset or journal retirement cannot complete.
     fn prepare_authority_replacement(&mut self, replacement: &Config) -> io::Result<Config> {
@@ -2781,22 +2869,36 @@ impl Node {
         #[cfg(feature = "mesh-dns")]
         denied.peer_names.clear();
         self.pending = None;
-        let rotation_error = self.settle_authority_rotation().err();
+        // A new process can still own the same database operation. Its authenticated full
+        // snapshot must name the exact UUID and sequence; key binding was checked by stage.
+        let continuity = self
+            .store
+            .as_ref()
+            .map(|store| store.rotation_matches(replacement.rotation_operation.as_ref()))
+            .transpose()
+            .map(|matched| matched.unwrap_or(false));
+        let continues_rotation = matches!(continuity, Ok(true));
+        let rotation_error = match continuity {
+            Ok(true) => None,
+            Ok(false) => self.settle_authority_rotation().err(),
+            Err(error) => Some(error),
+        };
         if let Some(identity) = &self.identity {
             denied.local_key = Some(identity.public_key);
         }
         self.config = Some(denied.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
         let persistence_error = self.persist_retired_snapshot(&denied).err();
-        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
-            self.store
-                .as_ref()
-                .map(crate::node_state::Store::discard_rotation_journal)
-                .transpose()
-                .err()
-        } else {
-            None
-        };
+        let journal_error =
+            if persistence_error.is_none() && rotation_error.is_none() && !continues_rotation {
+                self.store
+                    .as_ref()
+                    .map(crate::node_state::Store::discard_rotation_journal)
+                    .transpose()
+                    .err()
+            } else {
+                None
+            };
         if let Some(error) = persistence_error.or(rotation_error).or(journal_error) {
             return Err(self.fail_closed_authority_replacement(error, &denied));
         }
@@ -2811,11 +2913,19 @@ impl Node {
         error: io::Error,
         denied: &Config,
     ) -> io::Error {
+        // Rejected content fences peers but keeps the journal.
+        let mut denied = denied.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns")]
+        denied.peer_names.clear();
         self.config = Some(denied.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
         self.pending = None;
+        // Fence restore first; the disabled write below retries any failure.
+        let _ = self.persist_retired_snapshot(&denied);
         let stop_error = self.stop_retired_runtime().err();
-        if let Err(persist_error) = self.persist_retired_snapshot(denied) {
+        if let Err(persist_error) = self.persist_retired_snapshot(&denied) {
             tracing::error!(
                 error_kind = ?persist_error.kind(),
                 "could not persist disabled peer-free mesh state after authority replacement failed"
@@ -2856,17 +2966,21 @@ impl Node {
         Ok(())
     }
 
-    /// Retry retirement cleanup before accepting a full snapshot after an interrupted reset.
+    /// Retry retirement cleanup only after a full snapshot validates after an interrupted reset.
     ///
     /// A durable peer-free state records the pending reset. If its journal removal failed, settle
     /// and save the active key binding again before unlinking that previous authority's journal.
+    /// The incoming full snapshot's exact operation match retains it, independent of cached metadata.
     /// # Errors
     /// Refuses an unproven rotation or a failed state or journal write.
-    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+    fn retire_settled_authority_rotation(
+        &mut self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        if store.rotation_secret()?.is_none() {
+        if store.rotation_secret()?.is_none() || store.rotation_matches(operation)? {
             return Ok(());
         }
         self.settle_authority_rotation()?;
@@ -3045,6 +3159,7 @@ impl Node {
             } else {
                 Config {
                     authority_epoch: chunk.authority_epoch.clone(),
+                    rotation_operation: chunk.rotation_operation.clone(),
                     local_key: chunk.local_key,
                     server: chunk.server,
                     node: chunk.node,
@@ -3061,6 +3176,10 @@ impl Node {
                     peer_names: BTreeMap::new(),
                 }
             };
+            let mut config = config;
+            config
+                .rotation_operation
+                .clone_from(&chunk.rotation_operation);
             #[cfg(feature = "mesh-dns")]
             let config = {
                 let mut config = config;
@@ -3088,6 +3207,7 @@ impl Node {
         let dns_suffix_changed = false;
         if pending.server != chunk.server
             || pending.config.authority_epoch != chunk.authority_epoch
+            || pending.config.rotation_operation != chunk.rotation_operation
             || pending.next != chunk.index
             || pending.config.local_key != chunk.local_key
             || pending.config.node != chunk.node
@@ -3161,15 +3281,44 @@ impl Node {
         let pending = self.pending.take().ok_or(io::ErrorKind::InvalidData)?;
         let full_snapshot = pending.from_version.is_none();
         let config = pending.config;
-        if self
+        let authority_changed = self
             .config
             .as_ref()
-            .is_some_and(|old| old.authority_epoch != config.authority_epoch)
-        {
-            return self.apply_authority_replacement(config);
-        }
+            .is_some_and(|old| old.authority_epoch != config.authority_epoch);
         let completes_authority_reset =
             self.authority_reset == AuthorityResetState::AwaitingFullSnapshot && full_snapshot;
+        if authority_changed || completes_authority_reset {
+            // Validate before settlement; rejected authorities still fence stale peers.
+            let validation = (|| {
+                self.validate_snapshot(&config)?;
+                #[cfg(feature = "mesh-dns")]
+                crate::dns::Records::from_config(&config)?;
+                let proposed: Vec<_> = std::iter::once(config.addresses)
+                    .chain(config.peers.values().map(|peer| peer.peer.addresses))
+                    .collect();
+                Device::check_routes(&proposed)?;
+                if self.engine_kind == EngineKind::GotaTun {
+                    crate::gotatun_node::Engine::prepare_policy(
+                        &config,
+                        self.proxy_ingress.clone(),
+                    )?;
+                }
+                Ok::<_, io::Error>(())
+            })();
+            if let Err(error) = validation {
+                return Err(if authority_changed {
+                    self.fail_closed_authority_replacement(error, &config)
+                } else {
+                    error
+                });
+            }
+            if !authority_changed {
+                self.retire_settled_authority_rotation(config.rotation_operation.as_ref())?;
+            }
+        }
+        if authority_changed {
+            return self.apply_authority_replacement(config);
+        }
         // A lower revision under the same epoch is accepted on purpose when this node has a
         // Store: a database restored under a running server keeps that process's epoch but
         // rewinds its revisions, and refusing would strand every node (#382). The Store's
@@ -3211,6 +3360,17 @@ impl Node {
             .is_some_and(|old| old.version == config.version)
             && !completes_authority_reset
         {
+            // Operation metadata can clear at completion without advancing packet policy.
+            // Reconnect may replay that same revision; it still cannot change keys or access.
+            if self
+                .config
+                .as_ref()
+                .is_some_and(|old| crate::dataplane::same_runtime_content(old, &config))
+            {
+                self.save(Some(&config), true)?;
+                self.config = Some(config);
+                return Ok(true);
+            }
             return self.upgrade_legacy_binding(config);
         }
         if let Some(base) = snapshot_base.as_ref() {
@@ -3287,17 +3447,12 @@ impl Node {
     ) -> io::Result<()> {
         self.apply_transaction(config, Some(snapshot_base), true)
     }
-    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
-    fn apply_transaction(
-        &mut self,
-        config: Config,
-        snapshot_base: Option<&Config>,
-        force_reconcile: bool,
-    ) -> io::Result<()> {
-        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
-        let dns_records = crate::dns::Records::from_config(&config)?;
-        #[cfg(feature = "cutoff-measure")]
-        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
+    /// Check complete peer identities and address ownership before any destructive reset.
+    ///
+    /// Staging checks each chunk's headers; these cross-peer checks need the assembled snapshot.
+    /// # Errors
+    /// Refuses address changes without overlap or colliding peer keys and addresses.
+    fn validate_snapshot(&self, config: &Config) -> io::Result<()> {
         if self
             .config
             .as_ref()
@@ -3337,6 +3492,20 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        Ok(())
+    }
+    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
+    fn apply_transaction(
+        &mut self,
+        config: Config,
+        snapshot_base: Option<&Config>,
+        force_reconcile: bool,
+    ) -> io::Result<()> {
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+        let dns_records = crate::dns::Records::from_config(&config)?;
+        #[cfg(feature = "cutoff-measure")]
+        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
+        self.validate_snapshot(&config)?;
         let mut packet_policy = if self.engine_kind == EngineKind::GotaTun {
             self.gotatun
                 .as_ref()
@@ -4052,46 +4221,6 @@ mod tests {
         assert!(resurrected.is_none(), "recovery recreated a retired key");
     }
 
-    /// A finished `GotaTun` marker authorizes only its predecessor or candidate snapshot key.
-    #[test]
-    fn j356_completed_snapshot_binding_rejects_an_unrelated_key() {
-        let directory = crate::node_state::tests::Directory::new();
-        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
-        let previous = [0x11; 32];
-        let candidate = [0x22; 32];
-        let unrelated = [0x33; 32];
-        let previous_public = Key::from_private(&previous).expect("previous key").1;
-        let candidate_public = Key::from_private(&candidate).expect("candidate key").1;
-        let unrelated_public = Key::from_private(&unrelated).expect("unrelated key").1;
-        store.record_engine(EngineKind::GotaTun).expect("engine");
-        store
-            .record_interface(&candidate_public)
-            .expect("candidate interface record");
-        store
-            .write_private_key(&candidate)
-            .expect("candidate key file");
-        store
-            .save_rotation_secret(&crate::node_state::RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
-                sequence: 1,
-                previous,
-                candidate,
-                commit_requested: true,
-                completed: false,
-            })
-            .expect("commit intent");
-        store
-            .complete_rotation_secret("00000000-0000-4000-8000-000000000367", 1)
-            .expect("finish rotation");
-
-        assert!(gotatun_snapshot_binding_is_authorized(&store, previous_public).expect("old"));
-        assert!(gotatun_snapshot_binding_is_authorized(&store, candidate_public).expect("new"));
-        assert!(
-            !gotatun_snapshot_binding_is_authorized(&store, unrelated_public).expect("unrelated"),
-            "a completed marker does not authorize an unrelated saved binding"
-        );
-    }
-
     /// Both Linux engines require a live identity and owned link before rotation can start.
     #[test]
     fn inactive_engines_refuse_rotation_without_reading_or_mutating_state() {
@@ -4128,6 +4257,7 @@ mod tests {
                 dns_names: cfg!(target_os = "linux"),
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
                 public_key: PublicKey([1; 32]),
                 port: 44000,
             }),
@@ -4135,6 +4265,7 @@ mod tests {
         };
         let config = Config {
             authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(1)),
             local_key: None,
             node: NodeId(2),
@@ -4206,6 +4337,7 @@ mod tests {
         };
         let config = Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(1),

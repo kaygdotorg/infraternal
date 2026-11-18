@@ -102,6 +102,11 @@ pub(super) struct Inputs {
     /// order. This lets a partial PTY write credit only the writers whose bytes
     /// actually went out.
     segments: VecDeque<(u64, usize)>,
+    /// Whether a viewer's size has ever been applied to the terminal. Until
+    /// then the size is the spawn placeholder (80x24), which no viewer saw:
+    /// bytes written at it are not "another viewer's width", so an opener
+    /// reporting a different size keeps the raw replay (#521).
+    pub(super) viewer_sized: bool,
     /// Most runs `segments` may hold. Bounds bookkeeping when writers alternate
     /// byte by byte.
     #[cfg(feature = "process-per-user")]
@@ -127,6 +132,7 @@ impl Inputs {
                 },
             )]),
             segments: VecDeque::new(),
+            viewer_sized: false,
             #[cfg(feature = "process-per-user")]
             segment_limit: MAX_FRAME,
         }

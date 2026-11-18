@@ -57,7 +57,16 @@ url = { workspace = true, optional = true }
 # Both node platforms use the same pinned source to keep Nix vendoring unambiguous (D352).
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # ring remains the one crypto backend (D289).
-gotatun = { version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "9d7c3ffceaf30386c22f92eb0e06f5e9038d04f7", default-features = false, features = ["device", "ring"], optional = true }
+# The pinned fork commit (#260) runs receive batches inline on macOS by default
+# (GOTATUN_BENCH_RX_INLINE_MAX=0 turns that off; Linux keeps it off). Connected
+# per-endpoint sends on macOS stay opt-in (GOTATUN_BENCH_MAC_CONNECTED=1): while
+# they bind, another local user can take over the WireGuard port, so they wait
+# for a design without that window. With them off, the Mac binds the WireGuard
+# port as two exclusive sockets, AF_INET and IPv6-only, so no other local user
+# can bind beside it before or after start (#260, J826, J834). A port another
+# socket already holds is refused (EADDRINUSE), the same as a port taken
+# outright.
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

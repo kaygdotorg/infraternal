@@ -12,7 +12,7 @@
  * This module is a lazy chunk, loaded after sign-in and never on the sign-in path.
  */
 import { mountToast } from "../../../../packages/ui/src/toast";
-import { ICON_INFO } from "../../../../packages/ui/src/icons";
+import { ICON_INFO, ICON_PAUSE } from "../../../../packages/ui/src/icons";
 import type { StatusActionPref } from "../../../../packages/ui/src/settings-panels";
 import type { SettingsSource } from "./views/settings-body.on-demand";
 import { onDemand, whenIdle } from "../on-demand";
@@ -51,6 +51,8 @@ import { createProductRows } from "./settings-rows/product-source";
 
 import type { CanvasStore } from "./model/store";
 import { watchPendingNotice } from "./pending-notice";
+import { mountStartupNotice, startupProblem, watchStartup } from "./startup-notice";
+import { TAKEOVER_COPY, watchTakeover } from "./takeover-notice";
 
 /** How long the host list waits for the first terminal to settle before it starts on its own. */
 const HOSTS_FALLBACK_MS = 2000;
@@ -92,7 +94,43 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // name, so only root (execution uid 0) can be named; any other account shows the host alone until the server says it.
   const embedded: { name: string; user?: string; os?: HostPlatform } = { name: options.host.name };
   let canvasReady: (() => void) | undefined, osAsked = false;
+  // Until the layout arrives the page shows only the core screen's placeholder pane; if the first connection cannot be
+  // made, this says why in that pane instead of leaving it blank (#523). It ends on the first welcome.
+  const startup = watchStartup(mountStartupNotice(core.panes.querySelector<HTMLElement>(".pane-card") ?? core.panes, () => connection.connectNow()));
+  // Set by a close that refused this socket for the account's connection limit, or that gave it to a newer tab, and read
+  // once by the link-lost check that follows it. The server checked the session before either, so that close needs no
+  // session check. Each refused retry would otherwise spend one, and a few pages over the limit used up the account's
+  // sign-in request budget: every load then failed with "Too many attempts" (#523 spec).
+  let sessionKnownValid = false;
+  // After the first welcome: what the page says when a newer tab took its connection, or the account is full (#523,
+  // option B). One persistent toast; its action asks the connection to try now.
+  let takeoverToast: string | undefined;
+  const takeover = watchTakeover({
+    show: (problem) => {
+      const copy = TAKEOVER_COPY[problem];
+      takeoverToast = core.toast.show({
+        key: "connection-takeover", message: copy.message, duration: 0,
+        ...(problem === "paused" ? { icon: ICON_PAUSE } : { tone: "error" as const }),
+        action: { label: copy.action, onSelect: () => connection.connectNow() },
+        onClose: () => takeover.gone(problem),
+      });
+    },
+    // Only our own toast: a bare `dismiss()` would clear every other notice too.
+    hide: () => { if (takeoverToast !== undefined) core.toast.dismiss(takeoverToast); takeoverToast = undefined; },
+  }, () => document.hidden === true);
+  let startupOver = false;
+  const onTakeoverVisibility = (): void => takeover.visibility();
+  document.addEventListener("visibilitychange", onTakeoverVisibility);
   const connection: MuxConnection = new MuxConnection({
+    onUnwelcomedClose: (reason) => {
+      sessionKnownValid = startupProblem(reason) === "limit";
+      // Before the canvas exists the placeholder pane says it; afterwards the toast does. Never both.
+      if (startupOver) takeover.refused(reason); else startup.closed(reason);
+    },
+    onPausedChange: (paused) => {
+      if (paused) sessionKnownValid = true;
+      takeover.paused(paused);
+    },
     ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
     // Declared in the Hello of each socket, only while app windows are wanted (D208; off by default).
     desktop: appWindowsWanted,
@@ -100,7 +138,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.onRecoveryCompleted ? { onRecoveryCompleted: options.onRecoveryCompleted } : {}),
     onConnectionChange: (connected) => {
       core.setConnection(connected);
-      if (!connected) options.onSessionCheck?.();
+      const skipSessionCheck = sessionKnownValid;
+      sessionKnownValid = false;
+      if (!connected && !skipSessionCheck) options.onSessionCheck?.();
       if (!connected || osAsked) return;
       osAsked = true;
       connection.call("host.facts.read", { includeLive: false }).then((facts) => {
@@ -215,9 +255,16 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId === id) canvas.cx.win.close(rec);
     canvas.flush();
   })).then((adapter) => { readyRemoval = adapter; });
+  const offStartup = connection.onWelcome(() => startup.welcomed());
   const saved = await store.load();
+  offStartup();
+  startup.dispose();
+  startupOver = true;
+  const offTakeoverWelcome = connection.onWelcome(() => takeover.welcomed());
+  /** Ends the takeover toast and its listeners (both teardown paths). */
+  const disposeTakeover = (): void => { offTakeoverWelcome(); document.removeEventListener("visibilitychange", onTakeoverVisibility); takeover.dispose(); };
   if (options.isCurrent?.() === false) {
-    disposed = true; offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
+    disposed = true; disposeTakeover(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
     throw Error("The signed-in screen changed while layout was loading.");
   }
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
@@ -391,7 +438,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       versionArea?.dispose();
       account?.dispose();
       canvas.flush();
-      offLook(); offLayout(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose();
+      offLook(); offLayout(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); disposeTakeover();
       window.removeEventListener("pointerup", dropped);
       window.removeEventListener("pointercancel", dropped);
       offRoundTrip();

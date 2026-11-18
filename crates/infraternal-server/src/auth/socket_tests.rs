@@ -2,6 +2,9 @@
 use super::*;
 #[path = "socket_tests/startup_guard.rs"]
 mod startup_guard;
+/// A full account's new page takes over its own longest-hidden tab (#523).
+#[path = "socket_tests/takeover.rs"]
+mod takeover;
 
 /// Minimal descriptor catalog for the real socket tests of generic host-facts authorization.
 const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[
@@ -181,6 +184,7 @@ async fn socket_authority_latency_at_user_capacity() {
     server.abort();
 }
 
+/// Sockets that never send Hello still count against the account's limit, so a 17th is refused with the limit reason.
 #[tokio::test(start_paused = true)]
 async fn half_open_sockets_obey_user_limit() {
     let _guard = SERIAL.lock().await;
@@ -195,15 +199,48 @@ async fn half_open_sockets_obey_user_limit() {
         assert_server_hello(&mut socket).await;
         sockets.push(socket);
     }
-    let seventeenth = connect_async(test_ws_request(address, &cookie)).await;
-    assert!(
-        matches!(seventeenth, Err(tokio_tungstenite::tungstenite::Error::Http(ref response))
-        if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE),
-        "17 sockets without Hello bypassed the per-user admission limit"
-    );
+    assert_refused_over_limit(address, &cookie).await;
     server.abort();
 }
 
+/// The 17th socket of an account is upgraded only to be closed at once with the limit's own reason (#523): a
+/// bare 503 reached the page as a failed socket it could not explain, so it sat blank.
+async fn assert_refused_over_limit(address: std::net::SocketAddr, cookie: &str) {
+    let (mut seventeenth, _) = connect_async(test_ws_request(address, cookie))
+        .await
+        .expect("the limit refusal is a close frame, not an HTTP error");
+    let mut wire_close = false;
+    let closed = loop {
+        match seventeenth.next().await {
+            Some(Ok(Message::Close(frame))) => break frame,
+            Some(Ok(Message::Binary(bytes))) => {
+                // The protocol's own Close frame, which a browser can read even when it loses the WebSocket reason.
+                if let Frame::Close { code, reason } = decode_muxed_frame(&bytes).unwrap().frame {
+                    assert_eq!(
+                        (code, reason),
+                        (1008, "this account has too many open connections")
+                    );
+                    wire_close = true;
+                }
+            }
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+            other => panic!("17th socket was not closed with the limit reason: {other:?}"),
+        }
+    };
+    assert!(
+        wire_close,
+        "the limit refusal sends the protocol Close frame first"
+    );
+    let frame = closed.expect("the limit refusal names its reason");
+    assert_eq!(u16::from(frame.code), 1008);
+    assert_eq!(
+        frame.reason.as_str(),
+        "this account has too many open connections"
+    );
+}
+
+/// A handshake that never finishes keeps its slot only until the handshake deadline; until then a new socket is
+/// refused with the limit reason.
 #[tokio::test(start_paused = true)]
 async fn expired_handshake_releases_user_permits() {
     let _guard = SERIAL.lock().await;
@@ -226,11 +263,7 @@ async fn expired_handshake_releases_user_permits() {
     }
     // Admission remains full one millisecond before the production deadline.
     tokio::time::advance(Duration::from_millis(4999)).await;
-    assert!(matches!(
-        connect_async(test_ws_request(address, &cookie)).await,
-        Err(tokio_tungstenite::tungstenite::Error::Http(ref response))
-            if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE
-    ));
+    assert_refused_over_limit(address, &cookie).await;
     tokio::time::advance(Duration::from_millis(1)).await;
     for socket in &mut held {
         assert_socket_closed(socket).await;

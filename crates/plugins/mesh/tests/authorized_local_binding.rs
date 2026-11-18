@@ -46,6 +46,7 @@ fn check(backend: Backend) {
     let identity = node.up().unwrap();
     let mut old = Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: None,
         node: NodeId(1),

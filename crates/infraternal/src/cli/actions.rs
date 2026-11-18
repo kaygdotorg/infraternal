@@ -1,7 +1,9 @@
 //! Builds the validated action registry from built-in and enabled component plugins.
 
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
+use infraternal_plugin_api::ActionPermission;
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionPermission, ActionRegistry, ActionTarget,
+    ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget,
     CliDryRun as DryRun, CliHandler, JsonSchema, PluginDefinition, RegistryError,
 };
 
@@ -485,6 +487,11 @@ fn up_action() -> ActionDefinition {
         ],
         [],
     );
+    // Only builds with the host firewall code add its input below.
+    #[cfg_attr(
+        not(any(feature = "plugin-mesh", feature = "plugin-server")),
+        allow(unused_mut)
+    )]
     let mut inputs = vec![(
         "server".to_owned(),
         JsonSchema::string("HTTPS origin of the server."),

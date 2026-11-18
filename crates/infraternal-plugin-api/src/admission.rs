@@ -39,6 +39,9 @@ pub enum OpenRefusal {
     /// A root host's service manager did not answer in time, so no login was started. The host is
     /// busy; asking again may work.
     ProbeTimeout,
+    /// The host is being upgraded to the root infraternal agent (D376, D393). It opens no shells for
+    /// the moment and comes back by itself when the upgrade ends or is rolled back.
+    HostUpgrading,
     /// The terminal could not be opened for a reason the host does not detail.
     Unavailable,
     /// The host could not check or reserve the resources a terminal needs.
@@ -98,6 +101,20 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<OpenRefusal>(&json).unwrap(),
             OpenRefusal::NoSystemd
+        );
+    }
+
+    /// D393: an upgrade in progress is its own reason on the wire, so the browser can say the host will be back.
+    #[test]
+    fn host_upgrading_refusal_has_its_own_reason() {
+        let json = OpenRefusal::HostUpgrading.json().unwrap();
+        assert_eq!(
+            std::str::from_utf8(&json).unwrap(),
+            r#"{"error":"terminal unavailable","reason":"host_upgrading"}"#
+        );
+        assert_eq!(
+            serde_json::from_slice::<OpenRefusal>(&json).unwrap(),
+            OpenRefusal::HostUpgrading
         );
     }
 

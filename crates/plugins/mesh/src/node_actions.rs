@@ -46,6 +46,7 @@ pub const ACTIONS: &[ActionDef] = &[
         Effect::Read,
         &[
             "Read whether the mesh is on, its addresses, and which access rules apply.",
+            "Read the UDP port this machine is actually listening on.",
             "Read how this machine reaches its server: over the mesh, or over the enrolled port.",
             "With --json, data.public_key is the active public key only; the field is absent without a Mesh identity.",
         ],
@@ -400,6 +401,9 @@ struct IdentityProbe {
     key_rotation: bool,
     #[serde(default)]
     authority_epoch: bool,
+    /// Opt in to operation-bound rotation continuity metadata.
+    #[serde(default)]
+    rotation_continuity: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -450,6 +454,8 @@ pub enum Request {
         dns_names: bool,
         key_rotation: bool,
         authority_epoch: bool,
+        /// Whether the caller accepts rotation continuity metadata.
+        rotation_continuity: bool,
     },
     RotationPrepare(RotationOperation),
     RotationCommit(RotationOperation),
@@ -473,6 +479,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 dns_names: probe.dns_names,
                 key_rotation: probe.key_rotation,
                 authority_epoch: probe.authority_epoch,
+                rotation_continuity: probe.rotation_continuity,
             })
         }
         "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
@@ -532,6 +539,7 @@ fn identity_response(
         compact_access: identity.compact_access && requested.compact_access,
         key_rotation: identity.key_rotation && requested.key_rotation,
         authority_epoch: identity.authority_epoch && requested.authority_epoch,
+        rotation_continuity: identity.rotation_continuity && requested.rotation_continuity,
         #[cfg(feature = "mesh-dns")]
         dns_names: identity.dns_names && requested.dns_names,
     })
@@ -549,6 +557,9 @@ struct IdentityResponse {
     key_rotation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     authority_epoch: bool,
+    /// True only when both sides negotiated operation continuity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    rotation_continuity: bool,
     #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dns_names: bool,
@@ -616,6 +627,7 @@ impl AgentPlugin for MeshNodePlugin {
                     dns_names,
                     key_rotation,
                     authority_epoch,
+                    rotation_continuity,
                 } => {
                     let requested = IdentityProbe {
                         compact_access,
@@ -623,6 +635,7 @@ impl AgentPlugin for MeshNodePlugin {
                         dns_names,
                         key_rotation,
                         authority_epoch,
+                        rotation_continuity,
                     };
                     json!(identity_response(
                         node.ensure().map_err(|error| node_action_error(&error))?,
@@ -660,7 +673,19 @@ impl AgentPlugin for MeshNodePlugin {
                     } else {
                         "Waiting"
                     };
-                    let mut status = json!({"state":state,"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node),"enforcement":access_enforcement(node),"kernel_guard":kernel_guard_status(node)});
+                    let mut status = json!({
+                        "state": state,
+                        "version": node.config().map(|config| config.version),
+                        "addresses": node.config().map(|config| config.addresses),
+                        "peer_count": node.config().map_or(0, |config| config.peers.len()),
+                        "default_policy": node.config().map(|config| config.default_policy),
+                        "udp_port": node.listen_port(),
+                        "server_link": self.server_link,
+                        "engine": engine_health(node),
+                        "engine_selection": engine_selection(node),
+                        "enforcement": access_enforcement(node),
+                        "kernel_guard": kernel_guard_status(node),
+                    });
                     // Public identity is useful for continuity checks; private key material never leaves the node.
                     if let Some(public_key) = node.interface_key() {
                         status["public_key"] = json!(public_key.0);
@@ -865,6 +890,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: false,
+            rotation_continuity: false,
         }));
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
@@ -955,6 +981,7 @@ mod tests {
         let accepted = Chunk {
             access_updates: Vec::new(),
             authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            rotation_operation: None,
             server: Some(NodeId(2)),
             local_key: Some(identity.public_key),
             node: NodeId(1),
@@ -1037,6 +1064,7 @@ mod tests {
         let mut chunk = Chunk {
             access_updates: Vec::new(),
             authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
@@ -1116,6 +1144,10 @@ mod tests {
             status["server_link"],
             serde_json::to_value(&observed).expect("observed link")
         );
+        assert_eq!(
+            status["udp_port"], 10_254,
+            "mesh status reports the actual listener port"
+        );
         plugin.call("mesh.down", b"{}").expect("down");
         assert!(plugin.preferred_server().is_none());
         plugin.call("mesh.up", b"{}").expect("up");
@@ -1165,6 +1197,7 @@ mod tests {
         let (_, peer_key) = Key::generate().expect("peer key");
         let chunk = Chunk {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -1323,6 +1356,7 @@ mod tests {
         let chunk = Chunk {
             access_updates: Vec::new(),
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -1411,6 +1445,7 @@ mod identity_upgrade_tests {
             dns_names: true,
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let legacy = serde_json::json!(super::identity_response(
             Some(identity.clone()),
@@ -1427,11 +1462,13 @@ mod identity_upgrade_tests {
                 dns_names: true,
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
             },
         ));
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
         assert_eq!(negotiated["authority_epoch"], true);
+        assert_eq!(negotiated["rotation_continuity"], true);
         #[cfg(feature = "mesh-dns")]
         assert_eq!(negotiated["dns_names"], true);
         let compact_only = serde_json::json!(super::identity_response(
@@ -1444,6 +1481,7 @@ mod identity_upgrade_tests {
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
         assert!(compact_only.get("authority_epoch").is_none());
+        assert!(compact_only.get("rotation_continuity").is_none());
         #[cfg(feature = "mesh-dns")]
         assert!(compact_only.get("dns_names").is_none());
     }
@@ -1472,6 +1510,7 @@ mod peer_page_tests {
         };
         Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(1),

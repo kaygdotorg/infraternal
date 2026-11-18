@@ -40,6 +40,9 @@ pub struct Identity {
     /// This node accepts authenticated authority epochs on configuration chunks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_epoch: bool,
+    /// This node accepts operation-bound rotation continuity across authority epochs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rotation_continuity: bool,
 }
 
 /// Explicit pair rules replace this fallback, so port grants also narrow an open mesh.
@@ -101,6 +104,16 @@ pub struct ExposureIdentity {
     /// The optional DNS resolver remains a separate feature and does not follow from this field.
     pub dns_suffix: String,
 }
+/// Public proof that the authenticated coordinator still owns this exact rotation operation.
+/// A fresh database has no matching random operation UUID, even if its sequence restarts at one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotationContinuation {
+    /// Random operation identity retained in the coordinator database across process restarts.
+    pub operation_id: String,
+    /// Monotonic sequence within that database's node rotation history.
+    pub sequence: u64,
+}
 /// All fields are public. Private key material has no representation on this boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +132,9 @@ pub struct Config {
     /// changed peers; unchanged peers retain their sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_epoch: Option<String>,
+    /// The open coordinator operation; an exact match may retain its local journal on epoch change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_operation: Option<RotationContinuation>,
     pub node: NodeId,
     /// The coordinator's canonical single-label name for this node; absent on legacy snapshots.
     #[cfg(feature = "mesh-dns")]
@@ -143,6 +159,27 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_names: BTreeMap<NodeId, String>,
 }
+impl PeerPolicy {
+    /// Whether this peer's grants allow at least one network packet in either direction.
+    ///
+    /// The `GotaTun` node workers (Linux and macOS) install, and let through the handshake
+    /// admission guard, only peers for which this is true. A peer with no access gets no device
+    /// entry, so the node neither answers its handshakes nor keeps a session alive toward it
+    /// (#93478, J781, #483). The kernel engine keeps its complete inventory instead.
+    #[must_use]
+    pub fn has_network_access(&self) -> bool {
+        /// Whether one direction's rule allows at least one packet tuple.
+        fn allows_any(policy: &TrafficPolicy) -> bool {
+            match policy {
+                TrafficPolicy::All => true,
+                TrafficPolicy::Ports(ports) => !ports.is_empty(),
+                TrafficPolicy::None => false,
+            }
+        }
+        allows_any(&self.inbound) || allows_any(&self.outbound)
+    }
+}
+
 impl Config {
     /// Whether the Access policy lets `peer` start a TCP/22 connection to
     /// this node: the check mesh SSH makes on every connection (#221).
@@ -179,6 +216,9 @@ impl Config {
 pub(crate) fn same_runtime_content(left: &Config, right: &Config) -> bool {
     let mut normalized = left.clone();
     normalized
+        .rotation_operation
+        .clone_from(&right.rotation_operation);
+    normalized
         .authority_epoch
         .clone_from(&right.authority_epoch);
     normalized.version = right.version;
@@ -202,6 +242,9 @@ pub struct Chunk {
     /// Repeated in every part so a changed authenticated deployment epoch retires old peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_epoch: Option<String>,
+    /// The open coordinator operation; an exact match may retain its local journal on epoch change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_operation: Option<RotationContinuation>,
     /// Repeated on every chunk and checked before applying the complete policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
@@ -326,6 +369,7 @@ mod compatibility_tests {
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(3)),
             authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            rotation_operation: None,
             node: NodeId(1),
             #[cfg(feature = "mesh-dns")]
             name: None,

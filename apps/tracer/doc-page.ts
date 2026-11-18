@@ -18,6 +18,10 @@ if (searchButton) {
   const searchScript = "/docs/doc-search.js";
   const load = () => (search ??= (import(searchScript) as Promise<typeof import("./site-search")>).then((module) => module.installSiteSearch(searchButton)));
   searchButton.addEventListener("click", () => { void load().then((loaded) => loaded.open()); });
+  // Links marked `data-open-search` (the "not found" page) open the same search; they keep their address when scripts are off.
+  for (const opener of document.querySelectorAll("[data-open-search]")) {
+    opener.addEventListener("click", (event) => { event.preventDefault(); searchButton.click(); });
+  }
   document.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") {
       event.preventDefault();

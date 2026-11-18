@@ -1644,8 +1644,8 @@ dependencies = [
 
 [[package]]
 name = "gotatun"
-version = "0.10.2"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=9d7c3ffceaf30386c22f92eb0e06f5e9038d04f7#9d7c3ffceaf30386c22f92eb0e06f5e9038d04f7"
+version = "0.10.3"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6#987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
@@ -1658,6 +1658,8 @@ dependencies = [
  "either",
  "eyre",
  "futures",
+ "gotatun-crypto",
+ "gotatun-packet",
  "hmac 0.12.1",
  "ip_network",
  "ip_network_table",
@@ -1665,10 +1667,10 @@ dependencies = [
  "libc",
  "nix",
  "parking_lot",
+ "portable-atomic",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rand_core 0.6.4",
- "ring",
  "socket2",
  "thiserror 1.0.69",
  "tokio",
@@ -1677,6 +1679,29 @@ dependencies = [
  "typed-builder",
  "windows-sys 0.61.2",
  "x25519-dalek",
+ "zerocopy",
+]
+
+[[package]]
+name = "gotatun-crypto"
+version = "0.1.0"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6#987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6"
+dependencies = [
+ "ring",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "gotatun-packet"
+version = "0.1.0"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6#987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6"
+dependencies = [
+ "bitfield-struct",
+ "bytes",
+ "duplicate",
+ "either",
+ "eyre",
+ "thiserror 1.0.69",
  "zerocopy",
 ]
 
@@ -2123,6 +2148,7 @@ dependencies = [
  "infraternal-server",
  "infraternal-shim",
  "infraternal-status",
+ "mimalloc",
  "nix",
  "openssl",
  "qrcodegen",
@@ -2724,6 +2750,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2823,6 +2858,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -3893,13 +3937,13 @@ version = "3.0.1"
 dependencies = [
  "bitflags",
  "bytes",
- "chrono",
  "dashmap",
  "gloo-timers",
  "log",
  "serde",
  "serde_bytes",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-util",
  "wasm-bindgen-futures",

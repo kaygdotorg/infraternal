@@ -86,7 +86,7 @@ interface GhosttyActivityControls {
 /** How a terminal reports to the window that shows it: attach, output, disconnects, exit, refusals and session ids. All optional. */
 export interface TerminalHooks {
   /** Return true when a product surface presents the refusal and its session-list action. */
-  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction) => boolean;
+  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction, calm: boolean) => boolean;
   /** Only a public session id; writer/resume capabilities remain in memory. */
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
@@ -415,6 +415,12 @@ export class TerminalClient {
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
   private readonly prediction: PredictiveEcho | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
+  /**
+   * Whether the grid has been fitted to its host at least once. Until then `lastSize` is only the constructor's
+   * default, and reporting it would resize the shared session to 80x24 and back on every attach. The host then
+   * treats the reattach as a size change and repaints approximately instead of replaying (#521).
+   */
+  private sizeFitted = false;
   /** Stops the keyboard watcher that keeps the screen's height right (keyboard-viewport.ts). */
   private stopKeyboardWatch: (() => void) | undefined;
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
@@ -1270,11 +1276,17 @@ export class TerminalClient {
       this.openCallSent = false;
       if (!this.closed && this.conn.isOpen) {
         const refusal = terminalRefusal(error, this.config.hostName);
-        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action)) this.setStatus(refusal.message);
+        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action, refusal.calm === true)) this.setStatus(refusal.message);
       }
     });
   }
 
+  /**
+   * Sends AttachTerm for this window's session once nothing older is still being painted, so `lastOutSeq` names
+   * exactly what the screen shows. Grants the initial output credit and reports the grid size, but only once the
+   * grid has been fitted: the constructor's 80x24 default is no viewer's size (#521). Safe to call repeatedly; it
+   * returns early until every precondition holds.
+   */
   private tryAttach(): void {
     if (!this.attachRequested || !this.sessionId || this.attached || this.closed || this.exitReported || this.sessionGone || !this.conn.isOpen) return;
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
@@ -1290,7 +1302,8 @@ export class TerminalClient {
     });
     this.creditAvailable = INITIAL_CREDIT;
     this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
-    this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
+    // An unfitted default is not this viewer's size; the first fit reports the real one (#521).
+    if (this.sizeFitted) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     this.setStatus("Catching up…");
     this.hasAttached = true;
     this.wakeTerminal();
@@ -1706,7 +1719,12 @@ export class TerminalClient {
     this.drainOutput();
   }
 
-  /** Accepts a repaint only against free or replaced output credit, then drops the queued screen it supersedes. */
+  /**
+   * Takes a host repaint (Snapshot) valid at output offset `sequence`. It must not go backwards, and it may use only
+   * the credit already free on this stream plus the credit held by the queued output it replaces. It supersedes queued
+   * raw output and is painted on the next drain. The stale-screen note (D309) is settled only as far as the repaint
+   * carries output past the replay fence, because a repaint is the host's picture, not the program redrawing (#521).
+   */
   private acceptSnapshot(sequence: bigint, bytes: Uint8Array): void {
     performance.mark(`sw:snapshot:${this.streamId}`);
     performance.mark(`sw:snapshot:${this.streamId}`);
@@ -1721,7 +1739,8 @@ export class TerminalClient {
     }
     this.creditAvailable -= bytes.byteLength;
     this.receivedOutSeq = sequence;
-    this.staleWatch?.reset();
+    // A repaint with no output past the replay fence is not the program redrawing (D309, #521).
+    this.staleWatch?.repainted(sequence);
 
     // A snapshot replaces the parser's prior mode state before later live bytes are scanned.
     this.synchronizedOutput.reset();
@@ -1789,6 +1808,12 @@ export class TerminalClient {
       this.pendingWriteCompletion = onSnapshotWritten;
       this.pendingWriteSynchronizedBatch = false;
       this.writeSuppressingTerminalResponses(snapshot.bytes, onSnapshotWritten);
+      // #528: `reset()` above wiped the canvas, and the render loop draws only in its own animation-frame callback.
+      // During a flood this drain runs from an earlier write's callback, which comes after the render loop in the
+      // same frame, so the browser would show the wiped canvas for a frame. Drawing the parsed repaint here, in the
+      // task that reset it, means a frame shows the old screen or the new one, never neither. The render loop then
+      // finds no dirty rows, so a repaint costs one full draw either way.
+      this.repaintAll();
       return;
     }
 
@@ -2041,6 +2066,12 @@ export class TerminalClient {
     this.setStatus(message);
   }
 
+  /**
+   * Fits the grid to the host element on the next animation frame: whole cells of the current metrics, at least
+   * 20x6. A changed size resizes the terminal, whose resize event reports it to the host. The first fit also marks the
+   * size as real, and reports it directly when the grid already had it, so the attach never sends a default (#521).
+   * Coalesces repeated calls and does nothing while the window is closed, suspended or frozen.
+   */
   private scheduleFit(): void {
     if (this.fitQueued || this.closed || this.suspended || this.frozen) return;
     this.fitQueued = true;
@@ -2054,9 +2085,16 @@ export class TerminalClient {
       const metrics = this.cellMetrics();
       const cols = clamp(Math.floor(width / metrics.width), 20, 0xffff);
       const rows = clamp(Math.floor(height / metrics.height), 6, 0xffff);
+      const first = !this.sizeFitted;
+      this.sizeFitted = true;
       if (this.terminal.cols !== cols || this.terminal.rows !== rows) {
         this.wakeTerminal();
         this.terminal.resize(cols, rows);
+      } else if (first && this.attached) {
+        // The grid already had the fitted size, so no resize event follows: report it here, once.
+        const rect = this.config.host.getBoundingClientRect();
+        this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
+        this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
       }
     });
   }
@@ -2286,6 +2324,10 @@ export class TerminalClient {
     this.wakeTerminal();
   }
 
+  /**
+   * Draws every row of the current terminal state into the canvas now, in this task. A no-op while the renderer is
+   * silenced (frozen or released surface) or a synchronized-output batch holds paint, through the render wrapper.
+   */
   private repaintAll(): void {
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;

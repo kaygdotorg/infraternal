@@ -673,7 +673,7 @@ async fn build_router_core(
             let migration_source = legacy_state.clone();
             let migration_target = mesh_state.clone();
             // A database error fails start closed: guessing "not ours" here would mint a new key.
-            let own_keys = crate::embedded_mesh_state::server_node_keys(&pool)
+            let own_keys = crate::embedded_mesh_state::server_node_ownership(&pool)
                 .await
                 .map_err(|error| {
                     tracing::error!(
@@ -683,10 +683,11 @@ async fn build_router_core(
                     ServerError::InvalidConfiguration
                 })?;
             let migration = tokio::task::spawn_blocking(move || {
-                crate::embedded_mesh_state::migrate(
+                crate::embedded_mesh_state::migrate_preserving_rotation(
                     &migration_source,
                     &migration_target,
-                    &|public| own_keys.contains(public),
+                    &|public| own_keys.keys.contains(public),
+                    own_keys.rotation_open,
                 )
             })
             .await
@@ -946,6 +947,10 @@ fn remove_setup_token_socket_or_warn(data_dir: &Path, operation: &'static str) {
     }
 }
 
+/// Maximum WAL high-water allocation retained by a `SQLx` writer after reuse.
+/// This is not a live-WAL cap: a pinned snapshot may temporarily exceed it.
+const SQLX_WAL_RETAINED_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Open (creating it if needed) the server's SQLite database in `data_dir`,
 /// with the sqlx pool the server has always used.
 ///
@@ -967,6 +972,9 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
+        // Bound retained high-water allocation on every SQLx writer, including lazy replacements.
+        // Active readers can still pin a larger live WAL; reuse shrinks it after they release.
+        .pragma("journal_size_limit", SQLX_WAL_RETAINED_BYTES.to_string())
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -985,6 +993,10 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .map_err(ServerError::Storage)?;
     set_private_file(&data_dir.join("infraternal.sqlite"))
         .map_err(|_| ServerError::InvalidConfiguration)?;
+    tracing::info!(
+        sqlx_wal_retained_bytes = SQLX_WAL_RETAINED_BYTES,
+        "SQLx WAL retention limit configured; pinned readers may exceed it until reuse"
+    );
     Ok(pool)
 }
 
@@ -1369,6 +1381,99 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// A pinned reader may grow the WAL, but a later reuse must release its retained high-water size.
+    /// Hold every pool connection to verify the pragma also covers lazily opened writers.
+    #[tokio::test]
+    async fn sqlx_wal_shrinks_after_a_pinned_burst() {
+        let data_dir = temp_dir();
+        let pool = super::open_database(&data_dir).await.unwrap();
+        // Keep the session pool open but idle: SQLx commits cannot rely on its checkpoint hook.
+        let sessions = infraternal_db::Database::open(
+            data_dir.join("infraternal.sqlite"),
+            infraternal_db::Options {
+                readers: 2,
+                create_if_missing: false,
+                ..infraternal_db::Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut connections = Vec::new();
+        for _ in 0..8 {
+            connections.push(pool.acquire().await.unwrap());
+        }
+        let mut limits = {
+            let mut limits = Vec::new();
+            for connection in &mut connections {
+                limits.push(
+                    sqlx::query_scalar::<_, i64>("PRAGMA journal_size_limit")
+                        .fetch_one(&mut **connection)
+                        .await
+                        .unwrap(),
+                );
+            }
+            limits
+        };
+        let mut writer = connections.pop().unwrap();
+        let mut reader = connections.pop().unwrap();
+        sqlx::query("CREATE TABLE burst(v BLOB)")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN").execute(&mut *reader).await.unwrap();
+        let _: i64 = sqlx::query_scalar("SELECT count(*) FROM burst")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            sqlx::query("INSERT INTO burst VALUES(zeroblob(1048576))")
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+        }
+        let wal = data_dir.join("infraternal.sqlite-wal");
+        let burst = std::fs::metadata(&wal).unwrap().len();
+        let pinned: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("ROLLBACK").execute(&mut *reader).await.unwrap();
+        // A normal passive checkpoint and subsequent write reuse the WAL without a forced TRUNCATE.
+        let released: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO burst VALUES(zeroblob(8))")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let retained = std::fs::metadata(&wal).unwrap().len();
+        // Every other connection remains checked out, so acquisition must open a replacement.
+        writer.close().await.unwrap();
+        let mut replacement = pool.acquire().await.unwrap();
+        limits.push(
+            sqlx::query_scalar::<_, i64>("PRAGMA journal_size_limit")
+                .fetch_one(&mut *replacement)
+                .await
+                .unwrap(),
+        );
+        println!(
+            "SQLX_WAL burst_bytes={burst} retained_bytes={retained} connection_limits={limits:?} pinned_checkpoint={pinned:?} released_checkpoint={released:?}"
+        );
+        drop(connections);
+        drop(reader);
+        drop(replacement);
+        pool.close().await;
+        sessions.close().await;
+        std::fs::remove_dir_all(data_dir).unwrap();
+        assert!(burst > 8 * 1024 * 1024);
+        assert!(
+            retained <= 8 * 1024 * 1024,
+            "WAL retained {retained} bytes after reuse"
+        );
+        assert!(limits.iter().all(|limit| *limit == 8 * 1024 * 1024));
     }
 
     /// J696 P3 (#473): with `server --data ./x` (and the `./data` default)
@@ -2804,6 +2909,9 @@ pub(crate) async fn test_open_database(
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
+        // Bound retained high-water allocation on every SQLx writer, including lazy replacements.
+        // Active readers can still pin a larger live WAL; reuse shrinks it after they release.
+        .pragma("journal_size_limit", SQLX_WAL_RETAINED_BYTES.to_string())
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

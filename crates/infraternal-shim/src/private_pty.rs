@@ -155,7 +155,7 @@ pub fn lead_session(command: &mut std::process::Command) {
 ///
 /// `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` does it in one system call
 /// (Linux 5.11+). Older kernels answer `ENOSYS` (no `close_range`) or
-/// `EINVAL` (no flag); then each descriptor below `limit`, the open-file
+/// `EINVAL` (no flag); then each descriptor below `limit`, the hard open-file
 /// limit read before the fork, is marked with `fcntl`, which is slower but
 /// still allocates nothing. Descriptors at or above the limit can't have
 /// been opened under it.
@@ -200,8 +200,13 @@ unsafe fn mark_close_on_exec(limit: nix::libc::c_int) -> io::Result<()> {
 /// when the soft limit can't be read or is unlimited.
 const DEFAULT_NR_OPEN: nix::libc::c_int = 1 << 20;
 
-/// This process's soft limit on open descriptors, for
-/// [`mark_close_on_exec`]'s fallback.
+/// This process's HARD limit on open descriptors, for [`mark_close_on_exec`]'s
+/// fallback.
+///
+/// The hard limit, not the soft one (J727 P3-1): a descriptor opened while the
+/// soft limit was higher than it is now can sit at or above today's soft
+/// limit, and the walk must still reach it. The hard limit is the most any
+/// descriptor number of this process can have been opened under.
 fn open_file_limit() -> nix::libc::c_int {
     let mut limit = nix::libc::rlimit {
         rlim_cur: 0,
@@ -211,7 +216,12 @@ fn open_file_limit() -> nix::libc::c_int {
     if unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &raw mut limit) } == -1 {
         return DEFAULT_NR_OPEN;
     }
-    nix::libc::c_int::try_from(limit.rlim_cur).unwrap_or(DEFAULT_NR_OPEN)
+    descriptor_ceiling(limit)
+}
+
+/// The walk's ceiling for `limit`: its hard limit, or [`DEFAULT_NR_OPEN`] when that is unlimited or too big for a descriptor number.
+fn descriptor_ceiling(limit: nix::libc::rlimit) -> nix::libc::c_int {
+    nix::libc::c_int::try_from(limit.rlim_max).unwrap_or(DEFAULT_NR_OPEN)
 }
 
 /// Open the slave of `master` without a path lookup (Linux 4.13+).
@@ -256,6 +266,21 @@ fn wait_for_clock_after(seconds: i64, nanoseconds: i64) -> io::Result<()> {
 mod tests {
     //! The private terminal refuses the account and catches an intruder.
     use super::*;
+
+    /// J727 P3-1: the fallback walk must reach descriptors opened under a higher soft limit, so it follows the hard one.
+    #[test]
+    fn fallback_walk_follows_the_hard_limit() {
+        let limit = nix::libc::rlimit {
+            rlim_cur: 1024,
+            rlim_max: 4096,
+        };
+        assert_eq!(descriptor_ceiling(limit), 4096);
+        let unlimited = nix::libc::rlimit {
+            rlim_cur: 1024,
+            rlim_max: nix::libc::RLIM_INFINITY,
+        };
+        assert_eq!(descriptor_ceiling(unlimited), DEFAULT_NR_OPEN);
+    }
 
     /// Whether this test runs as root, which bypasses file modes.
     fn root() -> bool {
@@ -358,11 +383,24 @@ mod tests {
             // sleep: waiting for the child to execute its program; there is no event for it.
             std::thread::sleep(Duration::from_millis(5));
         }
-        let mut held: Vec<u32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-            .collect();
-        held.sort_unstable();
+        // The kernel points `exe` at the new program a moment BEFORE it closes the
+        // close-on-exec descriptors (std's own error pipe is one), so a single read can
+        // see that pipe. A leaked descriptor never goes away, so wait for the table to
+        // settle and judge the last reading.
+        let read_held = || {
+            let mut held: Vec<u32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+                .collect();
+            held.sort_unstable();
+            held
+        };
+        let mut held = read_held();
+        while held != [0, 1, 2] && std::time::Instant::now() < deadline {
+            // sleep: the kernel closes the close-on-exec descriptors right after it switches `exe`; there is no event for it.
+            std::thread::sleep(Duration::from_millis(5));
+            held = read_held();
+        }
         let _ = child.kill();
         let _ = child.wait();
         drop(leaked);

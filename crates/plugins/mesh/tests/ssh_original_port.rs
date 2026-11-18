@@ -74,6 +74,7 @@ with socket.socket(socket.AF_PACKET,socket.SOCK_RAW) as raw:
 fn configuration() -> Config {
     Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: None,
         node: NodeId(2),

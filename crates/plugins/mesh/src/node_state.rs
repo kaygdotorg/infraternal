@@ -61,6 +61,8 @@ pub struct Store {
     rotation_path: PathBuf,
     #[cfg(target_os = "linux")]
     engine_path: PathBuf,
+    /// The non-secret UDP port selected for the next automatic node start.
+    listen_port_path: PathBuf,
     key_path: PathBuf,
     // Authority epoch and reset marker live beside the public snapshot, which keeps the shape
     // the previous release parses (D295, #382 P2). See [`AuthorityRecord`].
@@ -204,6 +206,33 @@ fn lock_mesh_store_writer(
     })
 }
 
+/// Holds one update of a file in the mesh state directory for a caller with no Store handle.
+///
+/// The writer lock is declared first so it is released before the directory lease.
+#[cfg(target_os = "macos")]
+pub(crate) struct MeshStateUpdateGuard {
+    _writer: MeshStoreWriteGuard,
+    _lease: nix::fcntl::Flock<fs::File>,
+}
+
+/// Serialize one update of a file in the mesh state directory `path` with every Store's writes.
+///
+/// The Mac node's compare-and-replace of a full snapshot uses this instead of an exclusive lock
+/// on the directory itself. That exclusive lock now belongs to migration alone, and the node keeps its
+/// own Store open, so its shared lease would block an exclusive lock taken in the same process
+/// forever. The lease taken here is shared too, so a waiting migration still keeps this update out.
+/// # Errors
+/// Refuses an unsafe directory or lock file and reports lock failures.
+#[cfg(target_os = "macos")]
+pub(crate) fn lock_mesh_state_update(path: &Path) -> io::Result<MeshStateUpdateGuard> {
+    let lease = lock_mesh_directory_shared(path)?;
+    let writer = lock_mesh_store_writer(path, &lease)?;
+    Ok(MeshStateUpdateGuard {
+        _writer: writer,
+        _lease: lease,
+    })
+}
+
 impl Store {
     /// Read an owned private directory's public snapshot without following symlinks.
     /// # Errors
@@ -223,6 +252,7 @@ impl Store {
         let rotation_path = parent.join("mesh-key-rotation.bin");
         #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
+        let listen_port_path = parent.join("mesh-listen-port.json");
         let key_path = parent.join("mesh-private-key");
         let authority_path = parent.join(AUTHORITY_FILE);
         sweep_private_temporaries(&key_path, &directory_lease)?;
@@ -255,6 +285,7 @@ impl Store {
                 rotation_path,
                 #[cfg(target_os = "linux")]
                 engine_path,
+                listen_port_path,
                 key_path,
                 authority_path,
                 route_body: Mutex::new(route_body),
@@ -291,6 +322,7 @@ impl Store {
             route_path: parent.join("mesh-routes.json"),
             interface_path: parent.join("mesh-interface.json"),
             rotation_path,
+            listen_port_path: parent.join("mesh-listen-port.json"),
             key_path,
             authority_path: parent.join(AUTHORITY_FILE),
             route_body: Mutex::new(route_body),
@@ -563,6 +595,21 @@ impl Store {
         }
         result
     }
+    /// Prove that a replacement snapshot still names this journal's exact operation.
+    /// Missing or different operations retire the journal through the ordinary authority fence.
+    /// # Errors
+    /// Refuses an unsafe or malformed journal instead of guessing at continuity.
+    pub(crate) fn rotation_matches(
+        &self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<bool> {
+        let Some(operation) = operation else {
+            return Ok(false);
+        };
+        Ok(self.rotation_secret()?.is_some_and(|state| {
+            state.operation_id == operation.operation_id && state.sequence == operation.sequence
+        }))
+    }
     /// Retire the predecessor private bytes and keep its public key in the retry marker.
     /// # Errors
     /// Refuses a stale operation or a failed atomic durable replacement.
@@ -613,6 +660,36 @@ impl Store {
     pub(crate) fn recorded_engine(&self) -> io::Result<Option<crate::gotatun_node::EngineKind>> {
         read_public(&self.engine_path)
     }
+
+    /// Remember the automatic listener choice outside the public peer snapshot.
+    ///
+    /// The record keeps the default port stable and lets a node reuse an ephemeral fallback
+    /// after the default was occupied. Explicit environment overrides still win on each start;
+    /// callers record the standard port after a successful override so removing it resets to the
+    /// product default.
+    /// # Errors
+    /// Rejects zero and the reserved kernel `WireGuard` port, or reports an unsafe state file.
+    pub(crate) fn record_listen_port(&self, port: u16) -> io::Result<()> {
+        if port == 0 || port == 51_820 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        write_public(
+            &self.listen_port_path,
+            &serde_json::to_vec(&port).map_err(io::Error::other)?,
+        )
+    }
+
+    /// Read the saved automatic listener choice, if this node has started before.
+    /// # Errors
+    /// Rejects malformed or reserved values and unsafe state-file metadata.
+    pub(crate) fn recorded_listen_port(&self) -> io::Result<Option<u16>> {
+        let port = read_public(&self.listen_port_path)?;
+        if port.is_some_and(|port| port == 0 || port == 51_820) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(port)
+    }
+
     /// Create a durable private key file without replacing an existing identity.
     /// The bytes never enter the public state snapshot or a log.
     /// # Errors
@@ -859,7 +936,7 @@ impl Store {
             }
             if next.version == old.version
                 && same_authority
-                && next != old
+                && !crate::dataplane::same_runtime_content(next, old)
                 && !authorized_reset_completion
             {
                 // Equal-revision changes only normalize an enrollment binding or a journal-proven
@@ -978,6 +1055,10 @@ pub(crate) struct AuthorityRecord {
     /// The server authority epoch the saved snapshot came from, if it carried one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) epoch: Option<String>,
+    /// Snapshot metadata retained for exact-base persistence checks, never a continuity proof.
+    /// Reset recovery revalidates the operation from the incoming authenticated full snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rotation_operation: Option<crate::dataplane::RotationContinuation>,
     /// True after a new authority was fenced and until its first full snapshot is saved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) reset_pending: bool,
@@ -1037,10 +1118,14 @@ pub(crate) fn split_authority(
     let epoch = stripped
         .as_mut()
         .and_then(|config| config.authority_epoch.take());
+    let rotation_operation = stripped
+        .as_mut()
+        .and_then(|config| config.rotation_operation.take());
     (
         stripped,
         AuthorityRecord {
             epoch,
+            rotation_operation,
             reset_pending,
         },
     )
@@ -1060,6 +1145,7 @@ pub(crate) fn merge_authority(
     let Some(config) = config else {
         return;
     };
+    config.rotation_operation = record.rotation_operation;
     if config.authority_epoch.is_none() {
         config.authority_epoch = record.epoch;
     }
@@ -1414,6 +1500,7 @@ pub(crate) mod tests {
             authority_reset_pending: false,
             config: Some(Config {
                 authority_epoch: None,
+                rotation_operation: None,
                 local_key: Some(local_key),
                 server: None,
                 node: crate::policy::model::NodeId(1),
@@ -1518,6 +1605,7 @@ pub(crate) mod tests {
             &mut state.authority_reset_pending,
             AuthorityRecord {
                 epoch: Some("00000000-0000-4000-8000-0000000002c1".to_owned()),
+                rotation_operation: None,
                 reset_pending: true,
             },
         );
@@ -1528,6 +1616,39 @@ pub(crate) mod tests {
                 .as_ref()
                 .and_then(|config| config.authority_epoch.as_deref()),
             Some("00000000-0000-4000-8000-0000000002c1")
+        );
+    }
+
+    /// Operation metadata stays out of the rollback snapshot but round-trips for exact-base saves.
+    #[test]
+    fn rotation_metadata_uses_the_authority_record_not_the_legacy_snapshot() {
+        let mut state = binding_state(crate::policy::model::PublicKey([5; 32]));
+        let operation = crate::dataplane::RotationContinuation {
+            operation_id: "00000000-0000-4000-8000-000000000534".into(),
+            sequence: 1,
+        };
+        state
+            .config
+            .as_mut()
+            .expect("bound fixture snapshot")
+            .rotation_operation = Some(operation.clone());
+        let (body, record) = encode_state(&state).expect("encode the legacy snapshot");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode the legacy snapshot");
+        assert!(json["config"].get("rotation_operation").is_none());
+        let mut restored: State =
+            serde_json::from_slice(&body).expect("decode the legacy snapshot");
+        merge_authority(
+            restored.config.as_mut(),
+            &mut restored.authority_reset_pending,
+            record,
+        );
+        assert_eq!(
+            restored
+                .config
+                .expect("restored fixture snapshot")
+                .rotation_operation,
+            Some(operation)
         );
     }
 
@@ -1759,6 +1880,7 @@ pub(crate) mod tests {
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let mut config = Config {
             authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            rotation_operation: None,
             local_key: None,
             server: Some(crate::policy::model::NodeId(1)),
             node: crate::policy::model::NodeId(2),
@@ -2106,6 +2228,44 @@ pub(crate) mod tests {
                 .any(|window| window == b"gotatun")
         );
     }
+
+    /// A default listener choice survives a new Store without entering the public peer snapshot.
+    #[test]
+    fn selected_mesh_listener_port_is_durable_and_private() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+
+        assert_eq!(store.recorded_listen_port().expect("no saved port"), None);
+        store
+            .record_listen_port(10_254)
+            .expect("save listener port");
+        drop(store);
+
+        let (store, state) = Store::open(&directory.0).expect("reopen listener state");
+        assert_eq!(
+            store.recorded_listen_port().expect("saved port"),
+            Some(10_254)
+        );
+        assert_eq!(
+            state.config, None,
+            "the listener port stays outside the peer snapshot"
+        );
+        assert_eq!(
+            fs::metadata(&store.listen_port_path)
+                .expect("listener metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store
+            .record_listen_port(49_123)
+            .expect("replace fallback port");
+        assert_eq!(
+            store.recorded_listen_port().expect("updated port"),
+            Some(49_123)
+        );
+    }
+
     /// Records owned routes separately while preserving the legacy accepted-state bytes.
     #[test]
     fn route_recording_preserves_the_legacy_accepted_state_format() {
@@ -2113,6 +2273,7 @@ pub(crate) mod tests {
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let config = Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),

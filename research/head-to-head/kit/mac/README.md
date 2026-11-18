@@ -5,6 +5,7 @@
 The Mac VM (`infraternal-macos-01-std`) and an arm64 Linux VM share one bridge. Each window
 runs every engine once: GotaTun pin (`pin`), GotaTun candidate (`cand`), Tailscale and NetBird
 userspace, in both directions (`mac-tx`: Mac sends, `mac-rx`: Linux sends) at 1 and 8 flows.
+`REPEAT=N` repeats the whole design with unique window ids (`<run>-w1…`); the report refuses a window listed twice.
 Run from a fresh checkout of dev; never from a hand-edited copy (owner rule: latest code).
 
 | file | role |

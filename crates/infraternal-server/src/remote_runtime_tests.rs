@@ -1171,6 +1171,44 @@ async fn promotion_blocks_new_terminal_admission_until_its_guard_drops() {
     assert!(hosts.admit_terminal_open(host).is_ok());
 }
 
+/// D393: only the promotion guard's bit reads as "being upgraded", and it ends with the guard.
+///
+/// A full open counter and a poisoned admission map are refused too, but as `Unavailable`: a broken
+/// map must not tell every person that every host is being upgraded.
+#[tokio::test]
+async fn only_the_promotion_guard_refuses_as_upgrading() {
+    let hosts = RemoteHosts::default();
+    let host = Uuid::from_u128(0x524);
+    let promotion = hosts.block_terminal_opens(host).await.unwrap();
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Upgrading)
+    );
+    assert!(hosts.admit_terminal_open(Uuid::from_u128(0x525)).is_ok());
+    drop(promotion);
+    assert!(hosts.admit_terminal_open(host).is_ok());
+
+    let full = hosts.terminal_admission(host).unwrap();
+    full.state.store(OPEN_COUNT_MASK, AtomicOrdering::Release);
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Unavailable)
+    );
+    full.state.store(0, AtomicOrdering::Release);
+
+    let map = std::sync::Arc::clone(&hosts.8);
+    let poisoned = std::thread::spawn(move || {
+        let _held = map.lock().unwrap();
+        panic!("poison the admission map on purpose");
+    })
+    .join();
+    assert!(poisoned.is_err());
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Unavailable)
+    );
+}
+
 /// A promotion waits for open sessions admitted before it closed the host gate.
 #[tokio::test]
 async fn promotion_waits_for_an_admitted_terminal_open_to_finish() {
