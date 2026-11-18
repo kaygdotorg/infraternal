@@ -40,7 +40,7 @@ argon2 = "0.5"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tower-log", "tracing", "ws"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-openssl"] }
 bytes = "1"
-base64 = "0.22"
+base64 = "0.23"
 bip39 = { version = "2.2", features = ["rand"] }
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
