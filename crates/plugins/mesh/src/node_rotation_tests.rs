@@ -1610,3 +1610,43 @@ fn j618_failed_rollback_keeps_a_reused_address_off_its_old_owners_grants() {
         "node 3 holds 10.254.0.2 in the engine, but the filter admitted it under node 2's grants"
     );
 }
+
+/// A finished `GotaTun` marker authorizes only its predecessor or candidate snapshot key.
+#[test]
+fn j356_completed_snapshot_binding_rejects_an_unrelated_key() {
+    let directory = crate::node_state::tests::Directory::new();
+    let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
+    let previous = [0x11; 32];
+    let candidate = [0x22; 32];
+    let unrelated = [0x33; 32];
+    let previous_public = Key::from_private(&previous).expect("previous key").1;
+    let candidate_public = Key::from_private(&candidate).expect("candidate key").1;
+    let unrelated_public = Key::from_private(&unrelated).expect("unrelated key").1;
+    store.record_engine(EngineKind::GotaTun).expect("engine");
+    store
+        .record_interface(&candidate_public)
+        .expect("candidate interface record");
+    store
+        .write_private_key(&candidate)
+        .expect("candidate key file");
+    store
+        .save_rotation_secret(&crate::node_state::RotationSecret {
+            operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+            sequence: 1,
+            previous,
+            candidate,
+            commit_requested: true,
+            completed: false,
+        })
+        .expect("commit intent");
+    store
+        .complete_rotation_secret("00000000-0000-4000-8000-000000000367", 1)
+        .expect("finish rotation");
+
+    assert!(gotatun_snapshot_binding_is_authorized(&store, previous_public).expect("old"));
+    assert!(gotatun_snapshot_binding_is_authorized(&store, candidate_public).expect("new"));
+    assert!(
+        !gotatun_snapshot_binding_is_authorized(&store, unrelated_public).expect("unrelated"),
+        "a completed marker does not authorize an unrelated saved binding"
+    );
+}
