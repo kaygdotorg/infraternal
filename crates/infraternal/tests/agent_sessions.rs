@@ -111,6 +111,8 @@ async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
     });
 }
 
+/// A detached session resumes retained output at its last raw byte offset.
+/// Its unchanged attach size is distinct from a later live resize (#521).
 #[tokio::test(flavor = "current_thread")]
 async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset() {
     let fixture = fixture_state::fixture_state();
@@ -162,8 +164,9 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
     .await
     .unwrap();
     until(&mut session.peer, &mut cursor, b"OPEN_OK\r\n").await;
-    // A FIFO barrier holds the shell until the replacement reader is attached;
-    // scheduler delays cannot coalesce BEFORE and AFTER into one old-peer frame.
+    // A FIFO barrier keeps AFTER out of the old reader's observed frames.
+    // Release it only after that reader closes, then wait for retained output
+    // before reconnecting so the replay covers a nonempty byte range.
     let pipe = std::env::current_dir()
         .unwrap()
         .join(&directory)
@@ -189,14 +192,41 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
         .unwrap();
     until(&mut session.peer, &mut cursor, b"BEFORE_DROP\r\n").await;
     drop(session); // Close the sole infraternal agent connection, retaining the shim.
-    let mut discovered = discover(&directory).await.unwrap();
+    barrier.write_all(b"resume\n").unwrap();
+    let mut discovered = timeout(Duration::from_secs(10), async {
+        loop {
+            let sessions = discover(&directory).await.unwrap();
+            if sessions
+                .iter()
+                .any(|session| session.id == id && session.head > cursor)
+            {
+                break sessions;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the shim must retain output while its reader is detached");
     assert_eq!(discovered.len(), 1);
     let mut session = discovered.pop().unwrap();
     assert_eq!(session.id, id);
     send(&mut session.peer, &Frame::ReadFrom(cursor))
         .await
         .unwrap();
-    barrier.write_all(b"resume\n").unwrap();
+    // ReadFrom found retained bytes. Report the unchanged attach size now,
+    // as viewers do, so the later 91x31 change is a live resize (#521).
+    // The legacy reader keeps its strict raw-output-only replay oracle.
+    send(
+        &mut session.peer,
+        &Frame::Resize {
+            cols: 80,
+            rows: 24,
+            px_w: 0,
+            px_h: 0,
+        },
+    )
+    .await
+    .unwrap();
     until(&mut session.peer, &mut cursor, b"AFTER_DROP\r\n").await;
     send(
         &mut session.peer,
