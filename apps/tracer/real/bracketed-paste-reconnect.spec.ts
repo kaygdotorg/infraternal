@@ -101,6 +101,7 @@ test("a pasted multi-line command stays one bracketed paste after a reconnect re
     await expect.poll(() => current.fenced, { timeout: 60_000 }).toBe(true);
     // The reopened tab was repainted from the host's engine, not replayed: this is the path under test.
     expect(current.snapshots).toBeGreaterThan(0);
+    expect(current.approximate, "the reconnect must exercise the approximate painter").toBeGreaterThan(0);
     await page.screenshot({ path: tracerEvidencePath("j766-reopened-after-flood.png") });
     await host.click();
     await host.locator("textarea").focus();
