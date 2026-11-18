@@ -595,6 +595,8 @@ mod tests {
         notices: Mutex<Option<tokio::sync::watch::Sender<()>>>,
         enabled: AtomicBool,
         refuse_delta: AtomicBool,
+        /// Refuse one full snapshot to model a transient control-channel failure.
+        refuse_full_once: AtomicBool,
         queried: tokio::sync::Notify,
         applied: tokio::sync::Semaphore,
         frames: Mutex<Vec<(Option<u64>, u64, bool)>>,
@@ -636,6 +638,7 @@ mod tests {
                 notices: Mutex::new(Some(notices)),
                 enabled: AtomicBool::new(true),
                 refuse_delta: AtomicBool::new(false),
+                refuse_full_once: AtomicBool::new(false),
                 queried: tokio::sync::Notify::new(),
                 applied: tokio::sync::Semaphore::new(0),
                 frames: Mutex::new(Vec::new()),
@@ -845,6 +848,11 @@ mod tests {
                     );
                 }
                 let chunk: crate::dataplane::Chunk = serde_json::from_slice(&input).unwrap();
+                if chunk.from_version.is_none()
+                    && self.refuse_full_once.swap(false, Ordering::AcqRel)
+                {
+                    return Err("transient full configuration failure");
+                }
                 self.authority_epochs
                     .lock()
                     .unwrap()
@@ -2345,6 +2353,81 @@ mod tests {
         );
         worker.abort();
         let _ = worker.await;
+    }
+
+    /// A transient full-view failure must retry without an external event so retirement can obtain its own ack.
+    #[tokio::test]
+    #[ignore = "Known bug #533: a failed full rotation view has no retry wakeup; run explicitly for the red proof."]
+    async fn retiring_rotation_retries_its_failed_full_view_without_an_external_event() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        let operation = "00000000-0000-4000-8000-000000000533";
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(node, operation, PublicKey([3; 32]), 100, "test-boot", 1_000)
+            .await
+            .unwrap();
+        let retiring_revision = store.commit_rotation(node, operation).await.unwrap();
+        // Establish the same capabilities beforehand so attachment itself cannot wake a retry.
+        store
+            .attach_named_with_probed_capabilities(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([3; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                Some(true),
+                Some(true),
+            )
+            .await
+            .unwrap();
+        let channel = Channel::candidate();
+        channel.refuse_full_once.store(true, Ordering::Release);
+        let worker = tokio::spawn(run(
+            store.clone(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        // Await an actual successful delivery. The timeout is a hang guard; no source event is sent.
+        let retried = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            channel.applied.acquire(),
+        )
+        .await;
+        worker.abort();
+        let _ = worker.await;
+        let phase: Option<String> =
+            sqlx::query_scalar("SELECT rotation_phase FROM mesh_node_key_rotation WHERE node_id=?")
+                .bind(i64::try_from(node.0).unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            retried.is_ok(),
+            "rotation stayed {phase:?} at revision {retiring_revision}: one failed full delivery stranded its own acknowledgment"
+        );
     }
 
     /// Presence where one peer is reachable only through the relay and another is offline.
