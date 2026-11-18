@@ -59,18 +59,21 @@ url = { workspace = true, optional = true }
 # ring remains the one crypto backend (D289).
 # The pinned fork commit (#260) runs receive batches inline on macOS by default
 # (GOTATUN_BENCH_RX_INLINE_MAX=0 turns that off; Linux keeps it off). Connected
-# per-endpoint sends on macOS stay opt-in (GOTATUN_BENCH_MAC_CONNECTED=1): while
-# they bind, another local user can take over the WireGuard port, so they wait
-# for a design without that window. With them off, the Mac binds the WireGuard
-# port as two exclusive sockets, AF_INET and IPv6-only, so no other local user
-# can bind beside it before or after start (#260, J826, J834). A port another
-# socket already holds is refused (EADDRINUSE), the same as a port taken
-# outright.
-gotatun = { version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "72dc734affe2ab4c4e7e1a68b57aacab51545cb3", default-features = false, features = ["device", "ring"], optional = true }
+# per-endpoint sends on macOS stay opt-in (GOTATUN_BENCH_MAC_CONNECTED=1).
+# J815/J826's startup-only pools now bind per family on J834's exclusive
+# AF_INET / IPv6-only pair. Before/after audits refuse silent port sharing;
+# endpoints only reconnect already-bound sockets. The Mac route listener
+# invalidates cached sources before requesting live-session keepalives.
+# S-off keeps the two exclusive sockets without a private socket-list audit.
+gotatun = { version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "6b23b33a8e36e936871f9d1a2d64d0c0648d128d", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7.0", optional = true }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The underlay coalescing proofs advance a paused clock instead of waiting on wall time.
+tokio = { workspace = true, features = ["test-util"] }
 
 [dev-dependencies]
 # Namespace tests run each node on a thread that entered its own network namespace (D332).
