@@ -2771,17 +2771,6 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
-        if self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
-            && chunk.index == 0
-            && chunk.from_version.is_none()
-            && self
-                .config
-                .as_ref()
-                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
-        {
-            self.validate_binding(&chunk)?;
-            self.retire_settled_authority_rotation(chunk.rotation_operation.as_ref())?;
-        }
         let result = self.stage(chunk);
         if let Err(error) = &result {
             self.pending = None;
@@ -2969,7 +2958,7 @@ impl Node {
         Ok(())
     }
 
-    /// Retry retirement cleanup before accepting a full snapshot after an interrupted reset.
+    /// Retry retirement cleanup only after a full snapshot validates after an interrupted reset.
     ///
     /// A durable peer-free state records the pending reset. If its journal removal failed, settle
     /// and save the active key binding again before unlinking that previous authority's journal.
@@ -3284,15 +3273,32 @@ impl Node {
         let pending = self.pending.take().ok_or(io::ErrorKind::InvalidData)?;
         let full_snapshot = pending.from_version.is_none();
         let config = pending.config;
-        if self
+        let authority_changed = self
             .config
             .as_ref()
-            .is_some_and(|old| old.authority_epoch != config.authority_epoch)
-        {
-            return self.apply_authority_replacement(config);
-        }
+            .is_some_and(|old| old.authority_epoch != config.authority_epoch);
         let completes_authority_reset =
             self.authority_reset == AuthorityResetState::AwaitingFullSnapshot && full_snapshot;
+        if authority_changed || completes_authority_reset {
+            // Receipt deletion is irreversible. Validate the complete incoming content before
+            // either a fresh authority reset or its interrupted retry can settle the journal.
+            self.validate_snapshot(&config)?;
+            #[cfg(feature = "mesh-dns")]
+            crate::dns::Records::from_config(&config)?;
+            let proposed: Vec<_> = std::iter::once(config.addresses)
+                .chain(config.peers.values().map(|peer| peer.peer.addresses))
+                .collect();
+            Device::check_routes(&proposed)?;
+            if self.engine_kind == EngineKind::GotaTun {
+                crate::gotatun_node::Engine::prepare_policy(&config, self.proxy_ingress.clone())?;
+            }
+            if !authority_changed {
+                self.retire_settled_authority_rotation(config.rotation_operation.as_ref())?;
+            }
+        }
+        if authority_changed {
+            return self.apply_authority_replacement(config);
+        }
         // A lower revision under the same epoch is accepted on purpose when this node has a
         // Store: a database restored under a running server keeps that process's epoch but
         // rewinds its revisions, and refusing would strand every node (#382). The Store's
@@ -3421,17 +3427,12 @@ impl Node {
     ) -> io::Result<()> {
         self.apply_transaction(config, Some(snapshot_base), true)
     }
-    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
-    fn apply_transaction(
-        &mut self,
-        config: Config,
-        snapshot_base: Option<&Config>,
-        force_reconcile: bool,
-    ) -> io::Result<()> {
-        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
-        let dns_records = crate::dns::Records::from_config(&config)?;
-        #[cfg(feature = "cutoff-measure")]
-        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
+    /// Check complete peer identities and address ownership before any destructive reset.
+    ///
+    /// Staging checks each chunk's headers; these cross-peer checks need the assembled snapshot.
+    /// # Errors
+    /// Refuses address changes without overlap or colliding peer keys and addresses.
+    fn validate_snapshot(&self, config: &Config) -> io::Result<()> {
         if self
             .config
             .as_ref()
@@ -3471,6 +3472,20 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        Ok(())
+    }
+    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
+    fn apply_transaction(
+        &mut self,
+        config: Config,
+        snapshot_base: Option<&Config>,
+        force_reconcile: bool,
+    ) -> io::Result<()> {
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+        let dns_records = crate::dns::Records::from_config(&config)?;
+        #[cfg(feature = "cutoff-measure")]
+        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
+        self.validate_snapshot(&config)?;
         let mut packet_policy = if self.engine_kind == EngineKind::GotaTun {
             self.gotatun
                 .as_ref()

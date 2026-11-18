@@ -248,7 +248,6 @@ fn authority_change_keeps_the_matching_rotation_receipt() {
 
 /// An interrupted reset cannot retire a matching receipt from an unfinished snapshot header.
 #[test]
-#[ignore = "J862 review reproducer: run explicitly on the native Mac"]
 fn j862_incomplete_reset_snapshot_retains_the_mac_rotation_receipt() {
     authority_rotation_receipt_case(true, true);
 }
@@ -326,6 +325,39 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool) {
         chunk.rotation_operation = None;
         chunk.last = false;
         assert!(!node.chunk(chunk).expect("stage the first chunk only"));
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        let mut inconsistent = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        inconsistent.index = 1;
+        assert_eq!(
+            node.chunk(inconsistent).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        let mut rejected = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        rejected.rotation_operation = None;
+        rejected.upserted.values_mut().next().unwrap().peer.key = active_key;
+        assert_eq!(
+            node.chunk(rejected).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
     let journal = node
         .store
@@ -356,6 +388,21 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool) {
             node.chunk(chunk)
                 .expect("clear operation metadata at the same policy revision");
         }
+    }
+    if incomplete {
+        // Cached operation metadata must not substitute for the complete incoming proof.
+        replacement.rotation_operation = None;
+        for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+            node.chunk(chunk).expect("accept a validated replacement");
+        }
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_none()
+        );
     }
     node.down().expect("stop test worker");
     fs::remove_dir_all(directory).expect("remove state directory");

@@ -2689,7 +2689,7 @@ impl Node {
     /// # Errors
     /// Refuses wrong identity bindings, incomplete chunks, unsafe routes, or failed engine updates.
     pub fn chunk(&mut self, chunk: crate::dataplane::Chunk) -> io::Result<bool> {
-        let Some(mut identity) = self.identity.clone() else {
+        let Some(identity) = self.identity.clone() else {
             self.pending = None;
             tracing::warn!("Mac mesh configuration chunk refused while the node is not up");
             return Err(io::ErrorKind::NotConnected.into());
@@ -2761,17 +2761,6 @@ impl Node {
             );
             return Err(io::ErrorKind::InvalidData.into());
         }
-        if self.authority_reset_pending
-            && chunk.index == 0
-            && chunk.from_version.is_none()
-            && self
-                .config
-                .as_ref()
-                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
-        {
-            self.retire_settled_authority_rotation(chunk.rotation_operation.as_ref())?;
-            identity = self.identity.clone().ok_or(io::ErrorKind::NotConnected)?;
-        }
         // With a Store, a lower same-epoch revision is accepted on purpose: a database restored
         // under a running server keeps its epoch but rewinds revisions (#382, J418 P3-a). The
         // exact-base write (`write_public_state_full_snapshot`) keeps that swap atomic.
@@ -2793,9 +2782,6 @@ impl Node {
             return Ok(false);
         };
         validate_config(&config, identity.public_key)?;
-        if authority_changed {
-            self.prepare_authority_replacement(&config)?;
-        }
         // A complete snapshot may replay its revision only with identical contents. Authority
         // reset is handled separately because the new epoch may reuse a revision.
         if !self.authority_reset_pending
@@ -2821,6 +2807,13 @@ impl Node {
         }
         let desired_routes = route_addresses(&config);
         validate_underlay_routes(&config, &desired_routes)?;
+        // Preserve the receipt through incomplete or rejected snapshots. Only the fully
+        // validated incoming operation can authorize continuity or journal retirement.
+        if authority_changed {
+            self.prepare_authority_replacement(&config)?;
+        } else if self.authority_reset_pending {
+            self.retire_settled_authority_rotation(config.rotation_operation.as_ref())?;
+        }
         let completes_authority_reset = self.authority_reset_pending;
         let reset_config = completes_authority_reset
             .then(|| self.config.clone())
@@ -2962,7 +2955,7 @@ impl Node {
         Ok(())
     }
 
-    /// Retry journal retirement before accepting a full snapshot after a reset was interrupted.
+    /// Retry journal retirement after validating a full snapshot for an interrupted reset.
     ///
     /// The peer-free reset record makes startup safe. This retry saves the settled live key binding
     /// before removing the previous authority's rotation journal. An exact operation match from

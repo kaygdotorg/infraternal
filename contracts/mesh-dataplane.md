@@ -61,8 +61,9 @@ retains that operation through epoch adoption, including an interrupted commit.
 An absent or mismatched operation settles the active identity and discards the
 abandoned journal. A new database cannot inherit the old sequence space merely
 by enrolling the same public key. Recovery from an interrupted epoch reset
-checks the incoming operation again; saved metadata alone never proves
-continuity. Public snapshots retain their rollback-compatible shape; the
+checks the incoming operation again only after every chunk, header and complete
+snapshot content check succeeds. Incomplete or rejected snapshots leave the
+journal intact; saved metadata alone never proves continuity. Public snapshots retain their rollback-compatible shape; the
 separate authority record caches the metadata for persistence comparisons.
 
 A failed full configuration delivery retries after five seconds without a

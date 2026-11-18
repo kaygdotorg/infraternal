@@ -1243,7 +1243,7 @@ fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
 
 /// An interrupted authority reset must retain its journal until a complete replacement is validated.
 #[test]
-#[ignore = "J862 review reproducer: run explicitly in an isolated privileged network"]
+#[ignore = "Run as root inside a dedicated network namespace"]
 fn j862_incomplete_reset_snapshot_must_not_discard_the_rotation_receipt() {
     command("ip", &["link", "set", "lo", "up"]);
     let state = RotationState::new();
@@ -1272,6 +1272,40 @@ fn j862_incomplete_reset_snapshot_must_not_discard_the_rotation_receipt() {
     incomplete.rotation_operation = None;
     incomplete.last = false;
     assert!(!node.chunk(incomplete).unwrap());
+    assert!(
+        node.store
+            .as_ref()
+            .unwrap()
+            .rotation_secret()
+            .unwrap()
+            .is_some()
+    );
+    let mut inconsistent = crate::configuration::chunks(None, &replacement)
+        .unwrap()
+        .remove(0);
+    inconsistent.index = 1;
+    assert_eq!(
+        node.chunk(inconsistent).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert!(
+        node.store
+            .as_ref()
+            .unwrap()
+            .rotation_secret()
+            .unwrap()
+            .is_some()
+    );
+    // A complete header still cannot authorize receipt loss when its content is invalid.
+    let mut rejected = crate::configuration::chunks(None, &replacement)
+        .unwrap()
+        .remove(0);
+    rejected.rotation_operation = None;
+    rejected.upserted.values_mut().next().unwrap().peer.key = node.interface_key().unwrap();
+    assert_eq!(
+        node.chunk(rejected).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
     let retained = node
         .store
         .as_ref()
@@ -1280,6 +1314,20 @@ fn j862_incomplete_reset_snapshot_must_not_discard_the_rotation_receipt() {
         .unwrap()
         .is_some();
     println!("J862_INCOMPLETE_RESET retained_receipt={retained} complete_snapshot=false");
+    // The cached deny checkpoint still names the operation. Only the newly validated
+    // snapshot may prove continuity, so a valid full view without it must now retire.
+    replacement.rotation_operation = None;
+    for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    assert!(
+        node.store
+            .as_ref()
+            .unwrap()
+            .rotation_secret()
+            .unwrap()
+            .is_none()
+    );
     node.down().unwrap();
     assert!(
         retained,
