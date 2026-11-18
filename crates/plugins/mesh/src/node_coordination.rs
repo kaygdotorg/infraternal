@@ -450,13 +450,8 @@ pub async fn run(
                     }
                 }
                 if !failed && snapshot.acknowledgments_required() {
-                    match store.acknowledge_applied(config.node, config.version).await {
-                        Ok(changed) => {
-                            ack_retry = None;
-                            if changed {
-                                service.rotation_applied(&mut rotation_updates);
-                            }
-                        }
+                    match service.finalize_applied(config.node, config.version).await {
+                        Ok(()) => ack_retry = None,
                         Err(_) => ack_retry = Some((config.node, config.version)),
                     }
                 }
@@ -469,13 +464,8 @@ pub async fn run(
                 }
             } else if snapshot.acknowledgments_required() && installed.is_some() {
                 // A metadata-only revision can acknowledge an identical installed kernel view.
-                match store.acknowledge_applied(config.node, config.version).await {
-                    Ok(changed) => {
-                        ack_retry = None;
-                        if changed {
-                            service.rotation_applied(&mut rotation_updates);
-                        }
-                    }
+                match service.finalize_applied(config.node, config.version).await {
+                    Ok(()) => ack_retry = None,
                     Err(_) => ack_retry = Some((config.node, config.version)),
                 }
             }
@@ -492,6 +482,9 @@ pub async fn run(
             let address = std::net::IpAddr::V4(config.addresses.ipv4);
             update_listener(channel.as_ref(), address, &mut listener).await;
         }
+        // Consume our completed finalizer's publication before reading durable receipts.
+        // Coalesced peer progress is covered by that read; later progress stays unseen.
+        rotation_updates.borrow_and_update();
         let rotation_wait =
             if let (Some(node), Some(identity)) = (binding, current_identity.as_ref()) {
                 let live = presence_updates.borrow().keys().copied().collect();
@@ -529,12 +522,9 @@ pub async fn run(
             result=rotation_updates.changed()=>if result.is_err() {return;},
             () = tokio::time::sleep(std::time::Duration::from_secs(5)), if ack_retry.is_some() => {
                 if let Some((node, revision)) = ack_retry
-                    && let Ok(changed) = store.acknowledge_applied(node, revision).await
+                    && service.finalize_applied(node, revision).await.is_ok()
                 {
                     ack_retry = None;
-                    if changed {
-                        service.rotation_applied(&mut rotation_updates);
-                    }
                 }
             },
             () = sleep_until_optional(config_retry) => { config_retry = None; }

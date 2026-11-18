@@ -269,6 +269,20 @@ async fn unchanged_views_do_not_loop_acknowledgments() {
                 .await
                 .unwrap();
             let notifications = *progress.borrow_and_update();
+            let initial_finishes = channel.attempts.lock().unwrap().clone();
+            let initial_finish_attempts = initial_finishes.len();
+            // With one worker there is no peer publication that could wake it.
+            // Its own receipt must not cause a second finish before the retry deadline.
+            if workers == 1
+                && pending
+                && initial_finishes
+                    .windows(2)
+                    .any(|pair| pair[1].duration_since(pair[0]) < UNKNOWN_SUPPORT_RETRY)
+            {
+                violations.push(format!(
+                    "self-wake: {initial_finish_attempts} initial finishes"
+                ));
+            }
             let (ticks, writes) = process_counters();
             let wal_bytes = std::fs::metadata(directory.join("mesh.sqlite-wal"))
                 .unwrap()
@@ -311,7 +325,7 @@ async fn unchanged_views_do_not_loop_acknowledgments() {
                 }
             }
             println!(
-                "ACK_RATE workers={workers} pending={pending} initial_ack_commits={initial} after_external_event={after} approx_initial_commits_per_second={rate:.3} notifications={notifications}"
+                "ACK_RATE workers={workers} pending={pending} initial_ack_commits={initial} after_external_event={after} approx_initial_commits_per_second={rate:.3} notifications={notifications} initial_finish_attempts={initial_finish_attempts}"
             );
             for task in tasks {
                 task.abort();
@@ -541,7 +555,7 @@ struct OtherPeer(Arc<Channel>);
 
 impl NodeChannel for OtherPeer {
     /// Identify the peer whose receipt the rotating node is waiting for.
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "00000000-0000-4000-8000-000000000002"
     }
     /// Keep the pre-enrolled peer's endpoint identical across worker replacement.
@@ -681,7 +695,8 @@ async fn canceled_receipt_commit_is_not_lost_on_worker_replacement() {
             }
             tokio::task::yield_now().await;
         }
-        assert!(!progress.has_changed().unwrap());
+        // Publication may already have completed in the service-owned finalizer.
+        // Leave it unseen so the driver's wait below also covers that ordering.
         assert!(matches!(
             revisions.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
