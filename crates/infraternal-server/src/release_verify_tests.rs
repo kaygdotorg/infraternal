@@ -258,6 +258,7 @@ fn signed_lists_with_nested_notice_paths_are_parsed_and_traversal_is_refused() {
     );
 }
 
+/// Measure verification time across repeated checks of a 20 MiB fixture.
 #[test]
 #[ignore = "run release-profile measurements in a weighted scope"]
 fn verification_twenty_megabytes_fifty_runs() {

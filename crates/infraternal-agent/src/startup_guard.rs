@@ -178,6 +178,7 @@ fn contents(file: &File) -> io::Result<String> {
     Ok(text)
 }
 
+/// Return the lowercase SHA-256 fingerprint used by the startup trust check.
 fn fingerprint(text: &str) -> String {
     format!(
         "{:x}",

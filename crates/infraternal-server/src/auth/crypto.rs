@@ -104,6 +104,7 @@ pub(super) fn valid_secret(secret: &str) -> Result<()> {
     Ok(())
 }
 
+/// Checks that existing recovery verifier hashes remain usable.
 #[cfg(test)]
 mod verifier_tests {
     use super::*;

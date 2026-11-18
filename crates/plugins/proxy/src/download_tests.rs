@@ -75,6 +75,7 @@ impl ComponentManifestVerifier for FixtureVerifier {
     }
 }
 
+/// Build a signed release fixture for download verification.
 fn signed_fixture(archive: &[u8]) -> (Vec<(String, Vec<u8>)>, String, String) {
     let manifest = ComponentManifest {
         component: "traefik".to_owned(),

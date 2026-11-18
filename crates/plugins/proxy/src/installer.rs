@@ -377,6 +377,7 @@ struct ArchiveStreamWriter<'a> {
 }
 
 impl ArchiveStreamWriter<'_> {
+    /// Verify the length and digest of all archive bytes written.
     fn finish(self) -> io::Result<()> {
         if self.received != self.expected_size
             || format!("{:x}", base16ct::HexDisplay(&self.digest.finalize()))
@@ -501,6 +502,7 @@ fn extract_archive_entry<R: Read>(
     Ok(())
 }
 
+/// Extract the selected executable and verify its size and digest against the manifest.
 fn extract_allowlisted_executable<R: Read>(
     mut entry: tar::Entry<'_, R>,
     bin: &Path,
@@ -672,6 +674,7 @@ fn validate_executable_metadata(metadata: &fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
+/// Return the lowercase SHA-256 digest of a file, refusing a symlink at the final path component.
 fn hash_file(path: &Path) -> io::Result<String> {
     let mut file = OpenOptions::new()
         .read(true)

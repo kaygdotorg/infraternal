@@ -97,6 +97,7 @@ pub(super) fn archive(executable: &[u8], extra: Option<(&str, tar::EntryType)>) 
         .expect("finish gzip archive")
 }
 
+/// Build and verify a component manifest for the supplied test archive and executable.
 fn verified_manifest(
     archive: &[u8],
     executable: &[u8],
@@ -288,6 +289,7 @@ fn installer_refuses_a_state_directory_with_group_access() {
     assert!(!state.0.join("components").exists());
 }
 
+/// Check that offline import uses the archive and path named by the signed release.
 #[test]
 fn offline_bundle_import_uses_the_signed_manifest_and_archive_path() {
     let executable = b"signed executable bytes";
