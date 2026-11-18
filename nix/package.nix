@@ -14,11 +14,11 @@ let
     then (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version
     else releaseVersion;
   # Same tarball and checksum table as scripts/auth-toolchain (D213, D328).
-  zigArchive = (import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; }).archive;
-  zig = runCommand "infraternal-zig-0.17.0" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
+  zigToolchain = import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; };
+  zig = runCommand "infraternal-zig-${zigToolchain.version}" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
     ${lowerBuildPriority}
     mkdir -p "$out"
-    tar -xJf ${zigArchive} --strip-components=1 -C "$out"
+    tar -xJf ${zigToolchain.archive} --strip-components=1 -C "$out"
     # Keep the checksum-pinned compiler executable unchanged. Its build runner
     # must discover the Nix build host through an existing ELF, then pass that
     # resolved target explicitly to native generators. Cross targets keep the
