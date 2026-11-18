@@ -744,3 +744,184 @@ async fn canceled_receipt_commit_is_not_lost_on_worker_replacement() {
         "a durable peer receipt was lost as progress after worker replacement"
     );
 }
+
+/// Failed commits release admission without publishing, and later retries publish exactly once.
+#[tokio::test]
+async fn failed_finalizer_releases_admission_for_a_durable_retry() {
+    let (directory, service) = file_service().await;
+    let pool = service.pool_for_tests();
+    let node = service.dataplane().node_for_host("server").await.unwrap();
+    sqlx::query("UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id='00000000-0000-4000-8000-000000000537',sequence=1")
+        .execute(&pool).await.unwrap();
+    count_receipt_writes(&pool).await;
+    sqlx::raw_sql("CREATE TRIGGER refuse_ack BEFORE INSERT ON mesh_node_applied BEGIN SELECT RAISE(ABORT,'receipt refused'); END;")
+        .execute(&pool).await.unwrap();
+    let mut progress = service.subscribe_rotation_progress();
+    assert!(service.finalize_applied(node, 10).await.is_err());
+    assert!(!progress.has_changed().unwrap());
+    sqlx::query("DROP TRIGGER refuse_ack")
+        .execute(&pool)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        service.finalize_applied(node, 10).await.unwrap();
+        assert_eq!(*progress.borrow_and_update(), 1);
+        service.finalize_applied(node, 10).await.unwrap();
+        service.finalize_applied(node, 9).await.unwrap();
+    })
+    .await
+    .expect("failed finalizer must release admission");
+    assert!(!progress.has_changed().unwrap());
+    let writes: i64 = sqlx::query_scalar("SELECT count(*) FROM ack_writes")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(writes, 1);
+    pool.close().await;
+    assert!(service.finalize_applied(node, 11).await.is_err());
+    assert!(!progress.has_changed().unwrap());
+    println!(
+        "ACK_ERROR failed_commit_publications=0 retry_commits=1 duplicate_stale_publications=0 closed_pool_returns_error=true"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Dropping an admitted caller retains its finalizer, while dropping a queued caller admits no work.
+#[tokio::test]
+async fn canceled_admission_does_not_queue_a_detached_receipt() {
+    let (directory, service) = file_service().await;
+    let pool = service.pool_for_tests();
+    let node = service.dataplane().node_for_host("server").await.unwrap();
+    sqlx::query("UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id='00000000-0000-4000-8000-000000000537',sequence=1")
+        .execute(&pool).await.unwrap();
+    count_receipt_writes(&pool).await;
+    let mut progress = service.subscribe_rotation_progress();
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(pool.acquire().await.unwrap());
+    }
+    {
+        let admitted = service.finalize_applied(node, 10);
+        tokio::pin!(admitted);
+        // Poll once: admission succeeds, but its owned task cannot acquire a SQL connection.
+        tokio::select! {
+            biased;
+            _ = &mut admitted => panic!("receipt completed with every connection held"),
+            () = std::future::ready(()) => {}
+        }
+    }
+    {
+        let queued = service.finalize_applied(node, 99);
+        tokio::pin!(queued);
+        // Poll once behind the admitted finalizer, then cancel this admission by dropping it.
+        tokio::select! {
+            biased;
+            _ = &mut queued => panic!("queued receipt passed the admitted finalizer"),
+            () = std::future::ready(()) => {}
+        }
+    }
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        progress.changed().await.unwrap();
+        service.finalize_applied(node, 12).await.unwrap();
+    })
+    .await
+    .expect("abandoned admitted finalizer must publish and release admission");
+    let (revision, writes): (i64, i64) = sqlx::query_as(
+        "SELECT revision,(SELECT count(*) FROM ack_writes) FROM mesh_node_applied WHERE node_id=?",
+    )
+    .bind(i64::try_from(node.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((revision, writes), (12, 2));
+    assert_eq!(*progress.borrow_and_update(), 2);
+    println!(
+        "ACK_ADMISSION admitted_caller_canceled=true admitted_receipt_published=true queued_revision_99_absent=true final_revision=12 commits=2"
+    );
+    pool.close().await;
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// A process-runtime stop may lose publication, but its committed receipt cannot satisfy a fresh instance.
+#[test]
+fn stopped_runtime_receipt_is_reacknowledged_by_a_fresh_service() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let pause = Arc::new(ReceiptPause {
+        entered: tokio::sync::Semaphore::new(0),
+        used: AtomicBool::new(false),
+        released: Mutex::new(false),
+        ready: std::sync::Condvar::new(),
+    });
+    let sqlite_pause = pause.clone();
+    let (directory, pool, service, node, old_progress) = runtime.block_on(async {
+        let directory = std::env::temp_dir().join(format!("ack-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(directory.join("mesh.sqlite"))
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .collation("pause_receipt", move |left, right| {
+                if !sqlite_pause.used.swap(true, Ordering::AcqRel) {
+                    sqlite_pause.entered.add_permits(1);
+                    let mut released = sqlite_pause.released.lock().unwrap();
+                    while !*released {
+                        released = sqlite_pause.ready.wait(released).unwrap();
+                    }
+                }
+                left.cmp(right)
+            });
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(8).connect_with(options).await.unwrap();
+        let service = service_on_pool(pool.clone()).await;
+        let node = service.dataplane().node_for_host("server").await.unwrap();
+        sqlx::query("UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id='00000000-0000-4000-8000-000000000537',sequence=1")
+            .execute(&pool).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER pause_ack AFTER INSERT ON mesh_node_applied BEGIN SELECT 1 WHERE 'a' COLLATE pause_receipt = 'b'; END;")
+            .execute(&pool).await.unwrap();
+        let old_progress = service.subscribe_rotation_progress();
+        let caller = service.clone();
+        tokio::spawn(async move { caller.finalize_applied(node, 10).await });
+        tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.acquire()).await.unwrap().unwrap().forget();
+        (directory, pool, service, node, old_progress)
+    });
+    // Keep SQLite blocked while shutting down: async finalizers must not add a drain wait.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    pause.release();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            // Reopen as the next process would, without depending on the old runtime's pool cleanup.
+            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(directory.join("mesh.sqlite"));
+            let reopened = sqlx::sqlite::SqlitePoolOptions::new().connect_with(options).await.unwrap();
+            sqlx::query("DROP TRIGGER pause_ack").execute(&reopened).await.unwrap();
+            loop {
+                let committed: Option<i64> = sqlx::query_scalar("SELECT revision FROM mesh_node_applied WHERE node_id=?")
+                    .bind(i64::try_from(node.0).unwrap()).fetch_optional(&reopened).await.unwrap();
+                if committed == Some(10) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(!old_progress.has_changed().unwrap());
+            let fresh = MeshService::new(reopened.clone());
+            let live = [node].into_iter().collect();
+            assert!(!fresh.dataplane().rotation_acks_ready(10, &live).await.unwrap());
+            let mut progress = fresh.subscribe_rotation_progress();
+            fresh.finalize_applied(node, 10).await.unwrap();
+            assert!(fresh.dataplane().rotation_acks_ready(10, &live).await.unwrap());
+            assert_ne!(fresh.dataplane().server_instance(), service.dataplane().server_instance());
+            assert_eq!(*progress.borrow_and_update(), 1);
+            reopened.close().await;
+        }).await.expect("fresh instance must recover a receipt committed during runtime stop");
+        println!("ACK_STOP committed_after_runtime_stop=true old_publications=0 fresh_receipt_required=true fresh_publications=1");
+    });
+    drop(service);
+    drop(pool);
+    std::fs::remove_dir_all(directory).unwrap();
+}
