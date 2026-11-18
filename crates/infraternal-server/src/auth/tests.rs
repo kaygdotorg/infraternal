@@ -189,7 +189,7 @@ fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
     let ciphertext = Aes256Gcm::new_from_slice(&key)
         .unwrap()
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             Payload {
                 msg: dek,
                 aad: &aad,
@@ -218,7 +218,7 @@ fn unwrap_browser(
         .expand(&aad, &mut key)
         .unwrap();
     Aes256Gcm::new_from_slice(&key).unwrap().decrypt(
-        Nonce::from_slice(&nonce),
+        &Nonce::from(<[u8; 12]>::try_from(nonce.as_slice()).unwrap()),
         Payload {
             msg: &ciphertext,
             aad: &aad,

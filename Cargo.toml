@@ -69,7 +69,7 @@ quinn = { version = "0.11.12", default-features = false, features = ["runtime-to
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"] }
 # The native QUIC provider already includes this exact HMAC implementation.
 ring = { version = "0.17.14", default-features = false }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
 serde_cbor_2 = "0.13"
 tower = { version = "0.5", features = ["util"] }

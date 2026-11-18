@@ -89,8 +89,6 @@ fn post(server: &str, path: &str, origin: &str, cookie: Option<&str>, body: &Val
     (status, cookies, value)
 }
 
-// aes-gcm 0.10's nonce type is built through the older generic-array API.
-#[allow(deprecated)]
 /// Encrypt a data-encryption key using the same key-wrap envelope as setup.
 fn wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Value {
     let salt: [u8; 32] = random();
@@ -100,7 +98,7 @@ fn wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Value {
     Hkdf::<Sha256>::new(Some(&salt), ikm).expand(&aad, &mut key).unwrap();
     let ct = Aes256Gcm::new_from_slice(&key)
         .unwrap()
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: dek, aad: &aad })
+        .encrypt(&Nonce::from(nonce), Payload { msg: dek, aad: &aad })
         .unwrap();
     json!({"salt": B64.encode(salt), "nonce": B64.encode(nonce), "ciphertext": B64.encode(ct)})
 }
