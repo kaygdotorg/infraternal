@@ -237,23 +237,30 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
 /// A changed authority retires its old rotation journal but keeps the active interface marker.
 #[test]
 fn authority_change_discards_old_rotation_journal() {
-    authority_rotation_receipt_case(false);
+    authority_rotation_receipt_case(false, false);
 }
 
 /// A new coordinator process keeps the completed receipt for the same database operation.
 #[test]
 fn authority_change_keeps_the_matching_rotation_receipt() {
-    authority_rotation_receipt_case(true);
+    authority_rotation_receipt_case(true, false);
 }
 
-/// Compare genuine replacement with exact operation continuity on the same active Mac key.
-fn authority_rotation_receipt_case(continues: bool) {
+/// An interrupted reset cannot retire a matching receipt from an unfinished snapshot header.
+#[test]
+#[ignore = "J862 review reproducer: run explicitly on the native Mac"]
+fn j862_incomplete_reset_snapshot_retains_the_mac_rotation_receipt() {
+    authority_rotation_receipt_case(true, true);
+}
+
+/// Compare genuine replacement, exact operation continuity, and an incomplete reset on the same active Mac key.
+fn authority_rotation_receipt_case(continues: bool, incomplete: bool) {
     let private_key = [9; 32];
     let active_key = mac_private_public(&private_key);
     let mut current = config();
     current.local_key = Some(active_key);
     let directory = std::env::temp_dir().join(format!(
-        "infraternal-j363-mac-rotation-retirement-{}-{continues}",
+        "infraternal-j363-mac-rotation-retirement-{}-{continues}-{incomplete}",
         std::process::id()
     ));
     fs::create_dir(&directory).expect("state directory");
@@ -312,6 +319,14 @@ fn authority_rotation_receipt_case(continues: bool) {
     });
     node.prepare_authority_replacement(&replacement)
         .expect("persist the new authority's reset");
+    if incomplete {
+        let mut chunk = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        chunk.rotation_operation = None;
+        chunk.last = false;
+        assert!(!node.chunk(chunk).expect("stage the first chunk only"));
+    }
     let journal = node
         .store
         .as_ref()
@@ -330,7 +345,7 @@ fn authority_rotation_receipt_case(continues: bool) {
         .expect("node store")
         .read_private_key()
         .expect("read active key");
-    if continues {
+    if continues && !incomplete {
         for chunk in crate::configuration::chunks(None, &replacement).expect("continuing snapshot")
         {
             node.chunk(chunk)
@@ -345,6 +360,10 @@ fn authority_rotation_receipt_case(continues: bool) {
     node.down().expect("stop test worker");
     fs::remove_dir_all(directory).expect("remove state directory");
 
+    println!(
+        "J862_MAC_RESET incomplete={incomplete} retained_receipt={}",
+        journal.is_some()
+    );
     assert_eq!(
         journal.is_some(),
         continues,

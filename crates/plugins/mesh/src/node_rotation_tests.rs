@@ -1191,6 +1191,22 @@ fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
         operation_id: operation.into(),
         sequence: 1,
     });
+    // Knowledge of the public operation cannot replace the authenticated local-key binding.
+    let mut forged = replacement.clone();
+    forged.local_key = Some(Key::generate().unwrap().1);
+    for chunk in crate::configuration::chunks(None, &forged).unwrap() {
+        assert!(restored.chunk(chunk).is_err());
+    }
+    assert_eq!(restored.interface_key(), Some(candidate));
+    assert!(
+        restored
+            .store
+            .as_ref()
+            .unwrap()
+            .rotation_secret()
+            .unwrap()
+            .is_some()
+    );
     // Stop after the durable deny checkpoint, before applying the replacement runtime.
     // Recovery must prove continuity from the incoming snapshot again.
     restored
@@ -1222,6 +1238,52 @@ fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
     assert!(
         finished.is_ok(),
         "a cold coordinator restart stranded its persisted rotation finish: {finished:?}"
+    );
+}
+
+/// An interrupted authority reset must retain its journal until a complete replacement is validated.
+#[test]
+#[ignore = "J862 review reproducer: run explicitly in an isolated privileged network"]
+fn j862_incomplete_reset_snapshot_must_not_discard_the_rotation_receipt() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let identity = node.up().unwrap();
+    for chunk in crate::configuration::chunks(None, &j363_config(identity.public_key)).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let operation = "00000000-0000-4000-8000-000000000862";
+    node.prepare_rotation(operation, 1).unwrap();
+    node.commit_rotation(operation, 1).unwrap();
+    let mut replacement = node.config().unwrap().clone();
+    replacement.local_key = node.interface_key();
+    replacement.authority_epoch = Some(J363_EPOCH_B.into());
+    replacement.rotation_operation = Some(crate::dataplane::RotationContinuation {
+        operation_id: operation.into(),
+        sequence: 1,
+    });
+    node.prepare_authority_replacement(&replacement).unwrap();
+    drop(node);
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    node.ensure().unwrap();
+    let mut incomplete = crate::configuration::chunks(None, &replacement)
+        .unwrap()
+        .remove(0);
+    incomplete.rotation_operation = None;
+    incomplete.last = false;
+    assert!(!node.chunk(incomplete).unwrap());
+    let retained = node
+        .store
+        .as_ref()
+        .unwrap()
+        .rotation_secret()
+        .unwrap()
+        .is_some();
+    println!("J862_INCOMPLETE_RESET retained_receipt={retained} complete_snapshot=false");
+    node.down().unwrap();
+    assert!(
+        retained,
+        "an incomplete snapshot discarded the receipt before full-snapshot validation"
     );
 }
 
@@ -1345,6 +1407,24 @@ async fn atomic_journal_recovery_completes_the_pending_cleanup_retry() {
     assert!(state.0.join("mesh-key-rotation.bin").exists());
     // Simulate the old release's receipt loss so the atomic repair still exercises a real retry.
     std::fs::remove_file(state.0.join("mesh-key-rotation.bin")).unwrap();
+    drop(node);
+    // Deploying the fix cannot reconstruct the receipt lost by an older release.
+    // Reattach the committed candidate and replay the exact open operation after restart.
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    assert_eq!(node.ensure().unwrap().unwrap().public_key, candidate);
+    let mut deployed = cleanup.clone();
+    deployed.authority_epoch = Some("00000000-0000-4000-8000-000000000862".into());
+    for chunk in crate::configuration::chunks(None, &deployed).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    assert!(!state.0.join("mesh-key-rotation.bin").exists());
+    assert_eq!(
+        node.finish_rotation(operation, 1).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    println!(
+        "J862_NO_RECOVERY restarted=true exact_operation=true receipt_absent=true finish=NotFound"
+    );
     let channel = FinishChannel {
         node: std::sync::Mutex::new(node),
         attempts: std::sync::atomic::AtomicUsize::new(0),

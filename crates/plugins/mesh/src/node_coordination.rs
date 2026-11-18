@@ -618,6 +618,12 @@ mod tests {
         refuse_full_once: AtomicBool,
         /// Fail one continuity probe without claiming the receiver is an older binary.
         fail_continuity_once: AtomicBool,
+        /// Hold full deliveries refused until the bounded-retry proof releases them.
+        refuse_full_always: AtomicBool,
+        /// Record each delivery attempt before injecting a failure.
+        configure_attempts: Mutex<Vec<tokio::time::Instant>>,
+        /// Wake the retry proof on an attempted delivery, including failures.
+        configured: tokio::sync::Semaphore,
         queried: tokio::sync::Notify,
         applied: tokio::sync::Semaphore,
         frames: Mutex<Vec<(Option<u64>, u64, bool)>>,
@@ -661,6 +667,9 @@ mod tests {
                 refuse_delta: AtomicBool::new(false),
                 refuse_full_once: AtomicBool::new(false),
                 fail_continuity_once: AtomicBool::new(false),
+                refuse_full_always: AtomicBool::new(false),
+                configure_attempts: Mutex::new(Vec::new()),
+                configured: tokio::sync::Semaphore::new(0),
                 queried: tokio::sync::Notify::new(),
                 applied: tokio::sync::Semaphore::new(0),
                 frames: Mutex::new(Vec::new()),
@@ -877,8 +886,14 @@ mod tests {
                     );
                 }
                 let chunk: crate::dataplane::Chunk = serde_json::from_slice(&input).unwrap();
+                self.configure_attempts
+                    .lock()
+                    .unwrap()
+                    .push(tokio::time::Instant::now());
+                self.configured.add_permits(1);
                 if chunk.from_version.is_none()
-                    && self.refuse_full_once.swap(false, Ordering::AcqRel)
+                    && (self.refuse_full_always.load(Ordering::Acquire)
+                        || self.refuse_full_once.swap(false, Ordering::AcqRel))
                 {
                     return Err("transient full configuration failure");
                 }
@@ -2474,6 +2489,52 @@ mod tests {
             retried.is_ok(),
             "rotation stayed {phase:?} at revision {retiring_revision}: one failed full delivery stranded its own acknowledgment"
         );
+    }
+
+    /// Failed full views wait five seconds between attempts and stop retrying after success.
+    #[tokio::test]
+    async fn failed_full_views_are_bounded_and_success_stops_delivery_retries() {
+        let service = service().await;
+        let store = service.dataplane();
+        let channel = Channel::candidate();
+        store
+            .attach_named_with_probed_capabilities(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([3; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                Some(true),
+                Some(true),
+            )
+            .await
+            .unwrap();
+        channel.refuse_full_always.store(true, Ordering::Release);
+        let worker = tokio::spawn(run(
+            store,
+            service,
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            channel.configured.acquire_many(2).await.unwrap().forget();
+            let attempts = channel.configure_attempts.lock().unwrap().clone();
+            assert!(attempts[1].duration_since(attempts[0]) >= UNKNOWN_SUPPORT_RETRY,
+                "failed full delivery retried before its monotonic deadline");
+            channel.refuse_full_always.store(false, Ordering::Release);
+            channel.configured.acquire().await.unwrap().forget();
+            channel.applied.acquire().await.unwrap().forget();
+            // The timeout observes absence across an entire retry period, not execution speed.
+            assert!(tokio::time::timeout(UNKNOWN_SUPPORT_RETRY + std::time::Duration::from_secs(1),
+                channel.configured.acquire()).await.is_err(), "settled view was delivered again");
+            let attempts = channel.configure_attempts.lock().unwrap();
+            assert_eq!(attempts.len(), 3);
+            assert!(attempts[2].duration_since(attempts[1]) >= UNKNOWN_SUPPORT_RETRY);
+            println!("J862_RETRY attempts=3 failure_intervals_at_least_5s=true settled_6s_no_delivery=true");
+        }).await;
+        worker.abort();
+        let _ = worker.await;
+        result.expect("bounded retry proof must complete");
     }
 
     /// Presence where one peer is reachable only through the relay and another is offline.
