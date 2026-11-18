@@ -2913,11 +2913,19 @@ impl Node {
         error: io::Error,
         denied: &Config,
     ) -> io::Error {
+        // Rejected content fences peers but keeps the journal.
+        let mut denied = denied.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns")]
+        denied.peer_names.clear();
         self.config = Some(denied.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
         self.pending = None;
+        // Fence restore first; the disabled write below retries any failure.
+        let _ = self.persist_retired_snapshot(&denied);
         let stop_error = self.stop_retired_runtime().err();
-        if let Err(persist_error) = self.persist_retired_snapshot(denied) {
+        if let Err(persist_error) = self.persist_retired_snapshot(&denied) {
             tracing::error!(
                 error_kind = ?persist_error.kind(),
                 "could not persist disabled peer-free mesh state after authority replacement failed"
@@ -3280,17 +3288,29 @@ impl Node {
         let completes_authority_reset =
             self.authority_reset == AuthorityResetState::AwaitingFullSnapshot && full_snapshot;
         if authority_changed || completes_authority_reset {
-            // Receipt deletion is irreversible. Validate the complete incoming content before
-            // either a fresh authority reset or its interrupted retry can settle the journal.
-            self.validate_snapshot(&config)?;
-            #[cfg(feature = "mesh-dns")]
-            crate::dns::Records::from_config(&config)?;
-            let proposed: Vec<_> = std::iter::once(config.addresses)
-                .chain(config.peers.values().map(|peer| peer.peer.addresses))
-                .collect();
-            Device::check_routes(&proposed)?;
-            if self.engine_kind == EngineKind::GotaTun {
-                crate::gotatun_node::Engine::prepare_policy(&config, self.proxy_ingress.clone())?;
+            // Validate before settlement; rejected authorities still fence stale peers.
+            let validation = (|| {
+                self.validate_snapshot(&config)?;
+                #[cfg(feature = "mesh-dns")]
+                crate::dns::Records::from_config(&config)?;
+                let proposed: Vec<_> = std::iter::once(config.addresses)
+                    .chain(config.peers.values().map(|peer| peer.peer.addresses))
+                    .collect();
+                Device::check_routes(&proposed)?;
+                if self.engine_kind == EngineKind::GotaTun {
+                    crate::gotatun_node::Engine::prepare_policy(
+                        &config,
+                        self.proxy_ingress.clone(),
+                    )?;
+                }
+                Ok::<_, io::Error>(())
+            })();
+            if let Err(error) = validation {
+                return Err(if authority_changed {
+                    self.fail_closed_authority_replacement(error, &config)
+                } else {
+                    error
+                });
             }
             if !authority_changed {
                 self.retire_settled_authority_rotation(config.rotation_operation.as_ref())?;

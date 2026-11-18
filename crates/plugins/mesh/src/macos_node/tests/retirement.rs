@@ -237,29 +237,35 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
 /// A changed authority retires its old rotation journal but keeps the active interface marker.
 #[test]
 fn authority_change_discards_old_rotation_journal() {
-    authority_rotation_receipt_case(false, false);
+    authority_rotation_receipt_case(false, false, false);
 }
 
 /// A new coordinator process keeps the completed receipt for the same database operation.
 #[test]
 fn authority_change_keeps_the_matching_rotation_receipt() {
-    authority_rotation_receipt_case(true, false);
+    authority_rotation_receipt_case(true, false, false);
 }
 
 /// An interrupted reset cannot retire a matching receipt from an unfinished snapshot header.
 #[test]
 fn j862_incomplete_reset_snapshot_retains_the_mac_rotation_receipt() {
-    authority_rotation_receipt_case(true, true);
+    authority_rotation_receipt_case(true, true, false);
 }
 
-/// Compare genuine replacement, exact operation continuity, and an incomplete reset on the same active Mac key.
-fn authority_rotation_receipt_case(continues: bool, incomplete: bool) {
+/// A rejected new authority stops old peers without deleting their pending completion receipt.
+#[test]
+fn rejected_new_authority_fences_peers_and_retains_the_mac_receipt() {
+    authority_rotation_receipt_case(true, false, true);
+}
+
+/// Compare valid replacement, interrupted reset and rejected content against one active Mac key.
+fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: bool) {
     let private_key = [9; 32];
     let active_key = mac_private_public(&private_key);
     let mut current = config();
     current.local_key = Some(active_key);
     let directory = std::env::temp_dir().join(format!(
-        "infraternal-j363-mac-rotation-retirement-{}-{continues}-{incomplete}",
+        "infraternal-j363-mac-rotation-retirement-{}-{continues}-{incomplete}-{rejected}",
         std::process::id()
     ));
     fs::create_dir(&directory).expect("state directory");
@@ -316,6 +322,43 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool) {
         operation_id: "00000000-0000-4000-8000-000000000367".into(),
         sequence: 11,
     });
+    if rejected {
+        let mut chunk = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        chunk.rotation_operation = None;
+        chunk.upserted.values_mut().next().unwrap().peer.key = active_key;
+        assert_eq!(
+            node.chunk(chunk).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            node.config
+                .as_ref()
+                .is_some_and(
+                    |config| config.authority_epoch.as_deref() == Some(AUTHORITY_EPOCH_B)
+                        && config.peers.is_empty()
+                        && config.default_policy == DefaultPolicy::Deny
+                )
+        );
+        assert!(node.worker.is_none());
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        let saved = read_public_state(node.path.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(saved.authority_reset_pending && !saved.enabled);
+        assert!(saved.config.unwrap().peers.is_empty());
+        drop(node);
+        fs::remove_dir_all(directory).unwrap();
+        return;
+    }
     node.prepare_authority_replacement(&replacement)
         .expect("persist the new authority's reset");
     if incomplete {

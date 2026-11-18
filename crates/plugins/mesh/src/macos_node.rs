@@ -2781,37 +2781,47 @@ impl Node {
         let Some(config) = result? else {
             return Ok(false);
         };
-        validate_config(&config, identity.public_key)?;
-        // A complete snapshot may replay its revision only with identical contents. Authority
-        // reset is handled separately because the new epoch may reuse a revision.
-        if !self.authority_reset_pending
-            && self.config.as_ref().is_some_and(|accepted| {
-                accepted.authority_epoch == config.authority_epoch
-                    && accepted.version == config.version
-                    && !crate::dataplane::same_runtime_content(accepted, &config)
-            })
-        {
-            tracing::warn!(
-                authority_epoch = ?config.authority_epoch,
-                version = config.version,
-                "Mac mesh configuration conflict at an accepted authority revision"
-            );
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        if self
-            .config
-            .as_ref()
-            .is_some_and(|old| old.node == config.node && old.addresses != config.addresses)
-        {
-            return Err(io::ErrorKind::Unsupported.into());
-        }
-        let desired_routes = route_addresses(&config);
-        validate_underlay_routes(&config, &desired_routes)?;
-        if authority_changed || self.authority_reset_pending {
-            #[cfg(feature = "mesh-dns")]
-            crate::dns::Records::from_config(&config)?;
-            PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
-        }
+        let validation = (|| {
+            validate_config(&config, identity.public_key)?;
+            // A complete snapshot may replay its revision only with identical contents. Authority
+            // reset is handled separately because the new epoch may reuse a revision.
+            if !self.authority_reset_pending
+                && self.config.as_ref().is_some_and(|accepted| {
+                    accepted.authority_epoch == config.authority_epoch
+                        && accepted.version == config.version
+                        && !crate::dataplane::same_runtime_content(accepted, &config)
+                })
+            {
+                tracing::warn!(
+                    authority_epoch = ?config.authority_epoch,
+                    version = config.version,
+                    "Mac mesh configuration conflict at an accepted authority revision"
+                );
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if self
+                .config
+                .as_ref()
+                .is_some_and(|old| old.node == config.node && old.addresses != config.addresses)
+            {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+            let desired_routes = route_addresses(&config);
+            validate_underlay_routes(&config, &desired_routes)?;
+            if authority_changed || self.authority_reset_pending {
+                #[cfg(feature = "mesh-dns")]
+                crate::dns::Records::from_config(&config)?;
+                PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
+            }
+            Ok::<_, io::Error>(desired_routes)
+        })();
+        let desired_routes = match validation {
+            Ok(routes) => routes,
+            Err(error) if authority_changed => {
+                return self.stop_after_retirement_failure(error, &config);
+            }
+            Err(error) => return Err(error),
+        };
         // Preserve the receipt through incomplete or rejected snapshots. Only the fully
         // validated incoming operation can authorize continuity or journal retirement.
         if authority_changed {
@@ -3029,6 +3039,14 @@ impl Node {
         reset_error: io::Error,
         denied: &Config,
     ) -> io::Result<T> {
+        // A complete but rejected new authority retires peers without retiring its receipt.
+        let mut denied = denied.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns")]
+        denied.peer_names.clear();
+        // Fence restore first; the disabled write below retries any failure.
+        let _ = self.persist_retired_snapshot(&denied);
         self.enabled = false;
         let stop_result = self
             .worker

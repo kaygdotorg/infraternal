@@ -1245,6 +1245,18 @@ fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
 #[test]
 #[ignore = "Run as root inside a dedicated network namespace"]
 fn j862_incomplete_reset_snapshot_must_not_discard_the_rotation_receipt() {
+    rejected_reset_receipt_case(false);
+}
+
+/// A rejected new authority fences stale peers while preserving its receipt through restart.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j863_rejected_new_authority_retains_receipt_and_fences_peers() {
+    rejected_reset_receipt_case(true);
+}
+
+/// Exercise receipt preservation either during an interrupted reset or its first rejected replacement.
+fn rejected_reset_receipt_case(reject_new_authority: bool) {
     command("ip", &["link", "set", "lo", "up"]);
     let state = RotationState::new();
     let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
@@ -1262,6 +1274,46 @@ fn j862_incomplete_reset_snapshot_must_not_discard_the_rotation_receipt() {
         operation_id: operation.into(),
         sequence: 1,
     });
+    if reject_new_authority {
+        let mut rejected = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        rejected.rotation_operation = None;
+        rejected.upserted.values_mut().next().unwrap().peer.key = node.interface_key().unwrap();
+        let refusal = node.chunk(rejected);
+        println!("J863_REJECTED_AUTHORITY refusal={refusal:?}");
+        assert!(refusal.is_err());
+        assert!(
+            node.config()
+                .is_some_and(
+                    |config| config.authority_epoch.as_deref() == Some(J363_EPOCH_B)
+                        && config.peers.is_empty()
+                        && config.default_policy == DefaultPolicy::Deny
+                )
+        );
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        drop(node);
+        let restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+        // A rejected authority is explicitly disabled; restore must retain its receipt.
+        assert!(!restored.enabled());
+        assert!(
+            restored
+                .store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        return;
+    }
     node.prepare_authority_replacement(&replacement).unwrap();
     drop(node);
     let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
