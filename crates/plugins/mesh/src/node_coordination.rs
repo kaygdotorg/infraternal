@@ -60,6 +60,16 @@ async fn read_identity(channel: &dyn NodeChannel) -> Option<IdentityProbe> {
     {
         identity.identity.dns_names = read_dns_names(channel).await;
     }
+    // A timeout is not proof of an older receiver: withholding the view keeps an epoch
+    // change from discarding a current receiver's journal during transient probe failure.
+    identity.identity.rotation_continuity = match channel
+        .call("mesh.identity", br#"{"rotation_continuity":true}"#.to_vec())
+        .await
+    {
+        Ok(reply) => parse_identity(&reply)?.rotation_continuity,
+        Err(infraternal_plugin_api::node_channel::CALL_REFUSED) => false,
+        Err(_) => return None,
+    };
     Some(identity)
 }
 
@@ -401,6 +411,12 @@ pub async fn run(
                 };
                 let mut failed = false;
                 for mut chunk in chunks {
+                    if !current_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.rotation_continuity)
+                    {
+                        chunk.rotation_operation = None;
+                    }
                     chunk.authority_epoch.clone_from(&authority_epoch);
                     if !channel.supports_server_paths() {
                         chunk.server = None;
@@ -497,8 +513,8 @@ pub async fn run(
             } else {
                 None
             };
-        // No heartbeat. Reconnect, local up/down, a committed policy change, a rotation deadline or a refused
-        // attach with unknown rotation support wakes the worker. Closed sources retire it.
+        // No heartbeat. Source changes, rotation deadlines and pending delivery or capability
+        // retries wake the worker. Successful delivery leaves no view-retry timer. Closed sources retire it.
         tokio::select! {
             result=notices.changed()=> {if result.is_err() {return;}refresh_identity=true;installed=None;},
             result=revisions.recv()=>{
@@ -600,6 +616,8 @@ mod tests {
         refuse_delta: AtomicBool,
         /// Refuse one full snapshot to model a transient control-channel failure.
         refuse_full_once: AtomicBool,
+        /// Fail one continuity probe without claiming the receiver is an older binary.
+        fail_continuity_once: AtomicBool,
         queried: tokio::sync::Notify,
         applied: tokio::sync::Semaphore,
         frames: Mutex<Vec<(Option<u64>, u64, bool)>>,
@@ -642,6 +660,7 @@ mod tests {
                 enabled: AtomicBool::new(true),
                 refuse_delta: AtomicBool::new(false),
                 refuse_full_once: AtomicBool::new(false),
+                fail_continuity_once: AtomicBool::new(false),
                 queried: tokio::sync::Notify::new(),
                 applied: tokio::sync::Semaphore::new(0),
                 frames: Mutex::new(Vec::new()),
@@ -785,6 +804,11 @@ mod tests {
                         self.queried.notify_one();
                         return Err("Node control timed out.");
                     }
+                    if input == br#"{"rotation_continuity":true}"#
+                        && self.fail_continuity_once.swap(false, Ordering::AcqRel)
+                    {
+                        return Err("Node control timed out.");
+                    }
                     let legacy = input == b"{}";
                     let probe: serde_json::Value =
                         serde_json::from_slice(&input).map_err(|_| "invalid identity request")?;
@@ -793,7 +817,8 @@ mod tests {
                         && (probe["compact_access"] == true
                             || probe["dns_names"] == true
                             || probe["key_rotation"] == true
-                            || probe["authority_epoch"] == true)
+                            || probe["authority_epoch"] == true
+                            || probe["rotation_continuity"] == true)
                     {
                         return Err(infraternal_plugin_api::node_channel::CALL_REFUSED);
                     }
@@ -810,6 +835,7 @@ mod tests {
                             dns_names: false,
                             key_rotation,
                             authority_epoch,
+                            rotation_continuity: probe["rotation_continuity"] == true,
                             public_key: if self.server {
                                 PublicKey([1; 32])
                             } else {
@@ -1773,6 +1799,7 @@ mod tests {
             dns_names: false,
             key_rotation,
             authority_epoch: false,
+            rotation_continuity: false,
             public_key: PublicKey([2; 32]),
             port: 44000,
         }))
@@ -1787,6 +1814,7 @@ mod tests {
             dns_names: false,
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: false,
             public_key: PublicKey([2; 32]),
             port: 44000,
         }))
@@ -1818,6 +1846,22 @@ mod tests {
             )
         });
         (result, requests.into_inner().unwrap())
+    }
+
+    /// A transient continuity probe failure withholds configuration; explicit refusal remains compatible.
+    #[tokio::test]
+    async fn continuity_probe_failure_never_downgrades_a_current_receiver() {
+        let channel = Channel::candidate();
+        channel.fail_continuity_once.store(true, Ordering::Release);
+        assert!(read_identity(channel.as_ref()).await.is_none());
+        let retried = read_identity(channel.as_ref())
+            .await
+            .expect("successful retry");
+        assert!(retried.identity.rotation_continuity);
+        let legacy = read_identity(Channel::new().as_ref())
+            .await
+            .expect("explicit refusal permits fallback");
+        assert!(!legacy.identity.rotation_continuity);
     }
 
     /// An ambiguous full probe leaves epoch support unknown even when a weaker request returns identity.

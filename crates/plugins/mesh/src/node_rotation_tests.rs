@@ -179,6 +179,21 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
             expected,
             "journal recovery selects the live identity at {stage}"
         );
+        // The same database survives a cold coordinator restart even if this node stopped
+        // between the live key switch and the final durable key write.
+        let mut before_restart = j363_config(expected);
+        before_restart.rotation_operation = Some(crate::dataplane::RotationContinuation {
+            operation_id: "00000000-0000-4000-8000-000000000367".into(),
+            sequence: 1,
+        });
+        for chunk in crate::configuration::chunks(None, &before_restart).unwrap() {
+            restored.chunk(chunk).unwrap();
+        }
+        let mut after_restart = before_restart.clone();
+        after_restart.authority_epoch = Some(J363_EPOCH_B.into());
+        for chunk in crate::configuration::chunks(None, &after_restart).unwrap() {
+            restored.chunk(chunk).unwrap();
+        }
         restored
             .commit_rotation("00000000-0000-4000-8000-000000000367", 1)
             .unwrap();
@@ -213,6 +228,7 @@ fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() 
     let previous = node.up().unwrap().public_key;
     let snapshot = crate::dataplane::Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(previous),
         server: None,
         node: node_id,
@@ -337,6 +353,7 @@ fn check(backend: Backend) {
     Device::addresses(proposed).unwrap();
     let accepted = Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: None,
         node: NodeId(1),
@@ -927,6 +944,7 @@ pub(super) fn j363_retirement_crash_checkpoint() {
 fn j363_config(key: crate::policy::model::PublicKey) -> Config {
     Config {
         authority_epoch: Some(J363_EPOCH_A.to_owned()),
+        rotation_operation: None,
         local_key: Some(key),
         server: None,
         node: NodeId(1),
@@ -1057,7 +1075,21 @@ fn j363_kill_between_persist_and_fence() {
 fn j363_epoch_change_retires_old_rotation_journal() {
     command("ip", &["link", "set", "lo", "up"]);
     let mut failures = Vec::new();
-    for engine in [EngineKind::Kernel, EngineKind::GotaTun] {
+    for (engine, committed, replacement_operation) in [
+        (EngineKind::Kernel, false, None),
+        (EngineKind::GotaTun, false, None),
+        (EngineKind::GotaTun, true, None),
+        (
+            EngineKind::GotaTun,
+            true,
+            Some(("00000000-0000-4000-8000-000000000012", 11)),
+        ),
+        (
+            EngineKind::GotaTun,
+            true,
+            Some(("00000000-0000-4000-8000-000000000011", 12)),
+        ),
+    ] {
         let state = RotationState::new();
         let mut node = Node::restore_with_engine(&state.0, engine).unwrap();
         let identity = node.up().unwrap();
@@ -1065,12 +1097,35 @@ fn j363_epoch_change_retires_old_rotation_journal() {
         for chunk in crate::configuration::chunks(None, &old).unwrap() {
             node.chunk(chunk).unwrap();
         }
-        node.prepare_rotation("00000000-0000-4000-8000-000000000011", 11)
+        let abandoned_candidate = node
+            .prepare_rotation("00000000-0000-4000-8000-000000000011", 11)
             .unwrap();
 
-        let mut replacement = old.clone();
+        if committed {
+            node.commit_rotation("00000000-0000-4000-8000-000000000011", 11)
+                .unwrap();
+        }
+        let mut replacement = node.config().unwrap().clone();
+        replacement.local_key = node.interface_key();
+        replacement.rotation_operation = replacement_operation.map(|(operation_id, sequence)| {
+            crate::dataplane::RotationContinuation {
+                operation_id: operation_id.into(),
+                sequence,
+            }
+        });
         replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
         replacement.peers.clear();
+        if committed {
+            let mut interrupted = replacement.clone();
+            interrupted.rotation_operation = Some(crate::dataplane::RotationContinuation {
+                operation_id: "00000000-0000-4000-8000-000000000011".into(),
+                sequence: 11,
+            });
+            node.prepare_authority_replacement(&interrupted).unwrap();
+            drop(node);
+            node = Node::restore_with_engine(&state.0, engine).unwrap();
+            node.ensure().unwrap();
+        }
         for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
             node.chunk(chunk).unwrap();
         }
@@ -1080,11 +1135,26 @@ fn j363_epoch_change_retires_old_rotation_journal() {
             "J363_ENGINE={engine:?} RETAINED_OLD_JOURNAL={}",
             journal.is_some()
         );
+        assert!(
+            journal.is_none(),
+            "a foreign operation retained the old journal"
+        );
         drop(journal);
         let result = node.prepare_rotation("00000000-0000-4000-8000-000000000001", 1);
         println!("J363_ENGINE={engine:?} NEW_AUTHORITY_PREPARE={result:?}");
-        if result.is_err() {
-            failures.push(engine);
+        match result {
+            Ok(candidate) => {
+                assert_ne!(
+                    candidate, abandoned_candidate,
+                    "a new authority reused an abandoned candidate"
+                );
+                assert_ne!(
+                    Some(candidate),
+                    node.interface_key(),
+                    "a new operation reused the active key"
+                );
+            }
+            Err(_) => failures.push(engine),
         }
         node.down().unwrap();
     }
@@ -1096,8 +1166,9 @@ fn j363_epoch_change_retires_old_rotation_journal() {
 
 /// A same-database coordinator restart must be able to finish the candidate it committed before its epoch changed.
 #[test]
-#[ignore = "Known bug #534: run explicitly to reproduce the missing finish receipt after a cold coordinator restart."]
+#[ignore = "Run as root inside a dedicated network namespace"]
 fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
+    use std::os::unix::fs::PermissionsExt;
     command("ip", &["link", "set", "lo", "up"]);
     let state = RotationState::new();
     let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
@@ -1116,11 +1187,37 @@ fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
     let mut replacement = restored.config().unwrap().clone();
     replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
     replacement.version += 1;
+    replacement.rotation_operation = Some(crate::dataplane::RotationContinuation {
+        operation_id: operation.into(),
+        sequence: 1,
+    });
+    // Stop after the durable deny checkpoint, before applying the replacement runtime.
+    // Recovery must prove continuity from the incoming snapshot again.
+    restored
+        .prepare_authority_replacement(&replacement)
+        .unwrap();
+    drop(restored);
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    assert_eq!(restored.ensure().unwrap().unwrap().public_key, candidate);
     for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
         restored.chunk(chunk).unwrap();
     }
     // The coordinator kept its SQLite rotation row across restart and still names this operation.
+    assert_eq!(
+        std::fs::metadata(state.0.join("mesh-key-rotation.bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
     let finished = restored.finish_rotation(operation, 1);
+    // Completion clears the coordinator's operation without advancing policy revision.
+    // A reconnect with that metadata-only full view must still be accepted.
+    replacement.rotation_operation = None;
+    for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+        restored.chunk(chunk).unwrap();
+    }
     restored.down().unwrap();
     assert!(
         finished.is_ok(),
@@ -1245,7 +1342,9 @@ async fn atomic_journal_recovery_completes_the_pending_cleanup_retry() {
         node.chunk(chunk).unwrap();
     }
     store.acknowledge_applied(id, revision).await.unwrap();
-    assert!(!state.0.join("mesh-key-rotation.bin").exists());
+    assert!(state.0.join("mesh-key-rotation.bin").exists());
+    // Simulate the old release's receipt loss so the atomic repair still exercises a real retry.
+    std::fs::remove_file(state.0.join("mesh-key-rotation.bin")).unwrap();
     let channel = FinishChannel {
         node: std::sync::Mutex::new(node),
         attempts: std::sync::atomic::AtomicUsize::new(0),

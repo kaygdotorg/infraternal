@@ -595,6 +595,21 @@ impl Store {
         }
         result
     }
+    /// Prove that a replacement snapshot still names this journal's exact operation.
+    /// Missing or different operations retire the journal through the ordinary authority fence.
+    /// # Errors
+    /// Refuses an unsafe or malformed journal instead of guessing at continuity.
+    pub(crate) fn rotation_matches(
+        &self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<bool> {
+        let Some(operation) = operation else {
+            return Ok(false);
+        };
+        Ok(self.rotation_secret()?.is_some_and(|state| {
+            state.operation_id == operation.operation_id && state.sequence == operation.sequence
+        }))
+    }
     /// Retire the predecessor private bytes and keep its public key in the retry marker.
     /// # Errors
     /// Refuses a stale operation or a failed atomic durable replacement.
@@ -921,7 +936,7 @@ impl Store {
             }
             if next.version == old.version
                 && same_authority
-                && next != old
+                && !crate::dataplane::same_runtime_content(next, old)
                 && !authorized_reset_completion
             {
                 // Equal-revision changes only normalize an enrollment binding or a journal-proven
@@ -1040,6 +1055,10 @@ pub(crate) struct AuthorityRecord {
     /// The server authority epoch the saved snapshot came from, if it carried one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) epoch: Option<String>,
+    /// Snapshot metadata retained for exact-base persistence checks, never a continuity proof.
+    /// Reset recovery revalidates the operation from the incoming authenticated full snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rotation_operation: Option<crate::dataplane::RotationContinuation>,
     /// True after a new authority was fenced and until its first full snapshot is saved.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) reset_pending: bool,
@@ -1099,10 +1118,14 @@ pub(crate) fn split_authority(
     let epoch = stripped
         .as_mut()
         .and_then(|config| config.authority_epoch.take());
+    let rotation_operation = stripped
+        .as_mut()
+        .and_then(|config| config.rotation_operation.take());
     (
         stripped,
         AuthorityRecord {
             epoch,
+            rotation_operation,
             reset_pending,
         },
     )
@@ -1122,6 +1145,7 @@ pub(crate) fn merge_authority(
     let Some(config) = config else {
         return;
     };
+    config.rotation_operation = record.rotation_operation;
     if config.authority_epoch.is_none() {
         config.authority_epoch = record.epoch;
     }
@@ -1476,6 +1500,7 @@ pub(crate) mod tests {
             authority_reset_pending: false,
             config: Some(Config {
                 authority_epoch: None,
+                rotation_operation: None,
                 local_key: Some(local_key),
                 server: None,
                 node: crate::policy::model::NodeId(1),
@@ -1580,6 +1605,7 @@ pub(crate) mod tests {
             &mut state.authority_reset_pending,
             AuthorityRecord {
                 epoch: Some("00000000-0000-4000-8000-0000000002c1".to_owned()),
+                rotation_operation: None,
                 reset_pending: true,
             },
         );
@@ -1590,6 +1616,39 @@ pub(crate) mod tests {
                 .as_ref()
                 .and_then(|config| config.authority_epoch.as_deref()),
             Some("00000000-0000-4000-8000-0000000002c1")
+        );
+    }
+
+    /// Operation metadata stays out of the rollback snapshot but round-trips for exact-base saves.
+    #[test]
+    fn rotation_metadata_uses_the_authority_record_not_the_legacy_snapshot() {
+        let mut state = binding_state(crate::policy::model::PublicKey([5; 32]));
+        let operation = crate::dataplane::RotationContinuation {
+            operation_id: "00000000-0000-4000-8000-000000000534".into(),
+            sequence: 1,
+        };
+        state
+            .config
+            .as_mut()
+            .expect("bound fixture snapshot")
+            .rotation_operation = Some(operation.clone());
+        let (body, record) = encode_state(&state).expect("encode the legacy snapshot");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode the legacy snapshot");
+        assert!(json["config"].get("rotation_operation").is_none());
+        let mut restored: State =
+            serde_json::from_slice(&body).expect("decode the legacy snapshot");
+        merge_authority(
+            restored.config.as_mut(),
+            &mut restored.authority_reset_pending,
+            record,
+        );
+        assert_eq!(
+            restored
+                .config
+                .expect("restored fixture snapshot")
+                .rotation_operation,
+            Some(operation)
         );
     }
 
@@ -1821,6 +1880,7 @@ pub(crate) mod tests {
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let mut config = Config {
             authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            rotation_operation: None,
             local_key: None,
             server: Some(crate::policy::model::NodeId(1)),
             node: crate::policy::model::NodeId(2),
@@ -2213,6 +2273,7 @@ pub(crate) mod tests {
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let config = Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),

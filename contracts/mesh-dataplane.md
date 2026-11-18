@@ -47,6 +47,29 @@ coordinator channel, never through the public local CLI registry. Authorized
 replacement reconciles the owned local host addresses, including on restart;
 ordinary same-identity address changes still require the D199 overlap barrier.
 
+For rotation continuity across a coordinator process restart (#534, D166), the
+coordinator independently probes `mesh.identity` with
+`{"rotation_continuity":true}`. Only a positive negotiated reply permits
+`rotation_operation: {"operation_id":string,"sequence":u64}` on configuration
+chunks. A probe timeout or malformed reply withholds configuration until the
+existing identity retry succeeds; only explicit refusal or a valid negative
+reply permits an older receiver's shape. Every chunk repeats the same operation
+or omits it. The authenticated
+full snapshot must still bind the active local key and pass the existing
+complete-snapshot authority fence. An exact journal UUID and sequence match
+retains that operation through epoch adoption, including an interrupted commit.
+An absent or mismatched operation settles the active identity and discards the
+abandoned journal. A new database cannot inherit the old sequence space merely
+by enrolling the same public key. Recovery from an interrupted epoch reset
+checks the incoming operation again; saved metadata alone never proves
+continuity. Public snapshots retain their rollback-compatible shape; the
+separate authority record caches the metadata for persistence comparisons.
+
+A failed full configuration delivery retries after five seconds without a
+source event (#533). Successful delivery cancels the retry. A refused delta
+still falls back immediately to a full snapshot. No retry timer remains active
+for a settled, successfully installed view.
+
 Host revocation retires its Mesh membership key, direct network access rules and tag
 membership in the same SQLite transaction as the durable authority tombstone.
 A historical tombstone is reconciled during migration. After commit the host

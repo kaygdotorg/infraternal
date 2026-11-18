@@ -1339,6 +1339,7 @@ impl Node {
                 // Kernel `WireGuard` rotates its key in place (#285, D166).
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
             });
             // The restored kernel socket's port is what the host input table admits (D386).
             node.firewall.set_listen_port(Some(port))?;
@@ -1984,6 +1985,7 @@ impl Node {
                             dns_names: cfg!(target_os = "linux"),
                             key_rotation: true,
                             authority_epoch: true,
+                            rotation_continuity: true,
                         };
                         self.identity = Some(identity.clone());
                         // The host input table admits exactly the port this socket bound (D386).
@@ -2063,6 +2065,7 @@ impl Node {
                     // available on the authenticated, enrollment-bound channel (#382, D166, D352).
                     key_rotation: true,
                     authority_epoch: true,
+                    rotation_continuity: true,
                 };
                 self.identity = Some(identity.clone());
                 // The host input table admits exactly the port this socket bound (D386).
@@ -2777,7 +2780,7 @@ impl Node {
                 .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
         {
             self.validate_binding(&chunk)?;
-            self.retire_settled_authority_rotation()?;
+            self.retire_settled_authority_rotation(chunk.rotation_operation.as_ref())?;
         }
         let result = self.stage(chunk);
         if let Err(error) = &result {
@@ -2863,11 +2866,11 @@ impl Node {
         installed == desired
     }
 
-    /// Persist the deny state and retire the old journal without touching live peers.
+    /// Persist the deny state and retire a superseded journal without touching live peers.
     ///
     /// This runs only after the new authority's complete snapshot has passed chunk validation.
     /// A process stop between persistence and replacement then restores no peers from the old
-    /// authority.
+    /// authority. An exact operation match retains its journal for commit or finish retries.
     /// # Errors
     /// Stops the owned runtime if the durable reset or journal retirement cannot complete.
     fn prepare_authority_replacement(&mut self, replacement: &Config) -> io::Result<Config> {
@@ -2877,22 +2880,36 @@ impl Node {
         #[cfg(feature = "mesh-dns")]
         denied.peer_names.clear();
         self.pending = None;
-        let rotation_error = self.settle_authority_rotation().err();
+        // A new process can still own the same database operation. Its authenticated full
+        // snapshot must name the exact UUID and sequence; key binding was checked by stage.
+        let continuity = self
+            .store
+            .as_ref()
+            .map(|store| store.rotation_matches(replacement.rotation_operation.as_ref()))
+            .transpose()
+            .map(|matched| matched.unwrap_or(false));
+        let continues_rotation = matches!(continuity, Ok(true));
+        let rotation_error = match continuity {
+            Ok(true) => None,
+            Ok(false) => self.settle_authority_rotation().err(),
+            Err(error) => Some(error),
+        };
         if let Some(identity) = &self.identity {
             denied.local_key = Some(identity.public_key);
         }
         self.config = Some(denied.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
         let persistence_error = self.persist_retired_snapshot(&denied).err();
-        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
-            self.store
-                .as_ref()
-                .map(crate::node_state::Store::discard_rotation_journal)
-                .transpose()
-                .err()
-        } else {
-            None
-        };
+        let journal_error =
+            if persistence_error.is_none() && rotation_error.is_none() && !continues_rotation {
+                self.store
+                    .as_ref()
+                    .map(crate::node_state::Store::discard_rotation_journal)
+                    .transpose()
+                    .err()
+            } else {
+                None
+            };
         if let Some(error) = persistence_error.or(rotation_error).or(journal_error) {
             return Err(self.fail_closed_authority_replacement(error, &denied));
         }
@@ -2956,13 +2973,17 @@ impl Node {
     ///
     /// A durable peer-free state records the pending reset. If its journal removal failed, settle
     /// and save the active key binding again before unlinking that previous authority's journal.
+    /// The incoming full snapshot's exact operation match retains it, independent of cached metadata.
     /// # Errors
     /// Refuses an unproven rotation or a failed state or journal write.
-    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+    fn retire_settled_authority_rotation(
+        &mut self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        if store.rotation_secret()?.is_none() {
+        if store.rotation_secret()?.is_none() || store.rotation_matches(operation)? {
             return Ok(());
         }
         self.settle_authority_rotation()?;
@@ -3141,6 +3162,7 @@ impl Node {
             } else {
                 Config {
                     authority_epoch: chunk.authority_epoch.clone(),
+                    rotation_operation: chunk.rotation_operation.clone(),
                     local_key: chunk.local_key,
                     server: chunk.server,
                     node: chunk.node,
@@ -3157,6 +3179,10 @@ impl Node {
                     peer_names: BTreeMap::new(),
                 }
             };
+            let mut config = config;
+            config
+                .rotation_operation
+                .clone_from(&chunk.rotation_operation);
             #[cfg(feature = "mesh-dns")]
             let config = {
                 let mut config = config;
@@ -3184,6 +3210,7 @@ impl Node {
         let dns_suffix_changed = false;
         if pending.server != chunk.server
             || pending.config.authority_epoch != chunk.authority_epoch
+            || pending.config.rotation_operation != chunk.rotation_operation
             || pending.next != chunk.index
             || pending.config.local_key != chunk.local_key
             || pending.config.node != chunk.node
@@ -3307,6 +3334,17 @@ impl Node {
             .is_some_and(|old| old.version == config.version)
             && !completes_authority_reset
         {
+            // Operation metadata can clear at completion without advancing packet policy.
+            // Reconnect may replay that same revision; it still cannot change keys or access.
+            if self
+                .config
+                .as_ref()
+                .is_some_and(|old| crate::dataplane::same_runtime_content(old, &config))
+            {
+                self.save(Some(&config), true)?;
+                self.config = Some(config);
+                return Ok(true);
+            }
             return self.upgrade_legacy_binding(config);
         }
         if let Some(base) = snapshot_base.as_ref() {
@@ -4224,6 +4262,7 @@ mod tests {
                 dns_names: cfg!(target_os = "linux"),
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
                 public_key: PublicKey([1; 32]),
                 port: 44000,
             }),
@@ -4231,6 +4270,7 @@ mod tests {
         };
         let config = Config {
             authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(1)),
             local_key: None,
             node: NodeId(2),
@@ -4302,6 +4342,7 @@ mod tests {
         };
         let config = Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(1),

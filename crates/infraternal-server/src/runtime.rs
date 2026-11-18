@@ -673,7 +673,7 @@ async fn build_router_core(
             let migration_source = legacy_state.clone();
             let migration_target = mesh_state.clone();
             // A database error fails start closed: guessing "not ours" here would mint a new key.
-            let own_keys = crate::embedded_mesh_state::server_node_keys(&pool)
+            let own_keys = crate::embedded_mesh_state::server_node_ownership(&pool)
                 .await
                 .map_err(|error| {
                     tracing::error!(
@@ -683,10 +683,11 @@ async fn build_router_core(
                     ServerError::InvalidConfiguration
                 })?;
             let migration = tokio::task::spawn_blocking(move || {
-                crate::embedded_mesh_state::migrate(
+                crate::embedded_mesh_state::migrate_preserving_rotation(
                     &migration_source,
                     &migration_target,
-                    &|public| own_keys.contains(public),
+                    &|public| own_keys.keys.contains(public),
+                    own_keys.rotation_open,
                 )
             })
             .await

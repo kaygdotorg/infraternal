@@ -86,6 +86,7 @@ fn failed_retirement_case(open_store: bool) {
         dns_names: false,
         key_rotation: false,
         authority_epoch: true,
+        rotation_continuity: false,
     };
     let applied_configs = Arc::new(Mutex::new(Vec::new()));
     let mut node = Node {
@@ -179,6 +180,7 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
         dns_names: false,
         key_rotation: false,
         authority_epoch: true,
+        rotation_continuity: false,
     };
     let at_fence = Arc::new(Mutex::new(None));
     let observed = Arc::clone(&at_fence);
