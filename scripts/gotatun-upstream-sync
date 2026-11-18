@@ -165,6 +165,7 @@ report_conflict() {
   fgit log --format='  %h %ad %s' --date=short "$base..$onto" -- "${files[@]}" || true
 }
 
+# Fetch and describe upstream drift, then carry the pinned series onto a new branch when requested.
 cmd_sync() {
   local from="" onto="upstream/main" date branch="" keep_conflict=0 do_test=0 check_only=0
   local -a push_remotes=()
@@ -297,6 +298,7 @@ cmd_sync() {
   printf '(docs/operations/gotatun-fork.md, "Bumping the pin").\n'
 }
 
+# Run the feature matrix against the chosen checkout and preserve a failing gate as exit 4.
 cmd_test() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
