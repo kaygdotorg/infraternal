@@ -199,6 +199,7 @@ pub async fn run(
     // Retry an ambiguous probe without weakening the identity request.
     let mut identity_retry: Option<tokio::time::Instant> = None;
     let mut transport_port = None;
+    let mut config_retry = None;
     let mut peer_route: Option<(
         std::net::SocketAddr,
         Box<dyn infraternal_plugin_api::server_path::ListenerLease>,
@@ -445,8 +446,9 @@ pub async fn run(
                     }
                 }
                 installed = if failed { None } else { Some(snapshot) };
-                // A refused delta needs a snapshot now, not a future unrelated
-                // edit. A failed snapshot waits for a source change rather than spinning.
+                // Retry failed full snapshots on a fixed deadline even without source events.
+                // Delta refusal falls back immediately; success cancels the pending retry.
+                config_retry = failed.then(|| tokio::time::Instant::now() + UNKNOWN_SUPPORT_RETRY);
                 if failed && was_delta {
                     continue;
                 }
@@ -518,6 +520,7 @@ pub async fn run(
                     service.rotation_applied();
                 }
             },
+            () = sleep_until_optional(config_retry) => { config_retry = None; }
             () = sleep_optional(rotation_wait) => {}
             () = sleep_optional(attach_retry) => {
                 attach_retry = None;
@@ -2357,7 +2360,6 @@ mod tests {
 
     /// A transient full-view failure must retry without an external event so retirement can obtain its own ack.
     #[tokio::test]
-    #[ignore = "Known bug #533: a failed full rotation view has no retry wakeup; run explicitly for the red proof."]
     async fn retiring_rotation_retries_its_failed_full_view_without_an_external_event() {
         let service = service().await;
         let store = service.dataplane();
