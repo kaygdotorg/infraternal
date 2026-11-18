@@ -861,6 +861,60 @@ fn reopening_wider_at_any_width_while_another_writer_owns_the_size_repaints() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The input modes a program left on when a tab reopened at another width:
+/// bracketed paste, cursor keys, keypad, focus events, SGR button mouse,
+/// modifyOtherKeys and a bar cursor, written after a short prompt that fits
+/// every width tried here, so no row soft-wraps and the whole oracle applies.
+const MODES: &[u8] = b"\x1b[?2004h\x1b[?1h\x1b=\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[>4;2m\x1b[6 q";
+
+/// #521's reopen repaint must keep #524's input modes for a shell and a
+/// full-screen program. Both the initial geometry owner and a new writer
+/// after that owner disconnected take the narrower, wider, shorter or taller
+/// size. The non-strict oracle checks modes, key flags, charsets and cells.
+#[test]
+fn reopening_at_another_width_keeps_the_programs_input_modes() {
+    let mut failures = Vec::new();
+    for (name, screen) in [
+        ("shell", [PROMPT, MODES].concat()),
+        (
+            "full-screen program",
+            [PROMPT, b"\x1b[?1049h\x1b[>1u", MODES, b"\x1b[Hvim"].concat(),
+        ),
+    ] {
+        for (cols, rows, departed) in [
+            (38, 24, false),
+            (45, 24, false),
+            (38, 24, true),
+            (45, 24, true),
+            (42, 20, true),
+            (42, 30, true),
+        ] {
+            let mut session = Session::new(42, 24);
+            session.output(&screen);
+            let mut tab = peer();
+            if departed {
+                session.leave(&[]);
+                session.cursors.select(1, (42, 24, 0, 0)).unwrap();
+                tab.writer = Some(1);
+            }
+            let mut viewer = Terminal::new(cols, rows).unwrap();
+            session.handle(&mut tab, Frame::ReadFrom(0));
+            assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+            session.resize(&mut tab, cols, rows);
+            let repaint = session.deliver(&mut tab, &mut viewer);
+            let difference = viewer.screen_difference(&session.terminal);
+            if repaint != Some(Repaint::Approximate) || difference != 0 {
+                failures.push(format!(
+                    "{name} at {cols}x{rows}, departed={departed}: repaint {repaint:?}, difference {difference}"
+                ));
+            }
+            assert_eq!(session.cursors.active_writer, tab.writer);
+            assert_eq!((session.config.cols, session.config.rows), (cols, rows));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Sweep of the amended D74 (#521): after the tab that typed last left, a
 /// reopen at any other width, with fewer, the same or more rows, takes the
 /// size and ends on the shim's screen. Each failing case is listed.
