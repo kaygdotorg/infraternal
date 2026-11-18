@@ -206,7 +206,8 @@ class BuildHarnessTest(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[3]
     SCRIPT = MAC / "build-harness.sh"
 
-    def fixture(self, tmp: Path, lock_edit: str) -> tuple[Path, Path]:
+    def fixture(self, tmp: Path, lock_edit: str, *, split: bool = True,
+                fork_url: str | None = None) -> tuple[Path, Path]:
         """A copy of the real mesh Cargo.toml and Cargo.lock plus a `cargo` shim.
 
         The shim stands in for `cargo metadata`: it rewrites the lock the way a real
@@ -216,6 +217,21 @@ class BuildHarnessTest(unittest.TestCase):
         (src / "crates/plugins/mesh").mkdir(parents=True)
         shutil.copy(self.ROOT / "crates/plugins/mesh/Cargo.toml", src / "crates/plugins/mesh/Cargo.toml")
         shutil.copy(self.ROOT / "Cargo.lock", src / "Cargo.lock")
+        lock = src / "Cargo.lock"
+        parts = lock.read_text().split("\n[[package]]\n")
+        main = next(b for b in parts[1:] if b.startswith('name = "gotatun"\n'))
+        source = re.search(r'^source = "([^"]+)"', main, re.M).group(1)
+        for name in ("gotatun-crypto", "gotatun-packet"):
+            matching = [b for b in parts[1:] if b.startswith(f'name = "{name}"\n')]
+            if split and not matching:
+                parts.append(f'name = "{name}"\nversion = "0.1.0"\nsource = "{source}"\n')
+            elif not split:
+                parts = [b for b in parts if not b.startswith(f'name = "{name}"\n')]
+        lock.write_text("\n[[package]]\n".join(parts))
+        if fork_url is not None:
+            original = source.removeprefix("git+").split("?", 1)[0]
+            for path in (lock, src / "crates/plugins/mesh/Cargo.toml"):
+                path.write_text(path.read_text().replace(original, fork_url))
         shim = tmp / "cargo"
         shim.write_text(
             f"#!{sys.executable}\nimport re\nt = open('Cargo.lock').read()\n{lock_edit}\n"
@@ -234,8 +250,58 @@ class BuildHarnessTest(unittest.TestCase):
         )
 
     GOOD_LOCK = (
-        "t = re.sub(r'(gotatun\\?rev=)[0-9a-f]+#[0-9a-f]+', r'\\g<1>abcdef1234567#abcdef1234567', t)"
+        "t = re.sub(r'((?:gotatun|gotatun-fork)\\?rev=)[0-9a-f]+#[0-9a-f]+', r'\\g<1>abcdef1234567#abcdef1234567', t)"
     )
+
+    def test_split_crates_move_together_on_either_mirror(self) -> None:
+        """All three fork packages may move, with the pinned repository identity preserved."""
+        for url in ("https://github.com/kaygdotorg/gotatun", "https://git.kayg.org/kayg/gotatun-fork"):
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as tmp:
+                src, shim = self.fixture(Path(tmp), self.GOOD_LOCK, fork_url=url)
+                run = self.swap(src, shim)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                blocks = (src / "Cargo.lock").read_text().split("\n[[package]]\n")
+                for name in ("gotatun", "gotatun-crypto", "gotatun-packet"):
+                    block = next(b for b in blocks if b.startswith(f'name = "{name}"\n'))
+                    self.assertIn(f'{url}?rev=abcdef1234567#abcdef1234567', block)
+
+    def test_legacy_single_crate_swap_still_passes(self) -> None:
+        """The guard also accepts a fork revision from before the upstream crate extraction."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), self.GOOD_LOCK, split=False)
+            run = self.swap(src, shim)
+            self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_an_unchanged_lock_is_not_a_successful_swap(self) -> None:
+        """A resolver that leaves the old fork revision behind must fail the build preflight."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), "t = t")
+            self.assertEqual(self.swap(src, shim).returncode, 2)
+
+    def test_a_stale_split_crate_is_refused(self) -> None:
+        """Updating only the main crate cannot leave either extracted crate at the old SHA."""
+        only_main = self.GOOD_LOCK.removesuffix(", t)") + ", t, count=1)"
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), only_main)
+            run = self.swap(src, shim)
+            self.assertEqual(run.returncode, 2, run.stderr)
+
+    def test_a_same_named_registry_package_is_not_exempt(self) -> None:
+        """Only entries from the pinned fork source may bypass the unrelated-drift check."""
+        extra = self.GOOD_LOCK + '\nt += \'\\n[[package]]\\nname = "gotatun-packet"\\nversion = "9.9.9"\\nsource = "registry+https://example.invalid/index"\\n\''
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), extra)
+            run = self.swap(src, shim)
+            self.assertEqual(run.returncode, 2, run.stderr)
+            self.assertIn("gotatun-packet", run.stderr)
+
+    def test_changing_the_fork_repository_is_refused(self) -> None:
+        """A new repository is more than a revision swap even if all crate names match."""
+        edit = self.GOOD_LOCK + '\nt = re.sub(r\'git\\+https://[^"?]+(?=\\?rev=)\', "git+https://example.invalid/fork", t)'
+        with tempfile.TemporaryDirectory() as tmp:
+            src, shim = self.fixture(Path(tmp), edit)
+            run = self.swap(src, shim)
+            self.assertEqual(run.returncode, 2, run.stderr)
 
     def test_candidate_rev_edit_hits_exactly_the_gotatun_line(self) -> None:
         """The script's own `sed` swaps the rev on the one `gotatun = ` line and nothing else."""
