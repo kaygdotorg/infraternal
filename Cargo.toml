@@ -38,7 +38,7 @@ argon2 = "0.6"
 # Retain the server's HTTP, JSON, WebSocket and tracing paths; the form, query,
 # matched-path and original-URI extractors are not used [#198].
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tower-log", "tracing", "ws"] }
-axum-server = { version = "0.8", default-features = false, features = ["tls-openssl"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-openssl"] }
 bytes = "1"
 base64 = "0.23"
 # SHA-2 output arrays no longer format as hex; preserve existing persisted checksum text.
