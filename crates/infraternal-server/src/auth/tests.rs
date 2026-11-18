@@ -541,6 +541,7 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
 }
 
 #[tokio::test]
+/// Verify recovery delay, cancellation and replacement revoke all obsolete capabilities.
 async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -552,7 +553,9 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         f.auth
             .recovery_start(
                 &f.user,
-                bip39::Mnemonic::generate(24).unwrap().to_string(),
+                bip39::Mnemonic::generate(bip39::WordCount::Words24)
+                    .unwrap()
+                    .to_string(),
                 NOW
             )
             .await
@@ -1922,6 +1925,7 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
     std::fs::remove_dir_all(data_dir).expect("remove temporary server data");
 }
 
+/// Complete the HTTP registration fixture with a full-strength 24-word recovery phrase.
 pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
     let (status, start_headers, start) = http_post_json(
         app,
@@ -1931,7 +1935,9 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let user_id = str_field(&start, "user_id").to_owned();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
@@ -2739,7 +2745,9 @@ async fn setup_start_accepts_username_and_display_name() {
     );
 
     let user_id = str_field(&body, "user_id").to_owned();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
@@ -3605,8 +3613,11 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
 // Explicit legacy-enrollment fixtures keep old PHC/envelope migration coverage.
 // Production ceremonies never generate mnemonic entropy or retain a phrase hash.
 impl Auth {
+    /// Create the legacy enrollment fixture with a complete 24-word recovery phrase.
     async fn legacy_enrollment(&self, mut start: Value) -> Value {
-        let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+        let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+            .unwrap()
+            .to_string();
         let stored = crypto::recovery_hash_fixture(words.clone()).await.unwrap();
         self.pending
             .lock()
