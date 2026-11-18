@@ -1645,7 +1645,7 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.2"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=72dc734affe2ab4c4e7e1a68b57aacab51545cb3#72dc734affe2ab4c4e7e1a68b57aacab51545cb3"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=34a24e560e8b5fd20409d15c6c7e5a468cc9597e#34a24e560e8b5fd20409d15c6c7e5a468cc9597e"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
