@@ -19,12 +19,14 @@ senders to slow down. It drops a selected packet only when it cannot mark it.
 This controls the engine's local queue; it does not propagate outer tunnel ECN
 bits into inner packets.
 
-Small packets share an allowance per peer: packets up to 256 bytes can pass
-without a congestion signal, at 32 KiB per 10 ms with a 64 KiB burst. This covers
+Small packets share an allowance per peer. Authenticated plaintext frames up
+to 256 bytes can pass without a congestion signal, at 32 KiB per 10 ms with a
+64 KiB burst. Both the size ceiling and allowance count padding, so a large
+frame cannot claim exemption by declaring a small inner packet. This covers
 measured interactive SSH, TCP ACKs and latency probes alongside bulk transfers.
 Sending more small packets exhausts the allowance. Changing addresses or ports
 does not change eligibility. Small traffic within the allowance passes even
-when its flow keys change; larger packets always face the queue controller.
+when its flow keys change; larger frames always face the queue controller.
 Credit recovers fully after 20 ms without small traffic. Seeing the queue drain
 or an invalid receive timestamp resets the episode. Timestamps in the future or
 more than one second old pass unchanged, and valid samples must establish a

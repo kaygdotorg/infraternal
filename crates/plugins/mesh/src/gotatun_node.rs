@@ -7,9 +7,12 @@
 //! the link waits behind it. The pinned `GotaTun` therefore runs a `CoDel` controller on its Linux
 //! receive path: it measures each packet's time from the kernel's UDP receive stamp to the TUN
 //! write and, once that stays above 1 ms for 10 ms, marks ECN-capable packets CE and drops only
-//! packets of queue-heavy flows that can't be marked. Light flows (probes, keystrokes, DNS, pure
-//! ACKs) are exempt. On backup01 this took cubic 8-flow loaded p99 from 22.4 ms to about 6 ms
-//! (#260, J711 and J747).
+//! selected packets that cannot be marked. Authenticated frames up to 256 bytes share a per-peer
+//! allowance of 32 KiB per 10 ms with a 64 KiB burst, including padding before IP length trimming.
+//! This covers measured interactive packets, ACKs and probes; larger frames and small traffic
+//! exceeding the allowance remain subject to the controller. Flow keys never affect eligibility.
+//! J711's earlier prototype on backup01 took cubic 8-flow loaded p99 from 22.4 ms to about 6 ms;
+//! current-head measurements are recorded on #260.
 //!
 //! It is on by default. The one thing it needs from this crate: the socket wrapper in front of
 //! `GotaTun` (`PeerAdmissionUdpReceiver`) must hand each packet's receive stamp on with the
