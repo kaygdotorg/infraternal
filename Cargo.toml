@@ -52,7 +52,7 @@ zeroize = { version = "1.9", features = ["serde"] }
 # Retain SQLite's unlock notification while sharing the bundled C library with rusqlite (D379).
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "sqlite-unlock-notify", "migrate", "macros"] }
 # The D379 database driver shares SQLx's single bundled SQLite library during the port.
-rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 thiserror = "2"
 # Each role enables its required scheduler; private session images use only the current-thread runtime.
 tokio = { version = "1", features = ["rt", "macros", "sync", "net", "signal", "time", "process", "io-util"] }
