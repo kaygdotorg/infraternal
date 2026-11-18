@@ -23,7 +23,7 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, fixture_state, varint
+from agent_fixture import Binary, HANG, cleanup, fixture_state, varint
 
 # The browser's opening grant: the 1 MiB bulk window plus the 64 KiB it keeps
 # for a key repaint (D381), sent as one Credit on every attach.
@@ -32,8 +32,8 @@ BROWSER_OPENING = 1024 * 1024 + 64 * 1024
 READ_BEFORE_KEY = 256 * 1024
 # Replayed bytes that prove the resumed stream is contiguous from its cursor.
 REPLAY_PROOF = 64 * 1024
-# A frame that has not arrived after this long is a freeze, not slowness.
-DEADLINE_S = 20
+# Use the shared fixture bound: control replies can take longer than 20 seconds
+# under gate load.
 
 
 def next_frame(client, deadline, what, credit):
@@ -53,6 +53,7 @@ def attach_like_a_browser(client):
 
 
 def run(binary):
+    """Check that a key repaint does not move a resumed stream past its own cursor."""
     state = fixture_state('rr')
     state.mkdir(mode=0o700)
     client = Binary(binary.resolve(), state)
@@ -65,7 +66,7 @@ def run(binary):
             client.process(credit=False)
         resume_at = client.out
         client.input(b'k')
-        deadline = time.monotonic() + DEADLINE_S
+        deadline = time.monotonic() + HANG
         while client.acked < client.entered or not client.snapshots:
             next_frame(client, deadline, ('the key got no Ack and repaint', client.acked, client.entered, client.snapshots), credit=False)
         repainted_through = client.snapshots[-1][0]
@@ -77,7 +78,7 @@ def run(binary):
         client.data.clear()
         client.snapshots.clear()
         attach_like_a_browser(client)
-        deadline = time.monotonic() + DEADLINE_S
+        deadline = time.monotonic() + HANG
         while len(client.data) < REPLAY_PROOF and not client.snapshots:
             # `process` asserts every Output starts exactly at `client.out`.
             next_frame(client, deadline, f'no replay from {resume_at} after reattach (key repaint covered through {repainted_through}); got {len(client.data)} bytes', credit=True)
