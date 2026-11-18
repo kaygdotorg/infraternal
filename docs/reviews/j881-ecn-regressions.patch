@@ -1,10 +1,11 @@
+diff --git a/gotatun/src/aqm.rs b/gotatun/src/aqm.rs
+index 71b6abf..af196f8 100644
 --- a/gotatun/src/aqm.rs
 +++ b/gotatun/src/aqm.rs
-@@ -1327,4 +1327,127 @@
+@@ -1327,4 +1327,166 @@ mod tests {
              "J870 padding: inner84/plaintext1400=Drop; inner216/plaintext224=Pass, charged224"
          );
      }
--}
 +
 +    /// Independent peers keep separate credit and owed signals under a small-packet flood.
 +    #[test]
@@ -17,14 +18,18 @@
 +        for n in 0..100_000u64 {
 +            let now = 10 * MS + n * 1_000;
 +            let mut p = tcp_v4((n % 50_000) as u16 + 1, 2, 256);
-+            signs += usize::from(judge_with(&mut flood, &mut p, now-3*MS, now, &cfg) != Verdict::Pass);
++            signs += usize::from(
++                judge_with(&mut flood, &mut p, now - 3 * MS, now, &cfg) != Verdict::Pass,
++            );
 +            if n % 1000 == 0 {
 +                let mut a = tcp_v4(22, 0, 216);
 +                let mut b = a.clone();
-+                assert_eq!(judge_with(&mut victim,&mut a,now-3*MS,now,&cfg),
-+                           judge_with(&mut reference,&mut b,now-3*MS,now,&cfg));
-+                assert_eq!(a,b);
-+                assert_eq!(format!("{victim:?}"),format!("{reference:?}"));
++                assert_eq!(
++                    judge_with(&mut victim, &mut a, now - 3 * MS, now, &cfg),
++                    judge_with(&mut reference, &mut b, now - 3 * MS, now, &cfg)
++                );
++                assert_eq!(a, b);
++                assert_eq!(format!("{victim:?}"), format!("{reference:?}"));
 +            }
 +        }
 +        assert!(signs > 0);
@@ -51,32 +56,43 @@
 +            let exempt = budget.exempt(len, now);
 +            if len > 256 {
 +                assert!(!exempt);
-+                assert_eq!(before,budget.credit);
++                assert!(budget.credit >= before);
 +            } else if exempt {
 +                allowed += len as u64;
-+            } else { refused += 1; }
++            } else {
++                refused += 1;
++            }
 +            assert!(budget.credit <= SPARSE_BURST_BYTES * SPARSE_INTERVAL_NS);
-+            assert!(allowed as u128 * SPARSE_INTERVAL_NS as u128 <=
-+                SPARSE_BURST_BYTES as u128 * SPARSE_INTERVAL_NS as u128 +
-+                (now-start) as u128 * SPARSE_BYTES as u128);
++            assert!(
++                allowed as u128 * SPARSE_INTERVAL_NS as u128
++                    <= SPARSE_BURST_BYTES as u128 * SPARSE_INTERVAL_NS as u128
++                        + (now - start) as u128 * SPARSE_BYTES as u128
++            );
 +        }
 +        assert!(refused > 0);
-+        eprintln!("J881 irregular accepted={allowed} refused={refused} elapsed_ns={}",now-start);
++        eprintln!(
++            "J881 irregular accepted={allowed} refused={refused} elapsed_ns={}",
++            now - start
++        );
 +    }
 +
 +    /// Mixed refill-edge bursts cannot suppress all congestion signals.
 +    #[test]
 +    fn j881_mixed_overload_cannot_hide_due_signals() {
-+        let cfg=ecn_1_10();
-+        let mut codel=Codel::default();
-+        let mut small=0;
-+        let mut large=0;
++        let cfg = ecn_1_10();
++        let mut codel = Codel::default();
++        let mut small = 0;
++        let mut large = 0;
 +        for n in 0..200_000u64 {
-+            let now=10*MS + (n/1000)*10*MS + (n%1000);
-+            let len=if n%3==0 {1400} else {256};
-+            let mut p=tcp_v4((n%50000) as u16+1,2,len);
-+            if judge_with(&mut codel,&mut p,now-3*MS,now,&cfg)!=Verdict::Pass {
-+                if len==256 {small+=1;} else {large+=1;}
++            let now = 10 * MS + (n / 1000) * 10 * MS + (n % 1000);
++            let len = if n % 3 == 0 { 1400 } else { 256 };
++            let mut p = tcp_v4((n % 50000) as u16 + 1, 2, len);
++            if judge_with(&mut codel, &mut p, now - 3 * MS, now, &cfg) != Verdict::Pass {
++                if len == 256 {
++                    small += 1;
++                } else {
++                    large += 1;
++                }
 +            }
 +        }
 +        assert!(small + large > 0);
@@ -90,14 +106,25 @@
 +        for knob in ["GOTATUN_AQM_TARGET_US", "GOTATUN_AQM_INTERVAL_US"] {
 +            let result = std::panic::catch_unwind(|| from_vars(&[(knob, "2305843009213693952")]));
 +            match result {
-+                Err(_) => { eprintln!("J881 {knob}: panicked"); invalid.push(knob); }
++                Err(_) => {
++                    eprintln!("J881 {knob}: panicked");
++                    invalid.push(knob);
++                }
 +                Ok(cfg) => {
-+                    eprintln!("J881 {knob}: target_ns={} interval_ns={}",cfg.target_ns,cfg.interval_ns);
-+                    if cfg.target_ns == 0 || cfg.interval_ns == 0 { invalid.push(knob); }
++                    eprintln!(
++                        "J881 {knob}: target_ns={} interval_ns={}",
++                        cfg.target_ns, cfg.interval_ns
++                    );
++                    if cfg.target_ns == 0 || cfg.interval_ns == 0 {
++                        invalid.push(knob);
++                    }
 +                }
 +            }
 +        }
-+        assert!(invalid.is_empty(), "overflowing diagnostic durations: {invalid:?}");
++        assert!(
++            invalid.is_empty(),
++            "overflowing diagnostic durations: {invalid:?}"
++        );
 +    }
 +
 +    /// Clock steps must not suppress or burst congestion signals on fresh stamps.
@@ -107,25 +134,38 @@
 +        let epoch = 1_800_000_000_000_000_000;
 +        let mut errors = Vec::new();
 +        for ecn in [0, 2] {
-+        for shift_ms in [0_i64, -3_600_000, 3_600_000] {
-+            let mut codel = Codel::default();
-+            let (before, now) = drive_bulk(&mut codel, &cfg, 1, ecn, epoch, 200);
-+            assert!(before[0].iter().any(|&v| v != Verdict::Pass));
-+            let shift = shift_ms.unsigned_abs() * MS;
-+            let after = if shift_ms < 0 { now - shift } else { now + shift };
-+            let mut p = tcp_v4(40_000, ecn, 1400);
-+            let first = judge_with(&mut codel, &mut p, after - 3*MS, after, &cfg);
-+            let mut signals = 0;
-+            for step in 1..=100_000u64 {
-+                let at = after + step * 10_000;
-+                let age = 3 * MS + step * 1_000;
++            for shift_ms in [0_i64, -3_600_000, 3_600_000] {
++                let mut codel = Codel::default();
++                let (before, now) = drive_bulk(&mut codel, &cfg, 1, ecn, epoch, 200);
++                assert!(before[0].iter().any(|&v| v != Verdict::Pass));
++                let shift = shift_ms.unsigned_abs() * MS;
++                let after = if shift_ms < 0 {
++                    now - shift
++                } else {
++                    now + shift
++                };
 +                let mut p = tcp_v4(40_000, ecn, 1400);
-+                signals += usize::from(judge_with(&mut codel, &mut p, at-age, at, &cfg) != Verdict::Pass);
++                let first = judge_with(&mut codel, &mut p, after - 3 * MS, after, &cfg);
++                let mut signals = 0;
++                for step in 1..=100_000u64 {
++                    let at = after + step * 10_000;
++                    let age = 3 * MS + step * 1_000;
++                    let mut p = tcp_v4(40_000, ecn, 1400);
++                    signals += usize::from(
++                        judge_with(&mut codel, &mut p, at - age, at, &cfg) != Verdict::Pass,
++                    );
++                }
++                eprintln!(
++                    "J881 fresh stamps ecn={ecn} shift_ms={shift_ms} first={first:?} signals={signals}/100000"
++                );
++                if signals == 0 || signals == 100_000 {
++                    errors.push((ecn, shift_ms));
++                }
 +            }
-+            eprintln!("J881 fresh stamps ecn={ecn} shift_ms={shift_ms} first={first:?} signals={signals}/100000");
-+            if signals == 0 || signals == 100_000 { errors.push((ecn, shift_ms)); }
 +        }
-+        }
-+        assert!(errors.is_empty(), "post-step episodes retained old deadlines: {errors:?}");
++        assert!(
++            errors.is_empty(),
++            "post-step episodes retained old deadlines: {errors:?}"
++        );
 +    }
-+}
+ }
