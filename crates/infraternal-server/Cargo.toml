@@ -82,6 +82,8 @@ quinn = { workspace = true, optional = true }
 sha2.workspace = true
 
 [dev-dependencies]
+# HKDF 0.13 requires digest 0.11; the next SHA-2 upgrade removes this temporary alias.
+sha2-next = { package = "sha2", version = "0.11" }
 # Frozen extension vectors remain covered without adding them to shipping terminals.
 infraternal-protocol = { workspace = true, features = ["desktop"] }
 # Native-lane regressions opt in explicitly; shipping remote terminals do not.

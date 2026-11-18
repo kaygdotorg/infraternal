@@ -177,12 +177,13 @@ fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
 fn aad(user: &str, kind: &str) -> Vec<u8> {
     format!("infraternal/keywrap/v1|{user}|{kind}").into_bytes()
 }
+/// Build the browser key-wrap fixture with the production envelope and HKDF context.
 fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
     let salt = rand::random::<[u8; 32]>();
     let nonce = rand::random::<[u8; 12]>();
     let aad = aad(user, kind);
     let mut key = [0; 32];
-    Hkdf::<Sha256>::new(Some(&salt), ikm)
+    Hkdf::<sha2_next::Sha256>::new(Some(&salt), ikm)
         .expand(&aad, &mut key)
         .unwrap();
     let ciphertext = Aes256Gcm::new_from_slice(&key)
@@ -201,6 +202,7 @@ fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
         ciphertext: B64.encode(ciphertext),
     }
 }
+/// Decrypt a browser key-wrap fixture while authenticating its original account context.
 fn unwrap_browser(
     ikm: &[u8],
     wrap: &Wrap,
@@ -212,7 +214,7 @@ fn unwrap_browser(
     let ciphertext = B64.decode(&wrap.ciphertext).unwrap();
     let aad = aad(user, kind);
     let mut key = [0; 32];
-    Hkdf::<Sha256>::new(Some(&salt), ikm)
+    Hkdf::<sha2_next::Sha256>::new(Some(&salt), ikm)
         .expand(&aad, &mut key)
         .unwrap();
     Aes256Gcm::new_from_slice(&key).unwrap().decrypt(
@@ -3640,10 +3642,11 @@ impl Auth {
             .await)
     }
 }
+/// Derive the purpose-separated recovery fixture bytes from the phrase entropy.
 fn recovery_material(words: &str, kind: &str) -> [u8; 32] {
     let entropy = recovery_ikm(words);
     let mut output = [0; 32];
-    Hkdf::<Sha256>::new(None, &entropy)
+    Hkdf::<sha2_next::Sha256>::new(None, &entropy)
         .expand(
             format!("infraternal/recovery/{kind}/v2").as_bytes(),
             &mut output,
