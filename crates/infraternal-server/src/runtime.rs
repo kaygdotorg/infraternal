@@ -1404,7 +1404,7 @@ mod tests {
         for _ in 0..8 {
             connections.push(pool.acquire().await.unwrap());
         }
-        let limits = {
+        let mut limits = {
             let mut limits = Vec::new();
             for connection in &mut connections {
                 limits.push(
@@ -1450,12 +1450,21 @@ mod tests {
             .await
             .unwrap();
         let retained = std::fs::metadata(&wal).unwrap().len();
+        // Every other connection remains checked out, so acquisition must open a replacement.
+        writer.close().await.unwrap();
+        let mut replacement = pool.acquire().await.unwrap();
+        limits.push(
+            sqlx::query_scalar::<_, i64>("PRAGMA journal_size_limit")
+                .fetch_one(&mut *replacement)
+                .await
+                .unwrap(),
+        );
         println!(
             "SQLX_WAL burst_bytes={burst} retained_bytes={retained} connection_limits={limits:?} pinned_checkpoint={pinned:?} released_checkpoint={released:?}"
         );
         drop(connections);
         drop(reader);
-        drop(writer);
+        drop(replacement);
         pool.close().await;
         sessions.close().await;
         std::fs::remove_dir_all(data_dir).unwrap();
