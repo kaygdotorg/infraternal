@@ -515,3 +515,217 @@ async fn peer_progress_wakes_retirement_and_the_next_revision() {
     std::fs::remove_dir_all(directory).unwrap();
     result.expect("peer progress must not be lost by self-notification suppression");
 }
+
+/// Holds one SQLite statement before commit until the test releases it or its hang guard expires.
+struct ReceiptPause {
+    /// The SQLite worker reports entering the trigger through this barrier.
+    entered: tokio::sync::Semaphore,
+    /// Whether the trigger has already paused its first statement.
+    used: AtomicBool,
+    /// A blocking SQLite worker waits here, outside the async runtime.
+    released: Mutex<bool>,
+    /// Releases the SQLite worker after its async caller has been canceled.
+    ready: std::sync::Condvar,
+}
+
+impl ReceiptPause {
+    /// Let the SQLite statement commit even if its original caller no longer exists.
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.ready.notify_all();
+    }
+}
+
+/// Names a second remote peer while using the ordinary authenticated configuration fixture.
+struct OtherPeer(Arc<Channel>);
+
+impl NodeChannel for OtherPeer {
+    /// Identify the peer whose receipt the rotating node is waiting for.
+    fn id(&self) -> &str {
+        "00000000-0000-4000-8000-000000000002"
+    }
+    /// Keep the pre-enrolled peer's endpoint identical across worker replacement.
+    fn observed_ip(&self) -> std::net::IpAddr {
+        self.0.observed_ip()
+    }
+    /// This peer has no server-side presence tracker to create an unrelated wakeup.
+    fn is_server(&self) -> bool {
+        false
+    }
+    /// Reuse the authenticated channel notice stream.
+    fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0.changes()
+    }
+    /// Apply real coordinator chunks through the ordinary fixture.
+    fn call(&self, action: &str, input: Vec<u8>) -> PluginOperation<'_, Vec<u8>> {
+        self.0.call(action, input)
+    }
+}
+
+/// A receipt committed after cancellation must still wake a driver when the peer's worker is replaced.
+#[tokio::test]
+async fn canceled_receipt_commit_is_not_lost_on_worker_replacement() {
+    let directory = std::env::temp_dir().join(format!("ack-cancel-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let pause = Arc::new(ReceiptPause {
+        entered: tokio::sync::Semaphore::new(0),
+        used: AtomicBool::new(false),
+        released: Mutex::new(false),
+        ready: std::sync::Condvar::new(),
+    });
+    let sqlite_pause = pause.clone();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(directory.join("mesh.sqlite"))
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .collation("pause_receipt", move |left, right| {
+            if !sqlite_pause.used.swap(true, Ordering::AcqRel) {
+                sqlite_pause.entered.add_permits(1);
+                let mut released = sqlite_pause.released.lock().unwrap();
+                while !*released {
+                    released = sqlite_pause.ready.wait(released).unwrap();
+                }
+            }
+            left.cmp(right)
+        });
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(8)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let service = service_on_pool(pool.clone()).await;
+    let store = service.dataplane();
+    let (peer, _) = store
+        .attach_named_with_probed_capabilities(
+            "00000000-0000-4000-8000-000000000002",
+            PublicKey([4; 32]),
+            Some("192.0.2.1:44000".parse().unwrap()),
+            false,
+            None,
+            Some(true),
+            Some(true),
+        )
+        .await
+        .unwrap();
+    let (node, _, operation) = rotating_node(
+        &service,
+        "00000000-0000-4000-8000-000000000001",
+        PublicKey([2; 32]),
+    )
+    .await;
+    store
+        .start_rotation_overlap(
+            node,
+            &operation.operation_id,
+            PublicKey([3; 32]),
+            100,
+            "test-boot",
+            1,
+        )
+        .await
+        .unwrap();
+    let revision = store
+        .commit_rotation(node, &operation.operation_id)
+        .await
+        .unwrap();
+    let server = store.node_for_host("server").await.unwrap();
+    let live: std::collections::BTreeSet<_> = [node, server, peer].into_iter().collect();
+    service.set_presence(live.iter().map(|node| (*node, None)).collect());
+    assert!(store.acknowledge_applied(server, revision).await.unwrap());
+    assert!(store.acknowledge_applied(node, revision).await.unwrap());
+    let rotating_channel = StuckFinish {
+        inner: Channel::candidate(),
+        attempts: Mutex::default(),
+        finished: tokio::sync::Semaphore::new(0),
+    };
+    let identity = Identity {
+        compact_access: false,
+        #[cfg(feature = "mesh-dns")]
+        dns_names: false,
+        key_rotation: true,
+        authority_epoch: true,
+        rotation_continuity: true,
+        public_key: PublicKey([3; 32]),
+        port: 44000,
+    };
+    let mut progress = service.subscribe_rotation_progress();
+    let mut revisions = service.subscribe();
+    let mut presence = service.subscribe_presence();
+    assert_eq!(
+        crate::rotation::drive(&store, &service, &rotating_channel, node, &identity, &live).await,
+        None
+    );
+    sqlx::query(&format!("CREATE TRIGGER pause_ack AFTER INSERT ON mesh_node_applied WHEN NEW.node_id={} BEGIN SELECT 1 WHERE 'a' COLLATE pause_receipt = 'b'; END", peer.0))
+        .execute(&pool).await.unwrap();
+    let mut inner = Channel::candidate();
+    Arc::get_mut(&mut inner).unwrap().identity_key = PublicKey([4; 32]);
+    let channel = Arc::new(OtherPeer(inner));
+    let work = Arc::new(tokio::sync::Semaphore::new(1));
+    let mut tasks = vec![tokio::spawn(run(
+        store.clone(),
+        service.clone(),
+        channel.clone(),
+        work.clone(),
+    ))];
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        pause.entered.acquire().await.unwrap().forget();
+        let old = tasks.pop().unwrap();
+        old.abort();
+        assert!(old.await.unwrap_err().is_cancelled());
+        pause.release();
+        // Read until SQLite has finished the already-running statement after caller cancellation.
+        loop {
+            if store.rotation_acks_ready(revision, &live).await.unwrap() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!progress.has_changed().unwrap());
+        assert!(matches!(
+            revisions.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        while let Ok(permit) = channel.0.applied.try_acquire() {
+            permit.forget();
+        }
+        tasks.push(tokio::spawn(run(
+            store.clone(),
+            service.clone(),
+            channel.clone(),
+            work,
+        )));
+        channel.0.wait().await;
+        let wake = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                _ = progress.changed() => {},
+                _ = revisions.recv() => {},
+                _ = presence.changed() => {},
+            }
+        })
+        .await;
+        println!(
+            "ACK_CANCEL committed_after_abort=true successor_reconfigured=true driver_woken={}",
+            wake.is_ok()
+        );
+        assert_eq!(
+            crate::rotation::drive(&store, &service, &rotating_channel, node, &identity, &live)
+                .await,
+            Some(std::time::Duration::ZERO),
+            "the receipt is sufficient once an unrelated wake finally arrives"
+        );
+        wake.is_ok()
+    })
+    .await;
+    for task in tasks {
+        task.abort();
+        let _ = task.await;
+    }
+    pause.release();
+    pool.close().await;
+    std::fs::remove_dir_all(directory).unwrap();
+    assert!(
+        outcome.expect("cancellation proof must finish"),
+        "a durable peer receipt was lost as progress after worker replacement"
+    );
+}
