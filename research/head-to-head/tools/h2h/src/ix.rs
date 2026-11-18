@@ -147,7 +147,8 @@ pub fn register(args: &Args) {
     let user = start["user_id"].as_str().unwrap_or_else(|| die("no user_id")).to_owned();
     let pk = &start["options"]["publicKey"];
     let key = SigningKey::from_slice(&random::<32>()).unwrap();
-    let point = key.verifying_key().to_encoded_point(false);
+    // The COSE key below needs both coordinates from the uncompressed point.
+    let point = key.verifying_key().to_sec1_point(false);
     let cred_id: [u8; 32] = random();
     let prf_secret: [u8; 32] = random();
     // PRF: HMAC-SHA256 over SHA-256("WebAuthn PRF\0" || salt), as an authenticator's hmac-secret.
