@@ -1613,7 +1613,7 @@ dependencies = [
  "ip_network_table",
  "ipnetwork",
  "libc",
- "nix",
+ "nix 0.31.4",
  "parking_lot",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
@@ -2083,7 +2083,7 @@ dependencies = [
  "infraternal-shim",
  "infraternal-status",
  "mimalloc",
- "nix",
+ "nix 0.32.0",
  "openssl",
  "qrcodegen",
  "serde",
@@ -2116,7 +2116,7 @@ dependencies = [
  "infraternal-plugin-remote",
  "infraternal-protocol",
  "infraternal-shim",
- "nix",
+ "nix 0.32.0",
  "openssl",
  "quinn",
  "ring",
@@ -2177,7 +2177,7 @@ name = "infraternal-mesh"
 version = "0.1.0"
 dependencies = [
  "infraternal-plugin-api",
- "nix",
+ "nix 0.32.0",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2224,7 +2224,7 @@ dependencies = [
  "infraternal-plugin-api",
  "infraternal-plugin-remote",
  "infraternal-protocol",
- "nix",
+ "nix 0.32.0",
  "quinn",
  "screencapturekit",
  "serde",
@@ -2239,7 +2239,7 @@ version = "0.1.0"
 dependencies = [
  "infraternal-plugin-api",
  "infraternal-protocol",
- "nix",
+ "nix 0.32.0",
  "serde",
  "serde_json",
  "sysctl",
@@ -2259,7 +2259,7 @@ dependencies = [
  "infraternal-plugin-relay",
  "infraternal-protocol",
  "ipnetwork",
- "nix",
+ "nix 0.32.0",
  "openssl",
  "security-framework",
  "serde",
@@ -2284,7 +2284,7 @@ dependencies = [
  "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-shim",
- "nix",
+ "nix 0.32.0",
  "openssl",
  "serde",
  "serde_json",
@@ -2317,7 +2317,7 @@ dependencies = [
  "bytes",
  "infraternal-plugin-api",
  "infraternal-protocol",
- "nix",
+ "nix 0.32.0",
  "serde",
  "serde_json",
  "sqlx",
@@ -2334,7 +2334,7 @@ dependencies = [
  "infraternal-plugin-api",
  "infraternal-protocol",
  "infraternal-shim",
- "nix",
+ "nix 0.32.0",
  "openssl",
  "quinn",
  "ring",
@@ -2358,7 +2358,7 @@ dependencies = [
  "infraternal-plugin-api",
  "infraternal-plugin-remote",
  "infraternal-shim",
- "nix",
+ "nix 0.32.0",
  "russh",
  "russh-sftp",
  "serde",
@@ -2408,7 +2408,7 @@ dependencies = [
  "infraternal-plugin-ssh",
  "infraternal-protocol",
  "infraternal-shim",
- "nix",
+ "nix 0.32.0",
  "openssl",
  "quinn",
  "rand 0.10.4",
@@ -2437,7 +2437,7 @@ version = "0.1.0"
 dependencies = [
  "infraternal-plugin-ssh",
  "infraternal-shim",
- "nix",
+ "nix 0.32.0",
 ]
 
 [[package]]
@@ -2447,7 +2447,7 @@ dependencies = [
  "alacritty_terminal",
  "clap",
  "libghostty-vt",
- "nix",
+ "nix 0.32.0",
  "openssl",
  "tokio",
  "vt100",
@@ -2459,7 +2459,7 @@ name = "infraternal-status"
 version = "0.1.0"
 dependencies = [
  "infraternal-shim",
- "nix",
+ "nix 0.32.0",
  "uuid",
 ]
 
@@ -2890,6 +2890,19 @@ name = "nix"
 version = "0.31.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2bc81ce8148d3b4f3274da811f11cdd824ae661ee4ef732cdb229825cf5be7f7"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -3843,7 +3856,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3aec6cb630dbe85d72ffd7bcd95f07e1bd69f9f270ee8adfa1afe443a6331438"
 dependencies = [
  "log",
- "nix",
+ "nix 0.31.4",
  "ssh-encoding",
  "windows-sys 0.61.2",
 ]

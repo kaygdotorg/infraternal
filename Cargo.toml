@@ -82,7 +82,7 @@ libfuzzer-sys = "0.4"
 vt100 = "0.18"
 vte = "0.15"
 alacritty_terminal = "0.26"
-nix = { version = "0.31", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
+nix = { version = "0.32", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
 infraternal-shim = { version = "0.1.0", path = "crates/infraternal-shim" }
 infraternal-protocol = { version = "0.1.0", path = "crates/infraternal-protocol" }
 infraternal-server = { version = "0.1.0", path = "crates/infraternal-server" }
