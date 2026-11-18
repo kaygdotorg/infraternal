@@ -621,10 +621,14 @@ impl MeshService {
         self.presence.subscribe()
     }
 
-    /// Wake rotation drivers after an applied-view receipt is committed.
-    pub(crate) fn rotation_applied(&self) {
+    /// Wake other rotation drivers only after a receipt actually advances.
+    /// Mark the publishing worker caught up before its next driver pass, so it never
+    /// wakes itself. Concurrent progress consumed here is safe: that pass reads the
+    /// current durable receipts; progress arriving during the pass remains unseen.
+    pub(crate) fn rotation_applied(&self, own_progress: &mut tokio::sync::watch::Receiver<u64>) {
         self.rotation_updates
             .send_modify(|version| *version = version.wrapping_add(1));
+        own_progress.borrow_and_update();
     }
 
     /// Subscribe to coalesced applied-view progress without a polling timer.

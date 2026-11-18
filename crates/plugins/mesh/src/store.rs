@@ -677,28 +677,36 @@ impl Store {
         &self.server_instance
     }
     /// Record a kernel-applied view only while a rotation needs durable receipts.
+    /// Return whether the receipt advanced; identical or stale receipts do not write.
     /// A new server instance overwrites old receipts so restart always reapplies views.
     pub(crate) async fn acknowledge_applied(
         &self,
         node: NodeId,
         revision: u64,
-    ) -> Result<(), crate::api::MeshApiError> {
+    ) -> Result<bool, crate::api::MeshApiError> {
         let node =
             i64::try_from(node.0).map_err(|_| storage_error("Mesh applied node invalid."))?;
         let revision =
             i64::try_from(revision).map_err(|_| storage_error("Mesh applied revision invalid."))?;
-        let pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM mesh_node_key_rotation WHERE rotation_phase IS NOT NULL)",
+        // Read first so a quiet worker does not even acquire SQLite's writer lock. The
+        // UPSERT guard repeats the comparison atomically for concurrent/stale deliveries.
+        let needed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_node_key_rotation WHERE rotation_phase IS NOT NULL) \
+             AND NOT EXISTS(SELECT 1 FROM mesh_node_applied WHERE node_id=? AND server_instance=? AND revision>=?)",
         )
+        .bind(node)
+        .bind(self.server_instance.as_ref())
+        .bind(revision)
         .fetch_one(&self.pool)
         .await
         .map_err(|error| storage_sql_error(error))?;
-        if !pending {
-            return Ok(());
+        if !needed {
+            return Ok(false);
         }
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO mesh_node_applied(node_id,revision,server_instance) VALUES(?,?,?) \
-             ON CONFLICT(node_id) DO UPDATE SET revision=excluded.revision,server_instance=excluded.server_instance",
+             ON CONFLICT(node_id) DO UPDATE SET revision=excluded.revision,server_instance=excluded.server_instance \
+             WHERE mesh_node_applied.server_instance<>excluded.server_instance OR mesh_node_applied.revision<excluded.revision",
         )
         .bind(node)
         .bind(revision)
@@ -706,7 +714,7 @@ impl Store {
         .execute(&self.pool)
         .await
         .map_err(|error| storage_sql_error(error))?;
-        Ok(())
+        Ok(result.rows_affected() != 0)
     }
     /// Check whether every currently reachable peer has applied a rotation revision.
     pub(crate) async fn rotation_acks_ready(
