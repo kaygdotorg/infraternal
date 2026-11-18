@@ -196,6 +196,7 @@ fn compile_inner(
     }
     Ok(Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(local_member.keys.current),
         server: Some(checkpoint.server),
         node,
@@ -340,6 +341,7 @@ pub(crate) fn chunk_header(new: &Config, from_version: Option<u64>) -> crate::da
         access_updates: Vec::new(),
         local_key: new.local_key,
         authority_epoch: new.authority_epoch.clone(),
+        rotation_operation: new.rotation_operation.clone(),
         server: new.server,
         node: new.node,
         #[cfg(feature = "mesh-dns")]

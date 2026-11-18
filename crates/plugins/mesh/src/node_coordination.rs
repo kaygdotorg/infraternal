@@ -60,6 +60,16 @@ async fn read_identity(channel: &dyn NodeChannel) -> Option<IdentityProbe> {
     {
         identity.identity.dns_names = read_dns_names(channel).await;
     }
+    // A timeout is not proof of an older receiver: withholding the view keeps an epoch
+    // change from discarding a current receiver's journal during transient probe failure.
+    identity.identity.rotation_continuity = match channel
+        .call("mesh.identity", br#"{"rotation_continuity":true}"#.to_vec())
+        .await
+    {
+        Ok(reply) => parse_identity(&reply)?.rotation_continuity,
+        Err(infraternal_plugin_api::node_channel::CALL_REFUSED) => false,
+        Err(_) => return None,
+    };
     Some(identity)
 }
 
@@ -199,6 +209,7 @@ pub async fn run(
     // Retry an ambiguous probe without weakening the identity request.
     let mut identity_retry: Option<tokio::time::Instant> = None;
     let mut transport_port = None;
+    let mut config_retry = None;
     let mut peer_route: Option<(
         std::net::SocketAddr,
         Box<dyn infraternal_plugin_api::server_path::ListenerLease>,
@@ -400,6 +411,12 @@ pub async fn run(
                 };
                 let mut failed = false;
                 for mut chunk in chunks {
+                    if !current_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.rotation_continuity)
+                    {
+                        chunk.rotation_operation = None;
+                    }
                     chunk.authority_epoch.clone_from(&authority_epoch);
                     if !channel.supports_server_paths() {
                         chunk.server = None;
@@ -445,8 +462,9 @@ pub async fn run(
                     }
                 }
                 installed = if failed { None } else { Some(snapshot) };
-                // A refused delta needs a snapshot now, not a future unrelated
-                // edit. A failed snapshot waits for a source change rather than spinning.
+                // Retry failed full snapshots on a fixed deadline even without source events.
+                // Delta refusal falls back immediately; success cancels the pending retry.
+                config_retry = failed.then(|| tokio::time::Instant::now() + UNKNOWN_SUPPORT_RETRY);
                 if failed && was_delta {
                     continue;
                 }
@@ -495,8 +513,8 @@ pub async fn run(
             } else {
                 None
             };
-        // No heartbeat. Reconnect, local up/down, a committed policy change, a rotation deadline or a refused
-        // attach with unknown rotation support wakes the worker. Closed sources retire it.
+        // No heartbeat. Source changes, rotation deadlines and pending delivery or capability
+        // retries wake the worker. Successful delivery leaves no view-retry timer. Closed sources retire it.
         tokio::select! {
             result=notices.changed()=> {if result.is_err() {return;}refresh_identity=true;installed=None;},
             result=revisions.recv()=>{
@@ -518,6 +536,7 @@ pub async fn run(
                     service.rotation_applied();
                 }
             },
+            () = sleep_until_optional(config_retry) => { config_retry = None; }
             () = sleep_optional(rotation_wait) => {}
             () = sleep_optional(attach_retry) => {
                 attach_retry = None;
@@ -595,6 +614,16 @@ mod tests {
         notices: Mutex<Option<tokio::sync::watch::Sender<()>>>,
         enabled: AtomicBool,
         refuse_delta: AtomicBool,
+        /// Refuse one full snapshot to model a transient control-channel failure.
+        refuse_full_once: AtomicBool,
+        /// Fail one continuity probe without claiming the receiver is an older binary.
+        fail_continuity_once: AtomicBool,
+        /// Hold full deliveries refused until the bounded-retry proof releases them.
+        refuse_full_always: AtomicBool,
+        /// Record each delivery attempt before injecting a failure.
+        configure_attempts: Mutex<Vec<tokio::time::Instant>>,
+        /// Wake the retry proof on an attempted delivery, including failures.
+        configured: tokio::sync::Semaphore,
         queried: tokio::sync::Notify,
         applied: tokio::sync::Semaphore,
         frames: Mutex<Vec<(Option<u64>, u64, bool)>>,
@@ -636,6 +665,11 @@ mod tests {
                 notices: Mutex::new(Some(notices)),
                 enabled: AtomicBool::new(true),
                 refuse_delta: AtomicBool::new(false),
+                refuse_full_once: AtomicBool::new(false),
+                fail_continuity_once: AtomicBool::new(false),
+                refuse_full_always: AtomicBool::new(false),
+                configure_attempts: Mutex::new(Vec::new()),
+                configured: tokio::sync::Semaphore::new(0),
                 queried: tokio::sync::Notify::new(),
                 applied: tokio::sync::Semaphore::new(0),
                 frames: Mutex::new(Vec::new()),
@@ -779,6 +813,11 @@ mod tests {
                         self.queried.notify_one();
                         return Err("Node control timed out.");
                     }
+                    if input == br#"{"rotation_continuity":true}"#
+                        && self.fail_continuity_once.swap(false, Ordering::AcqRel)
+                    {
+                        return Err("Node control timed out.");
+                    }
                     let legacy = input == b"{}";
                     let probe: serde_json::Value =
                         serde_json::from_slice(&input).map_err(|_| "invalid identity request")?;
@@ -787,7 +826,8 @@ mod tests {
                         && (probe["compact_access"] == true
                             || probe["dns_names"] == true
                             || probe["key_rotation"] == true
-                            || probe["authority_epoch"] == true)
+                            || probe["authority_epoch"] == true
+                            || probe["rotation_continuity"] == true)
                     {
                         return Err(infraternal_plugin_api::node_channel::CALL_REFUSED);
                     }
@@ -804,6 +844,7 @@ mod tests {
                             dns_names: false,
                             key_rotation,
                             authority_epoch,
+                            rotation_continuity: probe["rotation_continuity"] == true,
                             public_key: if self.server {
                                 PublicKey([1; 32])
                             } else {
@@ -845,6 +886,17 @@ mod tests {
                     );
                 }
                 let chunk: crate::dataplane::Chunk = serde_json::from_slice(&input).unwrap();
+                self.configure_attempts
+                    .lock()
+                    .unwrap()
+                    .push(tokio::time::Instant::now());
+                self.configured.add_permits(1);
+                if chunk.from_version.is_none()
+                    && (self.refuse_full_always.load(Ordering::Acquire)
+                        || self.refuse_full_once.swap(false, Ordering::AcqRel))
+                {
+                    return Err("transient full configuration failure");
+                }
                 self.authority_epochs
                     .lock()
                     .unwrap()
@@ -1762,6 +1814,7 @@ mod tests {
             dns_names: false,
             key_rotation,
             authority_epoch: false,
+            rotation_continuity: false,
             public_key: PublicKey([2; 32]),
             port: 44000,
         }))
@@ -1776,6 +1829,7 @@ mod tests {
             dns_names: false,
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: false,
             public_key: PublicKey([2; 32]),
             port: 44000,
         }))
@@ -1807,6 +1861,22 @@ mod tests {
             )
         });
         (result, requests.into_inner().unwrap())
+    }
+
+    /// A transient continuity probe failure withholds configuration; explicit refusal remains compatible.
+    #[tokio::test]
+    async fn continuity_probe_failure_never_downgrades_a_current_receiver() {
+        let channel = Channel::candidate();
+        channel.fail_continuity_once.store(true, Ordering::Release);
+        assert!(read_identity(channel.as_ref()).await.is_none());
+        let retried = read_identity(channel.as_ref())
+            .await
+            .expect("successful retry");
+        assert!(retried.identity.rotation_continuity);
+        let legacy = read_identity(Channel::new().as_ref())
+            .await
+            .expect("explicit refusal permits fallback");
+        assert!(!legacy.identity.rotation_continuity);
     }
 
     /// An ambiguous full probe leaves epoch support unknown even when a weaker request returns identity.
@@ -2345,6 +2415,126 @@ mod tests {
         );
         worker.abort();
         let _ = worker.await;
+    }
+
+    /// A transient full-view failure must retry without an external event so retirement can obtain its own ack.
+    #[tokio::test]
+    async fn retiring_rotation_retries_its_failed_full_view_without_an_external_event() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        let operation = "00000000-0000-4000-8000-000000000533";
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(node, operation, PublicKey([3; 32]), 100, "test-boot", 1_000)
+            .await
+            .unwrap();
+        let retiring_revision = store.commit_rotation(node, operation).await.unwrap();
+        // Establish the same capabilities beforehand so attachment itself cannot wake a retry.
+        store
+            .attach_named_with_probed_capabilities(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([3; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                Some(true),
+                Some(true),
+            )
+            .await
+            .unwrap();
+        let channel = Channel::candidate();
+        channel.refuse_full_once.store(true, Ordering::Release);
+        let worker = tokio::spawn(run(
+            store.clone(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        // Await an actual successful delivery. The timeout is a hang guard; no source event is sent.
+        let retried = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            channel.applied.acquire(),
+        )
+        .await;
+        worker.abort();
+        let _ = worker.await;
+        let phase: Option<String> =
+            sqlx::query_scalar("SELECT rotation_phase FROM mesh_node_key_rotation WHERE node_id=?")
+                .bind(i64::try_from(node.0).unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            retried.is_ok(),
+            "rotation stayed {phase:?} at revision {retiring_revision}: one failed full delivery stranded its own acknowledgment"
+        );
+    }
+
+    /// Failed full views wait five seconds between attempts and stop retrying after success.
+    #[tokio::test]
+    async fn failed_full_views_are_bounded_and_success_stops_delivery_retries() {
+        let service = service().await;
+        let store = service.dataplane();
+        let channel = Channel::candidate();
+        store
+            .attach_named_with_probed_capabilities(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([3; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                Some(true),
+                Some(true),
+            )
+            .await
+            .unwrap();
+        channel.refuse_full_always.store(true, Ordering::Release);
+        let worker = tokio::spawn(run(
+            store,
+            service,
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            channel.configured.acquire_many(2).await.unwrap().forget();
+            let attempts = channel.configure_attempts.lock().unwrap().clone();
+            assert!(attempts[1].duration_since(attempts[0]) >= UNKNOWN_SUPPORT_RETRY,
+                "failed full delivery retried before its monotonic deadline");
+            channel.refuse_full_always.store(false, Ordering::Release);
+            channel.configured.acquire().await.unwrap().forget();
+            channel.applied.acquire().await.unwrap().forget();
+            // The timeout observes absence across an entire retry period, not execution speed.
+            assert!(tokio::time::timeout(UNKNOWN_SUPPORT_RETRY + std::time::Duration::from_secs(1),
+                channel.configured.acquire()).await.is_err(), "settled view was delivered again");
+            let attempts = channel.configure_attempts.lock().unwrap();
+            assert_eq!(attempts.len(), 3);
+            assert!(attempts[2].duration_since(attempts[1]) >= UNKNOWN_SUPPORT_RETRY);
+            println!("J862_RETRY attempts=3 failure_intervals_at_least_5s=true settled_6s_no_delivery=true");
+        }).await;
+        worker.abort();
+        let _ = worker.await;
+        result.expect("bounded retry proof must complete");
     }
 
     /// Presence where one peer is reachable only through the relay and another is offline.

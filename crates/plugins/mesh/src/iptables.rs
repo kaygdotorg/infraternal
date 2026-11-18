@@ -1022,6 +1022,7 @@ mod tests {
         };
         Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(0),
