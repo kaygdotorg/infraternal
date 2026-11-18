@@ -19,7 +19,7 @@ const OVERLAP_NANOS: i64 = 120_000_000_000;
 /// Back-off after a failed step. Each step is idempotent, so retrying it is safe.
 const RETRY: Duration = Duration::from_secs(5);
 
-/// Kernel clocks and the Linux boot ID keep schedule cadence and overlap independent of wall steps.
+/// Kernel clocks and the boot ID keep schedule cadence and overlap independent of wall steps.
 #[derive(Clone, Debug)]
 struct Clock {
     wall_secs: i64,
@@ -38,12 +38,7 @@ impl Clock {
                 .as_secs(),
         )
         .map_err(io::Error::other)?;
-        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
-            .trim()
-            .to_owned();
-        if boot_id.len() != 36 {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
+        let boot_id = read_boot_id()?;
         let monotonic = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
             .map_err(io::Error::other)?;
         let monotonic_secs = monotonic.tv_sec();
@@ -58,6 +53,26 @@ impl Clock {
             monotonic_nanos,
         })
     }
+}
+
+/// Read the kernel's boot UUID so persisted monotonic timestamps are only reused within the same boot.
+pub(crate) fn read_boot_id() -> io::Result<String> {
+    #[cfg(target_os = "macos")]
+    let id = {
+        use sysctl::Sysctl as _;
+
+        sysctl::Ctl::new("kern.bootsessionuuid")
+            .and_then(|ctl| ctl.value_string())
+            .map_err(io::Error::other)?
+    };
+    #[cfg(not(target_os = "macos"))]
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+
+    let id = id.trim();
+    if id.len() != 36 || uuid::Uuid::parse_str(id).is_err() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(id.to_owned())
 }
 
 /// A node's answer to prepare or commit: the key it now holds.
