@@ -2807,6 +2807,11 @@ impl Node {
         }
         let desired_routes = route_addresses(&config);
         validate_underlay_routes(&config, &desired_routes)?;
+        if authority_changed || self.authority_reset_pending {
+            #[cfg(feature = "mesh-dns")]
+            crate::dns::Records::from_config(&config)?;
+            PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
+        }
         // Preserve the receipt through incomplete or rejected snapshots. Only the fully
         // validated incoming operation can authorize continuity or journal retirement.
         if authority_changed {

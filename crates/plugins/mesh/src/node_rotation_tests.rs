@@ -1306,6 +1306,28 @@ fn j862_incomplete_reset_snapshot_must_not_discard_the_rotation_receipt() {
         node.chunk(rejected).unwrap_err().kind(),
         std::io::ErrorKind::InvalidData
     );
+    #[cfg(feature = "mesh-dns")]
+    {
+        // DNS is validated on the assembled config, not by an unfinished chunk header.
+        let mut invalid_dns = replacement.clone();
+        invalid_dns.rotation_operation = None;
+        invalid_dns.dns_suffix = "bad..suffix".into();
+        let chunk = crate::configuration::chunks(None, &invalid_dns)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            node.chunk(chunk).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+    }
     let retained = node
         .store
         .as_ref()

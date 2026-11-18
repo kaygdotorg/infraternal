@@ -359,6 +359,28 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool) {
             std::io::ErrorKind::InvalidData
         );
     }
+    #[cfg(feature = "mesh-dns")]
+    if incomplete {
+        // DNS is validated on the assembled config, not by an unfinished chunk header.
+        let mut invalid_dns = replacement.clone();
+        invalid_dns.rotation_operation = None;
+        invalid_dns.dns_suffix = "bad..suffix".into();
+        let chunk = crate::configuration::chunks(None, &invalid_dns)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            node.chunk(chunk).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+    }
     let journal = node
         .store
         .as_ref()
