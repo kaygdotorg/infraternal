@@ -1216,7 +1216,7 @@ async fn atomic_journal_recovery_completes_the_pending_cleanup_retry() {
         .await
         .unwrap();
     let operation = "00000000-0000-4000-8000-000000000535";
-    sqlx::query("UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?")
+    sqlx::query("UPDATE mesh_node_key_rotation SET last_rotation=100,rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?")
         .bind(operation).bind(i64::try_from(id.0).unwrap()).execute(&pool).await.unwrap();
     let candidate = node.prepare_rotation(operation, 1).unwrap();
     store
