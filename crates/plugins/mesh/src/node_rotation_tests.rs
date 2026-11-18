@@ -1128,6 +1128,211 @@ fn a_cold_coordinator_restart_can_finish_its_committed_rotation() {
     );
 }
 
+/// Rehearse an atomic receipt restore while the real coordinator's cleanup retry waits five seconds.
+#[cfg(feature = "server")]
+#[tokio::test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+async fn atomic_journal_recovery_completes_the_pending_cleanup_retry() {
+    use infraternal_plugin_api::{PluginOperation, node_channel::NodeChannel};
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    /// Give the production rotation driver the real node's finish action only.
+    struct FinishChannel {
+        /// The restored userspace node whose journal was retired by the new epoch.
+        node: std::sync::Mutex<Node>,
+        /// Count the refusal before recovery and the successful retry afterwards.
+        attempts: std::sync::atomic::AtomicUsize,
+        /// Retain the ordinary channel watch for the authenticated-channel contract.
+        changes: tokio::sync::watch::Sender<()>,
+    }
+    impl NodeChannel for FinishChannel {
+        /// Bind this isolated embedded node to the server inventory entry.
+        fn id(&self) -> &'static str {
+            "server"
+        }
+        /// Keep fixture observations inside its private network namespace.
+        fn observed_ip(&self) -> std::net::IpAddr {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        }
+        /// This fixture models the server's own embedded node.
+        fn is_server(&self) -> bool {
+            true
+        }
+        /// Offer the same watch contract without injecting a source event.
+        fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+            self.changes.subscribe()
+        }
+        /// Dispatch finish to the real node, returning the protocol's ordinary refusal on missing receipt.
+        fn call(&self, action: &str, input: Vec<u8>) -> PluginOperation<'_, Vec<u8>> {
+            let action = action.to_owned();
+            Box::pin(async move {
+                assert_eq!(action, "mesh.rotation.finish");
+                self.attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let input: serde_json::Value = serde_json::from_slice(&input).unwrap();
+                self.node
+                    .lock()
+                    .unwrap()
+                    .finish_rotation(
+                        input["operation_id"].as_str().unwrap(),
+                        input["sequence"].as_u64().unwrap(),
+                    )
+                    .map_err(|_| infraternal_plugin_api::node_channel::CALL_REFUSED)?;
+                Ok(b"{}".to_vec())
+            })
+        }
+    }
+
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let backup = RotationState::new();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::migrate!("../../infraternal-server/migrations")
+        .run(&pool)
+        .await
+        .unwrap();
+    let service =
+        crate::api::MeshService::with_authority_epoch_for_test(pool.clone(), J363_EPOCH_A.into());
+    let store = service.dataplane();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let identity = node.up().unwrap();
+    let (id, _) = store
+        .attach("server", identity.public_key, None, true)
+        .await
+        .unwrap();
+    let old = store.config(id).await.unwrap();
+    for chunk in crate::configuration::chunks(None, &old).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let operation = "00000000-0000-4000-8000-000000000535";
+    sqlx::query("UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?")
+        .bind(operation).bind(i64::try_from(id.0).unwrap()).execute(&pool).await.unwrap();
+    let candidate = node.prepare_rotation(operation, 1).unwrap();
+    store
+        .start_rotation_overlap(id, operation, candidate, 100, "test-boot", 1_000)
+        .await
+        .unwrap();
+    node.commit_rotation(operation, 1).unwrap();
+    store.commit_rotation(id, operation).await.unwrap();
+    let receipt = backup.0.join("mesh-key-rotation.bin");
+    std::fs::copy(state.0.join("mesh-key-rotation.bin"), &receipt).unwrap();
+    drop(node);
+
+    let restarted =
+        crate::api::MeshService::with_authority_epoch_for_test(pool.clone(), J363_EPOCH_B.into());
+    let store = restarted.dataplane();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let identity = node.ensure().unwrap().unwrap();
+    assert_eq!(identity.public_key, candidate);
+    let replacement = store.config(id).await.unwrap();
+    for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let revision = store.begin_rotation_cleanup(id, operation).await.unwrap();
+    let cleanup = store.config(id).await.unwrap();
+    for chunk in crate::configuration::chunks(None, &cleanup).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    store.acknowledge_applied(id, revision).await.unwrap();
+    assert!(!state.0.join("mesh-key-rotation.bin").exists());
+    let channel = FinishChannel {
+        node: std::sync::Mutex::new(node),
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+        changes: tokio::sync::watch::channel(()).0,
+    };
+    let retry = crate::rotation::drive(
+        &store,
+        &restarted,
+        &channel,
+        id,
+        &identity,
+        &BTreeSet::new(),
+    )
+    .await;
+    assert_eq!(retry, Some(Duration::from_secs(5)));
+    let phase: Option<String> =
+        sqlx::query_scalar("SELECT rotation_phase FROM mesh_node_key_rotation WHERE node_id=?")
+            .bind(i64::try_from(id.0).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(phase.as_deref(), Some("cleanup"));
+
+    // Rehearse the production writer: a new 0600 file in the same directory, fsync, rename, then directory fsync.
+    let temporary = state.0.join(".j858-recovery-new");
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .unwrap();
+    let mut input = std::fs::File::open(&receipt).unwrap();
+    std::io::copy(&mut input, &mut output).unwrap();
+    output.flush().unwrap();
+    output.sync_all().unwrap();
+    drop(output);
+    let destination = state.0.join("mesh-key-rotation.bin");
+    std::fs::rename(&temporary, &destination).unwrap();
+    std::fs::File::open(&state.0).unwrap().sync_all().unwrap();
+    assert_eq!(
+        std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    // sleep: exercise the production five-second retry deadline returned after the missing finish receipt.
+    tokio::time::sleep(retry.unwrap()).await;
+    assert_eq!(
+        crate::rotation::drive(
+            &store,
+            &restarted,
+            &channel,
+            id,
+            &identity,
+            &BTreeSet::new()
+        )
+        .await,
+        Some(Duration::ZERO)
+    );
+    let row: (Option<String>, i64) = sqlx::query_as(
+        "SELECT rotation_phase,last_rotation FROM mesh_node_key_rotation WHERE node_id=?",
+    )
+    .bind(i64::try_from(id.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, None);
+    assert!(
+        row.1 > 100,
+        "successful completion advances the weekly schedule"
+    );
+    assert_eq!(
+        channel.attempts.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        channel.node.lock().unwrap().interface_key(),
+        Some(candidate)
+    );
+    channel.node.lock().unwrap().down().unwrap();
+    println!(
+        "J858_RECOVERY atomic_mode=0600 finish_attempts=2 retry_secs=5 phase=none last_rotation_advanced=true identity_preserved=true"
+    );
+}
+
 /// A new authority must stage the complete replacement before it changes live kernel peers.
 #[test]
 #[ignore = "Run as root inside a dedicated network namespace"]
