@@ -100,6 +100,7 @@ fn snapshot_with_endpoint(
         local_key: Some(local.1),
         server: Some(NodeId(1)),
         authority_epoch: None,
+        rotation_operation: None,
         node: NodeId(local.0.into()),
         #[cfg(feature = "mesh-dns")]
         name: None,

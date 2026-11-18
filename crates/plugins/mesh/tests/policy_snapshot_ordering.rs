@@ -66,6 +66,7 @@ fn install(fallback: bool) -> (Node, Config) {
     let identity = node.up().unwrap();
     let config = Config {
         authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
+        rotation_operation: None,
         local_key: Some(identity.public_key),
         server: None,
         node: NodeId(1),

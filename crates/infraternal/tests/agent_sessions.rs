@@ -72,13 +72,18 @@ fn write_wrapper(path: &Path, script: &str) {
     );
 }
 
+/// Read contiguous PTY output through `marker`, skipping input acknowledgments that may arrive first.
 async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
     let mut reader = Reader::default();
     let mut tail = Vec::new();
     timeout(Duration::from_secs(10), async {
         loop {
-            let Frame::Output(seq, bytes) = reader.read(peer).await.unwrap() else {
-                panic!("expected raw shim output");
+            let (seq, bytes) = match reader.read(peer).await.unwrap() {
+                Frame::Output(seq, bytes) => (seq, bytes),
+                // The shim queues an input acknowledgment as soon as the PTY accepts input;
+                // under concurrent load that independent reply can precede the shell's output.
+                Frame::InputAck(_) | Frame::InputState(_, _) => continue,
+                frame => panic!("expected raw shim output, got {frame:?}"),
             };
             assert_eq!(
                 seq, *cursor,

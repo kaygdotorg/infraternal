@@ -126,6 +126,13 @@ impl Snapshot {
             _ => storage_error("configuration compilation failed"),
         })?;
         config.authority_epoch = Some(self.loaded.authority_epoch.clone());
+        config.rotation_operation =
+            rotations
+                .get(&node)
+                .map(|rotation| crate::dataplane::RotationContinuation {
+                    operation_id: rotation.operation_id.clone(),
+                    sequence: rotation.sequence,
+                });
         #[cfg(feature = "mesh-dns")]
         {
             if self.loaded.dns_placeholders.contains(&node) {

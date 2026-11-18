@@ -41,6 +41,7 @@ fn config() -> Config {
     let peer = NodeId(1);
     Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(PublicKey([2; 32])),
         server: Some(peer),
         node: NodeId(2),

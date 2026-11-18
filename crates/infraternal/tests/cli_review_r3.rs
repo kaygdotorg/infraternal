@@ -4,17 +4,20 @@
 
 use std::{
     io::Read,
+    os::fd::AsFd,
     os::unix::process::ExitStatusExt,
     process::{Command, Stdio},
     time::Duration,
 };
 
+use nix::poll::{PollFd, PollFlags, poll};
 use nix::sys::signal::{SigSet, Signal, raise};
 use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_infraternal");
 const FIXTURE: &str = "INFRATERNAL_REVIEW_R3_SIGNAL";
 
+/// Exercise the pending-interrupt fixture in an otherwise ordinary test process.
 #[test]
 fn signal_fixture() {
     let Ok(mode) = std::env::var(FIXTURE) else {
@@ -36,14 +39,51 @@ fn signal_fixture() {
     std::process::exit(42);
 }
 
+/// Run the signal fixture with the default foreground signal disposition.
 fn fixture(mode: &str) -> std::process::Output {
-    Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", "signal_fixture", "--nocapture"])
         .env(FIXTURE, mode)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Concurrent Cargo invocations may run as background jobs, whose children
+    // inherit SIG_IGN. The fixture must start with SIGINT enabled to test its handler.
+    infraternal_shim::prepare_child(&mut command);
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    let mut completed = [PollFd::new(
+        child.stdout.as_ref().unwrap().as_fd(),
+        PollFlags::POLLHUP,
+    )];
+    assert_eq!(
+        poll(&mut completed, 5000_u16).unwrap(),
+        1,
+        "signal fixture did not exit"
+    );
+    let status = child.wait().unwrap();
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
         .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
+    std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }
 }
 
+/// A pending SIGINT before final output emits one notice and ends by the signal.
 #[test]
 fn a_pending_blocked_interrupt_emits_notice_and_terminates_by_sigint() {
     let output = fixture("before");
@@ -52,6 +92,7 @@ fn a_pending_blocked_interrupt_emits_notice_and_terminates_by_sigint() {
     assert_eq!(stdout.matches("{\"error\":\"interrupted\"}").count(), 1);
 }
 
+/// A pending SIGINT during final output keeps the result whole and ends by the signal.
 #[test]
 fn a_pending_interrupt_during_final_output_preserves_result_and_sigint_status() {
     let output = fixture("final");

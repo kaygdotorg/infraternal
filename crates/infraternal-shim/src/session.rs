@@ -194,6 +194,37 @@ struct Peer {
     /// of the engine instead (#521).
     replay_awaits_size: bool,
 }
+/// Gives up the session size once the writer that owns it has no attached
+/// peer left (D74 as amended by the owner on 2026-11-16, #521).
+///
+/// D74 lets the device that typed last keep the session's size, but only
+/// while it is attached. A tab that reopens after that device left reports
+/// its size right after attaching. Clearing the owner here lets that
+/// `Resize` apply through the same path as a new session's first viewer, so
+/// the reopened tab gets the shim's screen reflowed to its own size instead
+/// of a replay laid out for a size it does not have (and the approximate
+/// repaint fits it exactly, rows included).
+///
+/// Call it as soon as a departure is observed, after marking that peer detached,
+/// or after removing peers. It walks the remaining attached peers once, so
+/// the attach and same-size resize paths cost nothing more. A link that
+/// still carries the owner's writer (an already attached replacement after a
+/// reconnect, or a shared link of the same writer) keeps the size. Nothing
+/// is resized here: the size changes only when a viewer next reports one or
+/// types, as D74 says ("the next device that reports a size takes it").
+fn release_size_of_departed_typist<'a>(
+    peers: impl IntoIterator<Item = &'a Peer>,
+    cursors: &mut Inputs,
+) {
+    if let Some(owner) = cursors.active_writer
+        && !peers
+            .into_iter()
+            .any(|p| p.attached && p.writer == Some(owner))
+    {
+        cursors.active_writer = None;
+    }
+}
+
 impl Peer {
     #[cfg(feature = "process-per-user")]
     fn buffer_bytes(&self) -> usize {
@@ -926,12 +957,13 @@ fn run_configured(
         // fresh inputs cannot repeatedly consume it; duplicates need no space.
         let oldest = peers.iter().filter_map(|p| p.deferred).min();
         let mut retired = Vec::new();
-        for (index, p) in peers.iter_mut().enumerate() {
+        for index in 0..peers.len() {
+            let p = &mut peers[index];
             if p.deferred.is_none() && p.trailing.is_empty() {
                 continue;
             }
             let mut trailing = std::mem::take(&mut p.trailing);
-            match consume_peer(
+            if let Ok((false, used)) = consume_peer(
                 &trailing,
                 p,
                 &mut pty,
@@ -944,15 +976,21 @@ fn run_configured(
                 oldest.is_some() && p.deferred != oldest,
                 &mut next_deferred,
             ) {
-                Ok((false, used)) => {
-                    trailing.drain(..used);
-                    p.trailing = trailing;
-                }
-                Ok((true, _)) | Err(_) => retired.push(index),
+                trailing.drain(..used);
+                p.trailing = trailing;
+            } else {
+                retired.push(index);
+                // Buffered frames obey the same departure ordering as
+                // socket reads: the next peer must see the owner leave.
+                p.attached = false;
+                release_size_of_departed_typist(&peers, &mut cursors);
             }
         }
-        for index in retired.into_iter().rev() {
-            peers.remove(index);
+        if !retired.is_empty() {
+            for index in retired.into_iter().rev() {
+                peers.remove(index);
+            }
+            release_size_of_departed_typist(&peers, &mut cursors);
         }
         if peers.iter().filter_map(|p| p.deferred).min() != oldest {
             // Successful admission (or malformed-peer removal) advances the
@@ -1317,7 +1355,8 @@ fn run_configured(
         }
 
         let mut disconnects = [false; MAX_PEERS];
-        for (index, p) in peers.iter_mut().enumerate() {
+        for index in 0..peers.len() {
+            let p = &mut peers[index];
             let flags = ready.3[index];
             let mut disconnect = flags.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
             if p.deferred.is_some() && flags.contains(PollFlags::POLLHUP) {
@@ -1360,6 +1399,12 @@ fn run_configured(
                 }
             }
             disconnects[index] = disconnect;
+            if disconnect {
+                // Keep readiness indices stable until removal, but settle this
+                // departure before a later peer can report its size (D74).
+                p.attached = false;
+                release_size_of_departed_typist(&peers, &mut cursors);
+            }
         }
         // Coexisting ordinary/shared sockets use the same durable input cursor.
         // Replacement stays within a mode, including legacy writer zero. Decide
@@ -1378,10 +1423,13 @@ fn run_configured(
                 });
             disconnects[index] |= duplicate;
         }
-        for index in (0..peers.len()).rev() {
-            if disconnects[index] {
-                peers.remove(index);
+        if disconnects.contains(&true) {
+            for index in (0..peers.len()).rev() {
+                if disconnects[index] {
+                    peers.remove(index);
+                }
             }
+            release_size_of_departed_typist(&peers, &mut cursors);
         }
     }
 }
@@ -1657,8 +1705,9 @@ fn handle<'a>(
                 }
             }
             // If the size applied, the engine has reflowed to this viewer and
-            // its repaint fits exactly. If it is only staged (another writer
-            // still owns the geometry, D74), the repaint keeps the session's
+            // its repaint fits exactly. If it is only staged (the writer that
+            // owns the geometry is still attached, D74; a departed one gave it
+            // up in `release_size_of_departed_typist`), the repaint keeps the session's
             // size with absolute positions: that fits a viewer at least as
             // large, but piles up in the last column of a smaller one. D74
             // leaves smaller viewers to scaling, which the client does not do

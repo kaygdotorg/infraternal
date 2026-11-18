@@ -188,6 +188,7 @@ impl Drop for ServerHost {
 fn snapshot(key: crate::policy::model::PublicKey, version: u64) -> Config {
     Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(key),
         server: None,
         node: NodeId(1),
