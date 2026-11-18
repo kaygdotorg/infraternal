@@ -450,15 +450,9 @@ pub async fn run(
                     }
                 }
                 if !failed && snapshot.acknowledgments_required() {
-                    if store
-                        .acknowledge_applied(config.node, config.version)
-                        .await
-                        .is_err()
-                    {
-                        ack_retry = Some((config.node, config.version));
-                    } else {
-                        ack_retry = None;
-                        service.rotation_applied();
+                    match service.finalize_applied(config.node, config.version).await {
+                        Ok(()) => ack_retry = None,
+                        Err(_) => ack_retry = Some((config.node, config.version)),
                     }
                 }
                 installed = if failed { None } else { Some(snapshot) };
@@ -468,17 +462,12 @@ pub async fn run(
                 if failed && was_delta {
                     continue;
                 }
-            } else if snapshot.acknowledgments_required()
-                && installed.is_some()
-                && store
-                    .acknowledge_applied(config.node, config.version)
-                    .await
-                    .is_ok()
-            {
-                // The kernel already holds an identical peer view; a metadata-only revision
-                // can acknowledge that applied view without an unchanged netlink rewrite.
-                ack_retry = None;
-                service.rotation_applied();
+            } else if snapshot.acknowledgments_required() && installed.is_some() {
+                // A metadata-only revision can acknowledge an identical installed kernel view.
+                match service.finalize_applied(config.node, config.version).await {
+                    Ok(()) => ack_retry = None,
+                    Err(_) => ack_retry = Some((config.node, config.version)),
+                }
             }
         }
         if binding.is_none() {
@@ -493,6 +482,9 @@ pub async fn run(
             let address = std::net::IpAddr::V4(config.addresses.ipv4);
             update_listener(channel.as_ref(), address, &mut listener).await;
         }
+        // Consume our completed finalizer's publication before reading durable receipts.
+        // Coalesced peer progress is covered by that read; later progress stays unseen.
+        rotation_updates.borrow_and_update();
         let rotation_wait =
             if let (Some(node), Some(identity)) = (binding, current_identity.as_ref()) {
                 let live = presence_updates.borrow().keys().copied().collect();
@@ -530,10 +522,9 @@ pub async fn run(
             result=rotation_updates.changed()=>if result.is_err() {return;},
             () = tokio::time::sleep(std::time::Duration::from_secs(5)), if ack_retry.is_some() => {
                 if let Some((node, revision)) = ack_retry
-                    && store.acknowledge_applied(node, revision).await.is_ok()
+                    && service.finalize_applied(node, revision).await.is_ok()
                 {
                     ack_retry = None;
-                    service.rotation_applied();
                 }
             },
             () = sleep_until_optional(config_retry) => { config_retry = None; }
@@ -923,12 +914,17 @@ mod tests {
             })
         }
     }
+    /// Seed the standard in-memory coordinator used by worker unit tests.
     async fn service() -> MeshService {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(2)
             .connect("sqlite::memory:")
             .await
             .unwrap();
+        service_on_pool(pool).await
+    }
+    /// Seed a coordinator fixture on either shared-memory or file-backed SQLite.
+    async fn service_on_pool(pool: sqlx::SqlitePool) -> MeshService {
         sqlx::migrate!("../../infraternal-server/migrations")
             .run(&pool)
             .await
@@ -2536,6 +2532,9 @@ mod tests {
         let _ = worker.await;
         result.expect("bounded retry proof must complete");
     }
+
+    /// Receipt idempotence, worker wakeups and stuck-cleanup regressions for #537.
+    mod ack_loop_tests;
 
     /// Presence where one peer is reachable only through the relay and another is offline.
     fn live_with_relay_activity(
