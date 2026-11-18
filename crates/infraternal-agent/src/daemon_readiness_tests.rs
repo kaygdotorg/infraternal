@@ -609,7 +609,7 @@ async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
     // A relay first announces its attachment to the writer (#477).
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,
