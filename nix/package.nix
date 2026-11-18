@@ -134,7 +134,9 @@ let
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-PSBZH4iSSZJJSTImCUk4ayupmor08VwHXfXHR/vh7i4=";
+    # Refresh this hash when either Bun input changes: a cached fixed output
+    # can otherwise retain an older dependency tree without rebuilding it.
+    outputHash = "sha256-r6aHNw0NsOimex8a0vkKs7Ki7mIXe1liDZPGQx/R8oQ=";
     dontFixup = true;
   };
   rustupShim = writeShellScriptBin "rustup" ''
