@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# gotatun-upstream-sync: carry infraternal's GotaTun patch series onto the newest upstream.
+#
+# infraternal pins a commit of our GotaTun fork (github.com/kaygdotorg/gotatun, D169). The fork is
+# upstream GotaTun (github.com/mullvad/gotatun) plus a linear series of our own patches. This
+# script rebases that series onto the newest upstream `main` on a new dated branch,
+# `infraternal/upstream-YYYYMMDD`, so the fork stays current and our patches keep applying
+# (owner, 2026-11-15, #260). The workflow and the rules for new patches are in
+# docs/operations/gotatun-fork.md.
+#
+# Usage:
+#   scripts/gotatun-upstream-sync sync [--fork DIR] [--from REF] [--onto REF] [--date YYYYMMDD]
+#                                      [--branch NAME] [--check] [--keep-conflict] [--test] [--push REMOTE]...
+#   scripts/gotatun-upstream-sync test [--fork DIR]
+#
+#   sync  fetches upstream and origin, finds the series (`merge-base(FROM, ONTO)..FROM`), and
+#         rebases it onto ONTO as `infraternal/upstream-DATE`. It prints how far the fork was
+#         behind, which upstream commits touched the files our series changes, and which of our
+#         commits upstream made empty. On a conflict it names the commit, the files and the
+#         upstream commits that touched them, then aborts and deletes the half-made branch
+#         (exit 3), unless --keep-conflict leaves the rebase stopped for a person to finish.
+#   test  runs the fork's own gate in the checkout as it is: rustfmt, clippy with warnings
+#         denied, the product's feature set (`device,ring`, which must not contain aws-lc-rs,
+#         D289), and the workspace tests with `ring` and with all features. It is heavy: run it on a build VM through build-slot,
+#         never on the control host.
+#
+# Options:
+#   --fork DIR        the fork checkout (default: $GOTATUN_FORK, else ../gotatun next to the repo).
+#   --from REF        the series to carry (default: the commit infraternal pins in
+#                     crates/plugins/mesh/Cargo.toml, because that is what ships; landed
+#                     patches sit on top of the last sync branch, so its tip may be older).
+#   --onto REF        the upstream commit to rebase onto (default: upstream/main).
+#   --date YYYYMMDD   the branch date (default: today, UTC).
+#   --branch NAME     use this new branch name instead of infraternal/upstream-DATE.
+#   --check           fetch and report upstream drift without creating a branch.
+#   --keep-conflict   stop on a conflict instead of aborting.
+#   --test            run `test` on the new branch after a clean rebase.
+#   --push REMOTE     push the new branch to REMOTE after a clean rebase (and passing tests,
+#                     with --test). Repeat it for each remote (D340: GitHub and git.kayg.org).
+#
+# Exit codes: 0 done (or already current), 2 usage or setup error, 3 conflict, 4 tests failed,
+# 5 push failed.
+#
+# Secrets: none pass through here. Fetch and push use the fork checkout's own git remotes and
+# credential helpers; the script never reads, prints or puts a token in argv.
+#
+# Conflicts recorded once are replayed: the script turns on `rerere` in the fork checkout, so a
+# resolution someone made with --keep-conflict is reused the next time the same hunk conflicts.
+# Keep one long-lived checkout for these runs so its rr-cache survives.
+
+set -euo pipefail
+
+UPSTREAM_URL="https://github.com/mullvad/gotatun"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MESH_TOML="$REPO_ROOT/crates/plugins/mesh/Cargo.toml"
+
+# Print to stderr and exit with the given code.
+die() {
+  local code="$1"
+  shift
+  printf 'gotatun-upstream-sync: %s\n' "$*" >&2
+  exit "$code"
+}
+
+# Print a section heading, so a log reads as a report.
+section() {
+  printf '\n== %s\n' "$*"
+}
+
+# Print the usage block from the header comment.
+usage() {
+  sed -n '/^# Usage:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# The fork commit infraternal pins today, read from the mesh crate's `rev = "..."`.
+pinned_rev() {
+  sed -n 's/^gotatun = .*rev = "\([0-9a-f]*\)".*/\1/p' "$MESH_TOML" | head -n1
+}
+
+# Run git inside the fork checkout.
+fgit() {
+  git -C "$FORK" "$@"
+}
+
+# True while the fork checkout is in the middle of a rebase. The git dir is resolved to an
+# absolute path, because this script runs from the infraternal checkout, not the fork.
+rebase_in_progress() {
+  local gd
+  gd="$(fgit rev-parse --absolute-git-dir)"
+  [[ -d "$gd/rebase-merge" || -d "$gd/rebase-apply" ]]
+}
+
+# Make sure the `upstream` remote exists and points at upstream GotaTun.
+ensure_upstream_remote() {
+  local url
+  if url="$(fgit remote get-url upstream 2>/dev/null)"; then
+    [[ "$url" == "$UPSTREAM_URL" || "$url" == "$UPSTREAM_URL.git" ]] ||
+      die 2 "remote 'upstream' in $FORK is $url, expected $UPSTREAM_URL"
+  else
+    fgit remote add upstream "$UPSTREAM_URL"
+  fi
+}
+
+# The fork's gate. Runs in the current checkout state; prints one RESULT line per step and
+# returns non-zero when any step failed (every step still runs, so one report shows all).
+run_fork_tests() {
+  local rc=0 step_rc
+  # The fork's .cargo/config.toml runs test binaries under `sudo -E`; the gate runs unprivileged.
+  export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=env
+  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=env
+  export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=env
+  # Upstream CI denies warnings the same way.
+  export RUSTFLAGS="--deny warnings"
+  # jemalloc-sys's debug configure fails under the nix shell's _FORTIFY_SOURCE.
+  export NIX_CFLAGS_COMPILE="${NIX_CFLAGS_COMPILE:-} -U_FORTIFY_SOURCE"
+  local jobs="${GOTATUN_SYNC_JOBS:-3}"
+  local -a steps=(
+    "cargo fmt --all --check"
+    "cargo clippy --locked --workspace --all-targets --all-features -j $jobs"
+    "cargo check --locked -p gotatun --no-default-features --features device,ring -j $jobs"
+    "cargo test --locked --workspace --no-default-features --features ring -j $jobs"
+    "cargo test --locked --workspace --all-features -j $jobs"
+  )
+  local s
+  # Inspect a successful dependency listing: a failed cargo invocation must never count as
+  # proof that a forbidden backend is absent (for example when the lockfile is stale).
+  section "STEP ring-only build has no aws-lc-rs"
+  local graph
+  if ! graph="$(cd "$FORK" && cargo tree --locked -p gotatun --no-default-features \
+    --features device,ring -e normal --prefix none --format '{p}')"; then
+    printf '=== RESULT 1 :: could not inspect the device,ring dependency graph\n'
+    rc=1
+  elif [[ "$graph" == *"aws-lc-rs v"* ]]; then
+    printf '=== RESULT 1 :: aws-lc-rs is in the device,ring build (D289)\n'
+    rc=1
+  else
+    printf '=== RESULT 0 :: no aws-lc-rs in the device,ring build\n'
+  fi
+  for s in "${steps[@]}"; do
+    section "STEP $s"
+    # Word splitting is intended: each step is a plain command line without quoting.
+    # shellcheck disable=SC2086
+    (cd "$FORK" && nice -n10 $s) && step_rc=0 || step_rc=$?
+    printf '=== RESULT %s :: %s\n' "$step_rc" "$s"
+    [[ $step_rc -eq 0 ]] || rc=1
+  done
+  return "$rc"
+}
+
+# Explain a stopped rebase in plain words: which of our commits, which files, and which
+# upstream commits touched those files since the series' old base.
+report_conflict() {
+  local base="$1" onto="$2" stopped
+  local -a files=()
+  stopped="$(fgit rev-parse --short REBASE_HEAD 2>/dev/null || echo '?')"
+  mapfile -t files < <(fgit diff --name-only --diff-filter=U)
+  section "CONFLICT"
+  printf 'Our commit %s does not apply on upstream %s:\n  %s\n' \
+    "$stopped" "$(fgit rev-parse --short "$onto")" "$(fgit log -1 --format=%s REBASE_HEAD 2>/dev/null)"
+  printf 'Conflicting files:\n'
+  printf '  %s\n' "${files[@]}"
+  printf 'Upstream commits since %s that touched them:\n' "$(fgit rev-parse --short "$base")"
+  fgit log --format='  %h %ad %s' --date=short "$base..$onto" -- "${files[@]}" || true
+}
+
+cmd_sync() {
+  local from="" onto="upstream/main" date branch="" keep_conflict=0 do_test=0 check_only=0
+  local -a push_remotes=()
+  date="$(date -u +%Y%m%d)"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --fork) FORK="$2"; shift 2 ;;
+      --from) from="$2"; shift 2 ;;
+      --onto) onto="$2"; shift 2 ;;
+      --date) date="$2"; shift 2 ;;
+      --branch) branch="$2"; shift 2 ;;
+      --check) check_only=1; shift ;;
+      --keep-conflict) keep_conflict=1; shift ;;
+      --test) do_test=1; shift ;;
+      --push) push_remotes+=("$2"); shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage >&2; die 2 "unknown option: $1" ;;
+    esac
+  done
+  [[ "$date" =~ ^[0-9]{8}$ ]] || die 2 "--date wants YYYYMMDD, got $date"
+  [[ -d "$FORK/.git" || -f "$FORK/.git" ]] || die 2 "no git checkout at $FORK (set --fork)"
+  [[ -z "$(fgit status --porcelain --untracked-files=no)" ]] || die 2 "$FORK has uncommitted changes"
+  ! rebase_in_progress || die 2 "$FORK is mid-rebase; finish or abort it"
+
+  ensure_upstream_remote
+  fgit config rerere.enabled true
+  fgit config rerere.autoupdate true
+
+  section "FETCH"
+  fgit fetch --quiet upstream
+  fgit fetch --quiet origin '+refs/heads/*:refs/remotes/origin/*'
+
+  if [[ -z "$from" ]]; then
+    from="$(pinned_rev)"
+    [[ -n "$from" ]] || die 2 "cannot read the GotaTun rev from $MESH_TOML; pass --from"
+  fi
+  local from_sha onto_sha base
+  from_sha="$(fgit rev-parse --quiet --verify "$from^{commit}")" ||
+    die 2 "--from $from is not in $FORK; fetch the fork remote that has it (GitHub or git.kayg.org)"
+  onto_sha="$(fgit rev-parse --quiet --verify "$onto^{commit}")" || die 2 "unknown --onto $onto"
+  base="$(fgit merge-base "$from_sha" "$onto_sha")"
+  branch="${branch:-infraternal/upstream-$date}"
+  fgit check-ref-format --branch "$branch" >/dev/null || die 2 "invalid branch name: $branch"
+
+  section "MEASURE"
+  local ahead behind
+  ahead="$(fgit rev-list --count "$base..$from_sha")"
+  behind="$(fgit rev-list --count "$base..$onto_sha")"
+  printf 'series   %s (%s), %s commits on upstream %s\n' "$from" "$(fgit rev-parse --short "$from_sha")" \
+    "$ahead" "$(fgit rev-parse --short "$base")"
+  printf 'upstream %s (%s), %s commits newer than the series base\n' "$onto" \
+    "$(fgit rev-parse --short "$onto_sha")" "$behind"
+  if [[ "$behind" -eq 0 ]]; then
+    printf 'Already current: the series sits on %s. Nothing to do.\n' "$onto"
+    return 0
+  fi
+  local merges
+  merges="$(fgit rev-list --merges --count "$base..$from_sha")"
+  [[ "$merges" -eq 0 ]] || die 2 "the series has $merges merge commits; it must be linear (docs/operations/gotatun-fork.md)"
+  printf '\nUpstream commits that touch files our series changes:\n'
+  local -a our_files=()
+  mapfile -t our_files < <(fgit diff --name-only "$base" "$from_sha")
+  fgit log --format='  %h %ad %s' --date=short "$base..$onto_sha" -- "${our_files[@]}" || true
+  printf '\nAll upstream commits:\n'
+  fgit log --format='  %h %ad %s' --date=short --no-merges "$base..$onto_sha"
+
+  [[ "$check_only" -eq 0 ]] || return 0
+
+  if fgit show-ref --quiet --verify "refs/heads/$branch" ||
+    fgit show-ref --quiet --verify "refs/remotes/origin/$branch"; then
+    die 2 "$branch already exists; pick another --date (branches are never rewritten)"
+  fi
+
+  section "REBASE onto $(fgit rev-parse --short "$onto_sha") as $branch"
+  fgit checkout --quiet -b "$branch" "$from_sha"
+  if ! fgit rebase --quiet --onto "$onto_sha" "$base" "$branch"; then
+    # rerere may have resolved every hunk from an earlier run; then only staging remains.
+    # Bounded by the series length, so a stop that staging cannot fix (an empty commit, say)
+    # ends in the conflict report instead of a loop.
+    local tries=0
+    while rebase_in_progress && [[ -z "$(fgit diff --name-only --diff-filter=U)" ]] &&
+      [[ $tries -le $ahead ]]; do
+      tries=$((tries + 1))
+      fgit add -u
+      GIT_EDITOR=true fgit rebase --continue >/dev/null 2>&1 || true
+    done
+    if rebase_in_progress; then
+      report_conflict "$base" "$onto_sha"
+      if [[ "$keep_conflict" -eq 1 ]]; then
+        printf '\nThe rebase is stopped in %s. Resolve by keeping upstream'"'"'s design and\n' "$FORK"
+        # shellcheck disable=SC2016 # the backticks are literal text
+        printf 're-expressing our change, then `git rebase --continue` (rerere records it).\n'
+      else
+        fgit rebase --abort
+        fgit checkout --quiet --detach "$from_sha"
+        fgit branch --quiet -D "$branch"
+        printf '\nAborted; %s was deleted. Rerun with --keep-conflict to resolve it by hand.\n' "$branch"
+      fi
+      exit 3
+    fi
+  fi
+
+  section "RESULT"
+  local new_count
+  new_count="$(fgit rev-list --count "$onto_sha..$branch")"
+  printf '%s at %s: %s of %s commits carried\n' "$branch" "$(fgit rev-parse --short "$branch")" \
+    "$new_count" "$ahead"
+  if [[ "$new_count" -ne "$ahead" ]]; then
+    printf 'Commits upstream made empty (dropped by the rebase; check them):\n'
+    # Lines marked "-" in range-diff exist only in the old series.
+    fgit range-diff --no-color "$base..$from_sha" "$onto_sha..$branch" | grep -E '^ *[0-9]+: +[0-9a-f]+ < +-' || true
+  fi
+
+  if [[ "$do_test" -eq 1 ]]; then
+    section "TEST"
+    if ! run_fork_tests; then
+      printf '\nTESTS FAILED on %s; not pushing.\n' "$branch"
+      exit 4
+    fi
+  fi
+
+  local remote
+  for remote in "${push_remotes[@]}"; do
+    section "PUSH $remote"
+    fgit push "$remote" "refs/heads/$branch:refs/heads/$branch" || die 5 "push to $remote failed"
+  done
+  # shellcheck disable=SC2016 # the backticks are literal text
+  printf '\nNext: pin %s in infraternal only after `scripts/verify fast` and the perf A/B pass\n' \
+    "$(fgit rev-parse --short "$branch")"
+  printf '(docs/operations/gotatun-fork.md, "Bumping the pin").\n'
+}
+
+cmd_test() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --fork) FORK="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage >&2; die 2 "unknown option: $1" ;;
+    esac
+  done
+  [[ -d "$FORK" ]] || die 2 "no checkout at $FORK (set --fork)"
+  section "TEST $(fgit rev-parse --short HEAD) $(fgit log -1 --format=%s HEAD)"
+  if run_fork_tests; then
+    printf '\nFORK TESTS PASSED\n'
+  else
+    printf '\nFORK TESTS FAILED\n'
+    exit 4
+  fi
+}
+
+FORK="${GOTATUN_FORK:-$REPO_ROOT/../gotatun}"
+case "${1:-}" in
+  sync) shift; cmd_sync "$@" ;;
+  test) shift; cmd_test "$@" ;;
+  -h|--help|"") usage; [[ -n "${1:-}" ]] || exit 2 ;;
+  *) usage >&2; die 2 "unknown command: $1" ;;
+esac
