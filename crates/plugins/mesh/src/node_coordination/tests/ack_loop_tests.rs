@@ -51,8 +51,16 @@ impl NodeChannel for StuckFinish {
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.inner.changes()
     }
-    /// Refuse only cleanup; configuration and identity use the ordinary fixture.
+    /// Accept the candidate commit but refuse cleanup; other actions use the ordinary fixture.
     fn call(&self, action: &str, input: Vec<u8>) -> PluginOperation<'_, Vec<u8>> {
+        if action == "mesh.rotation.commit" {
+            return Box::pin(async {
+                Ok(
+                    serde_json::to_vec(&serde_json::json!({"public_key": PublicKey([3; 32])}))
+                        .unwrap(),
+                )
+            });
+        }
         if action == "mesh.rotation.finish" {
             return Box::pin(async {
                 self.attempts
@@ -65,6 +73,92 @@ impl NodeChannel for StuckFinish {
         }
         self.inner.call(action, input)
     }
+}
+
+/// Coalescing an already committed peer receipt cannot lose the expired-overlap transition.
+#[tokio::test]
+async fn coalesced_peer_progress_is_read_before_overlap_retires() {
+    let (directory, service) = file_service().await;
+    let store = service.dataplane();
+    let pool = service.pool_for_tests();
+    let (node, _, operation) = rotating_node(
+        &service,
+        "00000000-0000-4000-8000-000000000001",
+        PublicKey([2; 32]),
+    )
+    .await;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    let clock = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).unwrap();
+    let nanos = clock.tv_sec() * 1_000_000_000 + clock.tv_nsec();
+    let revision = store
+        .start_rotation_overlap(
+            node,
+            &operation.operation_id,
+            PublicKey([3; 32]),
+            100,
+            boot.trim(),
+            nanos,
+        )
+        .await
+        .unwrap();
+    let server = store.node_for_host("server").await.unwrap();
+    let live = [node, server].into_iter().collect();
+    let channel = StuckFinish {
+        inner: Channel::candidate(),
+        attempts: Mutex::default(),
+        finished: tokio::sync::Semaphore::new(0),
+    };
+    let identity = Identity {
+        compact_access: false,
+        #[cfg(feature = "mesh-dns")]
+        dns_names: false,
+        key_rotation: true,
+        authority_epoch: true,
+        rotation_continuity: true,
+        public_key: PublicKey([2; 32]),
+        port: 44000,
+    };
+    assert!(
+        crate::rotation::drive(&store, &service, &channel, node, &identity, &live)
+            .await
+            .is_some()
+    );
+    sqlx::query("UPDATE mesh_node_key_rotation SET rotation_monotonic=? WHERE node_id=?")
+        .bind(nanos - 121_000_000_000)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::rotation::drive(&store, &service, &channel, node, &identity, &live).await,
+        None
+    );
+    let mut own = service.subscribe_rotation_progress();
+    let mut peer = service.subscribe_rotation_progress();
+    assert!(store.acknowledge_applied(server, revision).await.unwrap());
+    service.rotation_applied(&mut peer);
+    assert!(store.acknowledge_applied(node, revision).await.unwrap());
+    service.rotation_applied(&mut own);
+    assert!(!own.has_changed().unwrap());
+    assert_eq!(
+        crate::rotation::drive(&store, &service, &channel, node, &identity, &live).await,
+        Some(std::time::Duration::ZERO)
+    );
+    assert_eq!(
+        rotation_row(&service, i64::try_from(node.0).unwrap())
+            .await
+            .2
+            .as_deref(),
+        Some("retiring")
+    );
+    // Events committed after the pass must remain visible to its next select.
+    service.rotation_applied(&mut peer);
+    assert!(own.has_changed().unwrap());
+    println!(
+        "ACK_OVERLAP minimum_overlap_preserved=true missing_peer_waits=true coalesced_peer_seen=true later_progress_pending=true"
+    );
+    pool.close().await;
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// Read Linux process CPU ticks and disk write accounting for the focused before/after receipt run.
@@ -324,4 +418,100 @@ async fn identical_stale_concurrent_and_new_instance_receipts() {
     );
     pool.close().await;
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Deliver different revisions concurrently and then replay the older one after both complete.
+#[tokio::test]
+async fn reordered_receipts_keep_the_highest_revision() {
+    let (directory, service) = file_service().await;
+    let store = service.dataplane();
+    let pool = service.pool_for_tests();
+    let node = store.node_for_host("server").await.unwrap();
+    sqlx::query("UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id='00000000-0000-4000-8000-000000000537',sequence=1")
+        .execute(&pool).await.unwrap();
+    for round in 1..=32 {
+        let high = round * 2;
+        let (old, new) = tokio::join!(
+            store.acknowledge_applied(node, high - 1),
+            store.acknowledge_applied(node, high)
+        );
+        old.unwrap();
+        assert!(new.unwrap());
+        assert!(!store.acknowledge_applied(node, high - 1).await.unwrap());
+        let actual: i64 =
+            sqlx::query_scalar("SELECT revision FROM mesh_node_applied WHERE node_id=?")
+                .bind(i64::try_from(node.0).unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(actual, i64::try_from(high).unwrap());
+    }
+    println!("ACK_REORDER concurrent_pairs=32 delayed_stale_replays=32 highest_revision=64");
+    pool.close().await;
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// A sleeping retirement driver consumes a peer's real receipt and acknowledges the new cleanup revision.
+#[tokio::test]
+async fn peer_progress_wakes_retirement_and_the_next_revision() {
+    let (directory, service) = file_service().await;
+    let store = service.dataplane();
+    let pool = service.pool_for_tests();
+    let (node, _, operation) = rotating_node(
+        &service,
+        "00000000-0000-4000-8000-000000000001",
+        PublicKey([2; 32]),
+    )
+    .await;
+    store
+        .start_rotation_overlap(
+            node,
+            &operation.operation_id,
+            PublicKey([3; 32]),
+            100,
+            "test-boot",
+            1,
+        )
+        .await
+        .unwrap();
+    let revision = store
+        .commit_rotation(node, &operation.operation_id)
+        .await
+        .unwrap();
+    let server = store.node_for_host("server").await.unwrap();
+    service.set_presence([(node, None), (server, None)].into_iter().collect());
+    let channel = Arc::new(StuckFinish {
+        inner: Channel::candidate(),
+        attempts: Mutex::default(),
+        finished: tokio::sync::Semaphore::new(0),
+    });
+    let mut progress = service.subscribe_rotation_progress();
+    let task = tokio::spawn(run(
+        store.clone(),
+        service.clone(),
+        channel.clone(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+    ));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // The worker has committed its receipt, but the reachable server has not.
+        progress.changed().await.unwrap();
+        assert_eq!(rotation_row(&service, i64::try_from(node.0).unwrap()).await.2.as_deref(), Some("retiring"));
+        assert!(store.acknowledge_applied(server, revision).await.unwrap());
+        service.rotation_applied(&mut progress);
+        // This event has to wake the blocked driver; there is no rotation retry timer here.
+        progress.changed().await.unwrap();
+        let cleanup = store.config(node).await.unwrap().version;
+        assert!(cleanup > revision);
+        assert!(store.rotation_acks_ready(cleanup, &[node].into_iter().collect()).await.unwrap());
+        assert!(store.acknowledge_applied(server, cleanup).await.unwrap());
+        service.rotation_applied(&mut progress);
+        channel.finished.acquire().await.unwrap().forget();
+        assert_eq!(rotation_row(&service, i64::try_from(node.0).unwrap()).await.2.as_deref(), Some("cleanup"));
+        println!("ACK_LIVENESS peer_woke_retiring=true new_revision_acknowledged=true cleanup_finish_attempted=true");
+    }).await;
+    task.abort();
+    let _ = task.await;
+    pool.close().await;
+    std::fs::remove_dir_all(directory).unwrap();
+    result.expect("peer progress must not be lost by self-notification suppression");
 }
