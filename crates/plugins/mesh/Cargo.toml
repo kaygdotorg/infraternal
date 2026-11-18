@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["server", "mesh-dns"]
-server = ["dep:uuid", "dep:tracing", "dep:url", "dep:nix", "dep:sysctl"]
+server = ["dep:uuid", "dep:tracing", "dep:url", "dep:nix", "dep:libc"]
 ee = []
 # Diagnostic stage logging is removable and never enabled by a shipping role.
 cutoff-measure = ["nix?/time"]
@@ -71,15 +71,24 @@ ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7.0", optional = true }
-sysctl = { version = "0.7.1", optional = true }
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # Namespace tests run each node on a thread that entered its own network namespace (D332).
 nix = { workspace = true, features = ["net", "sched"] }
 socket2 = { version = "0.6", features = ["all"] }
 
-[lints]
-workspace = true
+# Keep unsafe denied by default while allowing the documented macOS sysctl boundary.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+# D351: review behaviour and cohesion instead of arbitrary item dimensions.
+too_many_lines = "allow"
+too_many_arguments = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
 
 # The production-schema proof needs coordinator storage, never an agent-only build.
 [[example]]
