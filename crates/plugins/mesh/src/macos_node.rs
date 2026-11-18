@@ -83,6 +83,9 @@ pub(crate) fn authority_replacement_crash_checkpoint() {
     }
 }
 
+/// The routing-socket listener that announces underlay changes to live sessions (#483).
+mod underlay;
+
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, MacUtunTx, MacUtunRx)>;
 
 /// A temporary Mac rotation key that clears its private bytes when dropped.
@@ -1268,6 +1271,7 @@ impl PendingWorker {
                     }
                 };
                 let admission = Arc::clone(&factory.admission);
+                let udp = factory.send.clone();
                 let PathBudgets {
                     route_mtus: initial_route_mtus,
                     interface_mtu,
@@ -1351,6 +1355,7 @@ impl PendingWorker {
                     return;
                 }
                 let state = RuntimeState {
+                    udp,
                     utun: Some(utun),
                     device: Some(device),
                     config,
@@ -1573,6 +1578,8 @@ mod peer_stats;
 /// Owns the live utun, peer-route MTUs, accepted snapshot and DNS resolver integration.
 /// `route_mtus` mirrors installed metrics so a failed update can restore them.
 struct RuntimeState {
+    /// The worker's live UDP listener; clones share the connected pools with the device.
+    udp: GotaUdpSocket,
     utun: Option<MacUtun>,
     device: Option<GotaDevice>,
     config: Option<Config>,
@@ -1591,16 +1598,34 @@ struct RuntimeState {
     dns_integration: crate::dns_integration::DnsIntegration,
 }
 
-/// Applies queued requests on the Mac worker and stops cleanly when its queue closes.
+/// Applies queued requests on the Mac worker, announces underlay changes to live sessions, and
+/// stops cleanly when its queue closes.
 ///
-/// Between requests it scans the device's confirmed endpoints every
+/// The worker owns the node's one routing-socket listener ([`underlay::UnderlayAnnouncer`]) for
+/// as long as its utun lives (#483 J707 P2-3). When an announcement is due, `GotaTun` sends one
+/// keepalive to each peer with a live session, so a peer follows our new address within tens of
+/// milliseconds instead of at our next 25 s keepalive (D392). Applies write host routes while the
+/// socket is not read, so each is followed by a resync.
+///
+/// Between requests it also scans the device's confirmed endpoints every
 /// [`peer_stats::CONFIRMED_ENDPOINT_SCAN`] for the admission guard, as the Linux worker does.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
+    let mut announcer = state
+        .utun
+        .as_ref()
+        .map(|utun| underlay::UnderlayAnnouncer::start(utun.name()));
     let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
     confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
+            () = announcement_due(announcer.as_mut()) => {
+                if let Some(device) = &state.device {
+                    let sessions = announce_underlay(device, &state.udp).await;
+                    tracing::debug!(sessions, "underlay changed; live sessions announce our endpoint");
+                }
+                continue;
+            }
             _ = confirmed_scan.tick() => {
                 state.admit_confirmed_endpoints().await;
                 continue;
@@ -1616,6 +1641,9 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 reply,
             } => {
                 let result = state.apply(*config, budgets).await;
+                if let Some(announcer) = announcer.as_mut() {
+                    announcer.resync();
+                }
                 let _ = reply.send(result);
             }
             WorkerCommand::ReplaceAuthority {
@@ -1624,6 +1652,9 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 reply,
             } => {
                 let result = state.replace_authority(*config, budgets).await;
+                if let Some(announcer) = announcer.as_mut() {
+                    announcer.resync();
+                }
                 let _ = reply.send(result);
             }
             WorkerCommand::SetPrivateKey { private_key, reply } => {
@@ -1646,6 +1677,23 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
         }
     }
     let _ = state.stop().await;
+}
+
+/// Refresh the live listener's cached sources before sessions announce on the new underlay.
+/// The listener and its startup pools share state with the device, including after peer or
+/// private-key updates. A busy session therefore reconnects on its next data send instead of
+/// waiting for the protocol's next handshake (#260, J826 finding 2).
+async fn announce_underlay(device: &GotaDevice, udp: &GotaUdpSocket) -> usize {
+    udp.underlay_changed();
+    device.request_keepalives().await
+}
+
+/// When `announcer` next has an announcement due, or never without one (no utun).
+async fn announcement_due(announcer: Option<&mut underlay::UnderlayAnnouncer>) {
+    match announcer {
+        Some(announcer) => announcer.due().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl RuntimeState {
@@ -3253,8 +3301,9 @@ mod tests {
             .collect()
     }
 
-    /// A one-peer configuration for the macOS node tests.
-    fn config() -> Config {
+    /// A one-peer configuration for the macOS node tests (the underlay proofs build their
+    /// packet filter from it too).
+    pub(super) fn config() -> Config {
         Config {
             authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
             rotation_operation: None,
