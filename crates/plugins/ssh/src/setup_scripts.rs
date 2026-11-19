@@ -39,10 +39,16 @@ fi
 /// other in `Exec` lines. A rootless unit has no step: its binary under
 /// `~/.local/share` is already executable for the account's service manager.
 /// The mode comes from `$manager`, which the prelude sets from the install mode.
+/// The root system service waits for `network-online.target`; a rootless unit
+/// stays in its user manager and does not pull the system target into that manager.
 macro_rules! service_unit {
     () => {
         r#"{
-    printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\nStartLimitIntervalSec=0\n[Service]\n' "$host"
+    printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\nStartLimitIntervalSec=0\n' "$host"
+    if [ "$manager" = systemctl ]; then
+        printf 'After=network-online.target\nWants=network-online.target\n'
+    fi
+    printf '[Service]\n'
     if [ "$manager" = systemctl ]; then
         printf 'ExecStartPre=-+/bin/sh -c "[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t %s/bin/current"\n' "$base"
     fi
@@ -201,8 +207,8 @@ mod tests {
         unit
     }
 
-    /// #401: the root unit relabels its binary before every start, ahead of
-    /// `ExecStart`, and keeps every line the install and removal checks match.
+    /// The root unit waits for network-online and relabels its binary before
+    /// every start, ahead of `ExecStart`, while keeping setup checks intact.
     #[test]
     fn root_unit_relabels_its_binary_before_every_start() {
         let unit = render("/var/lib/infraternal", "systemctl", "multi-user.target");
@@ -216,6 +222,8 @@ mod tests {
         ));
         assert!(lines.contains(&"KillMode=process"));
         assert!(lines.contains(&"WantedBy=multi-user.target"));
+        assert!(lines.contains(&"After=network-online.target"));
+        assert!(lines.contains(&"Wants=network-online.target"));
         // systemd expands `$` and splits commands on a lone `;` in Exec lines.
         assert!(!ROOT_RELABEL.contains('$') && !ROOT_RELABEL.contains(';'));
     }
@@ -231,5 +239,6 @@ mod tests {
         );
         assert!(!unit.contains("ExecStartPre"), "{unit}");
         assert!(unit.lines().any(|line| line == "WantedBy=default.target"));
+        assert!(!unit.contains("network-online.target"), "{unit}");
     }
 }
