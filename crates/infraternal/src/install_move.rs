@@ -1237,7 +1237,9 @@ fn is_shared(name: &OsStr) -> bool {
 }
 
 /// Read the base unit and its drop-ins through pinned, trusted parents.
-fn read_units(unit: &Path, _to: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+fn read_units(unit: &Path, to: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = to;
     let (parent, leaf) = disk::parent(unit, false)?;
     let text = String::from_utf8(disk::read(&parent, leaf, false)?).map_err(io::Error::other)?;
     let mut files = vec![(unit.to_owned(), text)];
@@ -1253,7 +1255,7 @@ fn read_units(unit: &Path, _to: &Path) -> io::Result<Vec<(PathBuf, String)>> {
             let text =
                 String::from_utf8(disk::read(&dropins, &name, false)?).map_err(io::Error::other)?;
             #[cfg(target_os = "linux")]
-            if manager::is_recovery_hook(&name, &text, _to)? {
+            if manager::is_recovery_hook(&name, &text, to)? {
                 continue;
             }
             files.push((unit.with_file_name(&drop_name).join(name), text));
