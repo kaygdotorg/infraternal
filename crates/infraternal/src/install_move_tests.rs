@@ -8,6 +8,17 @@ use std::{
     os::unix::fs::PermissionsExt,
 };
 
+/// Apply the disk transaction directly under the test manager.
+#[cfg(target_os = "linux")]
+fn apply(
+    relocation: &Relocation,
+    service: &dyn Service,
+    now: SystemTime,
+    publish: impl FnOnce() -> io::Result<()>,
+) -> Result<Outcome, MoveError> {
+    apply_recorded(relocation, service, now, publish, |_, _| Ok(()))
+}
+
 /// An old installation and unit in an isolated, trusted test directory.
 struct Install {
     /// Owns the fixture for the length of the test.
@@ -353,7 +364,9 @@ fn publishes_policy_before_switch_and_restarts_once() {
     .unwrap();
     assert_eq!(
         *manager.calls.borrow(),
-        ["stop", "publish", "reload", "start", "ready", "enable", "ready"]
+        [
+            "stop", "publish", "reload", "start", "ready", "enable", "ready"
+        ]
     );
 }
 
@@ -461,7 +474,10 @@ fn ready_with_original() -> (Install, Fake, Journal) {
     assert!(journal.ready);
     assert_eq!(Install::data(&fixture.old), "original");
     assert_eq!(Install::data(&fixture.new), "original");
-    assert_eq!(fs::read_to_string(journal.backup.join("unrelated")).unwrap(), "untouched");
+    assert_eq!(
+        fs::read_to_string(journal.backup.join("unrelated")).unwrap(),
+        "untouched"
+    );
     fs::remove_dir_all(&journal.backup).unwrap();
     (fixture, manager, journal)
 }
@@ -550,4 +566,16 @@ fn d395_preserves_root_attributes() {
     let mut copied = [0; 64];
     let size = fgetxattr(&new, name, copied.as_mut_slice()).unwrap();
     assert_eq!(&copied[..size], value);
+}
+
+/// A private legacy target still cannot own another install component's files.
+#[test]
+fn legacy_shared_base_is_refused() {
+    let fixture = Install::new();
+    fixture.legacy_rename();
+    fs::create_dir(fixture.new.join("bin")).unwrap();
+
+    assert!(plan(&fixture.old, &fixture.new, &fixture.unit).is_err());
+    assert_eq!(Install::data(&fixture.new), "original");
+    assert!(fixture.new.join("bin").is_dir());
 }

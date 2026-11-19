@@ -444,6 +444,21 @@ pub(super) fn read(dir: &File, name: &OsStr, private: bool) -> io::Result<Vec<u8
     Ok(output)
 }
 
+/// Publish a new file without replacing any existing directory entry.
+#[cfg(target_os = "linux")]
+pub(super) fn write_new(dir: &File, name: &OsStr, data: &[u8]) -> io::Result<()> {
+    let scratch = OsString::from(format!(".infraternal-write-{}", uuid::Uuid::new_v4()));
+    let mut file = new_file(dir, &scratch)?;
+    let result = file
+        .write_all(data)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| rename_new(dir, &scratch, dir, name));
+    if result.is_err() {
+        let _ = unlinkat(dir, scratch.as_os_str(), UnlinkatFlags::NoRemoveDir);
+    }
+    result
+}
+
 /// Atomically write a file and sync its directory. Keep existing unit metadata.
 pub(super) fn write(
     dir: &File,

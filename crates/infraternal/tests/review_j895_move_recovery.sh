@@ -21,12 +21,14 @@ mount --bind "$P/units" /etc/systemd/system
 mount --bind "$P/localbin" /usr/local/bin
 ip link set lo up
 export UNIT=/etc/systemd/system/infraternal-server.service
+UNIT_NAME=${UNIT##*/}
 cat > "$P/systemctl" <<'PY'
 #!/usr/bin/python3
 """Run the generated service command in the proof's private namespaces."""
 import os
 import shlex
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -35,6 +37,22 @@ from pathlib import Path
 unit = Path(os.environ["UNIT"])
 root = Path(os.environ["PROOF_ROOT"])
 pid_path = root / "server.pid"
+worker = unit.with_name("infraternal-d395-" + unit.name)
+client = root / "cutover-client"
+target = Path("/var/lib/infraternal")
+
+def cut(point, data):
+    """Write to the selected database, then kill only the installer client."""
+    marker = root / (point + "-kill")
+    if not marker.is_file() or not client.is_file():
+        return
+    marker.unlink()
+    with sqlite3.connect(data / "infraternal.sqlite") as database:
+        database.execute("CREATE TABLE IF NOT EXISTS d395_fixture (point TEXT)")
+        database.execute("INSERT INTO d395_fixture VALUES (?)", (point,))
+    (root / "cut-reached").write_text(point)
+    os.killpg(int(client.read_text()), signal.SIGKILL)
+
 
 def active():
     """Return the service process group while its leader can still run."""
@@ -59,7 +77,24 @@ def wait_for(ready):
 args = sys.argv[1:]
 with (root / "systemctl.log").open("a") as log:
     print(shlex.join(args), file=log)
-if args == ["show", "-p", "ActiveState", "--value", unit.name]:
+if args in (["enable", worker.name], ["disable", worker.name]):
+    pass
+elif args == ["start", worker.name]:
+    # Model a manager-owned process with a different process group and no
+    # dependency on the waiting CLI or the CLI's output pipes.
+    client.write_text(str(os.getppid()))
+    os.setsid()
+    line = next(line for line in worker.read_text().splitlines() if line.startswith("ExecStart=:"))
+    command = shlex.split(line.removeprefix("ExecStart=:"))
+    with (root / "worker.log").open("ab") as log:
+        job = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            cwd=root, start_new_session=True,
+        )
+        status = job.wait()
+    (root / "worker.exit").write_text(str(status))
+    sys.exit(status)
+elif args == ["show", "-p", "ActiveState", "--value", unit.name]:
     print("active" if active() else "inactive")
 elif args == ["show", "-p", "MainPID", "--value", unit.name]:
     print(active() or 0)
@@ -67,7 +102,10 @@ elif args == ["stop", unit.name]:
     if pid := active():
         os.killpg(pid, signal.SIGTERM)
         wait_for(lambda: not active())
+    cut("post-stop", Path("/var/lib/j895-old"))
 elif args in (["start", unit.name], ["enable", "--now", unit.name]):
+    if args[0] == "start":
+        cut("before-start", target)
     if not active():
         snippets = sorted(Path(f"{unit}.d").glob("*.conf"))
         line = [line for file in [unit, *snippets] for line in file.read_text().splitlines()
@@ -85,16 +123,19 @@ elif args in (["start", unit.name], ["enable", "--now", unit.name]):
         wait_for(lambda: child.poll() is not None or (data / "setup-token.sock").is_socket())
         if child.poll() is not None:
             raise RuntimeError(f"server exited {child.returncode} before socket readiness")
-elif args == ["daemon-reload"] and (root / "cutover-kill").exists():
-    (root / "cutover-kill").unlink()
-    os.kill(os.getppid(), signal.SIGKILL)
+    if args[0] == "start":
+        cut("after-start", target)
+    else:
+        cut("after-enable", target)
+elif args == ["daemon-reload"]:
+    cut("cutover", target)
 elif args != ["daemon-reload"]:
     sys.exit(1)
 PY
 chmod 0755 "$P/systemctl"
 mount --bind "$P/systemctl" /usr/bin/systemctl
 case "$method" in
-    rename|resume|shared|force|partial|cutover|wrong-tree) old=/var/lib/j895-old ;;
+    rename|resume|shared|force|partial|cutover|wrong-tree|post-stop|before-start|after-start|after-enable|metadata) old=/var/lib/j895-old ;;
     copy|full|stale) old=$P/old ;;
     *) exit 2 ;;
 esac
@@ -140,21 +181,67 @@ if [[ "$method" == partial ]]; then
     echo RESULT=0
     exit 0
 fi
-if [[ "$method" == cutover ]]; then
-    touch "$P/cutover-kill"
+if [[ "$method" == cutover || "$method" == post-stop || "$method" == before-start ||
+      "$method" == after-start || "$method" == after-enable ]]; then
+    touch "$P/$method-kill"
     status=0
-    init --yes > "$P/cutover.json" 2> "$P/cutover.err" || status=$?
+    setsid "$BIN" --json server init "${common[@]}" --yes         > "$P/interrupted.json" 2> "$P/interrupted.err" || status=$?
     check CUTOVER_KILLED_INSTALLER test "$status" = 137
-    check CUTOVER_ORIGINAL_REMAINS test -f "$old/probe"
+    check CUTOVER_SELECTED_BOUNDARY test "$(cat "$P/cut-reached")" = "$method"
+    check CUTOVER_REACHES_MOVED_SERVER wait_token_ready "$target"
+    deadline=$((SECONDS+15))
+    until [[ -e "$P/worker.exit" ]]; do
+        (( SECONDS < deadline )) || { echo "CASE CUTOVER_WORKER_DEADLINE BAD"; exit 1; }
+        # sleep: wait for the independent manager job to publish its exit status.
+        sleep 0.1
+    done
+    check CUTOVER_WORKER_SUCCESS test "$(cat "$P/worker.exit")" = 0
+    check CUTOVER_MOVED_SERVICE_ACTIVE test "$(/usr/bin/systemctl show -p ActiveState --value "$UNIT_NAME")" = active
     check CUTOVER_NEW_UNIT_DURABLE grep -Fq '"--data" "/var/lib/infraternal"' "$UNIT"
-    /usr/bin/systemctl start infraternal-server.service
-    check CUTOVER_REBOOT_NEW_SERVER wait_token_ready "$target"
-    printf 'write after boot
-' > "$target/postboot"
-    init --yes > "$P/finish.json" 2> "$P/finish.err"
-    check CUTOVER_RETRY_KEEPS_NEW_WRITES test -f "$target/postboot"
+    check CUTOVER_WRITE_PRESERVED python3 - "$target/infraternal.sqlite" "$method" <<'PY_CUT'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as database:
+    assert database.execute("SELECT point FROM d395_fixture").fetchall() == [(sys.argv[2],)]
+PY_CUT
     check CUTOVER_OLD_REMOVED_AFTER_HEALTH test ! -e "$old"
-    /usr/bin/systemctl stop infraternal-server.service
+    /usr/bin/systemctl stop "$UNIT_NAME"
+    echo RESULT=0
+    exit 0
+fi
+if [[ "$method" == metadata ]]; then
+    chown 0:65534 "$old"
+    chmod 2750 "$old"
+    python3 - "$old" <<'PY_META'
+import os
+import struct
+import sys
+
+old = sys.argv[1]
+os.setxattr(old, "user.infraternal.proof", b"root metadata")
+# Linux POSIX ACL version 2, with a named user and an explicit group mask.
+acl = struct.pack("<I", 2) + b"".join(
+    struct.pack("<HHI", tag, perm, ident)
+    for tag, perm, ident in [(1, 7, -1), (2, 5, 65534), (4, 5, -1), (16, 5, -1), (32, 0, -1)]
+    for ident in [ident & 0xffffffff]
+)
+for name in ("system.posix_acl_access", "system.posix_acl_default"):
+    os.setxattr(old, name, acl)
+PY_META
+    meta() {
+        stat -c '%a %u:%g' "$1"
+        python3 -c 'import os, sys; print(sorted((n, os.getxattr(sys.argv[1], n)) for n in os.listxattr(sys.argv[1])))' "$1"
+    }
+    before=$(meta "$old")
+    init --yes > "$P/metadata.json" 2> "$P/metadata.err"
+    check METADATA_SERVER_ANSWERS token_ready "$target"
+    after=$(meta "$target")
+    printf 'ROOT_DIRECTORY_METADATA before=%s
+after=%s
+' "$before" "$after"
+    check ROOT_DIRECTORY_METADATA test "$before" = "$after"
+    /usr/bin/systemctl stop "$UNIT_NAME"
     echo RESULT=0
     exit 0
 fi

@@ -23,6 +23,7 @@ const FIREWALL_UNIT_PATH: &str = "/etc/systemd/system/infraternal-firewall.servi
 
 #[cfg(target_os = "linux")]
 /// Files and policy that one system server install publishes together.
+#[derive(serde::Deserialize, serde::Serialize)]
 struct FirewallInstall {
     /// The generated boot-time unit that supersedes the hand-installed service.
     unit: String,
@@ -167,6 +168,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
 }
 
 /// Admission and fixed manager program for a move of an existing service.
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct MoveInstall {
     /// The same manager used for both the firewall and server restart.
     pub systemctl: PathBuf,
@@ -232,6 +234,7 @@ pub fn finish_move(user: bool) {
 /// Only a system install on Linux touches the host firewall (D392): it
 /// either publishes the server's default-drop policy or, with
 /// `--host-firewall-off`, clears the server role.
+#[derive(serde::Deserialize, serde::Serialize)]
 enum FirewallPlan {
     /// A user install, or a platform without the host firewall.
     Untouched,
@@ -615,7 +618,7 @@ fn render_firewall_unit() -> Result<String, InstallError> {
 /// on macOS the running path may be the PATH link itself, and a link to
 /// itself would loop. On Linux `current_exe` is already the resolved
 /// `/proc/self/exe`, so units written before this keep their exact text.
-fn service_program() -> std::io::Result<PathBuf> {
+pub(super) fn service_program() -> std::io::Result<PathBuf> {
     env::current_exe().and_then(fs::canonicalize)
 }
 

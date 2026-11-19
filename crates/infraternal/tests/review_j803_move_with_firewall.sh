@@ -50,6 +50,11 @@ for stub in systemctl evil/systemctl; do
     cat > "$S/$stub" <<STUB
 #!/bin/sh
 case "\$*" in
+    "start infraternal-d395-infraternal-server.service")
+        echo "$tag\$*" >> $S/systemctl.log
+        sed -n 's/^ExecStart=://p' /etc/systemd/system/infraternal-d395-infraternal-server.service |
+            xargs -r
+        exit \$?;;
     *MainPID*) echo "$tag\$*" >> $S/systemctl.log; tail -1 "$S/health.pids"; exit 0;;
     *ActiveState*) echo "$tag\$*" >> $S/systemctl.log; cat $S/active-state; exit 0;;
     "stop "*) echo inactive > $S/active-state
@@ -181,7 +186,7 @@ check MOVE_NO_LEFTOVERS 0 "$(ls -A $D | grep -c '^\.infraternal-\(incoming\|move
 check MOVE_FIREWALL_UNIT 1 "$(ls /etc/systemd/system | grep -c '^infraternal-firewall\.service$')"
 check MOVE_NO_PATH_SYSTEMCTL 0 "$(evil)"
 check MOVE_SYSTEMCTL_ORDER \
-    "show -p ActiveState --value infraternal-server.service|show -p ActiveState --value infraternal-server.service|stop infraternal-server.service|show -p ActiveState --value infraternal-server.service|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|start infraternal-server.service|show -p ActiveState --value infraternal-server.service|show -p MainPID --value infraternal-server.service|enable --now infraternal-server.service" \
+    "enable infraternal-d395-infraternal-server.service|start infraternal-d395-infraternal-server.service|show -p ActiveState --value infraternal-server.service|stop infraternal-server.service|show -p ActiveState --value infraternal-server.service|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|start infraternal-server.service|show -p ActiveState --value infraternal-server.service|show -p MainPID --value infraternal-server.service|enable --now infraternal-server.service|show -p ActiveState --value infraternal-server.service|show -p MainPID --value infraternal-server.service|disable infraternal-d395-infraternal-server.service|show -p ActiveState --value infraternal-server.service|show -p MainPID --value infraternal-server.service" \
     "$(paste -sd'|' "$S/systemctl.log")"
 
 echo "### 4. re-running again is a no-op for the folder and the unit"

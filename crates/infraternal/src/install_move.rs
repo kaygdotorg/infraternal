@@ -5,6 +5,10 @@
 /// Pins the data and unit paths used by the recovery transaction.
 #[path = "install_move_fs.rs"]
 mod disk;
+/// Runs the cutover as a persistent systemd job.
+#[cfg(target_os = "linux")]
+#[path = "install_move_manager.rs"]
+pub(super) mod manager;
 
 use self::disk::Identity;
 use serde::{Deserialize, Serialize};
@@ -44,6 +48,13 @@ pub trait Service {
     fn active(&self) -> io::Result<bool>;
     /// Stop the service and wait for the manager to finish the stop job.
     fn stop(&self) -> io::Result<()>;
+    /// Stop current work before copying. Managers can also cancel an outstanding start.
+    fn quiesce(&self) -> io::Result<()> {
+        if self.active()? {
+            self.stop()?;
+        }
+        Ok(())
+    }
     /// Make the manager read the unit files from disk.
     fn reload(&self) -> io::Result<()>;
     /// Confirm no unrelated server already occupies the expected listener.
@@ -57,6 +68,7 @@ pub trait Service {
 }
 
 /// The fixed systemd program and the server endpoint to verify after starting.
+#[derive(Deserialize, Serialize)]
 pub struct Systemd {
     /// The trusted absolute systemctl program.
     pub program: PathBuf,
@@ -197,6 +209,11 @@ impl Service for Systemd {
         self.checked(&["stop", &self.service])
     }
 
+    /// Cancel even a start job queued alongside the recovery unit at boot.
+    fn quiesce(&self) -> io::Result<()> {
+        self.stop()
+    }
+
     fn reload(&self) -> io::Result<()> {
         self.checked(&["daemon-reload"])
     }
@@ -297,7 +314,7 @@ struct Journal {
 }
 
 /// A read-only plan, revalidated under the destination lock before applying it.
-#[derive(Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Relocation {
     /// The original server folder.
     pub from: PathBuf,
@@ -318,6 +335,7 @@ pub struct Relocation {
 }
 
 /// The result of a healthy move.
+#[derive(Deserialize, Serialize)]
 pub struct Outcome {
     /// Dated read-only old data retained across filesystems or after legacy recovery.
     pub leftover: Option<PathBuf>,
@@ -488,11 +506,23 @@ impl Outcome {
 }
 
 /// Apply an admitted move. Publish the checked policy before any unit change.
+#[cfg(not(target_os = "linux"))]
 pub fn apply(
     relocation: &Relocation,
     service: &dyn Service,
     now: SystemTime,
     publish: impl FnOnce() -> io::Result<()>,
+) -> Result<Outcome, MoveError> {
+    apply_recorded(relocation, service, now, publish, |_, _| Ok(()))
+}
+
+/// Finish the cutover with a durable receipt before erasing the journal.
+fn apply_recorded(
+    relocation: &Relocation,
+    service: &dyn Service,
+    now: SystemTime,
+    publish: impl FnOnce() -> io::Result<()>,
+    complete: impl FnOnce(&Journal, &Outcome) -> io::Result<()>,
 ) -> Result<Outcome, MoveError> {
     use nix::fcntl::{Flock, FlockArg};
     let result = (|| {
@@ -566,7 +596,7 @@ pub fn apply(
                 journal
             };
         let switched = current_side(&journal, &read_units(&journal.unit)?)?;
-        let result = (|| {
+        let prepare = (|| {
             if journal.ready {
                 let target = selected_target(&parent, target_name, &journal)?;
                 if !service.active()? {
@@ -575,13 +605,11 @@ pub fn apply(
                 }
                 service.ready(&target)?;
                 selected_target(&parent, target_name, &journal)?;
-                return finish(&parent, &work_name, &work, &old_parent, old_name, &journal);
+                return Ok(());
             }
+            service.quiesce()?;
             if service.active()? {
-                service.stop()?;
-                if service.active()? {
-                    return Err(io::Error::other("the service did not stop"));
-                }
+                return Err(io::Error::other("the service did not stop"));
             }
             service.listener_is_idle()?;
             reconcile_staging(&parent, target_name, &work, &mut journal)?;
@@ -631,9 +659,14 @@ pub fn apply(
                 return Err(error);
             }
             journal.ready = true;
-            save(&work, &journal)?;
-            finish(&parent, &work_name, &work, &old_parent, old_name, &journal)
+            save(&work, &journal)
         })();
+        let result = prepare.and_then(|()| {
+            let outcome = finish(&parent, &old_parent, old_name, &journal)?;
+            complete(&journal, &outcome)?;
+            remove_journal(&parent, &work_name, &work)?;
+            Ok(outcome)
+        });
         if let Err(error) = &result
             && !journal.ready
             && !journal.legacy_target
@@ -769,7 +802,9 @@ fn selected_target(parent: &File, name: &OsStr, journal: &Journal) -> io::Result
         return Err(disk::invalid("destination identity changed during cleanup"));
     }
     if journal.database != Some(database_identity(&target)?) {
-        return Err(disk::invalid("destination database does not match the move journal"));
+        return Err(disk::invalid(
+            "destination database does not match the move journal",
+        ));
     }
     Ok(target)
 }
@@ -777,8 +812,6 @@ fn selected_target(parent: &File, name: &OsStr, journal: &Journal) -> io::Result
 /// Once the new process answers, retire the original by its saved identity.
 fn finish(
     parent: &File,
-    work_name: &OsStr,
-    work: &File,
     old_parent: &File,
     old_name: &OsStr,
     journal: &Journal,
@@ -828,7 +861,6 @@ fn finish(
     if journal.legacy_target && read_legacy_marker(&target)?.is_some() {
         disk::unlink(&target, OsStr::new(MARKER), false)?;
     }
-    remove_journal(parent, work_name, work)?;
     Ok(Outcome { leftover })
 }
 

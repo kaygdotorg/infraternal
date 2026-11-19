@@ -165,6 +165,10 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = run_internal_host_firewall_command() {
         return result;
     }
+    #[cfg(all(feature = "plugin-server", target_os = "linux"))]
+    if let Some(result) = install_move::manager::run_if_requested() {
+        return result;
+    }
     // The macOS PTY child's private entry runs before any runtime or thread
     // exists: it drops privileges and execs the person's shell (D335, #328).
     #[cfg(target_os = "macos")]
@@ -1649,9 +1653,14 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
                 listen: args.listen,
                 tls: args.tls_cert.is_some(),
             };
-            match install_move::apply(relocation, &service, std::time::SystemTime::now(), || {
-                admitted.publish()
-            }) {
+            #[cfg(target_os = "linux")]
+            let result = install_move::manager::trigger(relocation, service, admitted, name);
+            #[cfg(not(target_os = "linux"))]
+            let result =
+                install_move::apply(relocation, &service, std::time::SystemTime::now(), || {
+                    admitted.publish()
+                });
+            match result {
                 Ok(outcome) => {
                     install::finish_move(!install_args.system);
                     Some((
@@ -1708,7 +1717,12 @@ fn plan_server_data_move(
             .map_err(|error| error.to_string())?,
     };
     if explicit_data {
-        if install_move::pending(&target, &unit).map_err(|error| error.to_string())? {
+        #[cfg(target_os = "linux")]
+        let requested =
+            install_move::manager::requested(&target).map_err(|error| error.to_string())?;
+        #[cfg(not(target_os = "linux"))]
+        let requested = false;
+        if requested || install_move::pending(&target, &unit).map_err(|error| error.to_string())? {
             return Err("a data move is in progress; run init with the original service flags and without --data to finish it".to_owned());
         }
         return Ok(None);

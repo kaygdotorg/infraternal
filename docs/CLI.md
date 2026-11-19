@@ -121,9 +121,12 @@ the moved database. Across filesystems, or after an unconfirmed startup,
 init keeps a dated, read-only backup and prints its location. Otherwise,
 init removes the original after the health check.
 
-Run the same init command again to finish an interrupted move. Its private
-journal records the data paths, staging and backup locations, and complete
-unit set. Init refuses a move into a shared infraternal install base or into
+After confirmation, init asks systemd to run the cutover. The move continues
+if the CLI exits. A server start, including after reboot, also pulls in any
+pending cutover. Its private journal records the data paths and identities,
+staging and backup locations, and complete unit set. If the moved server
+may have accepted writes, recovery keeps both trees and retries the selected
+destination. Init refuses a move into a shared infraternal install base or into
 a folder with unrelated files. It also refuses a concurrent configuration
 change, such as a new listen port, even with `--force`. Use the existing
 service flags for relocation and apply changes separately.
