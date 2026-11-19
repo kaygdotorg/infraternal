@@ -2152,6 +2152,7 @@ dependencies = [
  "nix",
  "openssl",
  "qrcodegen",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",

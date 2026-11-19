@@ -1,118 +1,76 @@
-//! Moves an existing server install's data folder to its D395 standard location [D395, #516].
-//!
-//! The owner, on D395 (2026-11-15): "change for existing installs too". A fresh
-//! `server init` already uses the standard folder ([`super::install_paths`]);
-//! this module moves an install that an older init put somewhere else, such as
-//! `./data` resolved against the shell's directory.
-//!
-//! # When it runs
-//!
-//! [`plan`] and [`apply`] are the whole interface. `server init` calls them
-//! when it re-runs over a unit that records a non-standard `--data` and no
-//! explicit `--data` was given (an explicit `--data` keeps any folder). The
-//! server's updater (#211) is meant to call the same pair inside its stopped
-//! window; a warm `server restart --binary` keeps the service running, so it
-//! never moves anything.
-//!
-//! # What moves
-//!
-//! The whole folder, as one: the database with its `-wal` and `-shm` files,
-//! `identity.json`, `ssh-trust/`, the mesh key folder and anything else that
-//! lives there. Moving the folder instead of a list of files means a file added
-//! later can never be left behind. Every `ExecStart` path inside the folder
-//! (`--data`, and a `--remote-ca-dir` or TLS file kept there) is rewritten.
-//!
-//! # Steps, and why a crash at any point is safe
-//!
-//! The unit file is the single pointer to the live folder, so there is never a
-//! second live copy: whichever folder the unit names is the install.
-//!
-//! 1. [`plan`] checks everything and changes nothing. It refuses a target that
-//!    holds someone else's files (infraternal's own files in the install base,
-//!    such as the host firewall's policy, may be there and stay untouched;
-//!    see `is_reserved`), a symlinked or mounted old folder, a folder
-//!    owned by another user, and a unit line other than `ExecStart` that names
-//!    the old folder (it would break after the move).
-//! 2. [`apply`] stops the service and confirms it is down.
-//! 3. It writes a marker ([`MARKER`]) naming the old folder into it, then
-//!    renames the folder. Across filesystems it copies into a hidden staging
-//!    folder instead (files fsynced, modes and owners kept, stale sockets
-//!    skipped), compares every file byte for byte, and only then renames the
-//!    staging folder into place.
-//! 4. It rewrites the unit and its drop-ins, each by an atomic rename. This is
-//!    the switch.
-//! 5. After a copy, the old folder is renamed to `<old>.moved-<UTC time>` and
-//!    made read-only, kept until the operator removes it.
-//! 6. It removes the marker, reloads the manager and starts the service again
-//!    when it was running or is enabled.
-//!
-//! Crash before step 4: the unit still names the old folder. After a rename the
-//! old folder is gone and the target carries our marker, so the next run only
-//! finishes the switch ([`Stage::Switch`]). After a copy the old folder is
-//! still there and authoritative (the service may have started on it since),
-//! so the next run discards the marked copy and copies again ([`Stage::Redo`]).
-//! Crash after step 4: the unit names the target and the marker is still in it,
-//! so the next run sets the old folder aside if needed and removes the marker
-//! ([`Stage::Cleanup`]). A failure inside [`apply`] before the switch undoes the
-//! move and starts the old service again, so the old install keeps working.
+//! Crash-recoverable D395 server relocation. The old data stays at its boot
+//! path until the final unit and firewall policy are durable and the new
+//! service has answered. A private journal pins both trees and the unit set.
 
+#[path = "install_move_fs.rs"]
+mod disk;
+
+use self::disk::Identity;
+use serde::{Deserialize, Serialize};
 use std::{
+    ffi::{OsStr, OsString},
     fmt::Write as _,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
-    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    fs::File,
+    io,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// The marker file a move leaves in the data folder until it has finished.
-///
-/// Its only content is the old folder's path. It proves that a non-empty
-/// target was made by our own interrupted move, never by someone else.
-pub const MARKER: &str = ".infraternal-move";
+/// The legacy in-tree marker, read only when recovering an earlier installer.
+const MARKER: &str = ".infraternal-move";
+/// The durable record inside the private destination-side work directory.
+const RECORD: &str = "journal.json";
+/// The exact directory slot used for a verified copy and its displaced target.
+const STAGING: &str = "data";
 
-/// Why a folder could not be moved; the text says what to do instead.
+/// Why relocation could not proceed or finish.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct MoveError(String);
 
 impl MoveError {
-    /// Wrap an I/O failure with the step that failed.
+    /// Include the path and operation in an I/O failure.
     fn io(step: &str, path: &Path, error: &io::Error) -> Self {
         Self(format!("{step} {} failed: {error}", path.display()))
     }
 }
 
-/// The service manager calls a move needs; tests use a fake.
+/// Manager operations for one service, with a readiness check for the moved data.
 pub trait Service {
-    /// Whether the service is running or on its way up or down.
+    /// Whether the service may be running.
     fn active(&self) -> io::Result<bool>;
-    /// Whether the service starts at boot or login.
-    fn enabled(&self) -> io::Result<bool>;
-    /// Stop the service and wait until it has stopped.
+    /// Stop the service and wait for the manager to finish the stop job.
     fn stop(&self) -> io::Result<()>;
-    /// Make the manager read the rewritten unit files.
+    /// Make the manager read the unit files from disk.
     fn reload(&self) -> io::Result<()>;
-    /// Start the service.
+    /// Confirm no unrelated server already occupies the expected listener.
+    fn listener_is_idle(&self) -> io::Result<()>;
+    /// Start the unit the manager has loaded.
     fn start(&self) -> io::Result<()>;
+    /// Enable the service after it has started and answered.
+    fn enable(&self) -> io::Result<()>;
+    /// Wait for the new server to answer against its database.
+    fn ready(&self) -> io::Result<()>;
 }
 
-/// A systemd service, system-wide or in the caller's user manager.
+/// The fixed systemd program and the server endpoint to verify after starting.
 pub struct Systemd {
-    /// The `systemctl` to run, found at a fixed root-owned path the way the
-    /// install itself finds it, never through `PATH`: a system move runs as
-    /// root, and a writable folder early in `PATH` must not be able to supply
-    /// its own `systemctl` (J658, J803).
+    /// The trusted absolute systemctl program.
     pub program: PathBuf,
-    /// Talk to the user manager (`systemctl --user`).
+    /// Which instance of the service manager to contact.
     pub user: bool,
-    /// The unit name, for example `infraternal-server.service`.
+    /// Full service name, including its suffix.
     pub service: String,
+    /// Application listener from the final configuration.
+    pub listen: std::net::SocketAddr,
+    /// Whether that listener uses TLS.
+    pub tls: bool,
 }
 
 impl Systemd {
-    /// Run `systemctl` with this scope and return its output.
+    /// Run systemctl for this service scope.
     fn systemctl(&self, arguments: &[&str]) -> io::Result<std::process::Output> {
         let mut command = Command::new(&self.program);
         infraternal_shim::prepare_child(&mut command);
@@ -123,7 +81,7 @@ impl Systemd {
         command.args(arguments).output()
     }
 
-    /// Run `systemctl` and turn a non-zero exit into an error naming the action.
+    /// Return a manager failure with its action name.
     fn checked(&self, arguments: &[&str]) -> io::Result<()> {
         let output = self.systemctl(arguments)?;
         if output.status.success() {
@@ -136,25 +94,69 @@ impl Systemd {
             )))
         }
     }
-}
 
-impl Service for Systemd {
-    /// Reads `ActiveState`; only `inactive` and `failed` count as stopped.
-    ///
-    /// `is-active` was rejected: its non-zero exit means both "stopped" and
-    /// "could not reach the manager", and only the second must stop a move.
-    fn active(&self) -> io::Result<bool> {
+    /// Read manager state, distinguishing an unavailable manager from a stopped service.
+    fn state(&self) -> io::Result<String> {
         let output = self.systemctl(&["show", "-p", "ActiveState", "--value", &self.service])?;
         if !output.status.success() {
             return Err(io::Error::other("systemctl show failed"));
         }
-        let state = String::from_utf8_lossy(&output.stdout);
-        Ok(!matches!(state.trim(), "inactive" | "failed"))
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
-    fn enabled(&self) -> io::Result<bool> {
-        let output = self.systemctl(&["is-enabled", &self.service])?;
-        Ok(String::from_utf8_lossy(&output.stdout).trim() == "enabled")
+    /// Connect to the configured local listener, substituting loopback for a wildcard.
+    fn connect(&self) -> io::Result<std::net::TcpStream> {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
+        let address = match self.listen.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        };
+        let address = (address, self.listen.port()).into();
+        TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
+    }
+
+    /// Read the local server's health response, without sending credentials.
+    fn probe(&self) -> io::Result<()> {
+        let stream = self.connect()?;
+        let timeout = std::time::Duration::from_millis(500);
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        if self.tls {
+            use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+            let mut connector =
+                SslConnector::builder(SslMethod::tls_client()).map_err(io::Error::other)?;
+            // The local probe tests readiness, not public DNS or certificate renewal.
+            connector.set_verify(SslVerifyMode::NONE);
+            let stream = connector
+                .build()
+                .connect("localhost", stream)
+                .map_err(io::Error::other)?;
+            health(stream)
+        } else {
+            health(stream)
+        }
+    }
+}
+
+/// Test the SQLite-backed health route over a plain or TLS connection.
+fn health(mut stream: impl io::Read + io::Write) -> io::Result<()> {
+    stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut prefix = [0; 13];
+    stream.read_exact(&mut prefix)?;
+    if &prefix == b"HTTP/1.1 200 " {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "server health check did not return HTTP 200",
+        ))
+    }
+}
+
+impl Service for Systemd {
+    /// Only a confirmed inactive or failed unit counts as stopped.
+    fn active(&self) -> io::Result<bool> {
+        Ok(!matches!(self.state()?.as_str(), "inactive" | "failed"))
     }
 
     fn stop(&self) -> io::Result<()> {
@@ -165,189 +167,262 @@ impl Service for Systemd {
         self.checked(&["daemon-reload"])
     }
 
+    fn listener_is_idle(&self) -> io::Result<()> {
+        match self.connect() {
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "server listener still occupied after stop",
+            )),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn start(&self) -> io::Result<()> {
         self.checked(&["start", &self.service])
     }
+
+    fn enable(&self) -> io::Result<()> {
+        self.checked(&["enable", "--now", &self.service])
+    }
+
+    fn ready(&self) -> io::Result<()> {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if self.probe().is_ok() && self.state()? == "active" {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "moved server did not answer /healthz",
+                ));
+            }
+            // Relocation runs synchronously in init, outside the server runtime.
+            std::thread::park_timeout(Duration::from_millis(100));
+        }
+    }
 }
 
-/// Where an interrupted or new move resumes; see the module's crash notes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stage {
-    /// Nothing moved yet: move the old folder.
-    Move,
-    /// A copy finished but the unit was never switched: discard it and copy again.
-    Redo,
-    /// The folder was renamed but the unit was never switched: switch it.
-    Switch,
-    /// The unit is switched: set the old folder aside if it is still there, drop the marker.
-    Cleanup,
-}
-
-/// One unit file and the text it gets.
-#[derive(Debug, Clone)]
+/// One unit file, including any shadowed definitions, before and after relocation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Rewrite {
-    /// The unit or drop-in file.
+    /// Exact unit or drop-in path.
     path: PathBuf,
-    /// Its bytes now, restored if a later write fails.
-    before: Vec<u8>,
-    /// Its text after the move.
+    /// Original contents allowed before replacement.
+    before: String,
+    /// Contents allowed after replacement.
     after: String,
 }
 
-/// A checked move, ready for [`apply`].
-#[derive(Debug, Clone)]
+/// What is safe to do with the original tree after a healthy cutover.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum Backup {
+    /// Keep a dated read-only tree for a cross-filesystem or legacy move.
+    Retain,
+    /// Delete the old tree after verifying the new service.
+    Remove,
+}
+
+/// Persistent recovery data. Before `ready`, the effective `ExecStart` on disk
+/// identifies the authoritative tree. Once ready, only the exact backup is retired.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Journal {
+    /// Data path recorded by the original server.
+    from: PathBuf,
+    /// Standard data path for this transaction.
+    to: PathBuf,
+    /// Base service unit defining the scope and name.
+    unit: PathBuf,
+    /// The original source object, if it still exists.
+    source: Option<Identity>,
+    /// The currently published or pre-existing target object.
+    target: Option<Identity>,
+    /// The exact staging path inside the pinned journal directory.
+    staging: PathBuf,
+    /// The staged object, saved before any swap.
+    staged: Option<Identity>,
+    /// The exact backup path, allocated before the original data is touched.
+    backup: PathBuf,
+    /// Keep the old tree read-only after EXDEV and ambiguous legacy recovery.
+    backup_action: Backup,
+    /// An older installer put the only authoritative tree at the destination.
+    legacy_target: bool,
+    /// Health verified after reloading and starting the final configuration.
+    ready: bool,
+    /// Was the old service active before it was stopped?
+    was_running: bool,
+    /// All files the effective service definition depends on, in precedence order.
+    units: Vec<Rewrite>,
+    /// The index of the file supplying the effective `ExecStart`.
+    effective: usize,
+}
+
+/// A read-only plan, revalidated under the destination lock before applying it.
+#[derive(Debug)]
 pub struct Relocation {
-    /// The folder the unit records now.
+    /// The original server folder.
     pub from: PathBuf,
     /// The D395 standard folder.
     pub to: PathBuf,
-    /// Where this run starts.
-    pub stage: Stage,
-    /// Whether both folders are on one filesystem, so a rename moves the data.
+    /// Whether source and destination are on one filesystem.
     pub same_filesystem: bool,
-    /// Whether the target already holds infraternal's own files ([`is_reserved`]),
-    /// so the data is moved in entry by entry and the folder itself stays.
-    pub shared: bool,
-    /// The unit files whose `ExecStart` changes, in write order.
-    rewrites: Vec<Rewrite>,
+    /// Whether there is already a transaction to finish.
+    pub resuming: bool,
+    /// The unit files before and after the move.
+    units: Vec<Rewrite>,
+    /// The base service unit.
+    unit: PathBuf,
+    /// The effective unit file index.
+    effective: usize,
+    /// Validated legacy marker makes the target authoritative even with old unit text.
+    legacy_target: bool,
 }
 
-/// What [`apply`] did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The result of a healthy move.
 pub struct Outcome {
-    /// The read-only copy of the old folder, kept after a copy across filesystems.
+    /// Dated read-only old data retained across filesystems or after legacy recovery.
     pub leftover: Option<PathBuf>,
-    /// Whether the data was copied (true) or renamed (false).
-    pub copied: bool,
-    /// A step after the switch that did not finish; the next run retries it.
-    pub warning: Option<String>,
 }
 
-/// Check a move from `from` to `to` for the service whose unit file is `unit`.
-///
-/// Returns `None` when there is nothing to do: the install is already in its
-/// standard folder and no earlier move is unfinished. Nothing is changed.
+/// Plan a relocation or find its journal, without changing anything.
 pub fn plan(from: &Path, to: &Path, unit: &Path) -> Result<Option<Relocation>, MoveError> {
-    if same_folder(from, to) {
-        return Ok(read_marker(to).map(|previous| Relocation {
-            from: previous,
-            to: to.to_owned(),
-            stage: Stage::Cleanup,
-            same_filesystem: true,
-            shared: false,
-            rewrites: Vec::new(),
+    plan_inner(from, to, unit).map_err(|error| MoveError::io("checking move to", to, &error))
+}
+
+/// Refuse explicit reconfiguration while a journal is still responsible for the data.
+pub fn pending(to: &Path, unit: &Path) -> Result<bool, MoveError> {
+    load(to, unit)
+        .map(|journal| journal.is_some())
+        .map_err(|error| MoveError::io("reading move journal for", to, &error))
+}
+
+/// Check the old and new folder and reconstruct the full effective unit set.
+fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocation>> {
+    if let Some(journal) = load(to, unit)? {
+        if from != journal.from && from != to {
+            return Err(disk::invalid(
+                "recorded data path does not match the pending move",
+            ));
+        }
+        let current = read_units(unit)?;
+        current_side(&journal, &current)?;
+        return Ok(Some(Relocation {
+            same_filesystem: same_filesystem(&journal.from, to)?,
+            from: journal.from,
+            to: journal.to,
+            resuming: true,
+            units: journal.units,
+            effective: journal.effective,
+            unit: journal.unit,
+            legacy_target: journal.legacy_target,
         }));
     }
-    if !from.is_absolute() || !to.is_absolute() {
-        return Err(MoveError(
-            "both data folders must be absolute paths".to_owned(),
+
+    let legacy = legacy_source(to)?;
+    if from == to && legacy.is_none() {
+        return Ok(None);
+    }
+    let old = legacy.as_deref().unwrap_or(from);
+    if !old.is_absolute() || !to.is_absolute() || old.starts_with(to) || to.starts_with(old) {
+        return Err(disk::invalid(
+            "data folders must be absolute and outside one another",
         ));
     }
-    if to.starts_with(from) || from.starts_with(to) {
-        return Err(MoveError(format!(
-            "cannot move {} to {}: one folder is inside the other; pass --data {} to keep it",
-            from.display(),
-            to.display(),
-            from.display()
-        )));
+    if legacy.is_some() && from != old && from != to {
+        return Err(disk::invalid(
+            "legacy marker does not match the installed service",
+        ));
     }
-    let target = inspect_target(from, to)?;
-    let shared = target_is_shared(to);
-    let stage = match (fs::symlink_metadata(from), target) {
-        (Err(error), Target::Ours) if error.kind() == io::ErrorKind::NotFound => Stage::Switch,
-        (Err(error), _) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(MoveError(format!(
-                "the unit's data folder {} does not exist, so there is nothing to move; \
-                 if it lives on a disk that is not mounted, mount it and run init again, \
-                 or pass --data to choose a folder",
-                from.display()
-            )));
-        }
-        (Err(error), _) => return Err(MoveError::io("reading", from, &error)),
-        (Ok(metadata), target) => {
-            check_source(from, &metadata)?;
-            if shared {
-                check_no_reserved_names(from, to)?;
-            }
-            match target {
-                Target::Missing | Target::Empty => Stage::Move,
-                Target::Ours => Stage::Redo,
-            }
-        }
-    };
-    let rewrites = unit_rewrites(unit, from, to)?;
-    if rewrites.is_empty() {
-        return Err(MoveError(format!(
-            "{} does not record --data {}; nothing was moved",
-            unit.display(),
-            from.display()
-        )));
+    let (old_parent, old_name) = disk::parent(old, false)?;
+    let source = optional_tree(&old_parent, old_name)?;
+    let old_marker = source
+        .as_ref()
+        .map(read_legacy_marker)
+        .transpose()?
+        .flatten();
+    if old_marker.as_deref().is_some_and(|path| path != old) {
+        return Err(disk::invalid(
+            "old data has a marker for a different transaction",
+        ));
     }
-    let same_filesystem = match (fs::metadata(from), nearest_existing(to)) {
-        (Ok(source), Some(ancestor)) => {
-            fs::metadata(ancestor).is_ok_and(|a| a.dev() == source.dev())
+    let legacy_target = legacy.is_some() && (old_marker.is_none() || from == to);
+    if source.is_none() && !legacy_target {
+        return Err(disk::invalid(
+            "the unit's data folder does not exist; mount it or specify --data",
+        ));
+    }
+    if legacy.is_none() {
+        inspect_target(to)?;
+    } else {
+        let (parent, name) = disk::parent(to, false)?;
+        let target = disk::tree(&parent, name)?;
+        if target.metadata()?.mode() & 0o077 != 0 {
+            return Err(disk::invalid(
+                "legacy target is a shared base; preserve both folders",
+            ));
         }
-        _ => true,
-    };
+        reject_shared(&target)?;
+    }
+    let (units, effective) = unit_rewrites(unit, old, to)?;
     Ok(Some(Relocation {
-        from: from.to_owned(),
+        from: old.to_owned(),
         to: to.to_owned(),
-        stage,
-        same_filesystem,
-        shared,
-        rewrites,
+        unit: unit.to_owned(),
+        resuming: legacy.is_some(),
+        same_filesystem: same_filesystem(old, to)?,
+        units,
+        effective,
+        legacy_target,
     }))
 }
 
 impl Relocation {
-    /// The unit files whose `ExecStart` this move rewrites.
+    /// Unit files that change paths during this move.
     pub fn unit_files(&self) -> impl Iterator<Item = &Path> {
-        self.rewrites.iter().map(|rewrite| rewrite.path.as_path())
-    }
-
-    /// The text this move gives the unit file at `path`, or `None` when it leaves that file alone.
-    ///
-    /// `server init` checks the unit it is about to install against this
-    /// text before moving anything, so a re-run the install would refuse
-    /// moves nothing (J803).
-    pub fn unit_text_after(&self, path: &Path) -> Option<&str> {
-        self.rewrites
+        self.units
             .iter()
-            .find(|rewrite| rewrite.path == path)
-            .map(|rewrite| rewrite.after.as_str())
+            .filter(|file| file.before != file.after)
+            .map(|file| file.path.as_path())
     }
 
-    /// The plan in plain lines, for `--dry-run` and the confirmation.
-    #[must_use]
-    pub fn describe(&self) -> String {
-        let mut text = match self.stage {
-            Stage::Cleanup => format!(
-                "Finish the earlier move to {}: set {} aside if it is still there.\n",
-                self.to.display(),
-                self.from.display()
-            ),
-            Stage::Switch => format!(
-                "Finish the earlier move of {} to {}: point the unit at the moved folder.\n",
-                self.from.display(),
-                self.to.display()
-            ),
-            Stage::Move | Stage::Redo => format!(
-                "Move the data folder {} to {} (D395).\n{}",
-                self.from.display(),
-                self.to.display(),
-                if self.same_filesystem {
-                    "Method: rename on the same filesystem.\n".to_owned()
-                } else {
-                    format!(
-                        "Method: copy, compare every file, then keep {} as a dated read-only leftover.\n",
-                        self.from.display()
-                    )
-                }
-            ),
-        };
-        if self.stage != Stage::Cleanup {
-            text.push_str("The service is stopped during the move and started again afterwards.\n");
+    /// Carry an explicitly configured path inside the old data tree into the new tree.
+    pub fn relocate_path(&self, path: &mut Option<PathBuf>) {
+        if let Some(value) = path
+            && let Ok(suffix) = value.strip_prefix(&self.from)
+        {
+            *value = if suffix.as_os_str().is_empty() {
+                self.to.clone()
+            } else {
+                self.to.join(suffix)
+            };
         }
+    }
+
+    /// Check that the requested init uses the same effective command after relocation.
+    /// An explicit force can replace a unit in a separate init after the move.
+    pub fn check_command(&self, desired: &str) -> Result<(), MoveError> {
+        let command = exec_start(&self.units[self.effective].after);
+        let requested = exec_start(desired);
+        if command.is_none() || command != requested {
+            return Err(MoveError("the requested configuration differs from the installed service; move it with its existing flags first, or pass --data to keep the folder (including with --force)".to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Dry-run and confirmation description.
+    pub fn describe(&self) -> String {
+        let mut text = format!(
+            "{} {} to {} (D395).\nThe old path stays available until the moved service answers.\n",
+            if self.resuming {
+                "Resume moving"
+            } else {
+                "Move"
+            },
+            self.from.display(),
+            self.to.display(),
+        );
         for path in self.unit_files() {
             let _ = writeln!(text, "Rewrite ExecStart in {}", path.display());
         }
@@ -356,8 +431,7 @@ impl Relocation {
 }
 
 impl Outcome {
-    /// What happened, with the command that removes a leftover.
-    #[must_use]
+    /// Report the move and any backup retained for the operator.
     pub fn describe(&self, relocation: &Relocation) -> String {
         let mut text = format!(
             "Moved the data folder from {} to {}.\n",
@@ -368,471 +442,563 @@ impl Outcome {
             let quoted = shell_quote(&leftover.to_string_lossy());
             let _ = writeln!(
                 text,
-                "The old folder is kept read-only at {}. Once the server works, remove it with:\n  chmod -R u+w {quoted} && rm -rf {quoted}",
+                "The old folder is kept read-only at {}. To remove it:\n  chmod -R u+w {quoted} && rm -rf {quoted}",
                 leftover.display()
             );
-        }
-        if let Some(warning) = &self.warning {
-            let _ = writeln!(text, "Not finished: {warning}. Run init again to finish.");
         }
         text
     }
 }
 
-/// Carry out a [`plan`]ned move; on failure before the switch the old install keeps working.
-///
-/// `now` is the UNIX time used to name a leftover folder.
+/// Apply an admitted move. Publish the checked policy before any unit change.
 pub fn apply(
     relocation: &Relocation,
     service: &dyn Service,
     now: SystemTime,
+    publish: impl FnOnce() -> io::Result<()>,
 ) -> Result<Outcome, MoveError> {
-    if relocation.stage == Stage::Cleanup {
-        // The unit already names the target; the service may run there.
-        return Ok(finish(relocation, now, false));
-    }
-    let running = service.active().map_err(|error| {
-        MoveError(format!(
-            "could not read the service state: {error}; nothing was moved"
-        ))
-    })?;
-    let enabled = service.enabled().unwrap_or(false);
-    if running {
-        service
-            .stop()
-            .map_err(|error| MoveError(format!("{error}; nothing was moved")))?;
-        if service.active().unwrap_or(true) {
-            let _ = service.start();
-            return Err(MoveError(
-                "the service did not stop; nothing was moved".to_owned(),
-            ));
-        }
-    }
-    match move_and_switch(relocation, now) {
-        Ok(outcome) => {
-            let restart = service.reload().and_then(|()| {
-                if running || enabled {
-                    service.start()
-                } else {
-                    Ok(())
-                }
-            });
-            Ok(match restart {
-                Ok(()) => outcome,
-                Err(error) => Outcome {
-                    warning: Some(format!("the moved service did not start: {error}")),
-                    ..outcome
-                },
-            })
-        }
-        Err(error) => {
-            if running {
-                let _ = service.start();
-            }
-            Err(error)
-        }
-    }
-}
-
-/// Steps 3–6 of the module docs, undoing everything when the switch fails.
-///
-/// A target that already holds infraternal's own files (`shared`) cannot be
-/// replaced by a rename, and those files must stay where they are. The old
-/// folder is then renamed (or copied and verified) into
-/// `<target>/.infraternal-incoming` as one unit, and its entries are moved
-/// out into the target one rename at a time, the marker last. The incoming
-/// folder carries the marker until then, so a crash in between is finished
-/// by the next run ([`merge_incoming`]); no entry is ever in two places.
-fn move_and_switch(relocation: &Relocation, now: SystemTime) -> Result<Outcome, MoveError> {
-    let (from, to) = (&relocation.from, &relocation.to);
-    let shared = relocation.shared;
-    let incoming = to.join(INCOMING);
-    let mut copied = false;
-    if relocation.stage == Stage::Redo {
-        // Our own verified copy of a folder that may have changed since;
-        // infraternal's own files in the target are never part of it.
-        discard_ours(to)?;
-    }
-    if matches!(relocation.stage, Stage::Move | Stage::Redo) {
-        if !shared && to.is_dir() {
-            fs::remove_dir(to)
-                .map_err(|error| MoveError::io("removing the empty folder", to, &error))?;
-        }
-        let parent = to
-            .parent()
-            .ok_or_else(|| MoveError("the target has no parent folder".to_owned()))?;
-        super::install_paths::create_private_dir(parent)
-            .map_err(|error| MoveError::io("creating", parent, &error))?;
-        if shared {
-            // A crashed copy's staging folder is ours; never let it linger beside the data.
-            remove_stale_staging(&incoming, &staging_prefix(INCOMING))?;
-        }
-        write_marker(from, from).map_err(|error| MoveError::io("marking", from, &error))?;
-        let destination = if shared { &incoming } else { to };
-        copied = match rename_folder(from, destination) {
-            Ok(()) => false,
-            Err(error) if error.raw_os_error() == Some(nix::libc::EXDEV) => {
-                if let Err(error) = copy_into_place(from, destination) {
-                    let _ = fs::remove_file(from.join(MARKER));
-                    return Err(error);
-                }
-                true
-            }
-            Err(error) => {
-                let _ = fs::remove_file(from.join(MARKER));
-                return Err(MoveError::io("moving", from, &error));
-            }
+    use nix::fcntl::{Flock, FlockArg};
+    let result = (|| {
+        let (parent, target_name) = disk::parent(&relocation.to, true)?;
+        let parent = Flock::lock(parent, FlockArg::LockExclusiveNonblock)
+            .map_err(|(_, error)| io::Error::from(error))?;
+        let (old_parent, old_name) = disk::parent(&relocation.from, false)?;
+        let work_name = work_name(target_name);
+        let existing = optional_tree(&parent, &work_name)?;
+        let work = match existing {
+            Some(work) => work,
+            None => disk::make_dir(&parent, &work_name)?,
         };
-        sync_parent(from);
-        sync_parent(destination);
-    }
-    let resumed = relocation.stage == Stage::Switch;
-    let undo = |copied: bool| {
-        if resumed {
-            return;
+        if work.metadata()?.mode() & 0o077 != 0 {
+            return Err(disk::invalid("move journal directory is not private"));
         }
-        if shared {
-            if copied {
-                let _ = discard_ours(to);
-            } else if gather_ours(to).is_ok() && fs::rename(&incoming, from).is_ok() {
-                sync_parent(from);
+        let mut journal =
+            if let Some(journal) = load_record(&work, &relocation.to, &relocation.unit)? {
+                journal
+            } else {
+                if disk::names(&work)?
+                    .iter()
+                    .any(|name| name != "journal.next")
+                {
+                    return Err(disk::invalid("unclaimed journal directory is not empty"));
+                }
+                let current = plan_inner(&relocation.from, &relocation.to, &relocation.unit)?
+                    .ok_or_else(|| disk::invalid("move no longer applies"))?;
+                if current.from != relocation.from
+                    || current
+                        .units
+                        .iter()
+                        .map(|f| &f.after)
+                        .ne(relocation.units.iter().map(|f| &f.after))
+                {
+                    return Err(disk::invalid(
+                        "move changed after confirmation; run init again",
+                    ));
+                }
+                let source = optional_tree(&old_parent, old_name)?
+                    .as_ref()
+                    .map(Identity::of)
+                    .transpose()?;
+                let target = optional_tree(&parent, target_name)?
+                    .as_ref()
+                    .map(Identity::of)
+                    .transpose()?;
+                let backup = backup_path(&current.from, now)?;
+                let journal = Journal {
+                    from: current.from,
+                    to: current.to,
+                    unit: current.unit,
+                    source,
+                    target,
+                    staging: relocation.to.with_file_name(&work_name).join(STAGING),
+                    staged: None,
+                    backup,
+                    backup_action: if current.same_filesystem && !current.legacy_target {
+                        Backup::Remove
+                    } else {
+                        Backup::Retain
+                    },
+                    legacy_target: current.legacy_target,
+                    ready: false,
+                    was_running: service.active()?,
+                    units: current.units,
+                    effective: current.effective,
+                };
+                save(&work, &journal)?;
+                journal
+            };
+        let switched = current_side(&journal, &read_units(&journal.unit)?)?;
+        let result = (|| {
+            if journal.ready {
+                return finish(&parent, &work_name, &work, &old_parent, old_name, &journal);
             }
-        } else if copied {
-            let _ = fs::remove_dir_all(to);
-        } else if fs::rename(to, from).is_ok() {
-            sync_parent(from);
+            if service.active()? {
+                service.stop()?;
+                if service.active()? {
+                    return Err(io::Error::other("the service did not stop"));
+                }
+            }
+            service.listener_is_idle()?;
+            reconcile_staging(&parent, target_name, &work, &mut journal)?;
+            if !switched && !journal.legacy_target {
+                prepare_data(
+                    &parent,
+                    target_name,
+                    &work,
+                    &old_parent,
+                    old_name,
+                    &mut journal,
+                )?;
+            }
+            let target = disk::tree(&parent, target_name)?;
+            if journal.target != Some(Identity::of(&target)?) {
+                return Err(disk::invalid("destination identity changed"));
+            }
+            publish()?;
+            write_units(&journal)?;
+            service.reload()?;
+            service.start()?;
+            service.ready()?;
+            service.enable()?;
+            journal.ready = true;
+            save(&work, &journal)?;
+            finish(&parent, &work_name, &work, &old_parent, old_name, &journal)
+        })();
+        if let Err(error) = &result
+            && !journal.ready
+            && !journal.legacy_target
+            && !current_side(&journal, &read_units(&journal.unit)?)?
+        {
+            if journal.was_running {
+                service
+                    .reload()
+                    .and_then(|()| service.start())
+                    .map_err(|restart| {
+                        io::Error::other(format!(
+                            "{error}; restarting the original service failed: {restart}"
+                        ))
+                    })?;
+            }
+            if journal.target.is_none() {
+                reconcile_staging(&parent, target_name, &work, &mut journal)?;
+                if journal.target.is_none() {
+                    remove_journal(&parent, &work_name, &work)?;
+                }
+            }
         }
-        let _ = fs::remove_file(from.join(MARKER));
-    };
-    if shared {
-        if let Err(error) = merge_incoming(to) {
-            undo(copied);
-            return Err(error);
-        }
-    } else if let Err(error) = fs::set_permissions(to, fs::Permissions::from_mode(0o700)) {
-        // A shared install base keeps its own mode (`infraternal up` makes it 0711).
-        undo(copied);
-        return Err(MoveError::io("making private", to, &error));
-    }
-    if let Err(error) = write_rewrites(&relocation.rewrites) {
-        undo(copied);
-        return Err(error);
-    }
-    Ok(Outcome {
-        copied,
-        ..finish(relocation, now, copied)
-    })
+        result
+    })();
+    result.map_err(|error| MoveError::io("moving data to", &relocation.to, &error))
 }
 
-/// Step 5–6 after the switch: set a remaining old folder aside and drop the marker.
-///
-/// Failures here never undo the switch; they are reported and the next run
-/// (in [`Stage::Cleanup`]) retries them.
-fn finish(relocation: &Relocation, now: SystemTime, copied: bool) -> Outcome {
-    let mut outcome = Outcome {
-        leftover: None,
-        copied,
-        warning: None,
-    };
-    if fs::symlink_metadata(&relocation.from).is_ok() {
-        // The marker went into the old folder before the copy; a leftover is finished.
-        let _ = fs::remove_file(relocation.from.join(MARKER));
-        match set_aside(&relocation.from, now) {
-            Ok(leftover) => outcome.leftover = Some(leftover),
-            Err(error) => {
-                outcome.warning = Some(format!(
-                    "the old folder {} could not be set aside: {error}",
-                    relocation.from.display()
+/// Resume or discard the exact prepared staging tree by its saved identity.
+fn reconcile_staging(
+    parent: &File,
+    target_name: &OsStr,
+    work: &File,
+    journal: &mut Journal,
+) -> io::Result<()> {
+    let stage_name = OsStr::new(STAGING);
+    let stage = optional_tree(work, stage_name)?
+        .as_ref()
+        .map(Identity::of)
+        .transpose()?;
+    let target = optional_tree(parent, target_name)?
+        .as_ref()
+        .map(Identity::of)
+        .transpose()?;
+    if target.is_some() && target == journal.staged {
+        if let Some(stage) = stage {
+            if Some(stage) != journal.target {
+                return Err(disk::invalid(
+                    "displaced destination does not match the journal",
                 ));
-                return outcome;
             }
+            disk::retire(work, stage_name, stage, false)?;
+        }
+        journal.target = target;
+    } else {
+        if target != journal.target {
+            return Err(disk::invalid("destination identity changed during move"));
+        }
+        if let Some(stage) = stage {
+            if journal.staged.is_some_and(|expected| expected != stage) {
+                return Err(disk::invalid("staging identity changed during move"));
+            }
+            // No copying takes place until the staging inode is journaled.
+            if journal.staged.is_none() && !disk::names(&disk::tree(work, stage_name)?)?.is_empty()
+            {
+                return Err(disk::invalid("unclaimed staging directory is not empty"));
+            }
+            disk::retire(work, stage_name, stage, false)?;
         }
     }
-    match fs::remove_file(relocation.to.join(MARKER)) {
-        Ok(()) => sync_dir(&relocation.to),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            outcome.warning = Some(format!("the move marker could not be removed: {error}"));
-        }
+    if journal.staged.take().is_some() {
+        save(work, journal)?;
     }
-    outcome
+    Ok(())
 }
 
-/// Rename a folder; tests can make it fail as if across filesystems.
-fn rename_folder(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(test)]
-    if tests::FORCE_COPY.with(std::cell::Cell::get) {
-        return Err(io::Error::from_raw_os_error(nix::libc::EXDEV));
+/// Copy a fresh snapshot while the old service is stopped. Keep the previous
+/// destination until a single rename or exchange publishes the new snapshot.
+fn prepare_data(
+    parent: &File,
+    target_name: &OsStr,
+    work: &File,
+    old_parent: &File,
+    old_name: &OsStr,
+    journal: &mut Journal,
+) -> io::Result<()> {
+    let source = disk::tree(old_parent, old_name)?;
+    if journal.source != Some(Identity::of(&source)?) {
+        return Err(disk::invalid(
+            "original folder identity changed during move",
+        ));
     }
-    fs::rename(from, to)
-}
-
-/// What already sits at the target.
-enum Target {
-    /// Nothing.
-    Missing,
-    /// An empty folder.
-    Empty,
-    /// A folder our own move to here left, marked with the same old folder.
-    Ours,
-}
-
-/// Classify the target, refusing anything that is not ours to replace.
-fn inspect_target(from: &Path, to: &Path) -> Result<Target, MoveError> {
-    let metadata = match fs::symlink_metadata(to) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Target::Missing),
-        Err(error) => return Err(MoveError::io("reading", to, &error)),
-    };
-    if !metadata.is_dir() {
-        return Err(MoveError(format!(
-            "{} exists and is not a folder; move it away, or pass --data to keep the current folder",
-            to.display()
-        )));
-    }
-    let ours =
-        |folder: &Path| read_marker(folder).is_some_and(|previous| same_folder(&previous, from));
-    if ours(to) || ours(&to.join(INCOMING)) {
-        return Ok(Target::Ours);
-    }
-    // infraternal's own files may stay; anything else is someone's to keep.
-    let mut foreign: Vec<String> = fs::read_dir(to)
-        .map_err(|error| MoveError::io("reading", to, &error))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !is_reserved(name) && !name.starts_with(&staging_prefix(INCOMING)))
-        .collect();
-    if foreign.is_empty() {
-        return Ok(Target::Empty);
-    }
-    foreign.sort();
-    let more = foreign.len().saturating_sub(5);
-    foreign.truncate(5);
-    Err(MoveError(format!(
-        "{} already holds {}{}, which infraternal did not put there, so {} was not moved; \
-         move {} away, or pass --data {} to keep the current folder",
-        to.display(),
-        foreign.join(", "),
-        if more > 0 {
-            format!(" and {more} more")
-        } else {
-            String::new()
-        },
-        from.display(),
-        if foreign.len() + more == 1 {
-            "it"
-        } else {
-            "them"
-        },
-        from.display()
-    )))
-}
-
-/// The subfolder of a shared target that a move fills before its entries move out.
-const INCOMING: &str = ".infraternal-incoming";
-
-/// Whether `name` is something other parts of infraternal keep in the install
-/// base itself, so a move into that folder keeps it, never moves or deletes it,
-/// and never asks the operator to move it (J755, #483).
-///
-/// The list: the host firewall's policies (`host-firewall-server.json`,
-/// `host-firewall-agent.json`, any `host-firewall-*.json`) and their atomic
-/// writes in progress (`.host-firewall-*.pending`), whose loss would make the
-/// boot loader drop the host table; and the root infraternal agent's layout
-/// from `infraternal up` and SSH setup (`bin/`, `agent/`, `state/`,
-/// `sessions/`), plus the hidden files SSH setup and promotion keep beside
-/// them: every `.bootstrap-*` (the setup lock folder, owner, ready and
-/// acquiring markers, transaction records and their `.tmp` writes), the
-/// `.superseded-*` records of a replaced unit, and `.promotion-transaction`
-/// (J803). A new file kept in `/var/lib/infraternal` by another part must be
-/// added here.
-fn is_reserved(name: &str) -> bool {
-    // Case-sensitive names and prefixes: these are written by our own code.
-    let extension = |wanted: &str| Path::new(name).extension().is_some_and(|ext| ext == wanted);
-    matches!(
-        name,
-        "bin" | "agent" | "state" | "sessions" | ".promotion-transaction"
-    ) || name.starts_with(".bootstrap-")
-        || name.starts_with(".superseded-")
-        || (name.starts_with("host-firewall-") && extension("json"))
-        || (name.starts_with(".host-firewall-") && extension("pending"))
-}
-
-/// Whether the target folder exists and holds any of infraternal's own files.
-fn target_is_shared(to: &Path) -> bool {
-    fs::read_dir(to).is_ok_and(|entries| {
-        entries
-            .filter_map(Result::ok)
-            .any(|entry| entry.file_name().to_str().is_some_and(is_reserved))
-    })
-}
-
-/// Refuse an old folder whose entries would take a reserved name in a shared target.
-fn check_no_reserved_names(from: &Path, to: &Path) -> Result<(), MoveError> {
-    let mut clashes: Vec<String> = fs::read_dir(from)
-        .map_err(|error| MoveError::io("reading", from, &error))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| is_reserved(name) || name == INCOMING)
-        .collect();
-    if clashes.is_empty() {
-        return Ok(());
-    }
-    clashes.sort();
-    Err(MoveError(format!(
-        "{} holds {}, a name infraternal keeps in {} for other parts, so it was not moved; \
-         pass --data {} to keep the current folder",
-        from.display(),
-        clashes.join(", "),
-        to.display(),
-        from.display()
-    )))
-}
-
-/// Move every entry of `<to>/.infraternal-incoming` into `to`, the marker last.
-///
-/// Each step is one rename inside one folder, so an entry is always in
-/// exactly one place; a crash leaves the rest in the incoming folder, still
-/// marked, for the next run. Nothing reserved is ever touched.
-fn merge_incoming(to: &Path) -> Result<(), MoveError> {
-    let incoming = to.join(INCOMING);
-    let entries = match fs::read_dir(&incoming) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(MoveError::io("reading", &incoming, &error)),
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name();
+    let stage_name = OsStr::new(STAGING);
+    let stage = disk::make_dir(work, stage_name)?;
+    journal.staged = Some(Identity::of(&stage)?);
+    save(work, journal)?;
+    for name in disk::names(&source)? {
         if name == MARKER {
             continue;
         }
-        let target = to.join(&name);
-        if fs::symlink_metadata(&target).is_ok() {
-            return Err(MoveError(format!(
-                "{} already exists, so the moved {} was left in {}",
-                target.display(),
-                name.to_string_lossy(),
-                incoming.display()
-            )));
+        if is_firewall(&name) || is_shared(&name) {
+            return Err(disk::invalid(
+                "original folder contains files reserved for the install base",
+            ));
         }
-        fs::rename(entry.path(), &target)
-            .map_err(|error| MoveError::io("moving into", &target, &error))?;
+        disk::copy_entry(&source, &stage, &name)?;
     }
-    if incoming.join(MARKER).exists() {
-        fs::rename(incoming.join(MARKER), to.join(MARKER))
-            .map_err(|error| MoveError::io("moving the marker into", to, &error))?;
-    }
-    fs::remove_dir(&incoming).map_err(|error| MoveError::io("removing", &incoming, &error))?;
-    sync_dir(to);
-    Ok(())
-}
-
-/// Put every non-reserved entry of `to` back into `<to>/.infraternal-incoming`.
-///
-/// The undo of [`merge_incoming`] after a failed switch; the caller then
-/// renames the incoming folder back to the old one.
-fn gather_ours(to: &Path) -> io::Result<()> {
-    let incoming = to.join(INCOMING);
-    if !incoming.exists() {
-        use std::os::unix::fs::DirBuilderExt;
-        // It becomes the old data folder again, so it is private like one.
-        fs::DirBuilder::new().mode(0o700).create(&incoming)?;
-    }
-    for entry in fs::read_dir(to)?.filter_map(Result::ok) {
-        let name = entry.file_name();
-        if name == INCOMING || name.to_str().is_some_and(is_reserved) {
-            continue;
+    if journal.target.is_some() {
+        let previous = disk::tree(parent, target_name)?;
+        for name in disk::names(&previous)? {
+            if is_firewall(&name) {
+                disk::copy_entry(&previous, &stage, &name)?;
+            }
         }
-        fs::rename(entry.path(), incoming.join(&name))?;
     }
-    sync_dir(to);
-    Ok(())
+    stage.sync_all()?;
+    if journal.target.is_some() {
+        disk::exchange(work, stage_name, parent, target_name)?;
+    } else {
+        disk::rename_new(work, stage_name, parent, target_name)?;
+    }
+    reconcile_staging(parent, target_name, work, journal)
 }
 
-/// Remove everything in `to` that is not reserved: our own earlier copy.
-///
-/// Only called when the marker proves the copy is ours, or to undo a copy
-/// this run made. infraternal's own files stay.
-fn discard_ours(to: &Path) -> Result<(), MoveError> {
-    let entries = fs::read_dir(to).map_err(|error| MoveError::io("reading", to, &error))?;
-    for entry in entries.filter_map(Result::ok) {
-        if entry.file_name().to_str().is_some_and(is_reserved) {
-            continue;
+/// Once the new process answers, retire the original by its saved identity.
+fn finish(
+    parent: &File,
+    work_name: &OsStr,
+    work: &File,
+    old_parent: &File,
+    old_name: &OsStr,
+    journal: &Journal,
+) -> io::Result<Outcome> {
+    let mut leftover = None;
+    if let Some(source) = journal.source {
+        let (_, backup) = disk::parent(&journal.backup, false)?;
+        let backup_id = optional_tree(old_parent, backup)?
+            .as_ref()
+            .map(Identity::of)
+            .transpose()?;
+        let old_id = optional_tree(old_parent, old_name)?
+            .as_ref()
+            .map(Identity::of)
+            .transpose()?;
+        if backup_id.is_none() && old_id == Some(source) {
+            disk::rename_new(old_parent, old_name, old_parent, backup)?;
         }
-        let path = entry.path();
-        let result = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
-        result.map_err(|error| MoveError::io("removing the stale copy", &path, &error))?;
+        if optional_tree(old_parent, backup)?.is_some() {
+            disk::retire(
+                old_parent,
+                backup,
+                source,
+                journal.backup_action == Backup::Retain,
+            )?;
+            if journal.backup_action == Backup::Retain {
+                leftover = Some(journal.backup.clone());
+            }
+        } else if journal.backup_action == Backup::Retain {
+            return Err(disk::invalid(
+                "original folder and its recorded backup are missing",
+            ));
+        }
     }
-    Ok(())
+    let target_name = journal
+        .to
+        .file_name()
+        .ok_or_else(|| disk::invalid("target lacks a name"))?;
+    let target = disk::tree(parent, target_name)?;
+    if journal.target != Some(Identity::of(&target)?) {
+        return Err(disk::invalid("destination identity changed during cleanup"));
+    }
+    if journal.legacy_target
+        && let Some(previous) = read_legacy_marker(&target)?
+    {
+        if previous != journal.from {
+            return Err(disk::invalid("legacy move marker changed"));
+        }
+        disk::unlink(&target, OsStr::new(MARKER), false)?;
+    }
+    remove_journal(parent, work_name, work)?;
+    Ok(Outcome { leftover })
 }
 
-/// Refuse an old folder that a rename or copy would not move safely.
-fn check_source(from: &Path, metadata: &fs::Metadata) -> Result<(), MoveError> {
-    let keep = format!("pass --data {} to keep it", from.display());
-    if metadata.file_type().is_symlink() {
-        return Err(MoveError(format!(
-            "{} is a symbolic link; moving it would move only the link; {keep}",
-            from.display()
-        )));
+/// Remove the known record and private directory, leaving other siblings alone.
+fn remove_journal(parent: &File, work_name: &OsStr, work: &File) -> io::Result<()> {
+    match disk::unlink(work, OsStr::new("journal.next"), false) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
-    if !metadata.is_dir() {
-        return Err(MoveError(format!(
-            "{} is not a folder; {keep}",
-            from.display()
-        )));
-    }
-    if metadata.uid() != nix::unistd::Uid::effective().as_raw() {
-        return Err(MoveError(format!(
-            "{} belongs to user id {}, not to the user running init; run init as that user, or {keep}",
-            from.display(),
-            metadata.uid()
-        )));
-    }
-    let parent_device = from
-        .parent()
-        .and_then(|parent| fs::metadata(parent).ok())
-        .map(|parent| parent.dev());
-    if parent_device.is_some_and(|device| device != metadata.dev()) {
-        return Err(MoveError(format!(
-            "{} is a mount point; move its volume yourself, or {keep}",
-            from.display()
-        )));
-    }
-    Ok(())
+    disk::unlink(work, OsStr::new(RECORD), false)?;
+    disk::unlink(parent, work_name, true)
 }
 
-/// The new text of the unit and every drop-in whose `ExecStart` names `from`.
-///
-/// Drop-ins come first and the unit last, matching systemd's order for
-/// `ExecStart`. A non-`ExecStart` line naming the old folder (for example
-/// `ReadWritePaths=`) is refused: after the move it would point at nothing.
-fn unit_rewrites(unit: &Path, from: &Path, to: &Path) -> Result<Vec<Rewrite>, MoveError> {
-    let (Some(from_text), Some(to_text)) = (from.to_str(), to.to_str()) else {
-        return Err(MoveError("data folders must be UTF-8 paths".to_owned()));
+/// The fixed name of the dedicated journal directory beside the target.
+fn work_name(target: &OsStr) -> OsString {
+    let mut name = OsString::from(".infraternal-move-");
+    name.push(target);
+    name
+}
+
+/// Load a journal if the target parent already exists.
+fn load(to: &Path, unit: &Path) -> io::Result<Option<Journal>> {
+    let (parent, target) = match disk::parent(to, false) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
-    let mut files = vec![unit.to_owned()];
-    let mut dropins: Vec<PathBuf> = fs::read_dir(PathBuf::from(format!("{}.d", unit.display())))
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
-                .collect()
+    match optional_tree(&parent, &work_name(target))? {
+        Some(work) => load_record(&work, to, unit),
+        None => Ok(None),
+    }
+}
+
+/// Decode a private journal and verify its path bindings before using it.
+fn load_record(work: &File, to: &Path, unit: &Path) -> io::Result<Option<Journal>> {
+    if work.metadata()?.mode() & 0o077 != 0 {
+        return Err(disk::invalid("move journal directory is not private"));
+    }
+    let raw = match disk::read(work, OsStr::new(RECORD), true) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let journal: Journal = serde_json::from_slice(&raw)?;
+    let target = to
+        .file_name()
+        .ok_or_else(|| disk::invalid("target lacks a name"))?;
+    let old_name = journal
+        .from
+        .file_name()
+        .ok_or_else(|| disk::invalid("source lacks a name"))?;
+    let mut prefix = old_name.to_owned();
+    prefix.push(".moved-");
+    if journal.to != to
+        || journal.unit != unit
+        || !journal.from.is_absolute()
+        || journal.from.starts_with(to)
+        || to.starts_with(&journal.from)
+        || journal.staging != to.with_file_name(work_name(target)).join(STAGING)
+        || journal.backup.parent() != journal.from.parent()
+        || !journal.backup.file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with(prefix.to_string_lossy().as_ref())
         })
-        .unwrap_or_default();
-    dropins.sort();
-    files.extend(dropins);
-    let mut rewrites = Vec::new();
-    for path in files {
-        let before = fs::read(&path).map_err(|error| MoveError::io("reading", &path, &error))?;
-        let text = String::from_utf8(before.clone())
-            .map_err(|_| MoveError(format!("{} is not UTF-8 text", path.display())))?;
-        let mut after = String::with_capacity(text.len());
-        for (number, line) in text.split_inclusive('\n').enumerate() {
+        || journal.effective >= journal.units.len()
+    {
+        return Err(disk::invalid(
+            "move journal does not match these data and unit paths",
+        ));
+    }
+    Ok(Some(journal))
+}
+
+/// Advance the durable journal before executing the next irreversible step.
+fn save(work: &File, journal: &Journal) -> io::Result<()> {
+    disk::write_record(work, OsStr::new(RECORD), &serde_json::to_vec(journal)?)
+}
+
+/// Read a directory entry only if it exists, propagating all other safety errors.
+fn optional_tree(parent: &File, name: &OsStr) -> io::Result<Option<File>> {
+    match disk::tree(parent, name) {
+        Ok(folder) => Ok(Some(folder)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Read the old-format marker through a trusted target directory.
+fn legacy_source(to: &Path) -> io::Result<Option<PathBuf>> {
+    let (parent, name) = match disk::parent(to, false) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    optional_tree(&parent, name)?
+        .as_ref()
+        .map(read_legacy_marker)
+        .transpose()
+        .map(Option::flatten)
+}
+
+/// Legacy markers contain one absolute UTF-8 source path.
+fn read_legacy_marker(dir: &File) -> io::Result<Option<PathBuf>> {
+    match disk::read(dir, OsStr::new(MARKER), true) {
+        Ok(data) => String::from_utf8(data)
+            .map(PathBuf::from)
+            .map(Some)
+            .map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Determine whether the source and destination parents use the same filesystem.
+fn same_filesystem(from: &Path, to: &Path) -> io::Result<bool> {
+    let (from_parent, _) = disk::parent(from, false)?;
+    let to_parent = to
+        .parent()
+        .ok_or_else(|| disk::invalid("target lacks a parent"))?;
+    let existing = disk::directory(&disk::existing_parent(to_parent)?, false)?;
+    Ok(Identity::of(&from_parent)?.same_device(Identity::of(&existing)?))
+}
+
+/// Reserve a dated exact backup path without reusing an existing object.
+fn backup_path(old: &Path, now: SystemTime) -> io::Result<PathBuf> {
+    let (_, leaf) = disk::parent(old, false)?;
+    let mut name = leaf.to_owned();
+    let seconds = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_secs();
+    name.push(format!(
+        ".moved-{}-{}",
+        utc_stamp(seconds),
+        uuid::Uuid::new_v4()
+    ));
+    Ok(old.with_file_name(name))
+}
+
+/// Inspect a fresh target, allowing only the server's dedicated firewall files.
+fn inspect_target(to: &Path) -> io::Result<()> {
+    let (parent, name) = match disk::parent(to, false) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Some(folder) = optional_tree(&parent, name)? else {
+        return Ok(());
+    };
+    reject_shared(&folder)?;
+    let mut foreign = Vec::new();
+    for name in disk::names(&folder)? {
+        if is_firewall(&name) {
+            disk::regular(&folder, &name)?;
+        } else {
+            foreign.push(name);
+        }
+    }
+    if !foreign.is_empty() {
+        return Err(io::Error::other(format!(
+            "{} already holds {foreign:?}; pass --data to keep the current folder",
+            to.display()
+        )));
+    }
+    if folder.metadata()?.mode() & 0o077 != 0 {
+        return Err(disk::invalid(
+            "the target is a shared base; pass --data to keep the current folder",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a shared install base without listing or altering its component files.
+fn reject_shared(folder: &File) -> io::Result<()> {
+    if disk::names(folder)?.iter().any(|name| is_shared(name)) {
+        return Err(disk::invalid(
+            "the target is a shared install base; pass --data to keep the current folder",
+        ));
+    }
+    Ok(())
+}
+
+/// Install-base files maintained for the server firewall independently of the server.
+fn is_firewall(name: &OsStr) -> bool {
+    name == "host-firewall-server.json"
+        || name
+            .to_string_lossy()
+            .starts_with(".host-firewall-server.json.")
+}
+
+/// Files owned by other components in a shared install base.
+fn is_shared(name: &OsStr) -> bool {
+    let name = name.to_string_lossy();
+    matches!(
+        name.as_ref(),
+        "bin"
+            | "agent"
+            | "state"
+            | "sessions"
+            | "host-firewall-agent.json"
+            | ".promotion-transaction"
+            | ".infraternal-incoming"
+    ) || name.starts_with(".bootstrap-")
+        || name.starts_with(".superseded-")
+        || name.starts_with(".host-firewall-agent.json.")
+}
+
+/// Read the base unit and its drop-ins through pinned, trusted parents.
+fn read_units(unit: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+    let (parent, leaf) = disk::parent(unit, false)?;
+    let text = String::from_utf8(disk::read(&parent, leaf, false)?).map_err(io::Error::other)?;
+    let mut files = vec![(unit.to_owned(), text)];
+    let mut drop_name = leaf.to_owned();
+    drop_name.push(".d");
+    if let Some(dropins) = optional_tree(&parent, &drop_name)? {
+        let mut entries = disk::names(&dropins)?;
+        entries.sort();
+        for name in entries
+            .into_iter()
+            .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "conf"))
+        {
+            let text =
+                String::from_utf8(disk::read(&dropins, &name, false)?).map_err(io::Error::other)?;
+            files.push((unit.with_file_name(&drop_name).join(name), text));
+        }
+    }
+    Ok(files)
+}
+
+/// Parse the final explicit `ExecStart` in a file, including an empty reset.
+fn exec_assignment(text: &str) -> Option<&str> {
+    text.lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("ExecStart="))
+        .map(str::trim)
+}
+
+/// Tokenize the final nonempty command like the status reader does.
+fn exec_start(text: &str) -> Option<Vec<String>> {
+    exec_assignment(text).and_then(infraternal_status::exec_words)
+}
+
+/// Compute every replacement and identify the file whose rename switches the live path.
+fn unit_rewrites(unit: &Path, from: &Path, to: &Path) -> io::Result<(Vec<Rewrite>, usize)> {
+    let (Some(from_text), Some(to_text)) = (from.to_str(), to.to_str()) else {
+        return Err(disk::invalid("data folders must be UTF-8 paths"));
+    };
+    let mut units = Vec::new();
+    let mut effective = None;
+    for (path, before) in read_units(unit)? {
+        if exec_assignment(&before).is_some() {
+            effective = live_data(&before).map(|_| units.len());
+        }
+        let mut after = String::with_capacity(before.len());
+        for (number, line) in before.split_inclusive('\n').enumerate() {
             let body = line.trim_end_matches(['\n', '\r']);
             let ending = &line[body.len()..];
             let trimmed = body.trim_start();
@@ -844,49 +1010,107 @@ fn unit_rewrites(unit: &Path, from: &Path, to: &Path) -> Result<Vec<Rewrite>, Mo
                 .strip_prefix("ExecStart=")
                 .filter(|v| !v.trim().is_empty())
             {
-                let words = infraternal_status::exec_words(value).ok_or_else(|| {
-                    MoveError(format!(
-                        "{}:{} has an ExecStart that cannot be read safely",
-                        path.display(),
-                        number + 1
-                    ))
-                })?;
+                let words = infraternal_status::exec_words(value)
+                    .ok_or_else(|| disk::invalid("cannot safely parse ExecStart"))?;
                 let mapped: Vec<String> = words
                     .iter()
                     .map(|word| map_word(word, from_text, to_text))
                     .collect();
                 if mapped != words {
                     after.push_str("ExecStart=");
-                    after.push_str(&render_exec(&mapped, &path)?);
+                    after.push_str(&render_exec(&mapped, &path).map_err(io::Error::other)?);
                     after.push_str(ending);
                     continue;
                 }
             } else if names_path(body, from_text) {
-                return Err(MoveError(format!(
-                    "{}:{} names {} outside ExecStart and would break after the move; \
-                     change it yourself, or pass --data {} to keep the folder",
+                return Err(io::Error::other(format!(
+                    "{}:{} names {} outside ExecStart; pass --data to keep it",
                     path.display(),
                     number + 1,
-                    from.display(),
                     from.display()
                 )));
             }
             after.push_str(line);
         }
-        if after != text {
-            rewrites.push(Rewrite {
-                path,
-                before,
-                after,
-            });
+        units.push(Rewrite {
+            path,
+            before,
+            after,
+        });
+    }
+    let effective = effective
+        .ok_or_else(|| disk::invalid("installed unit does not select a usable data folder"))?;
+    let old = live_data(&units[effective].before);
+    let new = live_data(&units[effective].after);
+    if old.as_deref().is_none_or(|old| old != from && old != to) || new.as_deref() != Some(to) {
+        return Err(disk::invalid(
+            "effective unit does not match the planned data paths",
+        ));
+    }
+    Ok((units, effective))
+}
+
+/// Read the explicit data location in a unit command.
+fn live_data(text: &str) -> Option<PathBuf> {
+    let words = exec_start(text)?;
+    words
+        .windows(2)
+        .find(|pair| pair[0] == "--data")
+        .map(|pair| PathBuf::from(&pair[1]))
+        .or_else(|| {
+            words
+                .iter()
+                .find_map(|word| word.strip_prefix("--data=").map(PathBuf::from))
+        })
+}
+
+/// Check the snapshot and determine which data path is live on a fresh boot.
+fn current_side(journal: &Journal, current: &[(PathBuf, String)]) -> io::Result<bool> {
+    if current.len() != journal.units.len()
+        || current
+            .iter()
+            .zip(&journal.units)
+            .any(|((path, text), file)| {
+                path != &file.path || (text != &file.before && text != &file.after)
+            })
+    {
+        return Err(disk::invalid(
+            "a service unit changed outside the pending migration",
+        ));
+    }
+    let switched = live_data(&current[journal.effective].1).as_deref() == Some(&journal.to);
+    if journal.ready && !switched {
+        return Err(disk::invalid(
+            "the confirmed unit no longer points to the new data",
+        ));
+    }
+    Ok(switched)
+}
+
+/// Replace shadowed files first, then atomically switch the effective `ExecStart`.
+fn write_units(journal: &Journal) -> io::Result<()> {
+    current_side(journal, &read_units(&journal.unit)?)?;
+    let effective = &journal.units[journal.effective];
+    for file in journal
+        .units
+        .iter()
+        .filter(|file| file.path != effective.path)
+        .chain(std::iter::once(effective))
+    {
+        let (parent, name) = disk::parent(&file.path, false)?;
+        let old = disk::regular(&parent, name)?;
+        let contents = disk::read(&parent, name, false)?;
+        if contents == file.after.as_bytes() {
+            // An earlier write can have returned before its directory fsync.
+            parent.sync_all()?;
+        } else {
+            if contents != file.before.as_bytes() {
+                return Err(disk::invalid("unit changed before replacement"));
+            }
+            disk::write(&parent, name, file.after.as_bytes(), Some(&old))?;
         }
     }
-    // The unit is first in `files`; write it last so drop-ins never lag it.
-    if rewrites.first().is_some_and(|rewrite| rewrite.path == unit) {
-        let first = rewrites.remove(0);
-        rewrites.push(first);
-    }
-    Ok(rewrites)
+    Ok(())
 }
 
 /// Replace a word that is `from` or lies under it, also as `--flag=<path>`.
@@ -954,280 +1178,7 @@ fn render_exec(words: &[String], path: &Path) -> Result<String, MoveError> {
     Ok(parts.join(" "))
 }
 
-/// Write every rewrite atomically; restore the earlier ones if one fails.
-fn write_rewrites(rewrites: &[Rewrite]) -> Result<(), MoveError> {
-    for (index, rewrite) in rewrites.iter().enumerate() {
-        if let Err(error) = super::install::write_atomic(&rewrite.path, rewrite.after.as_bytes()) {
-            for done in &rewrites[..index] {
-                let _ = super::install::write_atomic(&done.path, &done.before);
-            }
-            return Err(MoveError::io("rewriting", &rewrite.path, &error));
-        }
-    }
-    Ok(())
-}
-
-/// Copy `from` into a staging folder beside `to`, verify it, then rename it into place.
-fn copy_into_place(from: &Path, to: &Path) -> Result<(), MoveError> {
-    let name = to
-        .file_name()
-        .ok_or_else(|| MoveError("the target has no folder name".to_owned()))?
-        .to_string_lossy();
-    let prefix = staging_prefix(&name);
-    remove_stale_staging(to, &prefix)?;
-    let staging = to.with_file_name(format!("{prefix}{}", std::process::id()));
-    let result = copy_tree(from, &staging)
-        .map_err(|error| {
-            MoveError(format!(
-                "copying {} failed: {error}; nothing was moved",
-                from.display()
-            ))
-        })
-        .and_then(|()| {
-            verify_tree(from, &staging).map_err(|error| {
-                MoveError(format!(
-                    "the copy of {} did not match: {error}; nothing was moved",
-                    from.display()
-                ))
-            })
-        })
-        .and_then(|()| {
-            fs::rename(&staging, to)
-                .map_err(|error| MoveError::io("placing the copy at", to, &error))
-        });
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
-    }
-    result
-}
-
-/// The name prefix of the hidden staging folder a copy into a folder called `name` uses.
-fn staging_prefix(name: &str) -> String {
-    format!(".{name}.partial-")
-}
-
-/// Remove staging folders an interrupted copy left beside `to`.
-///
-/// They hold a copy of the data, the mesh key included, that no unit points
-/// at. Only real folders (not links or files) whose name starts with
-/// `prefix` are ours; the old folder is never among them because it is not a
-/// hidden sibling of the target.
-fn remove_stale_staging(to: &Path, prefix: &str) -> Result<(), MoveError> {
-    let Some(parent) = to.parent() else {
-        return Ok(());
-    };
-    let entries = fs::read_dir(parent).map_err(|error| MoveError::io("reading", parent, &error))?;
-    for entry in entries.filter_map(Result::ok) {
-        let ours = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(prefix))
-            && entry.file_type().is_ok_and(|kind| kind.is_dir());
-        if ours {
-            let path = entry.path();
-            fs::remove_dir_all(&path).map_err(|error| MoveError::io("removing", &path, &error))?;
-        }
-    }
-    Ok(())
-}
-
-/// Copy a folder tree, keeping modes (and owners, as root); sockets are skipped.
-///
-/// Every file and folder is fsynced, so the copy is on disk before the
-/// switch. A socket belongs to the stopped server and is made again at start.
-fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(from)?;
-    fs::create_dir(to)?;
-    fs::set_permissions(to, fs::Permissions::from_mode(0o700))?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let (source, target) = (entry.path(), to.join(entry.file_name()));
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&source, &target)?;
-        } else if kind.is_file() {
-            copy_file(&source, &target)?;
-        } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
-            keep_owner(&fs::symlink_metadata(&source)?, &target)?;
-        } else if !kind.is_socket() {
-            return Err(io::Error::other(format!(
-                "{} is a special file that cannot be copied",
-                source.display()
-            )));
-        }
-    }
-    fs::set_permissions(to, fs::Permissions::from_mode(metadata.mode() & 0o7777))?;
-    keep_owner(&metadata, to)?;
-    sync_dir(to);
-    Ok(())
-}
-
-/// Copy one file's bytes and mode, then fsync it.
-fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(from)?;
-    let mut source = File::open(from)?;
-    let mut target = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(to)?;
-    io::copy(&mut source, &mut target)?;
-    target.set_permissions(fs::Permissions::from_mode(metadata.mode() & 0o7777))?;
-    target.sync_all()?;
-    keep_owner(&metadata, to)
-}
-
-/// As root, give the copy the original's owner; a user's copy is already theirs.
-fn keep_owner(metadata: &fs::Metadata, path: &Path) -> io::Result<()> {
-    if nix::unistd::Uid::effective().is_root() {
-        std::os::unix::fs::lchown(path, Some(metadata.uid()), Some(metadata.gid()))?;
-    }
-    Ok(())
-}
-
-/// Check that `copy` holds exactly what `original` holds, reading every byte back.
-fn verify_tree(original: &Path, copy: &Path) -> io::Result<()> {
-    let mismatch = |path: &Path, what: &str| io::Error::other(format!("{} {what}", path.display()));
-    let mut expected = Vec::new();
-    for entry in fs::read_dir(original)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_socket() {
-            continue;
-        }
-        let (source, target) = (entry.path(), copy.join(entry.file_name()));
-        let copied = fs::symlink_metadata(&target).map_err(|_| mismatch(&target, "is missing"))?;
-        if kind.is_dir() != copied.is_dir() || kind.is_symlink() != copied.file_type().is_symlink()
-        {
-            return Err(mismatch(&target, "has the wrong type"));
-        }
-        if kind.is_dir() {
-            verify_tree(&source, &target)?;
-        } else if kind.is_symlink() {
-            if fs::read_link(&source)? != fs::read_link(&target)? {
-                return Err(mismatch(&target, "points elsewhere"));
-            }
-        } else if !same_bytes(&source, &target)? {
-            return Err(mismatch(&target, "differs from the original"));
-        }
-        expected.push(entry.file_name());
-    }
-    if fs::read_dir(copy)?.count() != expected.len() {
-        return Err(mismatch(copy, "has extra entries"));
-    }
-    Ok(())
-}
-
-/// Compare two files byte for byte.
-fn same_bytes(left: &Path, right: &Path) -> io::Result<bool> {
-    let (mut left, mut right) = (File::open(left)?, File::open(right)?);
-    if left.metadata()?.len() != right.metadata()?.len() {
-        return Ok(false);
-    }
-    let (mut a, mut b) = (vec![0_u8; 64 * 1024], vec![0_u8; 64 * 1024]);
-    loop {
-        let read = left.read(&mut a)?;
-        if read == 0 {
-            return Ok(true);
-        }
-        right.read_exact(&mut b[..read])?;
-        if a[..read] != b[..read] {
-            return Ok(false);
-        }
-    }
-}
-
-/// Rename the old folder to `<name>.moved-<UTC time>` and make it read-only.
-fn set_aside(from: &Path, now: SystemTime) -> io::Result<PathBuf> {
-    let name = from
-        .file_name()
-        .ok_or_else(|| io::Error::other("the old folder has no name"))?
-        .to_string_lossy()
-        .into_owned();
-    let stamp = utc_stamp(
-        now.duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs()),
-    );
-    let mut leftover = from.with_file_name(format!("{name}.moved-{stamp}"));
-    let mut attempt = 1;
-    while fs::symlink_metadata(&leftover).is_ok() {
-        attempt += 1;
-        leftover = from.with_file_name(format!("{name}.moved-{stamp}-{attempt}"));
-    }
-    fs::rename(from, &leftover)?;
-    sync_parent(&leftover);
-    read_only(&leftover)?;
-    Ok(leftover)
-}
-
-/// Remove every write bit in a tree, without following links.
-fn read_only(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            read_only(&entry?.path())?;
-        }
-    }
-    fs::set_permissions(path, fs::Permissions::from_mode(metadata.mode() & 0o7555))
-}
-
-/// Write the marker naming `from` into `folder`, durably.
-fn write_marker(folder: &Path, from: &Path) -> io::Result<()> {
-    let path = folder.join(MARKER);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)?;
-    file.write_all(from.as_os_str().as_encoded_bytes())?;
-    file.sync_all()?;
-    sync_dir(folder);
-    Ok(())
-}
-
-/// The old folder an unfinished move into `folder` came from, if any.
-fn read_marker(folder: &Path) -> Option<PathBuf> {
-    let text = fs::read_to_string(folder.join(MARKER)).ok()?;
-    let path = PathBuf::from(text.trim_end_matches('\n'));
-    path.is_absolute().then_some(path)
-}
-
-/// Whether two paths are the same folder: equal, or resolving to the same place.
-///
-/// Prod's `/var/lib/infraternal` is already standard, and so is a path spelled
-/// with a trailing slash or through a link to it.
-fn same_folder(left: &Path, right: &Path) -> bool {
-    if left.components().eq(right.components()) {
-        return true;
-    }
-    matches!((fs::canonicalize(left), fs::canonicalize(right)), (Ok(a), Ok(b)) if a == b)
-}
-
-/// The closest ancestor of `path` (or itself) that exists.
-fn nearest_existing(path: &Path) -> Option<&Path> {
-    path.ancestors().find(|ancestor| ancestor.exists())
-}
-
-/// fsync a folder so a rename or new entry in it survives a crash; best effort.
-fn sync_dir(path: &Path) {
-    if let Ok(folder) = File::open(path) {
-        let _ = folder.sync_all();
-    }
-}
-
-/// fsync the folder that holds `path`.
-fn sync_parent(path: &Path) {
-    if let Some(parent) = path.parent() {
-        sync_dir(parent);
-    }
-}
-
-/// `YYYYMMDD-HHMMSS` in UTC, from UNIX seconds (civil-from-days, no time crate).
+/// Format a UTC calendar timestamp for the dated backup.
 fn utc_stamp(seconds: u64) -> String {
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
     let rest = seconds % 86_400;
@@ -1259,7 +1210,7 @@ fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-/// Behaviour tests on real scratch installs; also holds the copy-path test hook.
+/// Exercises interrupted moves on disposable data trees.
 #[cfg(test)]
 #[path = "install_move_tests.rs"]
 mod tests;

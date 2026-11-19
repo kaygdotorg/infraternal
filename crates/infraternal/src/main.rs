@@ -1579,6 +1579,10 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
     };
     if let Some(relocation) = &relocation {
         args.data.clone_from(&relocation.to);
+        relocation.relocate_path(&mut args.web_root);
+        relocation.relocate_path(&mut args.tls_cert);
+        relocation.relocate_path(&mut args.tls_key);
+        relocation.relocate_path(&mut args.remote.remote_ca_dir);
     }
     let yes = matches.get_flag("yes");
     if let Err(error) = confirm_server_setup(
@@ -1586,7 +1590,7 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         dry_run,
         args.listen,
         &match &relocation {
-            Some(relocation) if relocation.stage != install_move::Stage::Cleanup => format!(
+            Some(relocation) => format!(
                 "{} (moved from {})",
                 args.data.display(),
                 relocation.from.display()
@@ -1627,45 +1631,38 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             Some((relocation.describe(), relocation_json(relocation, None)))
         }
         Some(relocation) => {
-            // The install's own checks first, so a refusal (the host firewall
-            // finding no admitted sshd port, or a changed unit without
-            // --force) moves nothing (J803).
-            let unit_after = install::unit_path(!install_args.system, name)
-                .ok()
-                .and_then(|path| relocation.unit_text_after(&path));
-            if let Err(error) = install::preflight(&args, &install_args, unit_after) {
-                return report_failure(
-                    "server init",
-                    "The data folder was not moved; the existing install is unchanged.",
-                    error.to_string(),
-                    json_output,
-                );
-            }
-            let program = match install::systemctl_program() {
-                Ok(program) => program,
+            let admitted = match install::prepare_move(&args, &install_args, relocation) {
+                Ok(admitted) => admitted,
                 Err(error) => {
                     return report_failure(
                         "server init",
-                        "The data folder was not moved; the existing install is unchanged.",
+                        "The data move was refused.",
                         error.to_string(),
                         json_output,
                     );
                 }
             };
             let service = install_move::Systemd {
-                program,
+                program: admitted.systemctl.clone(),
                 user: !install_args.system,
                 service: format!("{name}.service"),
+                listen: args.listen,
+                tls: args.tls_cert.is_some(),
             };
-            match install_move::apply(relocation, &service, std::time::SystemTime::now()) {
-                Ok(outcome) => Some((
-                    outcome.describe(relocation),
-                    relocation_json(relocation, Some(&outcome)),
-                )),
+            match install_move::apply(relocation, &service, std::time::SystemTime::now(), || {
+                admitted.publish()
+            }) {
+                Ok(outcome) => {
+                    install::finish_move(!install_args.system);
+                    Some((
+                        outcome.describe(relocation),
+                        relocation_json(relocation, Some(&outcome)),
+                    ))
+                }
                 Err(error) => {
                     return report_failure(
                         "server init",
-                        "The data folder was not moved; the existing install is unchanged.",
+                        "The data move could not finish.",
                         error.to_string(),
                         json_output,
                     );
@@ -1689,7 +1686,7 @@ fn plan_server_data_move(
     roots: &infraternal_status::Roots,
     name: &str,
 ) -> Result<Option<install_move::Relocation>, String> {
-    let Some(recorded) = recorded.filter(|_| !explicit_data) else {
+    let Some(recorded) = recorded else {
         return Ok(None);
     };
     let target =
@@ -1710,6 +1707,12 @@ fn plan_server_data_move(
         None => install::unit_path(scope == install_paths::Scope::User, name)
             .map_err(|error| error.to_string())?,
     };
+    if explicit_data {
+        if install_move::pending(&target, &unit).map_err(|error| error.to_string())? {
+            return Err("a data move is in progress; run init with the original service flags and without --data to finish it".to_owned());
+        }
+        return Ok(None);
+    }
     install_move::plan(recorded, &target, &unit).map_err(|error| error.to_string())
 }
 
@@ -1726,7 +1729,7 @@ fn relocation_json(
         "unit_files": relocation.unit_files().collect::<Vec<_>>(),
         "moved": outcome.is_some(),
         "leftover": outcome.and_then(|outcome| outcome.leftover.as_ref()),
-        "warning": outcome.and_then(|outcome| outcome.warning.as_ref()),
+        "warning": null,
     })
 }
 
@@ -1786,11 +1789,12 @@ fn install_server(
     moved: Option<(String, serde_json::Value)>,
     json_output: bool,
 ) -> ExitCode {
-    let moved_note = moved
-        .as_ref()
-        .filter(|_| !install_args.dry_run)
-        .map(|(text, _)| text.clone());
-    match install::install(args, install_args) {
+    let installed = if moved.is_some() && !install_args.dry_run {
+        Ok(String::new())
+    } else {
+        install::install(args, install_args)
+    };
+    match installed {
         Ok(plan) => {
             let mut data = json!({
                 "service": format!("{}.service", install_args.name),
@@ -1834,15 +1838,10 @@ fn install_server(
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
         }
-        // A move that already happened stays reported: its unit is switched
-        // and its leftover still needs the removal command.
         Err(error) => report_failure(
             command,
             "The server service could not be installed.",
-            match moved_note {
-                Some(note) => format!("{error}. {}", note.trim_end()),
-                None => error.to_string(),
-            },
+            error.to_string(),
             json_output,
         ),
     }

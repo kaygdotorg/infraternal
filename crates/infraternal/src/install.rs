@@ -163,43 +163,48 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     })
 }
 
-/// Run every check [`install`] can refuse on before it changes anything, and change nothing.
-///
-/// `server init` calls this before it moves an existing install's data
-/// folder (D395, #516), because the move stops the service, moves the folder
-/// and rewrites the unit before [`install`] runs. Without it, a refusal came
-/// after the move, so a refused re-run had still moved the install (J803):
-/// the host firewall's sshd admission check (J671, #483), or a unit that
-/// differs from the installed one without `--force`. With it the move keeps
-/// [`install_in_order`]'s promise: a refusal creates and moves nothing.
-/// [`install`] repeats the same checks, so this is only an earlier copy of
-/// them, never a replacement.
-///
-/// `unit_after_move` is the text the move will give the unit file at
-/// [`unit_path`] ([`super::install_move::Relocation::unit_text_after`]); the
-/// unit check compares against it, because that is what [`install`] will
-/// find on disk. `None` reads the file as it is now.
-///
-/// # Errors
-/// The same [`InstallError`] that [`install`] would return from its checks.
-pub fn preflight(
+/// Admission and fixed manager program for a move of an existing service.
+pub struct MoveInstall {
+    /// The same manager used for both the firewall and server restart.
+    pub systemctl: PathBuf,
+    /// Policy checked before any change to data or units.
+    firewall: FirewallPlan,
+}
+
+impl MoveInstall {
+    /// Publish the policy before the migration can switch `ExecStart`.
+    pub fn publish(&self) -> std::io::Result<()> {
+        publish_planned_firewall(&self.firewall, &self.systemctl)
+            .map(drop)
+            .map_err(std::io::Error::other)
+    }
+}
+
+/// Validate the final command and firewall before the migration can stop the service.
+pub fn prepare_move(
     args: &ServerArgs,
     options: &InstallArgs,
-    unit_after_move: Option<&str>,
-) -> Result<(), InstallError> {
+    relocation: &super::install_move::Relocation,
+) -> Result<MoveInstall, InstallError> {
     validate_name(&options.name)?;
     let user = !options.system || options.user;
-    if args.host_firewall_off && user {
-        return Err(InstallError::HostFirewall(
-            "--host-firewall-off is available only for a system install".to_owned(),
-        ));
-    }
-    #[cfg(not(target_os = "linux"))]
-    if args.host_firewall_off {
+    if (args.host_firewall_off && (user || cfg!(not(target_os = "linux"))))
+        || (options.system && options.name == "infraternal-firewall")
+    {
         return Err(InstallError::Invalid);
     }
+    let firewall = plan_firewall(args, options)?;
     #[cfg(target_os = "linux")]
-    if options.system && options.name == "infraternal-firewall" {
+    if matches!(firewall, FirewallPlan::ClearServerRole)
+        && host_firewall::read_policy_file(Path::new(host_firewall::SERVER_POLICY_PATH))
+            .map_err(|error| InstallError::HostFirewall(error.to_string()))?
+            .is_some()
+    {
+        return Err(InstallError::HostFirewall(
+            "move with the existing host firewall policy before clearing it".to_owned(),
+        ));
+    }
+    if args.listen.port() == 0 {
         return Err(InstallError::Invalid);
     }
     let origin = args
@@ -207,30 +212,19 @@ pub fn preflight(
         .clone()
         .unwrap_or_else(|| origin_for_listener(args.listen));
     let unit = render_unit(args, &options.name, &origin, user)?;
-    unit_writable_after_move(
-        &unit_path(user, &options.name)?,
-        unit.as_bytes(),
-        options.force,
-        unit_after_move.map(str::as_bytes),
-    )?;
-    plan_firewall(args, options).map(drop)
+    relocation
+        .check_command(&unit)
+        .map_err(std::io::Error::other)
+        .map_err(InstallError::Io)?;
+    Ok(MoveInstall {
+        systemctl: systemctl_program()?,
+        firewall,
+    })
 }
 
-/// [`ensure_server_unit_writable`] against the unit as a pending move will leave it.
-///
-/// `after` is that text; `None` means no move rewrites this file, so the
-/// file on disk is what counts.
-fn unit_writable_after_move(
-    path: &Path,
-    unit: &[u8],
-    force: bool,
-    after: Option<&[u8]>,
-) -> Result<(), InstallError> {
-    match after {
-        Some(after) if after == unit || force => Ok(()),
-        Some(_) => Err(InstallError::ExistingUnit),
-        None => ensure_server_unit_writable(path, unit, force).map(drop),
-    }
+/// Publish the convenience link after the moved service is healthy.
+pub fn finish_move(user: bool) {
+    eprintln!("{}", link_note(user));
 }
 
 /// What a server install does to the host firewall, decided before anything is written.
@@ -857,10 +851,7 @@ pub(super) fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> 
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    if let Ok(directory) = OpenOptions::new().read(true).open(parent) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
+    OpenOptions::new().read(true).open(parent)?.sync_all()
 }
 
 #[cfg(test)]
@@ -1303,22 +1294,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&unit).unwrap(), "new");
         assert!(data.is_dir());
         fs::remove_dir_all(root).unwrap();
-    }
-
-    /// The unit check before a move compares against the unit the move will leave (J803).
-    #[test]
-    fn the_unit_check_before_a_move_uses_the_moved_unit() {
-        let missing = env::temp_dir().join(format!("preflight-{}", uuid::Uuid::new_v4()));
-        let path = missing.join("x.service");
-        assert!(unit_writable_after_move(&path, b"new", false, Some(b"new")).is_ok());
-        assert!(matches!(
-            unit_writable_after_move(&path, b"new", false, Some(b"old")),
-            Err(InstallError::ExistingUnit)
-        ));
-        assert!(unit_writable_after_move(&path, b"new", true, Some(b"old")).is_ok());
-        // No move: the file on disk counts, and a missing one may be written.
-        assert!(unit_writable_after_move(&path, b"new", false, None).is_ok());
-        assert!(!missing.exists(), "the check writes nothing");
     }
 
     /// The unit's program and the PATH link's target are the same canonical path (J719 P2).

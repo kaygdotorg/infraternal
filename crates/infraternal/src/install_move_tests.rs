@@ -1,840 +1,442 @@
-//! Behaviour of the data-folder move: each test builds a real install in a
-//! scratch folder (data files, a socket, a unit with drop-ins) and checks what
-//! is on disk afterwards, including after a simulated crash at each step.
+//! Transaction proofs using real directory entries and a deterministic manager.
+//! The root integration script repeats the cutover with a live server.
 
 use super::*;
 use std::{
     cell::{Cell, RefCell},
-    env,
-    os::unix::net::UnixListener,
+    fs,
+    os::unix::fs::PermissionsExt,
 };
 
-thread_local! {
-    /// Make the folder rename fail as if the target were on another filesystem.
-    pub(super) static FORCE_COPY: Cell<bool> = const { Cell::new(false) };
-}
-
-/// A service manager that records calls and holds a running flag.
-#[derive(Default)]
-struct Fake {
-    /// Whether the service runs now.
-    running: Cell<bool>,
-    /// What `enabled` answers.
-    enabled: bool,
-    /// Make `stop` fail.
-    fail_stop: bool,
-    /// Every call, in order.
-    calls: RefCell<Vec<&'static str>>,
-}
-
-impl Fake {
-    /// A service that is running and enabled, as a live install is.
-    fn running() -> Self {
-        Self {
-            running: Cell::new(true),
-            enabled: true,
-            ..Self::default()
-        }
-    }
-
-    /// The calls made so far.
-    fn calls(&self) -> Vec<&'static str> {
-        self.calls.borrow().clone()
-    }
-}
-
-impl Service for Fake {
-    fn active(&self) -> io::Result<bool> {
-        self.calls.borrow_mut().push("active");
-        Ok(self.running.get())
-    }
-    fn enabled(&self) -> io::Result<bool> {
-        self.calls.borrow_mut().push("enabled");
-        Ok(self.enabled)
-    }
-    fn stop(&self) -> io::Result<()> {
-        self.calls.borrow_mut().push("stop");
-        if self.fail_stop {
-            return Err(io::Error::other("stop refused"));
-        }
-        self.running.set(false);
-        Ok(())
-    }
-    fn reload(&self) -> io::Result<()> {
-        self.calls.borrow_mut().push("reload");
-        Ok(())
-    }
-    fn start(&self) -> io::Result<()> {
-        self.calls.borrow_mut().push("start");
-        self.running.set(true);
-        Ok(())
-    }
-}
-
-/// One scratch install: an old data folder, the standard target and a unit.
+/// An old installation and unit in an isolated, trusted test directory.
 struct Install {
-    /// The scratch root, removed on drop.
+    /// Owns the fixture for the length of the test.
     root: PathBuf,
-    /// The folder the unit records.
+    /// Original data path.
     old: PathBuf,
-    /// The standard folder (its parent does not exist yet).
+    /// Expected D395 data path.
     new: PathBuf,
-    /// The unit file.
+    /// systemd base unit.
     unit: PathBuf,
 }
 
+impl Install {
+    /// Set up a database sentinel and generated-style unit.
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("mv-{}", uuid::Uuid::new_v4().simple()));
+        let old = root.join("old");
+        let new = root.join("new");
+        let unit = root.join("test.service");
+        fs::create_dir_all(&old).unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(old.join("infraternal.sqlite"), "original").unwrap();
+        fs::write(&unit, unit_text(&old)).unwrap();
+        Self {
+            root,
+            old,
+            new,
+            unit,
+        }
+    }
+
+    /// Plan from the currently effective data path.
+    fn plan(&self, recorded: &Path) -> Relocation {
+        plan(recorded, &self.new, &self.unit).unwrap().unwrap()
+    }
+
+    /// Apply a planned move with no changes needed to external policy.
+    fn apply(&self, recorded: &Path, service: &Fake) -> Result<Outcome, MoveError> {
+        apply(&self.plan(recorded), service, UNIX_EPOCH, || Ok(()))
+    }
+
+    /// Read the original or migrated SQLite fixture bytes.
+    fn data(dir: &Path) -> String {
+        fs::read_to_string(dir.join("infraternal.sqlite")).unwrap()
+    }
+
+    /// Create an effective drop-in that overrides the base command.
+    fn dropin(&self, folder: &Path) -> PathBuf {
+        let dir = self.unit.with_extension("service.d");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("10-effective.conf");
+        let unit = unit_text(folder);
+        let command = unit
+            .lines()
+            .find(|line| line.starts_with("ExecStart="))
+            .unwrap();
+        fs::write(&file, format!("[Service]\nExecStart=\n{command}\n")).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        file
+    }
+
+    /// Reproduce a legacy same-filesystem rename before its unit was updated.
+    fn legacy_rename(&self) {
+        let marker = self.old.join(MARKER);
+        fs::write(&marker, self.old.to_str().unwrap()).unwrap();
+        fs::set_permissions(marker, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&self.old, &self.new).unwrap();
+    }
+}
+
 impl Drop for Install {
+    /// Remove the test fixture when the move has finished.
     fn drop(&mut self) {
-        // Leftovers are read-only; make them writable so the scratch tree goes.
-        let _ = Command::new("chmod")
-            .arg("-R")
-            .arg("u+w")
-            .arg(&self.root)
-            .status();
         let _ = fs::remove_dir_all(&self.root);
     }
 }
 
-/// The unit text `server init` writes for `data`.
-fn unit_text(data: &Path) -> String {
+/// A generated-style unit at the chosen data path.
+fn unit_text(path: &Path) -> String {
     format!(
-        "[Unit]\nDescription=infraternal server (x)\n\n[Service]\nType=simple\n\
-         ExecStart=\"/opt/infraternal\" \"server\" \"--listen\" \"127.0.0.1:47361\" \"--data\" \"{0}\" \
-         \"--public-origin\" \"https://localhost:47361\" \"--remote-ca-dir\" \"{0}/remote-ca\"\n\
-         Restart=on-failure\n\n[Install]\nWantedBy=default.target\n",
-        data.display()
+        "[Service]\nExecStart=\"/bin/infraternal\" \"server\" \"--listen\" \"127.0.0.1:47361\" \"--data\" \"{}\"\n",
+        path.display()
     )
 }
 
-/// Build an install with a database, WAL, a nested key folder and a stale socket.
-fn install() -> Install {
-    let root = env::temp_dir().join(format!(
-        "mv-{}",
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    ));
-    let old = root.join("cwd/data");
-    let new = root.join("home/.local/state/infraternal");
-    fs::create_dir_all(old.join("mesh")).unwrap();
-    fs::create_dir_all(old.join("remote-ca")).unwrap();
-    fs::set_permissions(&old, fs::Permissions::from_mode(0o750)).unwrap();
-    fs::write(old.join("infraternal.sqlite"), vec![7_u8; 200_000]).unwrap();
-    fs::write(old.join("infraternal.sqlite-wal"), b"wal frames").unwrap();
-    fs::write(old.join("infraternal.sqlite-shm"), b"shm").unwrap();
-    fs::write(old.join("mesh/key"), b"mesh private key").unwrap();
-    fs::set_permissions(old.join("mesh/key"), fs::Permissions::from_mode(0o600)).unwrap();
-    fs::write(old.join("remote-ca/ca.pem"), b"ca").unwrap();
-    std::os::unix::fs::symlink("infraternal.sqlite", old.join("link")).unwrap();
-    let listener = UnixListener::bind(old.join("s.sock")).unwrap();
-    drop(listener);
-    let units = root.join("units");
-    fs::create_dir_all(&units).unwrap();
-    let unit = units.join("x.service");
-    fs::write(&unit, unit_text(&old)).unwrap();
-    Install {
-        root,
-        old,
-        new,
-        unit,
+/// A manager whose start, readiness and active state are observable.
+#[derive(Default)]
+struct Fake {
+    /// Whether the old or new process is active.
+    active: Cell<bool>,
+    /// Whether the launched process answers.
+    fail_ready: Cell<bool>,
+    /// Exact sequence of side effects and health confirmation.
+    calls: RefCell<Vec<&'static str>>,
+}
+
+impl Service for Fake {
+    fn active(&self) -> io::Result<bool> {
+        Ok(self.active.get())
+    }
+
+    fn stop(&self) -> io::Result<()> {
+        self.calls.borrow_mut().push("stop");
+        self.active.set(false);
+        Ok(())
+    }
+
+    fn reload(&self) -> io::Result<()> {
+        self.calls.borrow_mut().push("reload");
+        Ok(())
+    }
+
+    fn listener_is_idle(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn start(&self) -> io::Result<()> {
+        self.calls.borrow_mut().push("start");
+        self.active.set(true);
+        Ok(())
+    }
+
+    fn ready(&self) -> io::Result<()> {
+        self.calls.borrow_mut().push("ready");
+        if self.fail_ready.get() {
+            return Err(io::Error::other("server did not answer"));
+        }
+        Ok(())
+    }
+
+    fn enable(&self) -> io::Result<()> {
+        self.calls.borrow_mut().push("enable");
+        Ok(())
     }
 }
 
-/// The data files a move must carry, as (relative path, bytes).
-fn data_of(folder: &Path) -> Vec<(String, Vec<u8>)> {
-    [
-        "infraternal.sqlite",
-        "infraternal.sqlite-wal",
-        "infraternal.sqlite-shm",
-        "mesh/key",
-        "remote-ca/ca.pem",
-    ]
-    .iter()
-    .map(|name| ((*name).to_owned(), fs::read(folder.join(name)).unwrap()))
-    .collect()
-}
-
-/// Permission bits of a path.
-fn mode(path: &Path) -> u32 {
-    fs::symlink_metadata(path).unwrap().mode() & 0o7777
-}
-
-/// A move at a fixed time, so the leftover name is known.
-fn when() -> SystemTime {
-    UNIX_EPOCH + std::time::Duration::from_secs(1_794_733_687)
-}
-
-/// Prod's case: the unit already records the standard folder, so nothing is planned.
+/// The old boot path remains intact before policy publication and an early failure.
 #[test]
-fn a_standard_folder_is_left_alone() {
-    let setup = install();
-    let unit = fs::read(&setup.unit).unwrap();
-    assert!(plan(&setup.old, &setup.old, &setup.unit).unwrap().is_none());
-    let slash = PathBuf::from(format!("{}/", setup.old.display()));
-    assert!(plan(&slash, &setup.old, &setup.unit).unwrap().is_none());
-    assert!(
-        plan(
-            Path::new("/var/lib/infraternal"),
-            Path::new("/var/lib/infraternal"),
-            &setup.unit
-        )
-        .unwrap()
-        .is_none()
-    );
-    assert_eq!(fs::read(&setup.unit).unwrap(), unit);
+fn pre_switch_retry_snapshots_data_written_after_old_unit_booted() {
+    let fixture = Install::new();
+    let service = Fake::default();
+    let failure = apply(&fixture.plan(&fixture.old), &service, UNIX_EPOCH, || {
+        assert_eq!(Install::data(&fixture.old), "original");
+        assert_eq!(Install::data(&fixture.new), "original");
+        assert_eq!(fs::read_to_string(&fixture.unit)?, unit_text(&fixture.old));
+        Err(io::Error::other("policy publish failed"))
+    });
+    assert!(failure.is_err());
+    fs::write(
+        fixture.old.join("infraternal.sqlite"),
+        "old server wrote after reboot",
+    )
+    .unwrap();
+    fixture.apply(&fixture.old, &service).unwrap();
+    assert_eq!(Install::data(&fixture.new), "old server wrote after reboot");
+    assert!(!fixture.old.exists());
 }
 
-/// Same filesystem: one rename moves everything, the unit points at the new folder, a re-run is a no-op.
+/// A legacy old unit booted from an empty replacement. Keep both copies.
 #[test]
-fn a_rename_moves_the_whole_folder_and_switches_the_unit() {
-    let setup = install();
-    let before = data_of(&setup.old);
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    assert_eq!(relocation.stage, Stage::Move);
-    assert!(relocation.same_filesystem);
-    let service = Fake::running();
-    let outcome = apply(&relocation, &service, when()).unwrap();
+fn interrupted_legacy_rename_never_discards_the_original_database() {
+    let fixture = Install::new();
+    fixture.legacy_rename();
+    fs::create_dir(&fixture.old).unwrap();
+    fs::write(fixture.old.join("infraternal.sqlite"), "empty replacement").unwrap();
+    let outcome = fixture.apply(&fixture.old, &Fake::default()).unwrap();
+    assert_eq!(Install::data(&fixture.new), "original");
+    let leftover = outcome.leftover.unwrap();
+    assert_eq!(Install::data(&leftover), "empty replacement");
     assert_eq!(
-        outcome,
-        Outcome {
-            leftover: None,
-            copied: false,
-            warning: None
-        }
+        fs::metadata(leftover.join("infraternal.sqlite"))
+            .unwrap()
+            .mode()
+            & 0o222,
+        0
     );
-    assert!(!setup.old.exists());
-    assert_eq!(data_of(&setup.new), before);
-    assert_eq!(mode(&setup.new), 0o700);
-    assert!(!setup.new.join(MARKER).exists());
-    assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.new)
-    );
-    assert_eq!(
-        service.calls(),
-        ["active", "enabled", "stop", "active", "reload", "start"]
-    );
-    assert!(service.running.get());
-    assert!(plan(&setup.new, &setup.new, &setup.unit).unwrap().is_none());
+    fs::set_permissions(leftover, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// Across filesystems: copy, compare, switch, and keep the old folder read-only with a dated name.
+/// If the new service never answers, the journal and intact original remain.
 #[test]
-fn a_copy_is_verified_and_the_old_folder_is_kept_read_only() {
-    let setup = install();
-    let before = data_of(&setup.old);
-    FORCE_COPY.with(|force| force.set(true));
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    let outcome = apply(&relocation, &Fake::running(), when());
-    FORCE_COPY.with(|force| force.set(false));
-    let outcome = outcome.unwrap();
-    let leftover = setup.root.join("cwd/data.moved-20261115-090807");
+fn retries_after_switch_keep_writes_to_the_new_database() {
+    let fixture = Install::new();
+    let service = Fake::default();
+    service.fail_ready.set(true);
+    assert!(fixture.apply(&fixture.old, &service).is_err());
+    assert_eq!(Install::data(&fixture.old), "original");
     assert_eq!(
-        outcome,
-        Outcome {
-            leftover: Some(leftover.clone()),
-            copied: true,
-            warning: None
-        }
+        fs::read_to_string(&fixture.unit).unwrap(),
+        unit_text(&fixture.new)
     );
-    assert_eq!(data_of(&setup.new), before);
-    assert_eq!(data_of(&leftover), before);
-    assert!(!setup.old.exists());
+    fs::write(
+        fixture.new.join("infraternal.sqlite"),
+        "new server already served a write",
+    )
+    .unwrap();
+    service.fail_ready.set(false);
+    fixture.apply(&fixture.new, &service).unwrap();
     assert_eq!(
-        fs::read_link(setup.new.join("link")).unwrap(),
-        Path::new("infraternal.sqlite")
+        Install::data(&fixture.new),
+        "new server already served a write"
     );
+    assert!(!fixture.old.exists());
     assert!(
-        !setup.new.join("s.sock").exists(),
-        "a stale socket is not copied"
+        plan(&fixture.new, &fixture.new, &fixture.unit)
+            .unwrap()
+            .is_none()
     );
-    assert_eq!(mode(&setup.new), 0o700);
-    assert_eq!(mode(&setup.new.join("mesh/key")), 0o600);
-    assert_eq!(mode(&leftover) & 0o222, 0);
-    assert!(
-        !leftover.join(MARKER).exists(),
-        "the leftover is not an unfinished move"
-    );
-    assert_eq!(mode(&leftover.join("mesh/key")) & 0o222, 0);
-    assert!(!setup.new.join(MARKER).exists());
-    assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.new)
-    );
-    let text = outcome.describe(&relocation);
-    assert!(
-        text.contains(&format!(
-            "chmod -R u+w '{0}' && rm -rf '{0}'",
-            leftover.display()
-        )),
-        "{text}"
-    );
-    assert!(plan(&setup.new, &setup.new, &setup.unit).unwrap().is_none());
 }
 
-/// A non-empty target that is not our own move is refused, and nothing changes.
+/// A shadowed unit changed first, then a host restart used the old effective path.
 #[test]
-fn a_non_empty_target_is_refused() {
-    let setup = install();
-    fs::create_dir_all(&setup.new).unwrap();
-    fs::write(setup.new.join("theirs"), b"x").unwrap();
-    let error = plan(&setup.old, &setup.new, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("already holds theirs"), "{error}");
-    assert!(error.contains("infraternal did not put there"), "{error}");
+fn journal_resumes_mixed_unit_set_with_effective_file_written_last() {
+    let fixture = Install::new();
+    let dropin = fixture.dropin(&fixture.old);
+    let service = Fake::default();
     assert!(
-        error.contains(&format!("--data {}", setup.old.display())),
+        apply(&fixture.plan(&fixture.old), &service, UNIX_EPOCH, || {
+            // This is the same on-disk state as dying after rewriting the base.
+            fs::write(&fixture.unit, unit_text(&fixture.new))?;
+            Err(io::Error::other("interrupted before the effective drop-in"))
+        })
+        .is_err()
+    );
+    assert_eq!(
+        live_data(&fs::read_to_string(&dropin).unwrap()),
+        Some(fixture.old.clone())
+    );
+    fs::write(
+        fixture.old.join("infraternal.sqlite"),
+        "writes after reboot",
+    )
+    .unwrap();
+    fixture.apply(&fixture.old, &service).unwrap();
+    assert_eq!(Install::data(&fixture.new), "writes after reboot");
+    assert_eq!(
+        live_data(&fs::read_to_string(&dropin).unwrap()),
+        Some(fixture.new.clone())
+    );
+    assert_eq!(fs::metadata(dropin).unwrap().mode() & 0o777, 0o600);
+}
+
+/// The former installer could write the effective drop-in before the base unit.
+#[test]
+fn legacy_mixed_unit_is_repaired_and_restarted_without_force() {
+    let fixture = Install::new();
+    fixture.legacy_rename();
+    let dropin = fixture.dropin(&fixture.new);
+    let manager = Fake::default();
+    fixture.apply(&fixture.new, &manager).unwrap();
+    assert_eq!(
+        fs::read_to_string(&fixture.unit).unwrap(),
+        unit_text(&fixture.new)
+    );
+    assert_eq!(fs::metadata(dropin).unwrap().mode() & 0o777, 0o600);
+    assert_eq!(
+        *manager.calls.borrow(),
+        ["reload", "start", "ready", "enable"]
+    );
+}
+
+/// A shared base remains traversable and the source stays available.
+#[test]
+fn shared_agent_base_is_refused_without_changing_modes() {
+    let fixture = Install::new();
+    fs::create_dir_all(fixture.new.join("bin")).unwrap();
+    fs::set_permissions(&fixture.new, fs::Permissions::from_mode(0o711)).unwrap();
+    let error = plan(&fixture.old, &fixture.new, &fixture.unit).unwrap_err();
+    assert!(error.to_string().contains("shared install base"));
+    assert_eq!(fs::metadata(&fixture.new).unwrap().mode() & 0o777, 0o711);
+    assert_eq!(Install::data(&fixture.old), "original");
+}
+
+/// The requested command must use the installed port, even for forced init.
+#[test]
+fn move_refuses_a_different_listen_address() {
+    let fixture = Install::new();
+    let relocation = fixture.plan(&fixture.old);
+    assert!(relocation.check_command(&unit_text(&fixture.new)).is_ok());
+    let new_port = unit_text(&fixture.new).replace("47361", "47362");
+    assert!(relocation.check_command(&new_port).is_err());
+}
+
+/// A sibling matching the old staging prefix survives data publication.
+#[test]
+fn unrelated_sibling_with_the_former_staging_prefix_is_retained() {
+    let fixture = Install::new();
+    let unrelated = fixture
+        .new
+        .with_file_name(".new.partial-not-migration-data");
+    fs::create_dir(&unrelated).unwrap();
+    fs::write(unrelated.join("probe"), "not ours").unwrap();
+    fixture.apply(&fixture.old, &Fake::default()).unwrap();
+    assert_eq!(
+        fs::read_to_string(unrelated.join("probe")).unwrap(),
+        "not ours"
+    );
+}
+
+/// Escape links are refused without opening their target or replacing the unit.
+#[test]
+fn data_link_outside_the_source_is_refused() {
+    let fixture = Install::new();
+    let outside = fixture.new.with_file_name("outside");
+    fs::write(&outside, "unrelated").unwrap();
+    std::os::unix::fs::symlink("../outside", fixture.old.join("link")).unwrap();
+    let error = fixture.apply(&fixture.old, &Fake::default()).err().unwrap();
+    assert!(
+        error.to_string().contains("link leaves the data folder"),
         "{error}"
     );
-    assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.old)
-    );
+    assert_eq!(fs::read_to_string(outside).unwrap(), "unrelated");
+    assert!(!fixture.new.exists());
 }
 
-/// An empty target folder is fine: it is replaced by the moved folder.
+/// Non-private legacy markers have no authority to redirect a move.
 #[test]
-fn an_empty_target_folder_is_used() {
-    let setup = install();
-    fs::create_dir_all(&setup.new).unwrap();
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    apply(&relocation, &Fake::running(), when()).unwrap();
-    assert!(setup.new.join("mesh/key").is_file());
+fn public_legacy_marker_is_refused() {
+    let fixture = Install::new();
+    fixture.legacy_rename();
+    fs::set_permissions(fixture.new.join(MARKER), fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(plan(&fixture.old, &fixture.new, &fixture.unit).is_err());
+    assert_eq!(Install::data(&fixture.new), "original");
 }
 
-/// A symlinked, nested, foreign-owned-looking or missing old folder is refused before anything changes.
+/// Before the manager may start the final unit, the host policy has been published.
 #[test]
-fn unsafe_sources_are_refused() {
-    let setup = install();
-    let link = setup.root.join("linked");
-    std::os::unix::fs::symlink(&setup.old, &link).unwrap();
-    fs::write(&setup.unit, unit_text(&link)).unwrap();
-    let error = plan(&link, &setup.new, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("symbolic link"), "{error}");
-
-    fs::write(&setup.unit, unit_text(&setup.old)).unwrap();
-    let inside = setup.old.join("state");
-    let error = plan(&setup.old, &inside, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("inside the other"), "{error}");
-
-    let missing = setup.root.join("gone");
-    fs::write(&setup.unit, unit_text(&missing)).unwrap();
-    let error = plan(&missing, &setup.new, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("does not exist"), "{error}");
-}
-
-/// Drop-ins: every `ExecStart` naming the folder is rewritten, the unit itself last.
-#[test]
-fn drop_in_exec_lines_are_rewritten_and_the_unit_goes_last() {
-    let setup = install();
-    let dropins = setup.root.join("units/x.service.d");
-    fs::create_dir_all(&dropins).unwrap();
-    let line = |data: &Path| {
-        format!(
-            "[Service]\nExecStart=\nExecStart=-/opt/infraternal server --data={} --listen 127.0.0.1:2\n",
-            data.display()
-        )
-    };
-    fs::write(dropins.join("10-local.conf"), line(&setup.old)).unwrap();
-    fs::write(
-        dropins.join("20-env.conf"),
-        "[Service]\nEnvironment=RUST_LOG=info\n",
-    )
+fn publishes_policy_before_switch_and_restarts_once() {
+    let fixture = Install::new();
+    let manager = Fake::default();
+    manager.active.set(true);
+    apply(&fixture.plan(&fixture.old), &manager, UNIX_EPOCH, || {
+        manager.calls.borrow_mut().push("publish");
+        assert_eq!(fs::read_to_string(&fixture.unit)?, unit_text(&fixture.old));
+        Ok(())
+    })
     .unwrap();
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    let files: Vec<&Path> = relocation.unit_files().collect();
     assert_eq!(
-        files,
-        [
-            dropins.join("10-local.conf").as_path(),
-            setup.unit.as_path()
-        ]
+        *manager.calls.borrow(),
+        ["stop", "publish", "reload", "start", "ready", "enable"]
     );
-    apply(&relocation, &Fake::running(), when()).unwrap();
+}
+
+/// A private pre-existing target can hold the independent server firewall policy.
+#[test]
+fn a_private_policy_only_target_keeps_its_policy() {
+    let fixture = Install::new();
+    fs::create_dir(&fixture.new).unwrap();
+    fs::set_permissions(&fixture.new, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(fixture.new.join("host-firewall-server.json"), "policy").unwrap();
+
+    fixture.apply(&fixture.old, &Fake::default()).unwrap();
+
+    assert_eq!(Install::data(&fixture.new), "original");
     assert_eq!(
-        fs::read_to_string(dropins.join("10-local.conf")).unwrap(),
-        format!(
-            "[Service]\nExecStart=\nExecStart=-\"/opt/infraternal\" \"server\" \"--data={}\" \"--listen\" \"127.0.0.1:2\"\n",
-            setup.new.display()
-        )
+        fs::read_to_string(fixture.new.join("host-firewall-server.json")).unwrap(),
+        "policy"
     );
-    let words = infraternal_status::exec_words(
-        fs::read_to_string(dropins.join("10-local.conf"))
-            .unwrap()
-            .lines()
-            .last()
-            .unwrap()
-            .strip_prefix("ExecStart=")
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(words[0], "-/opt/infraternal");
+}
+
+/// No data at an unrelated destination may be treated as a previous snapshot.
+#[test]
+fn a_target_with_unrelated_data_is_never_claimed() {
+    let fixture = Install::new();
+    fs::create_dir(&fixture.new).unwrap();
+    fs::write(fixture.new.join("other-data"), "unrelated").unwrap();
+
+    assert!(plan(&fixture.old, &fixture.new, &fixture.unit).is_err());
     assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.new)
+        fs::read_to_string(fixture.new.join("other-data")).unwrap(),
+        "unrelated"
     );
+    assert_eq!(Install::data(&fixture.old), "original");
 }
 
-/// A setting other than `ExecStart` naming the old folder is refused; a lookalike path is not.
+/// A unit directive the move cannot safely rewrite prevents all changes.
 #[test]
-fn other_lines_naming_the_folder_are_refused() {
-    let setup = install();
-    let dropins = setup.root.join("units/x.service.d");
-    fs::create_dir_all(&dropins).unwrap();
-    fs::write(
-        dropins.join("hardening.conf"),
-        format!(
-            "[Service]\n# old: {0}\nReadWritePaths={0}2\n",
-            setup.old.display()
-        ),
-    )
-    .unwrap();
-    assert!(plan(&setup.old, &setup.new, &setup.unit).unwrap().is_some());
-    fs::write(
-        dropins.join("hardening.conf"),
-        format!("[Service]\nReadWritePaths={}\n", setup.old.display()),
-    )
-    .unwrap();
-    let error = plan(&setup.old, &setup.new, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("hardening.conf:2"), "{error}");
-    assert!(error.contains("outside ExecStart"), "{error}");
+fn refuses_an_old_path_outside_exec_start() {
+    let fixture = Install::new();
+    let original = format!(
+        "{}ReadWritePaths={}\n",
+        unit_text(&fixture.old),
+        fixture.old.display()
+    );
+    fs::write(&fixture.unit, &original).unwrap();
+
+    let error = plan(&fixture.old, &fixture.new, &fixture.unit).unwrap_err();
+    assert!(error.to_string().contains("outside ExecStart"), "{error}");
+    assert_eq!(fs::read_to_string(&fixture.unit).unwrap(), original);
+    assert!(!fixture.new.exists());
 }
 
-/// Crash after the rename, before the switch: the next run only switches the unit.
+/// An existing journal never permits an unrelated replacement backup inode.
 #[test]
-fn a_crash_after_the_rename_is_finished_by_the_next_run() {
-    let setup = install();
-    let before = data_of(&setup.old);
-    write_marker(&setup.old, &setup.old).unwrap();
-    fs::create_dir_all(setup.new.parent().unwrap()).unwrap();
-    fs::rename(&setup.old, &setup.new).unwrap();
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    assert_eq!(relocation.stage, Stage::Switch);
-    apply(&relocation, &Fake::running(), when()).unwrap();
-    assert_eq!(data_of(&setup.new), before);
-    assert!(!setup.new.join(MARKER).exists());
+fn refuses_a_replaced_backup_without_deleting_either_tree() {
+    let fixture = Install::new();
+    let manager = Fake::default();
+    manager.fail_ready.set(true);
+    assert!(fixture.apply(&fixture.old, &manager).is_err());
+    let journal = load(&fixture.new, &fixture.unit).unwrap().unwrap();
+    fs::create_dir(&journal.backup).unwrap();
+    fs::write(journal.backup.join("unrelated"), "untouched").unwrap();
+
+    manager.fail_ready.set(false);
+    assert!(fixture.apply(&fixture.new, &manager).is_err());
+    assert_eq!(Install::data(&fixture.old), "original");
+    assert_eq!(Install::data(&fixture.new), "original");
     assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.new)
+        fs::read_to_string(journal.backup.join("unrelated")).unwrap(),
+        "untouched"
     );
 }
 
-/// Crash after a copy, before the switch: the old folder wins and is copied again.
+/// An unclaimed work directory with files is never adopted as migration staging.
 #[test]
-fn a_crash_after_a_copy_redoes_it_from_the_old_folder() {
-    let setup = install();
-    fs::create_dir_all(&setup.new).unwrap();
-    fs::write(setup.new.join("infraternal.sqlite"), b"stale copy").unwrap();
-    write_marker(&setup.new, &setup.old).unwrap();
-    // The service ran on the old folder after the crash and changed it.
-    fs::write(setup.old.join("infraternal.sqlite-wal"), b"newer frames").unwrap();
-    let before = data_of(&setup.old);
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    assert_eq!(relocation.stage, Stage::Redo);
-    apply(&relocation, &Fake::running(), when()).unwrap();
-    assert_eq!(data_of(&setup.new), before);
-    assert!(!setup.old.exists());
-}
+fn does_not_adopt_an_unclaimed_staging_tree() {
+    let fixture = Install::new();
+    let stage = fixture
+        .new
+        .with_file_name(work_name(fixture.new.file_name().unwrap()))
+        .join(STAGING);
+    fs::create_dir_all(&stage).unwrap();
+    fs::set_permissions(stage.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(stage.join("unrelated"), "untouched").unwrap();
 
-/// Crash after the switch: the next run sets the old folder aside and drops the marker, without touching the service.
-#[test]
-fn a_crash_after_the_switch_is_cleaned_up() {
-    let setup = install();
-    fs::create_dir_all(&setup.new).unwrap();
-    for (name, bytes) in data_of(&setup.old) {
-        let path = setup.new.join(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, bytes).unwrap();
-    }
-    write_marker(&setup.new, &setup.old).unwrap();
-    fs::write(&setup.unit, unit_text(&setup.new)).unwrap();
-    let relocation = plan(&setup.new, &setup.new, &setup.unit).unwrap().unwrap();
-    assert_eq!(relocation.stage, Stage::Cleanup);
-    let service = Fake::running();
-    let outcome = apply(&relocation, &service, when()).unwrap();
+    assert!(fixture.apply(&fixture.old, &Fake::default()).is_err());
     assert_eq!(
-        outcome.leftover,
-        Some(setup.root.join("cwd/data.moved-20261115-090807"))
+        fs::read_to_string(stage.join("unrelated")).unwrap(),
+        "untouched"
     );
-    assert!(!setup.old.exists());
-    assert!(!setup.new.join(MARKER).exists());
-    assert_eq!(service.calls(), Vec::<&str>::new());
-    assert!(plan(&setup.new, &setup.new, &setup.unit).unwrap().is_none());
-}
-
-/// A service that will not stop means nothing moves and the unit is untouched.
-#[test]
-fn a_failed_stop_moves_nothing() {
-    let setup = install();
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    let service = Fake {
-        fail_stop: true,
-        ..Fake::running()
-    };
-    let error = apply(&relocation, &service, when())
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("nothing was moved"), "{error}");
-    assert!(setup.old.join("mesh/key").is_file());
-    assert!(!setup.new.exists());
-    assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.old)
-    );
-}
-
-/// A unit that cannot be rewritten undoes the rename and starts the old service again.
-#[test]
-fn a_failed_switch_puts_the_old_install_back() {
-    if nix::unistd::Uid::effective().is_root() {
-        return; // root ignores the read-only folder this test relies on
-    }
-    for copy in [false, true] {
-        let setup = install();
-        let before = data_of(&setup.old);
-        let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-        let units = setup.unit.parent().unwrap().to_owned();
-        fs::set_permissions(&units, fs::Permissions::from_mode(0o500)).unwrap();
-        FORCE_COPY.with(|force| force.set(copy));
-        let service = Fake::running();
-        let result = apply(&relocation, &service, when());
-        FORCE_COPY.with(|force| force.set(false));
-        fs::set_permissions(&units, fs::Permissions::from_mode(0o700)).unwrap();
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("rewriting"), "{copy}: {error}");
-        assert_eq!(data_of(&setup.old), before, "{copy}");
-        assert!(!setup.old.join(MARKER).exists(), "{copy}");
-        assert!(!setup.new.exists(), "{copy}");
-        assert_eq!(
-            fs::read_to_string(&setup.unit).unwrap(),
-            unit_text(&setup.old)
-        );
-        assert!(service.running.get(), "{copy}: the old service runs again");
-    }
-}
-
-/// The copy check catches a byte that differs and an extra file.
-#[test]
-fn verification_catches_a_changed_or_extra_file() {
-    let setup = install();
-    let copy = setup.root.join("copy");
-    copy_tree(&setup.old, &copy).unwrap();
-    verify_tree(&setup.old, &copy).unwrap();
-    fs::write(copy.join("mesh/key"), b"mesh private kez").unwrap();
-    assert!(verify_tree(&setup.old, &copy).is_err());
-    fs::write(copy.join("mesh/key"), b"mesh private key").unwrap();
-    fs::write(copy.join("extra"), b"").unwrap();
-    assert!(verify_tree(&setup.old, &copy).is_err());
-}
-
-/// Words under the old folder are mapped; a lookalike prefix is not.
-#[test]
-fn only_whole_paths_are_mapped() {
-    assert_eq!(map_word("/srv/data", "/srv/data", "/new"), "/new");
-    assert_eq!(map_word("/srv/data/ca", "/srv/data", "/new"), "/new/ca");
-    assert_eq!(
-        map_word("--data=/srv/data", "/srv/data", "/new"),
-        "--data=/new"
-    );
-    assert_eq!(map_word("/srv/data2", "/srv/data", "/new"), "/srv/data2");
-    assert!(names_path("ReadWritePaths=/srv/data /tmp", "/srv/data"));
-    assert!(!names_path("ReadWritePaths=/srv/data2", "/srv/data"));
-}
-
-/// Leftover names use UTC calendar time.
-#[test]
-fn stamps_are_utc_calendar_time() {
-    assert_eq!(utc_stamp(0), "19700101-000000");
-    assert_eq!(utc_stamp(951_868_799), "20000229-235959");
-    assert_eq!(utc_stamp(1_794_733_687), "20261115-090807");
-}
-
-/// Real cross-filesystem proof: `INFRATERNAL_MOVE_PROOF_DIR` names a folder on
-/// another filesystem than `TMPDIR` (a tmpfs, or an attached disk image on
-/// macOS). Nothing is forced: the rename must really fail with EXDEV and the
-/// copy path must carry everything. Ignored by default; run it explicitly.
-#[test]
-#[ignore = "needs INFRATERNAL_MOVE_PROOF_DIR on a second filesystem"]
-fn a_real_second_filesystem_takes_the_copy_path() {
-    let other = PathBuf::from(
-        env::var_os("INFRATERNAL_MOVE_PROOF_DIR").expect("set INFRATERNAL_MOVE_PROOF_DIR"),
-    );
-    let mut setup = install();
-    setup.new = other.join(format!(
-        "mv-{}/state/infraternal",
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    ));
-    let before = data_of(&setup.old);
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    assert!(
-        !relocation.same_filesystem,
-        "{} is on the same filesystem",
-        other.display()
-    );
-    let outcome = apply(&relocation, &Fake::running(), when()).unwrap();
-    assert!(outcome.copied);
-    assert_eq!(data_of(&setup.new), before);
-    assert_eq!(data_of(outcome.leftover.as_ref().unwrap()), before);
-    assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.new)
-    );
-    println!("{}", outcome.describe(&relocation));
-    let _ = fs::remove_dir_all(setup.new.parent().unwrap().parent().unwrap());
-}
-
-/// A copy interrupted by a crash leaves a staging folder (with the mesh key in
-/// it); the next copy removes every such stray copy, not only its own.
-#[test]
-fn a_stray_partial_copy_is_removed_by_the_next_copy() {
-    let setup = install();
-    let parent = setup.new.parent().unwrap().to_owned();
-    let stray = parent.join(".infraternal.partial-4242");
-    fs::create_dir_all(stray.join("mesh")).unwrap();
-    fs::write(stray.join("mesh/key"), b"mesh private key").unwrap();
-    let unrelated = parent.join(".infraternal.partial-notes");
-    fs::write(&unrelated, b"not a folder of ours").unwrap();
-    FORCE_COPY.with(|force| force.set(true));
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    let outcome = apply(&relocation, &Fake::running(), when());
-    FORCE_COPY.with(|force| force.set(false));
-    assert!(outcome.unwrap().copied);
-    assert!(!stray.exists(), "the stray copy of the key is gone");
-    assert!(
-        unrelated.exists(),
-        "a file that is not a staging folder stays"
-    );
-}
-
-/// Files other parts of infraternal keep in the install base: the host
-/// firewall's policies and their pending writes, and the root agent layout.
-fn add_neighbours(folder: &Path) -> Vec<(PathBuf, Vec<u8>, u64)> {
-    fs::create_dir_all(folder.join("bin")).unwrap();
-    fs::create_dir_all(folder.join("agent")).unwrap();
-    let files = [
-        "host-firewall-server.json",
-        "host-firewall-agent.json",
-        ".host-firewall-server.json.77.0.pending",
-        "bin/infraternal",
-        "agent/identity",
-    ];
-    files
-        .iter()
-        .map(|name| {
-            let path = folder.join(name);
-            fs::write(&path, format!("owned by another part: {name}")).unwrap();
-            let inode = fs::metadata(&path).unwrap().ino();
-            (path, fs::read(folder.join(name)).unwrap(), inode)
-        })
-        .collect()
-}
-
-/// The neighbours are exactly where they were: same bytes, same inode.
-fn assert_untouched(neighbours: &[(PathBuf, Vec<u8>, u64)]) {
-    for (path, bytes, inode) in neighbours {
-        assert_eq!(&fs::read(path).unwrap(), bytes, "{}", path.display());
-        assert_eq!(
-            fs::metadata(path).unwrap().ino(),
-            *inode,
-            "{}",
-            path.display()
-        );
-    }
-}
-
-/// A target that already holds infraternal's own files (the host firewall's
-/// policy, the root agent layout) is moved into, never refused, and those
-/// files are neither moved nor deleted; the folder keeps its mode (J755, #483).
-#[test]
-fn a_target_with_infraternals_own_files_is_moved_into_and_they_stay() {
-    for copy in [false, true] {
-        let setup = install();
-        let before = data_of(&setup.old);
-        fs::create_dir_all(&setup.new).unwrap();
-        fs::set_permissions(&setup.new, fs::Permissions::from_mode(0o711)).unwrap();
-        let neighbours = add_neighbours(&setup.new);
-        let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-        assert_eq!(relocation.stage, Stage::Move, "{copy}");
-        FORCE_COPY.with(|force| force.set(copy));
-        let outcome = apply(&relocation, &Fake::running(), when());
-        FORCE_COPY.with(|force| force.set(false));
-        assert_eq!(outcome.unwrap().copied, copy);
-        assert_eq!(data_of(&setup.new), before, "{copy}");
-        assert_untouched(&neighbours);
-        assert_eq!(
-            mode(&setup.new),
-            0o711,
-            "{copy}: an existing install base keeps its mode"
-        );
-        assert!(!setup.new.join(".infraternal-incoming").exists(), "{copy}");
-        assert!(!setup.new.join(MARKER).exists(), "{copy}");
-        assert!(!setup.old.exists(), "{copy}");
-        assert_eq!(
-            fs::read_to_string(&setup.unit).unwrap(),
-            unit_text(&setup.new)
-        );
-        assert!(plan(&setup.new, &setup.new, &setup.unit).unwrap().is_none());
-    }
-}
-
-/// A refusal names only the files that are not infraternal's own, never the
-/// firewall policy, so following its advice cannot drop the host table.
-#[test]
-fn a_refusal_never_tells_the_operator_to_move_infraternals_own_files() {
-    let setup = install();
-    fs::create_dir_all(&setup.new).unwrap();
-    let neighbours = add_neighbours(&setup.new);
-    fs::write(setup.new.join("notes.txt"), b"someone's").unwrap();
-    let error = plan(&setup.old, &setup.new, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("notes.txt"), "{error}");
-    for own in ["host-firewall", "bin", "agent", "pending"] {
-        assert!(!error.contains(own), "{own}: {error}");
-    }
-    assert_untouched(&neighbours);
-}
-
-/// An old folder holding a name infraternal keeps in the install base would
-/// collide with it there, so it is refused before anything changes.
-#[test]
-fn an_old_folder_with_a_reserved_name_is_refused_for_a_shared_target() {
-    let setup = install();
-    fs::create_dir_all(&setup.new).unwrap();
-    let neighbours = add_neighbours(&setup.new);
-    fs::write(setup.old.join("host-firewall-server.json"), b"old copy").unwrap();
-    let error = plan(&setup.old, &setup.new, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("host-firewall-server.json"), "{error}");
-    assert_untouched(&neighbours);
-    assert!(setup.old.join("mesh/key").is_file());
-}
-
-/// Crash in the middle of moving entries into a shared target: the next run
-/// moves the rest and switches; nothing of the neighbours is touched.
-#[test]
-fn a_crash_mid_merge_is_finished_by_the_next_run() {
-    let setup = install();
-    let before = data_of(&setup.old);
-    fs::create_dir_all(&setup.new).unwrap();
-    let neighbours = add_neighbours(&setup.new);
-    write_marker(&setup.old, &setup.old).unwrap();
-    let incoming = setup.new.join(".infraternal-incoming");
-    fs::rename(&setup.old, &incoming).unwrap();
-    fs::rename(incoming.join("mesh"), setup.new.join("mesh")).unwrap();
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    assert_eq!(relocation.stage, Stage::Switch);
-    apply(&relocation, &Fake::running(), when()).unwrap();
-    assert_eq!(data_of(&setup.new), before);
-    assert_untouched(&neighbours);
-    assert!(!incoming.exists());
-    assert!(!setup.new.join(MARKER).exists());
-    assert_eq!(
-        fs::read_to_string(&setup.unit).unwrap(),
-        unit_text(&setup.new)
-    );
-}
-
-/// A failed switch into a shared target puts the old folder back whole and
-/// leaves the neighbours alone.
-#[test]
-fn a_failed_switch_into_a_shared_target_puts_the_old_install_back() {
-    if nix::unistd::Uid::effective().is_root() {
-        return; // root ignores the read-only folder this test relies on
-    }
-    for copy in [false, true] {
-        let setup = install();
-        let before = data_of(&setup.old);
-        fs::create_dir_all(&setup.new).unwrap();
-        let neighbours = add_neighbours(&setup.new);
-        let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-        let units = setup.unit.parent().unwrap().to_owned();
-        fs::set_permissions(&units, fs::Permissions::from_mode(0o500)).unwrap();
-        FORCE_COPY.with(|force| force.set(copy));
-        let service = Fake::running();
-        let result = apply(&relocation, &service, when());
-        FORCE_COPY.with(|force| force.set(false));
-        fs::set_permissions(&units, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(result.is_err(), "{copy}");
-        assert_eq!(data_of(&setup.old), before, "{copy}");
-        assert!(!setup.old.join(MARKER).exists(), "{copy}");
-        assert_untouched(&neighbours);
-        let mut left: Vec<String> = fs::read_dir(&setup.new)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        left.sort();
-        assert_eq!(
-            left,
-            [
-                ".host-firewall-server.json.77.0.pending",
-                "agent",
-                "bin",
-                "host-firewall-agent.json",
-                "host-firewall-server.json"
-            ],
-            "{copy}"
-        );
-        assert!(service.running.get(), "{copy}");
-    }
-}
-
-/// The hidden files SSH setup and promotion keep in the root install base
-/// count as infraternal's own too (J803, #516): an install base that a root
-/// infraternal agent was set up into over SSH is moved into, those files stay
-/// byte for byte, and a refusal never names them.
-///
-/// Before this, `.bootstrap-owner`, the setup transaction files, the
-/// superseded unit records and `.promotion-transaction` made the target look
-/// foreign, so the move was refused on such a host and the message told the
-/// operator to move the setup's own state away.
-#[test]
-fn the_root_agents_setup_files_count_as_infraternals_own() {
-    let own = [
-        ".bootstrap-owner",
-        ".bootstrap-ready",
-        ".bootstrap-acquiring",
-        ".bootstrap-transaction",
-        ".bootstrap-transaction-0123abcd.tmp",
-        ".bootstrap-transaction-rollback-0123abcd.tmp",
-        ".superseded-unit",
-        ".superseded-service",
-        ".promotion-transaction",
-    ];
-    let setup = install();
-    fs::create_dir_all(&setup.new).unwrap();
-    let mut neighbours = add_neighbours(&setup.new);
-    for directory in ["state", "sessions"] {
-        fs::create_dir_all(setup.new.join(directory)).unwrap();
-    }
-    for name in own {
-        let path = setup.new.join(name);
-        fs::write(&path, format!("setup state: {name}")).unwrap();
-        let inode = fs::metadata(&path).unwrap().ino();
-        neighbours.push((path.clone(), fs::read(&path).unwrap(), inode));
-    }
-    fs::write(setup.new.join("notes.txt"), b"someone's").unwrap();
-    let error = plan(&setup.old, &setup.new, &setup.unit)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("notes.txt"), "{error}");
-    for name in own {
-        assert!(!error.contains(name), "{name}: {error}");
-    }
-    fs::remove_file(setup.new.join("notes.txt")).unwrap();
-    let before = data_of(&setup.old);
-    let relocation = plan(&setup.old, &setup.new, &setup.unit).unwrap().unwrap();
-    assert_eq!(relocation.stage, Stage::Move);
-    apply(&relocation, &Fake::running(), when()).unwrap();
-    assert_eq!(data_of(&setup.new), before);
-    assert_untouched(&neighbours);
-    assert!(setup.new.join("state").is_dir() && setup.new.join("sessions").is_dir());
+    assert_eq!(Install::data(&fixture.old), "original");
 }

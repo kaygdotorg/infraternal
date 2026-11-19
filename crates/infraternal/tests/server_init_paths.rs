@@ -200,7 +200,11 @@ fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
         assert!(planned_unit(&output).contains("\"--data\" \"/var/lib/infraternal\""));
     } else {
         assert!(
-            message.contains("not empty") || message.contains("is not a folder"),
+            message.contains("already holds")
+                || message.contains("shared")
+                || message.contains("Permission denied")
+                || message.contains("Not a directory")
+                || message.contains("untrusted"),
             "{message}"
         );
     }

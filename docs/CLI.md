@@ -112,37 +112,20 @@ SHM files, identity, SSH trust, the mesh key and anything else in it) and
 rewrites every `ExecStart` path inside it, in the unit and its drop-ins. Pass
 `--data <current folder>` to keep a folder where it is. `--dry-run` prints the
 move first: the two folders, the method, and the unit files it rewrites.
-The move:
+The move stops the service and copies its data into a private staging folder.
+It syncs the copy, verifies file contents and metadata, publishes the checked
+firewall policy, and then switches the unit and its drop-ins. The effective
+`ExecStart` is switched last. The old path remains available until the new
+server answers its database-backed health check. Across filesystems, init
+keeps a dated, read-only backup and prints its location. On one filesystem,
+init removes the original after the health check.
 
-- stops the service and starts it again afterwards (also when it is enabled);
-- renames the folder when both sides are on one filesystem; otherwise it
-  copies it, fsyncs and compares every file byte for byte, and only then
-  switches. The old folder is then kept read-only as
-  `<old>.moved-YYYYMMDD-HHMMSS` (UTC), and init prints the command that
-  removes it once the server works;
-- moves into a target that already holds infraternal's own files and leaves
-  them exactly where they are: in `/var/lib/infraternal` the host firewall's
-  `host-firewall-*.json` policies (and their pending writes) and the root
-  infraternal agent's `bin/`, `agent/`, `state/` and `sessions/`, with the
-  hidden `.bootstrap-*`, `.superseded-*` and `.promotion-transaction` files
-  SSH setup and promotion keep there. The data then goes in through a hidden
-  `.infraternal-incoming` folder, one rename per entry, and the folder keeps
-  its mode;
-- refuses, changing nothing, when the target holds anything else (the
-  message names only those files), when an old folder entry would take one
-  of those reserved names, when
-  the old folder is a symlink, a mount point, inside the target (or the other
-  way round) or owned by another user, when a unit line other than
-  `ExecStart` names the old folder, or when the install itself would be
-  refused (the host firewall finds a port sshd uses that no
-  `--host-firewall-allow` rule admits, or the new unit differs from the
-  installed one and `--force` is missing): those checks run before the move;
-- gives a folder it creates mode 0700;
-- is idempotent and crash-safe. The unit is the only pointer to the live
-  folder, so there is never a second live copy. A marker file
-  (`.infraternal-move`) in the moved folder lets the next run finish an
-  interrupted move; a failure before the switch puts the old folder and unit
-  back and restarts the old service.
+Run the same init command again to finish an interrupted move. Its private
+journal records the data paths, staging and backup locations, and complete
+unit set. Init refuses a move into a shared infraternal install base or into
+a folder with unrelated files. It also refuses a concurrent configuration
+change, such as a new listen port, even with `--force`. Use the existing
+service flags for relocation and apply changes separately.
 
 An install already at its standard folder, such as a system server in
 `/var/lib/infraternal`, is left exactly as it is. Sockets in `/run` are never

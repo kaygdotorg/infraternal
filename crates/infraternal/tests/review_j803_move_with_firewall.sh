@@ -13,16 +13,14 @@
 # A second `systemctl` sits first in PATH and logs `EVIL ...`: the move must
 # never run it (J658's rule, J803 finding 4).
 #
-# NO_SETUP_FILES=1 leaves out the SSH setup's hidden files (.bootstrap-owner,
-# .promotion-transaction, .superseded-unit), so a binary from before J803's
-# reserved-name fix reaches the firewall-order and PATH cases (red runs).
+# J895 refuses the shared-base move and runs the admitted cutover against a
+# separate private target. The adapter serves only the health-check fixture.
 #
 # Cases print `CASE <name> expect=<x> got=<y> ok|BAD`; the last line is
 # RESULT=<number of BAD cases>.
 set -u
 BIN=${BIN:?set BIN to the infraternal binary under test}
 HIDDEN=".bootstrap-owner .promotion-transaction .superseded-unit"
-[ "${NO_SETUP_FILES:-}" = 1 ] && HIDDEN=
 BAD=0
 [ "$(id -u)" = 0 ] && grep -Eq '^ +0 +0 +4294967295$' /proc/self/uid_map \
     || { echo "SETUP_FAILED: needs real root under unshare -nm"; exit 2; }
@@ -53,13 +51,29 @@ for stub in systemctl evil/systemctl; do
 #!/bin/sh
 case "\$*" in
     *ActiveState*) echo "$tag\$*" >> $S/systemctl.log; cat $S/active-state; exit 0;;
-    "stop "*) echo inactive > $S/active-state;;
-    "start "*|"enable --now "*) echo active > $S/active-state;;
+    "stop "*) echo inactive > $S/active-state
+        while read -r pid; do kill -TERM "-\$pid" 2>/dev/null; done < "$S/health.pids"
+        : > "$S/health.pids";;
+    "start "*) echo active > $S/active-state
+        /usr/bin/setsid /usr/bin/python3 "$S/health.py" </dev/null >/dev/null 2>&1 &
+        echo \$! >> "$S/health.pids";;
+    "enable --now "*) echo active > $S/active-state;;
 esac
 case "\$1" in show) echo "System has not been booted with systemd" >&2; exit 1;; is-enabled) exit 1;; esac
 echo "$tag\$*" >> $S/systemctl.log
 STUB
 done
+cat > "$S/health.py" <<'PY_PROOF'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        self.send_response(200 if self.path == "/healthz" else 404)
+        self.end_headers()
+
+HTTPServer(("127.0.0.1", 7443), Handler).serve_forever()
+PY_PROOF
 chmod 755 "$S/systemctl" "$S/evil/systemctl"
 mount --bind "$S/systemctl" /usr/bin/systemctl
 printf 'Port 22\n' > "$S/cfg"
@@ -67,7 +81,8 @@ mount --bind "$S/cfg" /etc/ssh/sshd_config
 /usr/sbin/sshd -D -f /etc/ssh/sshd_config -o PidFile=none -E "$S/sshd.log" &
 SSHD=$!
 sleep 0.5 # sleep: let sshd bind before /proc/net is read
-trap 'kill $SSHD 2>/dev/null; wait $SSHD 2>/dev/null; rm -rf "$S"' EXIT
+trap 'while read -r pid; do kill -TERM -- "-$pid" 2>/dev/null; done < "$S/health.pids"; kill $SSHD 2>/dev/null; wait $SSHD 2>/dev/null; rm -rf "$S"' EXIT
+: > "$S/health.pids"
 
 # init ARGS...: the real install with a clean environment, the decoy first in PATH.
 init() {
@@ -76,6 +91,7 @@ init() {
         --behind-proxy --trusted-proxy 127.0.0.1 "$@" > "$S/out" 2> "$S/err"
 }
 D=/var/lib/infraternal
+SHARED=/var/lib/j803-shared-fixture
 U=/etc/systemd/system/infraternal-server.service
 OLD=/var/lib/j803-old
 # own: inode, mode and sha256 of every entry other parts keep in $D.
@@ -105,6 +121,21 @@ check OLD_UNIT_DATA 1 "$(grep -c "\"--data\" \"$OLD\"" $U)"
 check OLD_POLICY_MODE 600 "$(stat -c %a $D/host-firewall-server.json 2>/dev/null)"
 POLICY=$(sha256sum < $D/host-firewall-server.json | cut -c1-16)
 
+echo "### A shared install base is refused before stopping or changing its contents"
+UNIT_BEFORE=$(sha256sum < "$U" | cut -c1-16)
+init --host-firewall-allow '*,*,tcp,22'
+status=$?
+check SHARED_REFUSED 1 "$([ $status -ne 0 ] && echo 1 || echo 0)"
+check SHARED_DIAGNOSIS 1 "$(cat "$S/err" "$S/out" | grep -c 'shared install base')"
+check SHARED_UNIT_UNCHANGED "$UNIT_BEFORE" "$(sha256sum < "$U" | cut -c1-16)"
+check SHARED_DATA_UNCHANGED "$DATA" "$(data "$OLD")"
+check SHARED_BASE_MODE 711 "$(stat -c %a "$D")"
+check SHARED_NO_STOP 0 "$(grep -c '^stop' "$S/systemctl.log")"
+check SHARED_OWN_UNTOUCHED "$OWN" "$(own)"
+mv "$D" "$SHARED"
+install -d -m 700 "$D"
+cp -p "$SHARED/host-firewall-server.json" "$D/host-firewall-server.json"
+
 echo "### 2. a re-run the firewall refuses (only tcp/2299 admitted, sshd uses 22) moves nothing"
 UNIT_BEFORE=$(sha256sum < $U | cut -c1-16)
 # --force: the allow rule changes the unit, and only the firewall's refusal is under test here.
@@ -118,19 +149,19 @@ check REFUSED_OLD_DATA_IN_PLACE "$DATA" "$(data $OLD)"
 check REFUSED_NOTHING_IN_TARGET absent "$([ -e $D/infraternal.sqlite ] && echo present || echo absent)"
 check REFUSED_NO_STOP 0 "$(grep -c '^stop\|^EVIL stop' "$S/systemctl.log")"
 check REFUSED_POLICY_UNCHANGED "$POLICY" "$(sha256sum < $D/host-firewall-server.json | cut -c1-16)"
-check REFUSED_OWN_UNTOUCHED "$OWN" "$(own)"
+check REFUSED_OWN_UNTOUCHED "$OWN" "$(D=$SHARED own)"
 
 echo "### 2b. a re-run whose unit differs (an extra allow rule) without --force moves nothing"
 init --host-firewall-allow '*,*,tcp,22' --host-firewall-allow '*,*,tcp,8022'
 status=$?
 echo "    exit=$status: $(tr '\n' ' ' < "$S/err" | head -c 300)"
 check CHANGED_REFUSED 1 "$([ $status -ne 0 ] && echo 1 || echo 0)"
-check CHANGED_SAYS_FORCE 1 "$(cat "$S/err" "$S/out" | tr '\n' ' ' | grep -c 'pass --force')"
+check CHANGED_SAYS_CONFIGURATION 1 "$(cat "$S/err" "$S/out" | tr '\n' ' ' | grep -c 'configuration differs')"
 check CHANGED_UNIT_UNCHANGED "$UNIT_BEFORE" "$(sha256sum < $U | cut -c1-16)"
 check CHANGED_OLD_DATA_IN_PLACE "$DATA" "$(data $OLD)"
 check CHANGED_NO_STOP 0 "$(grep -c 'stop' "$S/systemctl.log")"
 
-echo "### 3. the re-run with sshd admitted moves the folder into the shared install base (rename)"
+echo "### 3. the re-run with sshd admitted moves the folder into a private install base"
 init --host-firewall-allow '*,*,tcp,22'
 status=$?
 echo "    exit=$status stderr: $(tr '\n' ' ' < "$S/err" | head -c 300)"
@@ -139,15 +170,15 @@ check MOVE_EXIT 0 "$status"
 check MOVE_UNIT_DATA 1 "$(grep -c "\"--data\" \"$D\"" $U)"
 check MOVE_DATA_CARRIED "$DATA" "$(data $D)"
 check MOVE_OLD_GONE absent "$([ -e $OLD ] && echo present || echo absent)"
-check MOVE_OWN_UNTOUCHED "$OWN" "$(own)"
-check MOVE_BASE_MODE 711 "$(stat -c %a $D)"
+check MOVE_OWN_UNTOUCHED "$OWN" "$(D=$SHARED own)"
+check MOVE_BASE_MODE 700 "$(stat -c %a $D)"
 check MOVE_POLICY_KEPT "$POLICY" "$(sha256sum < $D/host-firewall-server.json | cut -c1-16)"
 check MOVE_POLICY_MODE 600 "$(stat -c %a $D/host-firewall-server.json)"
 check MOVE_NO_LEFTOVERS 0 "$(ls -A $D | grep -c '^\.infraternal-\(incoming\|move\)')"
 check MOVE_FIREWALL_UNIT 1 "$(ls /etc/systemd/system | grep -c '^infraternal-firewall\.service$')"
 check MOVE_NO_PATH_SYSTEMCTL 0 "$(evil)"
 check MOVE_SYSTEMCTL_ORDER \
-    "show -p ActiveState --value infraternal-server.service|stop infraternal-server.service|show -p ActiveState --value infraternal-server.service|daemon-reload|start infraternal-server.service|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|enable --now infraternal-server.service" \
+    "show -p ActiveState --value infraternal-server.service|show -p ActiveState --value infraternal-server.service|stop infraternal-server.service|show -p ActiveState --value infraternal-server.service|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|start infraternal-server.service|show -p ActiveState --value infraternal-server.service|enable --now infraternal-server.service" \
     "$(paste -sd'|' "$S/systemctl.log")"
 
 echo "### 4. re-running again is a no-op for the folder and the unit"
@@ -159,7 +190,7 @@ check RERUN_EXIT 0 "$status"
 check RERUN_UNIT_UNTOUCHED "$before" "$(stat -c '%i %Y.%y' $U)"
 check RERUN_NO_STOP 0 "$(grep -c 'stop' "$S/systemctl.log")"
 
-echo "### 5. cross-filesystem: an install on $S/old2 (root disk) is copied into the shared base"
+echo "### 5. cross-filesystem: an install on $S/old2 (root disk) is copied into the private base"
 init --force --data "$S/old2" --host-firewall-allow '*,*,tcp,22'
 check OLD2_INSTALL_EXIT 0 "$?"
 printf 'sqlite two\n' > "$S/old2/infraternal.sqlite"; install -d -m 700 "$S/old2/mesh"; printf 'key two\n' > "$S/old2/mesh/key"
@@ -178,9 +209,9 @@ check COPY_UNIT_DATA 1 "$(grep -c "\"--data\" \"$D\"" $U)"
 check COPY_DATA_CARRIED "$DATA2" "$(data $D)"
 L=$(ls -d "$S"/old2.moved-* 2>/dev/null | head -1)
 check COPY_LEFTOVER_READ_ONLY 0 "$([ -n "$L" ] && find "$L" -perm /222 -not -type l | wc -l || echo missing)"
-check COPY_OWN_UNTOUCHED "$OWN" "$(own)"
+check COPY_OWN_UNTOUCHED "$OWN" "$(D=$SHARED own)"
 check COPY_POLICY_KEPT "$POLICY" "$(sha256sum < $D/host-firewall-server.json | cut -c1-16)"
-check COPY_BASE_MODE 711 "$(stat -c %a $D)"
+check COPY_BASE_MODE 700 "$(stat -c %a $D)"
 check COPY_NO_PATH_SYSTEMCTL 0 "$(evil)"
 
 echo "RESULT=$BAD"
