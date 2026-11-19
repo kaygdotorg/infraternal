@@ -451,9 +451,9 @@ fn harness_key(name: &str) -> [u8; 32] {
 
 /// The real-change proof's Mac side (#483 J710): this module's utun, the bound UDP factory and
 /// the pinned `GotaTun` device on a current-thread runtime, as the worker builds them, with one
-/// static peer (keepalive 25 s, D392) and the worker's own announce path
-/// ([`UnderlayAnnouncer`] plus `request_keepalives`). `J710_WATCH=off` leaves the announce path
-/// out, which is the node before this change; nothing else differs.
+/// static peer (keepalive 25 s, D392). It runs the production worker loop so the probe
+/// covers route-socket wakeups alongside candidate-walk scheduling. `J710_WATCH=off`
+/// runs the same device without the worker as the control.
 ///
 /// Root only (utun). Environment: `J710_PRIVATE_HEX`, `J710_PEER_PUBLIC_HEX`, `J710_ENDPOINT`
 /// (peer `ip:port`), `J710_PORT`, `J710_ADDR` and `J710_PEER_ADDR` (tunnel IPv4 addresses),
@@ -463,7 +463,7 @@ fn harness_key(name: &str) -> [u8; 32] {
 #[test]
 #[ignore = "proof harness: root, a live peer and the J710_* environment"]
 fn mac_underlay_announce_device() {
-    use crate::macos_node::{MacUtun, OpenUtun};
+    use crate::macos_node::{MacUtun, OpenUtun, RuntimeState, walks};
     use gotatun::{
         device::{DeviceBuilder, Peer as WireGuardPeer},
         x25519::{PublicKey, StaticSecret},
@@ -510,6 +510,7 @@ fn mac_underlay_announce_device() {
         )
         .await
         .expect("bind");
+        let admission = Arc::clone(&factory.admission);
         {
             let mut admission = factory.admission.write().await;
             admission.set_peers([crate::policy::model::PublicKey(peer_key)]);
@@ -530,27 +531,48 @@ fn mac_underlay_announce_device() {
             .await
             .expect("device");
         utun.set_mtu(1280);
-        run("/sbin/ifconfig", &[
-            utun.name(),
-            "inet",
-            &var("J710_ADDR"),
-            &peer_addr.to_string(),
-            "mtu",
-            "1280",
-            "up",
-        ]);
+        run(
+            "/sbin/ifconfig",
+            &[
+                utun.name(),
+                "inet",
+                &var("J710_ADDR"),
+                &peer_addr.to_string(),
+                "mtu",
+                "1280",
+                "up",
+            ],
+        );
         std::fs::write(var("J710_IFNAME_FILE"), utun.name()).expect("publish the utun name");
-        let mut announcer = watch.then(|| UnderlayAnnouncer::start(utun.name()));
         eprintln!("J710 harness up: watch={watch}");
-        loop {
-            tokio::select! {
-                _ = stop.recv() => break,
-                () = super::super::announcement_due(announcer.as_mut()) => {
-                    let sessions = super::super::announce_underlay(&device, &udp).await;
-                    eprintln!("J710 announce {:?} sessions={sessions}", std::time::SystemTime::now());
-                }
-            }
+        if !watch {
+            stop.recv().await;
+            device.stop().await;
+            return;
         }
-        device.stop().await;
+        let state = RuntimeState {
+            udp,
+            utun: Some(utun),
+            device: Some(Arc::new(device)),
+            handshakes: tokio::task::JoinSet::new(),
+            walks: crate::candidate_walks::Walks::default(),
+            config: Some(snapshot),
+            // The harness's point-to-point address installs the route with the utun.
+            routes: Default::default(),
+            route_mtus: Default::default(),
+            interface_mtu: 1280,
+            port,
+            admission,
+            confirmed_feed: Default::default(),
+            #[cfg(feature = "mesh-dns")]
+            dns_resolver: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_integration: Default::default(),
+        };
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(walks::run_worker(receiver, state));
+        stop.recv().await;
+        drop(commands);
+        worker.await.expect("stop Mac worker");
     });
 }

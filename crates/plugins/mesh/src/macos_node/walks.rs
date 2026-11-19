@@ -449,7 +449,10 @@ mod tests {
         let sessions = announce_underlay(
             || invalidated.set(true),
             async || {
-                assert!(invalidated.get(), "live-session walk ran before invalidation");
+                assert!(
+                    invalidated.get(),
+                    "live-session walk ran before invalidation"
+                );
                 0
             },
         )
