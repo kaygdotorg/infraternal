@@ -170,6 +170,7 @@ fn server_identity_cannot_change_inside_a_staged_snapshot() {
     assert!(node.config().is_none());
 }
 
+/// Explicit up recovers a disabled node with its saved mesh identity.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn explicit_up_recovers_disabled_intent_before_reusing_identity() {
@@ -183,6 +184,7 @@ fn explicit_up_recovers_disabled_intent_before_reusing_identity() {
     assert!(Device::owned().expect("owned interface"));
     node.down().expect("cleanup");
 }
+/// Down clears the node state when another process already removed the interface.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn externally_removed_interface_does_not_block_down() {
