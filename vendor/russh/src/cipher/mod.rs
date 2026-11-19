@@ -316,13 +316,16 @@ pub(crate) trait SealingKey {
     }
 }
 
+/// Read and open an SSH packet, leaving its unpadded bytes in the buffer.
 pub(crate) async fn read<R: AsyncRead + Unpin>(
     stream: &mut R,
     buffer: &mut SSHBuffer,
     cipher: &mut (dyn OpeningKey + Send),
 ) -> Result<usize, Error> {
+    // The same cipher determines the probe size for both reads.
+    let probe_len = cipher.packet_length_to_read_for_block_length();
     if buffer.len == 0 {
-        let mut len = vec![0; cipher.packet_length_to_read_for_block_length()];
+        let mut len = vec![0; probe_len];
 
         stream.read_exact(&mut len).await?;
         trace!("reading, len = {len:?}");
@@ -340,17 +343,16 @@ pub(crate) async fn read<R: AsyncRead + Unpin>(
 
             // A valid packet (with its MAC tag) can never be shorter than the
             // block we already read to probe it; a smaller value would shrink
-            // the buffer below `l` below and panic on the `buffer.buffer[l..]`
+            // the buffer below the probe size and panic on the body
             // slice. Reject it as a protocol error instead. The tag counts:
             // with an EtM MAC and 8-byte blocks (3des-cbc), packet_length can
             // be 8, and the probe also reads the start of the tag.
-            if len + PACKET_LENGTH_LEN + cipher.tag_len()
-                < cipher.packet_length_to_read_for_block_length()
-            {
+            let len_with_tag = len + cipher.tag_len();
+            if len_with_tag + PACKET_LENGTH_LEN < probe_len {
                 return Err(Error::PacketSize(len));
             }
 
-            buffer.len = len + cipher.tag_len();
+            buffer.len = len_with_tag;
             trace!("reading, clear len = {:?}", buffer.len);
         }
     }
@@ -358,10 +360,8 @@ pub(crate) async fn read<R: AsyncRead + Unpin>(
     buffer.buffer.resize(buffer.len + 4, 0);
     trace!("read_exact {:?}", buffer.len + 4);
 
-    let l = cipher.packet_length_to_read_for_block_length();
-
     #[allow(clippy::indexing_slicing)] // length checked
-    stream.read_exact(&mut buffer.buffer[l..]).await?;
+    stream.read_exact(&mut buffer.buffer[probe_len..]).await?;
 
     trace!("read_exact done");
     let seqn = buffer.seqn.0;
