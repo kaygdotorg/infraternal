@@ -1111,9 +1111,23 @@ fn logging_color(terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
     terminal && no_color.is_none_or(|value| value.is_empty())
 }
 
-async fn health(State(pool): State<SqlitePool>) -> Response {
+async fn health(State(pool): State<SqlitePool>, headers: axum::http::HeaderMap) -> Response {
     if server_healthy(&pool).await {
-        Json(json!({"status":"ok"})).into_response()
+        let mut response = Json(json!({"status":"ok"})).into_response();
+        #[cfg(target_os = "linux")]
+        if let Some(proof) = headers
+            .get(crate::move_health::HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::move_health::proof)
+            .and_then(|proof| axum::http::HeaderValue::from_str(&proof).ok())
+        {
+            response
+                .headers_mut()
+                .insert(crate::move_health::HEADER, proof);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (&mut response, headers);
+        response
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,

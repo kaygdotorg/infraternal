@@ -65,8 +65,8 @@ pub trait Service {
     fn enable(&self) -> io::Result<()>;
     /// Wait for the new server to answer against its database.
     fn ready(&self, path: &Path, data: &File) -> io::Result<()>;
-    /// Confirm the current managed process still has the selected database open.
-    fn verify_database(&self, path: &Path, data: &File) -> io::Result<()>;
+    /// Probe fresh HTTP health for the managed process holding the selected database.
+    fn check_live(&self, path: &Path, data: &File) -> io::Result<()>;
 }
 
 /// The fixed systemd program and the server endpoint to verify after starting.
@@ -103,9 +103,10 @@ impl Systemd {
             Ok(())
         } else {
             Err(io::Error::other(format!(
-                "systemctl {} {} failed",
+                "systemctl {} {} failed: {}",
                 arguments.first().copied().unwrap_or_default(),
-                self.service
+                self.service,
+                String::from_utf8_lossy(&output.stderr).trim()
             )))
         }
     }
@@ -144,7 +145,7 @@ impl Systemd {
     }
 
     /// Read the local server's health response, without sending credentials.
-    fn probe(&self) -> io::Result<()> {
+    fn probe(&self, challenge: Option<(&str, &str)>) -> io::Result<()> {
         let stream = self.connect()?;
         let timeout = std::time::Duration::from_millis(500);
         stream.set_read_timeout(Some(timeout))?;
@@ -159,24 +160,84 @@ impl Systemd {
                 .build()
                 .connect("localhost", stream)
                 .map_err(io::Error::other)?;
-            health(stream)
+            health(stream, challenge)
         } else {
-            health(stream)
+            health(stream, challenge)
         }
     }
 }
 
 /// Test the SQLite-backed health route over a plain or TLS connection.
-fn health(mut stream: impl io::Read + io::Write) -> io::Result<()> {
-    stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
-    let mut prefix = [0; 13];
-    stream.read_exact(&mut prefix)?;
-    if &prefix == b"HTTP/1.1 200 " {
-        Ok(())
-    } else {
-        Err(io::Error::other(
+fn health(
+    mut stream: impl io::Read + io::Write,
+    challenge: Option<(&str, &str)>,
+) -> io::Result<()> {
+    use std::io::{BufRead, BufReader, Read};
+    write!(
+        stream,
+        "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+    )?;
+    #[cfg(target_os = "linux")]
+    if let Some((nonce, _)) = challenge {
+        write!(
+            stream,
+            "{}: {nonce}\r\n",
+            infraternal_server::move_health::HEADER
+        )?;
+    }
+    stream.write_all(b"\r\n")?;
+    let mut response = BufReader::new(stream.take(8 * 1024));
+    let mut line = String::new();
+    response.read_line(&mut line)?;
+    if !line.starts_with("HTTP/1.1 200 ") {
+        return Err(io::Error::other(
             "server health check did not return HTTP 200",
-        ))
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some((_, expected)) = challenge {
+        loop {
+            line.clear();
+            if response.read_line(&mut line)? == 0 || line == "\r\n" {
+                return Err(disk::invalid(
+                    "HTTP health did not identify the process holding the moved database",
+                ));
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case(infraternal_server::move_health::HEADER)
+                && value.trim() == expected
+            {
+                break;
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = challenge;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+impl Systemd {
+    /// Match the selected file against the credential-checked MainPID's report.
+    fn verify_database(path: &Path, data: &File, pid: u32, challenge: &str) -> io::Result<String> {
+        use crate::server_control::{DATABASE_NAME, Database, query_database};
+
+        let database = disk::regular(data, OsStr::new(DATABASE_NAME))?;
+        let expected = Database::new(
+            std::path::absolute(path.join(DATABASE_NAME))?,
+            &database.metadata()?,
+        );
+        let proof = query_database(path, pid, challenge).map_err(|error| {
+            io::Error::other(format!(
+                "the running service has not opened the moved database: {error}"
+            ))
+        })?;
+        if proof.database != expected {
+            return Err(disk::invalid(
+                "the running service has not opened the moved database",
+            ));
+        }
+        Ok(proof.health)
     }
 }
 
@@ -222,8 +283,8 @@ impl Service for Systemd {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if self.probe().is_ok() && self.state()? == "active" {
-                return self.verify_database(path, data);
+            if self.probe(None).is_ok() {
+                return self.check_live(path, data);
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
@@ -237,22 +298,14 @@ impl Service for Systemd {
     }
 
     #[cfg(target_os = "linux")]
-    fn verify_database(&self, path: &Path, data: &File) -> io::Result<()> {
-        use crate::server_control::{DATABASE_NAME, Database, query_database};
-
-        let database = disk::regular(data, OsStr::new(DATABASE_NAME))?;
-        let expected = Database::new(
-            std::path::absolute(path.join(DATABASE_NAME))?,
-            &database.metadata()?,
-        );
+    fn check_live(&self, path: &Path, data: &File) -> io::Result<()> {
         let pid = self.main_pid()?;
-        let reported = query_database(path, pid)?;
-        if reported != expected {
-            return Err(disk::invalid(
-                "the running service has not opened the moved database",
-            ));
-        }
-        if self.state()? != "active" || self.main_pid()? != pid {
+        let mut random = [0; 16];
+        openssl::rand::rand_bytes(&mut random).map_err(io::Error::other)?;
+        let challenge = format!("{:032x}", u128::from_be_bytes(random));
+        let proof = Self::verify_database(path, data, pid, &challenge)?;
+        self.probe(Some((&challenge, &proof)))?;
+        if !matches!(self.state()?.as_str(), "active" | "activating") || self.main_pid()? != pid {
             return Err(disk::invalid(
                 "the moved service stopped or changed during verification",
             ));
@@ -261,7 +314,7 @@ impl Service for Systemd {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn verify_database(&self, _path: &Path, _data: &File) -> io::Result<()> {
+    fn check_live(&self, _path: &Path, _data: &File) -> io::Result<()> {
         Err(io::ErrorKind::Unsupported.into())
     }
 }
@@ -876,21 +929,31 @@ fn finish(
     } else {
         None
     };
-    let target = live_target(journal)?;
-    service.verify_database(&journal.to, &target)?;
-    // The configured parent may have changed while the manager or server replied.
-    let target = live_target(journal)?;
     if let Some((backup, source)) = backup {
-        let keep = journal.backup_action == Backup::Retain;
-        disk::retire(old_parent, backup, source, keep)?;
-        if keep {
-            leftover = Some(journal.backup.clone());
-        }
+        leftover = retire_original(old_parent, backup, source, journal, service)?;
     }
+    let target = live_target(journal)?;
     if journal.legacy_target && read_legacy_marker(&target)?.is_some() {
         disk::unlink(&target, OsStr::new(MARKER), false)?;
     }
     Ok(Outcome { leftover })
+}
+
+/// Renew the live proof immediately before retiring the exact recorded original.
+fn retire_original(
+    parent: &File,
+    name: &OsStr,
+    source: Identity,
+    journal: &Journal,
+    service: &dyn Service,
+) -> io::Result<Option<PathBuf>> {
+    let target = live_target(journal)?;
+    service.check_live(&journal.to, &target)?;
+    // The configured parent may have changed while the manager or server replied.
+    live_target(journal)?;
+    let keep = journal.backup_action == Backup::Retain;
+    disk::retire(parent, name, source, keep)?;
+    Ok(keep.then(|| journal.backup.clone()))
 }
 
 /// Remove the known record and private directory, leaving other siblings alone.

@@ -103,6 +103,9 @@ pub mod remote_http;
 mod remote_inventory;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::inventory::decode_list as decode_host_inventory;
+/// Process-bound readiness for the local server relocation transaction.
+#[cfg(target_os = "linux")]
+pub mod move_health;
 #[cfg(feature = "remote")]
 mod remote_link;
 #[cfg(all(test, feature = "mesh", feature = "remote"))]

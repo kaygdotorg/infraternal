@@ -76,6 +76,10 @@ pub(crate) fn same_account(peer: &tokio::net::unix::UCred) -> bool {
 #[cfg(target_os = "linux")]
 pub(crate) const DATABASE_REQUEST: [u8; 3] = [0, 0, 2];
 
+/// Number of ASCII bytes in the readiness challenge following the control opcode.
+#[cfg(target_os = "linux")]
+const CHALLENGE_LEN: usize = 32;
+
 /// The name of the SQLite file whose identity the move needs to prove.
 #[cfg(target_os = "linux")]
 pub(crate) const DATABASE_NAME: &str = "infraternal.sqlite";
@@ -108,6 +112,16 @@ impl Database {
     }
 }
 
+/// The live file and the answer to prove the HTTP peer is the same process.
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct DatabaseProof {
+    /// Identity of the file currently open in this process.
+    pub(crate) database: Database,
+    /// Expected HTTP answer to this query's one-use challenge.
+    pub(crate) health: String,
+}
+
 /// Inspect only this process's handles, which are still visible with dump protection.
 /// A pathname lookup alone would attest to a replacement SQLite never opened.
 #[cfg(target_os = "linux")]
@@ -137,13 +151,22 @@ pub(crate) async fn send_database(
     socket: &mut tokio::net::UnixStream,
     data: &Path,
 ) -> io::Result<()> {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // A running server can own many unrelated descriptors. Walk them on the
-    // blocking pool so the private query does not stall the serving future.
+    let mut challenge = [0; CHALLENGE_LEN];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        socket.read_exact(&mut challenge),
+    )
+    .await??;
+    let health = std::str::from_utf8(&challenge)
+        .ok()
+        .and_then(infraternal_server::move_health::proof)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    // Walk the serving process's open descriptors off its async runtime.
     let data = data.to_owned();
     let database = tokio::task::spawn_blocking(move || open_database(&data)).await??;
-    let payload = serde_json::to_vec(&database)?;
+    let payload = serde_json::to_vec(&DatabaseProof { database, health })?;
     if payload.len() > MAX_DATABASE_REPLY {
         return Err(io::ErrorKind::InvalidData.into());
     }
@@ -157,7 +180,11 @@ pub(crate) async fn send_database(
 
 /// Query only the socket peer that shares the service UID and owns its `MainPID`.
 #[cfg(target_os = "linux")]
-pub(crate) fn query_database(data: &Path, main_pid: u32) -> io::Result<Database> {
+pub(crate) fn query_database(
+    data: &Path,
+    main_pid: u32,
+    challenge: &str,
+) -> io::Result<DatabaseProof> {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
@@ -177,6 +204,7 @@ pub(crate) fn query_database(data: &Path, main_pid: u32) -> io::Result<Database>
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
     socket.write_all(&DATABASE_REQUEST)?;
+    socket.write_all(challenge.as_bytes())?;
     let mut length = [0; 2];
     socket.read_exact(&mut length)?;
     let length = usize::from(u16::from_be_bytes(length));

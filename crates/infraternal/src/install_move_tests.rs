@@ -176,9 +176,9 @@ impl Service for Fake {
         Ok(())
     }
 
-    /// Fail a fresh database confirmation after a simulated stop.
-    fn verify_database(&self, _path: &Path, _data: &File) -> io::Result<()> {
-        if !self.active()? || self.fail_ready.get() {
+    /// Fail a fresh correlated proof after a simulated stop or health loss.
+    fn check_live(&self, _path: &Path, _data: &File) -> io::Result<()> {
+        if !self.active()? || self.fail_ready.get() || self.unhealthy.get() {
             return Err(io::Error::other("moved server is no longer available"));
         }
         Ok(())
@@ -656,7 +656,6 @@ fn review_j899_restarts_stopped_service_during_cleanup_retry() {
 
 /// A responsive database control socket alone cannot authorize source retirement.
 #[test]
-#[ignore = "D395 review regression: cleanup does not renew HTTP health"]
 fn review_j925_keeps_original_when_http_health_is_lost() {
     let (fixture, manager, journal) = ready_with_original();
     manager.lose_health_after_ready.set(true);
@@ -667,6 +666,24 @@ fn review_j925_keeps_original_when_http_health_is_lost() {
         (fixture.old.exists() || journal.backup.exists()) && result.is_err(),
         "cleanup discarded the original after HTTP health was lost"
     );
+}
+
+/// Only a fresh answer from the database process can authorize retirement.
+#[cfg(target_os = "linux")]
+#[test]
+fn health_rejects_an_ordinary_or_replayed_200() {
+    use std::{io::Write as _, os::unix::net::UnixStream};
+
+    for (header, accepted) in [
+        ("", false),
+        ("x-infraternal-move-health: previous-proof\r\n", false),
+        ("x-infraternal-move-health: current-proof\r\n", true),
+    ] {
+        let (probe, mut responder) = UnixStream::pair().unwrap();
+        write!(responder, "HTTP/1.1 200 OK\r\n{header}\r\n").unwrap();
+        let result = health(probe, Some(("fresh-challenge", "current-proof")));
+        assert_eq!(result.is_ok(), accepted, "{header:?}: {result:?}");
+    }
 }
 
 /// A replacement SQLite file cannot authorize removal even inside the same directory.
@@ -750,15 +767,17 @@ fn review_j912_verifies_a_hardened_user_server() {
     };
 
     let data = File::open(&fixture.old).unwrap();
-    let wrong_peer = crate::server_control::query_database(&fixture.old, std::process::id());
-    let verified = manager.verify_database(&fixture.old, &data);
+    assert_eq!(manager.main_pid().unwrap(), child.id());
+    let nonce = "00000000000000000000000000000000";
+    let wrong_peer = crate::server_control::query_database(&fixture.old, std::process::id(), nonce);
+    let verified = Systemd::verify_database(&fixture.old, &data, child.id(), nonce);
     fs::rename(
         fixture.old.join("infraternal.sqlite"),
         fixture.old.join("previous.sqlite"),
     )
     .unwrap();
     fs::write(fixture.old.join("infraternal.sqlite"), "replacement").unwrap();
-    let replaced = manager.verify_database(&fixture.old, &data);
+    let replaced = Systemd::verify_database(&fixture.old, &data, child.id(), nonce);
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
     assert!(opened, "fixture never opened its database");
