@@ -517,6 +517,7 @@ mod proxy_mesh_context_tests {
                     ipv6: format!("fd00::{id:x}").parse().expect("IPv6 mesh address"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound,

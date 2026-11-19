@@ -73,7 +73,15 @@ pub struct Peer {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub previous_active: bool,
     pub addresses: Addresses,
+    /// The first underlay address to send to; `None` waits for the peer to reach this node first.
     pub endpoint: Option<SocketAddr>,
+    /// Further addresses to try, in order, while `endpoint` has not carried a packet back (#515,
+    /// D391): the peer's LAN address when both nodes share a public address, its server-reflexive
+    /// address, and the coordinator's older guess. The coordinator sends them only to nodes whose
+    /// identity reply said they accept them, because this struct refuses unknown fields: an older
+    /// node gets `endpoint` alone. Empty is omitted, so a snapshot without candidates is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<SocketAddr>,
 }
 /// Directional network access for initiating tuples and their authenticated replies [242].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,7 +101,6 @@ pub struct PeerPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_ssh: Option<bool>,
 }
-
 /// Coordinator-owned DNS identity used by mesh-only listeners and names [#266, #281].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +173,10 @@ impl PeerPolicy {
     /// admission guard, only peers for which this is true. A peer with no access gets no device
     /// entry, so the node neither answers its handshakes nor keeps a session alive toward it
     /// (#93478, J781, #483). The kernel engine keeps its complete inventory instead.
+    ///
+    /// A peer without access still stays in snapshots, so a later grant changes only policy, and
+    /// it learns no more of the node's coordinates than an older node would: no private
+    /// candidates, and no candidate walk toward it (#515).
     #[must_use]
     pub fn has_network_access(&self) -> bool {
         /// Whether one direction's rule allows at least one packet tuple.
@@ -407,6 +418,7 @@ mod compatibility_tests {
                 ipv6: "fd01::2".parse().unwrap(),
             },
             endpoint: None,
+            candidates: Vec::new(),
         };
         let encoded = serde_json::to_vec(&peer).unwrap();
         let legacy: PreRotationPeer = serde_json::from_slice(&encoded).unwrap();

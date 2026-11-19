@@ -115,8 +115,18 @@ class CoordinatorFixture:
         self.child = subprocess.Popen([str(executable), str(extra_members)], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, text=True)
 
-    def configuration(self, mode, identities=None):
-        return self.request({"mode": mode, "identities": identities})
+    def configuration(self, mode, identities=None, endpoints=None):
+        """Compile a production-schema snapshot with optional observed UDP endpoints."""
+        request = {"mode": mode}
+        if identities is not None:
+            request["identities"] = identities
+        if endpoints is not None:
+            request["endpoints"] = endpoints
+        return self.request(request)
+
+    def update_endpoints(self, endpoints):
+        """Publish a changed coordinator-observed endpoint pair to both nodes."""
+        return self.request({"mode": "allow", "endpoints": endpoints})
 
     def request(self, value):
         self.child.stdin.write(json.dumps(value) + "\n")

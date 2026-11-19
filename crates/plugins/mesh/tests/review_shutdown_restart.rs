@@ -62,6 +62,7 @@ fn configure(node: &mut Node) {
                         previous_active: false,
                         addresses: addresses(id),
                         endpoint: None,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

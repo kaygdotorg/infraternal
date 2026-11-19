@@ -101,6 +101,7 @@ fn configuration() -> Config {
                         ipv6: "fd00:3::3".parse().unwrap(),
                     },
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,

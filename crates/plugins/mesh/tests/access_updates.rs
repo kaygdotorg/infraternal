@@ -47,6 +47,7 @@ fn config() -> Config {
                                 ipv6: Ipv6Addr::from((0xfd02_u128 << 112) + u128::from(id)),
                             },
                             endpoint: None,
+                            candidates: Vec::new(),
                         },
                         inbound: TrafficPolicy::All,
                         outbound: TrafficPolicy::All,
