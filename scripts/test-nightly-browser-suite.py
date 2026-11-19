@@ -658,7 +658,7 @@ class Reporter(unittest.TestCase):
         self.assertIn('shard 2 of 2: 3 of 40 tests ran, did not finish', rollup['body'])
         self.assertIn('Spec files not fully run: test/slow.spec.ts', rollup['body'])
         merged = json.loads((self.results / 'merged-report.json').read_text())
-        self.assertEqual(merged['passing_files'], [])
+        self.assertEqual(merged['passing_files'], ['test/ok.spec.ts'])
         self.assertEqual(len([item for item in merged['not_run'] if item['file'] == 'test/slow.spec.ts']), 37)
         self.assertTrue([i for i in self.forgejo.issues.values() if 'docs-palette.spec.ts' in i['title']])
 
@@ -699,7 +699,9 @@ class Reporter(unittest.TestCase):
         """The TS reporter appends (two shards share the file) and tags every line with NIGHTLY_SHARD."""
         text = (Path(suite.__file__ if hasattr(suite, '__file__') else Path(__file__).with_name('nightly-browser-suite.py')).resolve().parents[1] / 'apps/tracer/nightly-reporter.ts').read_text()
         self.assertIn('NIGHTLY_SHARD', text)
-        self.assertIn('tests: tests', text)
+        self.assertIn('appendFileSync(target', text)
+        self.assertIn('kind: "begin"', text)
+        self.assertIn('total: tests.length, tests', text)
         self.assertIn('id: this.ids.get(test)', text)
         self.assertNotIn('writeFileSync(target', text)
         self.assertGreaterEqual(text.count('appendFileSync'), 2)
@@ -761,7 +763,8 @@ class Reporter(unittest.TestCase):
         self.assertIn('HTTP 403', lines[0])
         self.assertIn('--report-only', lines[0])
         self.assertNotIn(TOKEN, err)
-        self.assertEqual(sorted(p.name for p in self.results.iterdir()), ['meta.json', 'results.json', 'suite.log'])
+        self.assertEqual(sorted(p.name for p in self.results.iterdir()),
+                         ['merged-report.json', 'meta.json', 'results.json', 'suite.log'])
         self.forgejo.deny = None
         self.assertEqual(self.run_cli('--login', self.forgejo.login, '--run-name', name)[0], 0)
         self.assertEqual(len(self.forgejo.issues), 1)
@@ -887,9 +890,10 @@ class SeparateAccount(unittest.TestCase):
                     self.assertTrue(rename_ready.wait(5), 'publisher reached the final directory rename')
                     self.assertFalse(published.exists())
                     temporary = [path for path in publish_home.iterdir() if path.name.startswith('.publish-')]
-                    self.assertEqual(len(temporary), 1)
-                    self.assertEqual((temporary[0] / 'merged-report.json').read_bytes(), merged)
-                    self.assertEqual((temporary[0] / 'evidence' / 'trace.txt').read_text(), 'captured evidence\n')
+                    self.assertEqual(len(temporary), 2)  # The interrupted copy is private until this publish completes.
+                    current = next(path for path in temporary if path != stale)
+                    self.assertEqual((current / 'merged-report.json').read_bytes(), merged)
+                    self.assertEqual((current / 'evidence' / 'trace.txt').read_text(), 'captured evidence\n')
                 finally:
                     allow_rename.set()
                     publisher.join(5)
