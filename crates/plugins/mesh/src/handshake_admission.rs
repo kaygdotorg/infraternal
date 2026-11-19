@@ -781,6 +781,24 @@ impl ConfirmedEndpointFeed {
     }
 }
 
+/// The batch buffer of [`PeerAdmissionUdpReceiver`]. On Linux it also holds the kernel receive
+/// stamp of every packet the guard kept, in the same order as the packets.
+///
+/// `GotaTun`'s receive-queue bound (D397) asks for a packet's stamp by its index in the batch
+/// (`UdpRecv::rx_timestamp_ns`). The socket records stamps by the index each datagram had when
+/// it arrived, and the guard removes refused initiations from the batch, which moves later
+/// packets down. So the guard copies the stamps out when the batch arrives and moves them
+/// together with their packets. A stamp of 0 means "unknown" and leaves the packet unjudged.
+/// macOS uses only the socket buffer because its socket has no kernel receive stamps for AQM.
+#[derive(Default)]
+pub(crate) struct AdmissionRecvBuf {
+    /// The socket's batch buffer, used only by the socket.
+    socket_buf: <GotaUdpSocket as UdpRecv>::RecvManyBuf,
+    /// `rx_stamps[i]` is the kernel receive time (ns) of `packets[i]` after the guard's pass.
+    #[cfg(target_os = "linux")]
+    rx_stamps: Vec<u64>,
+}
+
 /// Keeps the socket's batched receive path while filtering unregistered handshakes before `GotaTun`.
 pub(crate) struct PeerAdmissionUdpReceiver {
     socket: GotaUdpSocket,
@@ -812,7 +830,7 @@ impl PeerAdmissionUdpReceiver {
 }
 
 impl UdpRecv for PeerAdmissionUdpReceiver {
-    type RecvManyBuf = <GotaUdpSocket as UdpRecv>::RecvManyBuf;
+    type RecvManyBuf = AdmissionRecvBuf;
 
     /// Receive one packet and suppress any valid-MAC1 initiation from an unknown peer key.
     async fn recv_from(&mut self, pool: &mut PacketBufPool) -> io::Result<(Packet, SocketAddr)> {
@@ -825,6 +843,10 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
     }
 
     /// Preserve `GotaTun`'s socket batch receive and remove only rejected handshake initiations.
+    ///
+    /// On Linux each receive stamp moves with its packet (see [`AdmissionRecvBuf`]), so the bound
+    /// judges the packet it timed. Packets already in `packets` keep the stamps an earlier call
+    /// gave them; if that call failed part-way, the missing ones read as 0 (unknown).
     async fn recv_many_from(
         &mut self,
         recv_buf: &mut Self::RecvManyBuf,
@@ -832,7 +854,22 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
         packets: &mut Vec<(Packet, SocketAddr)>,
     ) -> io::Result<()> {
         let first_new_packet = packets.len();
-        self.socket.recv_many_from(recv_buf, pool, packets).await?;
+        #[cfg(target_os = "linux")]
+        let stamps = {
+            let stamps = &mut recv_buf.rx_stamps;
+            stamps.resize(first_new_packet, 0);
+            stamps
+        };
+        self.socket
+            .recv_many_from(&mut recv_buf.socket_buf, pool, packets)
+            .await?;
+        // The socket indexes its stamps by position in `packets`, which is still the arrival
+        // order here. With the bound off it has none and every copy is 0.
+        #[cfg(target_os = "linux")]
+        stamps.extend(
+            (first_new_packet..packets.len())
+                .map(|index| GotaUdpSocket::rx_timestamp_ns(&recv_buf.socket_buf, index)),
+        );
         let mut read = first_new_packet;
         let mut write = first_new_packet;
         while read < packets.len() {
@@ -840,19 +877,32 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
             if self.admits(packet, *source).await {
                 if write != read {
                     packets.swap(write, read);
+                    #[cfg(target_os = "linux")]
+                    stamps.swap(write, read);
                 }
                 write += 1;
             }
             read += 1;
         }
         packets.truncate(write);
+        #[cfg(target_os = "linux")]
+        stamps.truncate(write);
         Ok(())
+    }
+
+    /// The kernel receive time of `packets[index]` from the last batch, after the guard's
+    /// pass, or 0 if unknown. `GotaTun`'s queue bound reads it; without this override the
+    /// trait's default 0 would turn the bound off for every node (#260, D397).
+    #[cfg(target_os = "linux")]
+    fn rx_timestamp_ns(recv_buf: &Self::RecvManyBuf, index: usize) -> u64 {
+        recv_buf.rx_stamps.get(index).copied().unwrap_or(0)
     }
 
     /// Pass `GotaTun`'s idle-time release through to the socket, so an idle node gives its
     /// batch receive pages back. The trait's default does nothing, which would keep them.
+    /// On Linux the stamp list is a few hundred bytes at most, so it stays allocated.
     fn release_recv_buf(&self, recv_buf: &mut Self::RecvManyBuf) {
-        self.socket.release_recv_buf(recv_buf);
+        self.socket.release_recv_buf(&mut recv_buf.socket_buf);
     }
 
     /// Keep the underlying socket's UDP GRO support available to `GotaTun`.
@@ -883,6 +933,17 @@ mod tests {
         sync::{Arc, atomic::Ordering},
         time::{Duration, Instant},
     };
+
+    /// A macOS receive guard has no timestamp storage because its socket never stamps packets.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_receive_guard_keeps_the_native_batch_buffer_size() {
+        use super::{GotaUdpSocket, PeerAdmissionUdpReceiver, UdpRecv};
+        let wrapped = size_of::<<PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf>();
+        let socket = size_of::<<GotaUdpSocket as UdpRecv>::RecvManyBuf>();
+        eprintln!("macOS receive buffer sizes: wrapper={wrapped} socket={socket}");
+        assert_eq!(wrapped, socket, "macOS has no receive stamps to retain");
+    }
 
     /// How many X25519 key agreements `admission` has run so far.
     fn key_agreements(admission: &PeerAdmission) -> u32 {
@@ -2394,6 +2455,117 @@ pub(crate) mod flood_fairness {
                 now + Duration::from_secs(1)
             ),
             Ok(())
+        );
+    }
+}
+
+/// The guard keeps each packet's kernel receive time with the packet (Linux, D397, #260).
+///
+/// The pinned `GotaTun` bounds its receive queue by how long each packet waited since the kernel
+/// stamped its datagram, and it asks the receiver for that stamp by the packet's index in the
+/// batch. These tests receive a real batch through [`PeerAdmissionUdpReceiver`] and check that
+/// the stamps reach `GotaTun` and still belong to the right packets after the guard removed one.
+#[cfg(all(test, target_os = "linux"))]
+mod receive_stamp_tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "a broken fixture (socket, key or clock) must stop the test loudly"
+    )]
+    use super::{PeerAdmission, PeerAdmissionUdpReceiver, flood_fairness::initiation_to};
+    use gotatun::{
+        packet::PacketBufPool,
+        udp::{UdpRecv, UdpTransportFactory, UdpTransportFactoryParams, socket::UdpSocketFactory},
+        x25519::{PublicKey as X25519PublicKey, StaticSecret},
+    };
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        sync::Arc,
+        time::Duration,
+    };
+    use tokio::sync::RwLock;
+
+    /// The test node's identity; no peer is ever granted, so every initiation is refused.
+    const NODE: [u8; 32] = [0x31; 32];
+
+    /// How long the test waits between the refused initiation and the last data packet, so the
+    /// two kernel stamps can't be mistaken for each other.
+    const GAP: Duration = Duration::from_millis(30);
+
+    /// A refused initiation in the middle of a batch must not shift the later packets' stamps.
+    ///
+    /// Sends data packet A, an initiation from a key the node never granted (the guard drops
+    /// it), waits [`GAP`], then sends data packet B, all before the receiver reads. The batch
+    /// that reaches `GotaTun` is A and B, and B's stamp must be B's own: at least [`GAP`] after
+    /// A's. Index 1 carrying the dropped initiation's stamp (or no stamp at all, the trait's
+    /// default) would leave the queue bound measuring the wrong packet or nothing.
+    #[tokio::test]
+    async fn stamps_stay_with_their_packets_after_the_guard_drops_one() {
+        if std::env::var("GOTATUN_AQM").is_ok_and(|mode| mode.trim() == "off") {
+            eprintln!("GOTATUN_AQM=off: the socket records no receive stamps; nothing to check");
+            return;
+        }
+        let params = UdpTransportFactoryParams {
+            addr: Some(Ipv4Addr::LOCALHOST.into()),
+            port: 0,
+            fwmark: None,
+        };
+        // The factory also turns on UDP GRO and, with the bound on, `SO_TIMESTAMPNS`, as the
+        // node's own bind does.
+        let (_send, receive) = UdpSocketFactory::default()
+            .bind(&params)
+            .await
+            .expect("bind the receive socket");
+        let target: SocketAddr = receive.local_addr().expect("receive address");
+        let admission = Arc::new(RwLock::new(PeerAdmission::new(StaticSecret::from(NODE))));
+        let mut receiver = PeerAdmissionUdpReceiver::new(receive, admission);
+
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("sender socket");
+        // Type 4 is a data packet, which the guard never inspects; the sizes differ so the
+        // kernel can't coalesce A and B into one GRO batch.
+        let first = [4_u8; 64];
+        let last = [4_u8; 96];
+        sender.send_to(&first, target).expect("send A");
+        sender
+            .send_to(
+                &initiation_to(X25519PublicKey::from(&StaticSecret::from(NODE)), [0x55; 32]),
+                target,
+            )
+            .expect("send the stranger's initiation");
+        // sleep: put a measurable gap between the dropped initiation's stamp and B's.
+        std::thread::sleep(GAP);
+        sender.send_to(&last, target).expect("send B");
+
+        let mut recv_buf = <PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf::default();
+        let mut pool = PacketBufPool::new(8);
+        let mut packets = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while packets.len() < 2 {
+                receiver
+                    .recv_many_from(&mut recv_buf, &mut pool, &mut packets)
+                    .await
+                    .expect("receive");
+            }
+        })
+        .await
+        .expect("A and B arrive");
+
+        let sizes: Vec<usize> = packets.iter().map(|(packet, _)| packet.len()).collect();
+        assert_eq!(
+            sizes,
+            [64, 96],
+            "the guard must drop exactly the initiation"
+        );
+        let stamp_a = PeerAdmissionUdpReceiver::rx_timestamp_ns(&recv_buf, 0);
+        let stamp_b = PeerAdmissionUdpReceiver::rx_timestamp_ns(&recv_buf, 1);
+        assert!(
+            stamp_a > 0 && stamp_b > 0,
+            "GotaTun gets no receive stamps through the guard (A {stamp_a} ns, B {stamp_b} ns)"
+        );
+        let gap = u64::try_from(GAP.as_nanos()).expect("gap fits");
+        assert!(
+            stamp_b.saturating_sub(stamp_a) >= gap,
+            "B's stamp {stamp_b} is within {gap} ns of A's {stamp_a}: it belongs to the dropped \
+             initiation"
         );
     }
 }
