@@ -226,6 +226,31 @@ fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
     assert!(!unit.contains("/var/lib/infraternal"), "{unit}");
 }
 
+/// A system `server init` unit waits for the network-online target.
+#[test]
+fn a_generated_system_unit_waits_for_network_online() {
+    let machine = Machine::new("network-online");
+    let system = planned_unit(&machine.run(
+        &[
+            "--json",
+            "server",
+            "init",
+            "--system",
+            "--dry-run",
+            "--host-firewall-off",
+        ],
+        &[],
+    ));
+    assert!(
+        system.contains("After=network-online.target\nWants=network-online.target\n"),
+        "{system}"
+    );
+
+    let user = planned_unit(&machine.run(&["--json", "server", "init", "--dry-run"], &[]));
+    assert!(user.contains("After=network.target\n"), "{user}");
+    assert!(!user.contains("Wants=network-online.target"), "{user}");
+}
+
 /// A fresh per-user install with an empty `XDG_STATE_HOME` uses D395's
 /// `~/.local/state/infraternal`, and a missing bundled `web/` is not an error.
 #[test]
