@@ -23,7 +23,13 @@ struct Install {
 impl Install {
     /// Set up a database sentinel and generated-style unit.
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("mv-{}", uuid::Uuid::new_v4().simple()));
+        let scratch = if std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS").is_some() {
+            // The privileged suite gives us a trusted private mount at /run.
+            PathBuf::from("/run")
+        } else {
+            std::env::temp_dir()
+        };
+        let root = scratch.join(format!("mv-{}", uuid::Uuid::new_v4().simple()));
         let old = root.join("old");
         let new = root.join("new");
         let unit = root.join("test.service");
@@ -502,4 +508,46 @@ fn ready_retry_rejects_a_replaced_database() {
 
     assert!(fixture.apply(&fixture.new, &manager).is_err());
     assert_eq!(Install::data(&fixture.old), "original");
+}
+
+/// Copy preserves the top-level setgid bit and the original owner and group.
+#[test]
+fn review_j899_preserves_data_root_mode() {
+    let fixture = Install::new();
+    fs::set_permissions(&fixture.old, fs::Permissions::from_mode(0o2750)).unwrap();
+    let before = fixture.old.metadata().unwrap();
+    fixture.apply(&fixture.old, &Fake::default()).unwrap();
+    let after = fixture.new.metadata().unwrap();
+    assert_eq!(after.mode() & 0o7777, before.mode() & 0o7777);
+    assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+}
+
+/// Exercise the ready-journal checks in the privileged namespace filesystem.
+#[test]
+#[ignore = "Run in a disposable user namespace"]
+fn d395_revalidates_current_data_before_cleanup() {
+    review_j899_checks_destination_before_retiring_original();
+    review_j899_restarts_stopped_service_during_cleanup_retry();
+    ready_retry_rejects_a_replaced_database();
+}
+
+/// Exercise root metadata copying with a real xattr inside the privileged suite.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "Run in a disposable user namespace"]
+fn d395_preserves_root_attributes() {
+    use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
+    review_j899_preserves_data_root_mode();
+    let fixture = Install::new();
+    let name = "user.infraternal.test";
+    let value = b"D395 fixture attribute";
+    let old = File::open(&fixture.old).unwrap();
+    fsetxattr(&old, name, value, XattrFlags::empty()).unwrap();
+
+    fixture.apply(&fixture.old, &Fake::default()).unwrap();
+
+    let new = File::open(&fixture.new).unwrap();
+    let mut copied = [0; 64];
+    let size = fgetxattr(&new, name, copied.as_mut_slice()).unwrap();
+    assert_eq!(&copied[..size], value);
 }

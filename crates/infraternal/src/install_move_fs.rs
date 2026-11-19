@@ -279,6 +279,61 @@ fn preserve(file: &File, source: &Metadata) -> io::Result<()> {
     Ok(())
 }
 
+/// Apply the original data root's metadata once the private copy is complete.
+pub(super) fn preserve_root(source: &File, target: &File) -> io::Result<()> {
+    let metadata = source.metadata()?;
+    // The tree checks require both roots to belong to this effective user.
+    // Set the group before the mode, since chown can clear setgid.
+    preserve(target, &metadata)?;
+    #[cfg(target_os = "linux")]
+    copy_root_attributes(source, target)?;
+    if target.metadata()?.mode() & 0o7777 != metadata.mode() & 0o7777 {
+        return Err(invalid("copied root ACL changed the directory mode"));
+    }
+    target.sync_all()
+}
+
+/// Copy Linux xattrs by descriptor. POSIX access and default ACLs are xattrs.
+#[cfg(target_os = "linux")]
+fn copy_root_attributes(source: &File, target: &File) -> io::Result<()> {
+    use rustix::fs::{XattrFlags, fgetxattr, fgetxattr_query, fremovexattr, fsetxattr};
+
+    let attributes = root_attributes(source)?;
+    for name in root_attributes(target)? {
+        let is_acl = name.as_bytes().starts_with(b"system.posix_acl_");
+        if is_acl && !attributes.contains(&name) {
+            // The staging parent may carry a default ACL absent on the source.
+            fremovexattr(target, name.as_os_str())?;
+        }
+    }
+    for name in attributes {
+        let name = name.as_os_str();
+        let mut value = vec![0; fgetxattr_query(source, name)?];
+        let size = fgetxattr(source, name, value.as_mut_slice())?;
+        fsetxattr(target, name, &value[..size], XattrFlags::empty())?;
+    }
+    Ok(())
+}
+
+/// Read the attribute names the source filesystem exposes on a pinned root.
+#[cfg(target_os = "linux")]
+fn root_attributes(dir: &File) -> io::Result<Vec<OsString>> {
+    use rustix::fs::{flistxattr, flistxattr_query};
+
+    let size = match flistxattr_query(dir) {
+        Ok(size) => size,
+        Err(rustix::io::Errno::OPNOTSUPP) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut names = vec![0; size];
+    let size = flistxattr(dir, names.as_mut_slice())?;
+    Ok(names[..size]
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| OsStr::from_bytes(name).to_owned())
+        .collect())
+}
+
 /// Compare two pinned files from byte zero, in bounded chunks.
 trait Compare {
     /// Verify the copied bytes using the already-validated descriptors.

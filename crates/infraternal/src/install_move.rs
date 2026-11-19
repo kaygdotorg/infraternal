@@ -748,7 +748,7 @@ fn prepare_data(
             }
         }
     }
-    stage.sync_all()?;
+    disk::preserve_root(&source, &stage)?;
     if journal.target.is_some() {
         disk::exchange(work, stage_name, parent, target_name)?;
     } else {
