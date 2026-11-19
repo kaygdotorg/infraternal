@@ -11,7 +11,10 @@ use crate::restart_binary::fixture::{
 };
 use std::os::{
     fd::AsRawFd,
-    unix::{fs::PermissionsExt as _, process::CommandExt},
+    unix::{
+        fs::{DirBuilderExt as _, PermissionsExt as _},
+        process::CommandExt,
+    },
 };
 use tokio::net::UnixListener;
 
@@ -248,17 +251,16 @@ async fn rollback_request_sets_the_mesh_handoff_control_bit() {
     let previous = PathBuf::from("/verified/previous");
     let server = async move {
         let (mut peer, _) = listener.accept().await.unwrap();
-        let request = read_request(&mut peer).await.unwrap();
-        let received = match request {
-            ControlRequest::Restart {
-                binary,
-                reload,
-                rollback,
-            } => (binary, reload, rollback),
-            _ => panic!("rollback request decoded as a read-only query"),
+        let ControlRequest::Restart {
+            binary,
+            reload,
+            rollback,
+        } = read_request(&mut peer).await.unwrap()
+        else {
+            panic!("rollback request decoded as a read-only query");
         };
         peer.write_all(b"RESTARTING\n").await.unwrap();
-        received
+        (binary, reload, rollback)
     };
     let (received, sent) = tokio::time::timeout(HANG_BOUND, async {
         tokio::join!(server, request(directory.state(), Some(&previous), true))

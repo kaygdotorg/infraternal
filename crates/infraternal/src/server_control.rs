@@ -151,7 +151,7 @@ pub(crate) async fn send_database(
     .await?
 }
 
-/// Query only the socket peer that shares the service UID and owns its MainPID.
+/// Query only the socket peer that shares the service UID and owns its `MainPID`.
 #[cfg(target_os = "linux")]
 pub(crate) fn query_database(data: &Path, main_pid: u32) -> io::Result<Database> {
     use std::{
