@@ -64,7 +64,9 @@ pub trait Service {
     /// Enable the service after it has started and answered.
     fn enable(&self) -> io::Result<()>;
     /// Wait for the new server to answer against its database.
-    fn ready(&self, data: &File) -> io::Result<()>;
+    fn ready(&self, path: &Path, data: &File) -> io::Result<()>;
+    /// Confirm the current managed process still has the selected database open.
+    fn verify_database(&self, path: &Path, data: &File) -> io::Result<()>;
 }
 
 /// The fixed systemd program and the server endpoint to verify after starting.
@@ -117,37 +119,16 @@ impl Systemd {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
-    /// Verify the manager started a process that has the new database open.
+    /// Identify the process currently named by the service manager.
     #[cfg(target_os = "linux")]
-    fn verify_database(&self, data: &File) -> io::Result<()> {
+    fn main_pid(&self) -> io::Result<u32> {
         let output = self.systemctl(&["show", "-p", "MainPID", "--value", &self.service])?;
-        let pid = String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout)
             .trim()
-            .parse::<u32>();
-        let pid = pid
+            .parse::<u32>()
             .ok()
             .filter(|pid| output.status.success() && *pid != 0)
-            .ok_or_else(|| io::Error::other("could not identify moved service process"))?;
-        let database = disk::regular(data, OsStr::new("infraternal.sqlite"))?.metadata()?;
-        let descriptors = std::fs::read_dir(format!("/proc/{pid}/fd"))?;
-        for descriptor in descriptors {
-            if descriptor?
-                .path()
-                .metadata()
-                .is_ok_and(|open| open.dev() == database.dev() && open.ino() == database.ino())
-            {
-                return Ok(());
-            }
-        }
-        Err(io::Error::other(
-            "the running service has not opened the moved database",
-        ))
-    }
-
-    /// Real installs require Linux systemd and its process descriptor view.
-    #[cfg(not(target_os = "linux"))]
-    fn verify_database(&self, _data: &File) -> io::Result<()> {
-        Err(io::ErrorKind::Unsupported.into())
+            .ok_or_else(|| io::Error::other("could not identify moved service process"))
     }
 
     /// Connect to the configured local listener, substituting loopback for a wildcard.
@@ -237,12 +218,12 @@ impl Service for Systemd {
         self.checked(&["enable", "--now", &self.service])
     }
 
-    fn ready(&self, data: &File) -> io::Result<()> {
+    fn ready(&self, path: &Path, data: &File) -> io::Result<()> {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if self.probe().is_ok() && self.state()? == "active" {
-                return self.verify_database(data);
+                return self.verify_database(path, data);
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
@@ -253,6 +234,35 @@ impl Service for Systemd {
             // Relocation runs synchronously in init, outside the server runtime.
             std::thread::park_timeout(Duration::from_millis(100));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn verify_database(&self, path: &Path, data: &File) -> io::Result<()> {
+        use crate::server_control::{DATABASE_NAME, Database, query_database};
+
+        let database = disk::regular(data, OsStr::new(DATABASE_NAME))?;
+        let expected = Database::new(
+            std::path::absolute(path.join(DATABASE_NAME))?,
+            &database.metadata()?,
+        );
+        let pid = self.main_pid()?;
+        let reported = query_database(path, pid)?;
+        if reported != expected {
+            return Err(disk::invalid(
+                "the running service has not opened the moved database",
+            ));
+        }
+        if self.state()? != "active" || self.main_pid()? != pid {
+            return Err(disk::invalid(
+                "the moved service stopped or changed during verification",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn verify_database(&self, _path: &Path, _data: &File) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -603,7 +613,7 @@ fn apply_recorded(
                     service.reload()?;
                     service.start()?;
                 }
-                service.ready(&target)?;
+                service.ready(&journal.to, &target)?;
                 selected_target(&parent, target_name, &journal)?;
                 return Ok(());
             }
@@ -647,9 +657,9 @@ fn apply_recorded(
             let startup = service
                 .reload()
                 .and_then(|()| service.start())
-                .and_then(|()| service.ready(&target))
+                .and_then(|()| service.ready(&journal.to, &target))
                 .and_then(|()| service.enable())
-                .and_then(|()| service.ready(&target))
+                .and_then(|()| service.ready(&journal.to, &target))
                 .and_then(|()| selected_target(&parent, target_name, &journal).map(drop));
             if let Err(error) = startup {
                 // A service whose startup cannot be confirmed may have written
@@ -668,7 +678,7 @@ fn apply_recorded(
             save(&work, &journal)
         })();
         let result = prepare.and_then(|()| {
-            let outcome = finish(&parent, &old_parent, old_name, &journal)?;
+            let outcome = finish(&old_parent, old_name, &journal, service)?;
             complete(&journal, &outcome)?;
             remove_journal(&parent, &work_name, &work)?;
             Ok(outcome)
@@ -815,26 +825,30 @@ fn selected_target(parent: &File, name: &OsStr, journal: &Journal) -> io::Result
     Ok(target)
 }
 
-/// Once the new process answers, retire the original by its saved identity.
+/// Resolve the configured absolute path again, independent of staging handles.
+fn live_target(journal: &Journal) -> io::Result<File> {
+    let (parent, name) = disk::parent(&journal.to, false)?;
+    selected_target(&parent, name, journal)
+}
+
+/// Retire the saved source only after the current path and service agree.
 fn finish(
-    parent: &File,
     old_parent: &File,
     old_name: &OsStr,
     journal: &Journal,
+    service: &dyn Service,
 ) -> io::Result<Outcome> {
-    let target_name = journal
-        .to
-        .file_name()
-        .ok_or_else(|| disk::invalid("target lacks a name"))?;
-    let target = selected_target(parent, target_name, journal)?;
+    let mut leftover = None;
+    // The rename is recoverable: the journal already records the exact backup.
+    // Do not change the source while the configured destination is uncertain.
+    let target = live_target(journal)?;
     if journal.legacy_target
         && let Some(previous) = read_legacy_marker(&target)?
         && previous != journal.from
     {
         return Err(disk::invalid("legacy move marker changed"));
     }
-    let mut leftover = None;
-    if let Some(source) = journal.source {
+    let backup = if let Some(source) = journal.source {
         let (_, backup) = disk::parent(&journal.backup, false)?;
         let backup_id = optional_tree(old_parent, backup)?
             .as_ref()
@@ -848,19 +862,26 @@ fn finish(
             disk::rename_new(old_parent, old_name, old_parent, backup)?;
         }
         if optional_tree(old_parent, backup)?.is_some() {
-            disk::retire(
-                old_parent,
-                backup,
-                source,
-                journal.backup_action == Backup::Retain,
-            )?;
-            if journal.backup_action == Backup::Retain {
-                leftover = Some(journal.backup.clone());
-            }
+            Some((backup, source))
         } else if journal.backup_action == Backup::Retain {
             return Err(disk::invalid(
                 "original folder and its recorded backup are missing",
             ));
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let target = live_target(journal)?;
+    service.verify_database(&journal.to, &target)?;
+    // The configured parent may have changed while the manager or server replied.
+    let target = live_target(journal)?;
+    if let Some((backup, source)) = backup {
+        let keep = journal.backup_action == Backup::Retain;
+        disk::retire(old_parent, backup, source, keep)?;
+        if keep {
+            leftover = Some(journal.backup.clone());
         }
     }
     if journal.legacy_target && read_legacy_marker(&target)?.is_some() {

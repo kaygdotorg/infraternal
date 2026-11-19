@@ -154,7 +154,7 @@ impl Service for Fake {
         Ok(())
     }
 
-    fn ready(&self, _data: &File) -> io::Result<()> {
+    fn ready(&self, _path: &Path, _data: &File) -> io::Result<()> {
         self.calls.borrow_mut().push("ready");
         if self.fail_ready.get() {
             return Err(io::Error::other("server did not answer"));
@@ -165,6 +165,14 @@ impl Service for Fake {
         if self.stop_after_ready.replace(false) {
             self.stop()?;
             self.fail_ready.set(true);
+        }
+        Ok(())
+    }
+
+    /// Fail a fresh database confirmation after a simulated stop.
+    fn verify_database(&self, _path: &Path, _data: &File) -> io::Result<()> {
+        if !self.active()? || self.fail_ready.get() {
+            return Err(io::Error::other("moved server is no longer available"));
         }
         Ok(())
     }
@@ -600,7 +608,6 @@ fn ready_retry_rejects_a_replaced_database() {
 /// The per-user worker must identify its server with startup dump protection enabled.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "D395 round-three review regression"]
 fn review_j912_verifies_a_hardened_user_server() {
     use std::io::{BufRead, BufReader, Write as _};
     use std::process::Stdio;
@@ -611,22 +618,34 @@ fn review_j912_verifies_a_hardened_user_server() {
     let open_marker = "D395_DATABASE_OPEN";
     if let Some(path) = std::env::var_os(database_env) {
         crate::harden_startup().unwrap();
-        let database = File::open(path).unwrap();
-        writeln!(io::stdout(), "\n{open_marker}").unwrap();
-        io::stdout().flush().unwrap();
-        let mut line = String::new();
-        io::stdin().read_line(&mut line).unwrap();
+        let path = PathBuf::from(path);
+        let database = File::open(&path).unwrap();
+        let data = path.parent().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let socket = crate::server_control::Socket::bind(data).unwrap();
+            writeln!(io::stdout(), "\n{open_marker}").unwrap();
+            io::stdout().flush().unwrap();
+            let done = tokio::task::spawn_blocking(|| io::stdin().read_line(&mut String::new()));
+            tokio::select! {
+                result = crate::server_control::serve_database(socket, data) => {
+                    panic!("control listener stopped: {result:?}");
+                }
+                result = done => {
+                    result.unwrap().unwrap();
+                }
+            }
+        });
         assert!(database.metadata().unwrap().is_file());
         return;
     }
-    assert!(
-        !nix::unistd::Uid::effective().is_root(),
-        "this fixture needs the same privileges as a per-user cutover"
-    );
 
     let fixture = Install::new();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test_name, "--ignored", "--nocapture"])
+        .args(["--exact", test_name, "--nocapture"])
         .env(database_env, fixture.old.join("infraternal.sqlite"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -639,7 +658,10 @@ fn review_j912_verifies_a_hardened_user_server() {
     let systemctl = fixture.root.join("systemctl");
     fs::write(
         &systemctl,
-        format!("#!/bin/sh\nprintf '%s\\n' {}\n", child.id()),
+        format!(
+            "#!/bin/sh\ncase \"$4\" in\n ActiveState) echo active;;\n MainPID) echo {};;\nesac\n",
+            child.id()
+        ),
     )
     .unwrap();
     fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
@@ -651,10 +673,24 @@ fn review_j912_verifies_a_hardened_user_server() {
         tls: false,
     };
 
-    let verified = manager.verify_database(&File::open(&fixture.old).unwrap());
+    let data = File::open(&fixture.old).unwrap();
+    let wrong_peer = crate::server_control::query_database(&fixture.old, std::process::id());
+    let verified = manager.verify_database(&fixture.old, &data);
+    fs::rename(
+        fixture.old.join("infraternal.sqlite"),
+        fixture.old.join("previous.sqlite"),
+    )
+    .unwrap();
+    fs::write(fixture.old.join("infraternal.sqlite"), "replacement").unwrap();
+    let replaced = manager.verify_database(&fixture.old, &data);
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
     assert!(opened, "fixture never opened its database");
+    assert_eq!(
+        wrong_peer.unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(replaced.is_err(), "a replacement pathname was accepted");
     assert!(
         verified.is_ok(),
         "per-user cutover cannot verify its server: {verified:?}"
@@ -663,7 +699,6 @@ fn review_j912_verifies_a_hardened_user_server() {
 
 /// A moved parent can leave the pinned tree intact while replacing its live path.
 #[test]
-#[ignore = "D395 round-three review regression"]
 fn review_j906_preserves_original_when_destination_parent_moves() {
     let mut fixture = Install::new();
     let destination_parent = fixture.root.join("destination");
@@ -701,7 +736,6 @@ fn review_j906_preserves_original_when_destination_parent_moves() {
 
 /// A final health reply cannot authorize deletion after the server has stopped.
 #[test]
-#[ignore = "D395 round-three review regression"]
 fn review_j906_preserves_original_when_server_stops_after_health() {
     let (fixture, service, journal) = ready_with_original();
     service.stop_after_ready.set(true);

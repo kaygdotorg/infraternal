@@ -71,8 +71,33 @@ STUB
 done
 cat > "$S/health.py" <<'PY_PROOF'
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from socketserver import BaseRequestHandler, UnixStreamServer
+import json
+import os
+import struct
+from threading import Thread
 
-database = open("/var/lib/infraternal/infraternal.sqlite", "rb")
+path = Path("/var/lib/infraternal/infraternal.sqlite")
+database = path.open("rb")
+control = path.parent / "restart/control.sock"
+control.parent.mkdir(mode=0o700, exist_ok=True)
+control.unlink(missing_ok=True)
+
+class DatabaseControl(BaseRequestHandler):
+    """Answer the relocation query using the same descriptor as the health fixture."""
+
+    def handle(self):
+        with self.request.makefile("rb") as request:
+            if request.read(3) != b"\0\0\2":
+                return
+        info = os.fstat(database.fileno())
+        reply = json.dumps(dict(path=str(path), device=info.st_dev, inode=info.st_ino)).encode()
+        self.request.sendall(struct.pack("!H", len(reply)) + reply)
+
+endpoint = UnixStreamServer(str(control), DatabaseControl)
+control.chmod(0o600)
+Thread(target=endpoint.serve_forever, daemon=True).start()
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -185,8 +210,14 @@ check MOVE_POLICY_MODE 600 "$(stat -c %a $D/host-firewall-server.json)"
 check MOVE_NO_LEFTOVERS 0 "$(ls -A $D | grep -c '^\.infraternal-\(incoming\|move\)')"
 check MOVE_FIREWALL_UNIT 1 "$(ls /etc/systemd/system | grep -c '^infraternal-firewall\.service$')"
 check MOVE_NO_PATH_SYSTEMCTL 0 "$(evil)"
+server=infraternal-server.service
+worker=infraternal-d395-$server
+active="show -p ActiveState --value $server"
+pid="show -p MainPID --value $server"
+verify="$pid|$active|$pid"
+ready="$active|$verify"
 check MOVE_SYSTEMCTL_ORDER \
-    "enable infraternal-d395-infraternal-server.service|start infraternal-d395-infraternal-server.service|show -p ActiveState --value infraternal-server.service|stop infraternal-server.service|show -p ActiveState --value infraternal-server.service|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|start infraternal-server.service|show -p ActiveState --value infraternal-server.service|show -p MainPID --value infraternal-server.service|enable --now infraternal-server.service|show -p ActiveState --value infraternal-server.service|show -p MainPID --value infraternal-server.service|disable infraternal-d395-infraternal-server.service|show -p ActiveState --value infraternal-server.service|show -p MainPID --value infraternal-server.service" \
+    "enable $worker|start $worker|$active|stop $server|$active|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|start $server|$ready|enable --now $server|$ready|$verify|disable $worker|$ready" \
     "$(paste -sd'|' "$S/systemctl.log")"
 
 echo "### 4. re-running again is a no-op for the folder and the unit"

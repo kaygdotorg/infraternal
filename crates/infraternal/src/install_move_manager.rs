@@ -341,7 +341,7 @@ fn confirm_receipt(request: &Request, target: Identity, database: Identity) -> i
             "cutover receipt no longer matches destination",
         ));
     }
-    request.service.ready(&data)
+    request.service.ready(&request.relocation.to, &data)
 }
 
 /// Check the durable link from the server to its independently ordered worker.

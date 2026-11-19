@@ -31,6 +31,12 @@ mod restart;
 mod restart_binary;
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_image;
+/// Owns the server's private, credential-checked control endpoint.
+#[cfg(all(
+    feature = "plugin-server",
+    any(feature = "remote", target_os = "linux")
+))]
+mod server_control;
 mod shim_cli;
 #[cfg(feature = "remote")]
 mod sign_in;

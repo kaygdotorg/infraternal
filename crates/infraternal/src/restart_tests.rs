@@ -9,7 +9,11 @@ use crate::restart_binary::fixture::{
     ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all,
     stripped_test_image,
 };
-use std::os::{fd::AsRawFd, unix::process::CommandExt};
+use std::os::{
+    fd::AsRawFd,
+    unix::{fs::PermissionsExt as _, process::CommandExt},
+};
+use tokio::net::UnixListener;
 
 /// Copy one executable into a private fixture path without inheriting a writable mode.
 fn copy_private_image(source: &Path, target: &Path) {
@@ -91,11 +95,14 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
         0o700
     );
     assert_eq!(
-        std::fs::metadata(&control.path).unwrap().mode() & 0o777,
+        std::fs::metadata(directory.state().join("restart/control.sock"))
+            .unwrap()
+            .mode()
+            & 0o777,
         0o600
     );
     assert!(Control::start(directory.state()).is_err());
-    assert!(control.path.exists());
+    assert!(directory.state().join("restart/control.sock").exists());
     drop(control);
     assert!(!directory.state().join("restart/control.sock").exists());
 }
@@ -248,7 +255,7 @@ async fn rollback_request_sets_the_mesh_handoff_control_bit() {
                 reload,
                 rollback,
             } => (binary, reload, rollback),
-            ControlRequest::Status => panic!("rollback request decoded as status"),
+            _ => panic!("rollback request decoded as a read-only query"),
         };
         peer.write_all(b"RESTARTING\n").await.unwrap();
         received
@@ -503,7 +510,7 @@ async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
     }
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();
-    let path = control.path.clone();
+    let path = directory.state().join("restart/control.sock");
     let receive = async {
         let result =
             tokio::time::timeout(Duration::from_millis(200), control.requested(None)).await;
