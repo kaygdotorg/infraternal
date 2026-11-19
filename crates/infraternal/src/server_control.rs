@@ -139,7 +139,11 @@ pub(crate) async fn send_database(
 ) -> io::Result<()> {
     use tokio::io::AsyncWriteExt;
 
-    let payload = serde_json::to_vec(&open_database(data)?)?;
+    // A running server can own many unrelated descriptors. Walk them on the
+    // blocking pool so the private query does not stall the serving future.
+    let data = data.to_owned();
+    let database = tokio::task::spawn_blocking(move || open_database(&data)).await??;
+    let payload = serde_json::to_vec(&database)?;
     if payload.len() > MAX_DATABASE_REPLY {
         return Err(io::ErrorKind::InvalidData.into());
     }
