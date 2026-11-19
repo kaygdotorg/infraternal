@@ -312,6 +312,57 @@ fn shared_agent_base_is_refused_without_changing_modes() {
     assert_eq!(Install::data(&fixture.old), "original");
 }
 
+/// A shared source needs the same refusal as a shared destination before stopping either role.
+#[test]
+#[ignore = "D395 round-three review regression"]
+fn review_j912_refuses_a_shared_source_during_planning() {
+    let fixture = Install::new();
+    let agent_root = fixture.old.join("agent");
+    fs::create_dir(&agent_root).unwrap();
+    fs::write(agent_root.join("state"), "agent state").unwrap();
+
+    let error = plan(&fixture.old, &fixture.new, &fixture.unit).unwrap_err();
+    assert!(
+        error.to_string().contains("shared install base"),
+        "{error}"
+    );
+    assert_eq!(Install::data(&fixture.old), "original");
+    assert_eq!(
+        fs::read_to_string(agent_root.join("state")).unwrap(),
+        "agent state"
+    );
+    assert!(!fixture.new.exists());
+}
+
+/// Planning twice on the standard path leaves the unit and data entries intact.
+#[test]
+fn standard_data_path_needs_no_move() {
+    let fixture = Install::new();
+    fs::rename(&fixture.old, &fixture.new).unwrap();
+    fs::write(&fixture.unit, unit_text(&fixture.new)).unwrap();
+    let database = fixture.new.join("infraternal.sqlite");
+    let paths = [&fixture.new, &database, &fixture.unit];
+    let before = paths.map(|path| path.metadata().unwrap());
+
+    for _ in 0..2 {
+        assert!(plan(&fixture.new, &fixture.new, &fixture.unit).unwrap().is_none());
+    }
+
+    for (path, previous) in paths.into_iter().zip(before) {
+        let current = path.metadata().unwrap();
+        assert_eq!(
+            (current.ino(), current.uid(), current.gid(), current.mode()),
+            (previous.ino(), previous.uid(), previous.gid(), previous.mode())
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(&fixture.unit).unwrap(),
+        unit_text(&fixture.new)
+    );
+    assert_eq!(Install::data(&fixture.new), "original");
+    assert!(!fixture.old.exists());
+}
+
 /// The requested command must use the installed port, even for forced init.
 #[test]
 fn move_refuses_a_different_listen_address() {
