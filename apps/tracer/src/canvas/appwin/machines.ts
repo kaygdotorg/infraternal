@@ -54,7 +54,11 @@ export class Machines {
 
   /** Asks machines over `connection`; `hosts` is the canvas's current host list. */
   constructor(private readonly connection: StreamConnection, private readonly hosts: () => HostEntry[]) {
-    this.icons = new AppIcons((actionId, input) => connection.call(actionId, input));
+    this.icons = new AppIcons((actionId, input) => {
+      // A socket that is between handshakes cannot send this optional fetch.
+      if (!connection.isWelcomed) return Promise.reject(new Error("desktop connection unavailable"));
+      return connection.call(actionId, input);
+    });
     this.offIcons = this.icons.onChange(() => this.emit());
   }
 

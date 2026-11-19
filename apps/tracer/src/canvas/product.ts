@@ -39,7 +39,6 @@ import { connectionTransport } from "./mesh/transport";
 import { offerMeshView } from "./mesh/offer";
 import { createLiveSessions, type LiveSessions } from "./sessions/live";
 import { createAppWindowsAdapter } from "./appwin/adapter";
-import { appWindowsWanted } from "./appwin/flag";
 import { createStartupHints } from "./sessions/startup-hints";
 import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
@@ -132,8 +131,6 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       takeover.paused(paused);
     },
     ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
-    // Declared in the Hello of each socket, only while app windows are wanted (D208; off by default).
-    desktop: appWindowsWanted,
     ...(options.onRecoveryPending ? { onRecoveryPending: options.onRecoveryPending } : {}),
     ...(options.onRecoveryCompleted ? { onRecoveryCompleted: options.onRecoveryCompleted } : {}),
     onConnectionChange: (connected) => {
@@ -317,8 +314,14 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       });
     },
   });
+  // Desktop streams and their icon calls have their own lazy socket. A video
+  // frame already queued in TCP cannot hold a terminal reply behind it.
+  const appWindows = createAppWindowsAdapter(connection, () => new MuxConnection({
+    desktop: () => true,
+    ...(options.sessionIncarnation ? { sessionIncarnation: options.sessionIncarnation } : {}),
+  }));
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, ...(lookBridge() ? { look: lookBridge()! } : {}), settings: { sections: [], ...productRows, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void loadAccount().then((session) => session.model.refresh?.()).catch(() => undefined); } } : {}) }, mesh, docs: createRowsDocs(() => docs), hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows: createAppWindowsAdapter(connection), startupHints },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, ...(lookBridge() ? { look: lookBridge()! } : {}), settings: { sections: [], ...productRows, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void loadAccount().then((session) => session.model.refresh?.()).catch(() => undefined); } } : {}) }, mesh, docs: createRowsDocs(() => docs), hostRemoval: removal, addHost: () => addHost.open(), authority, appWindows, startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -470,6 +473,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       offMeshView();
       addHost.dispose(); docs.dispose();
       canvas.dispose();
+      appWindows.dispose();
       mesh.dispose();
       inventory.dispose();
       sessions.dispose();

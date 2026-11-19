@@ -60,6 +60,10 @@ export async function checkedIcon(reply: Record<string, unknown>, hash: string):
 export class AppIcons {
   private readonly urls = new Map<string, string>();
   private readonly loading = new Map<string, Promise<string | undefined>>();
+  /** The previous fetch must settle before more icon bytes enter the connection. */
+  private tail: Promise<unknown> = Promise.resolve();
+  /** Queued loads are dropped and late replies cannot create URLs after disposal. */
+  private disposed = false;
   /** Hashes that failed once: they are not asked for again while the page lives. */
   private readonly failed = new Set<string>();
   private readonly listeners = new Set<() => void>();
@@ -83,12 +87,16 @@ export class AppIcons {
   load(hostId: string, hash: string): Promise<string | undefined> {
     const here = this.url(hash);
     if (here !== undefined) return Promise.resolve(here);
-    if (!isIconHash(hash) || this.failed.has(hash)) return Promise.resolve(undefined);
+    if (this.disposed || !isIconHash(hash) || this.failed.has(hash)) return Promise.resolve(undefined);
     const running = this.loading.get(hash);
     if (running) return running;
-    const job = this.call("desktop.icon", { host_id: hostId, sha256: hash })
-      .then((reply) => checkedIcon(reply, hash))
+    const job = this.tail.then(async () => {
+      if (this.disposed) return undefined;
+      const reply = await this.call("desktop.icon", { host_id: hostId, sha256: hash });
+      return checkedIcon(reply, hash);
+    })
       .then((bytes) => {
+        if (this.disposed) return undefined;
         if (!bytes) { this.failed.add(hash); return undefined; }
         const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
         this.urls.set(hash, url);
@@ -98,11 +106,13 @@ export class AppIcons {
       }, () => undefined)
       .finally(() => { this.loading.delete(hash); });
     this.loading.set(hash, job);
+    this.tail = job;
     return job;
   }
 
   /** Lets go of every icon (and its blob URL). */
   dispose(): void {
+    this.disposed = true;
     for (const url of this.urls.values()) URL.revokeObjectURL(url);
     this.urls.clear();
     this.listeners.clear();

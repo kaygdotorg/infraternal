@@ -11,7 +11,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page, type WebSocket } from "playwright/test";
+import { decodeMuxedFrame } from "../../../packages/protocol/src/codec";
 import { requireFixtureH264 } from "./appwin/codec-support";
 
 const enabled = process.env.TRACER_DOUBLE_APPWIN === "1";
@@ -83,12 +84,77 @@ test("the Settings switch is offered because the server reports the capability, 
   await expect(toggle).toBeVisible();
   await expect(toggle).not.toBeChecked();
   expect(await page.evaluate(() => localStorage.getItem("infraternal.app-windows"))).not.toBe("1");
-  // Turning it on stores the choice for this browser and reconnects once, so the next Hello declares the capability. (The mock
-  // preview reloads itself when its socket drops, which is why the reconnect itself is checked by the picker tests, which load
-  // the page with the preview door instead.)
+  // Turning it on stores the choice and lets the desktop socket declare the
+  // capability when it opens.
   await toggle.click();
   await expect(toggle).toBeChecked();
   expect(await page.evaluate(() => localStorage.getItem("infraternal.app-windows"))).toBe("1");
+});
+
+/** Observe terminal echo on the product canvas through the next browser paint opportunity. */
+async function echoPaintSamples(page: Page, keys: string): Promise<number[]> {
+  const terminal = page.locator('.ui-window[data-kind="terminal"]').first();
+  await terminal.locator("canvas").first().click();
+  const samples: number[] = [];
+  for (const [index, key] of [...keys].entries()) {
+    const echo = keys.slice(0, index + 1);
+    const painted = page.evaluate(({ echo, key }) => new Promise<number>((resolve, reject) => {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => { controller.abort(); reject(new Error("terminal echo did not paint")); }, 5000);
+      window.addEventListener("keydown", (event) => {
+        if (event.key !== key) return;
+        const start = event.timeStamp;
+        controller.abort();
+        const sample = (): void => {
+          if (!window.__tracerProductTestDouble?.screenText().includes(echo)) {
+            requestAnimationFrame(sample);
+            return;
+          }
+          requestAnimationFrame((at) => { clearTimeout(timer); resolve(at - start); });
+        };
+        requestAnimationFrame(sample);
+      }, { capture: true, signal: controller.signal });
+    }), { echo, key });
+    // Round-trip through the page so its key listener is installed before input.
+    await page.evaluate(() => undefined);
+    await page.keyboard.press(key);
+    samples.push(await painted);
+  }
+  return samples;
+}
+
+/** The page must route video, icons and terminal data over separate sockets. */
+test("terminal input and echo stay on their own socket while app video streams", async ({ page }) => {
+  test.setTimeout(120_000);
+  const terminals = new Set<WebSocket>();
+  const icons = new Set<WebSocket>();
+  const video = new Map<WebSocket, number>();
+  page.on("websocket", (socket) => {
+    socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") return;
+      const { frame } = decodeMuxedFrame(payload);
+      if (frame.type === "Input") terminals.add(socket);
+      if (frame.type === "Call" && frame.actionId === "desktop.icon") icons.add(socket);
+    });
+    socket.on("framereceived", ({ payload }) => {
+      if (typeof payload === "string") return;
+      const { frame } = decodeMuxedFrame(payload);
+      if (frame.type === "Desktop" && frame.message.kind === "video") video.set(socket, (video.get(socket) ?? 0) + 1);
+    });
+  });
+  await openCanvas(page);
+  await expect.poll(() => page.evaluate(() => window.__tracerProductTestDouble?.isConnected())).toBe(true);
+  const idle = await echoPaintSamples(page, "qqrstuvwxyzzqtwvuyxrwszt");
+  await openEditor(page);
+  expect(video.size).toBe(1);
+  const [desktop, before] = [...video.entries()][0]!;
+  // Type into the terminal while the app card is visible but idle.
+  const loaded = await echoPaintSamples(page, "jjklmnpqqrsxtpqlnjrxxlmn");
+  expect(video.get(desktop)!).toBeGreaterThan(before);
+  expect(icons.has(desktop)).toBe(true);
+  expect(terminals.size).toBe(1);
+  expect(terminals.has(desktop)).toBe(false);
+  console.log(`APPWIN_TERMINAL_PAINT ${JSON.stringify({ idle, loaded, framesWhileTyping: video.get(desktop)! - before })}`);
 });
 
 test("the picker lists every machine's shell, screen and windows, narrows with one field and follows the machine live", async ({ page }) => {

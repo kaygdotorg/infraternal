@@ -48,3 +48,34 @@ test("one hash is fetched once, shared by concurrent loads, and a bad answer is 
   expect(calls.length).toBe(2);
   icons.dispose();
 });
+
+/** A held transfer keeps other icon calls off the socket, including after disposal. */
+test("icon transfers run one at a time and disposal skips queued work", async () => {
+  const first = await hashOf(PNG);
+  const second = "1".repeat(64);
+  const third = "2".repeat(64);
+  const calls: unknown[] = [];
+  let releaseFirst!: (reply: Record<string, unknown>) => void;
+  const firstReply = new Promise<Record<string, unknown>>((resolve) => { releaseFirst = resolve; });
+  let enterSecond!: () => void;
+  const enteredSecond = new Promise<void>((resolve) => { enterSecond = resolve; });
+  const icons = new AppIcons(async (_, input) => {
+    calls.push(input.sha256);
+    if (input.sha256 === first) return firstReply;
+    enterSecond();
+    return { png: "" };
+  });
+  const a = icons.load("mac", first);
+  const b = icons.load("mac", second);
+  const c = icons.load("mac", third);
+  await Promise.resolve();
+  expect(calls).toEqual([first]);
+  releaseFirst({ png: base64(PNG) });
+  expect(await a).toBeDefined();
+  await enteredSecond;
+  expect(calls).toEqual([first, second]);
+  icons.dispose();
+  expect(await b).toBeUndefined();
+  expect(await c).toBeUndefined();
+  expect(calls).toEqual([first, second]);
+});
