@@ -8,6 +8,13 @@
 //! It lives in its own file only to keep `node.rs` under the repository's size limit; it is part
 //! of the node module and uses its route state directly.
 
+use crate::{
+    mesh_mtu::EndpointProbe,
+    policy::model::{Addresses, PublicKey},
+    wireguard::{ActiveLink, RouteWake},
+};
+use std::net::SocketAddr;
+
 use super::{
     Arc, AsFd, BTreeSet, Device, IpAddr, JoinHandle, Mutex, PeerRouteState, Shutdown, UnixStream,
     io, lock_route_state, thread,
@@ -91,10 +98,10 @@ impl RouteRepairWorker {
                         wait_for_route_recheck(cancel_read.as_fd(), deadline)
                     };
                     let address = match wake {
-                        Ok(crate::wireguard::RouteWake::Deleted(address)) => Some(address),
-                        Ok(crate::wireguard::RouteWake::Cancelled) => break,
-                        Ok(crate::wireguard::RouteWake::Reconcile) => None,
-                        Err(error) => {
+                        Ok(RouteWake::Deleted(address)) => Some(address),
+                        Ok(RouteWake::Cancelled) => break,
+                        Ok(RouteWake::Reconcile | RouteWake::Overflow) => None,
+                        Err(ref error) => {
                             tracing::warn!(error = %error, "mesh route notifications unavailable; periodic recovery remains active");
                             // A broken listener cannot spin or permanently disable reconciliation.
                             monitor = None;
@@ -102,9 +109,7 @@ impl RouteRepairWorker {
                             continue;
                         }
                     };
-                    // Keep membership and relay budgets stable through the kernel writes.
-                    let mut route_state = lock_route_state(&state);
-                    if let Err(error) = repair_accepted_routes(&link, &mut route_state, address) {
+                    if let Err(error) = repair_accepted_routes(&link, &state, address) {
                         tracing::warn!(error = %error, "mesh route repair skipped or failed; retrying on the next inventory check");
                     }
                     #[cfg(test)]
@@ -113,7 +118,9 @@ impl RouteRepairWorker {
                         // Path-MTU exceptions the kernel caches from ICMP are never announced;
                         // the next refresh after each periodic check re-derives every budget, so
                         // they are picked up within one interval (#489 J552 P2-2).
-                        worker_underlay.changed();
+                        if matches!(wake, Ok(RouteWake::Reconcile)) {
+                            worker_underlay.changed();
+                        }
                         deadline = std::time::Instant::now() + ROUTE_RECHECK_INTERVAL;
                         if monitor.is_none() {
                             monitor = Device::route_monitor(
@@ -185,87 +192,141 @@ fn wait_for_route_recheck(
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return Ok(crate::wireguard::RouteWake::Reconcile);
+            return Ok(RouteWake::Reconcile);
         }
         let mut descriptors = [PollFd::new(cancel, PollFlags::POLLIN)];
         match poll(
             &mut descriptors,
             PollTimeout::try_from(remaining).map_err(io::Error::other)?,
         ) {
-            Ok(0) => return Ok(crate::wireguard::RouteWake::Reconcile),
-            Ok(_) => return Ok(crate::wireguard::RouteWake::Cancelled),
+            Ok(0) => return Ok(RouteWake::Reconcile),
+            Ok(_) => return Ok(RouteWake::Cancelled),
             Err(nix::errno::Errno::EINTR) => {}
             Err(error) => return Err(error.into()),
         }
     }
 }
 
+/// A missing route's peer and the inputs used to derive its repair budget.
+struct RepairTarget {
+    /// Identity whose accepted membership is rechecked before every write.
+    key: PublicKey,
+    /// Both destinations must still belong to the accepted peer when it is repaired.
+    addresses: Addresses,
+    /// Configured endpoint used if no relay budget was active when the target was collected.
+    endpoint: Option<SocketAddr>,
+    /// Relay budget observed before looking up direct paths.
+    relay_mtu: Option<u16>,
+}
+
 /// Reconcile one deletion or the complete accepted inventory without replacing foreign routes.
-/// The caller holds the route-state lock; a full check dumps once and adds only missing routes.
+/// The inventory dump and normal path lookups run unlocked. Only the final exclusive addition
+/// and its bookkeeping need to hold the route-state lock.
 pub(super) fn repair_accepted_routes(
-    link: &crate::wireguard::ActiveLink,
-    state: &mut PeerRouteState,
+    link: &ActiveLink,
+    state: &Mutex<PeerRouteState>,
     deleted: Option<IpAddr>,
 ) -> io::Result<()> {
-    Device::verify_repair_link(link)?;
     let missing = if let Some(address) = deleted {
         BTreeSet::from([address])
     } else {
-        let expected = state
+        let addresses: Vec<_> = lock_route_state(state)
             .peers
             .values()
-            .flat_map(|peer| {
-                [
-                    IpAddr::V4(peer.addresses.ipv4),
-                    IpAddr::V6(peer.addresses.ipv6),
-                ]
-            })
+            .flat_map(|peer| route_addresses(peer.addresses))
             .collect();
-        Device::missing_peer_routes(link, &expected)?
+        Device::missing_peer_routes(link, addresses.into_iter().collect())?
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let targets: Vec<_> = {
+        let accepted = lock_route_state(state);
+        accepted
+            .peers
+            .values()
+            .filter(|peer| {
+                route_addresses(peer.addresses)
+                    .iter()
+                    .any(|address| missing.contains(address))
+            })
+            .map(|peer| RepairTarget {
+                key: peer.key,
+                addresses: peer.addresses,
+                endpoint: peer.endpoint,
+                relay_mtu: accepted.overrides.get(&peer.key).copied(),
+            })
+            .collect()
     };
     let mut first_error = None;
-    let mut repaired = BTreeSet::new();
-    // Budgets are derived only for peers with a missing route, through one probe for the whole
-    // pass. Deriving one for every installed peer cost a socket and two route-netlink requests
-    // per peer on every inventory check, under the route-state lock, even with nothing missing:
-    // 37-107 s at 4,096 peers on a starved worker thread (#483 J780).
-    let mut probe = crate::mesh_mtu::EndpointProbe::default();
-    for peer in state.peers.values() {
-        let addresses = [
-            IpAddr::V4(peer.addresses.ipv4),
-            IpAddr::V6(peer.addresses.ipv6),
-        ];
-        if !addresses.iter().any(|address| missing.contains(address)) {
+    let mut probe = EndpointProbe::default();
+    for target in targets {
+        if let Err(error) = repair_target(link, state, &missing, target, &mut probe) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Convert the peer's addresses into the destinations this worker can repair.
+fn route_addresses(addresses: Addresses) -> [IpAddr; 2] {
+    [IpAddr::V4(addresses.ipv4), IpAddr::V6(addresses.ipv6)]
+}
+
+/// Derive a missing peer's budget without blocking a refresh, then check the latest accepted
+/// state while adding its routes. A configuration change can retire the peer or replace its
+/// budget during the lookup. The rare case of a newly configured direct endpoint needs a fresh
+/// lookup while committing so repair cannot install a budget for the old path.
+fn repair_target(
+    link: &ActiveLink,
+    state: &Mutex<PeerRouteState>,
+    missing: &BTreeSet<IpAddr>,
+    target: RepairTarget,
+    probe: &mut EndpointProbe,
+) -> io::Result<()> {
+    let direct_mtu = target
+        .relay_mtu
+        .is_none()
+        .then(|| probe.mesh_mtu(target.endpoint));
+    let mut accepted = lock_route_state(state);
+    let Some(peer) = accepted.peers.get(&target.key) else {
+        return Ok(());
+    };
+    if peer.addresses != target.addresses {
+        return Ok(());
+    }
+    let mtu = accepted
+        .overrides
+        .get(&target.key)
+        .copied()
+        .unwrap_or_else(|| {
+            if let Some(mtu) = direct_mtu
+                && peer.endpoint == target.endpoint
+            {
+                return mtu;
+            }
+            EndpointProbe::default().mesh_mtu(peer.endpoint)
+        });
+    let mut first_error = None;
+    let mut changed = false;
+    for address in route_addresses(peer.addresses) {
+        if !missing.contains(&address) {
             continue;
         }
-        let mtu = state
-            .overrides
-            .get(&peer.key)
-            .copied()
-            .unwrap_or_else(|| probe.mesh_mtu(peer.endpoint));
-        for address in addresses {
-            if !missing.contains(&address) {
-                continue;
-            }
-            // A re-added route has the configured budget, and a failed add leaves the route
-            // unknown: the next live refresh rewrites either. A route that turned out to be
-            // there already (`Ok(false)`) still has the budget we wrote, so it is left alone:
-            // forgetting it made one inventory check rewrite every peer (#483 J780).
-            match Device::repair_peer_route(link, peer, address, mtu) {
-                Ok(false) => {}
-                Ok(true) => {
-                    repaired.insert(peer.key);
-                }
-                Err(error) => {
-                    tracing::warn!(%address, error = %error, "mesh peer route repair failed");
-                    repaired.insert(peer.key);
-                    first_error.get_or_insert(error);
-                }
+        // EEXIST leaves the written budget alone. A real addition or failed write makes the
+        // next live refresh recheck this peer's budget, including its authenticated endpoint.
+        match Device::repair_peer_route(link, peer, address, mtu) {
+            Ok(written) => changed |= written,
+            Err(error) => {
+                tracing::warn!(%address, error = %error, "mesh peer route repair failed");
+                changed = true;
+                first_error.get_or_insert(error);
             }
         }
     }
-    for key in &repaired {
-        state.forget_written_for(*key);
+    if changed {
+        accepted.forget_written_for(target.key);
     }
     first_error.map_or(Ok(()), Err)
 }

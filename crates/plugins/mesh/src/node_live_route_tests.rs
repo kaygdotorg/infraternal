@@ -562,6 +562,11 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
         median.as_secs_f64() * 4e3,
     );
     worker.stop();
+    eprintln!(
+        "METRIC j552_route_repair passes={} overflow_recoveries={}",
+        ROUTE_REPAIR_PASSES.load(std::sync::atomic::Ordering::Acquire),
+        crate::wireguard::OVERFLOW_RECOVERIES.load(std::sync::atomic::Ordering::Acquire)
+    );
 }
 
 /// J609 review (#489): a policy-routing rule change moves a peer endpoint's underlay path, and
@@ -1103,15 +1108,14 @@ fn repair_of_a_present_route_keeps_its_budget() {
         1
     );
     {
-        let mut route_state = lock_route_state(&state);
         for address in [
             IpAddr::V4(peer.addresses.ipv4),
             IpAddr::V6(peer.addresses.ipv6),
         ] {
-            repair_accepted_routes(&link, &mut route_state, Some(address))
+            repair_accepted_routes(&link, &state, Some(address))
                 .expect("a present route is not an error");
         }
-        assert_eq!(route_state.written.get(&key), Some(&1408));
+        assert_eq!(lock_route_state(&state).written.get(&key), Some(&1408));
     }
     assert_eq!(
         update_live_peer_endpoints(&state, &refresh).expect("steady"),
@@ -1123,7 +1127,7 @@ fn repair_of_a_present_route_keeps_its_budget() {
 /// J780 (#483): a full inventory check looks an underlay up only for a peer whose route is
 /// missing.
 ///
-/// The check runs every 30 s and after every notification overflow, under the route-state lock.
+/// The check runs every 30 s and after netlink notification loss.
 /// It used to derive a budget for every installed peer first (a socket and two route-netlink
 /// requests each), so at 4,096 peers on a starved thread it held the lock for 37-107 s with
 /// nothing to repair. With nothing missing it now looks nothing up; with one route missing it
@@ -1148,7 +1152,7 @@ fn a_full_check_looks_up_only_peers_with_missing_routes() {
     );
     let full_check = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
-        repair_accepted_routes(&link, &mut lock_route_state(&state), None).expect("full check");
+        repair_accepted_routes(&link, &state, None).expect("full check");
         ROUTE_LOOKUPS.with(std::cell::Cell::get)
     };
     assert_eq!(
@@ -1168,6 +1172,35 @@ fn a_full_check_looks_up_only_peers_with_missing_routes() {
         "the missing route is back"
     );
     assert_eq!(full_check(), 0);
+}
+
+/// A relay can change its budget during inventory repair's direct-path lookup. The lookup
+/// must leave route state available and the exclusive addition must use the new relay budget.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn repair_lookup_leaves_route_state_available_and_rechecks_the_relay() {
+    use crate::mesh_mtu::BEFORE_ROUTE_LOOKUP;
+
+    let (peers, _) = review_scale_mesh(1);
+    let peer = &peers[0];
+    let key = peer.key;
+    let link = Device::active_link()
+        .expect("read the mesh link")
+        .expect("the marked TUN holds the shared name");
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(&peers);
+    let callback_state = Arc::clone(&state);
+    BEFORE_ROUTE_LOOKUP.set(Some(Box::new(move || {
+        let mut accepted = callback_state
+            .try_lock()
+            .expect("repair must release route state before a path lookup");
+        accepted.overrides.insert(key, 1152);
+    })));
+    repair_accepted_routes(&link, &state, None).expect("repair the missing routes");
+    assert!(BEFORE_ROUTE_LOOKUP.take().is_none(), "the checkpoint ran");
+    let destination = format!("{}/32", peer.addresses.ipv4);
+    let repaired = review_route_command(&["route", "show", "exact", &destination]);
+    assert!(repaired.contains("mtu 1152"), "{repaired}");
 }
 
 /// #525: the route listener survives a burst of announcements that overflows its socket.
@@ -1214,13 +1247,15 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
         .collect();
     let routes: Vec<_> = peers.iter().map(|peer| (peer, 1408_u16)).collect();
     Device::replace_peer_routes_on(&link, &routes).expect("write the route burst");
+    let deleted = format!("{}/32", peers[0].addresses.ipv4);
+    review_route_command(&["route", "del", &deleted, "dev", "infraternal0"]);
     let (cancel_read, _cancel) = UnixStream::pair().expect("cancel stream");
     let wake = listener.wait_for_deleted_peer_route(
         cancel_read.as_fd(),
         std::time::Instant::now() + std::time::Duration::from_secs(5),
     );
     assert!(
-        matches!(wake, Ok(crate::wireguard::RouteWake::Reconcile)),
+        matches!(wake, Ok(crate::wireguard::RouteWake::Overflow)),
         "an overflow asks for an inventory check: {:?}",
         wake.as_ref().map(|_| ()).map_err(ToString::to_string)
     );
@@ -1232,5 +1267,12 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
         underlay.generation(),
         before,
         "the overflow moved the watch"
+    );
+    let state = Mutex::new(PeerRouteState::default());
+    lock_route_state(&state).set_peers(&peers[..1]);
+    repair_accepted_routes(&link, &state, None).expect("reconcile after overflow");
+    assert!(
+        review_route_command(&["route", "show", "exact", &deleted]).contains("proto 250"),
+        "the inventory pass must recover the deletion lost in the overflow"
     );
 }

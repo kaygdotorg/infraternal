@@ -17,6 +17,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
+    time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
@@ -842,16 +843,15 @@ impl Device {
     }
 
     /// Find accepted destinations missing from the actual kernel route table on this proven link.
-    /// The returned set is bounded by `expected` (two addresses per accepted peer); streaming the
+    /// The returned set is bounded by the input (two addresses per accepted peer); streaming the
     /// host dump avoids retaining unrelated routes. Allowed IPs are not evidence of a route.
     /// # Errors
     /// Refuses changed ownership, malformed route replies, and failed kernel dumps.
     pub(crate) fn missing_peer_routes(
         link: &ActiveLink,
-        expected: &BTreeSet<IpAddr>,
+        mut missing: BTreeSet<IpAddr>,
     ) -> io::Result<BTreeSet<IpAddr>> {
         Self::verify_repair_link(link)?;
-        let mut missing = expected.clone();
         Socket::open(SockProtocol::NetlinkRoute)?.visit(26, 0x300, &[0; 12], |reply| {
             if let Some(address) = mesh_peer_route_destination(reply, link.ifindex)? {
                 missing.remove(&address);
@@ -1133,6 +1133,8 @@ pub(crate) enum RouteWake {
     Deleted(IpAddr),
     /// The independent deadline requires a complete inventory check.
     Reconcile,
+    /// A completed overflow recovery invalidated the underlay and needs an inventory check.
+    Overflow,
     /// Link teardown requested the worker to stop.
     Cancelled,
 }
@@ -1272,26 +1274,35 @@ impl RouteMonitor {
     /// 250, are reported. Every other link, route, rule or nexthop change bumps the underlay watch
     /// (a route only when it really changed, see [`RouteBook`]) and is not reported. Those changes, and address changes, also wake the announce. A
     /// notification overflow (`ENOBUFS`) may have dropped a deletion or an address change, so it
-    /// bumps the watch, wakes the announce and asks for a full inventory check.
+    /// discards the rest of the burst before resyncing and requesting one full inventory check.
     /// # Errors
     /// Returns poll, receive, or malformed-netlink-message errors.
     pub(crate) fn wait_for_deleted_peer_route(
         &mut self,
         cancel: BorrowedFd<'_>,
-        deadline: std::time::Instant,
+        deadline: Instant,
     ) -> io::Result<RouteWake> {
+        let mut loss: Option<NotificationLoss> = None;
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let next = loss.map_or(deadline, |loss| loss.due().min(deadline));
+            let remaining = next.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                if loss.is_some() {
+                    self.lost_notifications();
+                    return Ok(RouteWake::Overflow);
+                }
                 return Ok(RouteWake::Reconcile);
             }
-            let timeout = PollTimeout::try_from(remaining).map_err(io::Error::other)?;
+            // PollTimeout rounds down to whole milliseconds. Check the clock again on a
+            // timeout, using at least one millisecond so the last fraction does not spin.
+            let timeout = PollTimeout::try_from(remaining.max(Duration::from_millis(1)))
+                .map_err(io::Error::other)?;
             let mut descriptors = [
                 PollFd::new(self.fd.as_fd(), PollFlags::POLLIN),
                 PollFd::new(cancel, PollFlags::POLLIN),
             ];
             match poll(&mut descriptors, timeout) {
-                Ok(0) => return Ok(RouteWake::Reconcile),
+                Ok(0) => continue,
                 Ok(_) => {}
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => return Err(error.into()),
@@ -1318,14 +1329,22 @@ impl RouteMonitor {
                 ) {
                     Ok(length) => length,
                     Err(nix::errno::Errno::ENOBUFS) => {
-                        self.lost_notifications();
-                        return Ok(RouteWake::Reconcile);
+                        let now = Instant::now();
+                        loss.get_or_insert_with(|| NotificationLoss::new(now))
+                            .received(now);
+                        continue;
                     }
                     Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
                     Err(error) => return Err(error.into()),
                 };
                 if length == 0 || length == self.buffer.len() {
                     return Err(io::ErrorKind::InvalidData.into());
+                }
+                if let Some(loss) = loss.as_mut() {
+                    // Until the books are resynced, a queued add can predate an unobserved
+                    // delete. The inventory check covers peer deletions discarded here too.
+                    loss.received(Instant::now());
+                    continue;
                 }
                 let mut deleted = None;
                 let mut change = UnderlayChange::default();
@@ -1352,7 +1371,7 @@ impl RouteMonitor {
     /// Recover from a notification overflow (`ENOBUFS`): some notifications are gone, so what
     /// the listener knows may be stale.
     ///
-    /// Everything still queued predates the loss and is discarded, because applying an old
+    /// Notifications still queued are discarded, because applying an old
     /// "added" after a fresh dump could book an address or route the lost notifications had
     /// removed, and the next real re-add would then look like a refresh. The books are then read
     /// again, and the announce wakes only if the host's addresses, routes, rules or nexthops
@@ -1371,18 +1390,48 @@ impl RouteMonitor {
                 Err(_) => break,
             }
         }
-        self.underlay.changed();
         if self.books.resync(self.interface_index) {
             self.announce.changed();
         }
+        self.underlay.changed();
         #[cfg(test)]
         OVERFLOW_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
+/// Deadline for rebuilding state after netlink dropped notifications. Recent activity extends
+/// the quiet period, while a sustained burst still gets a recovery within the maximum window.
+#[derive(Clone, Copy)]
+struct NotificationLoss {
+    /// Latest time a datagram or another overflow was seen.
+    last: Instant,
+    /// Absolute limit from the first overflow, independent of later traffic.
+    limit: Instant,
+}
+
+impl NotificationLoss {
+    /// Begin a recovery window using the same bounds as the endpoint announcement scheduler.
+    fn new(now: Instant) -> Self {
+        Self {
+            last: now,
+            limit: now + crate::underlay_announce::COALESCE_MIN_INTERVAL,
+        }
+    }
+
+    /// Keep receiving and discarding until the burst is quiet or the recovery is due.
+    fn due(self) -> Instant {
+        (self.last + crate::underlay_announce::COALESCE_DEBOUNCE).min(self.limit)
+    }
+
+    /// Extend the quiet deadline while notifications are still arriving.
+    fn received(&mut self, now: Instant) {
+        self.last = now;
+    }
+}
+
 /// Test probe: how many overflow recoveries ([`RouteMonitor`]'s `lost_notifications`) have
-/// finished in this process, so a namespace test can prove its burst really overflowed the
-/// listener before it asserts what the recovery did (#483 J780).
+/// finished in this process, so namespace tests can distinguish completed overflow recoveries
+/// from ordinary deletion repairs (#483 J780).
 #[cfg(test)]
 pub(crate) static OVERFLOW_RECOVERIES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -1501,7 +1550,7 @@ impl EndpointBooks {
     /// incomplete read counts as a change, which costs an extra announcement, never a missed
     /// one.
     ///
-    /// Known limit: every overflow re-dumps every route table, even when the route book is
+    /// Known limit: every overflow recovery re-dumps every route table, even when the route book is
     /// `untracked` (past 65,536 routes). A host carrying a full BGP table would re-dump about a
     /// million routes per overflow cycle under sustained churn; a mesh node is not that host.
     /// If it matters, skip the route dump while untracked.
@@ -3347,7 +3396,7 @@ mod endpoint_announce_tests {
         assert!(listener.announce.take_for_test());
     }
 
-    /// Read for 300 ms, through overflow recoveries too (they end a wait with `Reconcile`), and
+    /// Read for 300 ms, through overflow recoveries too (they end a wait with `Overflow`), and
     /// fail on any listener error: an error drops the listener until the 30 s recheck.
     fn read_everything(listener: &mut Listener) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
@@ -3379,6 +3428,23 @@ mod endpoint_announce_tests {
         std::fs::write(&path, batch).unwrap();
         ip(&["-batch", path.to_str().unwrap()]);
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// A later notification in the same burst postpones recovery, but continuous traffic
+    /// cannot postpone the inventory past the hard limit.
+    #[test]
+    fn notification_loss_coalesces_the_trailing_edge_with_a_hard_limit() {
+        let start = Instant::now();
+        let mut loss = NotificationLoss::new(start);
+        assert_eq!(loss.due(), start + Duration::from_millis(25));
+        for elapsed in [20, 40, 50] {
+            loss.received(start + Duration::from_millis(elapsed));
+        }
+        assert_eq!(loss.due(), start + Duration::from_millis(75));
+        for elapsed in (70..250).step_by(20) {
+            loss.received(start + Duration::from_millis(elapsed));
+        }
+        assert_eq!(loss.due(), start + Duration::from_millis(250));
     }
 
     /// #483 J707 P2: a route storm overflows the notification socket while the listener is
