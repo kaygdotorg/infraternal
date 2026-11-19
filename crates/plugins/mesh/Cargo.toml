@@ -66,7 +66,7 @@ url = { workspace = true, optional = true }
 # can bind beside it before or after start (#260, J826, J834). A port another
 # socket already holds is refused (EADDRINUSE), the same as a port taken
 # outright.
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "fd0a64e8552cdba282e4161139136f9b86294dd2", default-features = false, features = ["device", "ring"], optional = true }
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "4d2ce2f5b18fb83ed43378892d9f0e84b6a45c06", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -77,6 +77,8 @@ libc = { version = "0.2", optional = true }
 # Namespace tests run each node on a thread that entered its own network namespace (D332).
 nix = { workspace = true, features = ["net", "sched"] }
 socket2 = { version = "0.6", features = ["all"] }
+# Paused-clock tests of the coalesced announce schedule (#483).
+tokio = { workspace = true, features = ["test-util"] }
 
 # Keep unsafe denied by default while allowing the documented macOS sysctl boundary.
 [lints.rust]
