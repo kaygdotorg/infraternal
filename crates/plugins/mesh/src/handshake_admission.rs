@@ -781,19 +781,21 @@ impl ConfirmedEndpointFeed {
     }
 }
 
-/// The batch buffer of [`PeerAdmissionUdpReceiver`]: the socket's own buffer, plus the kernel
-/// receive stamp of every packet the guard kept, in the same order as the packets.
+/// The batch buffer of [`PeerAdmissionUdpReceiver`]. On Linux it also holds the kernel receive
+/// stamp of every packet the guard kept, in the same order as the packets.
 ///
 /// `GotaTun`'s receive-queue bound (D397) asks for a packet's stamp by its index in the batch
 /// (`UdpRecv::rx_timestamp_ns`). The socket records stamps by the index each datagram had when
 /// it arrived, and the guard removes refused initiations from the batch, which moves later
 /// packets down. So the guard copies the stamps out when the batch arrives and moves them
 /// together with their packets. A stamp of 0 means "unknown" and leaves the packet unjudged.
+/// macOS uses only the socket buffer because its socket has no kernel receive stamps for AQM.
 #[derive(Default)]
 pub(crate) struct AdmissionRecvBuf {
     /// The socket's batch buffer, used only by the socket.
     socket_buf: <GotaUdpSocket as UdpRecv>::RecvManyBuf,
     /// `rx_stamps[i]` is the kernel receive time (ns) of `packets[i]` after the guard's pass.
+    #[cfg(target_os = "linux")]
     rx_stamps: Vec<u64>,
 }
 
@@ -842,7 +844,7 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
 
     /// Preserve `GotaTun`'s socket batch receive and remove only rejected handshake initiations.
     ///
-    /// Each packet's receive stamp moves with it (see [`AdmissionRecvBuf`]), so the queue bound
+    /// On Linux each receive stamp moves with its packet (see [`AdmissionRecvBuf`]), so the bound
     /// judges the packet it timed. Packets already in `packets` keep the stamps an earlier call
     /// gave them; if that call failed part-way, the missing ones read as 0 (unknown).
     async fn recv_many_from(
@@ -852,13 +854,18 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
         packets: &mut Vec<(Packet, SocketAddr)>,
     ) -> io::Result<()> {
         let first_new_packet = packets.len();
-        let stamps = &mut recv_buf.rx_stamps;
-        stamps.resize(first_new_packet, 0);
+        #[cfg(target_os = "linux")]
+        let stamps = {
+            let stamps = &mut recv_buf.rx_stamps;
+            stamps.resize(first_new_packet, 0);
+            stamps
+        };
         self.socket
             .recv_many_from(&mut recv_buf.socket_buf, pool, packets)
             .await?;
         // The socket indexes its stamps by position in `packets`, which is still the arrival
         // order here. With the bound off it has none and every copy is 0.
+        #[cfg(target_os = "linux")]
         stamps.extend(
             (first_new_packet..packets.len())
                 .map(|index| GotaUdpSocket::rx_timestamp_ns(&recv_buf.socket_buf, index)),
@@ -870,6 +877,7 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
             if self.admits(packet, *source).await {
                 if write != read {
                     packets.swap(write, read);
+                    #[cfg(target_os = "linux")]
                     stamps.swap(write, read);
                 }
                 write += 1;
@@ -877,6 +885,7 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
             read += 1;
         }
         packets.truncate(write);
+        #[cfg(target_os = "linux")]
         stamps.truncate(write);
         Ok(())
     }
@@ -884,13 +893,14 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
     /// The kernel receive time of `packets[index]` from the last batch, after the guard's
     /// pass, or 0 if unknown. `GotaTun`'s queue bound reads it; without this override the
     /// trait's default 0 would turn the bound off for every node (#260, D397).
+    #[cfg(target_os = "linux")]
     fn rx_timestamp_ns(recv_buf: &Self::RecvManyBuf, index: usize) -> u64 {
         recv_buf.rx_stamps.get(index).copied().unwrap_or(0)
     }
 
     /// Pass `GotaTun`'s idle-time release through to the socket, so an idle node gives its
     /// batch receive pages back. The trait's default does nothing, which would keep them.
-    /// The stamp list is a few hundred bytes at most, so it stays allocated.
+    /// On Linux the stamp list is a few hundred bytes at most, so it stays allocated.
     fn release_recv_buf(&self, recv_buf: &mut Self::RecvManyBuf) {
         self.socket.release_recv_buf(&mut recv_buf.socket_buf);
     }
@@ -923,6 +933,17 @@ mod tests {
         sync::{Arc, atomic::Ordering},
         time::{Duration, Instant},
     };
+
+    /// A macOS receive guard has no timestamp storage because its socket never stamps packets.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_receive_guard_keeps_the_native_batch_buffer_size() {
+        use super::{GotaUdpSocket, PeerAdmissionUdpReceiver, UdpRecv};
+        let wrapped = size_of::<<PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf>();
+        let socket = size_of::<<GotaUdpSocket as UdpRecv>::RecvManyBuf>();
+        eprintln!("macOS receive buffer sizes: wrapper={wrapped} socket={socket}");
+        assert_eq!(wrapped, socket, "macOS has no receive stamps to retain");
+    }
 
     /// How many X25519 key agreements `admission` has run so far.
     fn key_agreements(admission: &PeerAdmission) -> u32 {
