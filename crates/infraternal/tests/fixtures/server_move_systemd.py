@@ -160,10 +160,11 @@ def run_case(workspace, case):
     )
     pre.chmod(0o700)
 
+    restart = "no" if case in ("staging-refusal", "destination-drift") else "on-failure"
     template = (
         f"[Unit]\nDescription=D395 isolated server ({case})\nAfter=network.target\n"
         f"[Service]\nType=simple\nExecStartPre={pre}\n"
-        "{command}Restart=on-failure\nRestartSec=2\nKillMode=process\nDelegate=yes\n"
+        "{command}" + f"Restart={restart}\nRestartSec=2\nKillMode=process\nDelegate=yes\n"
         f"[Install]\nWantedBy={target}\n"
     )
     before = template.format(command=command(old))
@@ -231,18 +232,22 @@ def run_case(workspace, case):
         if case == "initial-partial-record":
             work.mkdir(mode=0o700)
             (work / "journal.next").touch(mode=0o600)
-        elif case in journals:
+        elif case in journals or case == "destination-drift":
             work.mkdir(mode=0o700)
             journal = dict(
                 **{name: plan[name] for name in ("from", "to", "unit", "units", "effective", "legacy_target")},
                 source=identity(old), target=None, database=None, staging=str(stage), staged=None,
                 backup=str(backup), backup_action="Remove", ready=False, was_running=True,
             )
-            if case in ("unrecorded-stage", "partial-stage"):
+            if case in ("unrecorded-stage", "partial-stage", "destination-drift"):
                 stage.mkdir(mode=0o700)
-                if case == "partial-stage":
+                if case != "unrecorded-stage":
                     journal["staged"] = identity(stage)
                     (stage / "partial").write_text("unfinished")
+            if case == "destination-drift":
+                # The journal owns the partial staging tree but never claimed this destination.
+                new.mkdir(mode=0o700)
+                (new / "unrelated").write_text("preserve this")
             if case in ("published-rename", "published-exchange"):
                 copy_snapshot(old, new)
                 journal["staged"] = identity(new)
@@ -288,6 +293,15 @@ def run_case(workspace, case):
             assert wait_for(lambda: health(port))
             assert not new.exists()
             systemctl("stop", server)
+        if case == "staging-refusal":
+            nested = old / "nested"
+            nested.mkdir(mode=0o700)
+            # Copying makes the nested staging directory before rejecting the FIFO.
+            fifo = nested / "unsupported"
+            os.mkfifo(fifo, 0o600)
+        if case in ("staging-refusal", "destination-drift"):
+            source_db = old / "infraternal.sqlite"
+            before_db = source_db.read_bytes(), identity(source_db)
         # Model a lost client just after publication. The next start joins recovery.
         record(control / "request.json", request)
         if case == "concurrent-start":
@@ -312,7 +326,25 @@ def run_case(workspace, case):
                 (root / "fail-start").touch()
             kickoff = target if case == "boot-target" else server
             result = systemctl("start", kickoff, check=False)
-        if case == "failed-recovery":
+        if case in ("staging-refusal", "destination-drift"):
+            assert result.returncode != 0 and not health(port), result
+            assert systemctl("is-failed", server, check=False).returncode == 0
+            assert unit.read_text() == before
+            assert (source_db.read_bytes(), identity(source_db)) == before_db
+            receipt_path = control / "receipt.json"
+            assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+            error = json.loads(receipt_path.read_text())["Error"]
+            if case == "destination-drift":
+                assert "destination identity changed" in error, error
+                assert (new / "unrelated").read_text() == "preserve this"
+                assert not stage.exists(), "the tracked partial snapshot was left behind"
+                return
+            assert "unsupported file type in data folder" in error, error
+            assert not new.exists() and not work.exists()
+            assert stat.S_ISFIFO(fifo.stat().st_mode)
+            fifo.unlink()
+            systemctl("start", server)
+        elif case == "failed-recovery":
             assert result.returncode != 0 and not health(port), result
             assert sqlite_values(old) == sqlite_values(new) == [("source",)]
             (root / "fail-start").unlink()
@@ -458,7 +490,7 @@ def cli_admission(workspace):
 if __name__ == "__main__":
     failed = []
     with tempfile.TemporaryDirectory(prefix="d395-", dir=os.environ["XDG_RUNTIME_DIR"]) as workspace:
-        for scenario in sys.argv[1:] or (*CASES, "cli-admission"):
+        for scenario in sys.argv[1:] or (*CASES, "cli-admission", "staging-refusal"):
             try:
                 if scenario == "cli-admission":
                     cli_admission(Path(workspace))
