@@ -567,10 +567,11 @@ fn interrupted_start_preserves_possible_writes_to_the_original() {
 /// Refuse ready cleanup if the effective command selects the former path again.
 #[test]
 fn ready_retry_refuses_an_original_effective_unit() {
-    let (fixture, manager, _) = ready_with_original();
+    let (fixture, _, _) = ready_with_original();
     fs::write(&fixture.unit, unit_text(&fixture.old)).unwrap();
 
-    assert!(fixture.apply(&fixture.old, &manager).is_err());
+    let error = plan(&fixture.old, &fixture.new, &fixture.unit).unwrap_err();
+    assert!(error.to_string().contains("confirmed unit no longer points"));
     assert_eq!(Install::data(&fixture.old), "original");
 }
 

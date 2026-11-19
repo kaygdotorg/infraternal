@@ -598,11 +598,6 @@ fn apply_recorded(
         let switched = current_side(&journal, &read_units(&journal.unit)?)?;
         let prepare = (|| {
             if journal.ready {
-                if !switched {
-                    return Err(disk::invalid(
-                        "the effective unit no longer selects the destination",
-                    ));
-                }
                 let target = selected_target(&parent, target_name, &journal)?;
                 if !service.active()? {
                     service.reload()?;
