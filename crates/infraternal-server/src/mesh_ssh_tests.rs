@@ -38,6 +38,168 @@ async fn fixture() -> MeshSshPlugin {
     MeshSshPlugin::new(pool, None, None)
 }
 
+/// Create a Mesh SSH plugin backed by the supplied signing authority.
+async fn fixture_with_ca(ca: Arc<dyn CaKeySource>) -> MeshSshPlugin {
+    let plugin = fixture().await;
+    MeshSshPlugin::new(plugin.pool.clone(), Some(ca), None)
+}
+
+/// Test node whose process-owned host key can change while its channel remains alive.
+struct RestartableNode {
+    id: String,
+    server: bool,
+    host_key: std::sync::RwLock<PublicKey>,
+    host_key_requests: std::sync::atomic::AtomicUsize,
+    configurations: tokio::sync::Mutex<Vec<serde_json::Value>>,
+    configured: tokio::sync::Notify,
+    changes: tokio::sync::watch::Sender<()>,
+    restarts: tokio::sync::watch::Sender<()>,
+}
+
+impl RestartableNode {
+    /// Create a host channel whose process-owned key can be replaced after reconnect.
+    fn new(id: String, server: bool, host_key: PublicKey) -> Self {
+        Self {
+            id,
+            server,
+            host_key: std::sync::RwLock::new(host_key),
+            host_key_requests: std::sync::atomic::AtomicUsize::new(0),
+            configurations: tokio::sync::Mutex::new(Vec::new()),
+            configured: tokio::sync::Notify::new(),
+            changes: tokio::sync::watch::Sender::new(()),
+            restarts: tokio::sync::watch::Sender::new(()),
+        }
+    }
+
+    /// Wait until the SSH worker has sent the requested number of configurations.
+    async fn wait_configurations(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if self.configurations.lock().await.len() >= count {
+                    return;
+                }
+                self.configured.notified().await;
+            }
+        })
+        .await
+        .expect("Mesh SSH worker did not configure the node");
+    }
+}
+
+impl infraternal_plugin_api::node_channel::NodeChannel for RestartableNode {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn observed_ip(&self) -> IpAddr {
+        "127.0.0.1".parse().unwrap()
+    }
+
+    fn is_server(&self) -> bool {
+        self.server
+    }
+
+    fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changes.subscribe()
+    }
+
+    fn agent_restarts(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        Some(self.restarts.subscribe())
+    }
+
+    fn call(
+        &self,
+        action: &str,
+        input: Vec<u8>,
+    ) -> infraternal_plugin_api::PluginOperation<'_, Vec<u8>> {
+        let action = action.to_owned();
+        Box::pin(async move {
+            match action.as_str() {
+                "mesh-ssh-node.host_key" => {
+                    self.host_key_requests
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let key = self
+                        .host_key
+                        .read()
+                        .unwrap()
+                        .to_openssh()
+                        .map_err(|_| "encode key failed")?;
+                    serde_json::to_vec(&json!({ "host_key": key })).map_err(|_| "encode failed")
+                }
+                "mesh-ssh-node.configure" => {
+                    let config = serde_json::from_slice(&input).map_err(|_| "decode failed")?;
+                    self.configurations.lock().await.push(config);
+                    self.configured.notify_one();
+                    Ok(br"{}".to_vec())
+                }
+                _ => Ok(br"{}".to_vec()),
+            }
+        })
+    }
+}
+
+/// Decode an Ed25519 public key fixture using the same parser as the worker.
+fn host_key_fixture(subject: u8) -> PublicKey {
+    use base64::Engine;
+    let mut wire = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+    wire.extend([subject; 32]);
+    let body = base64::engine::general_purpose::STANDARD.encode(wire);
+    PublicKey::from_openssh(&format!("ssh-ed25519 {body}")).unwrap()
+}
+
+/// The server's restarted embedded infraternal agent gets a certificate for its new process key.
+#[tokio::test]
+async fn embedded_agent_restart_recertifies_the_new_host_key() {
+    let plugin = fixture_with_ca(Arc::new(crate::ca::tests::source(true))).await;
+    // The mesh snapshot needs its coordinator node; the server's own host has no person key.
+    plugin
+        .store
+        .attach_named(
+            "server",
+            infraternal_plugin_mesh::policy::model::PublicKey([8; 32]),
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+    let old_host_key = host_key_fixture(17);
+    sqlx::query("INSERT INTO mesh_ssh_hosts(host, enabled) VALUES (?, 1)")
+        .bind("server")
+        .execute(&plugin.pool)
+        .await
+        .unwrap();
+
+    let node = Arc::new(RestartableNode::new(
+        "server".to_owned(),
+        true,
+        old_host_key,
+    ));
+    let task = tokio::spawn(plugin.node_connected(node.clone()).unwrap());
+    node.wait_configurations(1).await;
+
+    let new_host_key = host_key_fixture(29);
+    *node.host_key.write().unwrap() = new_host_key.clone();
+    node.restarts.send_replace(());
+    node.wait_configurations(2).await;
+
+    let configurations = node.configurations.lock().await;
+    let certificate = Certificate::from_openssh(
+        configurations[1]["host_certificate"]
+            .as_str()
+            .expect("restart has a host certificate"),
+    )
+    .expect("restart certificate parses");
+    assert_eq!(certificate.public_key(), new_host_key.key_data());
+    assert_eq!(
+        node.host_key_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the restarted host key is fetched and certified"
+    );
+    task.abort();
+}
+
 /// Only the owner changes settings.
 #[tokio::test]
 async fn only_the_owner_changes_settings() {
