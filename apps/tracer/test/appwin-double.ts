@@ -12,7 +12,7 @@
  * Controls for checks: `/__mock/appwin/state` (read what the machine saw), `/__mock/appwin/config` (rate, windows,
  * permissions, view-only rights, local-input pause) and `/__mock/appwin/end` (the app closes).
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -117,15 +117,22 @@ export const appwinHosts = (): unknown[] => appwinEnabled ? [
   { id: LINUX_HOST_ID, name: "build-01", online: true, user: "kayg", os: "Ubuntu 24.04" },
 ] : [];
 
-interface Win { window_id: number; owner_pid: number; app_name: string; title: string; bundle_id: string; layer: number; frame: [number, number, number, number]; on_screen: boolean; app: string }
+/** Window metadata exposed by the browser test host in inventory replies. */
+interface Win { window_id: number; owner_pid: number; app_name: string; title: string; bundle_id: string; app_version?: string; layer: number; frame: [number, number, number, number]; on_screen: boolean; app: string }
+/** Supplies the test host's initial app-window and display rows. */
 const defaults = (): Win[] => [
-  { window_id: 101, owner_pid: 501, app_name: "Notebook", title: "Today", bundle_id: "test.notebook", layer: 0, frame: [40, 60, 900, 640], on_screen: true, app: "notebook" },
-  { window_id: 102, owner_pid: 501, app_name: "Notebook", title: "Ideas", bundle_id: "test.notebook", layer: 0, frame: [90, 100, 900, 640], on_screen: true, app: "notebook" },
-  { window_id: 201, owner_pid: 502, app_name: "Editor", title: "stream.ts", bundle_id: "test.editor", layer: 0, frame: [120, 80, 1100, 760], on_screen: true, app: "editor" },
-  { window_id: 301, owner_pid: 503, app_name: "Browser", title: "Getting started", bundle_id: "test.browser", layer: 0, frame: [60, 40, 1200, 800], on_screen: true, app: "browser" },
-  { window_id: 302, owner_pid: 503, app_name: "Browser", title: "", bundle_id: "test.browser", layer: 0, frame: [60, 40, 1200, 800], on_screen: false, app: "browser" },
+  { window_id: 101, owner_pid: 501, app_name: "Notebook", title: "Today", bundle_id: "test.notebook", app_version: "1.0", layer: 0, frame: [40, 60, 900, 640], on_screen: true, app: "notebook" },
+  { window_id: 102, owner_pid: 501, app_name: "Notebook", title: "Ideas", bundle_id: "test.notebook", app_version: "1.0", layer: 0, frame: [90, 100, 900, 640], on_screen: true, app: "notebook" },
+  { window_id: 201, owner_pid: 502, app_name: "Editor", title: "stream.ts", bundle_id: "test.editor", app_version: "1.0", layer: 0, frame: [120, 80, 1100, 760], on_screen: true, app: "editor" },
+  { window_id: 301, owner_pid: 503, app_name: "Browser", title: "Getting started", bundle_id: "test.browser", app_version: "1.0", layer: 0, frame: [60, 40, 1200, 800], on_screen: true, app: "browser" },
+  { window_id: 302, owner_pid: 503, app_name: "Browser", title: "", bundle_id: "test.browser", app_version: "1.0", layer: 0, frame: [60, 40, 1200, 800], on_screen: false, app: "browser" },
   { window_id: 9, owner_pid: 1, app_name: "Window Server", title: "Menubar", bundle_id: "", layer: 25, frame: [0, 0, 2560, 30], on_screen: true, app: "screen" },
 ];
+
+/** One tiny valid PNG lets production-browser checks exercise image layout without app-specific fixtures. */
+const TEST_APP_ICON = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/0xAAAAAASUVORK5CYII=";
+/** Its content hash: the name window rows carry and `desktop.icon` answers to, as the infraternal agent does (#146). */
+const TEST_APP_ICON_HASH = createHash("sha256").update(Buffer.from(TEST_APP_ICON, "base64")).digest("hex");
 
 const config = {
   fps: 60,
@@ -248,12 +255,17 @@ export function appwinCall(socket: WebSocket, callId: number, action: string, in
     case "desktop.windows": {
       if (!hostOk) { reply(socket, callId, false, { error: "unavailable" }); return true; }
       const answer = (): void => reply(socket, callId, true, {
-        windows: config.windows.map(({ app: _app, ...w }) => w),
+        windows: config.windows.map(({ app: _app, ...w }) => (w.bundle_id && w.app_version ? { ...w, icon: TEST_APP_ICON_HASH } : w)),
         displays: [{ display_id: 1, backing_scale: 2, pixel_width: 2880, pixel_height: 1800 }],
         permission_state: { screen_recording: config.screenRecording, accessibility: config.accessibility },
         source: "test-double",
       });
       if (config.windowsDelayMs) setTimeout(answer, config.windowsDelayMs); else answer();
+      return true;
+    }
+    case "desktop.icon": {
+      if (!hostOk || input.sha256 !== TEST_APP_ICON_HASH) { reply(socket, callId, false, { error: "unavailable" }); return true; }
+      reply(socket, callId, true, { png: TEST_APP_ICON });
       return true;
     }
     case "desktop.session.start": {

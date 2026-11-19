@@ -20,6 +20,7 @@
 //! for each worker to finish native cleanup. A start that is cancelled half-way
 //! withdraws its session at once; the worker still finishes retirement.
 use crate::{
+    app_icons::{ICON_CHUNK_BYTES, MAX_ICON_PNG_BYTES, content_hash, valid_hash, valid_png},
     protocol::Start,
     registry::Registry,
     server_manifest::DESCRIPTOR,
@@ -333,54 +334,8 @@ impl DesktopServer {
         input: &[u8],
     ) -> Result<Value, Error> {
         match action {
-            "desktop.windows" => {
-                let input: HostInput = parse(input)?;
-                let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
-                let mut inventory: Option<Value> = None;
-                let mut cursor: Option<String> = None;
-                let mut seen = std::collections::HashSet::new();
-                loop {
-                    let input = cursor.as_ref().map_or_else(
-                        || b"{}".to_vec(),
-                        |cursor| serde_json::to_vec(&json!({"cursor":cursor})).unwrap_or_default(),
-                    );
-                    let bytes = node
-                        .call("desktop.source.windows", &input)
-                        .await
-                        .map_err(|()| Error::Unavailable)?;
-                    let mut page: InventoryPage =
-                        serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
-                    let windows = page
-                        .inventory
-                        .get_mut("windows")
-                        .and_then(Value::as_array_mut)
-                        .ok_or(Error::Invalid)?;
-                    if let Some(inventory) = inventory.as_mut() {
-                        inventory
-                            .get_mut("windows")
-                            .and_then(Value::as_array_mut)
-                            .ok_or(Error::Invalid)?
-                            .append(windows);
-                    } else {
-                        inventory = Some(page.inventory);
-                    }
-                    if serde_json::to_vec(&inventory)
-                        .map_err(|_| Error::Invalid)?
-                        .len()
-                        > crate::protocol::MAX_CONTROL - 1024
-                    {
-                        return Err(Error::Limit);
-                    }
-                    cursor = page.cursor;
-                    if let Some(cursor) = &cursor {
-                        if !seen.insert(cursor.clone()) || seen.len() > 256 {
-                            return Err(Error::Invalid);
-                        }
-                    } else {
-                        return inventory.ok_or(Error::Invalid);
-                    }
-                }
-            }
+            "desktop.windows" => Self::list_windows(host, input).await,
+            "desktop.icon" => Self::fetch_icon(host, input).await,
             "desktop.session.start" => {
                 let input: StartInput = parse(input)?;
                 let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
@@ -428,6 +383,104 @@ impl DesktopServer {
             // arbitrary UUID. The viewer adapter owns that lease and operation.
             _ => Err(Error::Invalid),
         }
+    }
+
+    /// Joins a host's bounded window inventory pages into one browser reply.
+    async fn list_windows(host: &dyn SocketHost, input: &[u8]) -> Result<Value, Error> {
+        let input: HostInput = parse(input)?;
+        let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
+        let mut inventory: Option<Value> = None;
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let input = cursor.as_ref().map_or_else(
+                || b"{}".to_vec(),
+                |cursor| serde_json::to_vec(&json!({"cursor":cursor})).unwrap_or_default(),
+            );
+            let bytes = node
+                .call("desktop.source.windows", &input)
+                .await
+                .map_err(|()| Error::Unavailable)?;
+            let mut page: InventoryPage =
+                serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
+            let windows = page
+                .inventory
+                .get_mut("windows")
+                .and_then(Value::as_array_mut)
+                .ok_or(Error::Invalid)?;
+            if let Some(inventory) = inventory.as_mut() {
+                inventory
+                    .get_mut("windows")
+                    .and_then(Value::as_array_mut)
+                    .ok_or(Error::Invalid)?
+                    .append(windows);
+            } else {
+                inventory = Some(page.inventory);
+            }
+            if serde_json::to_vec(&inventory)
+                .map_err(|_| Error::Invalid)?
+                .len()
+                > crate::protocol::MAX_CONTROL - 1024
+            {
+                return Err(Error::Limit);
+            }
+            cursor = page.cursor;
+            if let Some(cursor) = &cursor {
+                if !seen.insert(cursor.clone()) || seen.len() > 256 {
+                    return Err(Error::Invalid);
+                }
+            } else {
+                return inventory.ok_or(Error::Invalid);
+            }
+        }
+    }
+
+    /// Reads one app icon from a host by its content hash and returns it whole
+    /// as `{"png": <base64>}` (#146, D349).
+    ///
+    /// The host answers in pieces of at most 4 KiB, so each piece fits the
+    /// action limit. The host is untrusted: every piece must agree on one total
+    /// of at most 16 KiB and arrive at the expected offset with the expected
+    /// length, the joined bytes must hash to the name the browser asked for, and
+    /// they must pass the PNG check. Anything else is `Invalid`, and the browser
+    /// keeps the letter tile.
+    async fn fetch_icon(host: &dyn SocketHost, input: &[u8]) -> Result<Value, Error> {
+        use base64::Engine;
+        let input: IconInput = parse(input)?;
+        if !valid_hash(&input.sha256) {
+            return Err(Error::Invalid);
+        }
+        let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
+        let mut png: Vec<u8> = Vec::with_capacity(MAX_ICON_PNG_BYTES);
+        let mut total = None;
+        while total.is_none_or(|total| png.len() < total) {
+            let request = serde_json::to_vec(&json!({"sha256":input.sha256,"offset":png.len()}))
+                .map_err(|_| Error::Invalid)?;
+            let bytes = node
+                .call("desktop.source.icon", &request)
+                .await
+                .map_err(|()| Error::Unavailable)?;
+            let piece: IconPiece = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
+            if piece.total == 0
+                || piece.total > MAX_ICON_PNG_BYTES
+                || total.is_some_and(|total| total != piece.total)
+                || piece.data.len() > ICON_CHUNK_BYTES.div_ceil(3) * 4
+            {
+                return Err(Error::Invalid);
+            }
+            total = Some(piece.total);
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(piece.data)
+                .map_err(|_| Error::Invalid)?;
+            if data.len() != ICON_CHUNK_BYTES.min(piece.total - png.len()) {
+                return Err(Error::Invalid);
+            }
+            png.extend_from_slice(&data);
+        }
+        if content_hash(&png) != input.sha256 || !valid_png(&png) {
+            return Err(Error::Invalid);
+        }
+        Ok(json!({"png": base64::engine::general_purpose::STANDARD.encode(&png)}))
     }
 }
 impl Plugin for DesktopServer {
@@ -721,6 +774,20 @@ fn parse<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Error> {
 #[serde(deny_unknown_fields)]
 struct HostInput {
     host_id: String,
+}
+/// Body of `desktop.icon`: which host, and the icon's content hash from a window row.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IconInput {
+    host_id: String,
+    sha256: String,
+}
+/// One `desktop.source.icon` reply: the icon's full length and one base64 piece.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IconPiece {
+    total: usize,
+    data: String,
 }
 /// Body of `desktop.session.start`.
 #[derive(Deserialize)]
@@ -1929,5 +1996,149 @@ mod slow_action_tests {
             "finite burst retired its viewer (resize={resize}, forwarded={forwarded})"
         );
         assert_eq!(forwarded, "ordinary text 🐈!".chars().count());
+    }
+}
+
+#[cfg(test)]
+/// The server reads an icon from an untrusted host in pieces and returns it
+/// only when the bytes match the hash and pass the PNG check (#146, D349).
+mod icon_tests {
+    use super::*;
+    use base64::Engine;
+    use infraternal_plugin_api::streams::{Authority, WireLane, WireStreamDef};
+
+    /// A host that answers `desktop.source.icon` from `png`, reporting `total` as its length.
+    struct IconNode {
+        png: Vec<u8>,
+        total: usize,
+    }
+    impl NodeHost for IconNode {
+        fn id(&self) -> &'static str {
+            "mac"
+        }
+        fn owner_id(&self) -> &'static str {
+            "owner"
+        }
+        fn permits(&self) -> bool {
+            true
+        }
+        fn authorized<'a>(
+            &'a self,
+            operation: Operation<'a, Result<(), ()>>,
+        ) -> Operation<'a, Result<(), ()>> {
+            operation
+        }
+        fn call<'a>(
+            &'a self,
+            action: &'a str,
+            input: &'a [u8],
+        ) -> Operation<'a, Result<Vec<u8>, ()>> {
+            Box::pin(async move {
+                assert_eq!(action, "desktop.source.icon");
+                let request: Value = serde_json::from_slice(input).map_err(|_| ())?;
+                let offset =
+                    usize::try_from(request["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
+                let end = self.png.len().min(offset + ICON_CHUNK_BYTES);
+                let data = base64::engine::general_purpose::STANDARD.encode(&self.png[offset..end]);
+                serde_json::to_vec(&json!({"total": self.total, "data": data})).map_err(|_| ())
+            })
+        }
+        fn open<'a>(
+            &'a self,
+            _: &'static WireStreamDef,
+            _: &'a [u8],
+        ) -> Operation<'a, Result<Arc<dyn WireLane>, ()>> {
+            Box::pin(async { Err(()) })
+        }
+    }
+    /// Always-live authority for the fixture socket.
+    struct Live;
+    impl Authority for Live {
+        fn permits(&self) -> bool {
+            true
+        }
+        fn cancelled(&self) -> Operation<'_, ()> {
+            Box::pin(std::future::pending())
+        }
+    }
+    /// A browser socket of the host's owner.
+    struct Browser(Arc<IconNode>);
+    impl SocketHost for Browser {
+        fn user_id(&self) -> &'static str {
+            "owner"
+        }
+        fn token_hash(&self) -> &'static str {
+            "fixture"
+        }
+        fn authority(&self) -> Arc<dyn Authority> {
+            Arc::new(Live)
+        }
+        fn authorized<'a>(
+            &'a self,
+            operation: Operation<'a, Result<(), ()>>,
+        ) -> Operation<'a, Result<(), ()>> {
+            operation
+        }
+        fn fresh(&self, _: i64) -> Operation<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn live(&self) -> Operation<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn may_configure(&self) -> Operation<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn node<'a>(&'a self, _: &'a str) -> Operation<'a, Option<Arc<dyn NodeHost>>> {
+            Box::pin(async move { Some(self.0.clone() as Arc<dyn NodeHost>) })
+        }
+    }
+    /// Asks the server for icon `sha256` from a host serving `png` with the given `total`.
+    async fn fetch(png: Vec<u8>, total: usize, sha256: &str) -> Result<Value, Error> {
+        let browser = Browser(Arc::new(IconNode { png, total }));
+        let input = serde_json::to_vec(&json!({"host_id":"mac","sha256":sha256})).unwrap();
+        DesktopServer::fetch_icon(&browser, &input).await
+    }
+
+    /// A 9 KiB icon arrives in three pieces and comes back whole.
+    #[tokio::test]
+    async fn an_honest_host_gives_the_whole_icon() {
+        let png = crate::app_icons::tests::png(64, 64, 9000);
+        let reply = fetch(png.clone(), png.len(), &content_hash(&png))
+            .await
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(reply["png"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, png);
+    }
+
+    /// Bytes that do not match the requested hash, a bad PNG, a lying total
+    /// and a malformed hash are all refused.
+    #[tokio::test]
+    async fn a_lying_host_is_refused() {
+        let png = crate::app_icons::tests::png(64, 64, 0);
+        let other = crate::app_icons::tests::png(64, 64, 10);
+        assert!(
+            fetch(other.clone(), other.len(), &content_hash(&png))
+                .await
+                .is_err()
+        );
+        let small = crate::app_icons::tests::png(32, 32, 0);
+        assert!(
+            fetch(small.clone(), small.len(), &content_hash(&small))
+                .await
+                .is_err()
+        );
+        assert!(
+            fetch(png.clone(), MAX_ICON_PNG_BYTES + 1, &content_hash(&png))
+                .await
+                .is_err()
+        );
+        assert!(
+            fetch(png.clone(), png.len() + 1, &content_hash(&png))
+                .await
+                .is_err()
+        );
+        assert!(fetch(png.clone(), png.len(), "ABC").await.is_err());
     }
 }

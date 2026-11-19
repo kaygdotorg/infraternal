@@ -204,7 +204,7 @@ private final class Session {
     /// off.
     func command(_ kind: UInt8, _ body: [String: Any]) throws -> (UInt8, [String: Any]) {
         switch kind {
-        case 1: return (65,try inventory())
+        case 1: return (65,try inventory(knownIcons: body["known_icons"]))
         case 2:
             guard geometry == nil && screen == nil, CGPreflightScreenCaptureAccess(), AXIsProcessTrusted(),
                   let target = body["target"] as? [String: Any], let type = target["type"] as? String,

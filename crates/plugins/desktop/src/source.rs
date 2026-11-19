@@ -17,6 +17,7 @@
 //! Executable and runtime paths come from trusted node setup, never from action
 //! bodies.
 use crate::{
+    app_icons::IconStore,
     protocol::{Kind, Start},
     source_inventory::Snapshot,
     source_ipc::{Config, Helper},
@@ -78,6 +79,8 @@ struct State {
     inventory: Option<Arc<Worker>>,
     /// The window inventory currently being paged through.
     snapshot: Option<Snapshot>,
+    /// App icons named by content hash, served by `desktop.source.icon` (#146).
+    icons: IconStore,
 }
 /// Shared innards of [`SourceBridge`].
 struct Inner {
@@ -233,6 +236,7 @@ impl SourceBridge {
                 prepared: HashMap::new(),
                 inventory: None,
                 snapshot: None,
+                icons: IconStore::default(),
             }),
         }))
     }
@@ -374,12 +378,12 @@ impl SourceBridge {
         }
         Ok(value)
     }
-    /// Starts a short-lived helper, sends it one command of `kind` (list or
-    /// status), returns its JSON answer, and retires the helper.
+    /// Starts a short-lived helper, sends one bounded command body, returns its
+    /// JSON answer, and retires the helper.
     ///
     /// One send-and-reply budget of 3 seconds covers everything. Only one such
     /// helper may run at a time; a second request is refused.
-    async fn idle_request(&self, kind: Kind) -> Result<Value, PluginError> {
+    async fn idle_request(&self, kind: Kind, body: Vec<u8>) -> Result<Value, PluginError> {
         let worker = {
             let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
             if !state.enabled
@@ -406,7 +410,7 @@ impl SourceBridge {
                     // silence before the first byte. Idle capture receives keep
                     // their existing partial-frame-only deadline.
                     result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                        helper.send(kind, b"{}").await?;
+                        helper.send(kind, &body).await?;
                         let (reply, body) = helper.receive().await?;
                         if reply == Kind::Error { return Err(std::io::ErrorKind::PermissionDenied.into()); }
                         serde_json::from_slice(&body).map_err(std::io::Error::other)
@@ -428,6 +432,10 @@ impl SourceBridge {
     /// Returns one page of the window inventory. Without a cursor it takes a
     /// fresh inventory from a helper and returns its first page; with a cursor it
     /// returns the next page of the current snapshot, if the cursor is valid.
+    ///
+    /// The helper is told which app icons this source already holds, so it
+    /// renders only new ones; their bytes go to the icon store, and the rows
+    /// carry just each icon's hash (#146).
     async fn windows(&self, cursor: Option<String>) -> Result<Value, PluginError> {
         if let Some(cursor) = cursor {
             let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
@@ -440,11 +448,24 @@ impl SourceBridge {
             }
             return snapshot.page();
         }
-        let inventory = self.idle_request(Kind::List).await?;
+        let known = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| PluginError::Rejected)?
+            .icons
+            .known();
+        let mut request = json!({});
+        if !known.is_empty() {
+            request["known_icons"] = json!(known);
+        }
+        let body = serde_json::to_vec(&request).map_err(|_| PluginError::Rejected)?;
+        let mut inventory = self.idle_request(Kind::List, body).await?;
         let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
         if !state.enabled {
             return Err(PluginError::Rejected);
         }
+        state.icons.absorb(&mut inventory);
         let mut snapshot = Snapshot::new(inventory)?;
         let page = snapshot.page()?;
         state.snapshot = Some(snapshot);
@@ -483,7 +504,7 @@ impl SourceBridge {
             }
         };
         let Some((worker, sender)) = sender else {
-            return self.idle_request(Kind::Status).await;
+            return self.idle_request(Kind::Status, b"{}".to_vec()).await;
         };
         let (reply, result) = oneshot::channel();
         sender
@@ -523,6 +544,16 @@ impl SourceBridge {
             }
             SourceRequest::Windows(cursor) => self.windows(cursor).await,
             SourceRequest::Clock(id) => self.clock(id).await,
+            SourceRequest::Icon { sha256, offset } => {
+                let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
+                if !state.enabled {
+                    return Err(PluginError::Rejected);
+                }
+                state
+                    .icons
+                    .chunk(&sha256, offset)
+                    .ok_or(PluginError::Rejected)
+            }
         }
     }
     /// Before a new lane for session `id`: fails if the previous worker is still

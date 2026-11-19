@@ -7,10 +7,13 @@
  * - the picker polls while it is open (the wire has no push for the list yet, so the list is live to within a poll);
  * - the palette asks again when it opens and the copy is stale;
  * - a stream that failed asks once, to explain itself.
- * A poll that changes nothing notifies nobody, so an open picker repaints only when the machine's windows changed.
+ * Rows name app icons by hash; `icons` fetches each one once and fires `onChange` when it arrives, so an open picker swaps the
+ * letter tile for the real icon. A poll that changes nothing notifies nobody, so an open picker repaints only when the visible
+ * inventory (or an icon) changed.
  */
 import type { HostEntry } from "../sessions/adapter";
 import type { StreamConnection } from "./adapter";
+import { AppIcons } from "./app-icons";
 import { parseInventory, sameInventory, type Inventory } from "./inventory";
 
 /** What is known about one machine: its last good inventory (kept through a failed poll), the status of the latest ask, and when it was answered. */
@@ -45,8 +48,15 @@ export class Machines {
   private readonly inflight = new Map<string, Promise<void>>();
   private timer = 0;
   private pollers = 0;
+  /** The page's app icons, by content hash; shared by the picker and the window pills. */
+  readonly icons: AppIcons;
+  private readonly offIcons: () => void;
 
-  constructor(private readonly connection: StreamConnection, private readonly hosts: () => HostEntry[]) {}
+  /** Asks machines over `connection`; `hosts` is the canvas's current host list. */
+  constructor(private readonly connection: StreamConnection, private readonly hosts: () => HostEntry[]) {
+    this.icons = new AppIcons((actionId, input) => connection.call(actionId, input));
+    this.offIcons = this.icons.onChange(() => this.emit());
+  }
 
   /** The hosts that can stream, in the canvas's own order. */
   streamable(): HostEntry[] { return this.hosts().filter(canStream); }
@@ -124,5 +134,6 @@ export class Machines {
     };
   }
 
-  dispose(): void { window.clearInterval(this.timer); this.timer = 0; this.listeners.clear(); this.states.clear(); }
+  /** Stops polling and clears machine state, listeners, and cached app icons. */
+  dispose(): void { window.clearInterval(this.timer); this.timer = 0; this.listeners.clear(); this.states.clear(); this.offIcons(); this.icons.dispose(); }
 }

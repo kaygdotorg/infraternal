@@ -34,6 +34,7 @@ fuzz_target!(|data: &[u8]| {
             }
             SourceRequest::Stop(id) => json!({"session_id":id}),
             SourceRequest::Windows(cursor) => json!({"cursor":cursor}),
+            SourceRequest::Icon { sha256, offset } => json!({"sha256":sha256,"offset":offset}),
         };
         let normalized = serde_json::to_vec(&canonical).unwrap();
         assert!(decode(action, &normalized).is_ok());

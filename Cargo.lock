@@ -2284,6 +2284,7 @@ dependencies = [
 name = "infraternal-plugin-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "infraternal-agent",
  "infraternal-plugin-api",
@@ -2294,6 +2295,7 @@ dependencies = [
  "screencapturekit",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "uuid",
 ]
