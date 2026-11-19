@@ -50,6 +50,7 @@ mod macos {
     }
 }
 
+/// Signal stop must join a capture worker even while its native encoder is blocked.
 #[test]
 fn signal_stop_joins_capture_without_waiting_for_a_blocked_encoder() {
     use std::{
@@ -84,8 +85,12 @@ fn signal_stop_joins_capture_without_waiting_for_a_blocked_encoder() {
     let dir = root.join(format!("desktop-helper-stop-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let executable = dir.join("native-fixture.py");
-    fs::write(&executable, r"#!/usr/bin/env python3
-# Role: acknowledge control cleanup but stop draining the encoder pixel packet.
+    fs::write(
+        &executable,
+        concat!(
+            "#!/usr/bin/env python3\n",
+            include_str!("fixtures/atomic_marker.py"),
+            r#"# Role: acknowledge control cleanup but stop draining the encoder pixel packet.
 import json, signal, struct, sys
 source = sys.stdin.buffer
 sink = sys.stdout.buffer
@@ -95,8 +100,7 @@ while True:
     if len(header) != 6: break
     length, version, kind = struct.unpack('>IBB', header)
     if encoder and kind == 101:
-        with open(sys.argv[0] + '.ready', 'w') as output:
-            output.write('ready')
+        publish_marker(sys.argv[0] + '.ready', b'ready')
         signal.pause()
         break
     if len(source.read(length-2)) != length-2: break
@@ -105,7 +109,10 @@ while True:
     reply = 66 if kind == 2 else 68
     sink.write(struct.pack('>IBB', len(body)+2, 1, reply)+body)
     sink.flush()
-").unwrap();
+"#,
+        ),
+    )
+    .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let mut companion = native::Native::spawn(&executable).unwrap();
     let (mut client, server) = UnixStream::pair().unwrap();
