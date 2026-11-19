@@ -86,6 +86,9 @@ pub(crate) fn authority_replacement_crash_checkpoint() {
     }
 }
 
+/// The routing-socket listener that announces underlay changes to live sessions (#483).
+mod underlay;
+
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, MacUtunTx, MacUtunRx)>;
 
 /// A temporary Mac rotation key that clears its private bytes when dropped.
@@ -1271,6 +1274,7 @@ impl PendingWorker {
                     }
                 };
                 let admission = Arc::clone(&factory.admission);
+                let udp = factory.send.clone();
                 let PathBudgets {
                     route_mtus: initial_route_mtus,
                     interface_mtu,
@@ -1354,6 +1358,7 @@ impl PendingWorker {
                     return;
                 }
                 let state = RuntimeState {
+                    udp,
                     utun: Some(utun),
                     device: Some(Arc::new(device)),
                     handshakes: tokio::task::JoinSet::new(),
@@ -1578,6 +1583,8 @@ mod peer_stats;
 /// Owns the live utun, peer-route MTUs, accepted snapshot and DNS resolver integration.
 /// `route_mtus` mirrors installed metrics so a failed update can restore them.
 struct RuntimeState {
+    /// The worker's live UDP listener; clones share the connected pools with the device.
+    udp: GotaUdpSocket,
     utun: Option<MacUtun>,
     /// Shared only with handshake tasks, which `stop` ends before stopping the device.
     device: Option<Arc<GotaDevice>>,
@@ -3210,6 +3217,39 @@ mod tests {
     /// A second process epoch for restored-server cases.
     const AUTHORITY_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
 
+    /// The worker's send handle keeps the mesh port while the factory is gone. Dropping that last
+    /// handle lets a new worker bind the same port, including with connected sends enabled.
+    #[tokio::test]
+    async fn worker_send_handle_releases_the_port_on_drop() {
+        let key = || super::StaticSecret::from([42; 32]);
+        let (factory, port) = super::bind_udp(
+            crate::listen_port::Request {
+                port: 0,
+                allow_fallback: false,
+            },
+            key(),
+        )
+        .await
+        .expect("bind a mesh port");
+        let exact = crate::listen_port::Request {
+            port,
+            allow_fallback: false,
+        };
+        let worker_send = factory.send.clone();
+        drop(factory);
+
+        assert!(matches!(
+            super::bind_udp(exact, key()).await,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse
+        ));
+        drop(worker_send);
+
+        let (_replacement, rebound_port) = super::bind_udp(exact, key())
+            .await
+            .expect("rebind the released mesh port");
+        assert_eq!(rebound_port, port);
+    }
+
     /// Encode a complete snapshot with one epoch repeated across every chunk.
     fn chunks_with_epoch(
         old: Option<&Config>,
@@ -3226,8 +3266,9 @@ mod tests {
             .collect()
     }
 
-    /// A one-peer configuration for the macOS node tests.
-    fn config() -> Config {
+    /// A one-peer configuration for the macOS node tests (the underlay proofs build their
+    /// packet filter from it too).
+    pub(super) fn config() -> Config {
         Config {
             authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
             rotation_operation: None,

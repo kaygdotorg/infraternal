@@ -13,12 +13,17 @@
 //! A failed update still rolls back with the full re-install (`rollback_device`), which is rare
 //! and restores a known state.
 //!
+//! The Mac route listener is needed only with connected sends enabled. That mode announces an
+//! underlay change immediately; when it is off, the listener must not change the default roaming
+//! behavior or request extra keepalives.
+//!
 //! Rejected: keeping the re-install and relying on it to send the new address its handshake
 //! (J586's approach). It drops a working session, which `1f646d4` exists to avoid.
 
 use super::{
     CounterMap, GotaDevice, RuntimeState, WireGuardPeer, WorkerCommand, X25519PublicKey,
     installed_keys, installed_peers, peer_for_policy, peer_stats, peers_for_config,
+    underlay::UnderlayAnnouncer,
 };
 use crate::{
     candidate_walks::{HANDSHAKE_WAIT, Observed, active_peer_key, kept_address, walking_peers},
@@ -44,10 +49,17 @@ use tokio::sync::mpsc::UnboundedReceiver;
 ///
 /// Every walk reads its peers through [`installed_peers`], the same filter
 /// [`peers_for_config`] installs with, so a peer without network access is never walked.
+///
+/// The worker owns one routing socket for its utun. On an underlay change it invalidates cached
+/// source addresses, then asks live sessions to announce the new source (D392, #260).
 pub(super) async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
     mut state: RuntimeState,
 ) {
+    let mut announcer = start_underlay_listener(
+        state.utun.as_ref().map(|utun| utun.name()),
+        mac_connected_sends_enabled(),
+    );
     let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
     confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // A restored configuration may already carry candidates; no session predates it.
@@ -67,6 +79,10 @@ pub(super) async fn run_worker(
                     } => {
                         let before = state.engine_addresses(&config).await;
                         let result = state.apply(*config, budgets).await;
+                        // The apply writes routes while the listener is outside the select.
+                        if let Some(announcer) = announcer.as_mut() {
+                            announcer.resync();
+                        }
                         let applied = result.is_ok();
                         let _ = reply.send(result);
                         state.after_apply(applied, &before).await;
@@ -77,6 +93,9 @@ pub(super) async fn run_worker(
                         reply,
                     } => {
                         let result = state.replace_authority(*config, budgets).await;
+                        if let Some(announcer) = announcer.as_mut() {
+                            announcer.resync();
+                        }
                         let applied = result.is_ok();
                         let _ = reply.send(result);
                         if applied {
@@ -105,6 +124,17 @@ pub(super) async fn run_worker(
             _ = confirmed_scan.tick() => {
                 state.admit_confirmed_endpoints().await;
             }
+            () = announcement_due(announcer.as_mut()) => {
+                if let Some(device) = &state.device {
+                    if let Some(sessions) = announce_underlay_on_route_event(
+                        announcer.as_mut(),
+                        || state.udp.underlay_changed(),
+                        async || device.request_keepalives().await,
+                    ).await {
+                        tracing::debug!(sessions, "underlay changed; live sessions announce our endpoint");
+                    }
+                }
+            }
             () = crate::candidate_walks::walk_due(next_walk), if next_walk.is_some() => {
                 state.step_walks().await;
             }
@@ -113,6 +143,66 @@ pub(super) async fn run_worker(
         }
     }
     let _ = state.stop().await;
+}
+
+/// Whether the opt-in Mac connected-send mode is enabled in this process.
+///
+/// `GotaTun` uses the same benchmark switch for per-endpoint sends. Keeping the route listener
+/// behind that switch preserves the original Mac behavior when the experiment is off.
+fn mac_connected_sends_enabled() -> bool {
+    connected_sends_switch_is_on(std::env::var_os("GOTATUN_BENCH_MAC_CONNECTED").as_deref())
+}
+
+/// Read the shared benchmark switch without changing or mutating process environment.
+fn connected_sends_switch_is_on(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Start the route listener only when the Mac connected-send path needs immediate announcements.
+///
+/// The disabled mode leaves the listener absent, so route events cannot trigger extra
+/// keepalives. A missing utun also leaves the listener absent.
+fn start_underlay_listener(
+    utun: Option<&str>,
+    connected_sends_enabled: bool,
+) -> Option<UnderlayAnnouncer> {
+    if connected_sends_enabled {
+        utun.map(UnderlayAnnouncer::start)
+    } else {
+        None
+    }
+}
+
+/// Handle a coalesced route event when the connected-send listener is active.
+///
+/// No listener means the event cannot invalidate cached sources or request keepalives. With a
+/// listener, invalidate sources before asking live sessions to announce their new endpoint.
+async fn announce_underlay_on_route_event(
+    announcer: Option<&mut UnderlayAnnouncer>,
+    invalidate_sources: impl FnOnce(),
+    request_keepalives: impl AsyncFnOnce() -> usize,
+) -> Option<usize> {
+    announcer?;
+    Some(announce_underlay(invalidate_sources, request_keepalives).await)
+}
+
+/// Wait for the listener's next announcement. With no utun, this branch stays pending.
+async fn announcement_due(announcer: Option<&mut UnderlayAnnouncer>) {
+    match announcer {
+        Some(announcer) => announcer.due().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Invalidate every cached source before walking the live sessions for keepalives (#260).
+/// The walk may find no eligible session, and its keepalive sends can only invalidate the
+/// endpoints they use. A busy peer must be able to reconnect on its next data send either way.
+async fn announce_underlay(
+    invalidate_sources: impl FnOnce(),
+    request_keepalives: impl AsyncFnOnce() -> usize,
+) -> usize {
+    invalidate_sources();
+    request_keepalives().await
 }
 
 /// Bring the device's peers in line with `next`, touching only what changed: add or update each
@@ -388,5 +478,84 @@ impl RuntimeState {
         self.handshakes.spawn(async move {
             let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.rehandshake(&key)).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Order of route-change recovery, independent of sockets or eligible WireGuard sessions.
+
+    use super::{
+        announce_underlay, announce_underlay_on_route_event, connected_sends_switch_is_on,
+        mac_connected_sends_enabled, start_underlay_listener,
+    };
+    use std::{
+        cell::Cell,
+        ffi::OsStr,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    /// The first operation in the keepalive walk must see explicit invalidation, even if the
+    /// walk finds no live sessions and sends nothing that might mark an endpoint stale.
+    #[tokio::test]
+    async fn invalidates_sources_before_walking_live_sessions() {
+        let invalidated = Cell::new(false);
+        let sessions = announce_underlay(
+            || invalidated.set(true),
+            async || {
+                assert!(
+                    invalidated.get(),
+                    "live-session walk ran before invalidation"
+                );
+                0
+            },
+        )
+        .await;
+        assert_eq!(sessions, 0);
+    }
+
+    /// An opt-in listener announces live sessions on route events; the default mode stays quiet.
+    #[tokio::test]
+    async fn connected_sends_gates_the_route_listener_and_keepalives() {
+        assert!(!connected_sends_switch_is_on(None));
+        assert!(connected_sends_switch_is_on(Some(OsStr::new("1"))));
+        assert!(!connected_sends_switch_is_on(Some(OsStr::new("0"))));
+
+        let enabled = mac_connected_sends_enabled();
+        let mut listener = start_underlay_listener(Some("lo0"), enabled);
+        let listening = listener
+            .as_ref()
+            .is_some_and(|listener| listener.is_listening());
+        let invalidations = AtomicUsize::new(0);
+        let requests = AtomicUsize::new(0);
+        let result = announce_underlay_on_route_event(
+            listener.as_mut(),
+            || {
+                invalidations.fetch_add(1, Ordering::SeqCst);
+            },
+            async || {
+                requests.fetch_add(1, Ordering::SeqCst);
+                1
+            },
+        )
+        .await;
+
+        let invalidation_count = invalidations.load(Ordering::SeqCst);
+        let request_count = requests.load(Ordering::SeqCst);
+        if enabled {
+            assert!(
+                listening && result == Some(1) && invalidation_count == 1 && request_count == 1,
+                "S on must start a listener and announce a route event: \
+                 listening={listening}, result={result:?}, \
+                 invalidations={invalidation_count}, requests={request_count}",
+            );
+        } else {
+            assert!(
+                !listening && result.is_none() && invalidation_count == 0 && request_count == 0,
+                "S off must not start a listener or handle a route event: \
+                 listening={listening}, result={result:?}, \
+                 invalidations={invalidation_count}, requests={request_count}",
+            );
+        }
     }
 }
