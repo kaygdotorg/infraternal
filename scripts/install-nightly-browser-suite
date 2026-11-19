@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the D373 nightly browser suite on dev-02, next to the nightly fuzz.
+"""Install the D373 nightly browser suite idempotently on dev-02, next to the nightly fuzz.
 
 Run `scripts/install-nightly-fuzz` first: this reuses its `infraternal-fuzz`
 account and Forgejo token for the reporter and installs nothing for the token.
@@ -41,6 +41,7 @@ import tempfile
 
 USER = 'infraternal-browser'
 HOME = Path('/var/lib/infraternal-browser')
+PUBLISH_HOME = Path('/var/lib/infraternal-browser-pub')
 SERVICE_HELPER = Path('/usr/local/libexec/infraternal-browser-suite-service')
 REPORTER = Path('/usr/local/libexec/infraternal-browser-suite-report')
 # The Forgejo account the token belongs to. The token has no `read:user` scope, so the reporter cannot ask Forgejo
@@ -80,7 +81,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 BindPaths=/tmp/infraternal-build-slots
 ProtectSystem=strict
-ReadWritePaths=/var/lib/infraternal-browser /var/lib/infraternal-fuzz /run /nix/var
+ReadWritePaths=/var/lib/infraternal-browser /var/lib/infraternal-browser-pub /var/lib/infraternal-fuzz /run /nix/var
 ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -143,6 +144,20 @@ def secure_home(entry):
     try:
         os.fchown(descriptor, entry.pw_uid, entry.pw_gid)
         os.fchmod(descriptor, 0o700)
+    finally:
+        os.close(descriptor)
+
+
+def ensure_publish_home(path=PUBLISH_HOME, publisher_uid=0, publisher_gid=0):
+    """Create or repair the root-only publication directory with stable owner and permissions."""
+    try:
+        os.mkdir(path, 0o750)
+    except FileExistsError:
+        pass
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchown(descriptor, publisher_uid, publisher_gid)
+        os.fchmod(descriptor, 0o750)
     finally:
         os.close(descriptor)
 
@@ -242,7 +257,7 @@ def install_file(source, destination):
 
 
 def main():
-    """Create the account, pin the checkout, install both root-owned copies and the timer."""
+    """Idempotently repair the account, pinned checkout, root-owned copies and enabled timer."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--ref', required=True, help='full 40-character reviewed commit that supplies the helper and the reporter')
     parser.add_argument('--forgejo-login', help='the Forgejo account the token belongs to (required the first time)')
@@ -258,6 +273,7 @@ def main():
     elif not LOGIN_FILE.is_file():
         raise SystemExit(f'pass --forgejo-login <account> once: {LOGIN_FILE} does not exist')
     ensure_user()
+    ensure_publish_home()
     # The browser account's checkout is only the suite's working copy (the service moves it to dev nightly).
     checkout(args.ref)
     source = reviewed_tree(args.ref)

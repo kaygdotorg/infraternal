@@ -47,6 +47,7 @@ import statistics
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -69,10 +70,10 @@ MAX_SHARD = 16
 # How many finished runs `run` keeps next to the new one; older ones are removed.
 KEEP_RUNS = 7
 
-# Where the unit keeps its runs on dev-02. The reporter builds the evidence and
-# log paths it prints from this and the validated run name, never from a file
+# Where the operator-readable runs are published on dev-02. The reporter builds
+# evidence and log paths from this and the validated run name, never from a path
 # the suite wrote.
-BROWSER_RUNS = '/var/lib/infraternal-browser/runs'
+BROWSER_RUNS = '/var/lib/infraternal-browser-pub'
 
 # A run directory is `<UTC stamp>-<first seven hex of the commit>`.
 RUN_NAME = re.compile(r'\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7}\Z', re.ASCII)
@@ -98,7 +99,10 @@ TOKEN_REFUSED_EXIT = 77
 LOGIN = re.compile(r'\A[A-Za-z0-9][A-Za-z0-9._-]{0,38}\Z', re.ASCII)
 MAX_RESULTS_BYTES = 32 << 20
 MAX_JSONL_BYTES = 32 << 20
+MAX_MERGED_REPORT_BYTES = 32 << 20
 MAX_JSONL_LINES = 200000
+MAX_PLANNED_TESTS = 50000
+MAX_UNRUN_FILES_IN_NOTE = 40
 TIMEOUT_LABEL = re.compile(r'\A[0-9]{1,3}h\Z', re.ASCII)
 MAX_LOG_BYTES = 16 << 20
 MAX_META_BYTES = 64 << 10
@@ -162,6 +166,39 @@ def prune_runs(runs, keep):
         shutil.rmtree(path, ignore_errors=True)
 
 
+def atomic_write_bytes(path, data):
+    """Publish complete bytes through a same-directory temporary file and rename.
+
+    The file is synced before it becomes visible, then its directory is synced
+    so a completed report survives a host restart. A unique temporary name
+    also means a previous retry cannot leave a partial file at the public name.
+    """
+    path = Path(path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        os.fsync(directory)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+        os.close(directory)
+
+
+def atomic_write_json(path, value):
+    """Write one JSON document with the durable, atomic publication rule."""
+    atomic_write_bytes(path, (json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n').encode())
+
+
 def load_times(runs):
     """Seconds per spec file from the previous night, or {} when there is nothing usable.
 
@@ -183,14 +220,13 @@ def load_times(runs):
 def assign(files, times, shards):
     """Split `files` into `shards` groups, longest first, each file to the least loaded group.
 
-    Files without a recorded time weigh the median of the known ones. Returns
-    None when fewer than half the files have a time: the numbers would not
-    balance anything, and the caller then uses Playwright's own `--shard`.
+    Files without a recorded time weigh the median of the known ones. If no
+    file has a time yet, each file weighs one second and the explicit split
+    still records which shard owns it; a report can then name an unstarted
+    shard's files instead of guessing what Playwright assigned.
     """
     known = [times[name] for name in files if name in times]
-    if len(known) * 2 < len(files) or not known:
-        return None
-    fill = statistics.median(known)
+    fill = statistics.median(known) if known else 1.0
     weight = {name: times.get(name, fill) for name in files}
     groups, loads = [[] for _ in range(shards)], [0.0] * shards
     for name in sorted(files, key=lambda name: (-weight[name], name)):
@@ -247,26 +283,29 @@ def record_times(runs, jsonl_data, files):
             item = json.loads(line)
         except ValueError:
             continue
-        if isinstance(item, dict) and item.get('kind') == 'test' and item.get('file') in files and isinstance(item.get('ms'), (int, float)):
-            seconds[item['file']] = seconds.get(item['file'], 0.0) + item['ms'] / 1000
-    temporary = runs / (FILE_TIMES + '.new')
-    temporary.write_text(json.dumps({name: round(value, 3) for name, value in seconds.items()}) + '\n')
-    os.replace(temporary, runs / FILE_TIMES)
+        if (isinstance(item, dict) and item.get('kind') == 'test'
+                and isinstance(item.get('ms'), (int, float)) and not isinstance(item.get('ms'), bool)):
+            file = clean_name(item.get('file'))
+            name = file.removeprefix('test/')
+            if name in files:
+                seconds[name] = seconds.get(name, 0.0) + item['ms'] / 1000
+    atomic_write_json(runs / FILE_TIMES, {name: round(value, 3) for name, value in seconds.items()})
 
 
 def run(root, runs, shards=SHARDS):
-    """Build the tracer, run the whole suite in `shards` parallel shards, and leave `results.jsonl`, `suite.log` and `meta.json`.
+    """Build the tracer, run the whole suite in `shards` parallel shards, and leave a durable run manifest and raw results.
 
     The run directory is `<runs>/<UTC stamp>-<sha7>`. Its name goes into
     `<runs>/latest` (the bare run name) and a first `meta.json` is written
     *before* the suite starts, so that if the suite is stopped by its time
-    budget the helper still knows where to find the partial results.
+    budget the helper still knows where to find the partial results and the
+    spec files assigned to each shard.
 
     Each shard is its own `playwright test` with its own test server (a port
     pair), build folder and evidence folder, because the specs of one server
     share a single test double (#377). The spec files are split longest-first
     by the previous night's seconds (`file-times.json`), or by Playwright's
-    own `--shard=i/N` when there are no usable times. The custom reporter
+    explicit equal-weight files when there are no usable times. The custom reporter
     (`apps/tracer/nightly-reporter.ts`) of every shard appends one line per
     finished test to the *one* `results.jsonl`, tagged with its shard number, so
     the file is merged by construction and a stopped run still leaves it. When a
@@ -285,9 +324,20 @@ def run(root, runs, shards=SHARDS):
     jsonl = out / 'results.jsonl'
     jsonl.write_text('')
     env = dict(os.environ, TRACER_TEST_PORT=TEST_PORT, INFRATERNAL_EVIDENCE_DIR=str(out / 'evidence'))
-    meta = {'head': head, 'evidence': str(out / 'evidence'), 'log': str(log), 'playwright_exit': None, 'shards': []}
-    (out / 'meta.json').write_text(json.dumps(meta) + '\n')
-    (runs / 'latest').write_text(out.name + '\n')
+    files = sorted(path.name for path in (tracer / 'test').glob('*.spec.ts'))
+    groups = assign(files, load_times(runs), shards) if shards > 1 else [files]
+    meta = {
+        'schema': 2,
+        'head': head,
+        'evidence': str(out / 'evidence'),
+        'log': str(log),
+        'playwright_exit': None,
+        'shards': [{'shard': number, 'of': shards, 'exit': None, 'seconds': None,
+                    'files': ['test/' + name for name in groups[number - 1]]}
+                   for number in range(1, shards + 1)],
+    }
+    atomic_write_json(out / 'meta.json', meta)
+    atomic_write_bytes(runs / 'latest', (out.name + '\n').encode())
     # Build failures are infrastructure failures: no spec issue is opened for them. (Each shard builds its own copy.)
     check_env = dict(env, TRACER_DIST=str(out / 'build-check'))
     for command in (['bun', 'install', '--frozen-lockfile'], ['bun', 'run', 'build'],
@@ -297,29 +347,25 @@ def run(root, runs, shards=SHARDS):
             return 1
     shutil.rmtree(out / 'build-check', ignore_errors=True)
     first_port = base_port(os.environ)
-    files = sorted(path.name for path in (tracer / 'test').glob('*.spec.ts'))
-    groups = assign(files, load_times(runs), shards) if shards > 1 else None
     lock = threading.Lock()
     started = []
     for shard in range(1, shards + 1):
         # `list` keeps readable progress in the log, `json` is the shard's full report, and the custom reporter streams a line per test.
         command = ['bun', 'x', 'playwright', 'test', '--reporter=list,json,./nightly-reporter.ts', f'--grep-invert={PERF_TAG}']
-        if shards == 1:
-            pass
-        elif groups is None:
-            command.append(f'--shard={shard}/{shards}')
-        else:
+        if shards > 1:
             command.extend('test/' + re.escape(name) + '$' for name in groups[shard - 1])
         (out / f'shard{shard}').mkdir()
         started.append((shard, time.monotonic(), *start_shard(command, tracer, shard_env(env, out, jsonl, shard, shards, first_port), log, lock, f's{shard}')))
     for shard, began, process, thread in started:
         code = process.wait()
         thread.join(10)
-        entry = {'kind': 'shard', 'shard': shard, 'of': shards, 'exit': code, 'seconds': round(time.monotonic() - began),
-                 'files': None if groups is None else groups[shard - 1]}
+        seconds = round(time.monotonic() - began)
+        entry = {'kind': 'shard', 'shard': shard, 'of': shards, 'exit': code, 'seconds': seconds,
+                 'files': ['test/' + name for name in groups[shard - 1]]}
         with lock, jsonl.open('a') as handle:
             handle.write(json.dumps(entry) + '\n')
-        meta['shards'].append({'shard': shard, 'exit': code, 'files': None if groups is None else len(groups[shard - 1])})
+        meta['shards'][shard - 1].update(exit=code, seconds=seconds)
+        atomic_write_json(out / 'meta.json', meta)
     data = read_regular(jsonl, MAX_JSONL_BYTES, tail=True)
     summary = shard_summary(data)
     if not any(info['planned'] is not None for info in summary.values()):
@@ -327,7 +373,7 @@ def run(root, runs, shards=SHARDS):
         return 1
     record_times(runs, data, set(files))
     meta['playwright_exit'] = max(m['exit'] for m in meta['shards'])
-    (out / 'meta.json').write_text(json.dumps(meta) + '\n')
+    atomic_write_json(out / 'meta.json', meta)
     prune_runs(runs, KEEP_RUNS)
     print(f'BROWSER_SUITE_DONE shards={[m["exit"] for m in meta["shards"]]} head={head} out={out}', flush=True)
     return 0
@@ -382,7 +428,7 @@ def shard_key(item):
     return shard if isinstance(shard, int) and not isinstance(shard, bool) and 1 <= shard <= MAX_SHARD else 0
 
 
-def shard_summary(data):
+def shard_summary(data, meta=None):
     """What each shard did, from the streamed lines: `{shard: {planned, finished, exit, of, files}}`.
 
     `planned` is the total its reporter announced (None if it never began),
@@ -392,6 +438,22 @@ def shard_summary(data):
     without a usable shard number. Lines are untrusted: bad ones are skipped.
     """
     summary = {}
+    manifest = meta.get('shards', []) if isinstance(meta, dict) else []
+    if isinstance(manifest, list):
+        for shard in manifest[:MAX_SHARD]:
+            if not isinstance(shard, dict):
+                continue
+            number = shard.get('shard')
+            if not isinstance(number, int) or isinstance(number, bool) or not 1 <= number <= MAX_SHARD:
+                continue
+            files = shard.get('files')
+            summary[number] = {
+                'planned': None,
+                'finished': 0,
+                'exit': shard.get('exit') if isinstance(shard.get('exit'), int) and not isinstance(shard.get('exit'), bool) else None,
+                'of': shard.get('of') if isinstance(shard.get('of'), int) and not isinstance(shard.get('of'), bool) else None,
+                'files': len(files) if isinstance(files, list) else None,
+            }
     for line in data.decode(errors='replace').splitlines()[:MAX_JSONL_LINES]:
         try:
             item = json.loads(line)
@@ -400,16 +462,17 @@ def shard_summary(data):
         if not isinstance(item, dict):
             continue
         info = summary.setdefault(shard_key(item), {'planned': None, 'finished': 0, 'exit': None, 'of': None, 'files': None})
-        if item.get('kind') == 'begin' and isinstance(item.get('total'), int) and 0 <= item['total'] <= 10 ** 7:
+        if (item.get('kind') == 'begin' and isinstance(item.get('total'), int) and not isinstance(item.get('total'), bool)
+                and 0 <= item['total'] <= 10 ** 7):
             info['planned'] = item['total']
         elif item.get('kind') == 'test':
             info['finished'] += 1
         elif item.get('kind') == 'shard':
-            if isinstance(item.get('exit'), int):
+            if isinstance(item.get('exit'), int) and not isinstance(item.get('exit'), bool):
                 info['exit'] = item['exit']
             if isinstance(item.get('files'), list):
                 info['files'] = len(item['files'])
-        if isinstance(item.get('of'), int) and 1 <= item['of'] <= MAX_SHARD:
+        if isinstance(item.get('of'), int) and not isinstance(item.get('of'), bool) and 1 <= item['of'] <= MAX_SHARD:
             info['of'] = item['of']
     return summary
 
@@ -427,7 +490,165 @@ def spec_shards(data):
     return {name: sorted(numbers) for name, numbers in found.items()}
 
 
-def collect_jsonl(data):
+def merged_report(meta, data):
+    """Merge shard plans and streamed outcomes into one explicit report.
+
+    A test is passing only when it appears in a shard's plan and completed
+    with an expected or flaky outcome. Missing, skipped, interrupted or
+    mismatched test events remain in `not_run`; the reporter never treats a
+    partly executed spec file as fixed.
+    """
+    plans, outcomes, duplicate_shards, duplicate_results, duplicate_failures = {}, {}, set(), set(), {}
+    for line in data.decode(errors='replace').splitlines()[:MAX_JSONL_LINES]:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        shard = shard_key(item)
+        if item.get('kind') == 'begin' and shard:
+            raw_tests = item.get('tests')
+            if not isinstance(raw_tests, list) or len(raw_tests) > MAX_PLANNED_TESTS:
+                duplicate_shards.add(shard)
+                continue
+            planned = {}
+            valid = True
+            for test in raw_tests:
+                if not isinstance(test, dict):
+                    valid = False
+                    break
+                identifier = test.get('id')
+                file = test.get('file')
+                if (not isinstance(identifier, int) or isinstance(identifier, bool) or identifier < 0
+                        or identifier in planned or not isinstance(file, str)):
+                    valid = False
+                    break
+                title = test.get('title')
+                planned[identifier] = {
+                    'file': clean_name(file),
+                    'title': str(title if title is not None else '?')[:MAX_LINE],
+                }
+            if not valid or shard in plans:
+                duplicate_shards.add(shard)
+            else:
+                plans[shard] = planned
+        elif item.get('kind') == 'test' and shard:
+            identifier = item.get('id')
+            if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier < 0:
+                continue
+            key = (shard, identifier)
+            if key in outcomes:
+                duplicate_results.add(key)
+                if item.get('outcome') == 'unexpected':
+                    duplicate_failures.setdefault(key, []).append(item)
+            else:
+                outcomes[key] = item
+
+    manifest = meta.get('shards', []) if isinstance(meta, dict) else []
+    assigned, exits = {}, {}
+    if isinstance(manifest, list):
+        for shard in manifest[:MAX_SHARD]:
+            if not isinstance(shard, dict):
+                continue
+            number = shard.get('shard')
+            if not isinstance(number, int) or isinstance(number, bool) or not 1 <= number <= MAX_SHARD:
+                continue
+            raw_files = shard.get('files')
+            if isinstance(raw_files, list):
+                assigned[number] = sorted({clean_name(name) for name in raw_files if isinstance(name, str)})
+            if isinstance(shard.get('exit'), int) and not isinstance(shard.get('exit'), bool):
+                exits[number] = shard['exit']
+
+    summaries = shard_summary(data, meta)
+    tests, not_run, failed, per_file = [], [], {}, {}
+    shard_numbers = sorted(set(plans) | set(assigned) | set(summaries))
+    for shard in shard_numbers:
+        planned = plans.get(shard)
+        if planned is None:
+            for file in assigned.get(shard, []):
+                item = {'shard': shard, 'file': file, 'title': None, 'state': 'not_run', 'reason': 'shard did not start'}
+                not_run.append(item)
+                per_file.setdefault(file, []).append('not_run')
+            continue
+        for identifier, plan in sorted(planned.items()):
+            file, title = plan['file'], plan['title']
+            event = outcomes.get((shard, identifier))
+            reason, outcome, error, state = None, None, '', 'not_run'
+            if shard in duplicate_shards or (shard, identifier) in duplicate_results:
+                reason = 'ambiguous shard result'
+            elif event is None:
+                reason = 'test did not finish'
+            elif clean_name(event.get('file')) != file or str(event.get('title', '?'))[:MAX_LINE] != title:
+                reason = 'result did not match the shard plan'
+            else:
+                outcome = event.get('outcome')
+                if outcome in ('expected', 'flaky'):
+                    state = 'passed'
+                elif outcome == 'unexpected':
+                    state = 'failed'
+                    error = clip_lines(ANSI.sub('', str(event.get('error', ''))).strip(), MAX_ERROR)
+                else:
+                    reason = 'test was skipped or interrupted'
+            result = {'shard': shard, 'file': file, 'title': title, 'state': state, 'outcome': outcome}
+            if error:
+                result['error'] = error
+            if reason:
+                result['reason'] = reason
+                not_run.append(result)
+            tests.append(result)
+            per_file.setdefault(file, []).append(state)
+    for key, event in outcomes.items():
+        candidates = [event, *duplicate_failures.get(key, [])]
+        for candidate in candidates:
+            if candidate.get('outcome') != 'unexpected':
+                continue
+            file = clean_name(candidate.get('file'))
+            title = str(candidate.get('title', '?'))[:MAX_LINE]
+            message = ANSI.sub('', str(candidate.get('error', ''))).strip()
+            failed.setdefault(file, []).append((title, clip_lines(message, MAX_ERROR)))
+
+    passing = {file for file, states in per_file.items()
+               if file != UNPARSEABLE and states and all(state == 'passed' for state in states)}
+    shard_rows = []
+    for shard in shard_numbers:
+        info = summaries.get(shard, {})
+        states = [test['state'] for test in tests if test['shard'] == shard]
+        shard_rows.append({
+            'shard': shard,
+            'of': info.get('of'),
+            'exit': exits.get(shard, info.get('exit')),
+            'assigned_files': assigned.get(shard, []),
+            'planned_tests': len(plans[shard]) if shard in plans else None,
+            'reported_tests': info.get('finished', 0),
+            'passed_tests': states.count('passed'),
+            'failed_tests': states.count('failed'),
+            'not_run_tests': states.count('not_run') + sum(1 for item in not_run if item['shard'] == shard and item.get('title') is None),
+        })
+    planned_count = sum(row['planned_tests'] for row in shard_rows if row['planned_tests'] is not None)
+    total_known = all(row['planned_tests'] is not None for row in shard_rows)
+    reported_count = sum(info.get('finished', 0) for shard, info in summaries.items() if shard)
+    abnormal = any(row['exit'] not in (0, 1) for row in shard_rows)
+    counts_match = all(row['planned_tests'] == row['reported_tests']
+                       for row in shard_rows if row['planned_tests'] is not None)
+    complete = total_known and counts_match and not not_run and not abnormal and all(row['exit'] in (0, 1) for row in shard_rows)
+    has_plan = bool(plans or assigned)
+    report = {
+        'schema': 1,
+        'head': meta.get('head') if isinstance(meta, dict) else None,
+        'status': 'partial' if has_plan and not complete else ('failed' if failed else 'passed') if has_plan else 'unknown',
+        'shards': shard_rows,
+        'tests': tests,
+        'not_run': not_run,
+        'failed_files': sorted(failed),
+        'passing_files': sorted(passing),
+        'reported_tests': reported_count,
+        'planned_tests': planned_count if total_known else None,
+    }
+    return report, failed, passing, reported_count, (planned_count if total_known else None)
+
+
+def collect_jsonl(data, meta=None):
     """Read the streamed per-test lines of a run; return `(failing, passing, finished, total)`.
 
     Same shape as `collect`, plus how many tests finished and how many the run
@@ -438,6 +659,9 @@ def collect_jsonl(data):
     `interrupted` test (cut off by the stop) is not a failure. The lines are
     untrusted: bad lines are skipped, names are cleaned, text is cut.
     """
+    merged, failing, passing, finished, total = merged_report(meta or {}, data)
+    if merged['status'] != 'unknown':
+        return failing, passing, finished, total
     failing, ran, finished = {}, set(), 0
     for line in data.decode(errors='replace').splitlines()[:MAX_JSONL_LINES]:
         try:
@@ -454,7 +678,7 @@ def collect_jsonl(data):
                                                      clip_lines(ANSI.sub('', str(item.get('error', ''))).strip(), MAX_ERROR)))
             elif item.get('outcome') in ('expected', 'flaky'):
                 ran.add(name)
-    planned = [info['planned'] for info in shard_summary(data).values() if info['planned'] is not None]
+    planned = [info['planned'] for info in shard_summary(data, meta).values() if info['planned'] is not None]
     return failing, ran - set(failing) - {UNPARSEABLE}, finished, (sum(planned) if planned else None)
 
 
@@ -625,7 +849,8 @@ def spec_issue(spec, failures, tail, run_name, head, runs_root, shard=None):
     blocks = [(f'Failing test {number}', f'{title}\n{text}') for number, (title, text) in enumerate(failures[:5], 1)] + [('Log tail for this spec', tail)]
     more = f'\n(and {len(failures) - 5} more failing tests)\n' if len(failures) > 5 else ''
     where = f'Shard: {shard}\n' if shard else ''
-    intro = f"Spec: `{spec}`\n{where}{more}Rerun with `cd apps/tracer && bun x playwright test test/{spec}`.\n"
+    test_file = spec if spec.startswith('test/') else f'test/{spec}'
+    intro = f"Spec: `{spec}`\n{where}{more}Rerun with `cd apps/tracer && bun x playwright test {test_file}`.\n"
     return {'title': f'browser suite: {spec} fails on dev',
             'body': issue_body(spec_marker(spec), intro, blocks, run_name, head, runs_root)}
 
@@ -655,11 +880,20 @@ def shard_note(shards):
                            else f'{who}: never started, none of its {files} spec files ran')
             continue
         ran = f'{who}: {info["finished"]} of {info["planned"]} tests ran'
-        if info['exit'] in (0, 1):
+        if info['exit'] in (0, 1) and info['finished'] == info['planned']:
             clauses.append(f'{ran}, finished (exit {info["exit"]})')
+        elif info['exit'] in (0, 1) and info['finished'] < info['planned']:
+            abnormal = True
+            clauses.append(f'{ran}, did not finish (exit {info["exit"]})')
+        elif info['exit'] is None:
+            abnormal = True
+            clauses.append(f'{ran}, did not finish')
+        elif info['exit'] not in (0, 1):
+            abnormal = True
+            clauses.append(f'{ran}, crashed (exit {info["exit"]})')
         else:
             abnormal = True
-            clauses.append(f'{ran}, did not finish' if info['exit'] is None else f'{ran}, crashed (exit {info["exit"]})')
+            clauses.append(f'{ran}, test stream did not match the plan (exit {info["exit"]})')
     return ('; '.join(clauses) if clauses else None), abnormal
 
 
@@ -671,8 +905,8 @@ def shard_label(numbers, shards):
     return f'{" and ".join(str(n) for n in numbers)} of {of}'
 
 
-def run_note(suite_timeout, finished, total, shards):
-    """The one note a night adds to the roll-up when the suite timed out or a shard did not finish, else None.
+def run_note(suite_timeout, finished, total, shards, unrun_files=()):
+    """The one note a night adds when the suite timed out or its test stream did not finish as planned, else None.
 
     It says which shard ran what. The first sentence is the timeout note,
     unchanged, so a night without shards reads as before.
@@ -682,7 +916,12 @@ def run_note(suite_timeout, finished, total, shards):
         return None
     parts = [timeout_note(suite_timeout, finished, total)] if suite_timeout else []
     if clauses:
-        parts.append(f'Shards: {clauses}' if parts else f'Shards: {clauses}')
+        parts.append(f'Shards: {clauses}')
+    names = sorted(set(unrun_files))
+    if names:
+        shown = ', '.join(names[:MAX_UNRUN_FILES_IN_NOTE])
+        remainder = f' (+{len(names) - MAX_UNRUN_FILES_IN_NOTE} more)' if len(names) > MAX_UNRUN_FILES_IN_NOTE else ''
+        parts.append(f'Spec files not fully run: {shown}{remainder}')
     return '. '.join(parts)
 
 
@@ -724,9 +963,10 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_t
     installer. Whose markers to believe cannot be asked of Forgejo (`/user` needs
     the `read:user` scope, which the token deliberately lacks); every issue or
     comment this function posts is checked against it, so a wrong value stops the night.
-    `suite_timeout` (like `9h`) says the suite was stopped by its time budget: the
-    results then come from the streamed `results.jsonl` when `results.json` is
-    missing, and the roll-up gets one note saying how many tests ran.
+    `suite_timeout` (like `9h`) says the suite was stopped by its time budget:
+    the streamed `results.jsonl` is merged with the durable shard manifest, and
+    the roll-up names spec files whose planned tests did not all finish. The
+    merged JSON is atomically published before any Forgejo request is made.
     """
     if not isinstance(login, str) or not LOGIN.fullmatch(login):
         raise ValueError('no valid Forgejo login configured')
@@ -742,16 +982,39 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_t
     finished, total = 0, None
     jsonl = results / 'results.jsonl'
     jsonl_data = read_regular(jsonl, MAX_JSONL_BYTES) if jsonl.exists() else b''
-    shards = shard_summary(jsonl_data)
+    shards = shard_summary(jsonl_data, meta)
     where = spec_shards(jsonl_data)
-    if (results / 'results.json').exists():
+    has_playwright_json = (results / 'results.json').exists()
+    if jsonl_data:
+        merged, streamed_failing, streamed_passing, finished, total = merged_report(meta, jsonl_data)
+        if merged['status'] == 'unknown':
+            if has_playwright_json:
+                failing, passing = collect(json.loads(read_regular(results / 'results.json', MAX_RESULTS_BYTES)))
+            else:
+                failing, passing, finished, total = collect_jsonl(jsonl_data, meta)
+            merged['status'] = 'failed' if failing else 'passed'
+            merged['failed_files'] = sorted(failing)
+            merged['passing_files'] = sorted(passing)
+        else:
+            failing, passing = streamed_failing, streamed_passing
+    elif has_playwright_json:
         failing, passing = collect(json.loads(read_regular(results / 'results.json', MAX_RESULTS_BYTES)))
-        if jsonl_data:
-            finished, total = collect_jsonl(jsonl_data)[2:]
-    elif jsonl_data:
-        failing, passing, finished, total = collect_jsonl(jsonl_data)
+        merged = {'schema': 1, 'head': head, 'status': 'failed' if failing else 'passed', 'shards': [],
+                  'tests': [], 'not_run': [], 'failed_files': sorted(failing), 'passing_files': sorted(passing),
+                  'reported_tests': None, 'planned_tests': None}
+    elif suite_timeout is not None and isinstance(meta.get('shards'), list) and meta['shards']:
+        merged, failing, passing, finished, total = merged_report(meta, b'')
+        if not merged['not_run']:
+            raise ValueError('the timed-out run has no reportable shard plan')
     else:
         raise ValueError('the run left neither results.json nor results.jsonl')
+    merged_bytes = (json.dumps(merged, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
+    if len(merged_bytes) > MAX_MERGED_REPORT_BYTES:
+        raise ValueError(f'merged report is larger than {MAX_MERGED_REPORT_BYTES} bytes')
+    atomic_write_bytes(results / 'merged-report.json', merged_bytes)
+    unrun_files = sorted({item['file'] for item in merged.get('not_run', [])
+                          if isinstance(item, dict) and isinstance(item.get('file'), str)
+                          and item.get('reason') != 'test was skipped or interrupted'})
     log_text = read_regular(results / 'suite.log', MAX_LOG_BYTES, tail=True).decode(errors='replace')
     known = open_issues(base, repo, token, login)
     new = sorted(spec for spec in failing if hashlib.sha256(spec.encode()).hexdigest()[:16] not in known)
@@ -764,7 +1027,7 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_t
         try:
             rollup = known.get(hashlib.sha256(ROLLUP.encode()).hexdigest()[:16])
             if rollup is None:
-                note = run_note(suite_timeout, finished, total, shards)
+                note = run_note(suite_timeout, finished, total, shards, unrun_files)
                 rollup = post(base, f'repos/{repo}/issues', token,
                              rollup_issue(new, len(failing) + len(passing), run_name, head, runs_root, note))['number']
                 print(f'opened roll-up issue #{rollup} specs={len(new)} head={head}', flush=True)
@@ -803,7 +1066,7 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_t
         except OSError as error:
             errors += 1
             print(f'report FAILED spec={spec}: {type(error).__name__}: {error}', flush=True)
-    note = run_note(suite_timeout, finished, total, shards)
+    note = run_note(suite_timeout, finished, total, shards, unrun_files)
     if note:
         # One note per timed-out or shard-broken run, on the roll-up (opened here if none is open yet).
         try:

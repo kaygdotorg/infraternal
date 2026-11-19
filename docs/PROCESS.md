@@ -764,17 +764,23 @@ the fuzz, and takes one of the build slots like any other run. Everything is
 token-less `infraternal-browser` account (`/var/lib/infraternal-browser`, mode
 0700, checkout moved to origin/dev each night, `nice -n 10`, own test port
 4731). Everything that account writes is hostile data. After the run, the
-root helper opens the run folder and its three result files without following
-links, accepts only regular files owned by that account under a size cap, and
-copies them into a staging folder owned by the token account. Only the
-root-owned, reviewed copy of the reporter runs in the `infraternal-fuzz`
-account, on the staged copies; it never opens a path the suite controls.
+root helper opens the run folder and its result files without following links,
+accepts only regular files owned by that account under size caps, and copies
+them into a staging folder owned by the token account. Only the root-owned,
+reviewed copy of the reporter runs in the `infraternal-fuzz` account, on the
+staged copies; it never opens a path the suite controls. After reporting, root
+copies the checked raw results, log, merged report and evidence to
+`/var/lib/infraternal-browser-pub/<run>/`. The publication directory is root-owned;
+each run is built under a hidden temporary name, synced, and made visible by a
+same-parent directory rename. Operators can read complete published runs
+with `sudo`, without access to the browser account's private home. The
+publication tree is root-owned (directories mode 0750, files mode 0640).
 
 **Reports:** one issue per failing spec file, found by a hidden marker (a hash
 of the name) in issues written by the token's own account, so a persistent red
 is one issue. It carries the dev SHA, the error text, a log tail and the
 evidence path (the newest seven nights are kept under
-`/var/lib/infraternal-browser/runs/`), all inside a code fence no content can
+`/var/lib/infraternal-browser-pub/`), all inside a code fence no content can
 close, with test titles inside it too. At most ten new issues a night and
 thirty open at once: more, or a mostly red suite (a dead test
 server), becomes one roll-up issue. A spec that passes again gets one comment,
@@ -784,12 +790,17 @@ that cannot run at all fails the unit and opens no spec issue.
 server (a port pair: 4731/4732 and 4733/4734; `NIGHTLY_BASE_PORT` moves the range, for a manual run beside the service), its own build folder (`TRACER_DIST`) and its own evidence
 folder, because every spec of one server shares one test double (#377); the service helper holds one
 build slot per shard. Spec files are split longest-first by the previous night's seconds
-(`runs/file-times.json`, rewritten at the end of every run), or by Playwright's own `--shard=i/N` when
-there are no usable times. All shards append to one `results.jsonl`, each line tagged with its shard,
-and one `suite.log` with `[s1]`/`[s2]` prefixes; when a shard ends, `run` appends a `shard` line with its
-exit status. A shard that crashes does not hide the other: the night is still reported, each spec
-issue says which shard ran it, and the roll-up gets one note, for example "shard 1 of 2: 700 of 700 tests ran,
-finished (exit 1); shard 2 of 2: crashed (exit 2): none of its 90 assigned spec files ran". Tests tagged
+(`runs/file-times.json`, rewritten at the end of every run), or by an explicit equal-weight assignment
+on a first night. The durable manifest records each shard's assigned spec files before the run starts.
+Each reporter writes a plan with stable per-shard test IDs, then each completed test outcome, to one
+`results.jsonl`; a complete merged `merged-report.json` is written through a synced temporary file and
+atomic rename before issue filing. A spec counts as passing only when every planned test in it finished
+with an expected or flaky outcome. The report lists missing or interrupted tests under `not_run`, and
+the roll-up names spec files that were not fully run. All shards append to one log with `[s1]`/`[s2]`
+prefixes and a final `shard` line with their exit status. A shard that crashes does not hide the other:
+the night is still reported, each spec issue says which shard ran it, and the roll-up gets one note, for
+example "shard 1 of 2: 700 of 700 tests ran, finished (exit 1); shard 2 of 2: crashed (exit 2): none
+of its 90 assigned spec files ran". Tests tagged
 `@perf` (frame budgets and benchmarks, for example `clusters-bench`) are left out with
 `--grep-invert=@perf` and run on the performance VM.
 
@@ -816,6 +827,9 @@ token, without re-running the suite, as root:
 the reporter, which is safe to repeat because issues are deduplicated).
 `sudo systemctl start infraternal-browser-suite.service` is a manual run; the
 reporter's test is the `nightly browser suite reporter` gate row.
+
+For the host, account, log, report, stop and recovery commands, see
+[`docs/operations/nightly-browser-suite.md`](operations/nightly-browser-suite.md).
 
 **Install or update** (as root, only from a reviewed commit; the installer
 clones its own fresh root-owned copy at that exact commit and installs the two

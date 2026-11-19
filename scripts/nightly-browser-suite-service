@@ -6,29 +6,34 @@ Installed root-owned at /usr/local/libexec/infraternal-browser-suite-service by
 fuzz helper it runs no repository code as root, and it keeps the Forgejo
 token away from the code under test:
 
-1. holds one shared build slot per Playwright shard (SHARDS, two) as `claude` (through `runuser`) until step 5 ends.
+1. holds one shared build slot per Playwright shard (SHARDS, two) as `claude` (through `runuser`) until publication ends.
    Waiting for the slot has its own bound (QUEUE_WAIT_SECONDS): on a timeout
    the unit fails with exit 75 and one `QUEUE WAIT TIMEOUT` journal line, and no
-   suite runs. The suite's own budget (`timeout`, 6 h) starts only after the
+   suite runs. The suite's own budget (`timeout`, 9 h) starts only after the
    slot is granted; a timeout is exit 124 and one `SUITE TIMEOUT` line;
 2. as `infraternal-browser` (no token, no sudo): fetches the newest origin/dev
    (hooks off) and runs `scripts/nightly-browser-suite.py run` in the dev shell,
    niced, then kills whatever that account still runs;
-3. as root, copies the run's three result files into a staging folder (created
+3. as root, copies the run's result files into a staging folder (created
    by descriptor, never following a link) that belongs to the token account. Everything in the run folder is hostile (the
    suite wrote it), so each file is opened without following links, must be a
    regular file owned by the suite account and under a size cap, and is
    written out as a fresh private copy;
 4. checks the staged copies are all there;
 5. as `infraternal-fuzz` (the account that holds the token): runs the
-   root-owned, reviewed copy of the reporter on the staged copies only. That
-   account never opens a path the suite account controls.
+   root-owned, reviewed copy of the reporter on the staged copies only. It
+   publishes one merged report atomically before posting issues;
+6. as root, publishes the log, raw results, merged report and evidence to a
+   root-owned, read-only run folder. The whole folder appears at once by
+   directory rename, and only after every source file passes the same hostile
+   data checks used for staging.
 
 `infraternal-browser-suite-service --report-only [--run-name NAME]` (as root) runs
-only step 5 again on the files already staged in `browser-staging`, with no slot,
-no suite and no staging: use it to file a night's results after fixing the token or
-the login. `--run-name` is needed for staging left by an older helper (it has no
-`staged.json`); otherwise the name comes from there.
+the reporter again on the files already staged in `browser-staging`, then
+publishes the checked report for operators to read. It takes no slot, runs no
+suite and stages no new files. Use it to file a night's results after fixing
+the token or login. `--run-name` is needed for staging left by an older helper
+(it has no `staged.json`); otherwise the name comes from there.
 
 The Forgejo account the token belongs to is configured by the installer in
 `/etc/infraternal-browser-suite.login` (root-owned) and handed to the reporter:
@@ -55,6 +60,7 @@ from pathlib import Path
 
 BROWSER_USER = 'infraternal-browser'
 BROWSER_HOME = '/var/lib/infraternal-browser'
+PUBLISH_HOME = '/var/lib/infraternal-browser-pub'
 REPORT_USER = 'infraternal-fuzz'
 REPORT_HOME = '/var/lib/infraternal-fuzz'
 REPORTER = '/usr/local/libexec/infraternal-browser-suite-report'
@@ -73,6 +79,13 @@ SUITE_TIMEOUT_EXIT = 124
 # `results.jsonl` are each optional (a suite stopped by its budget has only the streamed lines), but one must exist.
 CAPS = {'meta.json': 64 << 10, 'results.json': 32 << 20, 'results.jsonl': 32 << 20, 'suite.log': 16 << 20}
 OPTIONAL = ('results.json', 'results.jsonl')
+PUBLISH_FILE_CAP = 128 << 20
+PUBLISH_TOTAL_CAP = 1 << 30
+PUBLISH_ENTRY_CAP = 20000
+PUBLISH_DEPTH_CAP = 16
+PUBLISH_KEEP_RUNS = 7
+MERGED_REPORT = 'merged-report.json'
+MERGED_REPORT_CAP = 32 << 20
 LOGIN_FILE = '/etc/infraternal-browser-suite.login'
 LOGIN_OWNER = 0
 LOGIN = re.compile(r'\A[A-Za-z0-9][A-Za-z0-9._-]{0,38}\Z', re.ASCII)
@@ -277,6 +290,253 @@ def stage(runs, name, destination, owner, chown_to):
                 os.fchown(handle.fileno(), *chown_to)
 
 
+def write_published_file(destination, name, data, publisher_uid=0, publisher_gid=0):
+    """Create one complete operator-readable file owned by the publisher in a private directory."""
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=destination)
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fchown(handle.fileno(), publisher_uid, publisher_gid)
+            os.fchmod(handle.fileno(), 0o640)
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def copy_evidence(source, destination, owner, budget, depth=0, publisher_uid=0, publisher_gid=0):
+    """Copy an evidence tree through directory descriptors, refusing links and every non-regular object."""
+    if depth > PUBLISH_DEPTH_CAP:
+        raise Refused('evidence tree is nested too deeply')
+    for name in sorted(os.listdir(source)):
+        budget['entries'] += 1
+        if budget['entries'] > PUBLISH_ENTRY_CAP or '/' in name or '..' in name:
+            raise Refused('evidence tree has too many or unsafe entry names')
+        try:
+            info = os.stat(name, dir_fd=source, follow_symlinks=False)
+        except OSError as error:
+            raise Refused(f'evidence entry {name!r}: {error.strerror}') from error
+        if info.st_uid != owner:
+            raise Refused(f'evidence entry {name!r} is not owned by the suite account')
+        if stat.S_ISDIR(info.st_mode):
+            child_source = open_directory(source, name)
+            try:
+                current = os.fstat(child_source)
+                if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                    raise Refused(f'evidence directory {name!r} changed while it was opened')
+                os.mkdir(name, 0o700, dir_fd=destination)
+                child_destination = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=destination)
+                try:
+                    copy_evidence(child_source, child_destination, owner, budget, depth + 1, publisher_uid, publisher_gid)
+                    os.fchown(child_destination, publisher_uid, publisher_gid)
+                    os.fchmod(child_destination, 0o750)
+                    os.fsync(child_destination)
+                finally:
+                    os.close(child_destination)
+            finally:
+                os.close(child_source)
+        elif stat.S_ISREG(info.st_mode):
+            if info.st_nlink != 1 or info.st_size > PUBLISH_FILE_CAP:
+                raise Refused(f'evidence file {name!r} has too many links or is larger than {PUBLISH_FILE_CAP} bytes')
+            try:
+                data = read_owned(source, name, PUBLISH_FILE_CAP, owner)
+            except Refused as error:
+                raise Refused(f'evidence file {name!r}: {error}') from error
+            budget['bytes'] += len(data)
+            if budget['bytes'] > PUBLISH_TOTAL_CAP:
+                raise Refused(f'evidence tree is larger than {PUBLISH_TOTAL_CAP} bytes')
+            write_published_file(destination, name, data, publisher_uid, publisher_gid)
+        else:
+            raise Refused(f'evidence entry {name!r} is not a regular file or directory')
+
+
+def staged_report(home, owner):
+    """Read the reviewed reporter's atomically written merged report without following a path it controls."""
+    try:
+        parent = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f'report home: {error.strerror}') from error
+    try:
+        if os.fstat(parent).st_uid != owner:
+            raise Refused('report home is not owned by the reporter account')
+        staging = open_directory(parent, 'browser-staging')
+    finally:
+        os.close(parent)
+    try:
+        if os.fstat(staging).st_uid != owner:
+            raise Refused('report staging is not owned by the reporter account')
+        return read_owned(staging, MERGED_REPORT, MERGED_REPORT_CAP, owner)
+    finally:
+        os.close(staging)
+
+
+def prune_published_runs(root, publisher_uid=0):
+    """Remove interrupted hidden copies and keep only the newest complete published runs."""
+    published = []
+    for name in os.listdir(root):
+        if name.startswith('.publish-'):
+            temporary = open_directory(root, name)
+            try:
+                info = os.fstat(temporary)
+                if info.st_uid != publisher_uid or info.st_mode & 0o022:
+                    raise Refused(f'interrupted publication {name} is not private and publisher-owned')
+            finally:
+                os.close(temporary)
+            shutil.rmtree(name, dir_fd=root)
+            continue
+        if not RUN_NAME.fullmatch(name):
+            continue
+        directory = open_directory(root, name)
+        try:
+            info = os.fstat(directory)
+            if info.st_uid != publisher_uid or info.st_mode & 0o022:
+                raise Refused(f'published run {name} is not a private publisher-owned directory')
+        finally:
+            os.close(directory)
+        published.append(name)
+    for name in sorted(published)[:-PUBLISH_KEEP_RUNS]:
+        shutil.rmtree(name, dir_fd=root)
+
+
+def publish_run(runs, name, owner, report_home, report_owner, publish_home=PUBLISH_HOME, publisher_uid=0, publisher_gid=0):
+    """Atomically publish the merged report and checked run evidence for operators to read.
+
+    The source account ran unreviewed dev code, so the copy is built under a
+    private temporary name using no-follow descriptors, owner/link checks and
+    per-file and total size bounds. Files and directories are synced before a
+    same-parent rename makes the whole run visible. Existing complete runs are
+    left alone, making a retry safe.
+    """
+    if not RUN_NAME.fullmatch(name):
+        raise Refused('bad run name')
+    try:
+        root = os.open(publish_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f'publish directory: {error.strerror}') from error
+    temporary = None
+    try:
+        root_info = os.fstat(root)
+        if root_info.st_uid != publisher_uid or root_info.st_mode & 0o022:
+            raise Refused('publish directory must be publisher-owned and not group/world writable')
+        try:
+            os.stat(name, dir_fd=root, follow_symlinks=False)
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        if exists:
+            existing = open_directory(root, name)
+            try:
+                info = os.fstat(existing)
+                if info.st_uid != publisher_uid or info.st_mode & 0o022:
+                    raise Refused(f'published run {name} is not a private publisher-owned directory')
+                read_owned(existing, MERGED_REPORT, MERGED_REPORT_CAP, publisher_uid)
+            finally:
+                os.close(existing)
+            return False
+
+        temporary = f'.publish-{name}-{os.getpid()}-{time.monotonic_ns()}'
+        os.mkdir(temporary, 0o700, dir_fd=root)
+        destination = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+        try:
+            try:
+                source_root = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            except OSError as error:
+                raise Refused(f'runs: {error.strerror}') from error
+            try:
+                source = open_directory(source_root, name)
+            finally:
+                os.close(source_root)
+            try:
+                if os.fstat(source).st_uid != owner:
+                    raise Refused('run folder is not owned by the suite account')
+                budget = {'bytes': 0, 'entries': 0}
+                copied_results = False
+                for file, cap in CAPS.items():
+                    try:
+                        data = read_owned(source, file, cap, owner, tail=(file == 'suite.log'))
+                    except Missing:
+                        if file in OPTIONAL:
+                            continue
+                        raise
+                    budget['bytes'] += len(data)
+                    if budget['bytes'] > PUBLISH_TOTAL_CAP:
+                        raise Refused(f'published run is larger than {PUBLISH_TOTAL_CAP} bytes')
+                    write_published_file(destination, file, data, publisher_uid, publisher_gid)
+                    copied_results = copied_results or file in OPTIONAL
+                if not copied_results:
+                    raise Refused('the run left neither results.json nor results.jsonl')
+                evidence = open_directory(source, 'evidence')
+                try:
+                    if os.fstat(evidence).st_uid != owner:
+                        raise Refused('evidence folder is not owned by the suite account')
+                    os.mkdir('evidence', 0o700, dir_fd=destination)
+                    evidence_copy = os.open('evidence', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                            dir_fd=destination)
+                    try:
+                        copy_evidence(evidence, evidence_copy, owner, budget, publisher_uid=publisher_uid,
+                                      publisher_gid=publisher_gid)
+                        os.fchown(evidence_copy, publisher_uid, publisher_gid)
+                        os.fchmod(evidence_copy, 0o750)
+                        os.fsync(evidence_copy)
+                    finally:
+                        os.close(evidence_copy)
+                finally:
+                    os.close(evidence)
+            finally:
+                os.close(source)
+
+            merged = staged_report(report_home, report_owner)
+            budget['bytes'] += len(merged)
+            if budget['bytes'] > PUBLISH_TOTAL_CAP:
+                raise Refused(f'published run is larger than {PUBLISH_TOTAL_CAP} bytes')
+            write_published_file(destination, MERGED_REPORT, merged, publisher_uid, publisher_gid)
+            os.fchown(destination, publisher_uid, publisher_gid)
+            os.fchmod(destination, 0o750)
+            os.fsync(destination)
+        finally:
+            os.close(destination)
+        try:
+            os.rename(temporary, name, src_dir_fd=root, dst_dir_fd=root)
+        except FileExistsError:
+            shutil.rmtree(temporary, dir_fd=root)
+            temporary = None
+            return False
+        os.fsync(root)
+        temporary = None
+        prune_published_runs(root, publisher_uid)
+        os.fsync(root)
+        return True
+    finally:
+        if temporary is not None:
+            try:
+                shutil.rmtree(temporary, dir_fd=root)
+            except FileNotFoundError:
+                pass
+        os.close(root)
+
+
+def staged_run_name(home, owner):
+    """Read the current staging run name for a retry, validating its owner and format."""
+    parent = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        staging = open_directory(parent, 'browser-staging')
+    finally:
+        os.close(parent)
+    try:
+        staged = json.loads(read_owned(staging, 'staged.json', 4096, owner))
+    finally:
+        os.close(staging)
+    name = staged.get('run_name') if isinstance(staged, dict) else None
+    if not isinstance(name, str) or not RUN_NAME.fullmatch(name):
+        raise Refused('staged.json does not contain a valid run name')
+    return name
+
+
 def stop_holder(holder):
     """End a slot holder that is still queued: signal its whole process group, then let it go."""
     try:
@@ -311,6 +571,18 @@ def report_step(login, name, suite_timeout=None):
                    '--run-name', name, *extra, '--login', login, '--token-file', f'{REPORT_HOME}/forgejo-token', cwd=REPORT_HOME)
 
 
+def publish_reported_run(name, owner=None, report_owner=None):
+    """Publish the current reviewed merged report and checked run data for operators to inspect."""
+    owner = ids(BROWSER_USER)[0] if owner is None else owner
+    report_owner = ids(REPORT_USER)[0] if report_owner is None else report_owner
+    created = publish_run(f'{BROWSER_HOME}/runs', name, owner, REPORT_HOME, report_owner)
+    if created:
+        print(f'BROWSER_RUN_PUBLISHED run={name} path={PUBLISH_HOME}/{name}', flush=True)
+    else:
+        print(f'BROWSER_RUN_PUBLISHED run={name} already_present={PUBLISH_HOME}/{name}', flush=True)
+    return created
+
+
 def main(argv=None):
     """Take a slot, run the suite without the token, report with it, release the slot (or only re-run the report, see the module doc)."""
     parser = argparse.ArgumentParser(description='Nightly browser suite service helper (D373, #443).')
@@ -328,9 +600,22 @@ def main(argv=None):
         if args.run_name is None:
             # Staged by this helper: the name is in staged.json, which the reporter reads itself.
             staging = Path(REPORT_HOME) / 'browser-staging'
-            return as_user(REPORT_USER, REPORT_HOME, '/usr/bin/python3', '-I', REPORTER, 'report', '--results', str(staging),
+            code = as_user(REPORT_USER, REPORT_HOME, '/usr/bin/python3', '-I', REPORTER, 'report', '--results', str(staging),
                            '--login', login, '--token-file', f'{REPORT_HOME}/forgejo-token', cwd=REPORT_HOME)
-        return report_step(login, args.run_name)
+            try:
+                name = staged_run_name(REPORT_HOME, ids(REPORT_USER)[0])
+            except (Refused, OSError, ValueError) as error:
+                print(f'nightly browser suite: report-only could not publish its run ({error})', file=sys.stderr)
+                return code
+        else:
+            name = args.run_name
+            code = report_step(login, name)
+        try:
+            publish_reported_run(name)
+        except (Refused, OSError) as error:
+            print(f'nightly browser suite: refusing operator report publication: {error}', file=sys.stderr)
+            return 1 if code == 0 else code
+        return code
     started = datetime.datetime.now(datetime.timezone.utc)
     holders = []
     try:
@@ -389,6 +674,11 @@ def main(argv=None):
             print(f'nightly browser suite: refusing the run folder: {error}', file=sys.stderr)
             return SUITE_TIMEOUT_EXIT if timed_out else 1
         code = report_step(login, name, SUITE_BUDGET if timed_out else None)
+        try:
+            publish_reported_run(name, owner, reporter[0])
+        except (Refused, OSError) as error:
+            print(f'nightly browser suite: refusing operator report publication: {error}', file=sys.stderr)
+            return SUITE_TIMEOUT_EXIT if timed_out else 1
         return SUITE_TIMEOUT_EXIT if timed_out else code
     finally:
         for holder in holders:
