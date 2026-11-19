@@ -2447,8 +2447,11 @@ mod tests {
         };
 
         let data_dir = temp_dir();
-        std::fs::create_dir_all(&data_dir).expect("create private data directory");
-        create_data_directory(&data_dir).expect("create data directory");
+        create_data_directory(&data_dir).expect("create private data directory");
+        assert_eq!(
+            std::fs::metadata(&data_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let path = data_dir.join("setup-token.sock");
         start_setup_token_socket(&data_dir, "test-capability".to_owned())
             .expect("start token control socket");

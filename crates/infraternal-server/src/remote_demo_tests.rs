@@ -242,18 +242,14 @@ fn fixture_repository() -> PathBuf {
 
 struct Directory(PathBuf);
 impl Directory {
+    /// Create a private data directory for the two-process fixture.
     fn new() -> Self {
         let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
             || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ra6"),
             PathBuf::from,
         );
         let path = root.join(format!("{:08x}", rand::random::<u32>()));
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&path)
-            .unwrap();
-        set_private_directory(&path).unwrap();
+        create_data_directory(&path).unwrap();
         Self(path)
     }
 }
