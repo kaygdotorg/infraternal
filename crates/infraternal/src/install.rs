@@ -931,25 +931,39 @@ mod tests {
     /// `server init` refreshes only an old generated service whose network line changed.
     #[test]
     fn a_previous_generated_unit_is_refreshed_but_a_hand_edit_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+
         let directory =
-            std::env::temp_dir().join(format!("j901-network-unit-{}", std::process::id()));
+            std::env::temp_dir().join(format!("j905-network-unit-{}", uuid::Uuid::new_v4()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).expect("scratch folder");
         let path = directory.join("infraternal-server.service");
+        let data = directory.join("data");
         let current = b"[Unit]\nDescription=infraternal server (infraternal-server)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart=/var/lib/infraternal/bin/infraternal server\n";
         let previous = b"[Unit]\nDescription=infraternal server (infraternal-server)\nAfter=network.target\n\n[Service]\nExecStart=/var/lib/infraternal/bin/infraternal server\n";
 
         fs::write(&path, previous).expect("write previous generated unit");
-        assert!(
-            ensure_server_unit_writable(&path, current, false).expect("generated unit refresh")
+        install_in_order(&path, current, &data, false, || Ok(()), |()| Ok(()))
+            .expect("generated unit refresh");
+        assert_eq!(fs::read(&path).expect("refreshed unit"), current);
+
+        let before_rerun = fs::metadata(&path).expect("refreshed unit metadata");
+        install_in_order(&path, current, &data, false, || Ok(()), |()| Ok(()))
+            .expect("identical re-run");
+        let after_rerun = fs::metadata(&path).expect("re-run unit metadata");
+        assert_eq!(
+            (before_rerun.ino(), before_rerun.mtime_nsec()),
+            (after_rerun.ino(), after_rerun.mtime_nsec()),
+            "an identical re-run leaves the refreshed unit alone"
         );
 
         let hand_edited = b"[Unit]\nDescription=infraternal server (infraternal-server)\nAfter=network.target\n\n[Service]\nExecStart=/custom/server\n";
         fs::write(&path, hand_edited).expect("write hand-edited unit");
-        assert!(matches!(
-            ensure_server_unit_writable(&path, current, false),
-            Err(InstallError::ExistingUnit)
-        ));
+        let error = install_in_order(&path, current, &data, false, || Ok(()), |()| Ok(()))
+            .expect_err("hand edit requires force");
+        assert!(matches!(error, InstallError::ExistingUnit));
+        assert!(error.to_string().contains("--force"));
+        assert_eq!(fs::read(&path).expect("hand-edited unit"), hand_edited);
 
         fs::remove_dir_all(&directory).expect("remove scratch folder");
     }
