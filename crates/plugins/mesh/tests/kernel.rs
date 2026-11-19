@@ -29,6 +29,7 @@ fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
                 ipv6: Ipv6Addr::from((0xfd02_u128 << 112) + u128::from(id)),
             },
             endpoint: None,
+            candidates: Vec::new(),
         })
         .collect();
     let mut client = Client::new().unwrap();
@@ -79,6 +80,7 @@ fn real_kernel_chunked_peers() {
                     ipv6: Ipv6Addr::from((0xfd_u128 << 120) + u128::from(id)),
                 },
                 endpoint: Some("192.0.2.1:44000".parse().unwrap()),
+                candidates: Vec::new(),
             }
         })
         .collect();
@@ -190,6 +192,7 @@ fn retired_host_routes_can_be_replayed() {
             ipv6: "fd01:203:405::2".parse().unwrap(),
         },
         endpoint: None,
+        candidates: Vec::new(),
     };
     Device::routes(std::slice::from_ref(&peer), false).unwrap();
     Device::routes(std::slice::from_ref(&peer), true).unwrap();
@@ -224,6 +227,7 @@ fn rotation_overlap_keeps_routes_on_old_then_current_key_until_retirement() {
             ipv6: "fd01:203:405::2".parse().unwrap(),
         },
         endpoint: None,
+        candidates: Vec::new(),
     };
     let mut client = Client::new().unwrap();
     client.peers(std::slice::from_ref(&peer), &[]).unwrap();

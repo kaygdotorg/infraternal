@@ -39,6 +39,13 @@ const MAX_HTTP_BODY = 32 * 1024;
 const MAX_MOCK_OUTPUT = 2 * 1024 * 1024;
 const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
+/**
+ * The most flow-control credit a page may hold on one attached terminal: the 1 MiB bulk window plus the 64 KiB repaint
+ * reserve the page grants at attach (`INITIAL_CREDIT` in src/terminal.ts, D381/#477). A grant that would push the total
+ * past this is a protocol error. When the page's window changes, change this with it: a stale cap makes the double close
+ * every connection at its first Credit (1002), and every window then reconnects in a loop (#529).
+ */
+const MAX_PAGE_CREDIT = 1024 * 1024 + 64 * 1024;
 const MAX_TRACE_EVENTS = 120_000;
 const MAX_ATTACH_HISTORY = 64;
 const DIST_ROOT = resolve(process.env.TRACER_DIST ?? resolve(import.meta.dirname, "../dist"));
@@ -77,6 +84,7 @@ interface MockSession {
   echoDelayMs: number;
 }
 
+/** One welcomed or welcoming browser socket of the double, with its session, flow-control credit and subscriptions. */
 interface Connection {
   /** Test-only identity used to attribute input bytes to one attached browser. */
   clientId: number;
@@ -98,6 +106,8 @@ interface Connection {
   goneStreams: Set<number>;
   /** Active session inventory subscriptions receive full snapshots, including after reconnects. */
   sessionInventorySubscriptions: Set<number>;
+  /** Subscription ids of the `remote.hosts` topic: each hears `changed` when the host list changes, as the real server sends it. */
+  remoteHostSubscriptions: Set<number>;
   welcomed: boolean;
   /** The client declared the desktop video capability in its Hello (app-window double only). */
   desktopCap?: boolean;
@@ -230,6 +240,7 @@ webSockets.on("connection", (socket, request) => {
     stream: 1,
     goneStreams: new Set(),
     sessionInventorySubscriptions: new Set(),
+    remoteHostSubscriptions: new Set(),
     welcomed: false,
     resumeAccepted: false,
     resumeExpected: false,
@@ -267,6 +278,48 @@ server.listen(PORT, HOST, () => {
   process.stdout.write(`tracer TEST DOUBLE listening on http://${HOST}:${PORT}\n`);
 });
 
+/**
+ * Review knobs for the hosts surfaces (#500, J528, J539), all off unless set, so no spec changes: `MOCK_REMOTE_HOSTS` is a JSON array of
+ * admitted hosts (`{id, name, online, user?, os?, address?}`) that `remote.host.list` answers with; `MOCK_FACTS_DELAY_MS` makes
+ * `host.facts.read` answer after that many milliseconds with a full machine report (instead of the bare `{"os":"Linux"}`); and
+ * `MOCK_CA_LOCKED=1` makes the host-connections CA read as locked. They let a real browser on a real device see a registered
+ * host that is offline behind the lock, and a machine panel whose facts arrive late, against the same built app.
+ *
+ * What a real server does, and this double now does too (J539, read off a real server and its real enrolled host, #500):
+ * - A row of `remote.host.list` always carries every key (`user`, `os` and `address` are `null` when unknown) and its `name` is
+ *   the host's reported hostname, which may be the server's own.
+ * - `remote.hosts` sends `{"type":"changed"}` the moment it is subscribed and on every change of the list.
+ * - A server restart drops every socket and locks the CA, but a host that was connected stays `online: true` (its agent keeps
+ *   its certificate and reconnects by itself): `POST /__mock/restart` does exactly that, `{"offline": true}` also takes the
+ *   hosts offline for the moment before their agents are back.
+ * - `/remote/ca/status` is `{available, initialized, locked, clock_healthy, roots}`; `POST /__mock/ca {locked}` sets it.
+ * - `POST /__mock/remote-hosts {hosts}` replaces the list the specs want answered (and tells subscribers).
+ */
+const MOCK_REMOTE_HOSTS: unknown[] | undefined = process.env.MOCK_REMOTE_HOSTS ? JSON.parse(process.env.MOCK_REMOTE_HOSTS) as unknown[] : undefined;
+/** The list `remote.host.list` answers with, as set by `MOCK_REMOTE_HOSTS` or `POST /__mock/remote-hosts`; undefined falls back to the app-window double's hosts. */
+let remoteHosts: unknown[] | undefined = MOCK_REMOTE_HOSTS;
+/** Whether the host-connections CA reads as locked now (`MOCK_CA_LOCKED=1` at start, `POST /__mock/ca`, `POST /__mock/restart`). */
+let caLocked = process.env.MOCK_CA_LOCKED === "1";
+/** Whether the double answers `/remote/ca/status` at all: only once a spec or knob has said something about the lock (a server without host connections has no such route). */
+let caAnswers = caLocked;
+/** Gives one admitted host the exact keys a real server sends, whatever subset the caller wrote. */
+function realHostRow(row: unknown): unknown {
+  const r = row as Record<string, unknown>;
+  return { id: r.id, name: r.name, online: r.online ?? false, user: r.user ?? null, os: r.os ?? null, address: r.address ?? null, ...(r.state ? { state: r.state } : {}) };
+}
+/** The list as a real server answers it. */
+const hostListReply = (): { hosts: unknown[]; next: null } => ({ hosts: (remoteHosts ?? appwinHosts()).map(realHostRow), next: null });
+/** Tells every subscriber of `remote.hosts` that the list changed. */
+function publishRemoteHosts(): void {
+  for (const connection of connections) {
+    for (const subId of connection.remoteHostSubscriptions) sendFrame(connection.socket, 0, { type: "Event", subId, eventJson: new TextEncoder().encode('{"type":"changed"}') });
+  }
+}
+/** Milliseconds before `host.facts.read` answers with {@link MOCK_FACTS}; unset keeps the bare instant answer. */
+const MOCK_FACTS_DELAY_MS = process.env.MOCK_FACTS_DELAY_MS === undefined ? undefined : Number(process.env.MOCK_FACTS_DELAY_MS);
+/** A full machine report, the shape the product's facts reader accepts. */
+const MOCK_FACTS = { os: "Debian GNU/Linux", version: "13", kernel: "6.12.57", architecture: "aarch64", model: "Raspberry Pi 5", cpuModel: "Cortex-A76", logicalCpus: 4, memory: { usedBytes: 2e9, totalBytes: 8e9 }, rootDisk: { usedBytes: 1e10, totalBytes: 6e10 }, uptimeSeconds: 86_400, loadAverage: [0.1, 0.2, 0.3], executionUid: 0, mode: "embedded", engines: ["Podman"] };
+
 /** Serves the double's HTTP side: the `/__mock/*` controls the specs drive, auth, and the built app. */
 async function routeHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
   response.setHeader(TEST_DOUBLE_HEADER, "true");
@@ -278,6 +331,25 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     return sendJson(response, 200, { ok: true });
   }
   if (url.pathname === "/__perf") return perfSink(request, response);
+  // The host-connections CA (see the review knobs above): only its status is answered, and only once a lock is asked for.
+  if (url.pathname === "/__mock/ca" && request.method === "POST") { caAnswers = true; caLocked = ((await readJson(request)) ?? {}).locked === true; return sendJson(response, 200, { locked: caLocked }); }
+  if (url.pathname === "/__mock/remote-hosts" && request.method === "POST") {
+    remoteHosts = ((await readJson(request)) ?? {}).hosts as unknown[] | undefined;
+    publishRemoteHosts();
+    return sendJson(response, 200, hostListReply());
+  }
+  if (url.pathname === "/__mock/restart" && request.method === "POST") {
+    const options = (await readJson(request)) ?? {};
+    // The server's restart: the CA is locked again, every socket drops; a host stays online unless asked otherwise.
+    caAnswers = true;
+    caLocked = true;
+    if (options.offline === true) remoteHosts = (remoteHosts ?? appwinHosts()).map((row) => ({ ...(row as object), online: false }));
+    for (const connection of connections) connection.socket.close(1012, "test-double server restarting");
+    return sendJson(response, 200, { locked: caLocked });
+  }
+  if (caAnswers && url.pathname.startsWith("/remote/ca/")) {
+    return url.pathname === "/remote/ca/status" ? sendJson(response, 200, { available: true, initialized: true, locked: caLocked, clock_healthy: true, roots: [] }) : sendJson(response, 503, {});
+  }
   if (await appwinHttp(request, response, url.pathname, readJson, sendJson)) return;
   if (await handleBootstrapHttp(request, response, url.pathname, sameOrigin(request) || request.method === "GET" ? isAuthenticated(request) : false)) return;
   if (request.method === "GET" && url.pathname === "/__mock/proto/windows") {
@@ -921,6 +993,7 @@ function handleWire(connection: Connection, streamId: number, frame: WireFrame, 
   }
 }
 
+/** Handles one non-terminal frame of a welcomed socket: layout frames, host list, host facts and refusals of everything else. */
 function handleControlFrame(connection: Connection, frame: WireFrame): void {
   if (connection.welcomed && appwinLayoutFrame(connection.socket, frame)) return;
   switch (frame.type) {
@@ -955,13 +1028,18 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       return;
     case "Call": {
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "remote.host.list") {
-        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: appwinHosts(), next: null })) });
+        sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify(hostListReply())) });
         return;
       }
       if (connection.welcomed && frame.callId > 0 && appwinEnabled && frame.actionId.startsWith("desktop.")) {
         let input: Record<string, unknown> = {};
         try { input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as Record<string, unknown>; } catch { /* an empty input */ }
         if (appwinCall(connection.socket, frame.callId, frame.actionId, input)) return;
+      }
+      if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read" && MOCK_FACTS_DELAY_MS !== undefined) {
+        const socket = connection.socket;
+        setTimeout(() => sendFrame(socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify(MOCK_FACTS)) }), MOCK_FACTS_DELAY_MS);
+        return;
       }
       if (connection.welcomed && frame.callId > 0 && frame.actionId === "host.facts.read") {
         sendFrame(connection.socket, 0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode('{"os":"Linux"}') });
@@ -999,7 +1077,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
       return;
     }
     case "Subscribe":
-      if (JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "remote.hosts") return;
+      if (JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "remote.hosts") {
+        connection.remoteHostSubscriptions.add(frame.subId);
+        sendFrame(connection.socket, 0, { type: "Event", subId: frame.subId, eventJson: new TextEncoder().encode('{"type":"changed"}') });
+        return;
+      }
       if (frame.subId === 45 && new TextDecoder().decode(frame.filterJson) === '{"topic":"auth.recovery"}') return;
       if (JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "terminal.sessions") {
         connection.sessionInventorySubscriptions.add(frame.subId);
@@ -1036,6 +1118,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   }
 }
 
+/**
+ * Answers one frame on a terminal stream: attaching to a session, the page's flow-control credit, its input and resizes.
+ * A frame the real server would refuse closes the socket with 1002 and a reason naming the rule, so a page that breaks the
+ * wire contract fails loudly instead of hanging.
+ */
 function handleTerminalFrame(connection: Connection, streamId: number, frame: WireFrame): void {
   switch (frame.type) {
     case "AttachTerm":
@@ -1082,7 +1169,7 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       }
       return;
     case "Credit":
-      if (!connection.attached || connection.credit > 1024 * 1024 - frame.bytes) {
+      if (!connection.attached || connection.credit > MAX_PAGE_CREDIT - frame.bytes) {
         connection.socket.close(1002, "invalid test-double credit");
         return;
       }
@@ -1420,6 +1507,9 @@ function resetMockState(): void {
   refuseNextOpen = false;
   liveSessionIds.clear();
   sessionInventoryAvailable = true;
+  remoteHosts = MOCK_REMOTE_HOSTS;
+  caLocked = process.env.MOCK_CA_LOCKED === "1";
+  caAnswers = caLocked;
   retiredSessions.clear();
   interruptedRetirements.clear();
   attachCount = 0;

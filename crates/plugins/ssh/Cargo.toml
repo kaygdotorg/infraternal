@@ -12,6 +12,7 @@ session-bridge = ["dep:infraternal-agent"]
 [dependencies]
 infraternal-agent = { path = "../../infraternal-agent", version = "0.1.0", default-features = false, optional = true }
 infraternal-plugin-api.workspace = true
+infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
 infraternal-shim = { workspace = true, features = ["async-fd"] }
 nix = { workspace = true, features = ["uio"] }
 russh = { version = "=0.64.1", default-features = false, features = ["ring"] }
@@ -19,10 +20,12 @@ russh-sftp = "=3.0.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "sync"] }
 url.workspace = true
 uuid.workspace = true
 zeroize = "1.9"
+# The root upgrade's relay frames (D376, #399); plain std without features.
+infraternal-plugin-remote = { path = "../remote", version = "0.1.0", default-features = false }
 
 # The unreaped exit check uses kqueue where waitid(WNOWAIT) is absent (child_exit.rs).
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -15,7 +15,7 @@ import textwrap
 
 
 root = Path(__file__).resolve().parent.parent
-version = "1.0.0"
+version = "1.0.1"
 source_name = f"libghostty-vt-{version}.tar.gz"
 deps_name = f"libghostty-vt-{version}-deps.tar.gz"
 public_key = "RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV"
@@ -380,7 +380,7 @@ def check_build_recipe() -> None:
             assert args[args.index("-Demit-lib-vt=true")].endswith("true")
             assert args[args.index("-Demit-xcframework=false")].endswith("false")
             assert "--system" in args and Path(build["system"]).is_dir()
-            assert "libghostty-vt-1.0.0-deps" in build["system"]
+            assert "libghostty-vt-1.0.1-deps" in build["system"]
             assert Path(build["global_cache"]).is_dir()
             assert Path(build["executable"]).name == "zig"
 

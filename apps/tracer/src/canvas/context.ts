@@ -108,6 +108,13 @@ export interface CanvasState {
   recent: Map<ViewId, RecentList<string>>;
 }
 
+/**
+ * How a host removal that the panel confirmed itself ended, for the panel to say inline (#486): `removed` and `pending` are
+ * done (pending means the machine uninstalls itself when it next connects), `failed` can be retried, `refused` never started
+ * (a removal is already running, or the host or the account no longer allows it).
+ */
+export interface RemovalOutcome { state: "removed" | "pending" | "failed" | "refused"; message: string }
+
 /** The product services the canvas calls (sessions, inventory, host removal, and so on); the product and the test double each supply their own. */
 export interface Adapters {
   /** Raises an agent's privileges after the person's consent (#215); absent, the machine details show no "Access level" row. */
@@ -118,8 +125,11 @@ export interface Adapters {
     label(): string | undefined;
     /** Forget an expired pending retirement when this adapter supports it. */
     forget?(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void;
-    /** Confirm removal and request cleanup on the machine. */
-    remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void;
+    /**
+     * Confirm removal and request cleanup on the machine. `confirmed` means the caller already asked the person (the
+     * details card's in-panel question, #486), so no second card is shown.
+     */
+    remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void, confirmed?: boolean): Promise<RemovalOutcome | undefined>;
   };
   /** Binds terminal windows to sessions (real in the product, previews in mockups). */
   sessions: SessionService;

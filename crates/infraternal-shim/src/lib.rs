@@ -40,6 +40,10 @@ pub mod login_handoff;
 // receive refuses there, because host-login workers are Linux-only (D247).
 #[cfg(any(feature = "host-login", target_os = "macos"))]
 pub mod login_ready;
+/// A terminal no other process of the account can open, for the password
+/// of a root upgrade (#399, D274).
+#[cfg(target_os = "linux")]
+pub mod private_pty;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty;
 #[cfg(feature = "async-fd")]
@@ -71,6 +75,48 @@ pub fn session_locale_environment() -> Vec<(std::ffi::OsString, std::ffi::OsStri
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn prepare_child(command: &mut std::process::Command) {
     pty::prepare_child(command);
+}
+
+/// Remember the transparent-huge-page (THP) policy this process was started
+/// with, so every program it starts through [`prepare_child`] (shims, and
+/// through them people's shells) gets that policy back (#522).
+///
+/// Call first thing in `main`, before anything turns THP off for the process.
+/// The mesh engine does that for the whole infraternal agent when `GotaTun`
+/// starts, and the kernel would otherwise hand the opt-out to every program
+/// started afterwards. Only the first call records. Returns the recorded
+/// `PR_GET_THP_DISABLE` value.
+/// # Errors
+/// Returns the kernel's refusal; kernels before 3.15 have no such flag, and
+/// children then inherit the current policy as before.
+#[cfg(target_os = "linux")]
+pub fn record_launcher_thp() -> std::io::Result<i32> {
+    pty::record_launcher_thp()
+}
+
+/// Turn transparent huge pages (THP) off for this whole process, after
+/// recording the launcher's policy with [`record_launcher_thp`] (#522).
+///
+/// Static builds call this first thing in `main`: with mimalloc as the global
+/// allocator, a THP=`always` host would otherwise back its arenas with 2 MiB
+/// pages. The programs this process starts still get the launcher's policy
+/// through [`prepare_child`], and an in-place restart through
+/// [`with_launcher_thp`]. Returns the recorded launcher policy.
+/// # Errors
+/// Returns the kernel's refusal; kernels before 3.15 have no such flag.
+#[cfg(target_os = "linux")]
+pub fn disable_process_thp() -> std::io::Result<i32> {
+    pty::disable_process_thp()
+}
+
+/// Run `exec`, a call that replaces this process's image (an in-place
+/// restart), with the launcher's THP policy recorded by
+/// [`record_launcher_thp`] in place, so the new image records that policy and
+/// not this process's opt-out (#522). If `exec` returns, this process's own
+/// policy is restored before its result is returned.
+#[cfg(target_os = "linux")]
+pub fn with_launcher_thp<T>(exec: impl FnOnce() -> T) -> T {
+    pty::with_launcher_thp(exec)
 }
 
 /// Publish a staged install directory without replacing a pre-existing path (#338).

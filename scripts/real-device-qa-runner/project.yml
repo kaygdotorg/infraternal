@@ -1,0 +1,35 @@
+# XcodeGen spec for the real-device QA runner: an empty host app plus one XCUITest bundle that drives iOS Safari.
+# SPDX-License-Identifier: AGPL-3.0-only
+name: DeviceQA
+options:
+  bundleIdPrefix: org.kayg.infraternal.deviceqa
+  deploymentTarget:
+    iOS: '27.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    CODE_SIGNING_ALLOWED: NO
+    GENERATE_INFOPLIST_FILE: YES
+    TARGETED_DEVICE_FAMILY: '1'
+targets:
+  QAHost:
+    type: application
+    platform: iOS
+    sources: [Host]
+    settings:
+      base:
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+  DeviceQAUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: QAHost
+schemes:
+  DeviceQA:
+    build:
+      targets:
+        QAHost: all
+        DeviceQAUITests: [test]
+    test:
+      targets: [DeviceQAUITests]

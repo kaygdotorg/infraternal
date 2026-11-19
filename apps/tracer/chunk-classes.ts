@@ -4,7 +4,7 @@
  * - **Critical**: everything needed before the first paint of sign-in and of the first screen. That is every
  *   entry (the app and first-screen workers), everything they import statically, and every chunk they or those
  *   chunks load dynamically, except the roots below. So the terminal, its renderer and the core screen are critical.
- * - **Deferred**: code only the lazily loaded canvas reaches (views, Mesh, the droplet, the toolbar's edit mode).
+ * - **Deferred**: code only the lazily loaded canvas reaches (views, Mesh, the toolbar's edit mode).
  *   It loads after the first screen without the person asking for it.
  * - **On demand**: code that loads only when the person takes an action (the add-host wizard, the share studio, a
  *   Settings window). Its roots are modules named `*.on-demand.ts` (see src/on-demand.ts).

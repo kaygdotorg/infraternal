@@ -5,6 +5,7 @@ import type { CanvasHost, CanvasSession } from "./canvas";
 
 /** Builds the details popover's facts for a prototype window. The numbers are invented test data. */
 export function prototypeFacts(host: CanvasHost, session: CanvasSession, hostLabel: string, icons: { machine: string; connection: string; session: string }): DetailsFacts {
+  void icons.session; // D385: two tabs; the session's rows now sit in the Connection tab
   const machine: KeyValueRow[] = [
     { key: "Kernel", value: host.kernel },
     { key: "Architecture", value: host.architecture },
@@ -23,22 +24,22 @@ export function prototypeFacts(host: CanvasHost, session: CanvasSession, hostLab
     { key: "infraternal agent", value: host.mode },
   ];
   const connection: KeyValueRow[] = [
-    { key: "Route", value: host.connection.route },
-    { key: "Transport", value: host.connection.transport },
-    { key: "Mesh", value: host.connection.mesh },
-    { key: "Certificate", value: host.connection.certificate },
-    { key: "Connection delay", value: host.connection.roundTrip, hint: "Round-trip time to the server" },
-    { key: "Traffic", value: host.connection.bytes },
-    { key: "Reconnects", value: String(host.connection.reconnects) },
+    { key: "Route", value: host.connection.route, group: "Link" },
+    { key: "Transport", value: host.connection.transport, group: "Link" },
+    { key: "Connection delay", value: host.connection.roundTrip, hint: "Round-trip time to the server", group: "Link" },
+    { key: "Traffic", value: host.connection.bytes, group: "Link" },
+    { key: "Reconnects", value: String(host.connection.reconnects), group: "Link" },
+    { key: "Mesh", value: host.connection.mesh, group: "Mesh" },
+    { key: "Certificate", value: host.connection.certificate, group: "Mesh" },
   ];
   const sess: KeyValueRow[] = [
-    { key: "Session", value: session.name },
-    { key: "Started", value: session.started },
-    { key: "Age", value: session.age },
-    { key: "Viewers", value: String(session.viewers) },
-    { key: "Size", value: session.size },
-    { key: "Scrollback", value: session.scrollback },
-    { key: "Last output", value: session.lastOutput },
+    { key: "Session", value: session.name, group: "Session" },
+    { key: "Started", value: session.started, group: "Session" },
+    { key: "Age", value: session.age, group: "Session" },
+    { key: "Viewers", value: String(session.viewers), group: "Session" },
+    { key: "Size", value: session.size, group: "Session" },
+    { key: "Scrollback", value: session.scrollback, group: "Session" },
+    { key: "Last output", value: session.lastOutput, group: "Session" },
   ];
   return {
     os: host.os,
@@ -46,8 +47,7 @@ export function prototypeFacts(host: CanvasHost, session: CanvasSession, hostLab
     subtitle: [`${host.user ? `${host.user}@` : ""}${hostLabel}`, host.architecture].filter(Boolean).join(" · "),
     sections: [
       { id: "machine", label: "Machine", icon: icons.machine, rows: machine },
-      { id: "connection", label: "Connection", icon: icons.connection, rows: connection },
-      { id: "session", label: "Session", icon: icons.session, rows: sess },
+      { id: "connection", label: "Connection", icon: icons.connection, rows: [...connection, ...sess] },
     ],
   };
 }

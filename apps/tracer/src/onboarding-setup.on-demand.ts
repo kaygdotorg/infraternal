@@ -179,7 +179,7 @@ export function mountSetup(
 
   function renderTokenStep(body: HTMLElement): void {
     body.innerHTML = `<label class="auth-label" for="setup-token">setup token</label>
-      <input id="setup-token" class="auth-input auth-mono" type="text" autocomplete="off" spellcheck="false" placeholder="paste token" />
+      <input id="setup-token" class="auth-input auth-mono" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="paste token" />
       <p class="auth-error-line" id="setup-token-error" role="alert" hidden></p>
       <div class="auth-command"><code data-setup-token-command></code><button class="icon-action" type="button" aria-label="Copy setup token command" data-copy-command>${swapIcon(CLIPBOARD)}</button></div>
       <p class="auth-hint">Run the command on the server. The token expires after 24 hours.</p>`;
@@ -236,7 +236,7 @@ export function mountSetup(
 
   function renderIdentityStep(body: HTMLElement): void {
     body.innerHTML = `<label class="auth-label" for="setup-username">username</label>
-      <input id="setup-username" class="auth-input auth-mono" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" placeholder="ada" />
+      <input id="setup-username" class="auth-input auth-mono" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="32" placeholder="ada" />
       <p class="auth-hint" id="username-hint" aria-live="polite"></p>
       <label class="auth-label" for="setup-display-name">display name</label>
       <input id="setup-display-name" class="auth-input" type="text" autocomplete="name" maxlength="${DISPLAY_NAME_MAX}" placeholder="Ada Lovelace" />`;

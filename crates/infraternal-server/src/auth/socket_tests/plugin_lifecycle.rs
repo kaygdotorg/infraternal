@@ -250,13 +250,12 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     server.abort();
 }
 
+/// Disabling Mesh retires a held writer while preserving owner-only admission.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches() {
     let _guard = SERIAL.lock().await;
-    let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::PathBuf::from("target"),
-        std::path::PathBuf::from,
-    );
+    // Live SQLite data must not contend with compiler artifacts on the build disk.
+    let root = std::env::temp_dir();
     let path = root.join(format!("mesh-plugin-pending-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

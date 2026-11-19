@@ -498,11 +498,35 @@ async fn confirmation_interrupt(component_off: bool) {
     );
 }
 
+/// A replay (or any different request) sent during a pending confirmation gets the busy error and keeps the batch alive.
 #[tokio::test]
 async fn a_client_request_during_a_pending_confirmation_keeps_the_batch() {
     // A well-formed request that arrives while a confirmation lookup is pending
-    // (a replay, a retry of another host or a second confirmation) must wait its
+    // (a replay, a retry of another host or a different confirmation) must wait its
     // turn. Closing the socket drops the Batch, which cancels every host in it.
+    pending_confirmation_with(|_| serde_json::json!({"action":"replay","after":0}), true).await;
+}
+
+/// A repeat of the confirmation in flight (a double-click) gets no busy error: the first one's reply answers both.
+#[tokio::test]
+async fn an_identical_confirmation_during_a_pending_one_is_not_refused_as_busy() {
+    // A double-click resends the very same confirmation while the first is still
+    // looking up. It must not get the busy error (the screen reads any error as a
+    // failure); the one reply to the first confirmation answers both.
+    pending_confirmation_with(
+        |challenge| serde_json::json!({"action":"confirm-host-key","target":"one","challenge":challenge,"fingerprint":format!("SHA256:{}", "a".repeat(43))}),
+        false,
+    )
+    .await;
+}
+
+/// Starts a batch whose host-key confirmation lookup is held open, sends `second` meanwhile, and checks the
+/// socket survives and still answers the first confirmation. `busy_expected` says whether `second` must get
+/// the busy error (a different request) or no error at all (an identical confirmation).
+async fn pending_confirmation_with(
+    second: impl FnOnce(&uuid::Uuid) -> serde_json::Value,
+    busy_expected: bool,
+) {
     let (auth, _, cookie, _, _, original_server, _, _) = fixture(false).await;
     original_server.abort();
     let backend = Arc::new(ConfirmationLookup {
@@ -559,23 +583,28 @@ async fn a_client_request_during_a_pending_confirmation_keeps_the_batch() {
         .unwrap()
         .forget();
     socket
-        .send(ClientMessage::Text(
-            serde_json::json!({"action":"replay","after":0})
-                .to_string()
-                .into(),
-        ))
+        .send(ClientMessage::Text(second(&challenge).to_string().into()))
         .await
         .unwrap();
-    let busy = tokio::time::timeout(Duration::from_secs(2), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let busy: serde_json::Value = serde_json::from_str(busy.to_text().unwrap()).unwrap();
-    assert_eq!(
-        busy["error"],
-        "host-key confirmation busy; retry after confirmation"
-    );
+    if busy_expected {
+        let busy = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let busy: serde_json::Value = serde_json::from_str(busy.to_text().unwrap()).unwrap();
+        assert_eq!(
+            busy["error"],
+            "host-key confirmation busy; retry after confirmation"
+        );
+    } else {
+        // Nothing may arrive while the lookup is held: a reply now would be the busy error.
+        let early = tokio::time::timeout(Duration::from_millis(300), socket.next()).await;
+        assert!(
+            early.is_err(),
+            "an identical confirmation got a reply while the first was pending: {early:?}"
+        );
+    }
     // A busy response must leave the actual lookup pending and able to answer.
     backend.release.add_permits(1);
     // The confirmation answers (confirmed or refused) on the same live socket.

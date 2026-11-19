@@ -248,36 +248,42 @@ impl Drop for DesktopComponent {
     }
 }
 
+/// Tests the desktop plugin's helper lifecycle and native-child cleanup.
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn disabled_component_creates_no_helper_and_off_is_idempotent() {
-        let component = DesktopComponent::new(
-            PathBuf::from("missing-runtime"),
-            PathBuf::from("missing-helper"),
-        );
-        assert_eq!(component.status().state, PluginState::Off);
-        component.set_enabled(false).await.unwrap();
-        component.set_enabled(false).await.unwrap();
-        assert_eq!(component.status().active_work, 0);
-        #[cfg(not(target_os = "macos"))]
-        assert!(component.set_enabled(true).await.is_err());
+
+    /// Serializes Linux tests that temporarily make this process a child subreaper.
+    #[cfg(target_os = "linux")]
+    static NATIVE_CHILD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Owns the helper and forked child used to test native-process retirement.
+    /// Dropping the fixture kills and reaps the whole group, including when a
+    /// test panics before it reaches its ordinary assertions.
+    #[cfg(target_os = "linux")]
+    struct NativeChildFixture {
+        group: Option<nix::unistd::Pid>,
+        helper: Option<Child>,
+        native_pid: Option<nix::unistd::Pid>,
+        subreaper: bool,
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn disabling_after_helper_exit_retires_remaining_native_children() {
-        use nix::{
-            sys::signal::{Signal, kill},
-            unistd::Pid,
-        };
-        use std::io::{BufRead, BufReader};
+    impl NativeChildFixture {
+        /// Start a private helper group whose native child ignores SIGTERM.
+        fn start() -> Self {
+            use nix::unistd::Pid;
+            use std::io::{BufRead, BufReader};
 
-        // A stopped main process does not prove that its native framework children
-        // have retired. The child blocks in a syscall and uses no CPU load loop.
-        nix::sys::prctl::set_child_subreaper(true).unwrap();
-        let program = r"import os, signal
+            let mut fixture = Self {
+                group: None,
+                helper: None,
+                native_pid: None,
+                subreaper: false,
+            };
+            nix::sys::prctl::set_child_subreaper(true).unwrap();
+            fixture.subreaper = true;
+            let program = r"import os, signal
 ready_read, ready_write = os.pipe()
 child = os.fork()
 if child == 0:
@@ -293,20 +299,108 @@ else:
     print(child, flush=True)
     signal.pause()
 ";
-        let mut helper = Command::new("python3")
-            .args(["-c", program])
-            .process_group(0)
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let group = i32::try_from(helper.id()).unwrap();
-        let mut line = String::new();
-        BufReader::new(helper.stdout.take().unwrap())
+            let helper = Command::new("python3")
+                .args(["-c", program])
+                .process_group(0)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            fixture.group = Some(Pid::from_raw(i32::try_from(helper.id()).unwrap()));
+            fixture.helper = Some(helper);
+
+            let mut line = String::new();
+            BufReader::new(
+                fixture
+                    .helper
+                    .as_mut()
+                    .expect("the helper was just started")
+                    .stdout
+                    .take()
+                    .expect("the fixture captures the helper's child id"),
+            )
             .read_line(&mut line)
             .unwrap();
-        let native_pid = Pid::from_raw(line.trim().parse().unwrap());
+            fixture.native_pid = Some(Pid::from_raw(line.trim().parse().unwrap()));
+            fixture
+        }
+
+        /// Return the id of the SIGTERM-ignoring native child.
+        fn native_pid(&self) -> nix::unistd::Pid {
+            self.native_pid.expect("the native child was started")
+        }
+
+        /// Return the private process group that owns both fixture processes.
+        fn group_id(&self) -> nix::unistd::Pid {
+            self.group.expect("the helper process group was started")
+        }
+
+        /// Transfer the main helper to `DesktopComponent` while retaining group cleanup.
+        fn take_helper(&mut self) -> Child {
+            self.helper
+                .take()
+                .expect("the helper is still owned by the fixture")
+        }
+
+        /// Kill and reap the private process group, then restore this process's subreaper flag.
+        fn cleanup(&mut self) {
+            if let Some(group) = self.group.take() {
+                let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+                if let Some(mut helper) = self.helper.take() {
+                    let _ = helper.kill();
+                    let _ = helper.wait();
+                }
+                loop {
+                    match nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(-group.as_raw()), None)
+                    {
+                        Ok(nix::sys::wait::WaitStatus::StillAlive) => std::thread::yield_now(),
+                        Ok(_) | Err(nix::errno::Errno::EINTR) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+            if self.subreaper {
+                let _ = nix::sys::prctl::set_child_subreaper(false);
+                self.subreaper = false;
+            }
+        }
+    }
+
+    /// Reap the fixture on normal return and during panic unwinding.
+    #[cfg(target_os = "linux")]
+    impl Drop for NativeChildFixture {
+        fn drop(&mut self) {
+            self.cleanup();
+        }
+    }
+    /// An absent helper stays off, and repeated disables remain harmless.
+    #[tokio::test]
+    async fn disabled_component_creates_no_helper_and_off_is_idempotent() {
+        let component = DesktopComponent::new(
+            PathBuf::from("missing-runtime"),
+            PathBuf::from("missing-helper"),
+        );
+        assert_eq!(component.status().state, PluginState::Off);
+        component.set_enabled(false).await.unwrap();
+        component.set_enabled(false).await.unwrap();
+        assert_eq!(component.status().active_work, 0);
+        #[cfg(not(target_os = "macos"))]
+        assert!(component.set_enabled(true).await.is_err());
+    }
+
+    /// Disabling the component retires its helper and every forked native child.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabling_after_helper_exit_retires_remaining_native_children() {
+        let _lock = NATIVE_CHILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // A stopped main process does not prove that its native framework children
+        // have retired. The child blocks in a syscall and uses no CPU load loop.
+        let mut fixture = NativeChildFixture::start();
+        let native_pid = fixture.native_pid();
         let component = DesktopComponent::new(PathBuf::new(), PathBuf::new());
-        *component.child.lock().unwrap() = Some(helper);
+        *component.child.lock().unwrap() = Some(fixture.take_helper());
         // This fixture drives one component; do not require a multi-thread runtime
         // feature in the production dependency just to run its shutdown test.
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -314,20 +408,47 @@ else:
             .build()
             .unwrap();
         let result = runtime.block_on(component.set_enabled(false));
-        let native_still_present = std::fs::read_to_string(format!("/proc/{native_pid}/stat"))
-            .is_ok_and(|stat| {
-                stat.split_once(") ")
-                    .is_some_and(|(_, state)| !state.starts_with('Z'))
-            });
-        // Always retire the fixture before asserting, including the failing path.
-        let _ = kill(Pid::from_raw(-group), Signal::SIGKILL);
-        let _ = nix::sys::wait::waitpid(native_pid, None);
-        nix::sys::prctl::set_child_subreaper(false).unwrap();
+        let native_still_present = std::path::Path::new(&format!("/proc/{native_pid}")).exists();
+        let state = component.status().state;
+        drop(component);
+        fixture.cleanup();
         assert!(result.is_ok(), "disable result: {result:?}");
-        assert_eq!(component.status().state, PluginState::Off);
+        assert_eq!(state, PluginState::Off);
         assert!(
             !native_still_present,
-            "component is off but its native child still exists after helper exit"
+            "component is off but its native child was not reaped after helper exit"
+        );
+    }
+
+    /// The test fixture must retire its native child even when its body unwinds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_fixture_reaps_native_children() {
+        use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+
+        let _lock = NATIVE_CHILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let spawned: Result<(), _> = catch_unwind(AssertUnwindSafe(|| {
+            let fixture = NativeChildFixture::start();
+            resume_unwind(Box::new((fixture.group_id(), fixture.native_pid())));
+        }));
+        let payload = spawned.expect_err("fixture unexpectedly returned without unwinding");
+        let (group, native_pid) = *payload
+            .downcast::<(nix::unistd::Pid, nix::unistd::Pid)>()
+            .unwrap();
+        let native_still_present = std::path::Path::new(&format!("/proc/{native_pid}")).exists();
+        if native_still_present {
+            // Keep a broken guard from leaving a second orphan during its red run.
+            let _ = nix::sys::prctl::set_child_subreaper(true);
+            let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+            let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(-group.as_raw()), None);
+            let _ = nix::sys::wait::waitpid(native_pid, None);
+            let _ = nix::sys::prctl::set_child_subreaper(false);
+        }
+        assert!(
+            !native_still_present,
+            "unwinding the helper fixture left its native child unreaped"
         );
     }
 }

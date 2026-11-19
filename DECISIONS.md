@@ -340,6 +340,13 @@ access (#341 B19).
     session, the size of the device that typed last wins (tmux's default
     `window-size latest`). The other devices show the same screen, scaled to
     fit.
+    - **Amended (owner, 2026-11-16, #521):** a device that typed last keeps
+      the size only while it is attached. Once it has disconnected, the next
+      device that reports a size takes it. Why: a reopened tab could not
+      take the size until it typed, so a narrower or shorter reopen (for
+      example a phone turned to landscape) kept a garbled replay (J792,
+      J795). Asked "D74: session size after a reopen", the owner chose,
+      verbatim: "Disconnected last typist gives up the size".
 75. **Nothing depends on the browser.** Each session, each SSH connection
     and each job starts and runs on the server side: in an agent, which can
     be the server's embedded agent. Hosts without an agent (routers,
@@ -4718,3 +4725,385 @@ access (#341 B19).
        (this reverses #391's opaque confirm cards). Readability comes from
        the shared glass contrast guarantee (D365, #448). The owner,
        verbatim: "make them follow the same design".
+
+381. **Typing during a flood, and GotaTun's bar (owner, 2026-11-10, #477, #260):**
+     - **A key typed during a flood wins.** When output is waiting for
+       flow-control credit and a key arrives for the same session, the relay
+       drops the queued bulk output and sends a screen repaint from a small
+       reserved credit budget, so the echo shows within about one frame
+       (D375's 8.3 ms target). Output the flood produced just before the key
+       is skipped on screen, as the 250 ms starvation path already does, and
+       stays in the host's scrollback. Flood throughput is unchanged.
+       Rejected: holding back credit so the echo never queues (about 25%
+       slower floods); a bigger browser window (longer queues on slow links,
+       and it still misses the target); limiting D375 to other sessions. The
+       owner chose "Key wins: repaint" in a grill question. This is
+       relay flow-control code and gets the strictest review.
+     - **GotaTun's bar (amends D378).** The owner, verbatim: "yes please,
+       faster than tailscale and netbird on both linux/mac. our protocol must
+       do 10 Gbit/s at the least latency possible consuming as little memory
+       and cpu as possible to keep optimising and better yet, checkpoint and
+       keep shipping." And: "also pleaes simulate bufferbloat as that's a
+       problem with lots of home connections". Mac batching ships once it is
+       faster on both Linux and macOS. Each verified gain ships as a pin bump.
+       Reports give Gbit/s per core alongside totals, and the test matrix
+       gains a bufferbloat profile (a shaped bottleneck with a deep queue).
+
+382. **Revoke report, reconnect budget, D380 build, 10G testbed (owner, 2026-11-10, #355, #478, #260):**
+     - **Console power actions don't count as admin powers.** The revoke
+       report (D367) ignores exactly the 12 polkit login1 actions that stock
+       Linux grants an active local console session: reboot, power-off,
+       suspend, hibernate, their -multiple-sessions variants, and the four
+       set-reboot-* ids. None of them writes files or runs commands. Every
+       other grant still counts, such as Alma's tuned, NetworkManager and
+       fwupd grants. It ships only after a security review signs off. The
+       owner chose "Ignore the 12" in a grill question.
+     - **The reconnect budget covers the first echo, behind real TLS.**
+       D375's reconnect row measures until the session resumes, plus one
+       round trip for the first typed key's echo, and the gate runs behind
+       real TLS, so it matches what a user sees. D267's 4 round trips stop
+       at the resume. Rejected for now: sending keys typed during the outage
+       along with the resume (it touches auth and input ordering). The owner
+       chose "Resume + 1 RTT, real TLS".
+     - **D380 gets built now**, with production-build screenshots of every
+       theme and each confirmation card on the issue for review.
+     - **GotaTun's 10 Gbit/s testbed is std** (the Mac Studio): two Linux VMs
+       on the vmnet bridge, shaped to 10 Gbit/s, in announced windows of 20
+       minutes or less. These are arm64 numbers. x86 at 10G needs real
+       hardware.
+
+383. **Clipboard from programs, phone text sizes, permanent API keys (owner, 2026-11-10, #440, #345, #341):**
+     - **Programs can copy to the clipboard (OSC 52).** A remote program's
+       copy request writes the clipboard automatically and shows a visible
+       "Copied from the terminal" notice. If the browser refuses, a Copy
+       button appears for 15 s. A Settings switch, "Programs can copy to your
+       clipboard", is on by default and is stored per account so it follows
+       the person. Rejected: asking every time, and having no switch. The
+       owner chose "Auto + notice + switch".
+     - **Phone rows stay 15 px (amends D372).** On phones, palette results
+       and sidebar rows use body size (15 px). Only true labels, such as
+       section headings and tags, use the 13 px label size. TASTE row 46
+       ("phone text 15-16 px or larger") stands. The owner chose "Rows 15 px,
+       labels 13".
+     - **API keys have two dates, and both can be "forever" (amends D375 A1).**
+       The owner, verbatim: "keys have two dates: expiry and inactivity dates,
+       both can be set to forever for truly permanent keys." Each key has a
+       hard expiry and an inactivity limit. Either can be set to forever, and
+       a key with both set to forever is truly permanent.
+     - **Sign-in stays usernameless** (re-confirmed; already D375 A2).
+
+384. **Mesh access rules are enforced in userspace; the kernel firewall becomes an optional guard (owner, 2026-11-10, #483, #265; extends D340, amends D216):**
+     - **Why:** a missing `/usr/sbin/nft` stopped the production mesh without
+       a word. Prod's nft lives in a Nix store path (#483).
+     - **Access rules move into GotaTun's packet path on Linux, as D340
+       already planned for the Mac.** That gives one implementation for both
+       platforms. A GotaTun node enforces per-peer grants (D164) with no
+       firewall tool installed.
+     - **The kernel table is an optional extra guard.** It covers what only
+       the kernel can see: mesh addresses arriving on a non-mesh interface
+       (anti-spoofing), forwarding into or out of the mesh, and the public
+       80/443 gate. It is installed whenever nft or iptables-nft is found at a
+       fixed, root-owned path, including Nix-provided ones, and never through
+       a PATH search. Without it the mesh still runs, and `mesh status` and the
+       UI say plainly which protection is missing.
+     - **Still needs the kernel firewall:** the kernel-WireGuard opt-out
+       (D346), whose packets bypass userspace, and future routing features
+       such as exit nodes and subnet routers (forwarding and NAT). Mesh SSH's
+       port-22 redirect moves into userspace with the rules.
+     - **Research behind it:** Tailscale enforces its rules inside its own
+       process, and its netfilter rules are optional (netfilter-mode off).
+       NetBird prefers kernel rules and falls back to a userspace filter.
+     - **The owner chose "Userspace rules + optional kernel guard",** and
+       noted that nftables/iptables machinery will eventually be needed for
+       reverse-proxy work. Rejected: requiring the kernel guard to start, and
+       userspace only.
+     - **Every per-packet cost is measured** against the current GotaTun
+       numbers before it ships.
+
+385. **Remove host placement, machine pill tabs, phone confirmation inset (owner, 2026-11-10, #486):**
+     - **Remove host lives in two places:** a sidebar button plus a swipe
+       action on the machine row, and the end of the connection tab in the
+       machine pill. In the pill it is inline: the foot of the tab turns into
+       the question, with Keep and a red Remove. The row says what happens:
+       "Revokes its access, then uninstalls the infraternal agent from it."
+     - **The machine pill has two tabs: machine details and connection
+       details.** All connection, link and mesh details collapse into the one
+       connection tab. The owner, verbatim: "basically all the connection
+       detail stuff shoudl be in the same tab, I don't know if all the
+       connection and mesh details can be collapsed to one tab (basically one
+       tab machine details and one tab connectino details)" and "the remove
+       host button can be at the end of that mesh/connection tab with the
+       style inline".
+     - **On phones, the glass confirmation card is inset** from the screen
+       edges like the other floating cards, not edge to edge. The owner chose
+       "Inset it".
+
+386. **The app owns every infraternal_* firewall table, and hosts are never changed by hand (owner, 2026-11-11, #483, #489):**
+     - **Context:** prod's host input table `inet infraternal_host` and its
+       loader `infraternal-firewall.service` were written by a job on
+       2026-11-01 (#274). They were never updated for the mesh, so they drop
+       mesh traffic (soak finding F5).
+     - **The owner, verbatim:** "i think better yet the app itself should
+       recognize all infraternal tables/chains as its own and modify them as it
+       sees fit. you doing anything manully over ssh will be cheating."
+     - **Decision:** infraternal treats every nftables table and chain named
+       `infraternal_*` as its own. It creates, updates and removes them, the
+       host input policy included, from its own configuration. Enabling mesh
+       (D384) brings in the input it needs, such as traffic on `infraternal0`
+       and the mesh UDP port (10254 by default; see D391), with grants still enforced by the
+       mesh filter.
+     - **Fixes are proven in the product, not by hand:** a fix to a host's
+       network state ships as product behaviour and is proven on a
+       prod-shaped server (mesh-staging). It is never applied by hand over SSH.
+       The manual /usr/sbin/nft link applied to prod on 2026-11-10 (#483) is
+       replaced by the product's own nft discovery (D384) at the next deploy.
+     - **Ownership stays narrow:** tables not named `infraternal_*` are never
+       touched.
+
+387. **App-window controls mockup approved (owner, 2026-11-11, #146; extends D342, D343, D350, D351):**
+     - **Context:** J209 drew the app-window controls in the mockup
+       "App-window controls and phone toolbar" (#146 comment 78545) and left
+       seven calls for the owner. The owner chose the recommended option on
+       each.
+     - **Popovers over a streamed picture:** over an app-window picture only,
+       popover glass gets a minimum opacity so text stays crisp. Elsewhere it
+       keeps the normal material.
+     - **The ⋯ menu:** Screenshot, View only, Settings, then a hairline, then
+       "Close window on the machine" last (it confirms).
+     - **Phone bar:** two rows. Row 1 is the machine pill + Full screen +
+       Close. Row 2 is the keys (terminal keys, or Send keys for an app
+       window). On a phone the pill shows the app's icon, not its name.
+     - **Gear wording:** "1:1" = the Mac's window follows this window; "Fit"
+       = the Mac's window keeps its size, scaled. "Reconnect" is a button in
+       the gear and a "Reconnect by itself" switch in Settings.
+     - **Numbered windows:** when titles repeat, the number shows in the
+       picker row and in the window's pill ("Today 1").
+     - **Send keys glyphs:** Mac symbols (⌘ ⌥ ⌃ ⇧) on every keyboard, because
+       the keys go to the Mac.
+     - **Phone popovers** (gear, window picker): inset from the screen edges
+       and open below the pill, never covering it, as D385's confirmation
+       card does.
+
+388. **Website and docs (owner, 2026-11-11, #339; amends D44, D220, D317, D325):**
+     - **Context:** J184's grill on #339. infraternal.com served nothing yet;
+       the only public docs were ssh.kayg.org/docs, built by our own renderer
+       (`docs-build.ts`), not the Starlight/SvelteKit pair D44 named.
+     - **Pages (amends D220):** "one proper landing page + /docs + /changelog
+       + /releases", plus `/install` "for app/server download links".
+     - **Pitch:** not a terminal. The owner, verbatim: "we are not a
+       'self-hosted terminal' - we are an 'Infrastructure platform you
+       fully own'" (the owner's inner double quotes shown as single quotes). The headline is "Infrastructure you fully own". The
+       landing page claims only what is built (D45), and the scope ahead
+       (app windows, logs, containers, Proxmox, Kubernetes) waits until it
+       works.
+     - **Generator (amends D44):** our own renderer builds the docs and the
+       site. The owner, verbatim: "if we keep our renderer then we need to
+       make it really readable!"
+     - **Look:** the app's tokens, font and capsule top bar, tuned for
+       reading (comfortable line length and size, clear headings, contents
+       on wide screens). Mockup first; screenshots at 1440, 393 and 375,
+       light and dark.
+     - **Audiences (amends D317):** "/docs/user /docs/admin /docs/dev".
+     - **Media (carries out D325):** git holds only a hash lock
+       (`media.lock`). The files live in an R2 bucket named by their SHA-256.
+       Nothing goes on Forgejo. The owner, verbatim: "I don't wanna store
+       images on fj becuase we self-host it and we will likely need a lot of
+       storage for images and videos".
+     - **Freshness:** figures are recaptured at release time only.
+     - **Detached? (closes D317's open item):** no. The docs text ships in
+       the app, and media is fetched on demand.
+     - **Versions:** the public /docs shows the newest; each server shows
+       its own; at the first release add /docs/latest and /docs/v<N>/ for
+       supported versions. "?" help links use the server's own address.
+     - **Search:** "cmd + k should match everything!" The ⌘K index covers
+       page text as well as titles and headings, in the app and on the
+       standalone pages. No third-party service (D46).
+     - **Deploy:** straight to infraternal.com, no preview address. CI runs
+       on github.com and deploys to Cloudflare, "so it doesn't depend on our
+       infra". The Cloudflare token is scoped to the Pages project and the
+       media bucket, and lives only in that CI's secrets.
+     - **GitHub mirror:** `dev` and `main` are pushed to
+       github.com/kaygdotorg/infraternal (public) from 2026-11-11;
+       git.kayg.org stays the home of issues, merges and the gates.
+     - **Licence:** the docs' text and media are AGPL-3.0-only, stated in the
+       footer.
+
+389. **Website and docs mockup choices (owner, 2026-11-11, #339; extends D388):**
+     - **Context:** J514's mockup of the landing page, /install and the
+       reading-tuned docs (mockups index item "Website and docs (#339)").
+     - **Font:** mono everywhere. Docs body and landing copy keep the app's
+       Maple Mono, like the app. A sans body face was offered and declined.
+     - **Install step:** a one-line installer on the landing page
+       (`curl … | sh`). The installer itself verifies the build's signature
+       (D184) before installing anything.
+     - **Landing card:** "Your account" (passkey sign-in, recovery words,
+       signed-in devices, one terminal on several devices). It becomes
+       "Access and sharing" when those ship (D45).
+     - **Code blocks:** click to copy with "Copied" in place, and a faint
+       "Click to copy" hint on hover (desktop). No copy button.
+     - **Orchestrator's calls (reversible):** the ⌘K hint stays a label until
+       search ships; the standalone pages keep their own small copy of the
+       pill CSS instead of loading the app's full style sheet.
+
+390. **A never-chosen theme follows the system; `+` opens "Open shell on" (owner, 2026-11-12, #500, #194; amends D352):**
+     - **Theme:** an account that has never picked a theme follows each
+       device's light/dark setting. The first load no longer saves the theme
+       in force. Once the person picks a theme, D352 applies: the account's
+       theme wins on every device. Implemented with a "theme chosen" flag.
+     - **`+` with several hosts:** opens the palette filtered to "Open shell
+       on …" rows, one per host. With exactly one host it opens that host
+       directly.
+
+391. **Mesh relays, disguise, candidates and the mesh port (owner, 2026-11-14, #483, #514; amends D313's order and D386's port wording, extends D316):**
+     - **Context:** J536b's 18-profile NAT and censorship matrix (#483)
+       left four questions, and J511b and J509 left one each. The
+       orchestrator put them to the owner with recommendations; the owner
+       agreed with each one ("agreed").
+     - **Relay transport:** the first relay release is TLS on port 443,
+       with D313's WebSocket upgrade, so UDP-blocked and TCP-only networks
+       work from day one. The QUIC DATAGRAM relay (D313 Q7) follows it, for
+       pairs that can use UDP. Port 443 only for now.
+     - **Disguise:** WireGuard inside the TLS 443 relay is enough for the
+       first release. A self-hosted relay serves on the owner's own domain,
+       so no shared, well-known relay name exists to block. A cheap
+       header scramble for direct WireGuard paths is the next candidate. It
+       changes the GotaTun fork, so it comes back as its own question with
+       measurements.
+     - **Port prediction:** D313 Q4's two-week counter gate stays. The
+       owner: "agreed, good prioritisation".
+     - **Candidates first:** the coordinator publishes each node's
+       server-reflexive address (the public address and port it sees the
+       node's packets come from), plus LAN addresses for peers behind the
+       same public IP. This is built now, as the first slice of D316's path
+       finding. Measured in J536b's model: port-translating CGNAT 127 ms,
+       double NAT 88/132 ms, same NAT without hairpin 54 ms, and rebinds
+       behind filtering NATs recover in about 15 s instead of never. The
+       owner: "this is awesome!"
+     - **Mesh port:** 10254 is the default, not a fixed port. An explicit
+       override binds exactly that port and fails if it is taken. Without
+       one, an occupied default falls back to another port and keeps it.
+       The app-owned firewall (D386) opens the port the node actually
+       bound.
+     - **"Unlock to connect":** dropped as an expectation. Updates keep the
+       CA unlocked through the in-memory handoff (D217). A cold restart
+       still locks it and still needs an administrator's passkey (D168),
+       but only adding new hosts waits on that. Existing hosts reconnect by
+       themselves, so a per-host label has nothing to mark. The restart
+       toast and the locked Add host card cover it.
+
+392. **Host firewall scope, the su path, the mesh keepalive and the mesh key's host binding (owner, 2026-11-14, #483, #399, #515, #489; extends D386, D391, D376):**
+     - **Context:** the night of 2026-11-13/14, reviews of J511b (app-owned host
+       firewall), D376 (root upgrade), J564 (mesh candidates) and J501b (mesh
+       key persistence) left four questions. The owner agreed with each
+       recommendation.
+     - **Default-drop only on the server (amends D386's scope).** Only the
+       server role gets the app's explicit default-drop host input policy.
+       Every other joined machine gets an accept-by-default `infraternal_*`
+       table that adds only what the mesh needs (`infraternal0` and the bound
+       mesh UDP port), so `infraternal up` can never lock other admins out.
+       The owner, verbatim: "agreed but we were planning to make things work
+       even without opening ports right?" Yes: per D391, direct paths form by
+       hole punching (outbound UDP opens the NAT mapping), and the TLS 443
+       relay needs no inbound port. The app's own table only keeps infraternal
+       from dropping its own mesh traffic on that host; it never asks anyone
+       to open a router port.
+     - **The su path (D376).** The password typed for elevation must not be
+       readable by other processes of the same account. A private terminal
+       when that is proven, otherwise refusing `su` from an account that is not
+       the admin's own. Owner: "agreed".
+     - **Mesh keepalive stays 25 s (D81).** Faster rebind recovery comes from
+       fixing the handshake that was silently skipped (J587/J602, #515), not
+       from a shorter keepalive. Owner: "don't know the context so i agree".
+     - **The server's mesh key is tied to its host.** A hashed host binding
+       is stored next to the key, a mismatch refuses to start, and an explicit
+       command handles real host moves, so a copied or restored data directory
+       cannot clone the mesh identity. Owner: "agreed".
+
+393. **Mesh design scale, the root-upgrade wait message, deploy isolation and latest-code tooling (owner, 2026-11-14, #489, #399, #260; extends D169, D376):**
+     - **Mesh design scale:** a mesh is designed for 1,000 peers and tested up
+       to 4,096. Every mesh change is measured against that, for example the
+       per-refresh cost J552 found (71 ms at 1,024 peers, 288 ms at 4,096).
+       Owner: "agreed".
+     - **While a host is being upgraded to root (D376),** opening a shell on
+       it says the host is being upgraded and comes back by itself, not
+       "offline or cannot reach this server". Owner: "agreed". A stale
+       "uninstall" status after a rolled-back upgrade is simply fixed. The
+       owner: "don't even need to ask, it's an obvious fix".
+     - **Deploys never touch the live mesh identity:** the deploy's migration
+       check runs as its own user with its own runtime directory, and prod
+       backups leave the mesh private key out (or keep it 0600 and prune it).
+       Owner: "agreed".
+       - **Amended 2026-11-15 (#489):** the check stays root inside an
+         isolated sandbox that cannot see the live data (its own network, an
+         empty `/run`, a read-only system, the live data folders hidden),
+         instead of a separate user, which would mean copying secrets to that
+         user. Prod backups keep `mesh/` at 0700, 3 kept, because the mesh key
+         moves into the data folder (#489). Asked about the separate user, the
+         owner, verbatim: "i mean it's just a script though? not a LLM".
+     - **Tooling uses the latest code:** benchmark kits, harnesses and QA
+       runners live on `dev` with their own tests in the gate. Hand-copied or
+       stale-branch tools are not used. The owner, verbatim: "i don't know
+       why this is even a question. always use latest code."
+
+394. **D384's userspace filter ships with its measured cost, then gets faster (owner, 2026-11-14, #265, #260; extends D384, amends PROCESS §1's 3% gate for this change only):**
+     - **Context:** J593 measured the D384 userspace mesh filter on backup01
+       (16 counterbalanced holds): at 8 flows, −3.59% goodput, +3.27% CPU
+       per Gbit and +3.68% loaded p99 against dev, consistent in all 8
+       dev-vs-head holds. That is over the 3% performance gate. The filter is
+       what lets a Nix-only host like prod enforce grants without depending
+       on the kernel firewall path. Memory is about 52 MB per 1,000 peers
+       with flows (the 52 KiB flow table each) and 68.7 MB when every
+       peer's fragment table is in use too (68,672 bytes per peer; J797,
+       #265; corrected by the owner on 2026-11-16, was "about 55 MB").
+     - **Decision:** the owner chose, by quoting it, "Ship D384 now, then make
+       the filter's hot path faster as a measured follow-up. Grants are
+       enforced everywhere, and these security fixes land."
+     - **Follow-up:** a measured job optimises the filter's per-packet path
+       right after the merge, using the calibrated kit (J579's pooled
+       method), with the target of bringing the cost back under the 3% gate.
+
+395. **Install paths follow each operating system's standard (owner, 2026-11-14; amends D17's paths, keeps its update rules):**
+     - **Context:** a user-level server install on hd02 showed `server init --user`
+       put data relative to the current directory. A survey found rootless
+       paths hard-coded from `$HOME` (ignoring the XDG variables), the database
+       and logs mixed into the data folder, and the macOS root agent's data
+       under `/var/lib`, a Linux path. The owner, verbatim: "yeah let's just
+       follow standards relative to the operating system."
+     - **Linux, per user (XDG Base Directory, honouring the variables):**
+       binaries and data in `$XDG_DATA_HOME/infraternal`, databases, logs and
+       other state in `$XDG_STATE_HOME/infraternal`, caches in
+       `$XDG_CACHE_HOME/infraternal`, sockets in `$XDG_RUNTIME_DIR/infraternal`,
+       config in `$XDG_CONFIG_HOME/infraternal`.
+     - **Linux, system-wide (FHS):** state in `/var/lib/infraternal` (binaries stay
+       in `/var/lib/infraternal/bin`, never `/usr`, as D17 says), caches in
+       `/var/cache/infraternal`, sockets in `/run/infraternal`, config in
+       `/etc/infraternal`.
+     - **macOS:** system data in `/Library/Application Support/infraternal`, logs in
+       `/Library/Logs/infraternal`, caches in `/Library/Caches/infraternal`; per
+       user the same under `~/Library/...`. LaunchDaemons and LaunchAgents stay in
+       their standard folders.
+     - **The command on PATH:** one link to the newest installed release,
+       for agent and server alike (one binary): `~/.local/bin/infraternal` per
+       user on Linux, `/usr/local/bin/infraternal` system-wide. On macOS a
+       per-user install prints the PATH line to add. A link or file that
+       points elsewhere is never overwritten; the install says so. Uninstall
+       removes the link only if it still points at our binary.
+     - **Existing installs** keep working: the old locations are read and moved
+       on the next update, never broken in place.
+396. **Deploys lock the CA until auto-update ships; no interim signed-deploy path (owner, 2026-11-14, #211, #514; amends D217's deploy rule for now, keeps D251):**
+     - **Context:** `deploy.sh` replaces production by a plain stop/start, a cold start that locks the CA (D168) until an admin unlocks it with a passkey. The warm restart that keeps the CA unlocked already exists (`infraternal server … restart --binary`), but it only accepts a signed release (D184). The orchestrator asked for either (a) about 2 days to sign deploy builds through the edge release channel, which needs Cloudflare and release credentials, or (b) building the server's own auto-update first, 1.5–2.5 weeks.
+     - **The owner chose (b), verbatim:** "lock on restart, build auto-update directly".
+     - **Until D251's auto-update reaches production,** each orchestrator deploy is a stop/start and the owner unlocks the CA afterwards. This is accepted, not a bug.
+     - **No interim signing of hand deploys.** The effort goes into finishing D251 (#211): edge publication, quiet-window handoff and rollback. Once production updates itself, D217's rule ("deploys use the in-memory handoff") applies in full again.
+
+397. **GotaTun bounds its own queue, marking ECN first (owner, 2026-11-15, #260; serves the 2026-11-10 bufferbloat goal):**
+     - **Context:** behind a TUN device the kernel's TCP Small Queues cannot
+       see GotaTun's queue, so loaded flows park their whole window inside it
+       (J657/J691). J711 measured a queue-delay bound (1 ms target, 10 ms
+       interval) on backup01, 8 flows: on cubic, p99 22.4 → 6.16 ms (−72.5%)
+       with +4.7% Gbit/s and −2.7% CPU per Gbit (kernel WireGuard 4.36 ms);
+       on BBR it is neutral (8.8 → 8.9 ms).
+     - **Decision:** the bound ships on by default, marking ECN-capable
+       packets first and dropping only packets that cannot be marked, once
+       its final run (on top of the 512-slot build) holds those numbers. The
+       owner, verbatim: "agreed".

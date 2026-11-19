@@ -1,7 +1,7 @@
 /** Stable-ID intents and optimistic reduction for account layouts (D180, D183, #243). */
 import { reduce } from "./reducer";
 export { reduce } from "./reducer";
-import { MIN_COLUMN_WEIGHT, MIN_WINDOW_HEIGHT, documentWindows as windows } from "./schema";
+import { MIN_COLUMN_WEIGHT, MIN_WINDOW_HEIGHT, documentWindows as windows, parseLook } from "./schema";
 import type { CanvasDocument, DocColumn, DocLook, DocTarget, DocView, DocWindow } from "./schema";
 export type Intent =
   | { type: "view.add"; view: DocView }
@@ -101,7 +101,9 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
     }
   }
   // The account's look is one value: when it differs, the new one replaces the old whole.
-  if (after.look && !equal(before.look, after.look)) result.push({ type: "look.set", look: after.look });
+  // Decoded server looks and local snapshots arrange fields differently. Compare their normalized values so a
+  // repaint cannot journal the same appearance forever; retain invalid inputs for the existing refusal boundary.
+  if (after.look && !equal(parseLook(before.look) ?? before.look, parseLook(after.look) ?? after.look)) result.push({ type: "look.set", look: after.look });
   const working = structuredClone(before), compact: Intent[] = [];
   // Earlier insertions already move their following neighbours. Do not turn one drag into redundant moves.
   for (let intent of [...result.filter((i) => i.type !== "membership.remove"), ...result.filter((i) => i.type === "membership.remove")]) {

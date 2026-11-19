@@ -9,7 +9,6 @@
  * link the chunk into the deferred class again and move nothing.
  */
 import type { Ctx, ViewRec, WinRec } from "../context";
-import { loadDroplet } from "../layout/droplet-handle";
 import { COLUMN_GAP } from "../layout/geometry";
 import { freshColumnId, columnEls } from "../layout/columns";
 import { setColumnWidth } from "../layout/column-els";
@@ -19,9 +18,22 @@ import type { WindowModel } from "../model/types";
 import { MIN_COLUMN_WEIGHT } from "../model/schema";
 import { coarse } from "../dom";
 import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
-import { endActivity, setActivity } from "../../perf-activity";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 import { makeWindow } from "./frame";
 import { isTerminal } from "../views/body";
+
+/** How long a new window takes to fade in after a pointer split, in milliseconds (owner, #484: "make this animation a fade in instead and speed it up"). */
+const SPLIT_FADE_MS = 150;
+/** The glide of the windows a pointer split moves aside: a quick ease-out, well under 200 ms (`flip.play`'s `visualDuration`, in seconds). */
+const SPLIT_GLIDE = { visualDuration: 0.15 };
+
+/**
+ * Fades `el` in on the product's ease-out and resolves when it is done. Only opacity changes, so the window's own content is
+ * never scaled or drawn twice; a window that is cancelled or removed mid-fade resolves too. Reduced motion keeps the
+ * fade (opacity only is what it asks for).
+ */
+const fadeIn = (el: HTMLElement): Promise<void> =>
+  el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: SPLIT_FADE_MS, easing: EASE_OUT }).finished.then(() => undefined, () => undefined);
 
 /**
  * The split actions. Each resolves when its motion is over. Whether they animate is read from the input source (input-source.ts) when
@@ -50,7 +62,7 @@ export function createSplit(cx: Ctx): SplitModule {
     const next = change();
     g.applyCols(cx, c, g.fromGrid(c, next));
     cx.view.geometry(c);
-    if (before) flip.play(before);
+    if (before) flip.play(before, false, SPLIT_GLIDE);
   };
 
   /** A window's column is its own when no other window stands in it: only then can it divide sideways as a plain pair. */
@@ -118,7 +130,7 @@ export function createSplit(cx: Ctx): SplitModule {
     const b = c.wins.get(nm.id)!;
     rec.binding?.refit();
     // A new window by mouse glides the others aside (FLIP), as a new column always has. A keyboard action is instant.
-    if (!instant) flip.play(before);
+    if (!instant) flip.play(before, false, SPLIT_GLIDE);
     land(b, instant);
     b.binding?.refit();
     cx.store.changed();
@@ -137,7 +149,7 @@ export function createSplit(cx: Ctx): SplitModule {
 
   /**
    * Divides a window (D212). In a plain column the base path does it: `down` stacks the new window under it, `right` (a
-   * window that owns its column) gives it the other half, and the droplet plays. A window in a group, or a stacked window
+   * window that owns its column) gives it the other half; the new window fades in (about 150 ms) and the sizes snap. A window in a group, or a stacked window
    * split right, goes through the grid: the windows around it span the new half. Splits are windows in the one structure:
    * no nesting, and the total footprint does not change.
    */
@@ -154,6 +166,8 @@ export function createSplit(cx: Ctx): SplitModule {
     // A stacked window split right, or any window in a group, is the grouped module's; a plain split is the flat path.
     const plain = !inGroup(colEl) && (direction === "down" || ownsColumn(rec));
     const g = plain ? undefined : await loadGroups();
+    // The other windows, measured before the change so the ones a split right moves aside can glide (a grid change measures its own).
+    const before = plain && !instant ? flip.measure(flip.targets(c.colsEl)) : undefined;
     if (plain) {
       if (direction === "down") {
         const half = Math.round((h0 - COLUMN_GAP) / 2);
@@ -175,6 +189,8 @@ export function createSplit(cx: Ctx): SplitModule {
       }
       cx.view.geometry(c);
       cx.view.settle(c.view.id);
+      // Sizes snap to their new value (scaling a terminal's text would ghost it); only a window that changes place glides.
+      if (before) flip.play(before, false, SPLIT_GLIDE);
     } else {
       reshape(g!, c, instant, () => {
         const cols = g!.readColumns(cx, c);
@@ -186,21 +202,12 @@ export function createSplit(cx: Ctx): SplitModule {
     cx.tree.render();
     rec.binding?.refit();
     land(b, instant);
-    if (instant) {
-      // A keyboard action never animates (TASTE): the new window is simply there, refit once, with no silhouette.
-      b.binding?.refit();
-      cx.store.changed();
-      return;
-    }
-    colEl.dataset.split = "";
-    setActivity("split");
-    const { dropletSplit } = await loadDroplet();
-    await dropletSplit(root, b.card.root, direction, c.colsEl);
-    endActivity("split");
-    delete colEl.dataset.split;
-    rec.binding?.refit();
+    // The new size is final at once, so the terminals refit now and the layout is saved now.
     b.binding?.refit();
     cx.store.changed();
+    // A keyboard action never animates (TASTE): the new window is simply there. A pointer split fades it in.
+    if (instant) return;
+    await fadeIn(b.card.root);
   };
 
   return { split, newWindow, splitInto };

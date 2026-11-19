@@ -49,9 +49,14 @@ Definition of Done (it is in every job prompt):
    Clippy is not limited to the changed packages: a narrower feature set
    makes feature-dependent lints fire in untouched crates that the gate never
    reports.
+   The unit-test row builds first, untimed, and then runs the tests under a
+   hang timeout (`VERIFY_QUICK_TEST_TIMEOUT`, 1500 s), so a cold compile on a
+   busy host cannot be reported as a hung test (#509).
    It does not cover dependents of a changed crate, integration tests, the
    static builds, cargo-deny or the repository checks, so it never replaces
-   `iterate` or `fast` and is never quoted as the gate. Set
+   `iterate` or `fast` and is never quoted as the gate. The `test` row of
+   `fast` and `iterate` runs `cargo test --no-fail-fast` and lists every
+   failing test at its end, so one flaky test cannot hide the others (#509). Set
    `VERIFY_QUICK_BASE` to compare against another ref. Between commits,
    iterate with `scripts/verify iterate` (#204): the
    same fmt, VT fmt, clippy, tests, cargo-deny, plugin compile-out,
@@ -60,7 +65,10 @@ Definition of Done (it is in every job prompt):
    `scripts/verify fast` (static builds included) is the final gate: it runs
    at milestones and always on the branch head before you report done, hand
    off to review, push for integration or merge; its output is quoted
-   verbatim on the issue. A green `iterate` run is never quoted as the final
+   verbatim on the issue. Both modes run the `tracer unit suite` row with
+   `cd apps/tracer && bun test src` in one process, so module mocks and browser
+   globals leaking between source test files cannot hide behind separate runs
+   or a hand-picked file list (#503). A green `iterate` run is never quoted as the final
    gate. The commit body gives the why, the rejected alternatives, and the
    decision or issue references. (Owner, 2026-10-11: the full gate on every
    commit cost about half of each job's time on the shared build host.)
@@ -181,6 +189,15 @@ numbered history, both timestamp arrival orders and altered checksums.
   zero-network-overhead reference.
 
 ## 7. Rust build speed and static binary size
+
+- Dev and test profiles build hot crypto dependencies optimised (`sha2`,
+  `argon2`, `blake2` in the root `Cargo.toml`). Unoptimised Argon2 cost about
+  0.9 s of CPU per hash against 0.21 s optimised and made up 45% of the
+  server suite's CPU (#509). Add a dependency to that list only with a
+  measured per-test CPU saving; the production parameters never change.
+- Test fixtures must not move or hash the test executable (about 400 MB). A
+  scripted transport that never runs its payload takes a small tracked file
+  (#509).
 
 - `scripts/verify fast` checks the stripped, static release binaries against
   recorded baselines and reports the signed byte delta for each target
@@ -521,6 +538,16 @@ numbered history, both timestamp arrival orders and altered checksums.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
+  Give every distinct source worktree or revision its own target directory,
+  especially when comparing a job head with `origin/dev`; never reuse one target
+  across those source trees. #542 traced a shared-target failure to stale
+  generated migration metadata: the build target contained 62 migrations while
+  the source contained 64, and the host-promotion test refused a recorded
+  version missing from the stale list. `infraternal-server/build.rs` tracks the
+  migration directory and each existing migration file, and `scripts/verify`
+  warns when a target marker records a different source path or revision.
+  These checks help catch stale inputs but do not make cross-worktree target
+  reuse safe; keep the targets separate.
 - Machine-local compiler cache on the build VMs (#329), opt-in. `nix develop`
   provides `sccache`. When the machine sets `INFRATERNAL_SCCACHE_DIR` (the
   build VMs: `~/.cache/sccache`), the dev shell exports `SCCACHE_DIR`, the

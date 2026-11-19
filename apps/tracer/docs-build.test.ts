@@ -290,3 +290,16 @@ test("a link between pages, or a \"?\" in the app, that leads nowhere stops the 
     await f.done();
   }
 });
+
+test("the build writes the docs' own 'not found' page, with absolute links, for the server's 404 under /docs/ (#527)", async () => {
+  const f = await fixture({ "index.md": page("Welcome", "Start here.", "## Where\n\ntext\n") });
+  try {
+    await buildDocs(f.out, f.dir);
+    const html = await readFile(join(f.out, "404.html"), "utf8");
+    expect(html).toContain("That page is not in the docs");
+    expect(html).toContain('<a href="/docs/">Docs home</a>');
+    expect(html).toContain("data-open-search");
+    // One file served at any depth: every address in it is absolute, never relative.
+    expect([...html.matchAll(/(?:href|src)="([^"]*)"/g)].map((match) => match[1] ?? "").filter((url) => !url.startsWith("/") && !url.startsWith("https://") && !url.startsWith("#"))).toEqual([]);
+  } finally { await f.done(); }
+});

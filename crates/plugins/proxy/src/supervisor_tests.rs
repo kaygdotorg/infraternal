@@ -28,6 +28,7 @@ fn health_server(response: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
     health_server_sequence(vec![response])
 }
 
+/// Answer private health requests in order, waiting for each real loopback request.
 fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind private health fixture");
     listener
@@ -38,7 +39,7 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
         let expected_responses = responses.len();
         let mut served = 0;
         while served < expected_responses {
-            let deadline = Instant::now() + Duration::from_secs(1);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let accepted = loop {
                 match listener.accept() {
                     Ok(accepted) => break Some(accepted),
@@ -46,6 +47,7 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
                         if error.kind() == std::io::ErrorKind::WouldBlock
                             && Instant::now() < deadline =>
                     {
+                        // sleep: poll for the next real private health request under host load.
                         thread::sleep(Duration::from_millis(5));
                     }
                     Err(_) => break None,
@@ -109,20 +111,48 @@ fn supervisor_fixture(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// Install a fake Traefik with the executable policy the supervisor enforces.
+///
+/// The supervisor execs this file while sibling tests, on other threads of the same test process, fork
+/// children. A child forked while this process holds the file open for writing keeps a copy of that
+/// descriptor until its own exec, and an exec of our file in that window fails with `ETXTBSY` ("Text file
+/// busy"). So the test process never opens the final file for writing: the bytes go to a staging file that
+/// is never executed, and the standard `install` tool publishes them from a short-lived single-threaded
+/// child that forks nothing (#509, the same cure as the `infraternal` crate's restart fixtures, #355).
 fn fake_traefik(path: &Path, script: &[u8]) {
-    std::fs::write(path, script).expect("write fake Traefik");
-    if crate::identity::rootful() {
-        let (_, group) = crate::identity::child_ids().expect("proxy identity");
-        nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(group)))
-            .expect("hand fake Traefik to the child group");
-    }
     let mode = if crate::identity::rootful() {
         0o550
     } else {
         0o500
     };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .expect("executable fixture mode");
+    let mut staging_name = path
+        .file_name()
+        .expect("fake Traefik file name")
+        .to_os_string();
+    staging_name.push(format!(".staging-{}", uuid::Uuid::new_v4().simple()));
+    let staging = path.with_file_name(staging_name);
+    std::fs::write(&staging, script).expect("stage fake Traefik");
+    let output = Command::new("install")
+        .arg("-m")
+        .arg(format!("{mode:o}"))
+        .arg("--")
+        .arg(&staging)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run install");
+    assert!(
+        output.status.success(),
+        "install of the fake Traefik failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_file(&staging).expect("remove fake Traefik staging file");
+    if crate::identity::rootful() {
+        let (_, group) = crate::identity::child_ids().expect("proxy identity");
+        nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(group)))
+            .expect("hand fake Traefik to the child group");
+    }
 }
 
 /// Create the ACME storage file the way the agent does.
@@ -413,6 +443,7 @@ fn private_health_ping_rejects_an_unhealthy_response() {
     server.join().expect("health fixture thread");
 }
 
+/// Reports a running proxy unhealthy when its private health check never succeeds.
 #[test]
 fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
     const HEALTHY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
@@ -453,7 +484,7 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
         },
         provider_files: Vec::new(),
         private_ping_address: health_address,
-        startup_timeout: Duration::from_secs(2),
+        startup_timeout: Duration::from_secs(30),
         public_gate: None,
     };
     let log = std::sync::Arc::new(|_: String| {});

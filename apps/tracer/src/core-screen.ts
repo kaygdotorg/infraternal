@@ -22,7 +22,8 @@ import { onDemand } from "./on-demand";
 import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
 import { lookBridge, startThemes } from "./canvas/themes/controller";
-import { readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
+import { cachedThemeChosen, readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
+import { keyboardIsOpen, watchKeyboard } from "./keyboard-viewport";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { initialFont, rememberFont } from "./font-preference";
@@ -30,6 +31,7 @@ import type { InputModifierState, InputModifiers, TerminalClient } from "./termi
 import type { ITheme } from "../vendor/ghostty-web";
 import { recoveryUiEnabled } from "./recovery-ui";
 import { titled } from "./palette-entry";
+import { snippetParts } from "./snippet-parts";
 
 /** True only in preview builds (see build.ts): there a palette row without a title is an error, in production it is repaired. */
 declare const __CLUSTERS_PREVIEW__: boolean;
@@ -137,6 +139,12 @@ export interface CoreScreen {
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void, extras?: Pick<BranchedOptions, "openRename">): BranchedMenu;
   /** Adds palette rows computed each time the palette opens (state-dependent actions); returns a remover. */
   addPaletteProvider(provider: () => PaletteEntry[]): () => void;
+  /**
+   * Adds a search that answers what is typed with more rows (the text of the docs, #339). It is called with "" when the palette
+   * opens, so it can start loading what it needs, and with the query on every change; the rows it returns are listed under the
+   * ordinary matches and are not filtered again. Returns a remover.
+   */
+  addPaletteSearch(search: (query: string) => Promise<PaletteEntry[]>): () => void;
   /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
   refreshPalette(): void;
   /**
@@ -202,7 +210,7 @@ const SCREEN = `
     </aside>
     <div class="palette-scrim" id="scrim" hidden></div>
     <section class="palette ui-overlay-surface" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
-      <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
+      <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
     </section>
@@ -274,6 +282,8 @@ export interface PaletteEntry {
   search?: string;
   /** The row's own name when its label is a longer trail. A title that is, or starts with, the query lists this row's group first (palette-rank.ts). */
   title?: string;
+  /** A line of text under the label with the matched words highlighted (`marks` are `[start, end)` offsets into `text`). */
+  snippet?: { text: string; marks: [number, number][] };
 }
 
 /** The name of a modifier key on this platform: Option is the Mac key, Alt the PC one (Control is the same word everywhere). */
@@ -424,7 +434,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const legacyAppearance = options.accountId ? readLegacyAppearance(options.accountId) : undefined;
   const cachedLook = options.accountId ? readCachedLook(options.accountId) : undefined;
   const cachedTheme = cachedLook?.themes.find((theme) => theme.id === cachedLook.selected);
-  const savedThemeId = themeId(legacyAppearance?.theme ?? null) ?? themeId(cachedTheme?.colors ?? null)
+  // A look whose theme the person never picked (D390) holds only the scheme one device showed first, so it is not a saved choice here.
+  const savedThemeId = themeId(legacyAppearance?.theme ?? null) ?? (cachedThemeChosen(cachedLook) ? themeId(cachedTheme?.colors ?? null) : undefined)
     ?? (!options.accountId ? themeId(readLocal("tracer.theme")) : undefined);
   let currentThemeId = themeId(params.get("theme")) ?? savedThemeId ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
@@ -604,6 +615,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     entries.push(...contextual, ...staticEntries);
   };
   refreshEntries();
+  // Searches that add rows for what is typed (addPaletteSearch). Their rows are kept only for the query they answered.
+  const searches = new Set<(query: string) => Promise<PaletteEntry[]>>();
+  let extraRows: PaletteEntry[] = [];
+  let searchTurn = 0;
   let visibleEntries: PaletteEntry[] = [];
   let visibleOptions: HTMLButtonElement[] = [];
   let selected = 0;
@@ -666,11 +681,31 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       else { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); rowCache.delete(entry); }
     }
   };
+  /** Asks the searches for more rows for `query`; the list is drawn again when they answer, if the query is still the one typed. */
+  const searchMore = (query: string): void => {
+    const turn = ++searchTurn;
+    const clear = (): void => { for (const entry of extraRows) { paletteSearchText.delete(entry); paletteOptionIds.delete(entry); } extraRows = []; };
+    const text = query.trim();
+    // Under two letters nothing is searched (a single letter matches every page); the rows of the last query go.
+    if (text.length < 2 || scopedEntries || searches.size === 0) { if (text.length < 2) clear(); if (text === "") for (const search of searches) void search("").catch(() => undefined); return; }
+    void Promise.all([...searches].map((search) => search(text).catch((): PaletteEntry[] => []))).then((lists) => {
+      if (turn !== searchTurn || palette.hidden) return;
+      clear();
+      extraRows = lists.flat();
+      extraRows.forEach((entry, index) => indexEntry(entry, 3000 + index));
+      renderPalette(paletteInput.value, visibleEntries[selected]?.action);
+    });
+  };
   const renderPalette = (query = "", preserveAction?: string): void => {
     const needle = query.trim().toLocaleLowerCase();
     const found = (scopedEntries ?? entries).filter((entry) => (needle !== "" || !entry.queryOnly) && (paletteSearchText.get(entry)?.includes(needle) ?? false));
     // A group with a row named by what was typed comes first (palette-rank.ts); nothing else is reordered.
     visibleEntries = needle === "" ? found : rankByTitle(found, needle);
+    // Rows a search added come last, so a title or heading match always lists above a match in the text; a row that is already listed is not repeated.
+    if (needle !== "" && !scopedEntries && extraRows.length > 0) {
+      const listed = new Set(visibleEntries.map((entry) => entry.action));
+      visibleEntries = [...visibleEntries, ...extraRows.filter((entry) => !listed.has(entry.action))];
+    }
     selected = preserveAction === undefined ? Math.min(selected, Math.max(0, visibleEntries.length - 1)) : Math.max(0, visibleEntries.findIndex((entry) => entry.action === preserveAction));
     visibleOptions = [];
     // Clearing the list resets its viewport, avoiding a separate scrollTop read/write.
@@ -714,7 +749,26 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         const hint = document.createElement("span");
         hint.className = "result-hint";
         hint.textContent = entry.hint;
-        result.append(icon, label, hint);
+        if (entry.snippet) {
+          // A match in the text: the heading and, under it, the words around the match with the match highlighted.
+          const line = document.createElement("span");
+          line.className = "result-snippet";
+          for (const part of snippetParts(entry.snippet.text, entry.snippet.marks)) {
+            if (!part.marked) { line.append(part.text); continue; }
+            const mark = document.createElement("mark");
+            mark.textContent = part.text;
+            line.append(mark);
+          }
+          const text = document.createElement("span");
+          text.className = "result-text";
+          // The page's name sits beside the heading when both fit, and wraps under it when they do not: a name is never cut off (TASTE).
+          const head = document.createElement("span");
+          head.className = "result-head";
+          head.append(label, hint);
+          text.append(head, line);
+          result.classList.add("has-snippet");
+          result.append(icon, text);
+        } else result.append(icon, label, hint);
         rowCache.set(entry, result);
       }
       result.setAttribute("aria-selected", String(index === selected));
@@ -807,6 +861,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       refreshEntries();
       selected = 0;
       paletteInput.value = "";
+      searchMore("");
       renderPalette();
       palette.hidden = false;
       scrim.hidden = false;
@@ -822,6 +877,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       scrim.hidden = true;
       coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
+      searchMore("");
       if (focusInPalette && paletteReturnFocus?.isConnected) paletteReturnFocus.focus({ preventScroll: true });
       paletteReturnFocus = null;
       syncFontPreview();
@@ -909,16 +965,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
     }, 250);
   };
-  /** Keeps the OS scheme as a fallback only until the account document supplies its saved look. */
+  /**
+   * Follows the OS scheme while no theme store owns the look. Once the page's theme store runs (`startThemes`), it follows the system for an
+   * account that never picked a theme (D390) and leaves a chosen theme alone, so this fallback must not also change the theme.
+   */
   const systemThemeChange = (): void => {
-    if (!themeId(params.get("theme")) && !savedThemeId && !lookBridge()?.hasAccountLook()) {
+    if (!themeId(params.get("theme")) && !savedThemeId && !lookBridge()) {
       currentThemeId = systemDark.matches ? "mocha" : "latte";
       void applyLook();
     }
   };
-  const viewportChange = (): void => {
-    const viewport = window.visualViewport;
-    keyboardOpen = Boolean(viewport && viewport.height < window.innerHeight - 120);
+  /** Re-reads whether the keyboard is up (see keyboard-viewport.ts: it also runs after focus changes and a settle delay). */
+  const viewportChange = (open: boolean): void => {
+    keyboardOpen = open;
     ROOT.dataset.kb = keyboardOpen ? "open" : "closed";
     if (keyboardOpen) {
       keybar.classList.remove("is-away");
@@ -931,6 +990,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   scrim.addEventListener("click", scrimClick);
   paletteInput.addEventListener("input", () => {
     selected = 0;
+    searchMore(paletteInput.value);
     renderPalette(paletteInput.value);
   });
   paletteInput.addEventListener("keydown", (event) => {
@@ -987,9 +1047,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   systemDark.addEventListener("change", systemThemeChange);
   const dockedLayoutChange = (): void => dockPanes(!sidebar.hidden, true);
   dockedLayout.addEventListener("change", dockedLayoutChange);
-  window.visualViewport?.addEventListener("resize", viewportChange);
-  window.visualViewport?.addEventListener("scroll", viewportChange);
-  viewportChange();
+  const stopKeyboardWatch = watchKeyboard(viewportChange);
+  viewportChange(keyboardIsOpen());
 
   const keyInput: Record<string, string> = {
     esc: "\x1b", tab: "\t", up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C",
@@ -1134,7 +1193,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const rowHeight = (): number => keysRowEl.offsetHeight || 46;
   const paintRow = (v: number): void => { rowsEl.style.transform = v === 0 ? "" : `translateY(${-v * rowHeight()}px)`; };
   // A row is one 46 px step: the spring rests under a quarter of a device pixel of it (canvas/springs.ts).
-  const rowSpring = restAt(new Spring(1, (v) => { if (canvasRowEl.hidden) { rowsEl.style.transform = ""; return; } paintRow(v); }, { visualDuration: 0.38 }), quarterDevicePx() / 46);
+  const rowSpring = restAt(new Spring(1, (v) => { if (canvasRowEl.hidden) { rowsEl.style.transform = ""; return; } paintRow(v); }, { visualDuration: 0.28 }), quarterDevicePx() / 46);
   const settleRow = (index: number, instant = false): void => {
     rowIndex = index;
     stage.dataset.row = index === 0 ? "canvas" : "keys";
@@ -1263,9 +1322,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         if (b.hidden) continue;
         const now = b.getBoundingClientRect().left;
         const dx = was === undefined ? 0 : was - now;
-        if (was === undefined) { new Spring(1, (p) => { b.style.opacity = p === 0 ? "" : String(1 - p); b.style.transform = p === 0 ? "" : `scale(${1 - 0.4 * p})`; }, { visualDuration: 0.3 }).set(0); continue; }
+        if (was === undefined) { new Spring(1, (p) => { b.style.opacity = p === 0 ? "" : String(1 - p); b.style.transform = p === 0 ? "" : `scale(${1 - 0.4 * p})`; }, { visualDuration: 0.24 }).set(0); continue; }
         if (Math.abs(dx) < 1) continue;
-        new Spring(1, (p) => { b.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.36 }).set(0);
+        new Spring(1, (p) => { b.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.26 }).set(0);
       }
     }
   };
@@ -1406,7 +1465,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     editTray = undefined;
     if (tray) {
       if (matchMedia("(prefers-reduced-motion: reduce)").matches) tray.remove();
-      else new Spring(0, (v) => { tray.style.transform = `translateY(${v * 24}px)`; tray.style.opacity = String(1 - v); if (v >= 1) tray.remove(); }, { visualDuration: 0.25 }).set(1);
+      else new Spring(0, (v) => { tray.style.transform = `translateY(${v * 24}px)`; tray.style.opacity = String(1 - v); if (v >= 1) tray.remove(); }, { visualDuration: 0.22 }).set(1);
     }
     buzz(6);
   };
@@ -1424,7 +1483,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     editTray = tray;
     paintEditTray();
     paintBadges();
-    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) new Spring(1, (v) => { tray.style.transform = v === 0 ? "" : `translateY(${v * 28}px)`; tray.style.opacity = String(1 - v); }, { visualDuration: 0.4 }).set(0);
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) new Spring(1, (v) => { tray.style.transform = v === 0 ? "" : `translateY(${v * 28}px)`; tray.style.opacity = String(1 - v); }, { visualDuration: 0.22 }).set(0);
     document.addEventListener("pointerdown", outsideEdit, true);
   };
   // Long press (touch) starts it.
@@ -1492,7 +1551,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         if (!reducedMotion) for (const [c, left] of before) {
           if (c === b) continue;
           const dx = left - c.getBoundingClientRect().left;
-          if (Math.abs(dx) > 1) new Spring(1, (p) => { c.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.3 }).set(0);
+          if (Math.abs(dx) > 1) new Spring(1, (p) => { c.style.transform = p === 0 ? "" : `translateX(${dx * p}px)`; }, { visualDuration: 0.24 }).set(0);
         }
       }
     };
@@ -1510,7 +1569,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       const base = g.style.transform;
       const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(base);
       const sx = m ? Number(m[1]) : 0, sy = m ? Number(m[2]) : 0;
-      new Spring(0, (v) => { g.style.transform = `translate(${sx + dx * v}px, ${sy + dy * v}px) scale(${1.14 - 0.14 * Math.min(1, v)})`; if (v === 1) land(); }, { visualDuration: 0.34 }).set(1);
+      new Spring(0, (v) => { g.style.transform = `translate(${sx + dx * v}px, ${sy + dy * v}px) scale(${1.14 - 0.14 * Math.min(1, v)})`; if (v === 1) land(); }, { visualDuration: 0.28 }).set(1);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -1645,6 +1704,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       providers.add(provider);
       return () => { providers.delete(provider); };
     },
+    addPaletteSearch(search) {
+      searches.add(search);
+      return () => { searches.delete(search); };
+    },
     refreshPalette() {
       if (palette.hidden || scopedEntries) return;
       const action = visibleEntries[selected]?.action;
@@ -1766,8 +1829,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       window.removeEventListener("resize", resize);
       systemDark.removeEventListener("change", systemThemeChange);
       dockedLayout.removeEventListener("change", dockedLayoutChange);
-      window.visualViewport?.removeEventListener("resize", viewportChange);
-      window.visualViewport?.removeEventListener("scroll", viewportChange);
+      stopKeyboardWatch();
       offInputToolbar();
       keybar.removeEventListener("pointercancel", keybarPointerCancel);
       keybar.removeEventListener("click", keybarClick);

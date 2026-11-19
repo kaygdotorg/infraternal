@@ -2,6 +2,7 @@
  * The machine tab of the details popover (TASTE: no "More" tab; D126, D156). The default facts (kernel, architecture,
  * CPU, memory, disk, load, agent mode, engines...) show under titled sections with "Extended machine info" off; turning it
  * on adds only init, virtualization, shell and locale. No control labelled "More" exists either way.
+ * The Extended info choice is saved in the account's look (D352, #400); the check reads it from the page's first-paint cache of that look.
  * Also saves review screenshots in the external job evidence directory.
  */
 import { tracerEvidencePath } from "./evidence-path";
@@ -66,7 +67,13 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
     await page.screenshot({ path: `${SHOTS}/settings-hosts-${name}.png` });
     await input.click();
     await expect(input).toBeChecked();
-    expect(await page.evaluate(() => localStorage.getItem("tracer.extended-info"))).toBe("1");
+    // The choice belongs to the account's look (D352, #400), so it is saved there, not under the old device-wide key. The page
+    // keeps the account's look in its first-paint cache a moment after the change (a debounced write), so poll for it.
+    await expect.poll(() => page.evaluate(() => {
+      const key = Object.keys(localStorage).find((k) => k.startsWith("tracer.look.account."));
+      return key === undefined ? undefined : (JSON.parse(localStorage.getItem(key)!) as { extendedInfo?: boolean }).extendedInfo;
+    })).toBe(true);
+    expect(await page.evaluate(() => localStorage.getItem("tracer.extended-info")), "the old device-wide key is not written any more").toBeNull();
     await context.close();
   });
 }

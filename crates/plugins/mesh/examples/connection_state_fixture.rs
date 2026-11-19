@@ -7,6 +7,7 @@ use std::{
     os::unix::fs::PermissionsExt,
 };
 #[cfg(all(feature = "agent", target_os = "linux"))]
+/// Run the disposable Linux node fixture over its line-delimited test protocol.
 fn main() -> std::io::Result<()> {
     let parent =
         std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").ok_or(std::io::ErrorKind::InvalidInput)?;
@@ -76,6 +77,7 @@ fn main() -> std::io::Result<()> {
             store.save(&infraternal_plugin_mesh::node_state::State {
                 enabled: true,
                 config: Some(config),
+                authority_reset_pending: false,
                 backend: Some(if fallback {
                     infraternal_plugin_mesh::firewall::Backend::NfTables
                 } else {
@@ -101,6 +103,7 @@ fn main() -> std::io::Result<()> {
 }
 
 #[cfg(not(all(feature = "agent", target_os = "linux")))]
+/// Keep this example buildable on hosts that cannot run the Linux node fixture.
 fn main() {}
 
 /// Return the final installed-rule timestamp only after durable success, never after rollback.

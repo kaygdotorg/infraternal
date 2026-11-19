@@ -3,7 +3,7 @@ import { tracerEvidencePath } from "./evidence-path";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
-import { THEMES, type Theme } from "../../../packages/ui/src/themes";
+import { selectionColors, THEMES, type Theme } from "../../../packages/ui/src/themes";
 
 type TerminalPixels = {
   background: string;
@@ -144,11 +144,13 @@ async function selectDefaultRowText(page: Page): Promise<void> {
   await page.mouse.up();
 }
 
+/**
+ * The highlight the terminal must paint behind selected text: the theme's selection pair (D365, D380), which adapts to the theme so
+ * the selected text reads on it. Its contrast rules are unit-tested in `packages/ui/src/selection-colors.test.ts`; this check is that
+ * the terminal paints exactly that colour. (It used to be a fixed mix of accent and background, which only the light themes still are.)
+ */
 function expectedSelectionBackground(theme: Theme): string {
-  const alpha = 0x55 / 0xff;
-  const rgb = (hex: string) => [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16));
-  const [foreground, background] = [rgb(theme.accent), rgb(theme.bg)];
-  return `#${foreground.map((channel, index) => Math.round(channel * alpha + background[index]! * (1 - alpha)).toString(16).padStart(2, "0")).join("")}`;
+  return selectionColors(theme).background.toLowerCase();
 }
 
 function colorDistance(left: string, right: string): number {

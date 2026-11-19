@@ -104,6 +104,16 @@ export class StaleScreenWatch {
     this.reset();
   }
 
+  /**
+   * The host repainted the whole screen (a Snapshot) up to `received` bytes. The repaint is the host's
+   * own picture, not the program's redraw, so it settles the note only as far as it carries output:
+   * past the baseline it clears the note like any output, and at the baseline the wait or note stays.
+   * The shim sends exactly that repaint when a reattach changes the size after the replay (#521).
+   */
+  repainted(received: bigint): void {
+    this.output(received);
+  }
+
   /** The screen is replaced or the link is gone: stop waiting and take the note down. */
   reset(): void {
     if (this.handle !== undefined) this.scheduler.cancel(this.handle);

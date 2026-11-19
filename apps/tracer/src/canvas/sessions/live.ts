@@ -26,10 +26,12 @@ import { el } from "../dom";
 import { createStatusRelay } from "../status";
 import type { WindowModel } from "../model/types";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
+import { ICON_INFO } from "../../../../../packages/ui/src/icons";
 import { onDemand, whenIdle } from "../../on-demand";
 import type { RefusalAction } from "../../terminal-refusal";
 import type { HostEntry, LinkInfo, SessionBinding, SessionService } from "./adapter";
 import type { ScreenCache } from "./screen-cache.on-demand";
+import { reportShellExit } from "./exit-report";
 
 /** The product's sessions service: terminal windows bound to real sessions, plus the host list the palette and sidebar read. */
 export interface LiveSessionsOptions {
@@ -195,7 +197,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
     /** Binds one window's model to the callbacks the canvas gave it: saving, exit, the session picker, refusals, link changes and the unreachable notice. */
-    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string, action?: RefusalAction) => boolean, private readonly connectionChanged?: () => void, private readonly unreachable?: (message: string | undefined) => void) {}
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string, action?: RefusalAction, calm?: boolean) => boolean, private readonly connectionChanged?: () => void, private readonly unreachable?: (message: string | undefined) => void) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -269,10 +271,10 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onStaleScreen: (stale) => { if (stale !== this.staleScreen) { this.staleScreen = stale; this.connectionChanged?.(); } },
         onInputHeld: (keys) => { if (keys !== this.heldKeys) { this.heldKeys = keys; this.connectionChanged?.(); } },
         onDisconnected: (forced) => { this.setConnected(false); if (first) options.firstHooks?.onDisconnected?.(forced); },
-        onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
+        onExited: (status) => { reportShellExit(options.onSessionGone, this.model.host, this.model.sessionId, status); this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
         onSessionGone: (status) => { if (first) settle(); options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status); },
-        onOpenRefused: (message, sessionList, action) => {
+        onOpenRefused: (message, sessionList, action, calm) => {
           if (this.disposed) return true;
           if (first) settle();
           // The refusal is an answer: the window is not "slow" any more, it says why in its own strip.
@@ -280,9 +282,9 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           // A new shell that was refused has no session and none is coming: the window leaves the saved layout
           // rather than holding its birth as "waiting for a session id" (and the "Not saved" status with it, #395).
           if (!this.model.sessionId && !this.model.openRefused) { this.model.openRefused = true; this.changed(); }
-          if (this.refused?.(message, action)) return true;
+          if (this.refused?.(message, action, calm)) return true;
           // A refusal that names a way forward is long (about 150 characters); the default 4.2 s is too short to read it.
-          core.toast.show({ message, tone: "error", duration: sessionList ? 0 : Math.max(4200, message.length * 70),
+          core.toast.show({ message, ...(calm ? { icon: ICON_INFO } : { tone: "error" as const }), duration: sessionList ? 0 : Math.max(4200, message.length * 70),
             ...(sessionList && this.showSessions ? { action: { label: "Sessions", onSelect: this.showSessions } } : {}),
           });
           return true;

@@ -136,7 +136,7 @@ export function settleResize(apply: (frame: ResizeFrame) => void, from: ResizeFr
     const l = (a: number, b: number): number => a + (b - a) * p;
     if (p === 1) { apply(to); done(); return; }
     apply({ width: l(from.width, to.width), height: l(from.height, to.height), top: l(from.top, to.top), shiftX: l(from.shiftX, to.shiftX) });
-  }, { visualDuration: 0.42 });
+  }, { visualDuration: 0.28 });
   spring.set(1);
   return () => { cancelled = true; spring.set(spring.value, true); };
 }

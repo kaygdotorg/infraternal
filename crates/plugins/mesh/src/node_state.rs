@@ -11,17 +11,24 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     net::IpAddr,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 use zeroize::{Zeroize, Zeroizing};
+
+/// Bound public snapshots consistently with the macOS node's state reader.
+const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
+/// Public runtime state needed to restore mesh intent without storing private key material.
 /// The accepted public mesh snapshot saved for restart, with a firewall choice on Linux.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
     pub enabled: bool,
     pub config: Option<Config>,
+    /// True after a new authority is fenced and until its first full snapshot is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_reset_pending: bool,
     #[serde(default)]
     #[cfg(target_os = "linux")]
     pub backend: Option<crate::firewall::Backend>,
@@ -31,13 +38,18 @@ impl Default for State {
         Self {
             enabled: true,
             config: None,
+            authority_reset_pending: false,
             #[cfg(target_os = "linux")]
             backend: None,
         }
     }
 }
 /// One node's durable local state: public snapshot, routes, identity record, private key and rotation journal.
+/// A shared directory lease stays open for this store's lifetime, so migration cannot move state while
+/// this handle can write. Short writer locks serialize updates from independent stores.
 pub struct Store {
+    /// Keeps migration's exclusive directory lock out while this store can still write.
+    directory_lease: nix::fcntl::Flock<fs::File>,
     path: PathBuf,
     route_path: PathBuf,
     // The key of the interface this installation created (#235). It lives in
@@ -49,7 +61,12 @@ pub struct Store {
     rotation_path: PathBuf,
     #[cfg(target_os = "linux")]
     engine_path: PathBuf,
+    /// The non-secret UDP port selected for the next automatic node start.
+    listen_port_path: PathBuf,
     key_path: PathBuf,
+    // Authority epoch and reset marker live beside the public snapshot, which keeps the shape
+    // the previous release parses (D295, #382 P2). See [`AuthorityRecord`].
+    authority_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
@@ -96,6 +113,8 @@ const ROTATION_MAGIC: &[u8; 8] = b"IMKEYV1\0";
 /// Exact size of that file: magic, phase, sequence, operation ID, predecessor identity and
 /// candidate private key.
 const ROTATION_FIXED_BYTES: usize = 8 + 1 + 8 + 36 + 32 + 32;
+/// Stable private lock file used to serialize short updates from independent stores.
+const STORE_WRITE_LOCK: &str = ".mesh-store-write.lock";
 
 /// A canonical hyphenated UUID text, the only operation ID the secret file accepts.
 fn valid_operation_id(value: &str) -> bool {
@@ -108,6 +127,112 @@ fn valid_operation_id(value: &str) -> bool {
             }
         })
 }
+
+/// Holds a live-store directory lease and one serialized update lock.
+struct MeshStoreWriteGuard {
+    _directory: fs::File,
+    _writer: nix::fcntl::Flock<fs::File>,
+}
+
+/// Open the private state directory without following a replacement symlink.
+/// # Errors
+/// Refuses a changed owner or any mode other than the required private 0700 mode.
+fn open_mesh_directory(path: &Path) -> io::Result<fs::File> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(path)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(directory)
+}
+
+/// Keep migration's exclusive lock from moving a directory while a store is open.
+/// # Errors
+/// Returns an unsafe-directory or lock error to the caller.
+fn lock_mesh_directory_shared(path: &Path) -> io::Result<nix::fcntl::Flock<fs::File>> {
+    nix::fcntl::Flock::lock(open_mesh_directory(path)?, nix::fcntl::FlockArg::LockShared)
+        .map_err(|(_, error)| io::Error::from(error))
+}
+
+/// Serialize one state update while the caller's Store holds its shared directory lease.
+///
+/// Migration takes the exclusive directory lock and waits for every Store to close. A separate
+/// stable file lets independent Stores serialize writes without reacquiring the shared lock while
+/// a migration is waiting.
+/// # Errors
+/// Refuses an unsafe directory or lock file and reports lock failures.
+fn lock_mesh_store_writer(
+    path: &Path,
+    directory_lease: &nix::fcntl::Flock<fs::File>,
+) -> io::Result<MeshStoreWriteGuard> {
+    let directory = open_mesh_directory(path)?;
+    let opened = directory.metadata()?;
+    let leased = directory_lease.metadata()?;
+    if opened.dev() != leased.dev() || opened.ino() != leased.ino() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let file = fs::File::from(nix::fcntl::openat(
+        &directory,
+        STORE_WRITE_LOCK,
+        nix::fcntl::OFlag::O_CLOEXEC
+            | nix::fcntl::OFlag::O_NOFOLLOW
+            | nix::fcntl::OFlag::O_NONBLOCK
+            | nix::fcntl::OFlag::O_RDWR
+            | nix::fcntl::OFlag::O_CREAT,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+    )?);
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.nlink() != 1
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    if file.metadata()?.mode() & 0o7777 != 0o600 {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let writer = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| io::Error::from(error))?;
+    Ok(MeshStoreWriteGuard {
+        _directory: directory,
+        _writer: writer,
+    })
+}
+
+/// Holds one update of a file in the mesh state directory for a caller with no Store handle.
+///
+/// The writer lock is declared first so it is released before the directory lease.
+#[cfg(target_os = "macos")]
+pub(crate) struct MeshStateUpdateGuard {
+    _writer: MeshStoreWriteGuard,
+    _lease: nix::fcntl::Flock<fs::File>,
+}
+
+/// Serialize one update of a file in the mesh state directory `path` with every Store's writes.
+///
+/// The Mac node's compare-and-replace of a full snapshot uses this instead of an exclusive lock
+/// on the directory itself. That exclusive lock now belongs to migration alone, and the node keeps its
+/// own Store open, so its shared lease would block an exclusive lock taken in the same process
+/// forever. The lease taken here is shared too, so a waiting migration still keeps this update out.
+/// # Errors
+/// Refuses an unsafe directory or lock file and reports lock failures.
+#[cfg(target_os = "macos")]
+pub(crate) fn lock_mesh_state_update(path: &Path) -> io::Result<MeshStateUpdateGuard> {
+    let lease = lock_mesh_directory_shared(path)?;
+    let writer = lock_mesh_store_writer(path, &lease)?;
+    Ok(MeshStateUpdateGuard {
+        _writer: writer,
+        _lease: lease,
+    })
+}
+
 impl Store {
     /// Read an owned private directory's public snapshot without following symlinks.
     /// # Errors
@@ -120,27 +245,49 @@ impl Store {
         {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
+        let directory_lease = lock_mesh_directory_shared(parent)?;
         let path = parent.join("mesh-public.json");
         let route_path = parent.join("mesh-routes.json");
         let interface_path = parent.join("mesh-interface.json");
         let rotation_path = parent.join("mesh-key-rotation.bin");
         #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
+        let listen_port_path = parent.join("mesh-listen-port.json");
         let key_path = parent.join("mesh-private-key");
-        sweep_private_temporaries(&key_path)?;
-        sweep_rotation_temporaries(&rotation_path)?;
-        let state = read_public(&path)?.unwrap_or_default();
+        let authority_path = parent.join(AUTHORITY_FILE);
+        sweep_private_temporaries(&key_path, &directory_lease)?;
+        sweep_rotation_temporaries(&rotation_path, &directory_lease)?;
+        let state = read_state(&path, &authority_path)?.unwrap_or_default();
+        if state
+            .config
+            .as_ref()
+            .and_then(|config| config.authority_epoch.as_deref())
+            .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if state.authority_reset_pending
+            && state.config.as_ref().is_none_or(|config| {
+                !config.peers.is_empty()
+                    || config.default_policy != crate::dataplane::DefaultPolicy::Deny
+            })
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
         Ok((
             Self {
+                directory_lease,
                 path,
                 route_path,
                 interface_path,
                 rotation_path,
                 #[cfg(target_os = "linux")]
                 engine_path,
+                listen_port_path,
                 key_path,
+                authority_path,
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -162,18 +309,22 @@ impl Store {
         {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
+        let directory_lease = lock_mesh_directory_shared(parent)?;
         let key_path = parent.join(crate::macos_key::KEY_FILE);
         let rotation_path = parent.join("mesh-key-rotation.bin");
-        sweep_private_temporaries(&key_path)?;
-        sweep_rotation_temporaries(&rotation_path)?;
+        sweep_private_temporaries(&key_path, &directory_lease)?;
+        sweep_rotation_temporaries(&rotation_path, &directory_lease)?;
         let route_body =
             serde_json::to_vec(&BTreeSet::<IpAddr>::new()).map_err(io::Error::other)?;
         Ok(Self {
+            directory_lease,
             path: parent.join("mesh-public.json"),
             route_path: parent.join("mesh-routes.json"),
             interface_path: parent.join("mesh-interface.json"),
             rotation_path,
+            listen_port_path: parent.join("mesh-listen-port.json"),
             key_path,
+            authority_path: parent.join(AUTHORITY_FILE),
             route_body: Mutex::new(route_body),
         })
     }
@@ -195,6 +346,12 @@ impl Store {
     /// # Errors
     /// Uses the same private-file checks and atomic durable writer as `save`.
     pub fn record_interface(&self, key: &crate::policy::model::PublicKey) -> io::Result<()> {
+        let _writer = lock_mesh_store_writer(
+            self.interface_path
+                .parent()
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
         write_public(
             &self.interface_path,
             &serde_json::to_vec(key).map_err(io::Error::other)?,
@@ -245,18 +402,57 @@ impl Store {
         Ok(())
     }
 
+    /// Remove only the rotation journal after its live key has been settled.
+    ///
+    /// An authority replacement abandons the previous server's sequence space but must keep the
+    /// interface ownership marker and selected private key. The directory lock prevents removal
+    /// from racing a journal writer, and the parent sync makes retirement durable.
+    /// # Errors
+    /// Refuses unsafe journal files and reports failed removal or directory syncs.
+    pub(crate) fn discard_rotation_journal(&self) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let parent = self
+            .rotation_path
+            .parent()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
+        sweep_rotation_temporaries_locked(&self.rotation_path)?;
+        match fs::symlink_metadata(&self.rotation_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+                    && metadata.nlink() == 1
+                    && metadata.mode() & 0o777 == 0o600 =>
+            {
+                fs::remove_file(&self.rotation_path)?;
+                FileSync::parent(&self.rotation_path)
+            }
+            Ok(_) => Err(io::ErrorKind::PermissionDenied.into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Remove the saved interface identity and rotation journal when this node forgets or retires its mesh identity.
     ///
     /// Call after the engine has stopped; `remove_private_key` separately retires its key file.
     /// # Errors
     /// Refuses unsafe records and reports failed removals or directory syncs.
     pub(crate) fn discard_rotation_state(&self) -> io::Result<()> {
+        let _writer = lock_mesh_store_writer(
+            self.rotation_path
+                .parent()
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
         let mut removed = false;
         for path in [&self.rotation_path, &self.interface_path] {
             match fs::symlink_metadata(path) {
                 Ok(metadata)
                     if metadata.is_file()
                         && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+                        && metadata.nlink() == 1
                         && metadata.mode() & 0o777 == 0o600 =>
                 {
                     fs::remove_file(path)?;
@@ -290,6 +486,7 @@ impl Store {
         let metadata = file.metadata()?;
         if !metadata.is_file()
             || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            || metadata.nlink() != 1
             || metadata.mode() & 0o777 != 0o600
             || metadata.len() != u64::try_from(ROTATION_FIXED_BYTES).unwrap_or(u64::MAX)
         {
@@ -338,9 +535,15 @@ impl Store {
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
+        let parent = self
+            .rotation_path
+            .parent()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
         if let Ok(metadata) = fs::symlink_metadata(&self.rotation_path)
             && (!metadata.is_file()
                 || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                || metadata.nlink() != 1
                 || metadata.mode() & 0o777 != 0o600)
         {
             return Err(io::ErrorKind::PermissionDenied.into());
@@ -366,25 +569,17 @@ impl Store {
             nonce,
             ROTATION_MAGIC[6]
         ));
-        // Keep the directory lock through cleanup and replacement so a concurrent writer never
-        // sweeps another process's live journal temporary.
-        let parent = self
-            .rotation_path
-            .parent()
-            .ok_or(io::ErrorKind::InvalidInput)?;
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-            .open(parent)?;
-        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_, error)| error)?;
+        // Keep the stable writer lock through cleanup and replacement so a concurrent writer
+        // never sweeps another process's live journal temporary.
         sweep_rotation_temporaries_locked(&self.rotation_path)?;
         let result = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW)
                 .open(&temporary)?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             fs::rename(&temporary, &self.rotation_path)?;
@@ -399,6 +594,21 @@ impl Store {
             let _ = fs::remove_file(temporary);
         }
         result
+    }
+    /// Prove that a replacement snapshot still names this journal's exact operation.
+    /// Missing or different operations retire the journal through the ordinary authority fence.
+    /// # Errors
+    /// Refuses an unsafe or malformed journal instead of guessing at continuity.
+    pub(crate) fn rotation_matches(
+        &self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<bool> {
+        let Some(operation) = operation else {
+            return Ok(false);
+        };
+        Ok(self.rotation_secret()?.is_some_and(|state| {
+            state.operation_id == operation.operation_id && state.sequence == operation.sequence
+        }))
     }
     /// Retire the predecessor private bytes and keep its public key in the retry marker.
     /// # Errors
@@ -432,6 +642,12 @@ impl Store {
     /// Refuses unsafe state files and reports durable-write failures.
     #[cfg(target_os = "linux")]
     pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
+        let _writer = lock_mesh_store_writer(
+            self.engine_path
+                .parent()
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
         write_public(
             &self.engine_path,
             &serde_json::to_vec(&engine).map_err(io::Error::other)?,
@@ -444,6 +660,36 @@ impl Store {
     pub(crate) fn recorded_engine(&self) -> io::Result<Option<crate::gotatun_node::EngineKind>> {
         read_public(&self.engine_path)
     }
+
+    /// Remember the automatic listener choice outside the public peer snapshot.
+    ///
+    /// The record keeps the default port stable and lets a node reuse an ephemeral fallback
+    /// after the default was occupied. Explicit environment overrides still win on each start;
+    /// callers record the standard port after a successful override so removing it resets to the
+    /// product default.
+    /// # Errors
+    /// Rejects zero and the reserved kernel `WireGuard` port, or reports an unsafe state file.
+    pub(crate) fn record_listen_port(&self, port: u16) -> io::Result<()> {
+        if port == 0 || port == 51_820 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        write_public(
+            &self.listen_port_path,
+            &serde_json::to_vec(&port).map_err(io::Error::other)?,
+        )
+    }
+
+    /// Read the saved automatic listener choice, if this node has started before.
+    /// # Errors
+    /// Rejects malformed or reserved values and unsafe state-file metadata.
+    pub(crate) fn recorded_listen_port(&self) -> io::Result<Option<u16>> {
+        let port = read_public(&self.listen_port_path)?;
+        if port.is_some_and(|port| port == 0 || port == 51_820) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(port)
+    }
+
     /// Create a durable private key file without replacing an existing identity.
     /// The bytes never enter the public state snapshot or a log.
     /// # Errors
@@ -452,12 +698,10 @@ impl Store {
         if key.len() != 32 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-            .open(self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
-        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_, error)| error)?;
+        let _writer = lock_mesh_store_writer(
+            self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
         if self.key_path.exists() {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
@@ -470,17 +714,11 @@ impl Store {
     /// # Errors
     /// Refuses malformed keys, unsafe existing files and failed durable replacements.
     pub(crate) fn replace_private_key(&self, key: &[u8]) -> io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         if key.len() != 32 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let parent = self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-            .open(parent)?;
-        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_, error)| error)?;
+        let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
         if self
             .read_private_key()?
             .is_some_and(|current| current.as_slice() == key)
@@ -497,6 +735,7 @@ impl Store {
                 .mode(0o600)
                 .custom_flags(nix::libc::O_NOFOLLOW)
                 .open(&temporary)?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
             file.write_all(key)?;
             file.sync_all()?;
             fs::rename(&temporary, &self.key_path)?;
@@ -520,6 +759,7 @@ impl Store {
                 let metadata = file.metadata()?;
                 if !metadata.is_file()
                     || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                    || metadata.nlink() != 1
                     || metadata.mode() & 0o777 != 0o600
                     || metadata.len() != 32
                 {
@@ -540,6 +780,10 @@ impl Store {
     /// # Errors
     /// Refuses unsafe key files and reports durable directory failures.
     pub fn remove_private_key(&self) -> io::Result<()> {
+        let _writer = lock_mesh_store_writer(
+            self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
         if self.read_private_key()?.is_none() {
             return Ok(());
         }
@@ -551,6 +795,12 @@ impl Store {
     /// Uses the same private-file checks and atomic durable writer as `save`.
     pub fn record_routes(&self, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
         let body = serde_json::to_vec(routes).map_err(io::Error::other)?;
+        let _writer = lock_mesh_store_writer(
+            self.route_path
+                .parent()
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
         let mut previous = self.route_body.lock().map_err(|_| io::ErrorKind::Other)?;
         if *previous != body {
             write_public(&self.route_path, &body)?;
@@ -607,28 +857,90 @@ impl Store {
     /// temporary file is overwritten. Identical replay, legacy binding upgrades and journal-proven
     /// `GotaTun` binding advances retain their established semantics.
     pub fn save(&self, state: &State) -> io::Result<()> {
-        // The directory inode is stable across atomic snapshot replacement.
-        // Lock it, not the replaced file, so independent Store instances cannot
-        // race the revision check and rename. No idle descriptor is retained.
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-            .open(self.path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
-        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_, error)| error)?;
-        // Disabled/unconfigured intent carries no access revision. It must
-        // remain publishable even if the retained public snapshot is unreadable.
-        if let Some(next) = &state.config
-            && let Some(previous) = read_public::<State>(&self.path)?
-            && let Some(old) = previous.config
+        self.save_checked(state, None)
+    }
+    /// Save a complete snapshot against the exact accepted config it replaces.
+    ///
+    /// This narrow compare-and-set permits a same-authority full snapshot to lower its revision,
+    /// and permits the first full snapshot after an authority reset to complete at an equal
+    /// revision. Ordinary saves keep the monotonic revision fence.
+    /// # Errors
+    /// Refuses a stale base, a changed authority, or an equal-revision conflict outside a reset.
+    pub(crate) fn save_full_snapshot(&self, state: &State, expected: &Config) -> io::Result<()> {
+        self.save_checked(state, Some(expected))
+    }
+    /// Validate revision ownership under the directory lock before replacing the public file.
+    /// # Errors
+    /// Reports a stale revision, a mismatched base, or a durable write failure.
+    fn save_checked(&self, state: &State, full_snapshot_base: Option<&Config>) -> io::Result<()> {
+        if state.authority_reset_pending
+            && state.config.as_ref().is_none_or(|config| {
+                !config.peers.is_empty()
+                    || config.default_policy != crate::dataplane::DefaultPolicy::Deny
+            })
         {
-            if next.version < old.version {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // Serialize revision checks and renames without upgrading this Store's shared directory
+        // lease; migration takes the exclusive directory lock only after every Store closes.
+        let _writer = lock_mesh_store_writer(
+            self.path.parent().ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
+        // No-config intent carries no access revision. Avoid parsing the old file
+        // so explicit off can replace unreadable retained state; peer-bearing and
+        // full-snapshot writes still require a readable revision base.
+        let previous = if state.config.is_none() && full_snapshot_base.is_none() {
+            None
+        } else {
+            read_state(&self.path, &self.authority_path)?
+        };
+        if let Some(expected) = full_snapshot_base {
+            let previous = previous.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+            let old = previous.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+            let next = state.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+            let completes_reset = previous.authority_reset_pending
+                && !state.authority_reset_pending
+                && next.authority_epoch == old.authority_epoch;
+            if old != expected
+                || next.authority_epoch != old.authority_epoch
+                || !(next.version < old.version || completes_reset)
+            {
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            if next.version == old.version && next != &old {
-                // Legacy snapshots may gain their first binding. An existing binding may advance
-                // only when the local GotaTun commit journal and identity files prove that exact
-                // candidate; equal revision alone never authorizes new policy.
+        }
+        if let Some(next) = &state.config
+            && let Some(previous) = previous.as_ref()
+            && let Some(old) = previous.config.as_ref()
+        {
+            if next
+                .authority_epoch
+                .as_deref()
+                .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let same_authority = next.authority_epoch == old.authority_epoch;
+            if !same_authority
+                && (!next.peers.is_empty()
+                    || next.default_policy != crate::dataplane::DefaultPolicy::Deny)
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let authorized_reset_completion = full_snapshot_base == Some(old)
+                && previous.authority_reset_pending
+                && !state.authority_reset_pending;
+            // A lower revision is accepted only by the exact-base replacement transaction above.
+            if next.version < old.version && same_authority && full_snapshot_base != Some(old) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if next.version == old.version
+                && same_authority
+                && !crate::dataplane::same_runtime_content(next, old)
+                && !authorized_reset_completion
+            {
+                // Equal-revision changes only normalize an enrollment binding or a journal-proven
+                // GotaTun key advance; the revision itself never authorizes new policy.
                 let binding_advance = match (old.local_key, next.local_key) {
                     (Some(previous), Some(candidate)) if previous != candidate => {
                         self.rotation_binding_advance_is_proven(previous, candidate)?
@@ -639,7 +951,7 @@ impl Store {
                 if !binding_advance && !legacy_binding {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
-                let mut bound = old;
+                let mut bound = old.clone();
                 bound.local_key = next.local_key;
                 if &bound != next {
                     return Err(io::ErrorKind::InvalidData.into());
@@ -650,14 +962,61 @@ impl Store {
         let encode = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_encode")
         });
-        let body = serde_json::to_vec(state).map_err(io::Error::other)?;
+        let (body, authority) = encode_state(state)?;
         #[cfg(feature = "cutoff-measure")]
         drop(encode);
         #[cfg(feature = "cutoff-measure")]
         let _write = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_write")
         });
-        write_public(&self.path, &body)
+        // The snapshot goes first: a stop before the authority record leaves the older record,
+        // which restore honours only where it is safe (see [`merge_authority`]).
+        write_public(&self.path, &body)?;
+        write_authority(&self.authority_path, &authority)
+    }
+    /// Persist peer-free intent before fencing an authority at runtime.
+    ///
+    /// Atomic replacement is preferred. If that fails, the existing private snapshot is rewritten
+    /// in place so a failed temporary-file write cannot make the retired peer copy restartable.
+    /// A torn in-place write is invalid JSON and therefore fails closed at the next restore.
+    /// # Errors
+    /// Refuses snapshots that still carry peers and reports when neither safe write can complete.
+    pub(crate) fn save_retired(&self, state: &State) -> io::Result<()> {
+        if state.authority_reset_pending && state.config.is_none()
+            || state.config.as_ref().is_some_and(|config| {
+                !config.peers.is_empty()
+                    || config.default_policy != crate::dataplane::DefaultPolicy::Deny
+            })
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let (body, authority) = encode_state(state)?;
+        if body.len() as u64 > MAX_PUBLIC_STATE_BYTES {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        match self.save(state) {
+            Ok(()) => Ok(()),
+            Err(atomic_error) => {
+                write_public_in_place(&self.path, &body, &self.directory_lease).inspect_err(
+                    |fallback_error| {
+                        tracing::error!(
+                            atomic_error_kind = ?atomic_error.kind(),
+                            fallback_error_kind = ?fallback_error.kind(),
+                            "atomic and in-place fail-closed mesh state writes both failed"
+                        );
+                    },
+                )?;
+                // The peer-free snapshot is the safety-critical write. Without the record, restore
+                // keeps that peer-free state and waits for the server's next full snapshot.
+                if let Err(error) = write_authority(&self.authority_path, &authority) {
+                    tracing::warn!(
+                        error_kind = ?error.kind(),
+                        "mesh authority record not updated after an in-place fail-closed write"
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -677,7 +1036,166 @@ fn rotation_public_key(private_key: &[u8]) -> io::Result<crate::policy::model::P
     Ok(crate::policy::model::PublicKey(*public.as_bytes()))
 }
 
-// Both public files must pass the same ownership, mode and no-follow boundary.
+/// File beside `mesh-public.json` that holds a node's authority metadata.
+pub(crate) const AUTHORITY_FILE: &str = "mesh-authority.json";
+
+/// Authority metadata kept outside the public snapshot (D295 rollback, #382 P2).
+///
+/// The previous release parses `mesh-public.json` with `deny_unknown_fields`, so the epoch and
+/// the reset marker cannot live there: a rolled-back binary would fail to read its own state and
+/// leave the node without a mesh. They live in this separate file, which older releases never
+/// open. The snapshot file keeps exactly the older shape.
+///
+/// Writers update the snapshot first and this record second. Readers treat a missing or stale
+/// record as harmless: a wrong or missing epoch only makes the next server snapshot count as an
+/// authority change, and a reset marker is honoured only over a peer-free deny snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthorityRecord {
+    /// The server authority epoch the saved snapshot came from, if it carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) epoch: Option<String>,
+    /// Snapshot metadata retained for exact-base persistence checks, never a continuity proof.
+    /// Reset recovery revalidates the operation from the incoming authenticated full snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rotation_operation: Option<crate::dataplane::RotationContinuation>,
+    /// True after a new authority was fenced and until its first full snapshot is saved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) reset_pending: bool,
+}
+
+/// Read the authority record, treating a missing, unreadable or malformed file as empty.
+///
+/// An empty record is always safe to act on (see [`AuthorityRecord`]), so a damaged file is
+/// logged and skipped rather than blocking restore.
+pub(crate) fn read_authority(path: &Path) -> AuthorityRecord {
+    match read_public::<AuthorityRecord>(path) {
+        Ok(record) => {
+            let record = record.unwrap_or_default();
+            if record
+                .epoch
+                .as_deref()
+                .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+            {
+                tracing::warn!("mesh authority record ignored: its epoch is malformed");
+                return AuthorityRecord::default();
+            }
+            record
+        }
+        Err(error) => {
+            tracing::warn!(error_kind = ?error.kind(), "mesh authority record ignored: unreadable");
+            AuthorityRecord::default()
+        }
+    }
+}
+
+/// Persist `record`, or remove the file when it is empty. Unchanged records are not rewritten,
+/// so ordinary snapshot saves cost no extra fsync.
+/// # Errors
+/// Reports a failed durable write or removal.
+pub(crate) fn write_authority(path: &Path, record: &AuthorityRecord) -> io::Result<()> {
+    // A malformed file reads as empty; leaving it in place is harmless for the same reason.
+    if read_authority(path) == *record {
+        return Ok(());
+    }
+    if *record == AuthorityRecord::default() {
+        return match fs::remove_file(path) {
+            Ok(()) => fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    write_public(path, &serde_json::to_vec(record).map_err(io::Error::other)?)
+}
+
+/// Move the authority metadata out of a snapshot about to be written, returning the stripped
+/// copy for the snapshot file and the record for [`AUTHORITY_FILE`].
+pub(crate) fn split_authority(
+    config: Option<&Config>,
+    reset_pending: bool,
+) -> (Option<Config>, AuthorityRecord) {
+    let mut stripped = config.cloned();
+    let epoch = stripped
+        .as_mut()
+        .and_then(|config| config.authority_epoch.take());
+    let rotation_operation = stripped
+        .as_mut()
+        .and_then(|config| config.rotation_operation.take());
+    (
+        stripped,
+        AuthorityRecord {
+            epoch,
+            rotation_operation,
+            reset_pending,
+        },
+    )
+}
+
+/// Fill a just-read snapshot's authority metadata from its record.
+///
+/// Values written inline by earlier builds of this change win. The record's epoch applies only
+/// to an epoch-less snapshot. Its reset marker applies only when the snapshot is peer-free and
+/// deny-by-default, the state a reset writes first; anything else means the record is older
+/// than the snapshot, and is ignored.
+pub(crate) fn merge_authority(
+    config: Option<&mut Config>,
+    reset_pending: &mut bool,
+    record: AuthorityRecord,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    config.rotation_operation = record.rotation_operation;
+    if config.authority_epoch.is_none() {
+        config.authority_epoch = record.epoch;
+    }
+    if record.reset_pending
+        && config.peers.is_empty()
+        && config.default_policy == crate::dataplane::DefaultPolicy::Deny
+    {
+        *reset_pending = true;
+    }
+}
+
+/// Encode `state` for `mesh-public.json` in the previous release's shape, plus its record.
+/// # Errors
+/// Reports a serialization failure.
+fn encode_state(state: &State) -> io::Result<(Vec<u8>, AuthorityRecord)> {
+    let (config, authority) = split_authority(state.config.as_ref(), state.authority_reset_pending);
+    let legacy = State {
+        enabled: state.enabled,
+        config,
+        authority_reset_pending: false,
+        #[cfg(target_os = "linux")]
+        backend: state.backend,
+    };
+    Ok((
+        serde_json::to_vec(&legacy).map_err(io::Error::other)?,
+        authority,
+    ))
+}
+
+/// Read `mesh-public.json` and merge its authority record (see [`merge_authority`]).
+/// # Errors
+/// Reports an unsafe or unreadable snapshot file.
+fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
+    let Some(mut state) = read_public::<State>(path)? else {
+        return Ok(None);
+    };
+    merge_authority(
+        state.config.as_mut(),
+        &mut state.authority_reset_pending,
+        read_authority(authority_path),
+    );
+    Ok(Some(state))
+}
+
+/// Read an owned public state file without following links.
+///
+/// Both public files pass the same owner, mode, hard-link and no-follow checks. The checked open
+/// descriptor is used for decoding so a path replacement cannot change which bytes are read.
+/// # Errors
+/// Refuses unsafe metadata, malformed JSON, or filesystem errors.
 fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     match OpenOptions::new()
         .read(true)
@@ -688,6 +1206,7 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
             let meta = file.metadata()?;
             if !meta.is_file()
                 || meta.uid() != nix::unistd::Uid::effective().as_raw()
+                || meta.nlink() != 1
                 || meta.mode() & 0o777 != 0o600
             {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -706,6 +1225,7 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
         Err(error) => Err(error),
     }
 }
+/// Atomically replace a public state file through a synced temporary file.
 // Write the journal before kernel mutation and the accepted snapshot afterwards.
 // A crash between writes can recover ownership from the journal, the accepted
 // peer list and the retained kernel peer list; no cross-file atomicity is assumed.
@@ -715,7 +1235,9 @@ fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
         .open(&temporary)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     let result = (|| {
         file.write_all(body)?;
         file.sync_all()?;
@@ -728,13 +1250,62 @@ fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Overwrite an existing private public-state file after runtime peers are already fenced.
+///
+/// This is the last safe write when a directory rename fails: truncation can leave invalid JSON,
+/// which restore rejects, but it cannot silently retain the old peer snapshot after a complete
+/// write. The regular atomic writer remains the normal path.
+/// # Errors
+/// Refuses unsafe parent/file metadata, oversized state or failed durable writes.
+fn write_public_in_place(
+    path: &Path,
+    body: &[u8],
+    directory_lease: &nix::fcntl::Flock<fs::File>,
+) -> io::Result<()> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    if body.len() as u64 > MAX_PUBLIC_STATE_BYTES {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let _writer = lock_mesh_store_writer(parent, directory_lease)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    let file_metadata = file.metadata()?;
+    if !file_metadata.is_file()
+        || file_metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || file_metadata.nlink() != 1
+        || file_metadata.mode() & 0o777 != 0o600
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    file.set_len(0)?;
+    file.write_all(body)?;
+    file.sync_all()?;
+    FileSync::parent(path)
+}
+
+/// Save a private key through a synced 0600 temporary, without replacing an existing identity.
+///
+/// The temporary is hard-linked into place so a concurrent first key cannot be overwritten.
+/// # Errors
+/// Returns a temporary-file, link, write, sync, or directory-sync error.
 fn write_private(path: &Path, key: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension(format!("{}.new", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
         .open(&temporary)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     let result = (|| {
         file.write_all(key)?;
         file.sync_all()?;
@@ -752,7 +1323,10 @@ fn write_private(path: &Path, key: &[u8]) -> io::Result<()> {
 /// `write_private` leaves behind. Each holds a copy of the key, and nothing else ever removes
 /// one (#260 J143 P3-3). This holds the directory lock that `write_private_key` holds, so it
 /// never removes a live writer's file.
-fn sweep_private_temporaries(key_path: &Path) -> io::Result<()> {
+fn sweep_private_temporaries(
+    key_path: &Path,
+    directory_lease: &nix::fcntl::Flock<fs::File>,
+) -> io::Result<()> {
     let parent = key_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     let prefix = format!(
         "{}.",
@@ -761,12 +1335,7 @@ fn sweep_private_temporaries(key_path: &Path) -> io::Result<()> {
             .and_then(|name| name.to_str())
             .ok_or(io::ErrorKind::InvalidInput)?
     );
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-        .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-        .map_err(|(_, error)| error)?;
+    let _writer = lock_mesh_store_writer(parent, directory_lease)?;
     let mut removed = false;
     for entry in fs::read_dir(parent)? {
         let entry = entry?;
@@ -792,14 +1361,12 @@ fn sweep_private_temporaries(key_path: &Path) -> io::Result<()> {
 ///
 /// Only the numeric `<pid>.<nonce>.<version>.new` form is ours. A symlink or directory with that
 /// name is left alone, and syncing the parent makes successful removals durable.
-fn sweep_rotation_temporaries(rotation_path: &Path) -> io::Result<()> {
+fn sweep_rotation_temporaries(
+    rotation_path: &Path,
+    directory_lease: &nix::fcntl::Flock<fs::File>,
+) -> io::Result<()> {
     let parent = rotation_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-        .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-        .map_err(|(_, error)| error)?;
+    let _writer = lock_mesh_store_writer(parent, directory_lease)?;
     sweep_rotation_temporaries_locked(rotation_path)
 }
 
@@ -857,7 +1424,8 @@ pub(crate) mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     use std::{
-        os::unix::fs::{PermissionsExt, symlink},
+        collections::BTreeMap,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -886,11 +1454,53 @@ pub(crate) mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    /// Keeps migration's exclusive directory lock out while a live store may write state.
+    #[test]
+    fn live_mesh_store_excludes_exclusive_migration_lock() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("open mesh store");
+        let routes = BTreeSet::from(["10.254.0.2".parse().expect("route address")]);
+        store
+            .record_routes(&routes)
+            .expect("a live store can write while holding its shared lease");
+        store
+            .write_private_key(&[0x5a; 32])
+            .expect("a live store can persist a private key");
+        assert_eq!(store.route_inventory().expect("route cache"), routes);
+        store
+            .remove_private_key()
+            .expect("a live store can retire a private key");
+        let directory_fd = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(&directory.0)
+            .expect("open mesh directory for migration lock");
+
+        assert!(
+            nix::fcntl::Flock::lock(directory_fd, nix::fcntl::FlockArg::LockExclusiveNonblock)
+                .is_err(),
+            "migration must wait while a live mesh store can write its files"
+        );
+
+        drop(store);
+        let directory_fd = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(&directory.0)
+            .expect("reopen mesh directory after store exit");
+        let _migration_lock =
+            nix::fcntl::Flock::lock(directory_fd, nix::fcntl::FlockArg::LockExclusiveNonblock)
+                .expect("migration lock is released after the store closes");
+    }
+
     /// Build a minimal accepted mesh view with one local identity binding.
     fn binding_state(local_key: crate::policy::model::PublicKey) -> State {
         State {
             enabled: true,
+            authority_reset_pending: false,
             config: Some(Config {
+                authority_epoch: None,
+                rotation_operation: None,
                 local_key: Some(local_key),
                 server: None,
                 node: crate::policy::model::NodeId(1),
@@ -912,6 +1522,134 @@ pub(crate) mod tests {
             #[cfg(target_os = "linux")]
             backend: Some(crate::firewall::Backend::Nft),
         }
+    }
+
+    /// The public snapshot shape the previous release reads with `deny_unknown_fields`
+    /// (dev `966c52e07`, before authority epochs). A rollback (D295) must still parse it.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreviousReleaseState {
+        #[allow(dead_code)]
+        enabled: bool,
+        #[allow(dead_code)]
+        config: Option<PreviousReleaseConfig>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        backend: Option<serde_json::Value>,
+    }
+
+    /// The previous release's `Config` fields; any other key makes it refuse the file.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct PreviousReleaseConfig {
+        #[serde(default)]
+        local_key: Option<serde_json::Value>,
+        #[serde(default)]
+        server: Option<serde_json::Value>,
+        node: serde_json::Value,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        dns_suffix: Option<String>,
+        version: u64,
+        addresses: serde_json::Value,
+        default_policy: serde_json::Value,
+        #[serde(default)]
+        exposure: Option<serde_json::Value>,
+        peers: serde_json::Value,
+        #[serde(default)]
+        peer_names: Option<serde_json::Value>,
+    }
+
+    /// #382 P2 (J418): a node that saved an authority epoch and a pending reset must leave a
+    /// snapshot the previous release can parse, and must restore both values itself.
+    #[test]
+    fn authority_metadata_keeps_the_snapshot_readable_by_the_previous_release() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("empty state");
+        let mut state = binding_state(crate::policy::model::PublicKey([4; 32]));
+        let epoch = "00000000-0000-4000-8000-0000000002c1";
+        if let Some(config) = state.config.as_mut() {
+            config.authority_epoch = Some(epoch.to_owned());
+        }
+        state.authority_reset_pending = true;
+        store
+            .save_retired(&state)
+            .expect("save fenced authority state");
+
+        let body = fs::read(&store.path).expect("public snapshot");
+        serde_json::from_slice::<PreviousReleaseState>(&body)
+            .expect("the previous release parses the snapshot");
+
+        let (_, restored) = Store::open(&directory.0).expect("restore");
+        assert_eq!(
+            restored
+                .config
+                .as_ref()
+                .and_then(|config| config.authority_epoch.as_deref()),
+            Some(epoch)
+        );
+        assert!(restored.authority_reset_pending);
+    }
+
+    /// A reset marker left over from before a later peer-bearing save is not applied to it,
+    /// so a stop between the two files can never reopen as a reset over live peers.
+    #[test]
+    fn stale_reset_record_is_ignored_over_a_peer_bearing_snapshot() {
+        let mut state = binding_state(crate::policy::model::PublicKey([5; 32]));
+        let config = state.config.as_mut().expect("config");
+        config.default_policy = crate::dataplane::DefaultPolicy::Allow;
+        merge_authority(
+            state.config.as_mut(),
+            &mut state.authority_reset_pending,
+            AuthorityRecord {
+                epoch: Some("00000000-0000-4000-8000-0000000002c1".to_owned()),
+                rotation_operation: None,
+                reset_pending: true,
+            },
+        );
+        assert!(!state.authority_reset_pending);
+        assert_eq!(
+            state
+                .config
+                .as_ref()
+                .and_then(|config| config.authority_epoch.as_deref()),
+            Some("00000000-0000-4000-8000-0000000002c1")
+        );
+    }
+
+    /// Operation metadata stays out of the rollback snapshot but round-trips for exact-base saves.
+    #[test]
+    fn rotation_metadata_uses_the_authority_record_not_the_legacy_snapshot() {
+        let mut state = binding_state(crate::policy::model::PublicKey([5; 32]));
+        let operation = crate::dataplane::RotationContinuation {
+            operation_id: "00000000-0000-4000-8000-000000000534".into(),
+            sequence: 1,
+        };
+        state
+            .config
+            .as_mut()
+            .expect("bound fixture snapshot")
+            .rotation_operation = Some(operation.clone());
+        let (body, record) = encode_state(&state).expect("encode the legacy snapshot");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode the legacy snapshot");
+        assert!(json["config"].get("rotation_operation").is_none());
+        let mut restored: State =
+            serde_json::from_slice(&body).expect("decode the legacy snapshot");
+        merge_authority(
+            restored.config.as_mut(),
+            &mut restored.authority_reset_pending,
+            record,
+        );
+        assert_eq!(
+            restored
+                .config
+                .expect("restored fixture snapshot")
+                .rotation_operation,
+            Some(operation)
+        );
     }
 
     /// A committed `GotaTun` journal authorizes persisting its candidate binding at the same revision.
@@ -1110,6 +1848,7 @@ pub(crate) mod tests {
         );
     }
 
+    /// Explicitly disabled state survives restart without persisting private keys.
     #[test]
     fn explicit_off_survives_restart_and_snapshot_contains_only_public_fields() {
         let directory = Directory::new();
@@ -1119,6 +1858,7 @@ pub(crate) mod tests {
             .save(&State {
                 enabled: false,
                 config: None,
+                authority_reset_pending: false,
                 backend: Some(crate::firewall::Backend::Nft),
             })
             .expect("save");
@@ -1131,6 +1871,56 @@ pub(crate) mod tests {
         assert_eq!(
             fs::metadata(&store.path).expect("mode").mode() & 0o777,
             0o600
+        );
+    }
+    /// Ordinary persistence cannot move an accepted authority's revision backwards.
+    #[test]
+    fn ordinary_save_rejects_a_lower_same_authority_revision() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let mut config = Config {
+            authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            rotation_operation: None,
+            local_key: None,
+            server: Some(crate::policy::model::NodeId(1)),
+            node: crate::policy::model::NodeId(2),
+            #[cfg(feature = "mesh-dns")]
+            name: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            version: 11,
+            addresses: crate::policy::model::Addresses {
+                ipv4: "10.254.0.2".parse().expect("IPv4"),
+                ipv6: "fd01::2".parse().expect("IPv6"),
+            },
+            default_policy: crate::dataplane::DefaultPolicy::Deny,
+            exposure: None,
+            peers: BTreeMap::new(),
+            #[cfg(feature = "mesh-dns")]
+            peer_names: BTreeMap::new(),
+        };
+        store
+            .save(&State {
+                enabled: true,
+                config: Some(config.clone()),
+                authority_reset_pending: false,
+                backend: None,
+            })
+            .expect("accepted snapshot");
+        config.version = 2;
+
+        let result = store.save(&State {
+            enabled: true,
+            config: Some(config),
+            authority_reset_pending: false,
+            backend: None,
+        });
+
+        assert_eq!(
+            result
+                .expect_err("ordinary save must keep its revision fence")
+                .kind(),
+            io::ErrorKind::InvalidData
         );
     }
     /// Finishing a rotation removes only the predecessor key, and finishing it again is harmless.
@@ -1438,12 +2228,52 @@ pub(crate) mod tests {
                 .any(|window| window == b"gotatun")
         );
     }
+
+    /// A default listener choice survives a new Store without entering the public peer snapshot.
+    #[test]
+    fn selected_mesh_listener_port_is_durable_and_private() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+
+        assert_eq!(store.recorded_listen_port().expect("no saved port"), None);
+        store
+            .record_listen_port(10_254)
+            .expect("save listener port");
+        drop(store);
+
+        let (store, state) = Store::open(&directory.0).expect("reopen listener state");
+        assert_eq!(
+            store.recorded_listen_port().expect("saved port"),
+            Some(10_254)
+        );
+        assert_eq!(
+            state.config, None,
+            "the listener port stays outside the peer snapshot"
+        );
+        assert_eq!(
+            fs::metadata(&store.listen_port_path)
+                .expect("listener metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store
+            .record_listen_port(49_123)
+            .expect("replace fallback port");
+        assert_eq!(
+            store.recorded_listen_port().expect("updated port"),
+            Some(49_123)
+        );
+    }
+
     /// Records owned routes separately while preserving the legacy accepted-state bytes.
     #[test]
     fn route_recording_preserves_the_legacy_accepted_state_format() {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let config = Config {
+            authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),
@@ -1466,6 +2296,7 @@ pub(crate) mod tests {
             .save(&State {
                 enabled: false,
                 config: Some(config.clone()),
+                authority_reset_pending: false,
                 backend: Some(crate::firewall::Backend::Nft),
             })
             .expect("accepted intent");

@@ -115,6 +115,8 @@ fn deep_scratch_fallback_is_private_short_and_owned() {
 
 /// A foreground fake master owns a private socket for public-option tests only.
 /// Real authentication, connection reuse and trust are tested by the sshd fixture.
+/// `master.ready` acknowledges the bound socket so virtual-clock tests can wake
+/// readiness polling after external work, without charging it to a deadline.
 #[allow(
     dead_code,
     reason = "Shared fixture is also compiled into tests without an SSH master."
@@ -136,6 +138,8 @@ listener = socket.socket(socket.AF_UNIX)
 listener.bind(path)
 os.chmod(path, 0o600)
 listener.listen(1)
+with open(os.path.join(os.path.dirname(__file__), 'master.ready'), 'w'):
+    pass
 while True:
     time.sleep(3600)
 "#,

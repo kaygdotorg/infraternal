@@ -24,14 +24,13 @@ enum Refusal {
     Saturated,
 }
 
+/// Refusal ends its subscription even when SQLite holds the admission writer.
 async fn refusal_ends_subscription(case: Refusal) {
     let _guard = SERIAL.lock().await;
     // WAL retains independent authority reads while the worker's writer waits.
     // Reuse the registered fixture and production's eight-connection pool shape.
-    let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::PathBuf::from("target"),
-        std::path::PathBuf::from,
-    );
+    // Live SQLite data must not contend with compiler artifacts on the build disk.
+    let root = std::env::temp_dir();
     let path = root.join(format!("mesh-refusal-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

@@ -85,3 +85,16 @@ test("a denied account is told so, with nothing to retry", async () => {
 test("oversized refusal JSON is ignored before parsing", async () => {
   expect((await refusal({ reason: "host_memory_low", available_mib: 180, session_count: 212, extra: "x".repeat(32768) })).reason).toBeUndefined();
 });
+
+test("a host being upgraded to root says it will be back, with no address (D393)", async () => {
+  const { terminalRefusal } = await import("../../terminal-refusal");
+  const upgrading = terminalRefusal(await refusal({ error: "terminal unavailable", reason: "host_upgrading" }), "build-01");
+  expect(upgrading).toEqual({
+    message: "build-01 is being upgraded and will be back shortly.",
+    sessionList: false, action: "retry", calm: true,
+  });
+  // Only this self-clearing state is calm; an offline host is still a failure with the red cross.
+  expect((await import("../../terminal-refusal")).terminalRefusal(await refusal({ reason: "unavailable" }), "x").calm).toBeUndefined();
+  expect(upgrading.message).not.toContain("offline");
+  expect(terminalRefusal(await refusal({ reason: "host_upgrading" })).message).toStartWith("This host is being upgraded");
+});

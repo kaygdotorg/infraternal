@@ -20,13 +20,18 @@ import { BRAND_MARK } from "./auth-marks";
 import { loading } from "../../../packages/ui/src/countup";
 import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
-import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
+import type { PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
 import { onDemand } from "./on-demand";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
 
 declare global {
   interface Window {
+    /** Per-key paint stage timestamps, exposed only on the explicit `?probe=1` measurement page. */
+    __tracerPerformanceProbe?: {
+      /** Returns content-free probe stage times for the current synthetic key run. */
+      trace: () => ProbeTraceSample[];
+    };
     __tracerTestDouble?: {
       isConnected: () => boolean;
       dropConnection: () => void;
@@ -615,7 +620,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     }
     return;
   }
-  if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
+  if (probeMode) {
+    // The latency probe is a measuring tool for `?probe=1` pages, so its code loads only for them and stays off the first-screen budget.
+    const { PerformanceProbe } = await onDemand(() => import("./perf-probe.on-demand"));
+    if (generation !== sessionGeneration) return;
+    performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
+    window.__tracerPerformanceProbe = { trace: () => performanceProbe?.traceSamples() ?? [] };
+  }
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
@@ -723,6 +734,7 @@ async function showRecovery(): Promise<void> {
   productCanvas?.dispose(); productCanvas = undefined;
   coreScreen?.dispose(); coreScreen = undefined;
   performanceProbe?.dispose(); performanceProbe = undefined;
+  delete window.__tracerPerformanceProbe;
   delete window.__tracerTestDouble;
   document.documentElement.removeAttribute("data-ui-font");
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
@@ -781,6 +793,10 @@ let sessionStarted = 0;
 const peerSessions = sessionNotifications((account, before) => {
   if (activeUserId === account && sessionStarted <= before) endSession("Your session ended. Sign in again to reconnect.");
 });
+/**
+ * Ends the signed-in interface after logout or an expired account session. Disposes session-owned terminals, canvases,
+ * screens and probes before showing sign-in so callbacks from the old session cannot update the new one.
+ */
 function endSession(message = ""): void {
   sessionGeneration++; forgetAccountWork(activeUserId);
   welcomeEffect?.destroy();
@@ -794,6 +810,7 @@ function endSession(message = ""): void {
   productCanvas = undefined;
   performanceProbe?.dispose();
   performanceProbe = undefined;
+  delete window.__tracerPerformanceProbe;
   perfHudGeneration++;
   perfHud?.dispose();
   perfHud = undefined;

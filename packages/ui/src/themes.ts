@@ -292,6 +292,10 @@ export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT
   style.setProperty("--accent-soft", `rgb(${rgb(active.accent)} / 0.16)`);
   style.setProperty("--accent-fg", active.dark ? active.bg : "#ffffff");
   style.setProperty("--ok", active.ok);
+  // Selected text in the interface uses the terminal's pair, so a selection reads the same everywhere (D380).
+  const selection = selectionColors(active);
+  style.setProperty("--selection-bg", selection.background);
+  style.setProperty("--selection-fg", selection.foreground);
   // The canvas backdrop: the gradient shows everywhere at this strength, and the dots are light marks (a brighter
   // tint of the gradient on dark themes, a deeper one on light themes) at a low opacity.
   style.setProperty("--gradient-opacity", active.dark ? "0.46" : "0.32");
@@ -328,15 +332,31 @@ function mixHex(from: string, to: string, amount: number): string {
 }
 
 /**
- * The terminal's selection colours for a theme (#426, D365). The highlight is the accent mixed into the background. On a light
- * theme it stays the soft third it always was, with the theme's text on it. On a dark theme a third of the accent is nearly
+ * The selection colours for a theme (#426, D365, D380): the terminal's, and the same pair for selected text in the interface
+ * (`--selection-bg`, `--selection-fg`). The highlight is the accent mixed into the background. On a light
+ * theme it is the soft third it always was, with the theme's text on it, or black text when the theme's own cannot reach 4.5:1.
+ * On a dark theme a third of the accent is nearly
  * invisible and the renderer's default selected text (dark) was unreadable on it, so the mix grows until the highlight stands
  * out from the cell (3:1) while the selected text, the theme's own, still reads on it (4.5:1); if no mix does both, the one
  * that comes closest is used. Where the theme's own text cannot do it, the text is white, or the theme's background on a lighter highlight.
  */
 export function selectionColors(active: Theme): { background: string; foreground: string } {
   const soft = mixHex(active.bg, active.accent, 0x55 / 255);
-  if (!active.dark) return { background: soft, foreground: active.fg };
+  if (!active.dark) {
+    // D380: light themes follow the same rule as dark ones. The theme's own text stays when it reads on the soft highlight;
+    // when it cannot, the text turns black, and if even black cannot, the highlight is lightened a step at a time. The
+    // highlight need not stand out from the cell by 3:1 here: on paper a soft tint is the quiet look the owner approved.
+    let best = { background: soft, foreground: active.fg }, bestScore = -1;
+    for (let step = 85; step >= 20; step -= 5) {
+      const background = mixHex(active.bg, active.accent, step / 255);
+      for (const foreground of [active.fg, "#000000"]) {
+        const score = contrastRatio(foreground, background) / 4.5;
+        if (score >= 1) return { background, foreground };
+        if (score > bestScore) { bestScore = score; best = { background, foreground }; }
+      }
+    }
+    return best;
+  }
   let best = { background: soft, foreground: active.fg }, bestScore = -1;
   // The theme's own text first; then plain white, then the theme's background colour as dark text on a lighter highlight,
   // where no mix gives the theme's own text enough room (a dark theme whose accent is light or dim).

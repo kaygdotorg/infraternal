@@ -234,6 +234,24 @@ rust_check_cli_plugin_compile_out() {
     return "$failed"
 }
 
+# The "release feature sets" row (#530). Lints every package and feature
+# selection scripts/package-release ships, with warnings as errors. The clippy
+# row only sees the workspace's default features and the static builds row
+# only the default `infraternal`, so the host payload (no mesh, server or
+# desktop) went uncompiled until the release build failed on dev 6fe482d1e.
+# Linting for the build host is enough: the release targets differ only by
+# architecture, and no code here is conditional on it. Every set runs even
+# after one fails, so one log shows them all.
+rust_check_release_feature_sets() {
+    local failed=0
+    local release_server_cargo_args release_host_cargo_args release_session_cargo_args
+    source scripts/release/feature-sets || return 1
+    cargo clippy --locked "${release_server_cargo_args[@]}" -- -D warnings || failed=1
+    cargo clippy --locked "${release_host_cargo_args[@]}" -- -D warnings || failed=1
+    cargo clippy --locked "${release_session_cargo_args[@]}" -- -D warnings || failed=1
+    return "$failed"
+}
+
 # D244/#154 checks the shipping provider, never a GNU test executable or C probe.
 rust_check_static_key_memory() {
     local target="$1"
@@ -305,6 +323,26 @@ rust_static_build_check() {
     return "$failed"
 }
 
+# The `test` row (D345, #509). Runs every workspace test binary even after one
+# fails: plain `cargo test` stops at the first failing binary, so a flake in an
+# early package hid the results of every later package. `--no-fail-fast` keeps
+# the exit code non-zero when anything failed. Because the log is then huge, the
+# failing test names and binaries are repeated at the end. The row's exit code is
+# cargo's own, unchanged.
+rust_test_workspace() {
+    local log status
+    log="$(mktemp)" || return 1
+    cargo test --workspace --locked --no-fail-fast 2>&1 | tee "$log"
+    status="${PIPESTATUS[0]}"
+    if ((status != 0)); then
+        printf '\n--- failing tests (#509) ---\n'
+        { grep -E '^test .+ \.\.\. FAILED$|^error: test failed' "$log" | sort -u; } || :
+        printf -- '--- end of failing tests ---\n'
+    fi
+    rm -f "$log"
+    return "$status"
+}
+
 # Runs the Rust gate. Mode "final" (scripts/verify fast) is the full gate. Mode
 # "iterate" (scripts/verify iterate) runs every check except the static
 # release builds and what only they can check (linkage, D244 key heap, D243
@@ -324,11 +362,15 @@ rust_verify_fast() {
     rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/*.zig
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
+    rust_run_gate "release feature sets" rust_check_release_feature_sets
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
+    # The head-to-head kit is versioned here, so its own tests gate every change (#260); ~5 s.
+    rust_run_gate "head-to-head kit tests" python3 -m unittest discover -s research/head-to-head/kit -p "test_*.py"
     rust_run_gate "Traefik component manifest" python3 -m unittest discover -s scripts/release -p traefik_component_test.py
     rust_run_gate "release component publication" python3 scripts/release/test.py
-    rust_run_gate "test" cargo test --workspace --locked
+    rust_run_gate "test" rust_test_workspace
+    rust_run_gate "tracer unit suite" ts_verify_units
     rust_run_gate "SSH inode reuse fixture" scripts/test-ssh-inode-reuse
     # The shared host (#205) patches the native engine and its allocator;
     # the workspace run builds neither. Its shim lib tests are the gate.

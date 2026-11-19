@@ -1,19 +1,16 @@
 //! Reproduce an unsendable Mesh subscription at D170's ten-thousand-node headroom scale.
 use super::*;
 
-#[tokio::test(start_paused = true)]
+/// Assemble every inventory page and keep the shared socket usable at headroom scale.
+#[tokio::test]
 async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let _guard = SERIAL.lock().await;
-    // Pagination correctness must not spend runtime authority while real
-    // SQLite workers and the shared socket await a loaded host.
-    let clock = FrozenSocketTime::new().await;
     // The auth unit fixture has one connection. A long inventory transaction
     // would monopolize it and park the independent authority watchdog. Use a
     // real disk-backed eight-connection pool, matching the deployed runtime.
-    let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::PathBuf::from("target"),
-        std::path::PathBuf::from,
-    );
+    // Live fixture data belongs in TMPDIR, independently of the build-artifact
+    // disk. Contended artifact writes must not turn schema setup into a disk benchmark.
+    let root = std::env::temp_dir();
     let path = root.join(format!("mesh-headroom-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -28,6 +25,12 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
         .unwrap();
     let (auth, token) = empty_with_pool(pool).await;
     let f = fixture_with_bootstrap(auth, token).await;
+    // Migrations and enrollment use real acquisition deadlines. Starting the
+    // frozen-clock guard before them charges all setup to its 90-second bound;
+    // once it exits, automatic time advancement can expire a healthy pool's
+    // acquisition while its SQLite worker still awaits real IO (#509).
+    tokio::time::pause();
+    let clock = FrozenSocketTime::new().await;
     // Inventory correctness is independent of loaded-host authority-read latency.
     let (f, address, server) = socket_fixture_from_fixture(f, Some(Duration::from_secs(2))).await;
     clock.progress();

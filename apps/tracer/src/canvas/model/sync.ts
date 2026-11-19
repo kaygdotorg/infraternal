@@ -61,9 +61,10 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
       const saved = new Set(before?.views.map((v) => v.id) ?? []);
       return new Set([...cx.views.keys()].filter((id) => persisted(id) && !saved.has(id)));
     },
+    /** Only windows that can enter the document need preservation and a follow-up save after shared paint. */
     uncommittedWindows() {
       const saved = new Set(before ? documentWindows(before).map((w) => w.id) : []);
-      return new Set([...cx.views.values()].filter((v) => persisted(v.view.id) && v.view.layout === "tiled").flatMap((v) => [...v.wins.values()].filter((w) => w.model.kind !== "flow" && w.model.kind !== "node" && w.model.kind !== "app" && w.model.kind !== "screen" && !saved.has(w.model.id)).map((w) => w.model.id)));
+      return new Set([...cx.views.values()].filter((v) => persisted(v.view.id) && v.view.layout === "tiled").flatMap((v) => [...v.wins.values()].filter((w) => w.model.kind !== "flow" && w.model.kind !== "node" && w.model.kind !== "app" && w.model.kind !== "screen" && !(w.model.kind === "terminal" && w.model.openRefused && !w.model.sessionId) && !saved.has(w.model.id)).map((w) => w.model.id)));
     },
     flush() { if (queued) save(); cx.adapters.store.flush?.(); },
     /** After this nothing is written again: sign-out removes the document right after (D245). */

@@ -4,7 +4,7 @@
 //! person's login. A UID shared by people is never sufficient to select a host.
 use super::{
     CHUNK, Config, InputReply, Inputs, MAX_PEERS, Peer, Request, SessionTerminal, SocketPath,
-    consume_peer, shim_peer_uid_allowed, socket,
+    consume_peer, release_size_of_departed_typist, shim_peer_uid_allowed, socket,
 };
 use crate::{
     frame::{
@@ -517,24 +517,16 @@ impl Session {
         let mut wire_bytes = self.peer_bytes();
         let oldest = self.peers.iter().filter_map(|p| p.deferred).min();
         let mut retired = Vec::new();
-        for (i, p) in self.peers.iter_mut().enumerate() {
+        for i in 0..self.peers.len() {
+            let p = &mut self.peers[i];
             let mut before = p.buffer_bytes();
             // Healthy sockets need no writable-readiness round trip. Bound
             // each peer's work, including a partially transmitted repaint.
             let mut write_bytes = CHUNK * 2;
             let mut write_attempts = 4;
-            if p.flush_bounded(&mut write_bytes, &mut write_attempts)
-                .is_err()
-            {
-                retired.push(i);
-                continue;
-            }
-            let current = p.buffer_bytes();
-            wire_bytes = wire_bytes - before + current;
-            before = current;
             if p.deferred.is_some() || !p.trailing.is_empty() {
                 let mut trailing = std::mem::take(&mut p.trailing);
-                match consume_peer(
+                if let Ok((false, used)) = consume_peer(
                     &trailing,
                     p,
                     &mut self.pty,
@@ -547,11 +539,14 @@ impl Session {
                     oldest.is_some() && p.deferred != oldest,
                     &mut self.next_deferred,
                 ) {
-                    Ok((false, used)) => {
-                        trailing.drain(..used);
-                        p.trailing = trailing;
-                    }
-                    _ => retired.push(i),
+                    trailing.drain(..used);
+                    p.trailing = trailing;
+                } else {
+                    retired.push(i);
+                    p.attached = false;
+                    wire_bytes = wire_bytes - before + p.buffer_bytes();
+                    release_size_of_departed_typist(&self.peers, &mut self.cursors);
+                    continue;
                 }
             }
             if p.caps & SEQUENCED_INPUT != 0
@@ -570,20 +565,26 @@ impl Session {
             // requests, deferred input and ended sessions retain prompt replies.
             let defer_ack = coalesce_ack
                 && may_coalesce_data_ack(p, self.ring.head(), !self.drained && self.exit.is_none());
-            if p.pending.is_empty()
-                && !defer_ack
-                && let Some(reply) = p.input_reply.take()
-            {
+            if !defer_ack && p.input_reply.is_some() {
                 let state = self.cursors.get(p.writer)?;
-                p.ack_queued = state.written;
-                p.queue(&match reply {
-                    InputReply::State => Frame::InputState(state.written, state.accepted),
-                    InputReply::Ack => Frame::InputAck(state.written),
-                })?;
-                queued_reply = true;
+                queued_reply = p.queue_input_reply(state.written, state.accepted)?;
             }
             // Include all current buffers before reserving a repaint, even
             // when a preceding state frame completed without a new event.
+            let current = p.buffer_bytes();
+            wire_bytes = wire_bytes - before + current;
+            before = current;
+            // Process an already-read key and place its Ack before an unstarted
+            // Output before writing more flood bytes to the peer socket.
+            if p.flush_bounded(&mut write_bytes, &mut write_attempts)
+                .is_err()
+            {
+                retired.push(i);
+                p.attached = false;
+                wire_bytes = wire_bytes - before + p.buffer_bytes();
+                release_size_of_departed_typist(&self.peers, &mut self.cursors);
+                continue;
+            }
             let current = p.buffer_bytes();
             wire_bytes = wire_bytes - before + current;
             before = current;
@@ -687,14 +688,21 @@ impl Session {
                 .is_err()
             {
                 retired.push(i);
+                p.attached = false;
             }
             wire_bytes = wire_bytes - before + p.buffer_bytes();
+            if retired.last() == Some(&i) {
+                // Flush failures also leave before a later buffered Resize.
+                release_size_of_departed_typist(&self.peers, &mut self.cursors);
+            }
         }
-        // Indices follow peer order. Decoder refusal and an immediate write
-        // failure can name the same peer; retire it only once.
+        // Indices follow peer order; retire each failed peer only once.
         retired.dedup();
-        for i in retired.into_iter().rev() {
-            self.peers.remove(i);
+        if !retired.is_empty() {
+            for i in retired.into_iter().rev() {
+                self.peers.remove(i);
+            }
+            release_size_of_departed_typist(&self.peers, &mut self.cursors);
         }
         if self.peers.is_empty() {
             self.peers = Vec::new();
@@ -773,6 +781,7 @@ impl Session {
                     exited_sent: false,
                     stopping: false,
                     request: None,
+                    replay_awaits_size: false,
                 };
                 peer.queue(&Frame::Hello {
                     version: 1,
@@ -914,6 +923,12 @@ impl Session {
                 }
             }
             disconnects[i] = disconnect;
+            if disconnect {
+                // The batch still uses the original indices. Detach now so a
+                // later size report sees only the owner's surviving links.
+                p.attached = false;
+                release_size_of_departed_typist(&self.peers, &mut self.cursors);
+            }
         }
         for i in 0..self.peers.len() {
             let p = &self.peers[i];
@@ -927,10 +942,13 @@ impl Session {
                     })
                 });
         }
-        for i in (0..self.peers.len()).rev() {
-            if disconnects[i] {
-                self.peers.remove(i);
+        if disconnects.contains(&true) {
+            for i in (0..self.peers.len()).rev() {
+                if disconnects[i] {
+                    self.peers.remove(i);
+                }
             }
+            release_size_of_departed_typist(&self.peers, &mut self.cursors);
         }
         if self.peers.is_empty() {
             self.peers = Vec::new();
@@ -1154,31 +1172,48 @@ mod tests {
     //! Differential state and admission tests for the research-only reactor.
     use super::*;
 
-    /// Type bytes into a real PTY and finish one bounded output turn.
+    /// Type bytes into a real PTY, await the complete line-discipline echo,
+    /// then require one bounded session turn to drain all of it.
     ///
     /// The ring head is the replay position even when the configured ring has
     /// no retained capacity, so this helper checks both PTY drainage and that
-    /// the replay position advanced with the output.
-    fn type_and_drain(session: &mut Session, input: &[u8]) -> io::Result<u64> {
+    /// the replay position advanced with the output. `echo_bytes` is one for
+    /// an ASCII key and three for its erase (backspace, space, backspace).
+    fn type_and_drain(session: &mut Session, input: &[u8], echo_bytes: usize) -> io::Result<u64> {
         use std::os::fd::AsFd;
 
         let head = session.ring.head();
         session.pty.master.write_all(input)?;
-        let mut descriptors = [nix::poll::PollFd::new(
-            session.pty.master.as_fd(),
-            PollFlags::POLLIN,
-        )];
-        let ready = nix::poll::poll(&mut descriptors, 5000_u16)?;
-        assert_ne!(ready, 0, "typed input did not produce PTY echo");
-        let master = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
-        session.step(PollFlags::empty(), master, &[], true)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::pty::available_output(&session.pty.master)? < echo_bytes {
+            assert!(
+                Instant::now() < deadline,
+                "typed input did not finish PTY echo"
+            );
+            let mut descriptors = [nix::poll::PollFd::new(
+                session.pty.master.as_fd(),
+                PollFlags::POLLIN,
+            )];
+            let timeout = nix::poll::PollTimeout::try_from(
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .map_err(io::Error::other)?;
+            assert_ne!(nix::poll::poll(&mut descriptors, timeout)?, 0);
+            assert!(
+                descriptors[0]
+                    .revents()
+                    .is_some_and(|flags| flags.contains(PollFlags::POLLIN))
+            );
+            // Readability is level-triggered: an erase's first byte can be
+            // visible before its remaining bytes. Let the producer finish;
+            // neither an empty queue nor one readable byte ends an echo.
+            std::thread::yield_now();
+        }
+        session.step(PollFlags::empty(), PollFlags::POLLIN, &[], true)?;
         let unread = crate::pty::available_output(&session.pty.master)?;
         assert_eq!(unread, 0, "session step left {unread} PTY bytes unread");
         let advanced = session.ring.head() - head;
-        assert!(
-            advanced > 0,
-            "drained PTY output did not advance replay head"
-        );
+        assert_eq!(advanced, u64::try_from(echo_bytes).unwrap());
         assert_eq!(session.ring.start(), session.ring.head());
         Ok(advanced)
     }
@@ -1206,6 +1241,7 @@ mod tests {
             size: (session.config.cols, session.config.rows, 0, 0),
             cursor: Some(session.ring.head()),
             request: None,
+            replay_awaits_size: false,
             pending: Vec::new(),
             written: 0,
             exited_sent: false,
@@ -1233,6 +1269,180 @@ mod tests {
                 "replay gap did not produce a screen snapshot",
             )),
         }
+    }
+
+    /// An observed EOF releases the last typist before the next peer's size
+    /// report in the same readiness batch (D74, #521). Real sockets make the
+    /// departure and report ready together without a sleep or a timing race.
+    #[test]
+    fn departed_typist_eof_precedes_resize_in_the_same_poll_batch() {
+        let state = crate::fixture_state::fixture_state();
+        let mut config = Config::new([48; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let old = snapshot_peer(&mut session).unwrap();
+        let mut next = snapshot_peer(&mut session).unwrap();
+        session.peers[1].writer = Some(1);
+        session.cursors.select(1, (80, 24, 0, 0)).unwrap();
+        session.cursors.active_writer = Some(0);
+        session.cursors.viewer_sized = true;
+        // Another test can fork while this socket is live. A close-on-exec
+        // duplicate can delay EOF until that child execs, so establish EOF on
+        // the connection itself. Keep an alias open to pin that distinction.
+        let _inherited_link = old.try_clone().unwrap();
+        old.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(old);
+        next.write_all(
+            &Frame::Resize {
+                cols: 60,
+                rows: 20,
+                px_w: 0,
+                px_h: 0,
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+        session
+            .step(
+                PollFlags::empty(),
+                PollFlags::empty(),
+                &[PollFlags::POLLHUP, PollFlags::POLLIN],
+                false,
+            )
+            .unwrap();
+        assert_eq!((session.config.cols, session.config.rows), (60, 20));
+        assert_eq!(session.cursors.active_writer, Some(1));
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    /// Dispatch order decides which report follows the last owner's departure.
+    /// Earlier reports stay staged; an attached replacement or shared link
+    /// preserves ownership, and two departing links release it only once both
+    /// have been observed. Real sockets exercise the reactor, not just `handle`.
+    #[test]
+    fn size_handover_follows_departures_in_poll_batch_order() {
+        for (writers, departures, reports, expected, owner) in [
+            (vec![1, 0], vec![1], vec![(0, 60, 20)], (80, 24), None),
+            (
+                vec![0, 1, 2],
+                vec![0],
+                vec![(1, 60, 20), (2, 50, 15)],
+                (60, 20),
+                Some(1),
+            ),
+            (
+                vec![1, 0, 2],
+                vec![1],
+                vec![(0, 60, 20), (2, 50, 15)],
+                (50, 15),
+                Some(2),
+            ),
+            (
+                vec![1, 2, 0],
+                vec![2],
+                vec![(0, 60, 20), (1, 50, 15)],
+                (80, 24),
+                None,
+            ),
+            (vec![0, 0, 1], vec![0], vec![(2, 60, 20)], (80, 24), Some(0)),
+            (vec![0, 1, 0], vec![0], vec![(1, 60, 20)], (80, 24), Some(0)),
+            (
+                vec![0, 0, 1],
+                vec![0, 1],
+                vec![(2, 60, 20)],
+                (60, 20),
+                Some(1),
+            ),
+        ] {
+            let state = crate::fixture_state::fixture_state();
+            let mut config = Config::new([49; 16], Uid::effective().as_raw());
+            config.state = Some(state.clone());
+            config.readiness = true;
+            let mut session = Session::new(config, 65536).unwrap();
+            let mut clients = Vec::new();
+            let mut flags = vec![PollFlags::empty(); writers.len()];
+            let shared_link = writers == [0, 0, 1] && departures.len() == 1;
+            for (index, writer) in writers.iter().enumerate() {
+                clients.push(Some(snapshot_peer(&mut session).unwrap()));
+                let peer = session.peers.last_mut().unwrap();
+                peer.writer = Some(*writer);
+                peer.shared_writer = shared_link && index == 1;
+                session.cursors.select(*writer, (80, 24, 0, 0)).unwrap();
+            }
+            session.cursors.active_writer = Some(0);
+            session.cursors.viewer_sized = true;
+            for index in departures {
+                let client = clients[index].take().unwrap();
+                // Establish EOF even if a parallel fork inherited this socket.
+                client.shutdown(std::net::Shutdown::Both).unwrap();
+                drop(client);
+                flags[index] = PollFlags::POLLHUP;
+            }
+            for (index, cols, rows) in reports {
+                clients[index]
+                    .as_mut()
+                    .unwrap()
+                    .write_all(
+                        &Frame::Resize {
+                            cols,
+                            rows,
+                            px_w: 0,
+                            px_h: 0,
+                        }
+                        .encode()
+                        .unwrap(),
+                    )
+                    .unwrap();
+                flags[index] = PollFlags::POLLIN;
+            }
+            session
+                .step(PollFlags::empty(), PollFlags::empty(), &flags, false)
+                .unwrap();
+            assert_eq!(
+                (session.config.cols, session.config.rows),
+                expected,
+                "writers={writers:?}"
+            );
+            assert_eq!(session.cursors.active_writer, owner, "writers={writers:?}");
+            drop(session);
+            std::fs::remove_dir_all(state).unwrap();
+        }
+    }
+
+    /// A malformed buffered frame retires its writer before the next viewer's
+    /// already-read Resize. Buffered dispatch uses the same D74 ordering as
+    /// readiness dispatch, without waiting for a second socket event.
+    #[test]
+    fn buffered_departure_precedes_the_next_peers_resize() {
+        let state = crate::fixture_state::fixture_state();
+        let mut config = Config::new([50; 16], Uid::effective().as_raw());
+        config.state = Some(state.clone());
+        config.readiness = true;
+        let mut session = Session::new(config, 65536).unwrap();
+        let _old = snapshot_peer(&mut session).unwrap();
+        let _next = snapshot_peer(&mut session).unwrap();
+        session.peers[1].writer = Some(1);
+        session.cursors.select(1, (80, 24, 0, 0)).unwrap();
+        session.cursors.active_writer = Some(0);
+        session.cursors.viewer_sized = true;
+        session.peers[0].trailing = vec![0; 4];
+        session.peers[1].trailing = Frame::Resize {
+            cols: 60,
+            rows: 20,
+            px_w: 0,
+            px_h: 0,
+        }
+        .encode()
+        .unwrap();
+        session.housekeeping().unwrap();
+        assert_eq!((session.config.cols, session.config.rows), (60, 20));
+        assert_eq!(session.cursors.active_writer, Some(1));
+        assert_eq!(session.peers.len(), 1);
+        drop(session);
+        std::fs::remove_dir_all(state).unwrap();
     }
 
     /// PPU-R3-2 (#205): the host pool follows the machine within its bounds.
@@ -1517,10 +1727,10 @@ mod tests {
                         let before = session.terminal.snapshot().unwrap();
                         let key = b"abcdefghijklmnopqrstuvwxyz"
                             [usize::try_from(next(&mut seed) % 26).unwrap()];
-                        assert_eq!(type_and_drain(session, &[key]).unwrap(), 1);
+                        assert_eq!(type_and_drain(session, &[key], 1).unwrap(), 1);
                         let after = session.terminal.snapshot().unwrap();
                         assert_ne!(before, after, "live screen did not display typed input");
-                        type_and_drain(session, b"\x7f").unwrap();
+                        type_and_drain(session, b"\x7f", 3).unwrap();
                         if host.total_used() == cap {
                             full_pool_drains += 1;
                         }
@@ -1537,10 +1747,10 @@ mod tests {
                     let before = session.terminal.snapshot().unwrap();
                     let key = b"abcdefghijklmnopqrstuvwxyz"
                         [usize::try_from(next(&mut seed) % 26).unwrap()];
-                    assert_eq!(type_and_drain(session, &[key]).unwrap(), 1);
+                    assert_eq!(type_and_drain(session, &[key], 1).unwrap(), 1);
                     let after = session.terminal.snapshot().unwrap();
                     assert_ne!(before, after, "live screen did not display typed input");
-                    type_and_drain(session, b"\x7f").unwrap();
+                    type_and_drain(session, b"\x7f", 3).unwrap();
                     full_pool_drains += 1;
                 }
             }
@@ -1597,11 +1807,11 @@ mod tests {
         for index in 0..SAMPLES {
             let key = b"abcdefghijklmnopqrstuvwxyz"[index % 26];
             let started = Instant::now();
-            assert_eq!(type_and_drain(&mut session, &[key]).unwrap(), 1);
+            assert_eq!(type_and_drain(&mut session, &[key], 1).unwrap(), 1);
             session.housekeeping().unwrap();
             assert_eq!(snapshot_head(&mut viewer).unwrap(), session.ring.head());
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
-            type_and_drain(&mut session, b"\x7f").unwrap();
+            type_and_drain(&mut session, b"\x7f", 3).unwrap();
             session.housekeeping().unwrap();
             assert_eq!(snapshot_head(&mut viewer).unwrap(), session.ring.head());
         }
@@ -1675,6 +1885,28 @@ mod tests {
         let mut received = vec![0; expected.len()];
         client.read_exact(&mut received).unwrap();
         assert_eq!(received, expected, "a silent program must not hold the Ack");
+        drop(client);
+        drop(session);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    /// A fresh input Ack must pass a wholly unstarted flood frame so the relay can request its replacement repaint.
+    #[test]
+    fn data_ack_precedes_an_unstarted_output_frame() {
+        let (mut session, mut client, state) = ack_fixture(33);
+        let output = Frame::Output(0, b"flood".to_vec());
+        session.peers[0].queue(&output).unwrap();
+
+        session.housekeeping_coalesced(true).unwrap();
+
+        let mut expected = Frame::InputAck(0).encode().unwrap();
+        expected.extend(output.encode().unwrap());
+        let mut received = vec![0; expected.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(
+            received, expected,
+            "the unstarted output frame stays intact after the Ack"
+        );
         drop(client);
         drop(session);
         fs::remove_dir_all(state).unwrap();

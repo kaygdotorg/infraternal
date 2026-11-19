@@ -73,6 +73,8 @@ with socket.socket(socket.AF_PACKET,socket.SOCK_RAW) as raw:
 /// Builds an SSH test snapshot whose only peer cannot initiate SSH.
 fn configuration() -> Config {
     Config {
+        authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: None,
         node: NodeId(2),
@@ -99,6 +101,7 @@ fn configuration() -> Config {
                         ipv6: "fd00:3::3".parse().unwrap(),
                     },
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,

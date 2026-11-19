@@ -76,6 +76,12 @@ export function readCache(accountId?: string): unknown {
   try { return JSON.parse(raw) as unknown; } catch { return undefined; }
 }
 
+/**
+ * Whether a cached look carries a theme the person picked (D390). A cache written by a page before the flag existed has none, and every look
+ * saved by such a page is marked chosen by the server migration, so an unflagged cache counts as chosen; no cache at all means never chosen.
+ */
+export function cachedThemeChosen(look: DocLook | undefined): boolean { return look !== undefined && look.themeChosen !== false; }
+
 /** Validates the cache before first-paint callers use its selected theme. */
 export function readCachedLook(accountId?: string): DocLook | undefined { return parseLook(readCache(accountId)); }
 

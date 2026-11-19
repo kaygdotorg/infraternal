@@ -77,7 +77,7 @@ let
     path.write_text(source.replace(before, after))
     PY
   '';
-  vtVersion = "1.0.0";
+  vtVersion = "1.0.1";
   vtFiles = builtins.listToAttrs (map
     (line: let fields = lib.splitString "  " line; in {
       name = builtins.elemAt fields 1;
@@ -111,7 +111,7 @@ let
   cargoDeps = rustPlatform.importCargoLock {
     lockFile = ../Cargo.lock;
     # Fixed source hash for the commit pinned in Cargo.lock; required in the sandbox.
-    outputHashes."gotatun-0.10.2" = "sha256-mS0CUgX9V/8z8GNYqnXzBaoaLOMGI/ffekINaWA4rks=";
+    outputHashes."gotatun-0.10.3" = "sha256-0ngol7p6+8SoTMNYItJgyQQNjsRlJVo/17wfZ3WIF5U=";
   };
   bunDeps = stdenv.mkDerivation {
     name = "infraternal-bun-deps";

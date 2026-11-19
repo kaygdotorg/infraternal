@@ -25,7 +25,6 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 | `camera/gestures.ts` | wheel, trackpad, touch and pointer on the canvas | `installGestures(cx)` |
 | `layout/geometry.ts` | cell grid, metrics, boxes, push-aside (pure) | `CELL` `metricsFor` `boxOf` `resolve` `snapToGrid` |
 | `layout/stops.ts`, `columns.ts`, `flip.ts` | stops (pure), column scroll, FLIP reflow | `stopsFor` `nearestStop`, `scrollColumn` `stepWindow`, `Flip` |
-| `layout/droplet.on-demand.ts`, `droplet-handle.ts` | the droplet split (short-lived WebGL, only while it plays; loaded on demand, warmed when idle) | `loadDroplet` `endSplit` |
 | `views/world.ts` | building a view, sizing it on the grid, settle, hover card, dragging a view | `ViewsModule` (`cx.view`) |
 | `views/body.ts`, `settings*.ts`, `icons.ts` | what is inside a window by kind; Settings panels; icons | `makeBody`, `SettingsSource` |
 | `windows/frame.ts`, `move.on-demand.ts` | window card, activation, pill grab and move, resize | `makeWindow`, `setActive`, `beginMove` |
@@ -77,9 +76,8 @@ never shows mockup UI.
 - Instant work: handlers do a layout read and a transform write; saving, the tree and arrows are coalesced
   (timer, microtask, animation frame). Nothing runs while the camera is still.
 - Memory (iOS kills a page that holds too much): the backdrop is viewport-sized tiles; windows off screen or in
-  another view hold no canvas backing store (`SessionBinding.setVisible(false)`); at most one GL context exists,
-  only during the droplet animation (a device with a fine pointer keeps one parked 1 px context, built when idle, so the
-  first frame of a split does not wait on the GPU process); big surfaces are released on `pagehide` and while hidden.
+  another view hold no canvas backing store (`SessionBinding.setVisible(false)`); big surfaces are released on
+  `pagehide` and while hidden.
 
 ## Tests
 

@@ -4,6 +4,8 @@ use super::*;
 mod budgets {
     //! Exercises session invariants against real data and frozen expectations.
     use super::*;
+    /// A flush that hits its byte or syscall budget keeps the unsent part of a
+    /// frame and sends it before anything newer, so the wire stays in order.
     #[cfg(feature = "process-per-user")]
     #[test]
     fn bounded_flush_keeps_partial_frame_and_wire_order() {
@@ -27,6 +29,7 @@ mod budgets {
             exited_sent: false,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         let frame = Frame::Output(13, vec![b'x'; 4096]);
         let expected = frame.encode().unwrap();
@@ -49,6 +52,8 @@ mod budgets {
         assert_eq!(peer.pending, [] as [u8; 0]);
         assert_eq!(peer.written, 0);
     }
+    /// An allowed signal sent after the real shell has exited is harmless and
+    /// leaves the exit acknowledgement available to the peer.
     #[test]
     fn allowlisted_signal_after_real_pty_exit_keeps_exit_ack_available() {
         let mut pty = Pty::spawn(Uid::effective().as_raw(), 20, 4).unwrap();
@@ -73,6 +78,7 @@ mod budgets {
             exited_sent: true,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         let mut terminal = Terminal::new(20, 4).unwrap();
         let ring = Ring::new(DEFAULT_CAPACITY);
@@ -125,6 +131,8 @@ mod budgets {
             .unwrap()
         );
     }
+    /// Measures how long typed input takes to reach the PTY on a real shell
+    /// (ignored by default; a performance measurement, not a pass/fail check).
     #[test]
     #[ignore = "real-PTY performance measurement; set ZDOTDIR to tests/profile"]
     fn input_to_pty_write() {
@@ -163,6 +171,7 @@ mod budgets {
             exited_sent: false,
             stopping: false,
             request: None,
+            replay_awaits_size: false,
         };
         let mut terminal = Terminal::new(200, 60).unwrap();
         let ring = Ring::new(DEFAULT_CAPACITY);

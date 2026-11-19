@@ -364,7 +364,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   expect(await checkRows(page, "s-you-devices")).toBe(1);
   await shot(page, "10-you-devices");
   // The Appearance row has the Themes window (a theme holds Colour, backgrounds, windows, font and size, so one window edits all of them) and Layout.
-  for (const [at, titles] of [["appearance.themes", ["UI size", "Colour", "Backgrounds", "Windows", "Fonts"]], ["appearance.layout", ["Phones", "Desktop"]]] as const) {
+  for (const [at, titles] of [["appearance.themes", ["UI size", "Colour", "Backgrounds", "Windows", "Fonts", "Interface font"]], ["appearance.layout", ["Phones", "Desktop"]]] as const) {
     await page.evaluate((target) => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${target}`, source: "keyboard" } })), at);
     await page.waitForTimeout(700);
     await expect.poll(() => page.locator(`[data-window-id="s-${at.replace(".", "-")}"] .ui-sp > section .ui-ts-title`).allTextContents()).toEqual(titles);

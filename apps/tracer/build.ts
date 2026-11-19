@@ -1,6 +1,7 @@
 /** Bundles the tracer and workers, copies licensed fonts, and writes static compressed encodings. */
 import { cp, mkdir, rm } from "node:fs/promises";
 import { precompress } from "./precompress";
+import { pngToIco } from "./favicon-ico";
 import { browserFileLoader } from "./browser-build";
 import { classifyChunks, type MetaOutput } from "./chunk-classes";
 import { buildDocs } from "./docs-build";
@@ -72,6 +73,9 @@ await Promise.all([
   cp("../../packages/ui/styles.css", `${dist}/ui.css`),
   cp("fonts", `${dist}/fonts`, { recursive: true, filter: (source) => !source.endsWith(".sh") && !source.endsWith(".py") }),
   cp("licenses", `${dist}/licenses`, { recursive: true }),
+  // The app icons (favicon, home-screen icon) and the manifest that names them for browsers that install web apps.
+  cp("icons", `${dist}/icons`, { recursive: true }),
+  cp("manifest.webmanifest", `${dist}/manifest.webmanifest`),
   cp("../../THIRD_PARTY_NOTICES.md", `${dist}/THIRD_PARTY_NOTICES.md`),
   cp("node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2", `${dist}/fonts/Geist-Variable.woff2`),
 ]);
@@ -80,5 +84,7 @@ await buildDocs(`${dist}/docs`);
 // The budget gate reads this: which chunks the first screen needs and which load later (D188).
 const meta = (build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile;
 await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(meta.outputs), null, 1));
+// Tools ask for /favicon.ico by habit, whatever the page's <link> says; give them a real icon (#518).
+await Bun.write(`${dist}/favicon.ico`, pngToIco(new Uint8Array(await Bun.file("icons/dark-32.png").arrayBuffer())));
 await precompress(dist);
 console.log(`built ${build.outputs.map((output) => output.path.split("/").at(-1)).join(", ")}`);

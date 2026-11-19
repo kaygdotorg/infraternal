@@ -1,15 +1,16 @@
 /**
  * FLIP reflows: when a layout changes (a window opens, closes, moves, a column resizes), every element that
- * moved animates from where it was to where it is with the spring's curve. Only `transform` is animated, in world
+ * moved animates from where it was to where it is on the product's ease-out curve. Only `transform` is animated, in world
  * units (the camera zoom is divided out), and as a Web Animation: the browser runs it on the compositor, so a reflow
  * costs the main thread nothing per frame (a per-frame style write per element was 80-100 ms of Layerize and Commit for
- * one close). The spring is sampled once per configuration into a `linear()` easing that settles like the spring
- * does: critically damped, no value passes its end (TASTE §3, no overshoot). The caller measures first, changes the
+ * one close). The curve is `EASE_OUT`, the same one `Spring.set` plays, so
+ * a reflow and the canvas motion beside it move alike; no value passes its end (TASTE §3, no overshoot). The caller measures first, changes the
  * layout, then plays; a new measure of an element that is still animating cancels it so the "first" position is always the true one. Reduced motion skips the animation.
  */
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 import type { SpringConfig } from "../../../../../packages/ui/src/spring";
 
-/** The duration-based spring config: critically damped, so it has no bounce to set. */
+/** The duration-based spring config: a reflow plays the ease-out curve for its `visualDuration`. */
 type FlipSpring = Extract<SpringConfig, { visualDuration: number }>;
 
 /** The reflow animator made by `createFlip`: call `measure`, change the layout, then `play`. */
@@ -22,30 +23,14 @@ export interface Flip {
   targets(colsEl: HTMLElement): HTMLElement[];
 }
 
-/** A spring's progress from 1 (where the element was) to 0 (where it is), sampled into a CSS easing. */
-const easings = new Map<string, { css: string; duration: number }>();
 /**
- * Samples a critically damped spring into a CSS `linear()` easing and its duration in milliseconds. It runs from 0 to 1, never goes past
- * 1, and ends where the spring comes to rest (at most 3 seconds). The result is cached for each duration.
+ * The easing and length in milliseconds of a reflow: the product's ease-out curve (`EASE_OUT`, the same curve as
+ * `Spring.set` and CSS `var(--ease-out)`) for exactly the visual duration. It covers most of the distance in the first
+ * frames and never passes its end (TASTE section 3, "Fast, ease-out, under 300 ms" and "No overshoot, ever"). A
+ * sampled spring curve was used before #471; it started at zero speed and settled at 1.3x its duration.
  */
-export function springEasing(cfg: FlipSpring): { css: string; duration: number } {
-  const key = String(cfg.visualDuration);
-  const hit = easings.get(key);
-  if (hit) return hit;
-  // The same physics as `Spring`: omega from the visual duration, damping ratio 1.
-  const omega = (2 * Math.PI) / (cfg.visualDuration * 1.2), k = omega * omega, c = 2 * omega;
-  const h = 1 / 240, every = 4; // a sample every 1/60 s
-  let x = 1, v = 0, t = 0;
-  const points = [0];
-  while (t < 3) {
-    for (let i = 0; i < every; i++) { v += (-k * x - c * v) * h; x += v * h; t += h; }
-    points.push(Math.min(1, 1 - x)); // the explicit Euler steps must not nudge a sample past the end
-    if (Math.abs(x) < 0.0005 && Math.abs(v) < 0.03) break;
-  }
-  points[points.length - 1] = 1;
-  const out = { css: `linear(${points.map((p) => p.toFixed(4)).join(", ")})`, duration: Math.round(t * 1000) };
-  easings.set(key, out);
-  return out;
+export function flipEasing(cfg: FlipSpring): { css: string; duration: number } {
+  return { css: EASE_OUT, duration: Math.round(cfg.visualDuration * 1000) };
 }
 
 /**
@@ -66,10 +51,10 @@ export function createFlip(zoom: () => number, tick: () => void): Flip {
       }
       return out;
     },
-    play(first, scale = false, cfg = { visualDuration: 0.5 }) {
+    play(first, scale = false, cfg = { visualDuration: 0.28 }) {
       if (reduced.matches) return;
       const z = zoom();
-      const { css, duration } = springEasing(cfg);
+      const { css, duration } = flipEasing(cfg);
       for (const [n, a] of first) {
         if (!n.isConnected) continue;
         // An element with no box before the change (a column of a group, which has none of its own) has no place to

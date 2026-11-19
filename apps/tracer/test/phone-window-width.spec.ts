@@ -56,7 +56,15 @@ for (const { w, h } of SIZES) test(`phone ${w}x${h}: full width is the screen wi
     const press = async (id: string) => { await page.locator(`[data-cv='${id}']`).tap(); await page.waitForTimeout(800); };
     const stepTo = async (i: number) => { for (let k = 0; k < 4; k++) { const s = await measure(page); if (s.at === i) break; await press(i > s.at ? "next" : "previous"); } };
     const set = async (value: string) => {
-      await page.evaluate(([k, v]) => { localStorage.setItem(k!, v!); window.dispatchEvent(new CustomEvent("tracer:window-size")); }, [KEY, value]);
+      // The choice belongs to the account's look (D352, #400): a person changes it in Settings, and the old device-wide key is read
+      // only once at load (the seed in `open`). So switch it live the way a person does, then come back to the console view.
+      const clusters = (fn: string, arg: string) => page.evaluate(([f, a]) => (window as unknown as { __tracerClusters: Record<string, (x: string) => void> }).__tracerClusters[f!]!(a!), [fn, arg]);
+      await clusters("openSettings", "appearance.layout");
+      const row = page.locator(`[data-kind="window-size-phone"] .ui-sp-row[data-id="${value}"]`);
+      await expect(row).toBeVisible({ timeout: 10_000 });
+      await row.evaluate((button) => (button as HTMLElement).click());
+      await expect(row).toHaveAttribute("aria-checked", "true");
+      await clusters("flyView", "console");
       await page.waitForTimeout(1500);
     };
     const fits = (s: Awaited<ReturnType<typeof measure>>, label: string) => {

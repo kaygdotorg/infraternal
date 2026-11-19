@@ -43,15 +43,16 @@ async fn plugin_settings_enforce_boolean_and_role_plugin_identity() {
     pool.close().await;
 }
 
+/// A plugin switch written to the database is still in force after the database is closed
+/// and opened again.
 #[cfg(feature = "mesh")]
 #[tokio::test]
 async fn plugin_switches_survive_database_reopen() {
     use infraternal_server::plugins::compiled;
     use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
-    let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::PathBuf::from("target"),
-        std::path::PathBuf::from,
-    );
+    // Live SQLite stays in TMPDIR, off the build disk, where the first connection's WAL switch
+    // outlasted sqlx's 30 s acquire timeout on a loaded build host (PoolTimedOut, #509).
+    let root = std::env::temp_dir();
     let path = root.join(format!("plugin-settings-{}.sqlite", uuid::Uuid::new_v4()));
     let options = SqliteConnectOptions::new()
         .filename(&path)

@@ -55,6 +55,11 @@ export interface DocLook {
   windowSizes?: DocWindowSizes;
   /** Whether machine details include extended technical facts; absent in older documents. */
   extendedInfo?: boolean;
+  /**
+   * Whether the person ever picked a theme (D390). Absent or false means the account follows each device's light or dark setting, and the
+   * theme colours stored in this look are only the device that saved it; true means the look's theme wins on every device (D352).
+   */
+  themeChosen?: boolean;
 }
 
 export { MAX_THEMES };
@@ -98,9 +103,10 @@ const hex = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]
 
 /** Checks an untrusted look with the server's bounds (text up to 200 characters, percentages 0 to 100, size 50 to 150, hex colours, at most 16 distinct themes). */
 export function parseLook(input: unknown): DocLook | undefined {
-  if (!isObject(input) || !shape(input, ["v", "selected", "uiFont", "basics", "themes", "windowSizes", "extendedInfo"]) || input.v !== 1 || !text(input.selected) || !isObject(input.basics) || !shape(input.basics, ["colors", "font", "uiSize"]) || !Array.isArray(input.themes) || input.themes.length > MAX_THEMES) return undefined;
+  if (!isObject(input) || !shape(input, ["v", "selected", "uiFont", "basics", "themes", "windowSizes", "extendedInfo", "themeChosen"]) || input.v !== 1 || !text(input.selected) || !isObject(input.basics) || !shape(input.basics, ["colors", "font", "uiSize"]) || !Array.isArray(input.themes) || input.themes.length > MAX_THEMES) return undefined;
   if (input.uiFont !== undefined && input.uiFont !== "mono" && input.uiFont !== "sans") return undefined;
   if (input.extendedInfo !== undefined && typeof input.extendedInfo !== "boolean") return undefined;
+  if (input.themeChosen !== undefined && typeof input.themeChosen !== "boolean") return undefined;
   let windowSizes: DocWindowSizes | undefined;
   if (input.windowSizes !== undefined) {
     if (!isObject(input.windowSizes) || !shape(input.windowSizes, ["phone", "desktop"]) || !["full", "edge", "comfortable"].includes(String(input.windowSizes.phone)) || !["comfortable", "wide", "full"].includes(String(input.windowSizes.desktop))) return undefined;
@@ -119,6 +125,7 @@ export function parseLook(input: unknown): DocLook | undefined {
     v: 1, selected: input.selected, ...(input.uiFont === undefined ? {} : { uiFont: input.uiFont }), basics: { colors: b.colors, font: b.font, uiSize: b.uiSize }, themes,
     ...(windowSizes ? { windowSizes } : {}),
     ...(input.extendedInfo === undefined ? {} : { extendedInfo: input.extendedInfo }),
+    ...(input.themeChosen === undefined ? {} : { themeChosen: input.themeChosen }),
   };
 }
 

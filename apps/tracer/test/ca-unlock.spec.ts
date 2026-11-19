@@ -74,7 +74,8 @@ test("the palette row runs the ceremony and the lock clears", async ({ page }) =
   await paletteLabels(page, "unlock host");
   await page.keyboard.press("Enter");
   await expect(page.locator("#palette")).toBeHidden();
-  await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked");
+  // D336 keeps notifications in a stack; select the result, including while the dismissed lock toast exits.
+  await expect(page.locator(".ui-toast-message").filter({ hasText: "Host connections unlocked" })).toBeVisible();
   expect(await paletteLabels(page, "unlock host")).not.toContain(LABEL);
   await page.keyboard.press("Escape");
   await openSettingsHosts(page);
@@ -145,9 +146,10 @@ for (const [warning, expected] of [
     await inbox.getByRole("button", { name: "Review", exact: true }).click();
     const row = page.locator(SETTINGS_ROW);
     await expect(row).toBeVisible();
+    // D323's grouped Settings rows use the full section identity, Terminal › Hosts.
     await expect.poll(() => page.evaluate(() => (window as unknown as {
       __tracerClusters?: { activeWindow(): string | undefined };
-    }).__tracerClusters?.activeWindow())).toBe("s-hosts");
+    }).__tracerClusters?.activeWindow())).toBe("s-terminal-hosts");
     await expect(row).toBeInViewport({ ratio: 0.5 });
     await expect(row).toContainText(expected);
     const settingsAlignment = await page.evaluate(() => {
@@ -222,4 +224,20 @@ test("the inbox line is collapsed, expands to Unlock, and unlocking clears the c
   await unlock.click();
   await expect(card).toHaveCount(0);
   await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked");
+});
+
+test("a brand-new account with no host is not told the server restarted, and a host brings the toast (#512)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "ca=locked&nohosts=1");
+  // sleep: the authority status check runs 1.2 s after load, and an absence can only be shown after it.
+  await page.waitForTimeout(2200);
+  await expect(page.locator(".ui-toast")).toHaveCount(0);
+  await page.locator("#sidebar-toggle").click();
+  await expect(page.locator(".ui-inbox:not([hidden])")).toHaveCount(0);
+  // The palette still offers the unlock: a first host needs it.
+  expect(await paletteLabels(page, "unlock host")).toContain(LABEL);
+  await page.keyboard.press("Escape");
+  // With hosts the same lock is news: the toast says so.
+  await open(page, "ca=locked");
+  await expect(page.locator(".ui-toast")).toContainText("The server restarted", { timeout: 8000 });
 });

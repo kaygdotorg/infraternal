@@ -142,7 +142,9 @@ export const FONTS: readonly MonoFont[] = [
   // defaults, not ink measurements: variable families at 450 like most of the list, static families at their regular (400) with bold at 700.
   added("iosevka", "Iosevka", 400, staticPair("iosevka")),
   added("victor-mono", "Victor Mono", 400, staticPair("victor-mono")),
-  added("recursive-mono", "Recursive Mono", 400, variable("recursive-mono")),
+  // Recursive Mono's true advance is 0.6 em (8.4 px at the default size) while Chrome measures 8 px, so with one draw call per run its lines
+  // drift 0.4 px per glyph past their cells (36 px of ink beyond the cursor after 86 cells, font-metrics spec). One glyph per call is exact (`placeGlyphs`).
+  added("recursive-mono", "Recursive Mono", 400, variable("recursive-mono"), { placeGlyphs: true }),
   added("martian-mono", "Martian Mono", 400, uprightOnly("martian-mono"), { hint: "wide" }),
   added("intel-one-mono", "Intel One Mono", 400, staticPair("intel-one-mono")),
   added("fantasque-sans-mono", "Fantasque Sans Mono", 400, staticPair("fantasque-sans-mono")),
