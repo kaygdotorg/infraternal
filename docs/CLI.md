@@ -116,8 +116,9 @@ The move stops the service and copies its data into a private staging folder.
 It syncs the copy, verifies file contents and metadata, publishes the checked
 firewall policy, and then switches the unit and its drop-ins. The effective
 `ExecStart` is switched last. The old path remains available until the new
-server answers its database-backed health check. Across filesystems, init
-keeps a dated, read-only backup and prints its location. On one filesystem,
+server answers its health check and the service manager identifies it using
+the moved database. Across filesystems, or after an unconfirmed startup,
+init keeps a dated, read-only backup and prints its location. Otherwise,
 init removes the original after the health check.
 
 Run the same init command again to finish an interrupted move. Its private

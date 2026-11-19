@@ -61,6 +61,8 @@ with (root / "systemctl.log").open("a") as log:
     print(shlex.join(args), file=log)
 if args == ["show", "-p", "ActiveState", "--value", unit.name]:
     print("active" if active() else "inactive")
+elif args == ["show", "-p", "MainPID", "--value", unit.name]:
+    print(active() or 0)
 elif args == ["stop", unit.name]:
     if pid := active():
         os.killpg(pid, signal.SIGTERM)
@@ -71,6 +73,8 @@ elif args in (["start", unit.name], ["enable", "--now", unit.name]):
         line = [line for file in [unit, *snippets] for line in file.read_text().splitlines()
                 if line.startswith("ExecStart=")][-1]
         command = shlex.split(line.removeprefix("ExecStart="))
+        if (root / "wrong-tree").exists():
+            command[command.index("--data") + 1] = "/var/lib/j895-old"
         with (root / "server.log").open("ab") as log:
             child = subprocess.Popen(
                 command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
@@ -90,7 +94,7 @@ PY
 chmod 0755 "$P/systemctl"
 mount --bind "$P/systemctl" /usr/bin/systemctl
 case "$method" in
-    rename|resume|shared|force|partial|cutover) old=/var/lib/j895-old ;;
+    rename|resume|shared|force|partial|cutover|wrong-tree) old=/var/lib/j895-old ;;
     copy|full|stale) old=$P/old ;;
     *) exit 2 ;;
 esac
@@ -150,6 +154,26 @@ if [[ "$method" == cutover ]]; then
     init --yes > "$P/finish.json" 2> "$P/finish.err"
     check CUTOVER_RETRY_KEEPS_NEW_WRITES test -f "$target/postboot"
     check CUTOVER_OLD_REMOVED_AFTER_HEALTH test ! -e "$old"
+    /usr/bin/systemctl stop infraternal-server.service
+    echo RESULT=0
+    exit 0
+fi
+if [[ "$method" == wrong-tree ]]; then
+    touch "$P/wrong-tree"
+    if init --yes > "$P/wrong-tree.json" 2> "$P/wrong-tree.err"; then
+        check WRONG_TREE_REFUSED false
+    fi
+    check WRONG_TREE_EXPLAINS grep -Fq 'has not opened the moved database' "$P/wrong-tree.json"
+    check WRONG_TREE_KEEPS_SOURCE test -f "$old/probe"
+    check WRONG_TREE_KEEPS_CANDIDATE test -f "$target/probe"
+    check WRONG_TREE_SERVICE_STOPPED test "$(/usr/bin/systemctl show -p ActiveState --value infraternal-server.service)" = inactive
+    printf 'write from wrong tree
+' > "$old/outstanding-write"
+    rm "$P/wrong-tree"
+    init --yes > "$P/wrong-tree-retry.json" 2> "$P/wrong-tree-retry.err"
+    check WRONG_TREE_RETRY_STARTS_TARGET wait_token_ready "$target"
+    backups=("$old".moved-*)
+    check WRONG_TREE_BACKUP_RETAINS_WRITE test -f "${backups[0]}/outstanding-write"
     /usr/bin/systemctl stop infraternal-server.service
     echo RESULT=0
     exit 0

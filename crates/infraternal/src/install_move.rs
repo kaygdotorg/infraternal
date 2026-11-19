@@ -53,7 +53,7 @@ pub trait Service {
     /// Enable the service after it has started and answered.
     fn enable(&self) -> io::Result<()>;
     /// Wait for the new server to answer against its database.
-    fn ready(&self) -> io::Result<()>;
+    fn ready(&self, data: &File) -> io::Result<()>;
 }
 
 /// The fixed systemd program and the server endpoint to verify after starting.
@@ -103,6 +103,39 @@ impl Systemd {
             return Err(io::Error::other("systemctl show failed"));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    /// Verify the manager started a process that has the new database open.
+    #[cfg(target_os = "linux")]
+    fn verify_database(&self, data: &File) -> io::Result<()> {
+        let output = self.systemctl(&["show", "-p", "MainPID", "--value", &self.service])?;
+        let pid = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u32>();
+        let pid = pid
+            .ok()
+            .filter(|pid| output.status.success() && *pid != 0)
+            .ok_or_else(|| io::Error::other("could not identify moved service process"))?;
+        let database = disk::regular(data, OsStr::new("infraternal.sqlite"))?.metadata()?;
+        let descriptors = std::fs::read_dir(format!("/proc/{pid}/fd"))?;
+        for descriptor in descriptors {
+            if descriptor?
+                .path()
+                .metadata()
+                .is_ok_and(|open| open.dev() == database.dev() && open.ino() == database.ino())
+            {
+                return Ok(());
+            }
+        }
+        Err(io::Error::other(
+            "the running service has not opened the moved database",
+        ))
+    }
+
+    /// Real installs require Linux systemd and its process descriptor view.
+    #[cfg(not(target_os = "linux"))]
+    fn verify_database(&self, _data: &File) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
     }
 
     /// Connect to the configured local listener, substituting loopback for a wildcard.
@@ -187,12 +220,12 @@ impl Service for Systemd {
         self.checked(&["enable", "--now", &self.service])
     }
 
-    fn ready(&self) -> io::Result<()> {
+    fn ready(&self, data: &File) -> io::Result<()> {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if self.probe().is_ok() && self.state()? == "active" {
-                return Ok(());
+                return self.verify_database(data);
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
@@ -557,10 +590,24 @@ pub fn apply(
             }
             publish()?;
             write_units(&journal)?;
-            service.reload()?;
-            service.start()?;
-            service.ready()?;
-            service.enable()?;
+            let startup = service
+                .reload()
+                .and_then(|()| service.start())
+                .and_then(|()| service.ready(&target))
+                .and_then(|()| service.enable());
+            if let Err(error) = startup {
+                // A service whose startup cannot be confirmed may have written
+                // to either tree. Preserve both for inspection after any retry.
+                journal.backup_action = Backup::Retain;
+                let recorded = save(&work, &journal);
+                let stopped = service.stop();
+                recorded.and(stopped).map_err(|recovery| {
+                    io::Error::other(format!(
+                        "{error}; preserving both trees and stopping the service: {recovery}"
+                    ))
+                })?;
+                return Err(error);
+            }
             journal.ready = true;
             save(&work, &journal)?;
             finish(&parent, &work_name, &work, &old_parent, old_name, &journal)

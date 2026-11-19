@@ -130,7 +130,7 @@ impl Service for Fake {
         Ok(())
     }
 
-    fn ready(&self) -> io::Result<()> {
+    fn ready(&self, _data: &File) -> io::Result<()> {
         self.calls.borrow_mut().push("ready");
         if self.fail_ready.get() {
             return Err(io::Error::other("server did not answer"));
