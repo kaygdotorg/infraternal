@@ -538,6 +538,42 @@ fn review_j899_preserves_data_root_mode() {
     assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
 }
 
+/// Reconstruct a switched journal from before the first process was verified.
+#[test]
+fn interrupted_start_preserves_possible_writes_to_the_original() {
+    let fixture = Install::new();
+    let service = Fake::default();
+    service.fail_ready.set(true);
+    assert!(fixture.apply(&fixture.old, &service).is_err());
+
+    let mut journal = load(&fixture.new, &fixture.unit).unwrap().unwrap();
+    let (parent, target_name) = disk::parent(&fixture.new, false).unwrap();
+    let work = disk::tree(&parent, &work_name(target_name)).unwrap();
+    journal.backup_action = Backup::Remove;
+    save(&work, &journal).unwrap();
+    fs::write(
+        fixture.old.join("infraternal.sqlite"),
+        "write during unconfirmed startup",
+    )
+    .unwrap();
+    service.fail_ready.set(false);
+
+    let outcome = fixture.apply(&fixture.new, &service).unwrap();
+    let backup = outcome.leftover.unwrap();
+    assert_eq!(Install::data(&backup), "write during unconfirmed startup");
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// Refuse ready cleanup if the effective command selects the former path again.
+#[test]
+fn ready_retry_refuses_an_original_effective_unit() {
+    let (fixture, manager, _) = ready_with_original();
+    fs::write(&fixture.unit, unit_text(&fixture.old)).unwrap();
+
+    assert!(fixture.apply(&fixture.old, &manager).is_err());
+    assert_eq!(Install::data(&fixture.old), "original");
+}
+
 /// Exercise the ready-journal checks in the privileged namespace filesystem.
 #[test]
 #[ignore = "Run in a disposable user namespace"]
@@ -545,6 +581,8 @@ fn d395_revalidates_current_data_before_cleanup() {
     review_j899_checks_destination_before_retiring_original();
     review_j899_restarts_stopped_service_during_cleanup_retry();
     ready_retry_rejects_a_replaced_database();
+    ready_retry_refuses_an_original_effective_unit();
+    interrupted_start_preserves_possible_writes_to_the_original();
 }
 
 /// Exercise root metadata copying with a real xattr inside the privileged suite.

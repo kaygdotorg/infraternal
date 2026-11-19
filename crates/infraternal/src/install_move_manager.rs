@@ -2,10 +2,23 @@
 //! process to publishing a receipt for the checked destination. A client
 //! disconnect cannot cancel the accepted manager job.
 
-use super::*;
+use super::{
+    MoveError, Outcome, Relocation, Service, Systemd, apply_recorded, database_identity, disk,
+    optional_tree, pending,
+};
 use crate::install::{self, MoveInstall};
+use disk::Identity;
 use nix::fcntl::{Flock, FlockArg};
-use std::process::ExitCode;
+use serde::{Deserialize, Serialize};
+use std::{
+    ffi::{OsStr, OsString},
+    fs::File,
+    io,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::SystemTime,
+};
 
 /// The private, durable input to the manager's recovery job.
 const REQUEST: &str = "request.json";
@@ -256,15 +269,17 @@ pub(crate) fn run_if_requested() -> Option<ExitCode> {
 /// Resume from the durable journal, then unregister the completed worker.
 fn run(dir: &File, control: &Path, request: &Request) -> io::Result<()> {
     let plan = &request.relocation;
+    if !pending(&plan.to, &plan.unit).map_err(io::Error::other)?
+        && let Some(Receipt::Ready {
+            target, database, ..
+        }) = read(dir, RECEIPT)?
+    {
+        // A later process failure cannot erase the receipt for a committed move.
+        confirm_receipt(request, target, database)?;
+        finish_worker(control, request);
+        return Ok(());
+    }
     let result = (|| {
-        if !pending(&plan.to, &plan.unit).map_err(io::Error::other)?
-            && let Some(Receipt::Ready {
-                target, database, ..
-            }) = read(dir, RECEIPT)?
-        {
-            confirm_receipt(request, target, database)?;
-            return Ok(());
-        }
         apply_recorded(
             plan,
             &request.service,
@@ -294,12 +309,15 @@ fn run(dir: &File, control: &Path, request: &Request) -> io::Result<()> {
         return Err(error);
     }
 
-    // A failed unregister leaves a harmless recovery hook. The completed
-    // receipt lets it check readiness again without touching either tree.
+    finish_worker(control, request);
+    Ok(())
+}
+
+/// Leave a retryable recovery hook if unregistering the completed unit fails.
+fn finish_worker(control: &Path, request: &Request) {
     if let Err(error) = unregister(control, request) {
         eprintln!("server cutover unit cleanup: {error}");
     }
-    Ok(())
 }
 
 /// Remove the one owned unit and its server-start link after a successful move.
