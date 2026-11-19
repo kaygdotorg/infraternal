@@ -335,10 +335,13 @@ pub fn install(source: &Arc<MemoryCaSource>, material: CaMaterial) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies that a generated remote leaf survives cold-start chain validation.
     #[test]
     fn generated_remote_leaf_is_verifiable_after_cold_restart() {
-        let now = crate::runtime::unix_seconds().unwrap();
-        let (material, identity) = generate("bootstrap.example.test", now).unwrap();
+        // Leave room between whole-second ASN.1 validity and OpenSSL's live clock check.
+        let generated_at = crate::runtime::unix_seconds().unwrap().saturating_sub(60);
+        let (material, identity) = generate("bootstrap.example.test", generated_at).unwrap();
         let mut trust = openssl::x509::store::X509StoreBuilder::new().unwrap();
         trust.add_cert(material.issuer().clone()).unwrap();
         let mut params = openssl::x509::verify::X509VerifyParam::new().unwrap();
@@ -360,7 +363,7 @@ mod tests {
                     "certificate verification: error={} depth={} generated_at={} verified_at={} root_validity={}..{} leaf_validity={}..{}",
                     context.error(),
                     context.error_depth(),
-                    now,
+                    generated_at,
                     crate::runtime::unix_seconds().unwrap(),
                     material.issuer().not_before(),
                     material.issuer().not_after(),
