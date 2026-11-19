@@ -296,7 +296,8 @@ fn live_endpoint_refresh_probes_only_after_underlay_changes() {
         .collect();
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(&peers);
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     // Count lookups and writes of one refresh.
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
@@ -537,7 +538,8 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
     lock_route_state(&state).set_peers(&peers);
     // Run the route-repair worker as a node does: it proves and publishes the link, and its
     // route listener is the one a running node has while refreshes happen (J571).
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let first = std::time::Instant::now();
     let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
     let first = first.elapsed();
@@ -611,7 +613,8 @@ fn review_j609_policy_rule_change_rederives_route_budgets() {
     ];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(&peers);
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -745,7 +748,8 @@ fn live_endpoint_refresh_rederives_after_nexthop_replace() {
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -812,7 +816,8 @@ fn live_endpoint_refresh_retries_a_failed_lookup() {
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -908,7 +913,8 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -998,7 +1004,8 @@ fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
     let (peers, learned) = review_scale_mesh(peer_count);
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(&peers);
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
     assert_eq!(written, usize::from(peer_count));
     // The first refresh's own burst may overflow the listener already; settle that first, so
@@ -1180,8 +1187,8 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
     review_route_command(&["link", "set", "lo", "up"]);
     let link = review_marked_tun(PublicKey([0xee; 32]));
     let underlay = Arc::new(crate::wireguard::UnderlayWatch::default());
-    let mut listener =
-        Device::route_monitor(&link, Arc::clone(&underlay)).expect("open the route listener");
+    let mut listener = Device::route_monitor(&link, Arc::clone(&underlay), Arc::default())
+        .expect("open the route listener");
     underlay.set_watched(true);
     let before = underlay.generation();
     // 2,048 peers announce 4,096 routes while nobody reads: far more than the default

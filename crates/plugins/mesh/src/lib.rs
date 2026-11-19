@@ -86,6 +86,10 @@ pub mod gotatun_node;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
 
+/// Coalesces underlay endpoint announcements on the node's route listener (#483).
+#[cfg(all(feature = "agent", target_os = "linux"))]
+mod underlay_announce;
+
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Drops handshake initiations from ungranted keys before the userspace engine sees them.
 mod handshake_admission;

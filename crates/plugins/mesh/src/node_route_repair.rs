@@ -44,13 +44,23 @@ pub(super) struct RouteRepairWorker {
 
 impl RouteRepairWorker {
     /// Start recovery bound to the current owner-marked link, never just its shared name.
+    ///
+    /// The listener also wakes `announce` on every underlay change that can move our own
+    /// endpoint as peers see it (#483); the node's `GotaTun` worker turns that into keepalives.
     /// # Errors
     /// Returns ownership, listener, cancellation-stream, or thread creation errors.
-    pub(super) fn start(state: Arc<Mutex<PeerRouteState>>) -> io::Result<Self> {
+    pub(super) fn start(
+        state: Arc<Mutex<PeerRouteState>>,
+        announce: Arc<crate::gotatun_node::UnderlayAnnounce>,
+    ) -> io::Result<Self> {
         let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
         let underlay = Arc::new(crate::wireguard::UnderlayWatch::default());
-        let monitor = Some(Device::route_monitor(&link, Arc::clone(&underlay))?);
-        Self::start_for_link(state, link, monitor, underlay)
+        let monitor = Some(Device::route_monitor(
+            &link,
+            Arc::clone(&underlay),
+            Arc::clone(&announce),
+        )?);
+        Self::start_for_link(state, link, monitor, underlay, announce)
     }
 
     /// Spawn the worker with a proven identity and an optional listener; absence uses the fallback.
@@ -64,6 +74,7 @@ impl RouteRepairWorker {
         link: crate::wireguard::ActiveLink,
         mut monitor: Option<crate::wireguard::RouteMonitor>,
         underlay: Arc<crate::wireguard::UnderlayWatch>,
+        announce: Arc<crate::gotatun_node::UnderlayAnnounce>,
     ) -> io::Result<Self> {
         let shared = Arc::clone(&state);
         let worker_underlay = Arc::clone(&underlay);
@@ -108,7 +119,8 @@ impl RouteRepairWorker {
                             monitor = Device::route_monitor(
                                 &link,
                                 Arc::clone(&worker_underlay),
-                                                )
+                                Arc::clone(&announce),
+                            )
                             .ok();
                             worker_underlay.set_watched(monitor.is_some());
                         }

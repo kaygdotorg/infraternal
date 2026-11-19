@@ -877,6 +877,10 @@ pub struct Node {
     peer_route_state: Arc<Mutex<PeerRouteState>>,
     /// Passively restores deleted owned peer routes until this node goes down.
     route_repair: Option<RouteRepairWorker>,
+    /// Shared by every route-repair worker's listener and the `GotaTun` worker for this node's
+    /// life, so peers hear our new endpoint after an underlay change whichever worker heard it
+    /// (#483). A field of its own, because the route state is replaced wholesale on rollback.
+    underlay_announce: Arc<crate::gotatun_node::UnderlayAnnounce>,
     firewall: Firewall,
     proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
@@ -909,6 +913,7 @@ impl Default for Node {
             routes: BTreeSet::new(),
             peer_route_state: Arc::default(),
             route_repair: None,
+            underlay_announce: Arc::default(),
             firewall: Firewall::for_node(None, EngineKind::GotaTun),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
@@ -949,9 +954,10 @@ impl Node {
             self.route_repair.take();
         }
         if self.route_repair.is_none() {
-            self.route_repair = Some(RouteRepairWorker::start(Arc::clone(
-                &self.peer_route_state,
-            ))?);
+            self.route_repair = Some(RouteRepairWorker::start(
+                Arc::clone(&self.peer_route_state),
+                Arc::clone(&self.underlay_announce),
+            )?);
         }
         Ok(())
     }
@@ -1752,8 +1758,10 @@ impl Node {
                         store.record_listen_port(saved)?;
                     }
                     let client = Client::new()?;
-                    let route_repair =
-                        RouteRepairWorker::start(Arc::clone(&self.peer_route_state))?;
+                    let route_repair = RouteRepairWorker::start(
+                        Arc::clone(&self.peer_route_state),
+                        Arc::clone(&self.underlay_announce),
+                    )?;
                     self.routes.clear();
                     self.save(None, true)?;
                     Ok((port, client, route_repair))
@@ -1798,6 +1806,7 @@ impl Node {
                     &self.proxy_ingress,
                     adopt,
                     route_endpoint_updater,
+                    Arc::clone(&self.underlay_announce),
                 )?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
@@ -1821,15 +1830,17 @@ impl Node {
                         return Err(error);
                     }
                 }
-                let route_repair =
-                    match RouteRepairWorker::start(Arc::clone(&self.peer_route_state)) {
-                        Ok(worker) => worker,
-                        Err(error) => {
-                            let mut engine = engine;
-                            let _ = engine.stop();
-                            return Err(error);
-                        }
-                    };
+                let route_repair = match RouteRepairWorker::start(
+                    Arc::clone(&self.peer_route_state),
+                    Arc::clone(&self.underlay_announce),
+                ) {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        let mut engine = engine;
+                        let _ = engine.stop();
+                        return Err(error);
+                    }
+                };
                 self.owned = true;
                 self.gotatun = Some(engine);
                 if let Err(error) = self.save(self.config.as_ref(), true) {
