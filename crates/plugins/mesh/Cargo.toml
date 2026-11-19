@@ -68,7 +68,7 @@ url = { workspace = true, optional = true }
 # outright. The Mac route listener and immediate keepalive request also run
 # only with S enabled, which preserves default roaming behavior when it is off
 # (J920, #260).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "88b970ec0ddafd8026fbdf6083b30ee1724c2947", default-features = false, features = ["device", "ring"], optional = true }
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "310ac273b78f14f4b4e94390591fb5828fa7a5f2", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
