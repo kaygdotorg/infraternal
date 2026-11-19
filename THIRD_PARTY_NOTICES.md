@@ -115,7 +115,7 @@ Attribution and complete licence texts ship with the production build.
   - Licence: MPL-2.0. infraternal builds it, unchanged, from our fork. Under MPL-2.0
     §3.2, its Source Code Form is available from
     <https://github.com/kaygdotorg/gotatun> at commit
-    `aaa5c2d54271293b6cfabd0abe7f04d38557c636`, the commit pinned in
+    `c4813b5eedfff72f6f09d66f1a558fec3f568b9c`, the commit pinned in
     `crates/plugins/mesh/Cargo.toml`. The licence text is the file `LICENSE`
     there, and at <https://www.mozilla.org/MPL/2.0/>.
   - Code contributed before 5 March 2026 is also under the BSD 3-Clause licence

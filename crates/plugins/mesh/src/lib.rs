@@ -86,8 +86,8 @@ pub mod gotatun_node;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
 
-/// Coalesces underlay endpoint announcements on the node's route listener (#483).
-#[cfg(all(feature = "agent", target_os = "linux"))]
+/// Coalesces endpoint announcements from the Linux and Mac route listeners (#483).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 mod underlay_announce;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]

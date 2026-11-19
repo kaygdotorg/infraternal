@@ -65,8 +65,10 @@ url = { workspace = true, optional = true }
 # port as two exclusive sockets, AF_INET and IPv6-only, so no other local user
 # can bind beside it before or after start (#260, J826, J834). A port another
 # socket already holds is refused (EADDRINUSE), the same as a port taken
-# outright.
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "aaa5c2d54271293b6cfabd0abe7f04d38557c636", default-features = false, features = ["device", "ring"], optional = true }
+# outright. The Mac route listener and immediate keepalive request also run
+# only with S enabled, which preserves default roaming behavior when it is off
+# (J920, #260).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "c4813b5eedfff72f6f09d66f1a558fec3f568b9c", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -74,11 +76,11 @@ security-framework = { version = "3.7.0", optional = true }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+# Both underlay coalescing suites test the schedule with a paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 # Namespace tests run each node on a thread that entered its own network namespace (D332).
 nix = { workspace = true, features = ["net", "sched"] }
 socket2 = { version = "0.6", features = ["all"] }
-# Paused-clock tests of the coalesced announce schedule (#483).
-tokio = { workspace = true, features = ["test-util"] }
 
 # Keep unsafe denied by default while allowing the documented macOS sysctl boundary.
 [lints.rust]

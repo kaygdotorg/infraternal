@@ -1,9 +1,9 @@
-//! Coalesced wakeups and underlay endpoint announcements for the Linux userspace mesh (#483).
+//! Coalesced wakeups and underlay endpoint announcements for the Linux and macOS userspace mesh (#483).
 //!
 //! When the host's underlay changes in a way that can move our own endpoint (a new or removed
 //! address, a route or link change), every peer with a live session should hear one
 //! authenticated packet from us, so it follows our new address at once instead of after the
-//! keepalive or rekey timeout. The underlay listener calls
+//! keepalive or rekey timeout. Each platform's underlay listener calls
 //! [`UnderlayAnnounce::changed`]; the engine's worker waits on an [`AnnouncementWaiter`] and asks
 //! `GotaTun` for one keepalive per live session (`request_keepalives`).
 //!
@@ -118,12 +118,13 @@ impl CoalescedSchedule {
 /// A peer learns our endpoint only from an authenticated packet. A node that is only receiving
 /// sends nothing until `WireGuard`'s keepalive-plus-rekey timeout, so after an address change the
 /// peer kept sending to the old address for 15.2 s (J561's break-it matrix, against D41's 300 ms).
-/// The route-netlink listener calls [`Self::changed`]. The worker asks `GotaTun` for one
-/// keepalive per live session via `request_keepalives`, so the send count follows the number
-/// of live sessions.
+/// The Linux route-netlink listener and the macOS routing-socket listener call
+/// [`Self::changed`]. The worker asks `GotaTun` for one keepalive per live session via
+/// `request_keepalives`, so the send count follows the number of live sessions.
 ///
-/// It lives as long as the node, across route-listener restarts and engine rebuilds. With
-/// the kernel engine nobody waits on it, so a change costs one atomic swap.
+/// The Linux node owns the wake across listener restarts and engine rebuilds. With the
+/// kernel engine nobody waits on it, so a change costs one atomic swap. Each macOS worker
+/// owns its wake alongside its listener.
 #[derive(Debug, Default)]
 pub(crate) struct UnderlayAnnounce {
     wake: CoalescedWake,
