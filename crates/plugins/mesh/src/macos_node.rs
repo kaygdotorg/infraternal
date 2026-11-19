@@ -1,6 +1,8 @@
 //! Restores the Mac userspace Mesh node and its utun routes across daemon lifetimes.
 
 use crate::dataplane::Config;
+use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
+use crate::packet_filter::{Direction, PacketFilter};
 use bytes::Buf;
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
@@ -12,6 +14,7 @@ use gotatun::{
     },
     x25519::{PublicKey as X25519PublicKey, StaticSecret},
 };
+use infraternal_mesh::proxy_ports::MeshProxyIngress;
 use ipnetwork::IpNetwork;
 use nix::{
     fcntl::{FcntlArg, FdFlag, OFlag, fcntl},
@@ -35,17 +38,20 @@ use std::{
     process::Command,
     sync::{Arc, mpsc as sync},
     thread::JoinHandle,
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::unix::AsyncFd;
 use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::{
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        RwLock,
+        mpsc::{self, UnboundedSender},
         watch,
     },
 };
 use zeroize::Zeroizing;
+
+/// The worker loop, session-keeping peer updates and candidate walks (#515).
+mod walks;
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
@@ -79,6 +85,9 @@ pub(crate) fn authority_replacement_crash_checkpoint() {
         std::thread::park();
     }
 }
+
+/// The routing-socket listener that announces underlay changes to live sessions (#483).
+mod underlay;
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, MacUtunTx, MacUtunRx)>;
 
@@ -122,16 +131,22 @@ impl RotationKey {
     }
 }
 
+/// Holds the already-bound UDP sockets and the live handshake admission state for `GotaTun`.
+///
+/// Every receive half it hands out runs the shared admission guard (J555 F2), so an initiation
+/// from a key this Mac has not installed gets no reply, the same as on Linux. Clones share the
+/// listener and the guard.
 #[derive(Clone)]
 struct BoundUdpFactory {
     send: GotaUdpSocket,
     receive: GotaUdpSocket,
     port: u16,
+    admission: Arc<RwLock<PeerAdmission>>,
 }
 
 impl UdpTransportFactory for BoundUdpFactory {
     type Send = GotaUdpSocket;
-    type Recv = GotaUdpSocket;
+    type Recv = PeerAdmissionUdpReceiver;
 
     async fn bind(
         &mut self,
@@ -140,8 +155,19 @@ impl UdpTransportFactory for BoundUdpFactory {
         if params.addr.is_some() || params.port != self.port {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        Ok((self.send.clone(), self.receive.clone()))
+        Ok((
+            self.send.clone(),
+            PeerAdmissionUdpReceiver::new(self.receive.clone(), Arc::clone(&self.admission)),
+        ))
     }
+}
+
+/// The identities a peer list installs in `GotaTun`, which are the ones the guard admits.
+fn installed_keys(peers: &[WireGuardPeer]) -> BTreeSet<crate::policy::model::PublicKey> {
+    peers
+        .iter()
+        .map(|peer| crate::policy::model::PublicKey(*peer.public_key.as_bytes()))
+        .collect()
 }
 
 /// Peer statistics use the same public shape as the Linux kernel adapter.
@@ -216,13 +242,14 @@ struct MacUtun {
     fd: Arc<AsyncFd<OwnedFd>>,
     name: Arc<str>,
     mtu: watch::Sender<u16>,
+    filter: Arc<PacketFilter>,
 }
 
 impl MacUtun {
     /// Register one previously opened utun descriptor with this daemon's tokio runtime.
     /// # Errors
     /// Returns readiness registration failures.
-    fn from_open(open: OpenUtun) -> io::Result<Self> {
+    fn from_open(open: OpenUtun, filter: Arc<PacketFilter>) -> io::Result<Self> {
         // Tokio's safe constructor is deprecated but remains the only safe API;
         // the replacement requires unsafe code, which this crate forbids.
         #[allow(deprecated)]
@@ -232,6 +259,7 @@ impl MacUtun {
             fd: Arc::new(fd),
             name: Arc::from(open.name),
             mtu,
+            filter,
         })
     }
 
@@ -245,6 +273,7 @@ impl MacUtun {
             fd: self.fd.clone(),
             mtu: self.mtu.subscribe().into(),
             frame: Vec::with_capacity(usize::from(crate::mesh_mtu::IPV6_MINIMUM_MTU) + 4),
+            filter: Arc::clone(&self.filter),
         }
     }
 
@@ -253,6 +282,7 @@ impl MacUtun {
         MacUtunRx {
             fd: self.fd.clone(),
             mtu: self.mtu.subscribe().into(),
+            filter: Arc::clone(&self.filter),
         }
     }
 
@@ -267,11 +297,15 @@ struct MacUtunTx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
     frame: Vec<u8>,
+    filter: Arc<PacketFilter>,
 }
 
 impl IpSend for MacUtunTx {
     async fn send(&mut self, packet: Packet<Ip>) -> io::Result<()> {
-        let packet = packet.into_bytes();
+        let mut packet = packet.into_bytes();
+        if !self.filter.check(packet.buf_mut(), Direction::MeshToHost) {
+            return Ok(());
+        }
         let family = utun_family(packet.as_ref())?;
         if packet.len() > usize::from(self.mtu.get()) {
             return Err(io::ErrorKind::InvalidData.into());
@@ -295,6 +329,7 @@ impl IpSend for MacUtunTx {
 struct MacUtunRx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
+    filter: Arc<PacketFilter>,
 }
 
 impl IpRecv for MacUtunRx {
@@ -302,8 +337,8 @@ impl IpRecv for MacUtunRx {
         &'a mut self,
         pool: &mut PacketBufPool,
     ) -> io::Result<impl Iterator<Item = Packet<Ip>> + Send + 'a> {
-        let mut packet = pool.get();
         loop {
+            let mut packet = pool.get();
             let mut ready = self.fd.readable().await?;
             let result =
                 ready.try_io(|fd| read(fd.get_ref(), &mut packet[..]).map_err(io::Error::from));
@@ -315,6 +350,9 @@ impl IpRecv for MacUtunRx {
                     packet.truncate(length);
                     parse_utun_payload(packet.as_ref(), self.mtu.get())?;
                     packet.buf_mut().advance(4);
+                    if !self.filter.check(packet.buf_mut(), Direction::HostToMesh) {
+                        continue;
+                    }
                     let packet = packet
                         .try_into_ip()
                         .map_err(|_| io::ErrorKind::InvalidData)?;
@@ -554,34 +592,13 @@ impl Default for SavedState {
 }
 
 /// How this node enforces D164 access rules, as `mesh status` reports it.
-///
-/// The Mac node has no packet filter yet (#265 slice 3), so it cannot narrow
-/// what a peer may reach. Until it can, it fails closed: see [`installed_peers`].
-pub const ENFORCEMENT: &str = "unavailable";
+pub const ENFORCEMENT: &str = "userspace";
 
-/// The peers this node may connect to while it cannot enforce access rules.
-///
-/// The coordinator also distributes a peer when only the opposite direction is
-/// granted (`inbound` is `None`) or when the grant is narrowed to ports. A
-/// `WireGuard` peer would reach every port on this Mac in both cases, so only a
-/// peer that may open connections to every port here (`inbound` is `All`) is
-/// installed. The coordinator is always installed: every node may reach it
-/// (D164). Its own inbound policy is not checked, so the server host can reach
-/// every port on this Mac, which a Linux node would deny without an arrow.
-/// The owner accepted that gap until the slice-3 filter (#265, J162 F1), and
-/// `mesh status` says so. The cost is that an arrow from this Mac to a node
-/// without the reverse arrow does not work until enforcement arrives.
-fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
-    config.peers.iter().filter_map(|(node, policy)| {
-        (config.server == Some(*node)
-            || matches!(policy.inbound, crate::policy::rules::TrafficPolicy::All))
-        .then_some(policy)
-    })
-}
-
-/// Return only the installed peers' host addresses that belong on the utun interface.
+/// Return every configured peer address for the utun; the packet filter applies its grants.
 fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
-    installed_peers(config)
+    config
+        .peers
+        .values()
         .flat_map(|policy| {
             [
                 IpAddr::V4(policy.peer.addresses.ipv4),
@@ -613,7 +630,7 @@ impl PathBudgets {
         let mut route_mtus = BTreeMap::new();
         let mut peer_mtus = Vec::new();
         if let Some(config) = config {
-            for policy in installed_peers(config) {
+            for policy in config.peers.values() {
                 let mtu = probe.mesh_mtu(policy.peer.endpoint);
                 route_mtus.insert(IpAddr::V4(policy.peer.addresses.ipv4), mtu);
                 route_mtus.insert(IpAddr::V6(policy.peer.addresses.ipv6), mtu);
@@ -761,7 +778,7 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
     result.and_then(|()| crate::node_state::write_authority(&authority_path(path), &authority))
 }
 
-/// Compare and replace one lower-revision full snapshot under the public-state directory lock.
+/// Compare and replace one lower-revision full snapshot under the mesh state update lock.
 ///
 /// This transaction is for a same-authority rollback only. Authority changes continue through
 /// the peer-free checkpoint path, which carries its own durable reset marker.
@@ -773,12 +790,8 @@ fn write_public_state_full_snapshot(
     expected: &Config,
 ) -> io::Result<()> {
     let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-        .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
-        .map_err(|(_, error)| error)?;
+    // Not an exclusive directory lock: this node's own open Store holds a shared lease on it.
+    let _guard = crate::node_state::lock_mesh_state_update(parent)?;
     let previous = read_public_state(path)?.ok_or(io::ErrorKind::InvalidData)?;
     let old = previous.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
     let next = state.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
@@ -819,7 +832,9 @@ fn write_public_state_in_place(path: &Path, state: &SavedState) -> io::Result<()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
         .open(parent)?;
-    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+    // Shared: the node's own Store holds a shared lease here, and only migration locks it
+    // exclusively. The writer lock file can't be used, since this directory may be read-only.
+    let _lease = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockShared)
         .map_err(|(_, error)| error)?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -887,7 +902,18 @@ fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
     Ok(payload)
 }
 
-/// Convert every configured identity into GotaTun peers, keeping both rotation keys installed.
+/// The configured peers the Mac device installs: those whose grants allow some traffic.
+///
+/// A peer without network access gets no device entry, so the handshake guard refuses its key
+/// and the node keeps no session alive toward it, as on Linux (J781, #483, #515).
+fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
+    config
+        .peers
+        .values()
+        .filter(|policy| policy.has_network_access())
+}
+
+/// Convert every installed identity into GotaTun peers, keeping both rotation keys installed.
 ///
 /// Only the active overlap key gets routes and an endpoint, so the inactive key can accept an
 /// incoming handshake without competing to own the peer's host routes.
@@ -1015,6 +1041,7 @@ fn stage_chunk(
         } else {
             Config {
                 authority_epoch: chunk.authority_epoch.clone(),
+                rotation_operation: chunk.rotation_operation.clone(),
                 local_key: chunk.local_key,
                 server: chunk.server,
                 node: chunk.node,
@@ -1031,6 +1058,10 @@ fn stage_chunk(
                 peer_names: std::collections::BTreeMap::new(),
             }
         };
+        let mut config = config;
+        config
+            .rotation_operation
+            .clone_from(&chunk.rotation_operation);
         #[cfg(feature = "mesh-dns")]
         let config = {
             let mut config = config;
@@ -1058,6 +1089,7 @@ fn stage_chunk(
     let dns_suffix_changed = false;
     if staged.server != chunk.server
         || staged.config.authority_epoch != chunk.authority_epoch
+        || staged.config.rotation_operation != chunk.rotation_operation
         || staged.next != chunk.index
         || staged.config.local_key != chunk.local_key
         || staged.config.node != chunk.node
@@ -1172,6 +1204,10 @@ enum WorkerCommand {
     },
     Counters(sync::SyncSender<CounterMap>),
     Stop(sync::SyncSender<io::Result<()>>),
+    /// Hand a real-Mac test the worker's admission guard, so it can check what the guard
+    /// knows and flood it on a simulated clock.
+    #[cfg(test)]
+    Admission(sync::SyncSender<Arc<RwLock<PeerAdmission>>>),
 }
 
 struct Worker {
@@ -1194,11 +1230,15 @@ impl PendingWorker {
     fn begin(
         open: OpenUtun,
         private_key: gotatun::x25519::StaticSecret,
-        requested_port: u16,
+        requested_port: crate::listen_port::Request,
         config: Option<Config>,
         routes: BTreeSet<IpAddr>,
         budgets: PathBudgets,
     ) -> io::Result<Self> {
+        let filter = Arc::new(match config.as_ref() {
+            Some(config) => PacketFilter::new(config, MeshProxyIngress::default())?,
+            None => PacketFilter::empty(),
+        });
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (gate_tx, gate_rx) = sync::sync_channel(1);
         let (ready_tx, ready_rx) = sync::sync_channel(1);
@@ -1214,29 +1254,17 @@ impl PendingWorker {
                         return;
                     }
                 };
+                // The listener's guard gets its own copy; the device takes `private_key` below.
+                let guard_key = private_key.clone();
                 let initialized = runtime.block_on(async move {
-                    let utun = MacUtun::from_open(open)?;
-                    let mut factory = UdpSocketFactory::default();
-                    let params = UdpTransportFactoryParams {
-                        addr: None,
-                        port: requested_port,
-                    };
-                    let (send, receive) = factory.bind(&params).await?;
-                    let port = send.local_addr()?.port();
+                    let utun = MacUtun::from_open(open, filter)?;
+                    let (factory, port) = bind_udp(requested_port, guard_key).await?;
                     let info = RuntimeInfo {
                         interface: utun.name().to_owned(),
                         port,
                         routes,
                     };
-                    Ok((
-                        utun,
-                        BoundUdpFactory {
-                            send,
-                            receive,
-                            port,
-                        },
-                        info,
-                    ))
+                    Ok((utun, factory, info))
                 });
                 let (utun, factory, info) = match initialized {
                     Ok(initialized) => initialized,
@@ -1245,6 +1273,8 @@ impl PendingWorker {
                         return;
                     }
                 };
+                let admission = Arc::clone(&factory.admission);
+                let udp = factory.send.clone();
                 let PathBudgets {
                     route_mtus: initial_route_mtus,
                     interface_mtu,
@@ -1280,6 +1310,9 @@ impl PendingWorker {
                         .map(peers_for_config)
                         .transpose()?
                         .unwrap_or_default();
+                    // The guard knows the first peers before the device receives anything.
+                    let keys = installed_keys(&peers);
+                    admission.write().await.install(keys, &peers);
                     let device = DeviceBuilder::new()
                         .with_udp(factory)
                         .with_private_key(private_key)
@@ -1325,19 +1358,24 @@ impl PendingWorker {
                     return;
                 }
                 let state = RuntimeState {
+                    udp,
                     utun: Some(utun),
-                    device: Some(device),
+                    device: Some(Arc::new(device)),
+                    handshakes: tokio::task::JoinSet::new(),
+                    walks: crate::candidate_walks::Walks::default(),
                     config,
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
                     interface_mtu,
                     port: info.port,
+                    admission,
+                    confirmed_feed: ConfirmedEndpointFeed::default(),
                     #[cfg(feature = "mesh-dns")]
                     dns_resolver,
                     #[cfg(feature = "mesh-dns")]
                     dns_integration,
                 };
-                runtime.block_on(run_worker(receiver, state));
+                runtime.block_on(walks::run_worker(receiver, state));
             })?;
         let info = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
             Ok(info) => info,
@@ -1381,6 +1419,70 @@ impl PendingWorker {
             self.info.clone(),
         ))
     }
+}
+
+/// Bind the requested Mac UDP port, using one automatic fallback when that listener is occupied.
+///
+/// The bound socket remains owned by the worker, and the returned port is persisted and advertised
+/// so coordinator peers target the actual listener. An explicit operator override stays exact.
+/// The returned factory carries a handshake admission guard for `private_key` with no peers
+/// yet; the worker installs its peers before the device receives anything.
+/// # Errors
+/// Returns socket errors, rejects the reserved kernel `WireGuard` port, or reports allocation failure.
+async fn bind_udp(
+    request: crate::listen_port::Request,
+    private_key: StaticSecret,
+) -> io::Result<(BoundUdpFactory, u16)> {
+    if request.port == 51_820 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let admission = Arc::new(RwLock::new(PeerAdmission::new(private_key)));
+    let mut factory = UdpSocketFactory::default();
+    if request.port != 0 {
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port: request.port,
+        };
+        match factory.bind(&params).await {
+            Ok((send, receive)) => {
+                let port = send.local_addr()?.port();
+                if port == 0 || port == 51_820 {
+                    return Err(io::ErrorKind::AddrInUse.into());
+                }
+                return Ok((
+                    BoundUdpFactory {
+                        send,
+                        receive,
+                        port,
+                        admission,
+                    },
+                    port,
+                ));
+            }
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+    for _ in 0..16 {
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port: 0,
+        };
+        let (send, receive) = factory.bind(&params).await?;
+        let port = send.local_addr()?.port();
+        if port != 0 && port != 51_820 {
+            return Ok((
+                BoundUdpFactory {
+                    send,
+                    receive,
+                    port,
+                    admission,
+                },
+                port,
+            ));
+        }
+    }
+    Err(io::ErrorKind::AddrInUse.into())
 }
 
 impl Drop for PendingWorker {
@@ -1474,59 +1576,36 @@ impl Drop for Worker {
     }
 }
 
+/// Reads per-peer statistics from the live device for the worker: counters and the
+/// confirmed endpoints the admission guard learns from.
+mod peer_stats;
+
 /// Owns the live utun, peer-route MTUs, accepted snapshot and DNS resolver integration.
 /// `route_mtus` mirrors installed metrics so a failed update can restore them.
 struct RuntimeState {
+    /// The worker's live UDP listener; clones share the connected pools with the device.
+    udp: GotaUdpSocket,
     utun: Option<MacUtun>,
-    device: Option<GotaDevice>,
+    /// Shared only with handshake tasks, which `stop` ends before stopping the device.
+    device: Option<Arc<GotaDevice>>,
+    /// Running `rehandshake` waits ([`walks`]).
+    handshakes: tokio::task::JoinSet<()>,
+    /// Each peer's direct-path candidate walk (#515).
+    walks: crate::candidate_walks::Walks,
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
     route_mtus: BTreeMap<IpAddr, u16>,
     /// The utun MTU of the applied snapshot; a failed update restores it without re-probing.
     interface_mtu: u16,
     port: u16,
+    /// The receive guard; it follows the peers and key the live device accepted.
+    admission: Arc<RwLock<PeerAdmission>>,
+    /// Feeds the endpoints `GotaTun` confirmed into `admission`'s known set (J736).
+    confirmed_feed: ConfirmedEndpointFeed,
     #[cfg(feature = "mesh-dns")]
     dns_resolver: Option<crate::dns::Resolver>,
     #[cfg(feature = "mesh-dns")]
     dns_integration: crate::dns_integration::DnsIntegration,
-}
-
-/// Applies queued requests on the Mac worker and stops cleanly when its queue closes.
-async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
-    while let Some(command) = commands.recv().await {
-        match command {
-            WorkerCommand::Apply {
-                config,
-                budgets,
-                reply,
-            } => {
-                let result = state.apply(*config, budgets).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ReplaceAuthority {
-                config,
-                budgets,
-                reply,
-            } => {
-                let result = state.replace_authority(*config, budgets).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::SetPrivateKey { private_key, reply } => {
-                let result = state.set_private_key(private_key).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Counters(reply) => {
-                let counters = state.counters().await.unwrap_or_default();
-                let _ = reply.send(counters);
-            }
-            WorkerCommand::Stop(reply) => {
-                let result = state.stop().await;
-                let _ = reply.send(result);
-                return;
-            }
-        }
-    }
-    let _ = state.stop().await;
 }
 
 impl RuntimeState {
@@ -1540,9 +1619,12 @@ impl RuntimeState {
         self.device
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
-            .set_private_key(private_key)
+            .set_private_key(private_key.clone())
             .await
-            .map_err(|_| io::Error::other("WireGuard private key could not be changed."))
+            .map_err(|_| io::Error::other("WireGuard private key could not be changed."))?;
+        // The guard follows only a key the live device accepted.
+        self.admission.write().await.set_private_key(private_key);
+        Ok(())
     }
 
     /// Apply one accepted snapshot, its endpoint-derived route MTUs, and its DNS names.
@@ -1565,6 +1647,7 @@ impl RuntimeState {
         config: Config,
         budgets: PathBudgets,
     ) -> io::Result<RuntimeInfo> {
+        let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         if self
             .config
             .as_ref()
@@ -1583,6 +1666,11 @@ impl RuntimeState {
                     .ok_or(io::ErrorKind::NotConnected)?
                     .to_owned();
                 self.refresh_unchanged_mesh_mtus(budgets).await?;
+                self.utun
+                    .as_ref()
+                    .ok_or(io::ErrorKind::NotConnected)?
+                    .filter
+                    .publish_policy(policy);
                 self.config = Some(config);
                 return Ok(RuntimeInfo {
                     interface,
@@ -1591,6 +1679,9 @@ impl RuntimeState {
                 });
             }
         }
+        // Full replacement retires the old engine sessions and their walk positions.
+        self.handshakes.abort_all();
+        self.walks.clear();
         self.apply_with_rollback(config, budgets, false).await
     }
 
@@ -1653,6 +1744,7 @@ impl RuntimeState {
         budgets: PathBudgets,
         rollback_on_failure: bool,
     ) -> io::Result<RuntimeInfo> {
+        let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let interface = utun.name().to_owned();
         #[cfg(feature = "mesh-dns")]
@@ -1660,6 +1752,8 @@ impl RuntimeState {
         let new_routes = route_addresses(&config);
         validate_underlay_routes(&config, &new_routes)?;
         let peers = peers_for_config(&config)?;
+        let admitted = installed_keys(&peers);
+        let admitted_endpoints: Vec<_> = peers.iter().filter_map(|peer| peer.endpoint).collect();
         let old_config = self.config.clone();
         let old_routes = self.routes.clone();
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -1692,7 +1786,14 @@ impl RuntimeState {
         } else {
             None
         };
-        if let Err(error) = replace_peers(device, peers).await {
+        // An authority replacement may have reached this path because the installed keys
+        // disagreed with the snapshot. Rebuild from the complete list in that case.
+        let peers_applied = if rollback_on_failure {
+            walks::update_peers(device, old_config.as_ref(), &config, &admitted).await
+        } else {
+            replace_peers(device, peers).await
+        };
+        if let Err(error) = peers_applied {
             if rollback_on_failure {
                 rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
             }
@@ -1774,43 +1875,23 @@ impl RuntimeState {
                 self.dns_resolver = pending_dns_resolver;
             }
         }
+        // The receive guard follows only snapshots the live device fully accepted. A failure
+        // above has restored (or, for an authority replacement, stopped) the old peers.
+        let mut admission = self.admission.write().await;
+        admission.set_peers(admitted);
+        admission.set_configured_endpoints(admitted_endpoints);
+        drop(admission);
+        utun.filter.publish_policy(policy);
+        let readdressed = walks::readdressed(old_config.as_ref(), &config);
         self.config = Some(config);
+        for key in readdressed {
+            self.rehandshake(key);
+        }
         Ok(RuntimeInfo {
             interface,
             port: self.port,
             routes: new_routes,
         })
-    }
-
-    async fn counters(&self) -> io::Result<CounterMap> {
-        let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let peers = device.read(async |read| read.peers().await).await;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let mut counters = CounterMap::new();
-        for peer in peers {
-            let age = peer.stats.last_handshake.unwrap_or_default();
-            let timestamp = if peer.stats.last_handshake.is_some() {
-                now.checked_sub(age).unwrap_or_default()
-            } else {
-                Duration::ZERO
-            };
-            let key = crate::policy::model::PublicKey(*peer.peer.public_key.as_bytes());
-            counters.insert(
-                key,
-                Counters {
-                    persistent_keepalive_secs: peer.peer.keepalive.unwrap_or(0),
-                    handshake_secs: timestamp.as_secs(),
-                    #[cfg(feature = "relay")]
-                    handshake_nanos: timestamp.subsec_nanos(),
-                    received_bytes: u64::try_from(peer.stats.rx_bytes).unwrap_or(u64::MAX),
-                    sent_bytes: u64::try_from(peer.stats.tx_bytes).unwrap_or(u64::MAX),
-                    endpoint: peer.peer.endpoint,
-                },
-            );
-        }
-        Ok(counters)
     }
 
     /// Removes the host resolver route and listener before the Mac mesh device stops.
@@ -1836,7 +1917,11 @@ impl RuntimeState {
             .utun
             .as_ref()
             .map_or(Ok(()), |utun| remove_routes(utun.name(), &self.routes));
-        if let Some(device) = self.device.take() {
+        // Ending every handshake task drops its device handle, so this one is the last.
+        self.handshakes.abort_all();
+        while self.handshakes.join_next().await.is_some() {}
+        self.walks.clear();
+        if let Some(device) = self.device.take().and_then(Arc::into_inner) {
             device.stop().await;
         }
         self.utun.take();
@@ -2152,6 +2237,15 @@ impl Node {
         self.enabled && self.identity.is_some() && self.worker.is_some()
     }
 
+    /// Return the active UDP listener port advertised by this node's mesh identity.
+    ///
+    /// `None` means the worker has not bound a socket. The value is the actual port after an
+    /// automatic fallback, so `mesh status` reports the endpoint peers should reach.
+    #[must_use]
+    pub fn listen_port(&self) -> Option<u16> {
+        self.identity.as_ref().map(|identity| identity.port)
+    }
+
     /// Whether a retired authority still needs a complete snapshot from the enrolled server.
     #[must_use]
     pub fn awaiting_server_snapshot(&self) -> bool {
@@ -2189,6 +2283,8 @@ impl Node {
             .and_then(Path::parent)
             .ok_or(io::ErrorKind::NotFound)?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let saved_port = store.recorded_listen_port()?;
+        let listen_port = crate::listen_port::from_environment(saved_port)?;
         let (private_key, public_key) = if let Some(rotation) = store.rotation_secret()? {
             let (journal_key, journal_public) = recover_macos_rotation_key(store, &rotation)?;
             let (secret, keychain_public) = crate::macos_key::load_or_create(state)?;
@@ -2238,12 +2334,18 @@ impl Node {
         let startup = PendingWorker::begin(
             open,
             private_key,
-            self.port,
+            listen_port,
             self.config.clone(),
             desired_routes.clone(),
             PathBudgets::probe(self.config.as_ref()),
         )?;
         let info = startup.info().clone();
+        let saved_port = if listen_port.allow_fallback {
+            info.port
+        } else {
+            crate::listen_port::DEFAULT_PORT
+        };
+        store.record_listen_port(saved_port)?;
         self.interface = Some(info.interface.clone());
         self.port = info.port;
         self.routes = desired_routes.clone();
@@ -2280,6 +2382,7 @@ impl Node {
             // macOS GotaTun supports journaled key rotation (#367) and authenticated authority epochs.
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         self.identity = Some(identity.clone());
         Ok(identity)
@@ -2564,7 +2667,7 @@ impl Node {
     /// # Errors
     /// Refuses wrong identity bindings, incomplete chunks, unsafe routes, or failed engine updates.
     pub fn chunk(&mut self, chunk: crate::dataplane::Chunk) -> io::Result<bool> {
-        let Some(mut identity) = self.identity.clone() else {
+        let Some(identity) = self.identity.clone() else {
             self.pending = None;
             tracing::warn!("Mac mesh configuration chunk refused while the node is not up");
             return Err(io::ErrorKind::NotConnected.into());
@@ -2636,17 +2739,6 @@ impl Node {
             );
             return Err(io::ErrorKind::InvalidData.into());
         }
-        if self.authority_reset_pending
-            && chunk.index == 0
-            && chunk.from_version.is_none()
-            && self
-                .config
-                .as_ref()
-                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
-        {
-            self.retire_settled_authority_rotation()?;
-            identity = self.identity.clone().ok_or(io::ErrorKind::NotConnected)?;
-        }
         // With a Store, a lower same-epoch revision is accepted on purpose: a database restored
         // under a running server keeps its epoch but rewinds revisions (#382, J418 P3-a). The
         // exact-base write (`write_public_state_full_snapshot`) keeps that swap atomic.
@@ -2667,35 +2759,54 @@ impl Node {
         let Some(config) = result? else {
             return Ok(false);
         };
-        validate_config(&config, identity.public_key)?;
+        let validation = (|| {
+            validate_config(&config, identity.public_key)?;
+            // A complete snapshot may replay its revision only with identical contents. Authority
+            // reset is handled separately because the new epoch may reuse a revision.
+            if !self.authority_reset_pending
+                && self.config.as_ref().is_some_and(|accepted| {
+                    accepted.authority_epoch == config.authority_epoch
+                        && accepted.version == config.version
+                        && !crate::dataplane::same_runtime_content(accepted, &config)
+                })
+            {
+                tracing::warn!(
+                    authority_epoch = ?config.authority_epoch,
+                    version = config.version,
+                    "Mac mesh configuration conflict at an accepted authority revision"
+                );
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if self
+                .config
+                .as_ref()
+                .is_some_and(|old| old.node == config.node && old.addresses != config.addresses)
+            {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+            let desired_routes = route_addresses(&config);
+            validate_underlay_routes(&config, &desired_routes)?;
+            if authority_changed || self.authority_reset_pending {
+                #[cfg(feature = "mesh-dns")]
+                crate::dns::Records::from_config(&config)?;
+                PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
+            }
+            Ok::<_, io::Error>(desired_routes)
+        })();
+        let desired_routes = match validation {
+            Ok(routes) => routes,
+            Err(error) if authority_changed => {
+                return self.stop_after_retirement_failure(error, &config);
+            }
+            Err(error) => return Err(error),
+        };
+        // Preserve the receipt through incomplete or rejected snapshots. Only the fully
+        // validated incoming operation can authorize continuity or journal retirement.
         if authority_changed {
             self.prepare_authority_replacement(&config)?;
+        } else if self.authority_reset_pending {
+            self.retire_settled_authority_rotation(config.rotation_operation.as_ref())?;
         }
-        // A complete snapshot may replay its revision only with identical contents. Authority
-        // reset is handled separately because the new epoch may reuse a revision.
-        if !self.authority_reset_pending
-            && self.config.as_ref().is_some_and(|accepted| {
-                accepted.authority_epoch == config.authority_epoch
-                    && accepted.version == config.version
-                    && accepted != &config
-            })
-        {
-            tracing::warn!(
-                authority_epoch = ?config.authority_epoch,
-                version = config.version,
-                "Mac mesh configuration conflict at an accepted authority revision"
-            );
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        if self
-            .config
-            .as_ref()
-            .is_some_and(|old| old.node == config.node && old.addresses != config.addresses)
-        {
-            return Err(io::ErrorKind::Unsupported.into());
-        }
-        let desired_routes = route_addresses(&config);
-        validate_underlay_routes(&config, &desired_routes)?;
         let completes_authority_reset = self.authority_reset_pending;
         let reset_config = completes_authority_reset
             .then(|| self.config.clone())
@@ -2766,7 +2877,8 @@ impl Node {
     ///
     /// The full replacement has already been authenticated and staged. This peer-free durable
     /// checkpoint is therefore crash-safe, while the serialized worker receives the complete
-    /// replacement only after the checkpoint succeeds.
+    /// replacement only after the checkpoint succeeds. Only an exact operation match retains
+    /// the rotation journal for commit or finish retries.
     /// # Errors
     /// Stops the worker if snapshot persistence or rotation-journal retirement fails.
     fn prepare_authority_replacement(&mut self, replacement: &Config) -> io::Result<()> {
@@ -2776,22 +2888,34 @@ impl Node {
         #[cfg(feature = "mesh-dns")]
         denied.peer_names.clear();
         self.pending = None;
-        let rotation_error = self.settle_authority_rotation().err();
+        let continuity = self
+            .store
+            .as_ref()
+            .map(|store| store.rotation_matches(replacement.rotation_operation.as_ref()))
+            .transpose()
+            .map(|matched| matched.unwrap_or(false));
+        let continues_rotation = matches!(continuity, Ok(true));
+        let rotation_error = match continuity {
+            Ok(true) => None,
+            Ok(false) => self.settle_authority_rotation().err(),
+            Err(error) => Some(error),
+        };
         if let Some(identity) = &self.identity {
             denied.local_key = Some(identity.public_key);
         }
         self.config = Some(denied.clone());
         self.authority_reset_pending = true;
         let persistence_error = self.persist_retired_snapshot(&denied).err();
-        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
-            self.store
-                .as_ref()
-                .map(crate::node_state::Store::discard_rotation_journal)
-                .transpose()
-                .err()
-        } else {
-            None
-        };
+        let journal_error =
+            if persistence_error.is_none() && rotation_error.is_none() && !continues_rotation {
+                self.store
+                    .as_ref()
+                    .map(crate::node_state::Store::discard_rotation_journal)
+                    .transpose()
+                    .err()
+            } else {
+                None
+            };
         if let Some(error) = persistence_error.or(rotation_error).or(journal_error) {
             return self.stop_after_retirement_failure(error, &denied);
         }
@@ -2824,17 +2948,21 @@ impl Node {
         Ok(())
     }
 
-    /// Retry journal retirement before accepting a full snapshot after a reset was interrupted.
+    /// Retry journal retirement after validating a full snapshot for an interrupted reset.
     ///
     /// The peer-free reset record makes startup safe. This retry saves the settled live key binding
-    /// before removing the previous authority's rotation journal.
+    /// before removing the previous authority's rotation journal. An exact operation match from
+    /// the incoming full snapshot retains it; cached metadata alone never proves continuity.
     /// # Errors
     /// Refuses a journal that does not prove the active key or a failed state write.
-    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+    fn retire_settled_authority_rotation(
+        &mut self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        if store.rotation_secret()?.is_none() {
+        if store.rotation_secret()?.is_none() || store.rotation_matches(operation)? {
             return Ok(());
         }
         self.settle_authority_rotation()?;
@@ -2889,6 +3017,14 @@ impl Node {
         reset_error: io::Error,
         denied: &Config,
     ) -> io::Result<T> {
+        // A complete but rejected new authority retires peers without retiring its receipt.
+        let mut denied = denied.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns")]
+        denied.peer_names.clear();
+        // Fence restore first; the disabled write below retries any failure.
+        let _ = self.persist_retired_snapshot(&denied);
         self.enabled = false;
         let stop_result = self
             .worker
@@ -3035,14 +3171,21 @@ mod tests {
 
     /// Real-Mac authority refresh proofs with encrypted traffic and kernel MTU checks.
     mod authority_mtu;
+    /// The Mac UDP listener: socket reuse and the handshake admission guard.
+    mod listener;
+    /// A failed retirement save leaves a peer-free deny snapshot, written before the worker fence.
+    mod retirement;
+    /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
+    mod roamed_peer;
+    /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
+    mod walks;
 
     use super::{
-        BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, UdpSocketFactory,
-        UdpTransportFactoryParams, Worker, WorkerCommand, macos_snapshot_binding_is_authorized,
-        mpsc, parse_utun_payload, peers_for_config, read_public_state, reconcile,
-        rotation_crash_checkpoint, route_addresses, route_mtus_to_refresh, stage_chunk,
-        utun_family, valid_utun_name, validate_config, validate_underlay_routes,
-        write_public_state, write_public_state_full_snapshot,
+        Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, Worker, WorkerCommand,
+        macos_snapshot_binding_is_authorized, mpsc, parse_utun_payload, peers_for_config,
+        read_public_state, reconcile, rotation_crash_checkpoint, route_addresses,
+        route_mtus_to_refresh, stage_chunk, utun_family, valid_utun_name, validate_config,
+        validate_underlay_routes, write_public_state, write_public_state_full_snapshot,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -3051,7 +3194,6 @@ mod tests {
             rules::TrafficPolicy,
         },
     };
-    use gotatun::udp::UdpTransportFactory;
     use std::{
         collections::{BTreeMap, BTreeSet},
         fs,
@@ -3075,6 +3217,39 @@ mod tests {
     /// A second process epoch for restored-server cases.
     const AUTHORITY_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
 
+    /// The worker's send handle keeps the mesh port while the factory is gone. Dropping that last
+    /// handle lets a new worker bind the same port, including with connected sends enabled.
+    #[tokio::test]
+    async fn worker_send_handle_releases_the_port_on_drop() {
+        let key = || super::StaticSecret::from([42; 32]);
+        let (factory, port) = super::bind_udp(
+            crate::listen_port::Request {
+                port: 0,
+                allow_fallback: false,
+            },
+            key(),
+        )
+        .await
+        .expect("bind a mesh port");
+        let exact = crate::listen_port::Request {
+            port,
+            allow_fallback: false,
+        };
+        let worker_send = factory.send.clone();
+        drop(factory);
+
+        assert!(matches!(
+            super::bind_udp(exact, key()).await,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse
+        ));
+        drop(worker_send);
+
+        let (_replacement, rebound_port) = super::bind_udp(exact, key())
+            .await
+            .expect("rebind the released mesh port");
+        assert_eq!(rebound_port, port);
+    }
+
     /// Encode a complete snapshot with one epoch repeated across every chunk.
     fn chunks_with_epoch(
         old: Option<&Config>,
@@ -3091,10 +3266,12 @@ mod tests {
             .collect()
     }
 
-    /// A one-peer configuration for the macOS node tests.
-    fn config() -> Config {
+    /// A one-peer configuration for the macOS node tests (the underlay proofs build their
+    /// packet filter from it too).
+    pub(super) fn config() -> Config {
         Config {
             authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
+            rotation_operation: None,
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -3121,6 +3298,7 @@ mod tests {
                             ipv6: "fd01::4".parse().expect("peer IPv6"),
                         },
                         endpoint: Some("192.0.2.4:51820".parse::<SocketAddr>().expect("endpoint")),
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -3194,6 +3372,7 @@ mod tests {
                     ipv6: format!("fd01::{id}").parse().expect("peer IPv6"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound: TrafficPolicy::All,
@@ -3254,6 +3433,8 @@ mod tests {
                         let _ = reply.send(Ok(()));
                         break;
                     }
+                    // A recording worker has no guard; dropping the reply tells the asker so.
+                    WorkerCommand::Admission(_) => {}
                 }
             }
         });
@@ -3263,9 +3444,9 @@ mod tests {
         }
     }
 
-    /// D164 deny-by-default must hold while the Mac has no packet filter (#265 P1-2).
+    /// GotaTun installs granted peers even when the grant is one-way or port-narrowed.
     #[test]
-    fn peers_without_full_inbound_access_are_not_installed() {
+    fn peers_with_one_way_and_port_narrowed_access_are_installed() {
         let mut config = config();
         config.peers = BTreeMap::from([
             // The coordinator is reachable by every node, whatever its inbound grant.
@@ -3286,13 +3467,15 @@ mod tests {
             ),
         ]);
 
-        assert_eq!(installed_keys(&config), BTreeSet::from([[11; 32], [4; 32]]));
+        assert_eq!(
+            installed_keys(&config),
+            BTreeSet::from([[11; 32], [4; 32], [5; 32], [6; 32]])
+        );
         let routes = route_addresses(&config);
-        for absent in [5, 6] {
-            assert!(!routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, absent))));
+        for installed in [4, 5, 6, 11] {
+            assert!(routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, installed))));
         }
-        assert!(routes.contains(&IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4))));
-        assert_eq!(super::ENFORCEMENT, "unavailable");
+        assert_eq!(super::ENFORCEMENT, "userspace");
     }
 
     /// Revoking a peer's arrow removes it from the installed peer set.
@@ -3307,6 +3490,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         assert_eq!(installed_keys(&old), BTreeSet::from([[2; 32]]));
 
@@ -3323,8 +3507,14 @@ mod tests {
         let applied = applied.expect("complete revision");
 
         assert!(applied.peers.contains_key(&NodeId(4)));
-        assert!(installed_keys(&applied).is_empty());
-        assert!(route_addresses(&applied).is_empty());
+        assert_eq!(installed_keys(&applied), BTreeSet::from([[2; 32]]));
+        assert_eq!(
+            route_addresses(&applied),
+            BTreeSet::from([
+                IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4)),
+                IpAddr::V6("fd01::4".parse().expect("peer IPv6")),
+            ])
+        );
     }
 
     /// A restored lower-revision snapshot replaces peers from the later state.
@@ -3360,6 +3550,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(Vec::new()));
         let mut node = Node {
@@ -3412,6 +3603,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(Vec::new()));
         let mut node = Node {
@@ -3462,6 +3654,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(Vec::new()));
         let mut node = Node {
@@ -3516,6 +3709,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(vec![current.clone()]));
         let mut node = Node {
@@ -3570,282 +3764,6 @@ mod tests {
         assert_eq!(runtime, vec![current, replacement]);
     }
 
-    /// A failed retirement save must not leave the old snapshot enabled for restart.
-    #[test]
-    fn failed_retirement_does_not_preserve_a_persisted_peer_rollback() {
-        let mut current = config();
-        current.version = 11;
-        let mut restored = current.clone();
-        restored.version = 2;
-        restored.peers.clear();
-        let directory =
-            std::env::temp_dir().join(format!("infraternal-j330-mac-{}", std::process::id()));
-        fs::create_dir(&directory).expect("state directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("private state directory");
-        let state_path = directory.join(PUBLIC_STATE);
-        write_public_state(
-            &state_path,
-            &SavedState {
-                enabled: true,
-                config: Some(current.clone()),
-                routes: route_addresses(&current),
-                interface: Some("utun-test".to_owned()),
-                port: 51820,
-                ..SavedState::default()
-            },
-        )
-        .expect("accepted snapshot");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
-            .expect("make state directory unwritable");
-        let identity = Identity {
-            public_key: current.local_key.expect("bound key"),
-            port: 51820,
-            compact_access: true,
-            #[cfg(feature = "mesh-dns")]
-            dns_names: false,
-            key_rotation: false,
-            authority_epoch: true,
-        };
-        let applied_configs = Arc::new(Mutex::new(Vec::new()));
-        let mut node = Node {
-            enabled: true,
-            worker: Some(recording_worker(Arc::clone(&applied_configs))),
-            store: None,
-            identity: Some(identity),
-            config: Some(current.clone()),
-            authority_reset_pending: false,
-            pending: None,
-            routes: route_addresses(&current),
-            interface: Some("utun-test".to_owned()),
-            port: 51820,
-            path: Some(state_path.clone()),
-            binding: None,
-        };
-        let result = chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B)
-            .into_iter()
-            .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
-        let saved = read_public_state(&state_path)
-            .expect("read saved state")
-            .expect("saved state exists");
-        let runtime_configs = applied_configs.lock().expect("recorded configs").clone();
-        let stopped_after_failure = !node.enabled && node.worker.is_none();
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("restore state directory permissions");
-        node.down().expect("stop test worker");
-        fs::remove_dir_all(&directory).expect("remove state directory");
-
-        assert!(
-            result.is_err(),
-            "the injected persistence failure was ignored"
-        );
-        assert_eq!(
-            runtime_configs.len(),
-            0,
-            "a failed durable checkpoint must not apply a partial replacement"
-        );
-        assert!(
-            stopped_after_failure,
-            "a failed durable checkpoint must stop the runtime"
-        );
-        // The unwritable directory also blocks the authority record, so the epoch may still read
-        // as the old one. That is safe: the saved snapshot is peer-free, and the next server
-        // snapshot counts as an authority change (#382 P2).
-        assert!(
-            saved
-                .config
-                .as_ref()
-                .is_some_and(|config| config.peers.is_empty()
-                    && config.default_policy == DefaultPolicy::Deny),
-            "a failed replacement must leave a peer-free deny snapshot: {saved:?}"
-        );
-        assert!(
-            !saved.enabled
-                || saved
-                    .config
-                    .as_ref()
-                    .is_none_or(|config| config.peers.is_empty()),
-            "a restart could restore the retired peer: {saved:?}"
-        );
-    }
-
-    /// The peer-free authority state is durable before the worker hears about the new authority.
-    #[test]
-    fn mac_retirement_persists_deny_state_before_worker_fence() {
-        let current = config();
-        let directory = std::env::temp_dir().join(format!(
-            "infraternal-j363-mac-retirement-order-{}",
-            std::process::id()
-        ));
-        fs::create_dir(&directory).expect("state directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("private state directory");
-        let state_path = directory.join(PUBLIC_STATE);
-        write_public_state(
-            &state_path,
-            &SavedState {
-                enabled: true,
-                config: Some(current.clone()),
-                routes: route_addresses(&current),
-                interface: Some("utun-test".to_owned()),
-                port: 51820,
-                ..SavedState::default()
-            },
-        )
-        .expect("persist original peer-bearing snapshot");
-        let identity = Identity {
-            public_key: current.local_key.expect("bound key"),
-            port: 51820,
-            compact_access: true,
-            #[cfg(feature = "mesh-dns")]
-            dns_names: false,
-            key_rotation: false,
-            authority_epoch: true,
-        };
-        let at_fence = Arc::new(Mutex::new(None));
-        let observed = Arc::clone(&at_fence);
-        let hook_path = state_path.clone();
-        let mut node = Node {
-            enabled: true,
-            worker: Some(recording_worker_with_replace_hook(
-                Arc::new(Mutex::new(Vec::new())),
-                move |_| {
-                    let saved = read_public_state(&hook_path)
-                        .expect("read state when worker retirement begins")
-                        .expect("state exists when worker retirement begins");
-                    *observed.lock().expect("retirement state lock") = Some(saved);
-                },
-            )),
-            identity: Some(identity),
-            store: None,
-            config: Some(current.clone()),
-            authority_reset_pending: false,
-            pending: None,
-            routes: route_addresses(&current),
-            interface: Some("utun-test".to_owned()),
-            port: 51820,
-            path: Some(state_path),
-            binding: None,
-        };
-
-        // The production replacement path: persist the reset, then hand the worker the
-        // complete new snapshot. Read the disk between the two steps.
-        let mut replacement = current.clone();
-        replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
-        node.prepare_authority_replacement(&replacement)
-            .expect("persist the new authority's reset");
-        let saved_before_worker = read_public_state(&directory.join(PUBLIC_STATE))
-            .expect("read state before the worker is told")
-            .expect("state exists before the worker is told");
-        let worker_touched_peers = at_fence.lock().expect("replacement state lock").is_some();
-        node.down().expect("stop test worker");
-        fs::remove_dir_all(directory).expect("remove state directory");
-
-        assert!(
-            !worker_touched_peers,
-            "the worker was told before the reset was durable"
-        );
-        let denied = saved_before_worker
-            .config
-            .expect("retained denied snapshot");
-        assert_eq!(denied.authority_epoch.as_deref(), Some(AUTHORITY_EPOCH_B));
-        assert!(denied.peers.is_empty(), "retired peers were persisted");
-        assert_eq!(denied.default_policy, DefaultPolicy::Deny);
-        assert!(saved_before_worker.authority_reset_pending);
-    }
-
-    /// A changed authority retires its old rotation journal but keeps the active interface marker.
-    #[test]
-    fn authority_change_discards_old_rotation_journal() {
-        let private_key = [9; 32];
-        let active_key = mac_private_public(&private_key);
-        let mut current = config();
-        current.local_key = Some(active_key);
-        let directory = std::env::temp_dir().join(format!(
-            "infraternal-j363-mac-rotation-retirement-{}",
-            std::process::id()
-        ));
-        fs::create_dir(&directory).expect("state directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("private state directory");
-        let state_path = directory.join(PUBLIC_STATE);
-        let store = crate::node_state::Store::open_for_macos(&directory).expect("open node store");
-        store
-            .record_interface(&active_key)
-            .expect("record active key");
-        store
-            .replace_private_key(&private_key)
-            .expect("save active key");
-        store
-            .save_rotation_secret(&crate::node_state::RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
-                sequence: 11,
-                previous: [3; 32],
-                candidate: private_key,
-                commit_requested: true,
-                completed: true,
-            })
-            .expect("save old authority journal");
-        let identity = Identity {
-            public_key: active_key,
-            port: 51820,
-            compact_access: true,
-            #[cfg(feature = "mesh-dns")]
-            dns_names: false,
-            key_rotation: true,
-            authority_epoch: true,
-        };
-        let store = Some(store);
-        let applied = Arc::new(Mutex::new(Vec::new()));
-        let mut node = Node {
-            enabled: true,
-            worker: Some(recording_worker(Arc::clone(&applied))),
-            identity: Some(identity),
-            store,
-            config: Some(current.clone()),
-            authority_reset_pending: false,
-            pending: None,
-            routes: route_addresses(&current),
-            interface: Some("utun-test".to_owned()),
-            port: 51820,
-            path: Some(state_path),
-            binding: None,
-        };
-
-        let mut replacement = current.clone();
-        replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
-        node.prepare_authority_replacement(&replacement)
-            .expect("persist the new authority's reset");
-        let journal = node
-            .store
-            .as_ref()
-            .expect("node store")
-            .rotation_secret()
-            .expect("read journal");
-        let retained_key = node
-            .store
-            .as_ref()
-            .expect("node store")
-            .recorded_interface()
-            .expect("read interface marker");
-        let retained_private_key = node
-            .store
-            .as_ref()
-            .expect("node store")
-            .read_private_key()
-            .expect("read active key");
-        node.down().expect("stop test worker");
-        fs::remove_dir_all(directory).expect("remove state directory");
-
-        assert!(journal.is_none(), "retired rotation journal remained");
-        assert_eq!(retained_key, Some(active_key));
-        assert!(
-            retained_private_key
-                .as_ref()
-                .is_some_and(|key| key.as_slice() == private_key)
-        );
-    }
-
     #[test]
     fn accepted_configuration_rejects_duplicate_peer_identity_and_addresses() {
         let mut config = config();
@@ -3872,6 +3790,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let mut chunks = crate::configuration::chunks(None, &config).expect("full snapshot");
         assert_eq!(chunks.len(), 1);
@@ -3918,6 +3837,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
 
         let mut pending = None;
@@ -4845,31 +4765,6 @@ mod tests {
         assert!(validate_underlay_routes(&config, &routes).is_err());
     }
 
-    #[tokio::test]
-    async fn prebound_wireguard_socket_keeps_the_advertised_port_on_reconfiguration() {
-        let mut factory = UdpSocketFactory::default();
-        let params = UdpTransportFactoryParams {
-            addr: None,
-            port: 0,
-        };
-        let (send, receive) = factory.bind(&params).await.expect("prebind UDP");
-        let port = send.local_addr().expect("UDP address").port();
-        let mut bound = BoundUdpFactory {
-            send,
-            receive,
-            port,
-        };
-        let (reused_send, reused_receive) = bound
-            .bind(&UdpTransportFactoryParams { addr: None, port })
-            .await
-            .expect("reuse the prebound UDP socket");
-        assert_eq!(reused_send.local_addr().expect("send address").port(), port);
-        assert_eq!(
-            reused_receive.local_addr().expect("receive address").port(),
-            port
-        );
-    }
-
     struct TestDirectory(PathBuf);
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     impl TestDirectory {
@@ -4920,5 +4815,112 @@ mod tests {
             .map(|directory| directory.0.clone())
             .collect::<BTreeSet<_>>();
         assert_eq!(paths.len(), directories.len());
+    }
+
+    /// Decode a 64-character hex `WireGuard` key from the bench environment.
+    fn bench_key(name: &str) -> [u8; 32] {
+        let hex = std::env::var(name).expect("bench key variable");
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex key"))
+            .collect();
+        bytes.try_into().expect("32-byte key")
+    }
+
+    /// J461 bench harness (#260): the exact Mac data path (this module's `MacUtun` reader and
+    /// writer, the bound UDP factory, the pinned `GotaTun` device on a current-thread runtime, as
+    /// `Node` builds it) with one static peer and no coordinator, so the macOS send and receive
+    /// cells can be measured against other engines on the same link.
+    ///
+    /// Root only (utun). Environment: `J461_PRIVATE_HEX`, `J461_PEER_PUBLIC_HEX`,
+    /// `J461_ENDPOINT` (peer `ip:port`), `J461_PORT`, `J461_ADDR` and `J461_PEER_ADDR` (tunnel
+    /// IPv4 addresses), `J461_IFNAME_FILE` (the utun name is written there once up) and `J461_STOP` (the
+    /// device stops when that file appears). Run with
+    /// `cargo test --release --features agent --lib mac_bench_device -- --ignored`.
+    #[test]
+    #[ignore = "bench harness: root, a live peer and the J461_* environment"]
+    fn mac_bench_device() {
+        use gotatun::{
+            device::{DeviceBuilder, Peer as WireGuardPeer},
+            x25519::{PublicKey as WgPublicKey, StaticSecret},
+        };
+        let var = |name: &str| std::env::var(name).expect("bench variable");
+        let port: u16 = var("J461_PORT").parse().expect("port");
+        let endpoint: std::net::SocketAddr = var("J461_ENDPOINT").parse().expect("endpoint");
+        let peer_addr: IpAddr = var("J461_PEER_ADDR").parse().expect("peer address");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        // The worker's packet filter, compiled from a one-peer snapshot that grants the bench
+        // peer every port both ways, so the filter's per-packet cost is part of the measurement
+        // and nothing is dropped. An empty filter would deny all traffic.
+        let mut snapshot = config();
+        snapshot.addresses.ipv4 = var("J461_ADDR").parse().expect("tunnel IPv4");
+        let peer_key = bench_key("J461_PEER_PUBLIC_HEX");
+        for policy in snapshot.peers.values_mut() {
+            policy.peer.key = PublicKey(peer_key);
+            policy.peer.addresses.ipv4 = var("J461_PEER_ADDR").parse().expect("peer IPv4");
+            policy.peer.endpoint = Some(endpoint);
+        }
+        let filter = std::sync::Arc::new(
+            crate::packet_filter::PacketFilter::new(
+                &snapshot,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
+        runtime.block_on(async {
+            let utun = super::MacUtun::from_open(super::OpenUtun::open().expect("utun"), filter)
+                .expect("register utun");
+            // The worker's socket, with its handshake guard admitting the one bench peer.
+            let private_key = StaticSecret::from(bench_key("J461_PRIVATE_HEX"));
+            let (factory, port) = super::bind_udp(
+                crate::listen_port::Request {
+                    port,
+                    allow_fallback: false,
+                },
+                private_key.clone(),
+            )
+            .await
+            .expect("bind");
+            {
+                let mut admission = factory.admission.write().await;
+                admission.set_peers([PublicKey(peer_key)]);
+                admission.set_configured_endpoints([endpoint]);
+            }
+            let mut peer = WireGuardPeer::new(WgPublicKey::from(peer_key))
+                .with_allowed_ips(vec![ipnetwork::IpNetwork::new(peer_addr, 32).expect("net")]);
+            peer.endpoint = Some(endpoint);
+            peer.keepalive = Some(25);
+            let device = DeviceBuilder::new()
+                .with_udp(factory)
+                .with_private_key(private_key)
+                .with_listen_port(port)
+                .with_ip_pair(utun.sender(), utun.receiver())
+                .with_peers(vec![peer])
+                .build()
+                .await
+                .expect("device");
+            utun.set_mtu(1280);
+            let status = std::process::Command::new("/sbin/ifconfig")
+                .args([
+                    utun.name(),
+                    "inet",
+                    &var("J461_ADDR"),
+                    &peer_addr.to_string(),
+                ])
+                .args(["mtu", "1280", "up"])
+                .status()
+                .expect("ifconfig");
+            assert!(status.success(), "ifconfig failed");
+            fs::write(var("J461_IFNAME_FILE"), utun.name()).expect("publish the utun name");
+            let stop = PathBuf::from(var("J461_STOP"));
+            while !stop.exists() {
+                // sleep: poll the stop file
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            device.stop().await;
+        });
     }
 }

@@ -26,6 +26,8 @@ def main():
             runs_static = "RUN static builds\n" in result.stdout
             assert runs_static == (mode == "final"), result.stdout
             assert "RUN test\n" in result.stdout, result.stdout
+            # Cheap enough for iterate; the release feature sets must never go unchecked (#530).
+            assert "RUN release feature sets\n" in result.stdout, result.stdout
             print(f"{host} {mode}: native tests run; static dispatch PASS")
 
     # Exercise runtime selection without executing a foreign image. The real

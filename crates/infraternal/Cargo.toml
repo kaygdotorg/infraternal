@@ -49,6 +49,14 @@ infraternal-plugin-proxy = { path = "../plugins/proxy", version = "0.1.0", optio
 [target.'cfg(target_os = "linux")'.dependencies]
 qrcodegen = { version = "1.8.0", optional = true }
 
+# Static (musl) builds use mimalloc as the global allocator of the whole binary
+# (#522, owner decision 2026-11-16). musl's own malloc hands freed memory back to
+# the kernel eagerly, which halved GotaTun's throughput. MIT-licensed; builds
+# mimalloc v3 from C with its own defines only. glibc and macOS builds keep the
+# C library's allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1.52", default-features = false }
+
 [features]
 # App windows are compiled only for an explicit desktop build (#146).
 desktop = ["plugin-agent", "infraternal-agent/desktop", "plugin-server", "dep:infraternal-plugin-desktop", "infraternal-plugin-desktop/desktop", "infraternal-server/desktop"]
@@ -76,7 +84,7 @@ mesh = ["plugin-mesh"]
 ee = ["infraternal-server?/ee", "infraternal-agent?/ee"]
 plugin-host-facts = ["plugin-agent", "dep:infraternal-plugin-host-facts", "infraternal-agent/plugin-host-facts"]
 plugin-relay = ["dep:infraternal-plugin-relay"]
-plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "infraternal-plugin-remote?/server", "dep:tokio"]
+plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "infraternal-plugin-remote?/server", "dep:infraternal-plugin-mesh", "dep:tokio"]
 plugin-ssh = ["dep:infraternal-plugin-ssh"]
 # Also compile the hidden commands of components that are not built yet (D299 C5); the
 # D16 one-source tests need them. Off by default: their text costs binary size (D243).

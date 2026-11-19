@@ -43,6 +43,8 @@ required-features = ["desktop"]
 [dev-dependencies]
 # The socket publication test watches the runtime directory (Linux inotify).
 nix = { workspace = true, features = ["event", "inotify"] }
+# Paused time keeps marker-retry tests deterministic without wall-clock sleeps.
+tokio = { workspace = true, features = ["test-util"] }
 infraternal-agent = { path = "../../infraternal-agent", version = "0.1.0", default-features = false, features = ["remote", "native-streams"] }
 quinn.workspace = true
 # Real mutual-TLS fixtures generate identities in memory; no test key is stored.

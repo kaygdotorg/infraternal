@@ -74,6 +74,7 @@ fn review_live_endpoint_refresh_refuses_foreign_interface() {
             ipv6: "fd01::2".parse().expect("IPv6"),
         },
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
     };
     // This inventory can survive a person's deletion/replacement of the live TUN. The
     // replacement has no ownership alias, so its routes are outside this node's authority.
@@ -167,6 +168,7 @@ fn live_endpoint_refresh_stays_on_the_proven_link() {
             ipv6: "fd01::2".parse().expect("IPv6"),
         },
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
     };
     let state = Mutex::new(PeerRouteState::default());
     {
@@ -231,6 +233,7 @@ fn live_endpoint_refresh_writes_only_changed_budgets() {
                 ipv6: format!("fd01::{id}").parse().expect("IPv6"),
             },
             endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+            candidates: Vec::new(),
         })
         .collect();
     let state = Mutex::new(PeerRouteState::default());
@@ -284,6 +287,7 @@ fn live_endpoint_refresh_probes_only_after_underlay_changes() {
                 ipv6: format!("fd01::{id}").parse().expect("IPv6"),
             },
             endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+            candidates: Vec::new(),
         })
         .collect();
     let learned: Vec<_> = peers
@@ -360,6 +364,7 @@ fn live_endpoint_refresh_preserves_relay_budget_for_direct_fallback() {
             ipv6: "fd01::2".parse().expect("mesh IPv6"),
         },
         endpoint: Some(configured),
+        candidates: Vec::new(),
     };
     let state = Mutex::new(PeerRouteState::default());
     {
@@ -427,6 +432,7 @@ fn review_j552_relay_fallback_does_not_derive_budget_from_relay_shim() {
             ipv6: "fd01::2".parse().expect("IPv6"),
         },
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
     };
     let state = Mutex::new(PeerRouteState::default());
     {
@@ -499,6 +505,7 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
                 ipv6: format!("fd02::{:x}", index + 2).parse().expect("IPv6"),
             },
             endpoint: Some(std::net::SocketAddr::from(([192, 0, 2, 2], 51820))),
+            candidates: Vec::new(),
         });
         learned.push((
             key,
@@ -574,6 +581,7 @@ fn review_j609_policy_rule_change_rederives_route_budgets() {
             ipv6: format!("fd01::{id}").parse().expect("IPv6"),
         },
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
     };
     let peers = [peer(2), peer(3)];
     let learned = [
@@ -711,6 +719,7 @@ fn live_endpoint_refresh_rederives_after_nexthop_replace() {
             ipv6: "fd01::2".parse().expect("IPv6"),
         },
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
     };
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
@@ -777,6 +786,7 @@ fn live_endpoint_refresh_retries_a_failed_lookup() {
             ipv6: "fd01::2".parse().expect("IPv6"),
         },
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
     };
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
@@ -872,6 +882,7 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
             ipv6: "fd01::2".parse().expect("IPv6"),
         },
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
     };
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
@@ -924,4 +935,69 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
         "an IPv6 rule that moves the endpoint must re-derive at the next refresh"
     );
     assert!(after.0.contains("mtu 1216"), "{after:?}");
+}
+
+/// #525: the route listener survives a burst of announcements that overflows its socket.
+///
+/// A node's first refresh at mesh scale writes thousands of peer routes, and the kernel
+/// announces every one to the listener. When the listener's receive buffer fills, the kernel
+/// drops the rest and records `ENOBUFS` as the socket's pending error, so poll reports POLLERR.
+/// The listener must treat that as the lost notification it is (bump the underlay watch and ask
+/// for a full inventory check), not as a dead socket: dropping it marks the watch unwatched, and
+/// every refresh re-derives every peer until the next inventory check opens a new one. That is
+/// what made `review_j552_steady_refresh_cost_at_4096_peers` flaky under load.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
+    use crate::policy::model::{Addresses, PublicKey};
+    use std::os::fd::AsFd;
+    review_route_command(&["link", "set", "lo", "up"]);
+    let link = review_marked_tun(PublicKey([0xee; 32]));
+    let underlay = Arc::new(crate::wireguard::UnderlayWatch::default());
+    let mut listener =
+        Device::route_monitor(&link, Arc::clone(&underlay)).expect("open the route listener");
+    underlay.set_watched(true);
+    let before = underlay.generation();
+    // 2,048 peers announce 4,096 routes while nobody reads: far more than the default
+    // receive buffer holds, so the kernel drops some and flags the overflow.
+    let peers: Vec<_> = (0_u16..2048)
+        .map(|index| {
+            let [high, low] = index.to_be_bytes();
+            let mut key = [0_u8; 32];
+            key[..2].copy_from_slice(&index.to_be_bytes());
+            key[31] = 1;
+            crate::dataplane::Peer {
+                key: PublicKey(key),
+                previous_key: None,
+                previous_active: false,
+                addresses: Addresses {
+                    ipv4: std::net::Ipv4Addr::new(10, 200, high, low),
+                    ipv6: format!("fd02::{:x}", index + 2).parse().expect("IPv6"),
+                },
+                endpoint: None,
+                candidates: Vec::new(),
+            }
+        })
+        .collect();
+    let routes: Vec<_> = peers.iter().map(|peer| (peer, 1408_u16)).collect();
+    Device::replace_peer_routes_on(&link, &routes).expect("write the route burst");
+    let (cancel_read, _cancel) = UnixStream::pair().expect("cancel stream");
+    let wake = listener.wait_for_deleted_peer_route(
+        cancel_read.as_fd(),
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+    assert!(
+        matches!(wake, Ok(crate::wireguard::RouteWake::Reconcile)),
+        "an overflow asks for an inventory check: {:?}",
+        wake.as_ref().map(|_| ()).map_err(ToString::to_string)
+    );
+    assert!(
+        underlay.generation().is_some(),
+        "the watch is still watched"
+    );
+    assert_ne!(
+        underlay.generation(),
+        before,
+        "the overflow moved the watch"
+    );
 }

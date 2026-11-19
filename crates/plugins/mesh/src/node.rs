@@ -346,11 +346,10 @@ fn repair_accepted_routes(
     let mut first_error = None;
     let mut repaired = BTreeSet::new();
     for peer in state.peers.values() {
-        let mtu = state
-            .overrides
-            .get(&peer.key)
-            .copied()
-            .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint));
+        // Derived only for a peer with a missing route: the lookup is a netlink request made
+        // under the route-state lock, and an inventory check that finds nothing missing must not
+        // cost one per installed peer every interval (#525: 4,096 lookups on fresh sockets).
+        let mut mtu = None;
         for address in [
             IpAddr::V4(peer.addresses.ipv4),
             IpAddr::V6(peer.addresses.ipv6),
@@ -358,6 +357,13 @@ fn repair_accepted_routes(
             if !missing.contains(&address) {
                 continue;
             }
+            let mtu = *mtu.get_or_insert_with(|| {
+                state
+                    .overrides
+                    .get(&peer.key)
+                    .copied()
+                    .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint))
+            });
             // The re-added route has the configured budget; the next live refresh rewrites it.
             repaired.insert(peer.key);
             if let Err(error) = Device::repair_peer_route(link, peer, address, mtu) {
@@ -632,6 +638,28 @@ pub static BEFORE_KERNEL_KEY: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>
 #[cfg(feature = "test-support")]
 pub static BEFORE_SETTLE_SAVE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
+/// A one-shot, fallible test step: set it to a closure, and the transaction runs (and clears) it
+/// at its seam; an `Err` fails the step the seam stands in front of.
+#[cfg(feature = "test-support")]
+pub type TransactionSeam = std::sync::Mutex<Option<Box<dyn FnOnce() -> io::Result<()> + Send>>>;
+/// Test seam (#265 J618): runs once in a full mesh transaction right before its disk save. An
+/// `Err` fails that save, so a namespace test can drive the rollback of a transaction that has
+/// already changed the engine's peers.
+#[cfg(feature = "test-support")]
+pub static BEFORE_TRANSACTION_SAVE: TransactionSeam = std::sync::Mutex::new(None);
+/// Test seam (#265 J618): runs once in a failed full transaction's rollback right before the
+/// `GotaTun` engine gets its old peers back. An `Err` fails that step, leaving the state a
+/// failed rollback leaves behind for the test to inspect.
+#[cfg(feature = "test-support")]
+pub static BEFORE_ROLLBACK_ENGINE_APPLY: TransactionSeam = std::sync::Mutex::new(None);
+/// Run and clear one of the fallible transaction test seams above; `Ok` when none is set.
+#[cfg(feature = "test-support")]
+fn run_transaction_seam(seam: &TransactionSeam) -> io::Result<()> {
+    seam.lock()
+        .ok()
+        .and_then(|mut hook| hook.take())
+        .map_or(Ok(()), |hook| hook())
+}
 /// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
 /// shared-filter decision, so a namespace test can start another installation in that window.
 #[cfg(feature = "test-support")]
@@ -736,6 +764,49 @@ fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof
     link.engine == EngineKind::GotaTun
         && !proof.is_empty()
         && link.owner.is_some_and(|owner| proof.accepts(owner))
+}
+
+/// Choose the port a restarted kernel node keeps on the link it adopted, and save it.
+///
+/// Kernel links outlive their process (D332), so restore finds the old port already bound.
+/// D391 still applies: an explicit `INFRATERNAL_MESH_PORT` binds exactly that port and fails if it
+/// is taken (J555 F3). Without an override, the node moves back to its saved or default port when
+/// that is free, the same as `GotaTun`, which binds on every start, and otherwise keeps the port it
+/// has as its fallback. A retained link from an older daemon may sit on the reserved 51820; it
+/// moves to a fresh port. The saved port follows `up`'s rule: a fallback is saved, an override
+/// saves the default, so removing the override later moves the node back.
+/// # Errors
+/// Reports a malformed override, a taken explicit port, kernel errors, or a failed state write.
+fn restore_kernel_listen_port(node: &Node, ifindex: u32, current: u16) -> io::Result<u16> {
+    let saved = node
+        .store
+        .as_ref()
+        .map(crate::node_state::Store::recorded_listen_port)
+        .transpose()?
+        .flatten();
+    let request = crate::listen_port::from_environment(saved)?;
+    let mut port = current;
+    if request.port != current {
+        match Device::set_listen_port(ifindex, request.port) {
+            Ok(()) => port = request.port,
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if port == 51820 {
+        port = Device::allocate_port(ifindex)?;
+    }
+    if let Some(store) = &node.store {
+        let keep = if request.allow_fallback {
+            port
+        } else {
+            crate::listen_port::DEFAULT_PORT
+        };
+        if saved != Some(keep) {
+            store.record_listen_port(keep)?;
+        }
+    }
+    Ok(port)
 }
 
 /// Recreate the `GotaTun` private-key file only from the durable rotation journal.
@@ -1052,7 +1123,7 @@ impl Default for Node {
             routes: BTreeSet::new(),
             peer_route_state: Arc::default(),
             route_repair: None,
-            firewall: Firewall::default(),
+            firewall: Firewall::for_node(None, EngineKind::GotaTun),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
             kernel_owner: KernelProof::default(),
@@ -1065,6 +1136,17 @@ impl Default for Node {
             dns_integration: crate::dns_integration::DnsIntegration::default(),
             #[cfg(feature = "cutoff-measure")]
             refusing_at_ns: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Node {
+    /// Build an in-memory node with a known public identity for action-output tests.
+    pub(crate) fn with_identity_for_action_test(identity: Identity) -> Self {
+        Self {
+            identity: Some(identity),
+            ..Self::default()
         }
     }
 }
@@ -1112,6 +1194,7 @@ impl Node {
     pub fn with_engine(mut self, engine: EngineKind) -> Self {
         self.engine_kind = engine;
         self.engine_source = EngineSource::Code;
+        self.firewall = Firewall::for_node(self.firewall.backend(), engine);
         self
     }
 
@@ -1207,9 +1290,7 @@ impl Node {
                 AuthorityResetState::Stable
             },
             store: Some(store),
-            firewall: state
-                .backend
-                .map_or_else(Firewall::default, Firewall::for_backend),
+            firewall: Firewall::for_node(state.backend, engine_kind),
             ..Self::default()
         };
         // Both links outlive their process (D332). A live one is this installation's only under
@@ -1248,11 +1329,7 @@ impl Node {
             if public_key.0 == [0; 32] || port == 0 {
                 return Err(io::ErrorKind::NotConnected.into());
             }
-            // A retained interface from an older daemon may have selected the
-            // reserved port. Rebind its socket while preserving its private key.
-            if port == 51820 {
-                port = Device::allocate_port(link.ifindex)?;
-            }
+            port = restore_kernel_listen_port(&node, link.ifindex, port)?;
             node.identity = Some(Identity {
                 public_key,
                 port,
@@ -1262,7 +1339,10 @@ impl Node {
                 // Kernel `WireGuard` rotates its key in place (#285, D166).
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
             });
+            // The restored kernel socket's port is what the host input table admits (D386).
+            node.firewall.set_listen_port(Some(port))?;
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
@@ -1300,8 +1380,10 @@ impl Node {
     /// own, a live mesh link belongs to another running node whose policy the
     /// filter enforces (#260). An unmarked interface with the shared name
     /// counts as live: it may be another node's TUN before it is marked.
+    /// The same step closes the mesh listener this node opened in the host
+    /// input table, which a `GotaTun` node may hold without any kernel table.
     fn remove_unshared_filter(&mut self) -> io::Result<()> {
-        if !self.firewall.installed() {
+        if !self.firewall.installed() && !self.firewall.host_ingress_open() {
             return Ok(());
         }
         match Device::active_link() {
@@ -1425,6 +1507,14 @@ impl Node {
     pub fn active(&self) -> bool {
         self.identity.is_some()
     }
+    /// Return the active UDP listener port advertised by this node's mesh identity.
+    ///
+    /// `None` means the data plane is stopped or has not bound a socket yet. The value is the
+    /// actual port after automatic fallback, so `mesh status` can report what peers should reach.
+    #[must_use]
+    pub fn listen_port(&self) -> Option<u16> {
+        self.identity.as_ref().map(|identity| identity.port)
+    }
     /// Whether a retired authority still needs a complete snapshot from the enrolled server.
     #[must_use]
     pub fn awaiting_server_snapshot(&self) -> bool {
@@ -1442,6 +1532,18 @@ impl Node {
         proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
         confirmed: bool,
     ) -> io::Result<()> {
+        let policy = if self.engine_kind == EngineKind::GotaTun
+            && self.active()
+            && let Some(config) = self.config.as_ref()
+        {
+            self.gotatun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+            Some(crate::gotatun_node::Engine::prepare_policy(
+                config,
+                proxy_ingress.clone(),
+            )?)
+        } else {
+            None
+        };
         // An unchanged snapshot still reaches the firewall: Traefik has just confirmed it, and
         // any source that lost a route since the last confirmation must lose its open flows.
         if self.active()
@@ -1449,6 +1551,12 @@ impl Node {
         {
             self.firewall
                 .apply_proxy_ingress(config, &proxy_ingress, confirmed)?;
+        }
+        if let Some(policy) = policy {
+            self.gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .publish_policy(policy);
         }
         self.proxy_ingress = proxy_ingress;
         Ok(())
@@ -1532,6 +1640,13 @@ impl Node {
             reason: self.engine_source.reason(),
         }
     }
+
+    /// Report the optional kernel-only guard that the `GotaTun` node currently has installed.
+    #[must_use]
+    pub(crate) fn kernel_guard_status(&self) -> Option<&crate::firewall::KernelGuardStatus> {
+        self.firewall.kernel_guard_status()
+    }
+
     /// Health of the running `GotaTun` engine; `None` under kernel `WireGuard` or when stopped.
     #[must_use]
     pub fn engine_health(&self) -> Option<crate::gotatun_node::EngineHealth> {
@@ -1784,6 +1899,13 @@ impl Node {
             self.ensure_route_repair()?;
             return Ok(identity);
         }
+        let saved_port = self
+            .store
+            .as_ref()
+            .map(crate::node_state::Store::recorded_listen_port)
+            .transpose()?
+            .flatten();
+        let listen_port = crate::listen_port::from_environment(saved_port)?;
         if self.engine_kind == EngineKind::GotaTun
             && let Some(store) = &self.store
         {
@@ -1813,7 +1935,17 @@ impl Node {
                 {
                     hook();
                 }
-                if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                let configure = Device::configure(created, public_key, &key, listen_port.port);
+                let configure = match configure {
+                    Err(error)
+                        if listen_port.allow_fallback
+                            && error.kind() == io::ErrorKind::AddrInUse =>
+                    {
+                        Device::configure(created, public_key, &key, 0)
+                    }
+                    result => result,
+                };
+                if let Err(error) = configure {
                     // Delete exactly the link this call created: `down` proves links by the
                     // shared name, which may no longer lead to ours (#260 J242).
                     let _ = Device::delete_ifindex(created);
@@ -1824,6 +1956,14 @@ impl Node {
                     let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    if let Some(store) = &self.store {
+                        let saved = if listen_port.allow_fallback {
+                            port
+                        } else {
+                            crate::listen_port::DEFAULT_PORT
+                        };
+                        store.record_listen_port(saved)?;
                     }
                     let client = Client::new()?;
                     let route_repair =
@@ -1845,8 +1985,11 @@ impl Node {
                             dns_names: cfg!(target_os = "linux"),
                             key_rotation: true,
                             authority_epoch: true,
+                            rotation_continuity: true,
                         };
                         self.identity = Some(identity.clone());
+                        // The host input table admits exactly the port this socket bound (D386).
+                        self.firewall.set_listen_port(Some(identity.port))?;
                         Ok(identity)
                     }
                     Err(error) => {
@@ -1864,8 +2007,9 @@ impl Node {
                 let engine = Engine::start(
                     key.gotatun_secret()?,
                     public_key,
-                    0,
+                    listen_port,
                     None,
+                    &self.proxy_ingress,
                     adopt,
                     route_endpoint_updater,
                 )?;
@@ -1878,6 +2022,18 @@ impl Node {
                     let mut engine = engine;
                     let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
+                }
+                if let Some(store) = &self.store {
+                    let saved = if listen_port.allow_fallback {
+                        port
+                    } else {
+                        crate::listen_port::DEFAULT_PORT
+                    };
+                    if let Err(error) = store.record_listen_port(saved) {
+                        let mut engine = engine;
+                        let _ = engine.stop();
+                        return Err(error);
+                    }
                 }
                 let route_repair =
                     match RouteRepairWorker::start(Arc::clone(&self.peer_route_state)) {
@@ -1909,8 +2065,11 @@ impl Node {
                     // available on the authenticated, enrollment-bound channel (#382, D166, D352).
                     key_rotation: true,
                     authority_epoch: true,
+                    rotation_continuity: true,
                 };
                 self.identity = Some(identity.clone());
+                // The host input table admits exactly the port this socket bound (D386).
+                self.firewall.set_listen_port(Some(identity.port))?;
                 Ok(identity)
             }
         }
@@ -2506,7 +2665,10 @@ impl Node {
             self.remove_unshared_filter()?;
         }
         self.retire_routes()?;
-        self.firewall = Firewall::default();
+        // A fresh firewall keeps this node's engine mode: a `GotaTun` node that comes up again
+        // in this process must stay on the optional guard, not switch to the full kernel policy,
+        // which needs nft or iptables-nft (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
         self.gotatun = None;
@@ -2609,17 +2771,6 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
-        if self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
-            && chunk.index == 0
-            && chunk.from_version.is_none()
-            && self
-                .config
-                .as_ref()
-                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
-        {
-            self.validate_binding(&chunk)?;
-            self.retire_settled_authority_rotation()?;
-        }
         let result = self.stage(chunk);
         if let Err(error) = &result {
             self.pending = None;
@@ -2684,25 +2835,31 @@ impl Node {
     }
 
     /// Check that the live data plane contains exactly the keys in a same-content snapshot.
+    ///
+    /// `GotaTun` omits peers with no network access so their configured endpoints cannot receive
+    /// unsolicited handshakes. The kernel engine retains its complete peer inventory.
     fn runtime_peer_inventory_matches(&self, config: &Config) -> bool {
         let Ok(counters) = self.peer_counters() else {
             return false;
         };
         let installed: std::collections::BTreeSet<_> = counters.keys().copied().collect();
-        let desired: std::collections::BTreeSet<_> = config
-            .peers
-            .values()
-            .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
-            .flatten()
-            .collect();
+        let desired = match self.engine_kind {
+            EngineKind::GotaTun => crate::gotatun_node::peer_keys_with_network_access(config),
+            EngineKind::Kernel => config
+                .peers
+                .values()
+                .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
+                .flatten()
+                .collect(),
+        };
         installed == desired
     }
 
-    /// Persist the deny state and retire the old journal without touching live peers.
+    /// Persist the deny state and retire a superseded journal without touching live peers.
     ///
     /// This runs only after the new authority's complete snapshot has passed chunk validation.
     /// A process stop between persistence and replacement then restores no peers from the old
-    /// authority.
+    /// authority. An exact operation match retains its journal for commit or finish retries.
     /// # Errors
     /// Stops the owned runtime if the durable reset or journal retirement cannot complete.
     fn prepare_authority_replacement(&mut self, replacement: &Config) -> io::Result<Config> {
@@ -2712,22 +2869,36 @@ impl Node {
         #[cfg(feature = "mesh-dns")]
         denied.peer_names.clear();
         self.pending = None;
-        let rotation_error = self.settle_authority_rotation().err();
+        // A new process can still own the same database operation. Its authenticated full
+        // snapshot must name the exact UUID and sequence; key binding was checked by stage.
+        let continuity = self
+            .store
+            .as_ref()
+            .map(|store| store.rotation_matches(replacement.rotation_operation.as_ref()))
+            .transpose()
+            .map(|matched| matched.unwrap_or(false));
+        let continues_rotation = matches!(continuity, Ok(true));
+        let rotation_error = match continuity {
+            Ok(true) => None,
+            Ok(false) => self.settle_authority_rotation().err(),
+            Err(error) => Some(error),
+        };
         if let Some(identity) = &self.identity {
             denied.local_key = Some(identity.public_key);
         }
         self.config = Some(denied.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
         let persistence_error = self.persist_retired_snapshot(&denied).err();
-        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
-            self.store
-                .as_ref()
-                .map(crate::node_state::Store::discard_rotation_journal)
-                .transpose()
-                .err()
-        } else {
-            None
-        };
+        let journal_error =
+            if persistence_error.is_none() && rotation_error.is_none() && !continues_rotation {
+                self.store
+                    .as_ref()
+                    .map(crate::node_state::Store::discard_rotation_journal)
+                    .transpose()
+                    .err()
+            } else {
+                None
+            };
         if let Some(error) = persistence_error.or(rotation_error).or(journal_error) {
             return Err(self.fail_closed_authority_replacement(error, &denied));
         }
@@ -2742,11 +2913,19 @@ impl Node {
         error: io::Error,
         denied: &Config,
     ) -> io::Error {
+        // Rejected content fences peers but keeps the journal.
+        let mut denied = denied.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns")]
+        denied.peer_names.clear();
         self.config = Some(denied.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
         self.pending = None;
+        // Fence restore first; the disabled write below retries any failure.
+        let _ = self.persist_retired_snapshot(&denied);
         let stop_error = self.stop_retired_runtime().err();
-        if let Err(persist_error) = self.persist_retired_snapshot(denied) {
+        if let Err(persist_error) = self.persist_retired_snapshot(&denied) {
             tracing::error!(
                 error_kind = ?persist_error.kind(),
                 "could not persist disabled peer-free mesh state after authority replacement failed"
@@ -2787,17 +2966,21 @@ impl Node {
         Ok(())
     }
 
-    /// Retry retirement cleanup before accepting a full snapshot after an interrupted reset.
+    /// Retry retirement cleanup only after a full snapshot validates after an interrupted reset.
     ///
     /// A durable peer-free state records the pending reset. If its journal removal failed, settle
     /// and save the active key binding again before unlinking that previous authority's journal.
+    /// The incoming full snapshot's exact operation match retains it, independent of cached metadata.
     /// # Errors
     /// Refuses an unproven rotation or a failed state or journal write.
-    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+    fn retire_settled_authority_rotation(
+        &mut self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        if store.rotation_secret()?.is_none() {
+        if store.rotation_secret()?.is_none() || store.rotation_matches(operation)? {
             return Ok(());
         }
         self.settle_authority_rotation()?;
@@ -2898,7 +3081,8 @@ impl Node {
         if let Err(error) = self.remove_unshared_filter() {
             first_error.get_or_insert(error);
         }
-        self.firewall = Firewall::default();
+        // Keep the engine's firewall mode for the next `up`, as `down` does (D384).
+        self.firewall = Firewall::for_node(None, self.engine_kind);
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.identity = None;
         self.owned = false;
@@ -2975,6 +3159,7 @@ impl Node {
             } else {
                 Config {
                     authority_epoch: chunk.authority_epoch.clone(),
+                    rotation_operation: chunk.rotation_operation.clone(),
                     local_key: chunk.local_key,
                     server: chunk.server,
                     node: chunk.node,
@@ -2991,6 +3176,10 @@ impl Node {
                     peer_names: BTreeMap::new(),
                 }
             };
+            let mut config = config;
+            config
+                .rotation_operation
+                .clone_from(&chunk.rotation_operation);
             #[cfg(feature = "mesh-dns")]
             let config = {
                 let mut config = config;
@@ -3018,6 +3207,7 @@ impl Node {
         let dns_suffix_changed = false;
         if pending.server != chunk.server
             || pending.config.authority_epoch != chunk.authority_epoch
+            || pending.config.rotation_operation != chunk.rotation_operation
             || pending.next != chunk.index
             || pending.config.local_key != chunk.local_key
             || pending.config.node != chunk.node
@@ -3091,15 +3281,44 @@ impl Node {
         let pending = self.pending.take().ok_or(io::ErrorKind::InvalidData)?;
         let full_snapshot = pending.from_version.is_none();
         let config = pending.config;
-        if self
+        let authority_changed = self
             .config
             .as_ref()
-            .is_some_and(|old| old.authority_epoch != config.authority_epoch)
-        {
-            return self.apply_authority_replacement(config);
-        }
+            .is_some_and(|old| old.authority_epoch != config.authority_epoch);
         let completes_authority_reset =
             self.authority_reset == AuthorityResetState::AwaitingFullSnapshot && full_snapshot;
+        if authority_changed || completes_authority_reset {
+            // Validate before settlement; rejected authorities still fence stale peers.
+            let validation = (|| {
+                self.validate_snapshot(&config)?;
+                #[cfg(feature = "mesh-dns")]
+                crate::dns::Records::from_config(&config)?;
+                let proposed: Vec<_> = std::iter::once(config.addresses)
+                    .chain(config.peers.values().map(|peer| peer.peer.addresses))
+                    .collect();
+                Device::check_routes(&proposed)?;
+                if self.engine_kind == EngineKind::GotaTun {
+                    crate::gotatun_node::Engine::prepare_policy(
+                        &config,
+                        self.proxy_ingress.clone(),
+                    )?;
+                }
+                Ok::<_, io::Error>(())
+            })();
+            if let Err(error) = validation {
+                return Err(if authority_changed {
+                    self.fail_closed_authority_replacement(error, &config)
+                } else {
+                    error
+                });
+            }
+            if !authority_changed {
+                self.retire_settled_authority_rotation(config.rotation_operation.as_ref())?;
+            }
+        }
+        if authority_changed {
+            return self.apply_authority_replacement(config);
+        }
         // A lower revision under the same epoch is accepted on purpose when this node has a
         // Store: a database restored under a running server keeps that process's epoch but
         // rewinds its revisions, and refusing would strand every node (#382). The Store's
@@ -3141,6 +3360,17 @@ impl Node {
             .is_some_and(|old| old.version == config.version)
             && !completes_authority_reset
         {
+            // Operation metadata can clear at completion without advancing packet policy.
+            // Reconnect may replay that same revision; it still cannot change keys or access.
+            if self
+                .config
+                .as_ref()
+                .is_some_and(|old| crate::dataplane::same_runtime_content(old, &config))
+            {
+                self.save(Some(&config), true)?;
+                self.config = Some(config);
+                return Ok(true);
+            }
             return self.upgrade_legacy_binding(config);
         }
         if let Some(base) = snapshot_base.as_ref() {
@@ -3217,17 +3447,12 @@ impl Node {
     ) -> io::Result<()> {
         self.apply_transaction(config, Some(snapshot_base), true)
     }
-    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
-    fn apply_transaction(
-        &mut self,
-        config: Config,
-        snapshot_base: Option<&Config>,
-        force_reconcile: bool,
-    ) -> io::Result<()> {
-        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
-        let dns_records = crate::dns::Records::from_config(&config)?;
-        #[cfg(feature = "cutoff-measure")]
-        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
+    /// Check complete peer identities and address ownership before any destructive reset.
+    ///
+    /// Staging checks each chunk's headers; these cross-peer checks need the assembled snapshot.
+    /// # Errors
+    /// Refuses address changes without overlap or colliding peer keys and addresses.
+    fn validate_snapshot(&self, config: &Config) -> io::Result<()> {
         if self
             .config
             .as_ref()
@@ -3267,6 +3492,30 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        Ok(())
+    }
+    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
+    fn apply_transaction(
+        &mut self,
+        config: Config,
+        snapshot_base: Option<&Config>,
+        force_reconcile: bool,
+    ) -> io::Result<()> {
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+        let dns_records = crate::dns::Records::from_config(&config)?;
+        #[cfg(feature = "cutoff-measure")]
+        let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
+        self.validate_snapshot(&config)?;
+        let mut packet_policy = if self.engine_kind == EngineKind::GotaTun {
+            self.gotatun
+                .as_ref()
+                .map(|_| {
+                    crate::gotatun_node::Engine::prepare_policy(&config, self.proxy_ingress.clone())
+                })
+                .transpose()?
+        } else {
+            None
+        };
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         if self.config.is_some() {
             self.ensure_dns_resolver(config.addresses.ipv4)?;
@@ -3468,13 +3717,54 @@ impl Node {
                 crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
-            self.firewall.install_pending(&config)?;
+            // The same nodes keep the same addresses here, so the new grants can reach the
+            // packet path first: a revocation is enforced before the firewall, routes or the
+            // disk save run, not after them (J592 P2-5). A failure below republishes the old
+            // grants.
+            self.publish_gotatun_policy(packet_policy.take());
+            if let Err(error) = self.firewall.install_pending(&config) {
+                self.restore_gotatun_policy(&BTreeSet::new());
+                return Err(error);
+            }
+            // `GotaTun` installs only peers with network access (gotatun_node.rs), so a grant or
+            // a revocation adds or removes engine peers although no peer field changed. Kernel
+            // `WireGuard` keeps every peer and needs only the firewall (#515).
+            let engine_peers_changed = self.engine_kind == EngineKind::GotaTun
+                && self.config.as_ref().is_none_or(|old| {
+                    crate::gotatun_node::peer_keys_with_network_access(old)
+                        != crate::gotatun_node::peer_keys_with_network_access(&config)
+                });
+            // Undo this transaction's packet-path changes: the old grants, and the old engine
+            // peers when this change added or removed some.
+            let restore_engine = |node: &Self| -> io::Result<()> {
+                node.restore_gotatun_policy(&BTreeSet::new());
+                if engine_peers_changed {
+                    node.gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(node.config.clone().ok_or(io::ErrorKind::NotConnected)?)?;
+                }
+                Ok(())
+            };
+            if engine_peers_changed
+                && let Err(error) = self
+                    .gotatun
+                    .as_ref()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+                    .and_then(|engine| engine.apply(config.clone()))
+            {
+                self.restore_gotatun_policy(&BTreeSet::new());
+                self.firewall
+                    .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+                return Err(error);
+            }
             let configured_peers: Vec<_> = config
                 .peers
                 .values()
                 .map(|policy| policy.peer.clone())
                 .collect();
             if let Err(error) = self.install_peer_routes(&configured_peers, false) {
+                restore_engine(self)?;
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3489,6 +3779,7 @@ impl Node {
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
             if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
+                restore_engine(self)?;
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
                 return Err(error);
@@ -3544,6 +3835,15 @@ impl Node {
             crate::mesh_mtu::for_config(Some(&config)),
         );
         self.apply_fence(&fence, &config)?;
+        // The engine starts delivering a reused or moved address's packets for its new owner as
+        // soon as the peers change below. Withdraw the old owners from the packet path first,
+        // then publish the new policy right after the peer change, before routes, the firewall
+        // and the disk save (J592 P2-5). A failed transaction keeps them withdrawn until the
+        // engine has its old peers back (J617 P2).
+        let moved = self.moved_gotatun_peers(&config);
+        if let Some(engine) = self.gotatun.as_ref() {
+            engine.withdraw_peers(&moved);
+        }
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
         let mut previous_route_overrides = None;
@@ -3562,6 +3862,7 @@ impl Node {
             // link stays IPv6-safe; its final size follows the largest peer budget.
             self.set_mesh_mtu(ifindex, previous_mtu.max(requested_mtu))?;
             self.apply_peer_changes(&config, &changed, &retired_keys)?;
+            self.publish_gotatun_policy(packet_policy.take());
             // A full accepted snapshot also re-derives routes for unchanged peers: the endpoint
             // route or its egress link MTU may have changed since their last peer update.
             let configured_peers: Vec<_> = config
@@ -3588,6 +3889,10 @@ impl Node {
             // Retire inventory only after kernel cleanup. If accepted-state
             // persistence fails, keep the union available for rollback/restart.
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
+            #[cfg(feature = "test-support")]
+            let saved = run_transaction_seam(&BEFORE_TRANSACTION_SAVE)
+                .and_then(|()| self.save_with_snapshot_base(Some(&config), true, snapshot_base));
+            #[cfg(not(feature = "test-support"))]
             let saved = self.save_with_snapshot_base(Some(&config), true, snapshot_base);
             if saved.is_err() {
                 self.routes = recorded;
@@ -3604,6 +3909,12 @@ impl Node {
             }
             // Saving can fail after the permissive policy transaction. Reinstall
             // the fence before rollback so any later error still denies NEW traffic.
+            // The packet path goes back to the accepted grants (or denies everything when there
+            // are none), whether or not the new policy was already published. The engine may
+            // still hold the new peer set, where a moved peer's old address can belong to
+            // another node, so the moved peers stay withdrawn until `apply(old)` below has
+            // succeeded. If any rollback step fails, they stay withdrawn (J617 P2).
+            self.restore_gotatun_policy(&moved);
             self.apply_fence(&fence, &config)?;
             if let Some(old) = &self.config {
                 if old.addresses != config.addresses {
@@ -3626,10 +3937,15 @@ impl Node {
                                 .collect::<Vec<_>>(),
                         )?;
                 } else {
+                    #[cfg(feature = "test-support")]
+                    run_transaction_seam(&BEFORE_ROLLBACK_ENGINE_APPLY)?;
                     self.gotatun
                         .as_ref()
                         .ok_or(io::ErrorKind::NotConnected)?
                         .apply(old.clone())?;
+                    // The engine has the accepted peers again, so their addresses mean what the
+                    // accepted grants say: give the moved peers their grants back.
+                    self.restore_gotatun_policy(&BTreeSet::new());
                 }
                 self.set_mesh_mtu(
                     mesh_mtu.0,
@@ -3679,6 +3995,61 @@ impl Node {
         self.publish_dns(dns_records)?;
         self.connection_cleanup_pending = true;
         self.finish_connection_cleanup()
+    }
+
+    /// Publish a precompiled `GotaTun` policy as soon as the engine's peers match it.
+    ///
+    /// Callers publish before the firewall, routes and disk save, so a narrowed grant is
+    /// enforced first; a failed transaction then calls [`Self::restore_gotatun_policy`].
+    fn publish_gotatun_policy(&self, policy: Option<crate::packet_filter::PreparedPolicy>) {
+        if let (Some(engine), Some(policy)) = (self.gotatun.as_ref(), policy) {
+            engine.publish_policy(policy);
+        }
+    }
+
+    /// Put the accepted config's grants back on the packet path after a failed transaction,
+    /// leaving out the `withheld` peers.
+    ///
+    /// `self.config` is still the accepted config here. When it cannot be compiled again, or
+    /// there is none, the filter denies everything rather than keep a half-applied snapshot.
+    /// `withheld` holds the accepted peers whose addresses the engine may currently give to
+    /// another node (see [`Self::moved_gotatun_peers`]); they are left out in the same atomic
+    /// publish, so there is no moment when their old grants match those addresses.
+    fn restore_gotatun_policy(&self, withheld: &BTreeSet<crate::policy::model::NodeId>) {
+        let Some(engine) = self.gotatun.as_ref() else {
+            return;
+        };
+        let restored = self
+            .config
+            .as_ref()
+            .and_then(|old| {
+                crate::gotatun_node::Engine::prepare_policy(old, self.proxy_ingress.clone()).ok()
+            })
+            .map_or_else(
+                crate::packet_filter::PacketFilter::deny_all_policy,
+                |policy| policy.without_peers(withheld),
+            );
+        engine.publish_policy(restored);
+    }
+
+    /// The accepted peers that `config` removes or moves to other addresses: once the engine
+    /// takes `config`'s peers, another node's packets may arrive from their old addresses, so
+    /// their grants must not be on the packet path. Empty without an accepted config or a
+    /// `GotaTun` engine.
+    fn moved_gotatun_peers(&self, config: &Config) -> BTreeSet<crate::policy::model::NodeId> {
+        let (Some(_), Some(old)) = (self.gotatun.as_ref(), self.config.as_ref()) else {
+            return BTreeSet::new();
+        };
+        old.peers
+            .iter()
+            .filter(|(node, previous)| {
+                config
+                    .peers
+                    .get(node)
+                    .is_none_or(|next| next.peer.addresses != previous.peer.addresses)
+            })
+            .map(|(node, _)| *node)
+            .collect()
     }
 
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
@@ -3785,322 +4156,18 @@ impl Retirement {
 }
 /// Node lifecycle, retirement and rotation checks that need no kernel.
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used)]
-    use super::*;
-
-    /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
-    #[test]
-    fn retirement_removes_the_private_key_file() {
-        let directory = crate::node_state::tests::Directory::new();
-        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
-        store.write_private_key(&[5; 32]).expect("key");
-        let key = directory.0.join("mesh-private-key");
-        assert!(key.exists());
-        let retirement = Retirement {
-            interface: false,
-            interface_index: None,
-            filter: None,
-            left: Vec::new(),
-            store: Some(store),
-        };
-        assert_eq!(retirement.execute().expect("retire"), Vec::<&str>::new());
-        assert!(!key.exists(), "retirement leaves no private key behind");
-    }
-
-    /// A completed journal must not recreate the key after host-uninstall retirement (#367).
-    #[test]
-    fn j356_retirement_after_rotation_leaves_no_private_key() {
-        let directory = crate::node_state::tests::Directory::new();
-        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
-        let (candidate_key, candidate_public) = Key::generate().expect("candidate");
-        let candidate: [u8; 32] = candidate_key.private_bytes().try_into().expect("32 bytes");
-        store.record_engine(EngineKind::GotaTun).expect("engine");
-        store
-            .record_interface(&candidate_public)
-            .expect("interface");
-        store.write_private_key(&candidate).expect("key");
-        store
-            .save_rotation_secret(&crate::node_state::RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000356".to_owned(),
-                sequence: 1,
-                previous: [0; 32],
-                candidate,
-                commit_requested: true,
-                completed: true,
-            })
-            .expect("completed marker");
-        let retirement = Retirement {
-            interface: false,
-            interface_index: None,
-            filter: None,
-            left: Vec::new(),
-            store: Some(store),
-        };
-        retirement.execute().expect("retire");
-        assert!(!directory.0.join("mesh-private-key").exists());
-        let (store, _) = crate::node_state::Store::open(&directory.0).expect("reopen");
-        let residue = store.rotation_secret().expect("read journal");
-        let interface = store.recorded_interface().expect("read interface record");
-        let key_before_recovery = store.read_private_key().expect("read key");
-        eprintln!(
-            "J356 R1: retirement leaves journal={} interface={} private_key={}",
-            residue.is_some(),
-            interface.is_some(),
-            key_before_recovery.is_some()
-        );
-        recover_gotatun_private_key_from_journal(&store).expect("recover");
-        let resurrected = store.read_private_key().expect("read key");
-        eprintln!(
-            "J356 R1: key file recreated after retirement={}",
-            resurrected
-                .as_ref()
-                .is_some_and(|k| k.as_slice() == candidate)
-        );
-        assert!(
-            residue.is_none() && interface.is_none() && key_before_recovery.is_none(),
-            "retirement left identity state: journal={}, interface={}, private_key={}",
-            residue.is_some(),
-            interface.is_some(),
-            key_before_recovery.is_some()
-        );
-        assert!(resurrected.is_none(), "recovery recreated a retired key");
-    }
-
-    /// A finished `GotaTun` marker authorizes only its predecessor or candidate snapshot key.
-    #[test]
-    fn j356_completed_snapshot_binding_rejects_an_unrelated_key() {
-        let directory = crate::node_state::tests::Directory::new();
-        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
-        let previous = [0x11; 32];
-        let candidate = [0x22; 32];
-        let unrelated = [0x33; 32];
-        let previous_public = Key::from_private(&previous).expect("previous key").1;
-        let candidate_public = Key::from_private(&candidate).expect("candidate key").1;
-        let unrelated_public = Key::from_private(&unrelated).expect("unrelated key").1;
-        store.record_engine(EngineKind::GotaTun).expect("engine");
-        store
-            .record_interface(&candidate_public)
-            .expect("candidate interface record");
-        store
-            .write_private_key(&candidate)
-            .expect("candidate key file");
-        store
-            .save_rotation_secret(&crate::node_state::RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
-                sequence: 1,
-                previous,
-                candidate,
-                commit_requested: true,
-                completed: false,
-            })
-            .expect("commit intent");
-        store
-            .complete_rotation_secret("00000000-0000-4000-8000-000000000367", 1)
-            .expect("finish rotation");
-
-        assert!(gotatun_snapshot_binding_is_authorized(&store, previous_public).expect("old"));
-        assert!(gotatun_snapshot_binding_is_authorized(&store, candidate_public).expect("new"));
-        assert!(
-            !gotatun_snapshot_binding_is_authorized(&store, unrelated_public).expect("unrelated"),
-            "a completed marker does not authorize an unrelated saved binding"
-        );
-    }
-
-    /// Both Linux engines require a live identity and owned link before rotation can start.
-    #[test]
-    fn inactive_engines_refuse_rotation_without_reading_or_mutating_state() {
-        let operation = "00000000-0000-4000-8000-000000000005";
-        let mut gotatun = Node::default().with_engine(EngineKind::GotaTun);
-        for result in [
-            gotatun.prepare_rotation(operation, 1).map(|_| ()),
-            gotatun.commit_rotation(operation, 1).map(|_| ()),
-            gotatun.finish_rotation(operation, 1),
-        ] {
-            assert_eq!(
-                result.expect_err("inactive GotaTun refuses").kind(),
-                io::ErrorKind::NotConnected
-            );
-        }
-        let mut kernel = Node::default().with_engine(EngineKind::Kernel);
-        assert_eq!(
-            kernel
-                .prepare_rotation(operation, 1)
-                .expect_err("inactive kernel refuses")
-                .kind(),
-            io::ErrorKind::NotConnected
-        );
-    }
-
-    /// A staged snapshot cannot change the server's identity.
-    #[test]
-    fn server_identity_cannot_change_inside_a_staged_snapshot() {
-        use crate::policy::model::{Addresses, NodeId, PublicKey};
-        let mut node = Node {
-            identity: Some(Identity {
-                compact_access: true,
-                #[cfg(feature = "mesh-dns")]
-                dns_names: cfg!(target_os = "linux"),
-                key_rotation: true,
-                authority_epoch: true,
-                public_key: PublicKey([1; 32]),
-                port: 44000,
-            }),
-            ..Node::default()
-        };
-        let config = Config {
-            authority_epoch: None,
-            server: Some(NodeId(1)),
-            local_key: None,
-            node: NodeId(2),
-            #[cfg(feature = "mesh-dns")]
-            name: None,
-            #[cfg(feature = "mesh-dns")]
-            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
-            version: 1,
-            addresses: Addresses {
-                ipv4: "10.254.0.2".parse().expect("IPv4"),
-                ipv6: "fd01::2".parse().expect("IPv6"),
-            },
-            default_policy: crate::dataplane::DefaultPolicy::default(),
-            exposure: None,
-            peers: BTreeMap::new(),
-            #[cfg(feature = "mesh-dns")]
-            peer_names: std::collections::BTreeMap::new(),
-        };
-        let mut chunk = crate::configuration::chunks(None, &config)
-            .expect("snapshot")
-            .remove(0);
-        chunk.last = false;
-        assert!(!node.chunk(chunk.clone()).expect("staged header"));
-        chunk.index = 1;
-        chunk.server = Some(NodeId(3));
-        assert!(node.chunk(chunk).is_err());
-        assert!(node.config().is_none());
-    }
-
-    #[test]
-    #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn explicit_up_recovers_disabled_intent_before_reusing_identity() {
-        let mut node = Node::default();
-        node.up().expect("start");
-        // Down publishes disabled intent before kernel cleanup. Model an
-        // interrupted cleanup at that exact boundary with a still-live identity.
-        node.enabled = false;
-        node.up().expect("explicit restart");
-        assert!(node.enabled());
-        assert!(Device::owned().expect("owned interface"));
-        node.down().expect("cleanup");
-    }
-    #[test]
-    #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn externally_removed_interface_does_not_block_down() {
-        let mut node = Node::default();
-        node.up().expect("start");
-        Device::delete().expect("external removal");
-        node.down().expect("already absent owned interface");
-        assert!(!node.active());
-        assert!(!node.enabled());
-    }
-    /// A 1000-peer snapshot applied in chunks is accepted all at once, with every peer in the kernel.
-    #[test]
-    #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN; use release for timing."]
-    fn chunked_snapshot_is_atomic_and_applies_1000_kernel_peers() {
-        use crate::{
-            dataplane::{DefaultPolicy, Peer, PeerPolicy},
-            policy::{
-                model::{Addresses, NodeId},
-                rules::TrafficPolicy,
-            },
-        };
-        let mut node = Node::default().with_engine(EngineKind::Kernel);
-        node.up().expect("start");
-        let addresses = |id: u32| Addresses {
-            ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
-            ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
-        };
-        let config = Config {
-            authority_epoch: None,
-            local_key: None,
-            server: None,
-            node: NodeId(1),
-            #[cfg(feature = "mesh-dns")]
-            name: None,
-            #[cfg(feature = "mesh-dns")]
-            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
-            version: 1,
-            addresses: addresses(1),
-            default_policy: DefaultPolicy::Allow,
-            exposure: None,
-            peers: (2..=1001)
-                .map(|id| {
-                    let (_, key) = Key::generate().expect("public peer fixture");
-                    (
-                        NodeId(u64::from(id)),
-                        PeerPolicy {
-                            peer: Peer {
-                                key,
-                                previous_key: None,
-                                previous_active: false,
-                                addresses: addresses(id),
-                                endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
-                            },
-                            inbound: TrafficPolicy::All,
-                            outbound: TrafficPolicy::All,
-                            access_ssh: None,
-                        },
-                    )
-                })
-                .collect(),
-            #[cfg(feature = "mesh-dns")]
-            peer_names: std::collections::BTreeMap::new(),
-        };
-        let chunks = crate::configuration::chunks(None, &config).expect("bounded chunks");
-        let count = chunks.len();
-        assert!(count > 1);
-        // An interrupted or out-of-order snapshot cannot mutate the live view.
-        node.chunk(chunks[0].clone()).expect("first staged");
-        assert!(node.chunk(chunks[count - 1].clone()).is_err());
-        assert!(node.config().is_none());
-        assert_eq!(Device::counters().expect("empty kernel").len(), 0);
-        let started = std::time::Instant::now();
-        for chunk in chunks {
-            let last = chunk.last;
-            assert_eq!(node.chunk(chunk).expect("stage/apply"), last);
-            if !last {
-                assert!(node.config().is_none());
-            }
-        }
-        let initial = started.elapsed().as_micros();
-        assert_eq!(Device::counters().expect("kernel peers").len(), 1000);
-        let mut next = config.clone();
-        next.version += 1;
-        next.peers
-            .get_mut(&NodeId(500))
-            .expect("member")
-            .peer
-            .endpoint = Some("192.0.2.2:44000".parse().expect("public endpoint"));
-        let delta = crate::configuration::chunks(Some(&config), &next).expect("delta");
-        assert_eq!(delta.len(), 1);
-        assert_eq!(delta[0].upserted.len(), 1);
-        let started = std::time::Instant::now();
-        node.chunk(delta[0].clone()).expect("endpoint delta");
-        println!(
-            "METRIC mesh_node machine=infraternal-dev peers=1000 chunks={count} apply_us={initial} single_endpoint_us={} load={}",
-            started.elapsed().as_micros(),
-            std::fs::read_to_string("/proc/loadavg")
-                .expect("load")
-                .trim()
-        );
-        assert_eq!(node.config().expect("applied").version, 2);
-        node.down().expect("off");
-        assert!(!Device::owned().expect("absent owned interface"));
-    }
-}
+#[path = "node_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 #[path = "node_rotation_tests.rs"]
 mod rotation_tests;
+
+/// Namespace proofs that a `GotaTun` node opens and closes its host listener without any
+/// firewall tool (#483, D384, D386).
+#[cfg(test)]
+#[path = "node_host_listener_tests.rs"]
+mod host_listener_tests;
 
 /// Root-only measurement of live traffic across a same-content coordinator restart (#382 P2-c).
 #[cfg(test)]

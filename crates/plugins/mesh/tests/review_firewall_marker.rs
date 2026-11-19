@@ -1,8 +1,11 @@
-//! Checks that a marker substring cannot authorize adoption or removal of another firewall's state [166,198], #173.
-#![cfg(all(feature = "agent", target_os = "linux"))]
+//! Checks that exact infraternal table names define product ownership, D386, #173.
+#![cfg(all(feature = "agent", feature = "test-support", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 
-use infraternal_plugin_mesh::firewall::Firewall;
+use infraternal_plugin_mesh::{
+    firewall::Firewall,
+    host_firewall::{NftTestPathOverride, discover_nft},
+};
 use std::{
     io::Write,
     process::{Command, Stdio},
@@ -20,10 +23,13 @@ fn command(tool: &str, args: &[&str]) {
     );
 }
 
+/// Treat an exact infraternal table name as owned even when its comment differs.
 #[test]
 #[ignore = "Run in a disposable user/network namespace, #173."]
-fn nft_marker_substring_is_not_table_ownership() {
-    let mut create = Command::new("/usr/sbin/nft")
+fn infraternal_mesh_table_is_owned_even_with_an_unfamiliar_comment() {
+    let _nft_override = NftTestPathOverride::with_fixed_nft_fixture();
+    let nft = discover_nft(None).expect("fixed-path test fixture");
+    let mut create = Command::new(&nft)
         .args(["-f", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -33,27 +39,21 @@ fn nft_marker_substring_is_not_table_ownership() {
     create.stdin.take().unwrap().write_all(b"add table inet infraternal_mesh { comment \"operator.reference.infraternal.mesh.v1\"; }\n").unwrap();
     assert!(create.wait().unwrap().success());
     let mut firewall = Firewall::default();
-    let adopted = firewall.adopt();
-    if adopted.is_ok() {
-        firewall.remove().unwrap();
-    }
-    let retained = Command::new("/usr/sbin/nft")
+    firewall
+        .adopt()
+        .expect("the exact infraternal table name is product-owned");
+    assert!(firewall.installed());
+    firewall.remove().unwrap();
+    let retained = Command::new(&nft)
         .args(["list", "table", "inet", "infraternal_mesh"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .unwrap()
         .success();
-    if retained {
-        command(
-            "/usr/sbin/nft",
-            &["delete", "table", "inet", "infraternal_mesh"],
-        );
-    }
     assert!(
-        adopted.is_err() && retained,
-        "different table marker accepted as ownership: adopted={} retained={retained}",
-        adopted.is_ok()
+        !retained,
+        "the exact infraternal table was not removed by the product"
     );
 }
 

@@ -8,9 +8,10 @@ product source and harness used to build each kit.
 
 ## Build and run
 
-On compute01, enter the `nix-devshell` flake with Go and Bison available, then run
-`~/infraternal-ops/build-slot research/head-to-head/build-kit x86_64 OUT`.
-Use `CARGO_BUILD_JOBS=4` and a job-specific `CARGO_TARGET_DIR`. The build uses
+On compute01, run the worktree's dedicated Nix shell through the build slot:
+`~/infraternal-ops/build-slot nice -n10 nix develop <worktree>#head-to-head-kit -c env CARGO_BUILD_JOBS=4 research/head-to-head/build-kit x86_64 OUT`.
+The root `flake.lock` pins Go and Bison with the rest of the toolchain. The
+build slot supplies a job-specific `CARGO_TARGET_DIR`. The build uses
 the product's static musl recipe, its pinned Zig, checked-in Rust/Go locks,
 and the official downloads and checksums in `pins.txt`. tmux is built from
 verified official sources because it has no official static binary.

@@ -42,6 +42,7 @@ fn turning_off_or_leaving_the_mesh_ends_sessions_but_renewal_does_not() {
             node,
             addresses: vec!["10.254.0.9".parse().unwrap()],
             interface: "infraternal0".into(),
+            userspace_filter: false,
             certificate: certificate.to_vec(),
         })
     };
@@ -230,6 +231,7 @@ fn stopping_the_agent_removes_the_redirect_and_mesh_22_reaches_sshd() {
         node: 9,
         addresses: vec![address],
         interface: "infraternal0".into(),
+        userspace_filter: false,
         peers: std::collections::BTreeMap::new(),
     };
     let observe = node.mesh_observer();
@@ -303,6 +305,7 @@ fn a_revoking_push_lands_while_logins_keep_overlapping() {
         node: 9,
         addresses: vec!["10.254.0.9".parse().unwrap()],
         interface: "infraternal0".into(),
+        userspace_filter: false,
         peers: std::collections::BTreeMap::new(),
     }));
     let runtime = node.handle().unwrap();

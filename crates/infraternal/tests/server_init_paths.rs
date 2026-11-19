@@ -116,6 +116,12 @@ fn rerunning_init_on_an_existing_user_install_plans_the_same_unit() {
 
 /// `--system --force` without `--data` keeps the custom folder of the system
 /// unit it replaces instead of pointing it at `/var/lib/infraternal`.
+///
+/// The plan uses `--host-firewall-off`, so it holds only the server unit: a
+/// default-drop plan needs every port sshd uses (J671, #483), which an
+/// unprivileged runner cannot read, so it would be refused before the folder
+/// choice this test is about. The firewall plan's folder line is covered by
+/// `install::tests::system_units_mark_the_scope_used_by_first_run_status`.
 #[test]
 fn forcing_a_system_reinstall_keeps_its_custom_data_folder() {
     let machine = Machine::new("rerun-system");
@@ -135,11 +141,37 @@ fn forcing_a_system_reinstall_keeps_its_custom_data_folder() {
             "--system",
             "--dry-run",
             "--force",
+            "--host-firewall-off",
         ],
         &[],
     ));
     assert!(unit.contains("\"--data\" \"/srv/custom state\""), "{unit}");
     assert!(!unit.contains("/var/lib/infraternal"), "{unit}");
+}
+
+/// A system `server init` unit waits for the network-online target.
+#[test]
+fn a_generated_system_unit_waits_for_network_online() {
+    let machine = Machine::new("network-online");
+    let system = planned_unit(&machine.run(
+        &[
+            "--json",
+            "server",
+            "init",
+            "--system",
+            "--dry-run",
+            "--host-firewall-off",
+        ],
+        &[],
+    ));
+    assert!(
+        system.contains("After=network-online.target\nWants=network-online.target\n"),
+        "{system}"
+    );
+
+    let user = planned_unit(&machine.run(&["--json", "server", "init", "--dry-run"], &[]));
+    assert!(user.contains("After=network.target\n"), "{user}");
+    assert!(!user.contains("Wants=network-online.target"), "{user}");
 }
 
 /// A fresh per-user install with an empty `XDG_STATE_HOME` uses D395's

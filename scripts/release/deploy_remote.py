@@ -40,10 +40,17 @@ SEGMENT = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
 
 def signed_entries(text):
-    """Parse a signed SHA256SUMS strictly: every line is a digest, two spaces and a
-    bundle-relative name; traversal, absolute names and duplicates refuse the list."""
+    """Parse a signed SHA256SUMS exactly as the Rust verifier does (`release_verify.rs`
+    `checksum`), so deploy admission never passes a list `restart --binary` refuses
+    (J685 P3-1): a non-empty list of at most 64 KiB that ends in a newline, split on
+    newlines only (one trailing carriage return per line is dropped, as Rust's
+    `str::lines` does), where every line is a lowercase digest, two spaces and a
+    bundle-relative name. Traversal, absolute names and duplicates refuse the list."""
+    if not text or len(text.encode()) > 65536 or not text.endswith("\n"):
+        raise ValueError("invalid signed artifact list")
     entries = {}
-    for line in text.splitlines():
+    for line in text[:-1].split("\n"):
+        line = line.removesuffix("\r")
         value, separator, name = line.partition("  ")
         parts = name.split("/")
         if (not separator or not re.fullmatch(r"[0-9a-f]{64}", value) or name in entries
@@ -68,8 +75,9 @@ def verify_signed(directory, trust, image, complete=False):
                     "-s", str(signature)], input=sums, capture_output=True, check=True)
     entries = signed_entries(sums.decode())
     # The signed VERSION carries the identity; the channel comes from it [226].
-    version = (directory / "VERSION").read_text()
-    if not re.fullmatch(r"(edge-[0-9]{8}T[0-9]{6}Z|[0-9]+\.[0-9]+\.[0-9]+)\n", version):
+    # Read it once: the same bytes are checked here and hashed below (J685 P3-2).
+    version = (directory / "VERSION").read_bytes()
+    if not re.fullmatch(rb"(edge-[0-9]{8}T[0-9]{6}Z|[0-9]+\.[0-9]+\.[0-9]+)\n", version):
         raise ValueError("invalid signed version")
     required = {"VERSION", "infraternal-x86_64-musl"}
     if complete:
@@ -81,7 +89,9 @@ def verify_signed(directory, trust, image, complete=False):
     with image.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != entries["infraternal-x86_64-musl"]:
             raise ValueError("signed server image mismatch")
-    for name in required:
+    if hashlib.sha256(version).hexdigest() != entries["VERSION"]:
+        raise ValueError("signed artifact mismatch")
+    for name in required - {"VERSION"}:
         if name == "infraternal-x86_64-musl" and not complete:
             continue  # The retained executable was already authenticated above.
         artifact = directory / name
@@ -146,14 +156,16 @@ def same_image(pid, binary):
         return hashlib.file_digest(running, "sha256").digest() == hashlib.file_digest(installed, "sha256").digest()
 
 
-def restart(data, binary):
+def restart(data, binary, rollback=False):
+    """Request a restart, asking the current server to hand Mesh state back on rollback."""
     payload = os.fsencode(binary)
     if len(payload) > 4096:
         raise ValueError("replacement path exceeds control bound")
     with socket.socket(socket.AF_UNIX) as peer:
         peer.settimeout(5)
         peer.connect(str(data / "restart/control.sock"))
-        peer.sendall(struct.pack("!H", len(payload)) + payload)
+        length = len(payload) | (0x8000 if rollback else 0)
+        peer.sendall(struct.pack("!H", length) + payload)
         reply = bytearray()
         while b"\n" not in reply and len(reply) < 128:
             part = peer.recv(128 - len(reply))
@@ -204,24 +216,14 @@ def swap_link(path, target):
 
 
 def backup(data, destination):
+    """Write D295's SQLite-only snapshot while the live server stays available."""
     destination.mkdir(mode=0o700)
     # The SQLite backup API includes committed WAL pages while serving continues.
-    # Other persisted state is retained unchanged by binary handoff; save encrypted
-    # state/public metadata too, excluding live sockets and mutable database sidecars.
+    # D295 snapshots only this database; the separate release handoff preserves Mesh state.
     database = data / "infraternal.sqlite"
     with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
         with closing(sqlite3.connect(destination / "infraternal.sqlite")) as target:
             source.backup(target)
-    for path in data.iterdir():
-        if path.name.startswith("infraternal.sqlite") or path.name == "restart":
-            continue
-        if path.is_dir() and not path.is_symlink():
-            shutil.copytree(path, destination / path.name,
-                            ignore=lambda root, names: [n for n in names if
-                                Path(root, n).is_symlink() or not
-                                (Path(root, n).is_file() or Path(root, n).is_dir())])
-        elif path.is_file() and not path.is_symlink():
-            shutil.copy2(path, destination / path.name)
 
 
 def apply(config):
@@ -325,7 +327,7 @@ def apply(config):
             # recovery: its signed image already exists in the retained backup.
             if requested:
                 before_rollback = endpoint(data)
-                restart(data, previous)
+                restart(data, previous, rollback=True)
                 wait_for_success(config, before_rollback, previous)
             # Never overwrite a running SQLite database. Restoring a database is
             # a separate cold recovery operation; automatic rollback keeps its data.

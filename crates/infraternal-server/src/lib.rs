@@ -3,6 +3,8 @@
 
 /// Shared compiled release identity; channel policy remains in the release plugin [225,226].
 pub use infraternal_plugin_api::{VERSION, release_version};
+/// Each account's live browser sockets, and taking over the longest-hidden one when the account is full (#523).
+mod account_sockets;
 pub mod auth;
 #[cfg(feature = "remote")]
 pub mod ca;
@@ -36,6 +38,8 @@ mod completion;
 #[cfg(feature = "remote")]
 pub mod csr;
 mod embedded;
+/// Moves embedded server mesh state between durable storage and rollback runtime paths [J501, #489].
+pub mod embedded_mesh_state;
 mod node_bridge;
 #[cfg(any(feature = "ssh", feature = "release"))]
 mod release_http;

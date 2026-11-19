@@ -538,6 +538,16 @@ numbered history, both timestamp arrival orders and altered checksums.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
+  Give every distinct source worktree or revision its own target directory,
+  especially when comparing a job head with `origin/dev`; never reuse one target
+  across those source trees. #542 traced a shared-target failure to stale
+  generated migration metadata: the build target contained 62 migrations while
+  the source contained 64, and the host-promotion test refused a recorded
+  version missing from the stale list. `infraternal-server/build.rs` tracks the
+  migration directory and each existing migration file, and `scripts/verify`
+  warns when a target marker records a different source path or revision.
+  These checks help catch stale inputs but do not make cross-worktree target
+  reuse safe; keep the targets separate.
 - Machine-local compiler cache on the build VMs (#329), opt-in. `nix develop`
   provides `sccache`. When the machine sets `INFRATERNAL_SCCACHE_DIR` (the
   build VMs: `~/.cache/sccache`), the dev shell exports `SCCACHE_DIR`, the

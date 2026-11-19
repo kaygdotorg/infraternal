@@ -69,8 +69,9 @@ wait_for 30 in_ns h2h-ts bash -c 'exec 3<>/dev/tcp/127.0.0.1/47100' || die "infr
 umask 077
 host "$B/infraternal" server setup-token --data "$U/ixdata" --json \
     | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["data"]["token"])' > "$R/setup-token"
+# The rootless test host can log in only as itself, so register that same OS account name.
 in_ns h2h-ts "$H" ix-register --server 127.0.0.1:47100 --origin https://localhost:47100 \
-    --setup-token-file "$R/setup-token" --cookie-out "$R/cookie" > /dev/null
+    --setup-token-file "$R/setup-token" --name "$USER_NAME" --cookie-out "$R/cookie" > /dev/null
 rm -f "$R/setup-token"
 umask 022
 # The account's own session cookie; its viewers run as that account.

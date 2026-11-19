@@ -1,8 +1,8 @@
 //! A native infraternal viewer: the browser's leg-A path without the browser.
 //!
-//! It signs up the owner the way the browser does (setup token, WebAuthn
-//! registration with a software ES256 passkey and PRF key wraps), then talks to
-//! the real server over the real WebSocket with the shipping codec
+//! It signs up the fixture account the way the browser does (setup token,
+//! WebAuthn registration with a software ES256 passkey and PRF key wraps), then
+//! talks to the real server over the real WebSocket with the shipping codec
 //! (`infraternal-protocol`): Hello, Welcome, `ssh.session.open`, AttachTerm, Resize,
 //! Input, Output, Credit. Credit follows the web client's policy: a 1 MiB
 //! window, returned as output is consumed.
@@ -136,13 +136,23 @@ fn cbor_text(t: &str, out: &mut Vec<u8>) {
     out.extend_from_slice(t.as_bytes());
 }
 
-/// `ix-register`: create the owner account with a software passkey.
+/// `ix-register`: create the fixture account with a software passkey.
+///
+/// `--name` selects the account name used for its host login. It defaults to
+/// `owner` for callers that do not need to match a particular host account.
 pub fn register(args: &Args) {
     let server = args.str("server");
     let origin = args.str("origin");
     let rp_id = origin.split("://").nth(1).unwrap_or("").split(':').next().unwrap_or("").to_owned();
     let token = std::fs::read_to_string(args.str("setup-token-file")).unwrap_or_else(|_| die("setup token file"));
-    let (status, cookies, start) = post(&server, "/auth/setup-start", &origin, None, &json!({"token": token.trim(), "name": "owner"}));
+    let name = args.opt("name").unwrap_or_else(|| "owner".to_owned());
+    let (status, cookies, start) = post(
+        &server,
+        "/auth/setup-start",
+        &origin,
+        None,
+        &json!({"token": token.trim(), "name": name}),
+    );
     if status != 200 {
         die(&format!("setup-start returned {status}"));
     }

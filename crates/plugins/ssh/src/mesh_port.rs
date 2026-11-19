@@ -1,9 +1,9 @@
-//! Owns exact-address mesh TCP/22 listeners and reversible nft redirects [D197,D235], #221.
+//! Owns exact-address mesh TCP/22 listeners and publishes private ports to the userspace filter [D197,D235,D384], #221.
 //!
 //! The node lifecycle must serialize start/stop/recovery and supply only its
 //! applied mesh address/interface. These blocking operations belong outside the
 //! async packet path. No protocol server is started by this module. The mesh
-//! firewall must enforce original TCP/22 access before this is wired to a node.
+//! policy must check the original TCP/22 grant before a private listener port is used.
 
 use std::{
     fmt::Write as _,
@@ -27,6 +27,8 @@ pub enum PortMode {
     /// TCP/22 was taken, so we listen on a privileged internal port and
     /// redirect mesh TCP/22 to it.
     Redirect,
+    /// TCP/22 was taken, so `GotaTun` rewrites mesh packets to the private listener.
+    UserspaceRedirect,
 }
 
 /// A listener and its optional owned redirect. Explicit stop is retryable and
@@ -38,6 +40,10 @@ pub struct MeshPort {
     address: IpAddr,
     /// True while our redirect rules are installed.
     redirected: bool,
+    /// True while the `GotaTun` packet filter translates TCP/22 to the private listener.
+    userspace_redirected: bool,
+    /// The listener port published for the packet filter, if the lease is active.
+    filter_port: Option<u16>,
 }
 
 impl MeshPort {
@@ -48,18 +54,36 @@ impl MeshPort {
     /// Refuses invalid coordinates, foreign/stale tables, missing privileges,
     /// non-address-in-use bind failures and failed atomic rule installation.
     pub fn bind(address: IpAddr, interface: &str) -> io::Result<Self> {
+        Self::bind_mode(address, interface, false)
+    }
+
+    /// Bind a listener whose private-port redirect is applied by `GotaTun`.
+    ///
+    /// The filter checks the original TCP/22 grant before rewriting the destination port. No
+    /// nft table is needed for this path; kernel `WireGuard` continues to use [`Self::bind`].
+    ///
+    /// # Errors
+    /// Refuses invalid coordinates, non-address-in-use bind failures, unavailable privileged
+    /// ports, or a listener address that cannot be published to the packet filter.
+    pub(crate) fn bind_for_userspace_filter(address: IpAddr, interface: &str) -> io::Result<Self> {
+        Self::bind_mode(address, interface, true)
+    }
+
+    /// Bind one exact address using either `GotaTun`'s packet filter or the kernel redirect.
+    fn bind_mode(address: IpAddr, interface: &str, userspace_filter: bool) -> io::Result<Self> {
         validate(address, interface)?;
         // Never silently adopt rules that might still belong to a live listener.
-        if presence(address)? {
+        if !userspace_filter && presence(address)? {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
-        let (listener, redirected) = match TcpListener::bind(SocketAddr::new(address, 22)) {
+        let (listener, needs_redirect) = match TcpListener::bind(SocketAddr::new(address, 22)) {
             Ok(listener) => (listener, false),
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                 (internal_listener(address)?, true)
             }
             Err(error) => return Err(error),
         };
+        let redirected = needs_redirect && !userspace_filter;
         if redirected {
             transaction(&render(address, interface, listener.local_addr()?.port()))?;
             // Never run with a partial install: a bare table would let mesh
@@ -69,11 +93,22 @@ impl MeshPort {
                 return Err(error);
             }
         }
-        Ok(Self {
+        let listener_port = listener.local_addr()?.port();
+        let filter_port = userspace_filter.then_some(listener_port);
+        let mut binding = Self {
             listener: Some(listener),
             address,
             redirected,
-        })
+            userspace_redirected: needs_redirect && userspace_filter,
+            filter_port,
+        };
+        if let Some(port) = filter_port
+            && let Err(error) = infraternal_mesh::mesh_ssh::publish_listener(address, port)
+        {
+            let _ = binding.stop();
+            return Err(error);
+        }
+        Ok(binding)
     }
 
     /// [`Self::bind`] for a component that is starting: a table our marker
@@ -85,9 +120,26 @@ impl MeshPort {
     /// # Errors
     /// The same refusals as [`Self::bind`].
     pub fn bind_after_restart(address: IpAddr, interface: &str) -> io::Result<Self> {
+        Self::bind_after_restart_with_filter(address, interface, false)
+    }
+
+    /// Recover and bind using the packet filter when `GotaTun` owns mesh access enforcement.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::bind`], plus failures while recovering an old kernel redirect.
+    pub(crate) fn bind_after_restart_with_filter(
+        address: IpAddr,
+        interface: &str,
+        userspace_filter: bool,
+    ) -> io::Result<Self> {
         validate(address, interface)?;
-        Self::recover(address)?;
-        Self::bind(address, interface)
+        if userspace_filter {
+            Self::recover_legacy_redirect(address)?;
+            Self::bind_for_userspace_filter(address, interface)
+        } else {
+            Self::recover(address)?;
+            Self::bind(address, interface)
+        }
     }
 
     /// Whether the port is stopped, direct or redirected.
@@ -95,6 +147,8 @@ impl MeshPort {
     pub fn mode(&self) -> PortMode {
         if self.listener.is_none() {
             PortMode::Stopped
+        } else if self.userspace_redirected {
+            PortMode::UserspaceRedirect
         } else if self.redirected {
             PortMode::Redirect
         } else {
@@ -119,6 +173,10 @@ impl MeshPort {
             Self::recover(self.address)?;
             self.redirected = false;
         }
+        if let Some(port) = self.filter_port.take() {
+            infraternal_mesh::mesh_ssh::clear_listener(self.address, port);
+        }
+        self.userspace_redirected = false;
         self.listener = None;
         Ok(())
     }
@@ -133,6 +191,21 @@ impl MeshPort {
             transaction(&format!("delete table inet {}\n", table(address)))?;
         }
         Ok(())
+    }
+
+    /// Remove an exact owned legacy redirect when nft is available to `GotaTun` recovery.
+    ///
+    /// `GotaTun` does not need a firewall executable. A missing fixed path therefore skips only
+    /// this optional inspection; the mesh status guard reports the same missing path and its
+    /// kernel-only protections. Any present tool refusal or foreign table still stops recovery.
+    ///
+    /// # Errors
+    /// Refuses a foreign same-named table or reports failures from the fixed nft path.
+    fn recover_legacy_redirect(address: IpAddr) -> io::Result<()> {
+        match Self::recover(address) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
     }
 }
 
@@ -222,24 +295,38 @@ fn table(address: IpAddr) -> String {
 
 // Table names and script coordinates contain only typed addresses, integer ports
 // and a validated interface. No shell, key material or caller script is accepted.
+/// Name the fixed firewall executable and operation when its spawn or command fails.
+fn nft_error(operation: &str, error: &io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("nft at {NFT} could not {operation}: {error}"),
+    )
+}
+
 /// Apply an nft script atomically (`nft -f -`, script on stdin, output discarded).
-/// Any tool failure is reported as `PermissionDenied`.
+/// Failures name the fixed nft path so a missing or unusable tool is diagnosable.
 fn transaction(script: &str) -> io::Result<()> {
     let mut child = Command::new(NFT)
         .args(["-f", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| nft_error("start the mesh SSH redirect", &error))?;
     let written = child
         .stdin
         .take()
         .ok_or(io::ErrorKind::BrokenPipe)?
         .write_all(script.as_bytes());
-    let status = child.wait()?;
-    written?;
+    let status = child
+        .wait()
+        .map_err(|error| nft_error("finish the mesh SSH redirect", &error))?;
+    written.map_err(|error| nft_error("write the mesh SSH redirect", &error))?;
     if !status.success() {
-        return Err(io::ErrorKind::PermissionDenied.into());
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("nft at {NFT} refused the mesh SSH redirect ({status})"),
+        ));
     }
     Ok(())
 }
@@ -252,9 +339,16 @@ pub(crate) fn presence(address: IpAddr) -> io::Result<bool> {
     let output = Command::new(NFT)
         .args(["-j", "list", "tables"])
         .stderr(Stdio::null())
-        .output()?;
+        .output()
+        .map_err(|error| nft_error("inspect mesh SSH redirect ownership", &error))?;
     if !output.status.success() {
-        return Err(io::ErrorKind::PermissionDenied.into());
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "nft at {NFT} could not inspect mesh SSH redirect ownership ({})",
+                output.status
+            ),
+        ));
     }
     let name = table(address);
     let tables: serde_json::Value =

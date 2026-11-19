@@ -3,6 +3,8 @@
  * dry-runs it, then removes it inside the 15-minute admin window, with no passkey of its own (D339).
  * Pending cleanup keeps both the host row and the manual uninstall copy action available.
  * D369 Forget cancels an unreachable retirement here, in that same window, without touching the machine.
+ * Different hosts are removed in parallel (the server admits eight at once); the same host is never worked on twice, and
+ * removals that find the window closed share one passkey prompt (#519).
  */
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
 import { mountConfirmTip } from "../../../../packages/ui/src/tooltip";
@@ -28,18 +30,48 @@ async function post<T>(path: string, body: unknown, failure = "The host could no
   const response = await fetch(`/remote/hosts/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new RemovalError(response.status === 401 ? "Your session has ended. Sign in again, then try again."
     : response.status === 403 ? "This request could not be authorised. Refresh the host list and try again."
-    : response.status === 429 ? "Too many host requests. Try again in a moment."
+    : response.status === 429 ? "Too many host removals are running at once. Wait a moment, then try again."
     : response.status >= 500 ? "The server could not complete this request. Try again." : failure, response.status);
   return await response.json() as T;
 }
 
+/**
+ * How many times the admin window has been renewed in this page. A removal that met a closed window compares it with the
+ * value it saw before asking, so one that was refused just before a renewal landed retries at once and never prompts again.
+ */
+let renewals = 0;
+/** The passkey renewal in progress, shared so that removals running in parallel open one prompt, not one each (#519). */
+let renewing: Promise<void> | undefined;
+/** Hosts whose removal waits on the renewal in progress, by id, in the order they asked; the prompt's title names them. */
+const waiting = new Map<string, string>();
+/** Redraws the open prompt's title when another host joins it. */
+let retitle: (() => void) | undefined;
+/**
+ * The question the shared prompt asks, for everyone it unblocks: the host's name when one waits, both names when two
+ * short ones wait, otherwise how many (a long list of names would not fit a compact card).
+ */
+export function renewalTitle(names: readonly string[]): string {
+  const named = names.join(" and ");
+  return names.length === 1 || (names.length === 2 && named.length <= 40) ? `Confirm removal of ${named}` : `Confirm removal of ${names.length} hosts`;
+}
+/** Renew the admin window once for everyone who needs it now; the prompt is titled for every host that has joined it. */
+function renewOnce(id: string, name: string): Promise<void> {
+  waiting.set(id, name);
+  retitle?.();
+  return renewing ??= renewWindow(id).then(() => { renewals += 1; }).finally(() => { renewing = undefined; waiting.clear(); retitle = undefined; });
+}
+
 /** Prepare first, then invoke WebAuthn directly from a fresh tap so mobile browsers keep user activation. */
-async function renewWindow(id: string, name: string): Promise<void> {
+async function renewWindow(id: string): Promise<void> {
   const start = await post<AuthStart>("reauth/start", { host_id: id });
   const publicKey = auth.requestOptions(start.options.publicKey);
   await new Promise<void>((resolve, reject) => {
+    const title = document.createElement("span");
+    const draw = (): void => { title.textContent = renewalTitle([...waiting.values()]); };
+    draw();
+    retitle = draw;
     mountConfirmTip(null, {
-      label: `Confirm removal of ${name}`, title: `Confirm removal of ${name}`,
+      label: "Confirm host removal", titleNode: title,
       effect: "Confirm with your passkey to continue. This opens 15 minutes of admin actions.",
       named: true, confirmLabel: "Confirm with passkey", cancelLabel: "Keep host",
       onCancel: () => reject(new Error("Passkey confirmation was cancelled. The host was not removed.")),
@@ -59,7 +91,9 @@ async function renewWindow(id: string, name: string): Promise<void> {
 /** Remove only the reviewed host, renewing authority once if the admin window closes at either step. */
 async function removeReviewed(id: string, name: string): Promise<Result> {
   /** A new review always binds the selected host to the current session before removal. */
+  let seen = renewals;
   const run = async (): Promise<Result> => {
+    seen = renewals;
     const start = await post<RemovalStart>("remove/start", { host_id: id, uninstall: true });
     if (start.action.host_id !== id || start.action.uninstall !== true || typeof start.review !== "string") throw new Error("Host confirmation changed. Try again.");
     return post<Result>("remove/finish", { host_id: id, review: start.review });
@@ -67,7 +101,8 @@ async function removeReviewed(id: string, name: string): Promise<Result> {
   try { return await run(); }
   catch (error) {
     if (!(error instanceof RemovalError) || error.status !== 428) throw error;
-    await renewWindow(id, name);
+    // Someone else's renewal finished while this request was in flight: the window is already open again.
+    if (renewals === seen) await renewOnce(id, name);
     return run();
   }
 }
@@ -76,19 +111,29 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
   // The server's `label` is a sentence describing the action; rows and buttons use this short name instead.
   let label: string | undefined;
   try { const action = await post<{ id: string; label: string }>("actions", {}); if (action.id === "remote.host.remove" && typeof action.label === "string") label = "Remove host"; } catch { /* The optional remote component or owner authority is unavailable. */ }
-  let busy = false;
+  /** Hosts with a removal or forget under way. Per host, so two different hosts never wait for each other (#519). */
+  const running = new Set<string>();
+  /**
+   * Errors already said aloud. Removals that waited on one shared passkey renewal all fail with that one error; it gets a
+   * single toast, not one per waiting host, while each host still reports its own failed outcome.
+   */
+  const toasted = new WeakSet<Error>();
   return {
     label: () => label,
     /** Forget an unreachable retirement here without sending anything to the machine. */
     forget(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void {
-      if (!label || !isCanonicalUuid(id) || busy) return;
+      if (!label || !isCanonicalUuid(id)) return;
+      /** Said aloud like a removal's refusals (#486): a silent no-op looks like a broken button. */
+      const again = (): boolean => { if (!running.has(id)) return false; core.toast.show({ message: `${name} is already being removed or forgotten.`, tone: "error", duration: 6000 }); return true; };
+      if (again()) return;
       confirmHostForget(name, anchor, () => {
-        busy = true;
+        if (again()) return;
+        running.add(id);
         void post<{ host_id: string; state: string; message: string }>("forget", { host_id: id }, "The host could not be forgotten. Refresh the list or sign in again, then try again.").then((result) => {
           if (result.host_id !== id || result.state !== "forgotten") throw new Error("Host forgetting could not be confirmed.");
           removed(id);
           core.toast.show({ message: result.message, duration: 5000 });
-        }).catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "The host could not be forgotten. Try again.", tone: "error", duration: 6000 })).finally(() => { busy = false; });
+        }).catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "The host could not be forgotten. Try again.", tone: "error", duration: 6000 })).finally(() => { running.delete(id); });
       }, returnFocus);
     },
     /**
@@ -101,13 +146,13 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
      * `undefined`, the card and toasts being its whole answer.
      */
     remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void, confirmed = false): Promise<RemovalOutcome | undefined> {
-      const refusal = !label ? "Removing hosts is not available to this account." : !isCanonicalUuid(id) ? `${name} can't be removed from here.` : busy ? "Another host removal is still running. Try again in a moment." : undefined;
+      const refusal = !label ? "Removing hosts is not available to this account." : !isCanonicalUuid(id) ? `${name} can't be removed from here.` : running.has(id) ? `${name} is already being removed.` : undefined;
       if (refusal !== undefined) {
         if (!confirmed) core.toast.show({ message: refusal, tone: "error", duration: 6000 });
         return Promise.resolve({ state: "refused", message: refusal });
       }
       const go = async (): Promise<RemovalOutcome> => {
-        busy = true;
+        running.add(id);
         try {
           const result = await removeReviewed(id, name);
           if (!["removed", "pending"].includes(result.state) || result.host_id !== id) throw new Error("Host removal could not be confirmed.");
@@ -135,10 +180,11 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
           return { state: result.state === "removed" ? "removed" : "pending", message: asking ? `${name}: access revoked. It uninstalls infraternal as soon as it connects.` : result.state === "pending" ? `${name}: access revoked. The uninstall is still pending.` : `${name} was removed.` };
         } catch (error) {
           const message = error instanceof Error ? error.message : "Host removal failed. Try again.";
-          core.toast.show({ message, tone: "error", duration: 6000 });
+          if (!(error instanceof Error) || !toasted.has(error)) core.toast.show({ message, tone: "error", duration: 6000 });
+          if (error instanceof Error) toasted.add(error);
           return { state: "failed", message };
         } finally {
-          busy = false;
+          running.delete(id);
         }
       };
       if (confirmed) return go();

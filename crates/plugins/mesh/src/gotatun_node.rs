@@ -1,4 +1,24 @@
 //! Linux userspace mesh engine using the `GotaTun` device API and an owned TUN.
+//!
+//! ## The engine bounds its own queue (D397)
+//!
+//! A TUN device hides the engine's queue from the kernel's TCP Small Queues, so without a bound
+//! a loaded flow parks its whole congestion window inside the engine and every other packet on
+//! the link waits behind it. The pinned `GotaTun` therefore runs a `CoDel` controller on its Linux
+//! receive path: it measures each packet's time from the kernel's UDP receive stamp to the TUN
+//! write and, once that stays above 1 ms for 10 ms, marks ECN-capable packets CE and drops only
+//! selected packets that cannot be marked. Authenticated frames up to 256 bytes share a per-peer
+//! allowance of 32 KiB per 10 ms with a 64 KiB burst, including padding before IP length trimming.
+//! This covers measured interactive packets, ACKs and probes; larger frames and small traffic
+//! exceeding the allowance remain subject to the controller. Flow keys never affect eligibility.
+//! J711's earlier prototype on backup01 took cubic 8-flow loaded p99 from 22.4 ms to about 6 ms;
+//! current-head measurements are recorded on #260.
+//!
+//! It is on by default. The one thing it needs from this crate: the socket wrapper in front of
+//! `GotaTun` (`PeerAdmissionUdpReceiver`) must hand each packet's receive stamp on with the
+//! packet, or the bound sees no stamps and never acts. For diagnosis, `GOTATUN_AQM=off` in
+//! the infraternal agent's environment turns it off (read once when the engine starts);
+//! `GOTATUN_AQM=drop` drops instead of marking. See `docs/user/40-mesh/index.md`.
 
 use gotatun::{
     device::{Device as WireGuardDevice, DeviceBuilder, Peer as WireGuardPeer},
@@ -27,13 +47,24 @@ use std::{
 };
 use tokio::{
     runtime::Builder as RuntimeBuilder,
-    sync::Notify,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::{
+        Notify, RwLock,
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+    },
     task::JoinSet,
     time::Instant,
 };
 
-use crate::{dataplane::Config, gotatun_tun::LinuxTun, policy::model::PublicKey};
+use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
+use crate::listen_port::Request as ListenPortRequest;
+use crate::{
+    candidate_walks::{HANDSHAKE_WAIT, Observed, Walks, active_peer_key, kept_address},
+    dataplane::Config,
+    gotatun_tun::LinuxTun,
+    packet_filter::{Direction, PacketFilter, PreparedPolicy},
+    policy::model::PublicKey,
+};
+use infraternal_mesh::proxy_ports::MeshProxyIngress;
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, LinuxPacketIo, LinuxPacketIo)>;
 type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
@@ -111,11 +142,6 @@ const ENDPOINT_REFRESH_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Bound route refreshes and authenticated endpoint scans to four per second.
 const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long a forced relay handshake may wait; `GotaTun`'s own wait has no deadline.
-/// One `WireGuard` handshake attempt is 5 s, after which the peer timers retry.
-#[cfg(feature = "relay")]
-const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
-
 /// Selects the node's data plane. `GotaTun` is the Linux default (D346), so the product runs on
 /// it and its bugs surface; kernel `WireGuard` stays an explicit per-machine opt-out. Reaching
 /// kernel throughput and loss-aware latency is still the goal (D331, D332), not a gate.
@@ -170,16 +196,21 @@ impl EngineKind {
     }
 }
 
+/// Holds the already-bound UDP sockets and live peer-admission state for `GotaTun`.
+///
+/// Clones share the listener and admission guard so a device restart keeps its actual port and
+/// uses the latest accepted peer snapshot.
 #[derive(Clone)]
 struct BoundUdpFactory {
     send: GotaUdpSocket,
     receive: GotaUdpSocket,
     port: u16,
+    admission: Arc<RwLock<PeerAdmission>>,
 }
 
 impl UdpTransportFactory for BoundUdpFactory {
     type Send = GotaUdpSocket;
-    type Recv = GotaUdpSocket;
+    type Recv = PeerAdmissionUdpReceiver;
 
     // The trait returns a future; these sockets are already bound, so complete it immediately.
     fn bind(
@@ -189,7 +220,10 @@ impl UdpTransportFactory for BoundUdpFactory {
         if params.addr.is_some() || params.port != self.port {
             return std::future::ready(Err(io::ErrorKind::InvalidInput.into()));
         }
-        std::future::ready(Ok((self.send.clone(), self.receive.clone())))
+        std::future::ready(Ok((
+            self.send.clone(),
+            PeerAdmissionUdpReceiver::new(self.receive.clone(), Arc::clone(&self.admission)),
+        )))
     }
 }
 
@@ -238,6 +272,7 @@ pub(crate) struct Engine {
     join: Option<JoinHandle<()>>,
     info: RuntimeInfo,
     health: Arc<Health>,
+    filter: Arc<PacketFilter>,
 }
 
 /// How long a stopped engine waits before it is rebuilt. A cause that persists, such as a deleted
@@ -303,11 +338,18 @@ impl Engine {
     pub(crate) fn start(
         private_key: StaticSecret,
         local_public_key: PublicKey,
-        requested_port: u16,
+        requested_port: ListenPortRequest,
         config: Option<Config>,
+        proxy_ingress: &MeshProxyIngress,
         adopt: Option<u32>,
         route_endpoint_updater: RouteEndpointUpdater,
     ) -> io::Result<Self> {
+        crate::packet_filter::warn_about_sysctl_gaps();
+        let filter = Arc::new(match config.as_ref() {
+            Some(config) => PacketFilter::new(config, proxy_ingress.clone())?,
+            None => PacketFilter::empty(),
+        });
+        let worker_filter = Arc::clone(&filter);
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (commands, receiver) = mpsc::unbounded_channel();
         let health = Arc::new(Health::default());
@@ -331,6 +373,7 @@ impl Engine {
                     local_public_key,
                     requested_port,
                     config.as_ref(),
+                    worker_filter,
                     refused,
                     thp_disabled,
                     adopt,
@@ -367,6 +410,8 @@ impl Engine {
                     info,
                     health: worker_health,
                     restart_at: None,
+                    walks: Walks::default(),
+                    relayed: BTreeMap::new(),
                 };
                 runtime.block_on(run_worker(
                     receiver,
@@ -387,6 +432,7 @@ impl Engine {
             join: Some(join),
             info,
             health,
+            filter,
         })
     }
 
@@ -419,6 +465,37 @@ impl Engine {
             })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
+    /// Compile a new snapshot before changing the firewall or accepted node state.
+    /// # Errors
+    /// Refuses duplicate peer addresses or an unindexable policy snapshot.
+    pub(crate) fn prepare_policy(
+        config: &Config,
+        proxy_ingress: MeshProxyIngress,
+    ) -> io::Result<PreparedPolicy> {
+        PacketFilter::prepare_policy(config, proxy_ingress)
+    }
+
+    /// Publish a previously compiled snapshot with one lock swap.
+    pub(crate) fn publish_policy(&self, policy: PreparedPolicy) {
+        self.filter.publish_policy(policy);
+    }
+
+    /// Test seam (#265 J618): judge one packet with the live filter, exactly as the packet
+    /// path would, so a namespace test can see which grants are published right now.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn check_packet(&self, packet: &mut [u8], direction: Direction) -> bool {
+        self.filter.check(packet, direction)
+    }
+
+    /// Stop admitting the listed peers' addresses before the peer set changes; see
+    /// [`PacketFilter::withdraw_peers`].
+    pub(crate) fn withdraw_peers(
+        &self,
+        withdrawn: &std::collections::BTreeSet<crate::policy::model::NodeId>,
+    ) {
+        self.filter.withdraw_peers(withdrawn);
     }
 
     /// Set the mesh MTU on the worker that owns the TUN and its packet-size watcher.
@@ -535,8 +612,9 @@ struct Started {
 async fn initialize(
     private_key: StaticSecret,
     local_public_key: PublicKey,
-    requested_port: u16,
+    requested_port: ListenPortRequest,
     config: Option<&Config>,
+    filter: Arc<PacketFilter>,
     refused: Arc<AtomicU64>,
     thp_disabled: bool,
     adopt: Option<u32>,
@@ -598,12 +676,13 @@ async fn initialize(
     let tx_queue_len = crate::wireguard::Device::raise_tx_queue_len(TUN_TX_QUEUE_LEN)
         .or_else(|_| crate::wireguard::Device::tx_queue_len())
         .unwrap_or(0);
-    let tun = LinuxPacketIo::new(tun);
-    let (factory, port) = bind_udp(requested_port).await?;
+    let tun = LinuxPacketIo::new(tun, filter);
+    let (factory, port) = bind_udp(requested_port, private_key.clone()).await?;
     let peers = config
         .map(peers_for_config)
         .transpose()?
         .unwrap_or_default();
+    let admitted_peers = config.map(admitted_peer_keys).unwrap_or_default();
     // GotaTun starts its packet workers only when the builder has peers.
     // Node::up precedes the coordinator's first snapshot, so the bound
     // transport and key wait for that first nonempty peer set; they also stay
@@ -617,6 +696,7 @@ async fn initialize(
                 private_key.clone(),
                 port,
                 peers,
+                admitted_peers,
                 tun.clone(),
             )
             .await?,
@@ -668,6 +748,8 @@ fn engine_runtime() -> io::Result<(tokio::runtime::Runtime, bool)> {
     Ok((runtime, thp_disabled))
 }
 
+/// Everything the engine worker owns: the TUN, the live device, its rebuild material, the applied
+/// configuration and each peer's candidate walk (#515).
 struct RuntimeState {
     tun: Option<LinuxPacketIo>,
     /// Shared only with forced-handshake tasks, which `stop` ends before stopping the device.
@@ -682,6 +764,22 @@ struct RuntimeState {
     health: Arc<Health>,
     /// When a device that stopped on a fatal error is rebuilt.
     restart_at: Option<Instant>,
+    /// Each peer's walk through its direct-path candidates (#515), by the key that owns its
+    /// endpoint, with the peer it was started for: a re-installed peer starts a new walk.
+    walks: Walks,
+    /// The relay address each relayed peer was last pointed at, by device key (J699 P3-1).
+    /// While the engine sends a peer's packets there (or nowhere, mid-preparation), no walk runs
+    /// for it and a re-install keeps it there ([`on_relay`], [`kept_address`]): D391 makes the
+    /// relay the fallback once direct paths failed, and moving back to a direct path is the
+    /// relay controller's decision. Only relay builds fill it; an entry goes when its peer
+    /// leaves the configuration.
+    relayed: BTreeMap<PublicKey, SocketAddr>,
+}
+
+/// Whether a peer sits on its relay: the worker pointed it at `relay`, and the engine still
+/// sends there, or nowhere because the relay is preparing its handshake (J699 P3-1).
+fn on_relay(engine_at: Option<SocketAddr>, relay: Option<SocketAddr>) -> bool {
+    relay.is_some() && (engine_at.is_none() || engine_at == relay)
 }
 
 struct PendingDevice {
@@ -706,11 +804,31 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the worker.
+/// What the candidate walks need from the engine's counters ([`crate::candidate_walks::observe`]).
+fn observed(counters: &CounterMap) -> Observed {
+    let unix = crate::candidate_walks::unix_now();
+    counters
+        .iter()
+        .map(|(key, stats)| {
+            let seen = crate::candidate_walks::observe(
+                stats.received_bytes,
+                stats.handshake_secs,
+                stats.endpoint,
+                unix,
+            );
+            (*key, seen)
+        })
+        .collect()
+}
+
+/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the `GotaTun`
+/// worker, and steps candidate walks when one is due.
 ///
 /// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
 /// either direction requests re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
-/// writes run on Tokio's blocking pool.
+/// writes run on Tokio's blocking pool. The scan reads each peer's *confirmed* endpoint, so a walk
+/// step that only moves where this node sends does not move a route. The route follows once an
+/// authenticated packet arrives from the walked address, which is exactly when the walk finds it.
 async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
     mut state: RuntimeState,
@@ -722,15 +840,26 @@ async fn run_worker(
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
+    // A restored configuration may already carry candidates; no session predates it.
+    state.refresh_walks(&BTreeMap::new()).await;
+    // Hands the peers' confirmed endpoints to the admission guard's reserve on a change.
+    let mut confirmed_feed = ConfirmedEndpointFeed::default();
     loop {
+        let next_walk = state.walks.next_due();
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
-                    let result = state.apply(*config).await;
-                    if result.is_ok() {
+                    let before = state.engine_addresses(&config).await;
+                    let result = state.apply(*config, &before).await;
+                    let applied = result.is_ok();
+                    if applied {
                         observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
                     }
                     let _ = reply.send(result);
+                    // After the reply: a walk reads the counters once, off the apply path.
+                    if applied {
+                        state.refresh_walks(&before).await;
+                    }
                 }
                 Some(WorkerCommand::SetMtu { mtu, reply }) => {
                     let _ = reply.send(state.update_mtu(mtu));
@@ -777,6 +906,9 @@ async fn run_worker(
             }
             _ = endpoint_scan.tick() => {
                 let endpoints = state.live_peer_endpoint_snapshot().await;
+                state
+                    .admit_confirmed_endpoints(&mut confirmed_feed, &endpoints)
+                    .await;
                 let changed = observed_endpoints
                     .as_ref()
                     .is_some_and(|previous| previous != &endpoints);
@@ -796,11 +928,34 @@ async fn run_worker(
             () = restart_due(state.restart_at), if state.restart_at.is_some() => {
                 state.restart().await;
             }
+            () = crate::candidate_walks::walk_due(next_walk), if next_walk.is_some() => {
+                state.step_walks().await;
+            }
         }
     }
 }
 
 impl RuntimeState {
+    /// Give the admission guard the peers' confirmed endpoints through `feed`, so those exact
+    /// sources keep the guard's reserved budget under a flood.
+    ///
+    /// Runs on the 250 ms endpoint scan. The shared feed takes the guard's write lock only on a
+    /// change, because the receive task takes its read lock for every initiation.
+    async fn admit_confirmed_endpoints(
+        &self,
+        feed: &mut ConfirmedEndpointFeed,
+        endpoints: &BTreeMap<PublicKey, Option<SocketAddr>>,
+    ) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        feed.offer(
+            &pending.factory.admission,
+            endpoints.values().flatten().copied(),
+        )
+        .await;
+    }
+
     /// Read authenticated live endpoints and refresh their route budgets away from the runtime.
     ///
     /// Only active identities own host routes. The stable peer key is passed to the node so
@@ -881,15 +1036,21 @@ impl RuntimeState {
     /// # Errors
     /// Reports an absent runtime or a failed userspace device reconfiguration.
     async fn set_private_key(&mut self, private_key: StaticSecret) -> io::Result<()> {
-        if self.pending.is_none() {
-            return Err(io::ErrorKind::NotConnected.into());
-        }
+        let admission = Arc::clone(
+            &self
+                .pending
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .factory
+                .admission,
+        );
         if let Some(device) = self.device.as_ref() {
             device
                 .set_private_key(private_key.clone())
                 .await
                 .map_err(|_| io::Error::other("GotaTun private key could not be updated."))?;
         }
+        admission.write().await.set_private_key(private_key.clone());
         self.pending
             .as_mut()
             .ok_or(io::ErrorKind::NotConnected)?
@@ -897,8 +1058,9 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Install a relay endpoint on the peer whose key currently owns its host routes.
-    #[cfg(feature = "relay")]
+    /// Install `endpoint` on the peer whose key currently owns its host routes: a relay address,
+    /// or the next direct-path candidate of a walk (#515). Keys, routes and keepalive stay as the
+    /// configuration says; only the address the next packet goes to changes.
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         let policy = self
             .config
@@ -921,12 +1083,136 @@ impl RuntimeState {
             .ok_or(io::ErrorKind::NotConnected)?
             .write(async |device| device.add_or_update_peers(peers).await)
             .await
-            .map_err(|_| io::Error::other("GotaTun relay endpoint could not be installed."))
+            .map_err(|_| io::Error::other("GotaTun peer endpoint could not be installed."))
+    }
+
+    /// Bring the candidate walks in line with the applied configuration (#515): drop walks whose
+    /// peer left, start one for each peer that is new or changed, and start again for a peer
+    /// whose walk once found it and whose path has since gone silent.
+    ///
+    /// A peer that is unchanged keeps its walk, finished or not (J585 F4). `apply` re-installs a
+    /// peer, and with it the first candidate, only when the peer itself changed, so an unrelated
+    /// snapshot never sends a working peer back through its list. `before` holds where the engine
+    /// sent each peer's packets before that apply ([`Self::engine_addresses`]). A re-installed
+    /// peer's live session proves its first candidate only if the engine was already there: after
+    /// a change to the rest of its list, the session may live on a later candidate (J602 F1).
+    /// `apply` keeps the engine on such a candidate while the new list still holds it
+    /// ([`kept_address`], J699 P3-3), and moves it to the first one otherwise.
+    ///
+    /// A relayed peer gets no walk while the engine sends to its relay (J699 P3-1, [`on_relay`]).
+    ///
+    /// Each walk that starts running begins with a real handshake on its address
+    /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
+    ///
+    /// Cost: at most one counter read per applied snapshot, on the worker after the apply reply;
+    /// [`Self::engine_addresses`] adds one before the apply only when the snapshot changes a
+    /// walking or relayed peer. No timer runs for a finished walk, so an idle node stays idle
+    /// (D81). Known follow-up (J699 P3-2, D393): once any walk has found its peer, `watching` is
+    /// true, so every applied snapshot reads every peer's counters, an O(peers) read not yet
+    /// measured at 1,000 and 4,096 peers. #515 holds the measurement plan; a per-walk "earliest
+    /// silent deadline" would skip the read until a found walk can actually have gone silent.
+    async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
+        let Some(config) = self.config.as_ref() else {
+            self.walks.clear();
+            self.relayed.clear();
+            return;
+        };
+        let members: BTreeSet<PublicKey> = config
+            .peers
+            .values()
+            .map(|policy| active_peer_key(&policy.peer))
+            .collect();
+        self.relayed.retain(|key, _| members.contains(key));
+        // `walking_peers` keeps only peers with network access, the ones `peers_for_config`
+        // installs.
+        let mut wanted = crate::candidate_walks::walking_peers(config.peers.values());
+        if !self.walks.prepare(&wanted) {
+            return;
+        }
+        let Ok(counters) = self.counters().await else {
+            return;
+        };
+        let observed = observed(&counters);
+        // A relayed peer is not walked off its relay (J699 P3-1).
+        wanted.retain(|key, _| {
+            let engine_at = observed.get(key).and_then(|seen| seen.endpoint);
+            let relayed = on_relay(engine_at, self.relayed.get(key).copied());
+            if relayed {
+                self.walks.abandon(*key);
+            }
+            !relayed
+        });
+        let started = self
+            .walks
+            .start(wanted, &observed, before, std::time::Instant::now());
+        // A walk starts on the engine's address when that is on the list (J602 F2), else on the
+        // first candidate, which a re-installed peer already has. Anything else is moved there,
+        // or the walk's first tick would read the engine's address as the peer having roamed.
+        // Then the walk's address gets a real handshake, so a working one answers at once.
+        for walk in started {
+            if walk.engine_at != Some(walk.address)
+                && self.set_endpoint(walk.key, walk.address).await.is_err()
+            {
+                // The engine could not be moved; the next applied snapshot starts the walk again.
+                self.walks.abandon(walk.key);
+                continue;
+            }
+            let _ = self.rehandshake(walk.key);
+        }
+    }
+
+    /// Where the engine sends each peer's packets before `next` is applied, by device key, for
+    /// [`Self::refresh_walks`] (J602 F1).
+    ///
+    /// Read only when `next` changes a peer that walks or is relayed, because only then can
+    /// `apply` keep a re-installed peer's address ([`kept_address`]). Every other snapshot reads
+    /// nothing here.
+    async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, Option<SocketAddr>> {
+        let watched = |peer: &crate::dataplane::Peer| {
+            !peer.candidates.is_empty() || self.relayed.contains_key(&active_peer_key(peer))
+        };
+        if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, watched) {
+            return BTreeMap::new();
+        }
+        self.counters()
+            .await
+            .map(|counters| {
+                counters
+                    .into_iter()
+                    .map(|(key, counters)| (key, counters.endpoint))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Step every due walk with the peers' counters and install the addresses they move to. A
+    /// stopped device has no counters to judge by, so nothing moves until it is back.
+    async fn step_walks(&mut self) {
+        if self.device.is_none() {
+            return;
+        }
+        let Ok(counters) = self.counters().await else {
+            return;
+        };
+        let moves = self
+            .walks
+            .step(std::time::Instant::now(), &observed(&counters));
+        for (key, endpoint) in moves {
+            if self.set_endpoint(key, endpoint).await.is_ok() {
+                let _ = self.rehandshake(key);
+            } else {
+                // The engine still holds the old address; the walk's next step tries again.
+                self.walks.install_failed(key);
+            }
+        }
     }
 
     /// Prepare a peer for relayed traffic while preserving any session it already established.
     #[cfg(feature = "relay")]
     async fn prepare_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        // From here the relay owns this peer's address: no walk moves it (J699 P3-1).
+        self.walks.abandon(key);
+        self.relayed.insert(key, endpoint);
         // GotaTun records a handshake as soon as either side derives a session, including a
         // responder that has just answered a relayed initiation. Keep that session.
         let has_session = self
@@ -965,16 +1251,54 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("GotaTun relay peer could not be reset."))
     }
 
+    /// Point `key` at a relay `endpoint` and start a handshake through it at once.
     #[cfg(feature = "relay")]
     async fn force_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        self.walks.abandon(key);
+        self.relayed.insert(key, endpoint);
         self.set_endpoint(key, endpoint).await?;
+        self.initiate(key)
+    }
+
+    /// Send a handshake initiation to `key`'s current address now, unless it has a live session
+    /// or an initiation is already in flight, without waiting for it. Only the relay path uses it.
+    #[cfg(feature = "relay")]
+    fn initiate(&mut self, key: PublicKey) -> io::Result<()> {
+        self.spawn_handshake(key, false)
+    }
+
+    /// Send a new handshake initiation to `key`'s current address now, even over a live session,
+    /// without waiting for it (#515, J604).
+    ///
+    /// A new address on a peer sends nothing by itself: the engine only uses it for the next
+    /// packet, and an idle peer has none for up to a keepalive interval. Behind a filtering NAT
+    /// that first packet is what opens this side for the peer's replies, so a changed or walked
+    /// address starts a handshake at once. `initiate` cannot do it: the engine's forced
+    /// handshake sends nothing while the session is younger than two minutes, which is exactly
+    /// the rebind case (J587's finding). The engine's `rehandshake` sends the initiation its
+    /// rekey retry would send, and keeps the session carrying data until the new one is up, so
+    /// a working session is never dropped. An unanswered initiation is retried by the engine's
+    /// own rekey timer, to wherever the endpoint is by then; nothing new is scheduled here.
+    fn rehandshake(&mut self, key: PublicKey) -> io::Result<()> {
+        self.spawn_handshake(key, true)
+    }
+
+    /// The body of `initiate` (`fresh` false, relay only) and [`Self::rehandshake`].
+    fn spawn_handshake(&mut self, key: PublicKey, fresh: bool) -> io::Result<()> {
         let device = Arc::clone(self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?);
         let key = X25519PublicKey::from(key.0);
         // GotaTun sends the initiation, then waits for the session without holding its device
         // lock. Wait in a task: callers of this serialized loop block their own threads, and
         // the relay shim that must deliver the response may run on one of them.
         self.handshakes.spawn(async move {
-            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.force_handshake(&key)).await;
+            let wait = async {
+                if fresh {
+                    device.rehandshake(&key).await
+                } else {
+                    device.force_handshake(&key).await
+                }
+            };
+            let _ = tokio::time::timeout(HANDSHAKE_WAIT, wait).await;
         });
         Ok(())
     }
@@ -1000,6 +1324,7 @@ impl RuntimeState {
             pending.private_key.clone(),
             self.info.port,
             peers,
+            admitted_peer_keys(config),
             tun,
         )
         .await?;
@@ -1037,7 +1362,11 @@ impl RuntimeState {
     /// The caller installs the new per-peer route MTUs before lowering the shared interface.
     /// # Errors
     /// Reports a missing TUN, route-netlink failure, or peer update failure.
-    async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+    async fn apply(
+        &mut self,
+        config: Config,
+        before: &BTreeMap<PublicKey, Option<SocketAddr>>,
+    ) -> io::Result<RuntimeInfo> {
         let mtu = crate::mesh_mtu::for_config(Some(&config));
         let previous_mtu = self
             .tun
@@ -1054,26 +1383,73 @@ impl RuntimeState {
             self.config = Some(config);
             return Ok(self.info.clone());
         }
-        let desired: BTreeSet<_> = config.peers.values().flat_map(policy_keys).collect();
+        let desired = peer_keys_with_network_access(&config);
+        let admitted_peers = admitted_peer_keys(&config);
+        let admission = Arc::clone(
+            &self
+                .pending
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .factory
+                .admission,
+        );
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        // Re-installed peers that stay where the engine already sends ([`kept_address`]).
+        let mut kept = BTreeSet::new();
         let changed_policies = config
             .peers
             .iter()
             .filter(|(id, policy)| {
-                self.config
-                    .as_ref()
-                    .and_then(|old| old.peers.get(id))
-                    .is_none_or(|old| old.peer != policy.peer)
+                policy.has_network_access()
+                    && self
+                        .config
+                        .as_ref()
+                        .and_then(|old| old.peers.get(id))
+                        .is_none_or(|old| !old.has_network_access() || old.peer != policy.peer)
             })
-            .map(|(_, policy)| peer_for_policy(policy))
+            .map(|(_, policy)| {
+                let mut peers = peer_for_policy(policy)?;
+                let key = active_peer_key(&policy.peer);
+                let engine_at = before.get(&key).copied().flatten();
+                let relay = self.relayed.get(&key).copied();
+                if let Some(at) = kept_address(&policy.peer, engine_at, relay)
+                    && let Some(active) = peers
+                        .iter_mut()
+                        .find(|peer| peer.public_key.as_bytes() == &key.0)
+                {
+                    active.endpoint = Some(at);
+                    kept.insert(key);
+                }
+                Ok(peers)
+            })
             .collect::<io::Result<Vec<_>>>()?;
         let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
-        let previous_keys: BTreeSet<_> = self
-            .config
+        // Peers that keep their access but get a new first address: tell them at once
+        // (`rehandshake`, which sends even over the live session the old address carried). A peer
+        // with candidates gets that handshake when its new walk starts (`refresh_walks`).
+        let readdressed: Vec<PublicKey> = config
+            .peers
             .iter()
-            .flat_map(|old| old.peers.values())
-            .flat_map(policy_keys)
+            .filter(|(id, policy)| {
+                policy.has_network_access()
+                    && policy.peer.endpoint.is_some()
+                    && policy.peer.candidates.is_empty()
+                    && self
+                        .config
+                        .as_ref()
+                        .and_then(|old| old.peers.get(id))
+                        .is_some_and(|old| {
+                            old.has_network_access() && old.peer.endpoint != policy.peer.endpoint
+                        })
+            })
+            .map(|(_, policy)| active_peer_key(&policy.peer))
+            .filter(|key| !kept.contains(key))
             .collect();
+        let previous_keys = self
+            .config
+            .as_ref()
+            .map(peer_keys_with_network_access)
+            .unwrap_or_default();
         let retired: Vec<_> = previous_keys
             .difference(&desired)
             .copied()
@@ -1083,6 +1459,15 @@ impl RuntimeState {
         self.update_mtu(previous_mtu.max(mtu))?;
         if !changed.is_empty() || !retired.is_empty() {
             // One device transaction: packet workers never see a half-applied snapshot.
+            //
+            // Known limit (J555 note, #483): `add_or_update_peers` overwrites every field of a
+            // changed peer, including the endpoint, unless [`kept_address`] keeps a walking or
+            // relayed peer where it is. When a snapshot changes any other peer for another
+            // reason (its access, addresses or rotation keys), the coordinator's endpoint, or
+            // none, replaces an endpoint the device learned from that peer's authenticated
+            // traffic after a NAT rebinding. The peer's next keepalive (at most 25 s) or data
+            // packet moves it back, so a rebinding that coincides with such a snapshot can take
+            // up to 25 s to recover. Peers the snapshot leaves unchanged keep their endpoint.
             if let Err(error) = device
                 .write(async |device| {
                     device.add_or_update_peers(changed).await;
@@ -1097,7 +1482,21 @@ impl RuntimeState {
                 return Err(error);
             }
         }
+        // The receive guard follows only snapshots the live device accepted. The configured
+        // endpoints are the ones that snapshot installs: only active identities carry one.
+        let configured_endpoints = config
+            .peers
+            .values()
+            .filter(|policy| policy.has_network_access())
+            .filter_map(|policy| policy.peer.endpoint);
+        let mut guard = admission.write().await;
+        guard.set_peers(admitted_peers);
+        guard.set_configured_endpoints(configured_endpoints);
+        drop(guard);
         self.config = Some(config);
+        for key in readdressed {
+            let _ = self.rehandshake(key);
+        }
         Ok(self.info.clone())
     }
 
@@ -1147,6 +1546,7 @@ impl RuntimeState {
         Ok(counters)
     }
 
+    /// Stop the device and drop the TUN, the configuration and every walk.
     async fn stop(&mut self) {
         // Ending every handshake task drops its device handle, so this one is the last.
         self.handshakes.abort_all();
@@ -1158,16 +1558,31 @@ impl RuntimeState {
         self.tun.take();
         self.config = None;
         self.restart_at = None;
+        self.walks.clear();
+        self.relayed.clear();
     }
 }
 
+/// Build a `GotaTun` device from a retained listener, identity, peers and TUN.
+///
+/// Install the admission set before the device starts receiving, so its first initiation sees the
+/// same peers as the device configuration.
+/// # Errors
+/// Reports a failure to start `GotaTun` with these sockets, peers or TUN.
 async fn build_device(
     factory: BoundUdpFactory,
     private_key: StaticSecret,
     port: u16,
     peers: Vec<WireGuardPeer>,
+    admitted_peers: BTreeSet<PublicKey>,
     tun: LinuxPacketIo,
 ) -> io::Result<GotaDevice> {
+    let admission = Arc::clone(&factory.admission);
+    {
+        let mut admission = admission.write().await;
+        admission.set_private_key(private_key.clone());
+        admission.install(admitted_peers, &peers);
+    }
     DeviceBuilder::new()
         .with_udp(factory)
         .with_private_key(private_key)
@@ -1186,22 +1601,58 @@ async fn build_device(
 /// used only while packets queue.
 const UDP_BUFFER_BYTES: usize = 7 * 1024 * 1024;
 
-/// Bind the engine's underlay UDP socket on `requested_port` (0 lets the kernel pick) and return
-/// it with the port it actually got.
+/// Bind the requested port, falling back to a stable ephemeral choice only for automatic requests.
 ///
-/// Port 51820 stays free for the kernel engine, so a kernel pick that lands on it is retried, up
-/// to 16 times. Every bound socket sends IPv4 with Don't Fragment clear (#483).
+/// A fallback socket remains bound for the life of the engine, and its actual port is returned
+/// for identity publication and durable restart state. Explicit operator ports fail on collision.
+/// Every bound socket sends IPv4 with Don't Fragment clear (#483).
 /// # Errors
-/// Returns the socket error from binding, or `AddrInUse` when no usable port came back.
-async fn bind_udp(requested_port: u16) -> io::Result<(BoundUdpFactory, u16)> {
+/// Returns socket errors, rejects the reserved port, or reports bounded ephemeral allocation failure.
+async fn bind_udp(
+    request: ListenPortRequest,
+    private_key: StaticSecret,
+) -> io::Result<(BoundUdpFactory, u16)> {
+    if request.port == 51_820 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let admission = Arc::new(RwLock::new(PeerAdmission::new(private_key)));
     let mut factory = UdpSocketFactory {
         recv_buffer_size: Some(UDP_BUFFER_BYTES),
         send_buffer_size: Some(UDP_BUFFER_BYTES),
     };
+    if request.port != 0 {
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port: request.port,
+            fwmark: None,
+        };
+        match factory.bind(&params).await {
+            Ok((send, receive)) => {
+                // Routers may fragment our IPv4 packets, as with kernel WireGuard (#483 PMTU black hole).
+                #[cfg(target_os = "linux")]
+                infraternal_linux_tun::allow_ipv4_fragmentation(&send)?;
+                let port = send.local_addr()?.port();
+                if port == 0 || port == 51_820 {
+                    return Err(io::ErrorKind::AddrInUse.into());
+                }
+                return Ok((
+                    BoundUdpFactory {
+                        send,
+                        receive,
+                        port,
+                        admission: Arc::clone(&admission),
+                    },
+                    port,
+                ));
+            }
+            Err(error) if request.allow_fallback && error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
+    }
     for _ in 0..16 {
         let params = UdpTransportFactoryParams {
             addr: None,
-            port: requested_port,
+            port: 0,
             fwmark: None,
         };
         let (send, receive) = factory.bind(&params).await?;
@@ -1215,6 +1666,7 @@ async fn bind_udp(requested_port: u16) -> io::Result<(BoundUdpFactory, u16)> {
                     send,
                     receive,
                     port,
+                    admission: Arc::clone(&admission),
                 },
                 port,
             ));
@@ -1227,12 +1679,13 @@ async fn bind_udp(requested_port: u16) -> io::Result<(BoundUdpFactory, u16)> {
 #[derive(Clone)]
 struct LinuxPacketIo {
     tun: LinuxTun,
+    filter: Arc<PacketFilter>,
 }
 
 impl LinuxPacketIo {
     /// Wrap the opened TUN for `GotaTun` packet delivery and its live MTU watcher.
-    fn new(tun: LinuxTun) -> Self {
-        Self { tun }
+    fn new(tun: LinuxTun, filter: Arc<PacketFilter>) -> Self {
+        Self { tun, filter }
     }
 
     /// Keep the link MTU and `GotaTun`'s packet-size watcher in step.
@@ -1252,8 +1705,28 @@ impl LinuxPacketIo {
     }
 }
 
+/// Check a typed `GotaTun` IP packet without copying its backing buffer.
+///
+/// `GotaTun` exposes mutable bytes on `Packet<[u8]>`, not `Packet<Ip>`. Converting to bytes and
+/// back is a zero-copy type cast; the filter owns the only packet parser and the second cast
+/// revalidates the type after a possible mesh SSH port rewrite.
+fn filter_ip_packet(
+    packet: Packet<Ip>,
+    filter: &PacketFilter,
+    direction: Direction,
+) -> Option<Packet<Ip>> {
+    let mut packet = packet.into_bytes();
+    if !filter.check(packet.buf_mut(), direction) {
+        return None;
+    }
+    packet.try_into_ip().ok()
+}
+
 impl IpSend for LinuxPacketIo {
     async fn send(&mut self, packet: Packet<Ip>) -> io::Result<()> {
+        let Some(packet) = filter_ip_packet(packet, &self.filter, Direction::MeshToHost) else {
+            return Ok(());
+        };
         let Some(packet) = self.local_service_hook(packet)? else {
             return Ok(());
         };
@@ -1266,7 +1739,10 @@ impl IpRecv for LinuxPacketIo {
         &'a mut self,
         pool: &mut PacketBufPool,
     ) -> io::Result<impl Iterator<Item = Packet<Ip>> + Send + 'a> {
-        self.tun.recv(pool).await
+        let packets = self.tun.recv(pool).await?;
+        let filter = &self.filter;
+        Ok(packets
+            .filter_map(move |packet| filter_ip_packet(packet, filter, Direction::HostToMesh)))
     }
 
     fn mtu(&self) -> MtuWatcher {
@@ -1274,13 +1750,15 @@ impl IpRecv for LinuxPacketIo {
     }
 }
 
-/// Build the device's complete peer list, retaining both keys during a rotation overlap.
+/// Build the device's peer list from peers with network access, retaining both keys during a
+/// rotation overlap.
 /// # Errors
 /// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let peers = config
         .peers
         .values()
+        .filter(|peer| peer.has_network_access())
         .map(peer_for_policy)
         .collect::<io::Result<Vec<_>>>()?;
     Ok(peers.into_iter().flatten().collect())
@@ -1304,6 +1782,8 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
         let mut current =
             WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
         current.endpoint = peer.endpoint;
+        // The first due keepalive initiates a handshake after endpoint discovery,
+        // before user traffic exists.
         current.keepalive = Some(25);
         return Ok(vec![current]);
     };
@@ -1328,17 +1808,10 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
         &mut current_peer
     };
     active.endpoint = peer.endpoint;
+    // Both peers initiate after learning the endpoint to open conntrack state
+    // through strict input firewalls.
     active.keepalive = Some(25);
     Ok(vec![previous_peer, current_peer])
-}
-
-/// Select the identity that currently owns this peer's host routes.
-fn active_peer_key(peer: &crate::dataplane::Peer) -> PublicKey {
-    if peer.previous_active {
-        peer.previous_key.unwrap_or(peer.key)
-    } else {
-        peer.key
-    }
 }
 
 /// Include every configured identity so cleanup removes only keys no longer in overlap.
@@ -1346,6 +1819,30 @@ fn policy_keys(policy: &crate::dataplane::PeerPolicy) -> impl Iterator<Item = Pu
     std::iter::once(policy.peer.key).chain(policy.peer.previous_key)
 }
 
+/// Return configured `WireGuard` identities whose peers have network access in either direction.
+///
+/// `GotaTun` must not install a peer with no access: a configured endpoint and keepalive would let
+/// the node initiate a handshake to that peer even though inbound handshake admission rejects it.
+pub(crate) fn peer_keys_with_network_access(config: &Config) -> BTreeSet<PublicKey> {
+    config
+        .peers
+        .values()
+        .filter(|peer| peer.has_network_access())
+        .flat_map(policy_keys)
+        .collect()
+}
+
+/// Return identities whose effective network access permits traffic in at least one direction.
+fn admitted_peer_keys(config: &Config) -> BTreeSet<PublicKey> {
+    peer_keys_with_network_access(config)
+}
+
+/// Turn a stored 32-byte private key into the engine's secret and this node's public key.
+///
+/// The raw bytes are copied into a zeroizing buffer, so the copy made for the conversion is
+/// wiped when it drops.
+/// # Errors
+/// Returns `InvalidData` when `bytes` is not exactly 32 bytes long.
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {
     let raw: [u8; 32] = bytes.try_into().map_err(|_| io::ErrorKind::InvalidData)?;
     let raw = zeroize::Zeroizing::new(raw);
@@ -1354,11 +1851,79 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
     Ok((secret, PublicKey(*public.as_bytes())))
 }
 
+/// Checks the two rules that keep a peer where the engine already sends (J699 P3-1, P3-3).
+#[cfg(test)]
+mod keep_tests {
+    #![allow(clippy::expect_used)]
+    use super::{kept_address, on_relay};
+    use crate::{
+        dataplane::Peer,
+        policy::model::{Addresses, PublicKey},
+    };
+    use std::net::SocketAddr;
+
+    /// Parse a fixture socket address.
+    fn at(address: &str) -> SocketAddr {
+        address.parse().expect("fixture address")
+    }
+
+    /// A walking peer whose list is `first` then `rest`.
+    fn walking(first: &str, rest: &[&str]) -> Peer {
+        Peer {
+            key: PublicKey([3; 32]),
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.1".parse().expect("peer IPv4"),
+                ipv6: "fd01::1".parse().expect("peer IPv6"),
+            },
+            endpoint: Some(at(first)),
+            candidates: rest.iter().map(|address| at(address)).collect(),
+        }
+    }
+
+    /// J699 P3-1: a peer on its relay (or mid-preparation, with no address) is not walked; one
+    /// the engine has moved elsewhere, or never relayed, is.
+    #[test]
+    fn a_relayed_peer_is_on_its_relay_until_the_engine_leaves_it() {
+        let relay = Some(at("127.0.0.1:40000"));
+        assert!(on_relay(relay, relay));
+        assert!(on_relay(None, relay), "preparing the relayed handshake");
+        assert!(!on_relay(Some(at("192.0.2.2:10254")), relay));
+        assert!(!on_relay(Some(at("192.0.2.2:10254")), None));
+        assert!(!on_relay(None, None));
+    }
+
+    /// J699 P3-1: a re-install keeps a relayed peer on its relay, which no list ever holds.
+    #[test]
+    fn a_reinstall_keeps_a_relayed_peer_on_its_relay() {
+        let relay = at("127.0.0.1:40000");
+        let peer = walking("192.0.2.2:10254", &["198.51.100.2:10254"]);
+        assert_eq!(kept_address(&peer, Some(relay), Some(relay)), Some(relay));
+        let single = walking("192.0.2.2:10254", &[]);
+        assert_eq!(kept_address(&single, Some(relay), Some(relay)), Some(relay));
+    }
+
+    /// J699 P3-3: a re-install keeps a walking peer on an address its new list still holds, and
+    /// takes the snapshot's first address when the list dropped the engine's or has one entry.
+    #[test]
+    fn a_reinstall_keeps_a_found_address_the_list_still_holds() {
+        let peer = walking("10.0.0.2:10254", &["198.51.100.2:10254", "198.51.100.2:9"]);
+        let found = at("198.51.100.2:10254");
+        assert_eq!(kept_address(&peer, Some(found), None), Some(found));
+        assert_eq!(kept_address(&peer, Some(at("203.0.113.1:1")), None), None);
+        assert_eq!(kept_address(&peer, None, None), None);
+        let single = walking("10.0.0.2:10254", &[]);
+        assert_eq!(kept_address(&single, Some(at("203.0.113.1:1")), None), None);
+    }
+}
+
 /// Checks engine selection, `GotaTun` peer conversion, and mesh-link lifecycle behavior.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{EngineKind, peers_for_config};
+    use super::{EngineKind, admitted_peer_keys, peer_keys_with_network_access, peers_for_config};
+    use crate::listen_port::Request;
     use crate::{
         dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
         policy::{
@@ -1399,8 +1964,17 @@ mod tests {
     /// even where `rmem_default` equals `rmem_max`. With `CAP_NET_ADMIN` the request is forced.
     #[tokio::test]
     async fn engine_udp_socket_requests_the_large_buffers() {
+        use gotatun::x25519::StaticSecret;
         use nix::sys::socket::{getsockopt, setsockopt, sockopt};
-        let (factory, _) = super::bind_udp(0).await.expect("bound engine socket");
+        let (factory, _) = super::bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            StaticSecret::from([1; 32]),
+        )
+        .await
+        .expect("bound engine socket");
         let reference = std::net::UdpSocket::bind("127.0.0.1:0").expect("reference socket");
         setsockopt(&reference, sockopt::RcvBuf, &super::UDP_BUFFER_BYTES).expect("receive request");
         setsockopt(&reference, sockopt::SndBuf, &super::UDP_BUFFER_BYTES).expect("send request");
@@ -1416,6 +1990,51 @@ mod tests {
             engine.0 >= requested.0 && engine.1 >= requested.1,
             "engine buffers {engine:?} are below an explicit request {requested:?}"
         );
+    }
+
+    /// An automatic listener falls back when its preferred UDP port is held; an explicit choice fails.
+    #[tokio::test]
+    async fn occupied_listener_falls_back_only_for_automatic_selection() {
+        use gotatun::x25519::StaticSecret;
+        let occupied = std::net::UdpSocket::bind("0.0.0.0:0").expect("reserve test port");
+        let preferred = occupied.local_addr().expect("reserved port").port();
+        assert_ne!(
+            preferred, 51_820,
+            "the fallback test does not use the reserved port"
+        );
+
+        let (factory, actual) = super::bind_udp(
+            Request {
+                port: preferred,
+                allow_fallback: true,
+            },
+            StaticSecret::from([2; 32]),
+        )
+        .await
+        .expect("automatic listener falls back");
+        assert_ne!(actual, preferred, "the occupied preference was not reused");
+        assert_eq!(
+            factory.port, actual,
+            "the reported port matches the bound socket"
+        );
+        assert_eq!(
+            factory.send.local_addr().expect("bound listener").port(),
+            actual
+        );
+        drop(factory);
+
+        let Err(error) = super::bind_udp(
+            Request {
+                port: preferred,
+                allow_fallback: false,
+            },
+            StaticSecret::from([2; 32]),
+        )
+        .await
+        else {
+            panic!("an explicit occupied port unexpectedly succeeded")
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
     }
 
     #[test]
@@ -1477,12 +2096,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_rebuilds_the_device_after_a_fatal_error() {
         use super::{
-            EndpointRefreshSignal, Health, LinuxPacketIo, PendingDevice, RouteEndpointUpdater,
-            RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device, run_worker,
+            EndpointRefreshSignal, Health, LinuxPacketIo, PacketFilter, PendingDevice,
+            RouteEndpointUpdater, RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device,
+            run_worker,
         };
         use gotatun::x25519::StaticSecret;
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
         use std::sync::{Arc, mpsc as sync};
+        let private_key = StaticSecret::from([7; 32]);
         let (kernel, device) = socketpair(
             AddressFamily::Unix,
             SockType::SeqPacket,
@@ -1491,19 +2112,35 @@ mod tests {
         )
         .expect("TUN stand-in");
         let health = Arc::new(Health::default());
+        let config = one_peer_config(None);
+        let filter = Arc::new(
+            PacketFilter::new(
+                &config,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
         let tun = LinuxPacketIo::new(
             crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
                 .expect("TUN stand-in registers"),
+            filter,
         );
-        let (factory, port) = bind_udp(0).await.expect("engine socket");
-        let private_key = StaticSecret::from([7; 32]);
-        let config = one_peer_config(None);
+        let (factory, port) = bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            private_key.clone(),
+        )
+        .await
+        .expect("engine socket");
         let peers = peers_for_config(&config).expect("peers");
         let device = build_device(
             factory.clone(),
             private_key.clone(),
             port,
             peers,
+            admitted_peer_keys(&config),
             tun.clone(),
         )
         .await
@@ -1525,6 +2162,8 @@ mod tests {
             },
             health: Arc::clone(&health),
             restart_at: None,
+            walks: crate::candidate_walks::Walks::default(),
+            relayed: BTreeMap::new(),
         };
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
         let endpoint_refresh = Arc::new(EndpointRefreshSignal::default());
@@ -1563,6 +2202,7 @@ mod tests {
     fn one_peer_config(endpoint: Option<SocketAddr>) -> Config {
         Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -1589,6 +2229,7 @@ mod tests {
                             ipv6: "fd01::1".parse().expect("peer IPv6"),
                         },
                         endpoint,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1600,6 +2241,54 @@ mod tests {
         }
     }
 
+    /// The Linux typed-packet adapter applies grants before returning packets to `GotaTun`.
+    #[test]
+    fn typed_ip_packets_pass_through_the_mesh_filter() {
+        use super::{Direction, PacketFilter, filter_ip_packet};
+        use gotatun::packet::Packet;
+
+        let config = one_peer_config(None);
+        let filter = PacketFilter::new(
+            &config,
+            infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+        )
+        .expect("compile filter");
+        let mut bytes = vec![0_u8; 40];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        bytes[8] = 64;
+        bytes[9] = 6;
+        bytes[12..16].copy_from_slice(&config.addresses.ipv4.octets());
+        bytes[16..20].copy_from_slice(
+            &"10.254.0.1"
+                .parse::<std::net::Ipv4Addr>()
+                .expect("peer")
+                .octets(),
+        );
+        bytes[20..22].copy_from_slice(&40_000_u16.to_be_bytes());
+        bytes[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        bytes[32] = 0x50;
+        bytes[33] = 0x02;
+
+        let mut packet = Packet::<[u8]>::default();
+        packet.buf_mut().extend_from_slice(&bytes);
+        let packet = packet.try_into_ip().expect("typed IP packet");
+        assert!(filter_ip_packet(packet, &filter, Direction::HostToMesh).is_some());
+
+        bytes[12..16].copy_from_slice(
+            &"10.254.0.99"
+                .parse::<std::net::Ipv4Addr>()
+                .expect("spoofed address")
+                .octets(),
+        );
+        let mut packet = Packet::<[u8]>::default();
+        packet.buf_mut().extend_from_slice(&bytes);
+        let packet = packet.try_into_ip().expect("typed spoofed IP packet");
+        assert!(filter_ip_packet(packet, &filter, Direction::HostToMesh).is_none());
+    }
+
+    /// A coordinator peer becomes one `GotaTun` peer with its key, address, host routes and the
+    /// keepalive for its role.
     #[test]
     fn peer_conversion_uses_coordinator_keys_endpoints_and_host_allowed_ips() {
         let endpoint: SocketAddr = "192.0.2.4:51831".parse().expect("endpoint");
@@ -1618,6 +2307,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["10.254.0.1/32", "fd01::1/128"]
         );
+    }
+
+    /// A peer with no network access cannot trigger an unsolicited userspace handshake.
+    #[test]
+    fn peer_without_network_access_is_not_installed() {
+        let mut config = one_peer_config(None);
+        let policy = config.peers.get_mut(&NodeId(1)).expect("configured peer");
+        policy.inbound = TrafficPolicy::None;
+        policy.outbound = TrafficPolicy::None;
+
+        assert!(peers_for_config(&config).expect("convert peers").is_empty());
+        assert!(peer_keys_with_network_access(&config).is_empty());
     }
 
     /// Keep both rotation keys installed while routing only through the currently active one.

@@ -1,12 +1,19 @@
 /** Measures synthetic terminal keydown-to-paint latency and forced-drop recovery. Loaded only by `?probe=1` pages (an on-demand module, D188). */
 import type { TerminalClient, TerminalHooks, TerminalTraceHop } from "./terminal";
 
-/** The characters the probe types, one after another. */
-const KEY_SET = "abcdefghijklmnopqrstuvwxyz0123456789";
+/** The parser state used to skip terminal escape sequences before matching painted screen characters. */
+type VisibleOutputState = "text" | "escape" | "csi" | "string" | "string-escape";
+
+/** Distinct adjacent keys stay out of `yes !` output so a stale screen cannot finish the next sample. */
+const KEY_SET = "abcdfghijklmnopqrtuvwxz0123456789";
 /** The most keys one run may send. */
 const MAX_PROBE_KEYS = 5_000;
-/** The shortest time a run waits for its echoes before giving up; longer runs wait 50 ms per key. */
+/** The minimum deadline for a key run, including quiet links with a few slow echoes. */
 const ECHO_TIMEOUT_MS = 15_000;
+/** Budget a few seconds per serial paint sample, including recovery from a busy flood. */
+const KEY_SAMPLE_TIMEOUT_MS = 3_600;
+/** Bound a long 200-key browser profile without truncating its slow samples. */
+const MAX_ECHO_TIMEOUT_MS = 720_000;
 /**
  * A deadlock guard, not a latency budget: two minutes is over 70 times the 1700 ms worst-case bound at 300 ms RTT
  * plus jitter. It also leaves slow successes (including a minute-long reconnect) measured at their full duration.
@@ -57,6 +64,8 @@ export class PerformanceProbe {
   private terminal: TerminalClient | undefined;
   /** Samples waiting for their echo, by the character code that will be painted. */
   private readonly pending = new Map<number, SampleQueue>();
+  /** Current parser mode for split ANSI control sequences in painted terminal output. */
+  private visibleOutputState: VisibleOutputState = "text";
   /** Keydown-to-paint times in milliseconds for the current run. */
   private readonly latencies: number[] = [];
   /** Every sample of the current run, in order. */
@@ -128,7 +137,7 @@ export class PerformanceProbe {
       onDisconnected: (forced) => this.onDisconnected(forced),
       onInput: (data, at, sequence) => this.onInput(data, at, sequence),
       onTrace: (id, hop, at) => this.onTrace(id, hop, at),
-      onPaintedOutput: (bytes, at) => this.onPaintedOutput(bytes, at),
+      onPaintedOutput: (bytes, at, _sequence, kind) => this.onPaintedOutput(bytes, at, kind),
     };
   }
 
@@ -190,7 +199,8 @@ export class PerformanceProbe {
     this.results.textContent = `Painted 0 / ${count}`;
     this.syncButtons();
 
-    this.timeout = window.setTimeout(() => this.finishRun(true), Math.max(ECHO_TIMEOUT_MS, count * 50));
+    const runTimeout = Math.min(MAX_ECHO_TIMEOUT_MS, Math.max(ECHO_TIMEOUT_MS, count * KEY_SAMPLE_TIMEOUT_MS));
+    this.timeout = window.setTimeout(() => this.finishRun(true), runTimeout);
     this.sendNextKey();
   }
 
@@ -270,12 +280,16 @@ export class PerformanceProbe {
     this.syncButtons();
   }
 
-  /** Matches painted bytes to waiting samples, records their latency and sends the next key when the previous ones are done. */
-  private onPaintedOutput(bytes: Uint8Array, paintedAt: number): void {
+  /** Matches visible painted characters, records their latency and sends the next key when the previous ones are done. */
+  private onPaintedOutput(bytes: Uint8Array, paintedAt: number, kind: "output" | "snapshot" = "output"): void {
     this.waitForOutputQuiet();
-    this.matchResumeMarker(bytes, paintedAt);
+    if (kind === "snapshot") this.visibleOutputState = "text";
+    let paintedSample = false;
     for (const byte of bytes) {
-      const queue = this.pending.get(byte);
+      const visibleByte = this.visibleByte(byte);
+      if (visibleByte === undefined) continue;
+      this.matchResumeMarkerByte(visibleByte, paintedAt);
+      const queue = this.pending.get(visibleByte);
       if (!queue) continue;
       const sample = queue.samples[queue.next];
       if (!sample) {
@@ -288,11 +302,15 @@ export class PerformanceProbe {
       const duration = Math.max(0, paintedAt - sample.startedAt);
       if (this.runActive) {
         this.latencies.push(duration);
+        paintedSample = true;
         this.results.textContent = `Painted ${this.latencies.length} / ${this.runTarget}`;
         if (this.latencies.length >= this.runTarget) this.finishRun(false);
       }
     }
-    if (this.runActive && this.latencies.length === this.samples.length) {
+    // Busy output may produce many paint callbacks after a key is done. Only
+    // the callback that matched that key may schedule its successor, and a
+    // pending timer must not be overwritten by another callback.
+    if (this.runActive && paintedSample && this.latencies.length === this.samples.length && this.nextKeyTimer === 0) {
       this.nextKeyTimer = window.setTimeout(() => {
         this.nextKeyTimer = 0;
         this.sendNextKey();
@@ -300,23 +318,51 @@ export class PerformanceProbe {
     }
   }
 
+  /** Return printable ASCII bytes and skip terminal controls, retaining state across split output frames. */
+  private visibleByte(byte: number): number | undefined {
+    if (this.visibleOutputState === "text") {
+      if (byte === 0x1b) this.visibleOutputState = "escape";
+      else if (byte === 0x9b) this.visibleOutputState = "csi";
+      else if (byte === 0x9d || byte === 0x90 || byte === 0x98 || byte === 0x9e || byte === 0x9f) {
+        this.visibleOutputState = "string";
+      } else if (byte >= 0x20 && byte <= 0x7e) return byte;
+      return undefined;
+    }
+    if (this.visibleOutputState === "escape") {
+      if (byte === 0x5b) this.visibleOutputState = "csi";
+      else if (byte === 0x5d || byte === 0x50 || byte === 0x58 || byte === 0x5e || byte === 0x5f) {
+        this.visibleOutputState = "string";
+      } else if (byte >= 0x30 && byte <= 0x7e) this.visibleOutputState = "text";
+      return undefined;
+    }
+    if (this.visibleOutputState === "csi") {
+      if (byte >= 0x40 && byte <= 0x7e) this.visibleOutputState = "text";
+      return undefined;
+    }
+    if (this.visibleOutputState === "string") {
+      if (byte === 0x07 || byte === 0x9c) this.visibleOutputState = "text";
+      else if (byte === 0x1b) this.visibleOutputState = "string-escape";
+      return undefined;
+    }
+    if (byte === 0x5c || byte === 0x9c) this.visibleOutputState = "text";
+    else if (byte !== 0x1b) this.visibleOutputState = "string";
+    return undefined;
+  }
+
   /**
    * Matches this drop's marker across painted chunks without allocating per byte in the timing probe (P11).
    * Markers contain `~` only at their ends, so after a mismatch only a leading `~` can remain matched.
    */
-  private matchResumeMarker(bytes: Uint8Array, paintedAt: number): void {
+  private matchResumeMarkerByte(byte: number, paintedAt: number): void {
     if (this.resumeStartedAt === undefined || !this.resumeMarkerSent) return;
-    for (const byte of bytes) {
-      this.resumeMatched = byte === this.resumeMarker.charCodeAt(this.resumeMatched)
-        ? this.resumeMatched + 1
-        : byte === this.resumeMarker.charCodeAt(0) ? 1 : 0;
-      if (this.resumeMatched !== this.resumeMarker.length) continue;
-      this.resumeDuration = Math.max(0, paintedAt - this.resumeStartedAt);
-      this.clearResume();
-      this.renderReport();
-      this.message.textContent = "Resume completed after the first echoed marker painted.";
-      break;
-    }
+    this.resumeMatched = byte === this.resumeMarker.charCodeAt(this.resumeMatched)
+      ? this.resumeMatched + 1
+      : byte === this.resumeMarker.charCodeAt(0) ? 1 : 0;
+    if (this.resumeMatched !== this.resumeMarker.length) return;
+    this.resumeDuration = Math.max(0, paintedAt - this.resumeStartedAt);
+    this.clearResume();
+    this.renderReport();
+    this.message.textContent = "Resume completed after the first echoed marker painted.";
   }
 
   /** Queues a sample under the character it will paint. */

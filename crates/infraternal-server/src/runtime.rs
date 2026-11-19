@@ -205,6 +205,48 @@ pub enum ServerError {
     Clock,
 }
 
+/// The maximum time server startup waits for a configured listen address to appear.
+const LISTENER_BIND_RETRY_WINDOW: Duration = Duration::from_secs(30);
+
+/// The delay between attempts to bind an address that is not assigned yet.
+const LISTENER_BIND_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Bind a TCP listener, retrying only while the requested local address is absent.
+///
+/// `network-online.target` can precede a mesh or secondary address becoming
+/// local. Other bind errors still fail immediately; retries stop after 30
+/// seconds and each retry is logged so systemd's restart policy remains visible.
+async fn bind_listener_with_retry(
+    address: SocketAddr,
+    mut bind: impl FnMut(SocketAddr) -> std::io::Result<std::net::TcpListener>,
+) -> std::io::Result<std::net::TcpListener> {
+    let deadline = tokio::time::Instant::now() + LISTENER_BIND_RETRY_WINDOW;
+    let mut retries = 0_u32;
+    loop {
+        match bind(address) {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    return Err(error);
+                }
+                retries += 1;
+                tracing::warn!(
+                    listen = %address,
+                    retry = retries,
+                    retry_window_seconds = LISTENER_BIND_RETRY_WINDOW.as_secs(),
+                    "server listen address is not assigned yet; retrying bind"
+                );
+                tokio::time::sleep(
+                    LISTENER_BIND_RETRY_INTERVAL.min(deadline.saturating_duration_since(now)),
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Initialize SQLite, mount auth and health routes, and serve HTTP or HTTPS until shutdown.
 ///
 /// # Errors
@@ -313,8 +355,9 @@ async fn serve_inner(
         if let Some(tls) = config.tls {
             let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
                 .map_err(|_| ServerError::TlsConfiguration)?;
-            let listener =
-                std::net::TcpListener::bind(config.listen).map_err(ServerError::Listener)?;
+            let listener = bind_listener_with_retry(config.listen, std::net::TcpListener::bind)
+                .await
+                .map_err(ServerError::Listener)?;
             listener
                 .set_nonblocking(true)
                 .map_err(ServerError::Listener)?;
@@ -326,8 +369,13 @@ async fn serve_inner(
                 .await
                 .map_err(ServerError::Listener)
         } else {
-            let listener = TcpListener::bind(config.listen)
+            let listener = bind_listener_with_retry(config.listen, std::net::TcpListener::bind)
                 .await
+                .map_err(ServerError::Listener)?;
+            listener
+                .set_nonblocking(true)
+                .map_err(ServerError::Listener)?;
+            let listener = TcpListener::from_std(listener)
                 .map_err(ServerError::Listener)?
                 .tap_io(|socket| {
                     // Match the TLS acceptor: Ack and PTY Output are separate small
@@ -634,6 +682,15 @@ async fn build_router_core(
     // An injected actor's caller owns node-worker startup. Production starts
     // the process and binds admitted node workers after persisted switches load.
     let owns_node_workers = supplied_agent.is_none();
+    // The periodic update check (#211 S3) belongs to the production process only. It
+    // starts nothing outside root release builds and never applies a release.
+    #[cfg(feature = "release")]
+    if owns_node_workers {
+        drop(crate::release_latest::start_updates(
+            pool.clone(),
+            &config.data_dir,
+        ));
+    }
     #[cfg(feature = "remote")]
     let observed_server_ip = remote
         .as_ref()
@@ -651,7 +708,57 @@ async fn build_router_core(
         let executable = std::path::PathBuf::from("/proc/self/exe");
         #[cfg(not(target_os = "linux"))]
         let executable = std::env::current_exe().map_err(|_| ServerError::InvalidConfiguration)?;
-        EmbeddedAgent::spawn(executable)
+        #[cfg(target_os = "linux")]
+        {
+            let legacy_state = infraternal_agent::sessions::state_path(None).map_err(|error| {
+                tracing::error!(
+                    error_kind = ?error.kind(),
+                    "embedded Mesh runtime state location is unavailable"
+                );
+                ServerError::InvalidConfiguration
+            })?;
+            let mesh_state = config.data_dir.join("mesh");
+            let migration_source = legacy_state.clone();
+            let migration_target = mesh_state.clone();
+            // A database error fails start closed: guessing "not ours" here would mint a new key.
+            let own_keys = crate::embedded_mesh_state::server_node_ownership(&pool)
+                .await
+                .map_err(|error| {
+                    tracing::error!(
+                        error_kind = ?error.kind(),
+                        "embedded Mesh identity ownership could not be read"
+                    );
+                    ServerError::InvalidConfiguration
+                })?;
+            let migration = tokio::task::spawn_blocking(move || {
+                crate::embedded_mesh_state::migrate_preserving_rotation(
+                    &migration_source,
+                    &migration_target,
+                    &|public| own_keys.keys.contains(public),
+                    own_keys.rotation_open,
+                )
+            })
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    task_panicked = error.is_panic(),
+                    "embedded Mesh state migration task failed"
+                );
+                ServerError::InvalidConfiguration
+            })?;
+            migration.map_err(|error| {
+                tracing::error!(
+                    error_kind = ?error.kind(),
+                    "embedded Mesh state migration failed"
+                );
+                ServerError::InvalidConfiguration
+            })?;
+            EmbeddedAgent::spawn_with_mesh_state(executable, mesh_state)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            EmbeddedAgent::spawn(executable)
+        }
     };
     #[cfg(feature = "remote")]
     let (ca_api, remote_api, hosts, listeners, issuer, enrollment_store, removal) = remote_router(
@@ -888,6 +995,10 @@ fn remove_setup_token_socket_or_warn(data_dir: &Path, operation: &'static str) {
     }
 }
 
+/// Maximum WAL high-water allocation retained by a `SQLx` writer after reuse.
+/// This is not a live-WAL cap: a pinned snapshot may temporarily exceed it.
+const SQLX_WAL_RETAINED_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Open (creating it if needed) the server's SQLite database in `data_dir`,
 /// with the sqlx pool the server has always used.
 ///
@@ -909,6 +1020,9 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
+        // Bound retained high-water allocation on every SQLx writer, including lazy replacements.
+        // Active readers can still pin a larger live WAL; reuse shrinks it after they release.
+        .pragma("journal_size_limit", SQLX_WAL_RETAINED_BYTES.to_string())
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -927,6 +1041,10 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .map_err(ServerError::Storage)?;
     set_private_file(&data_dir.join("infraternal.sqlite"))
         .map_err(|_| ServerError::InvalidConfiguration)?;
+    tracing::info!(
+        sqlx_wal_retained_bytes = SQLX_WAL_RETAINED_BYTES,
+        "SQLx WAL retention limit configured; pinned readers may exceed it until reuse"
+    );
     Ok(pool)
 }
 
@@ -1211,18 +1329,30 @@ mod tests {
     //! Verifies startup storage, setup-token socket lifecycle, and proxy validation with local fixtures.
 
     use super::{
-        ProxyNetwork, ServerConfig, TlsFiles, logging_color, router_with_agent,
-        set_private_directory, start_setup_token_socket, validate_config,
+        LISTENER_BIND_RETRY_WINDOW, ProxyNetwork, ServerConfig, TlsFiles, bind_listener_with_retry,
+        logging_color, router_with_agent, set_private_directory, start_setup_token_socket,
+        validate_config,
     };
     use crate::embedded::EmbeddedAgent;
     use axum::{body::Body, http::Request};
-    use std::{ffi::OsString, net::SocketAddr, path::PathBuf, str::FromStr};
+    use std::{
+        ffi::OsString,
+        net::SocketAddr,
+        path::PathBuf,
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
     use tower::ServiceExt;
 
     fn temp_dir() -> PathBuf {
         std::env::temp_dir().join(format!("infraternal-server-{}", uuid::Uuid::new_v4()))
     }
 
+    /// Build a local server configuration that uses `data_dir` for test state.
     fn config(data_dir: PathBuf) -> ServerConfig {
         ServerConfig {
             listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
@@ -1236,6 +1366,262 @@ mod tests {
             behind_proxy: false,
             trusted_proxies: Vec::new(),
         }
+    }
+
+    /// Startup retries an absent local address and returns the listener after it becomes bindable.
+    #[tokio::test]
+    async fn listener_bind_retries_address_not_available() {
+        let address = SocketAddr::from(([127, 0, 0, 1], 0));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let bind_attempts = Arc::clone(&attempts);
+        let listener = bind_listener_with_retry(address, move |address| {
+            if bind_attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable))
+            } else {
+                std::net::TcpListener::bind(address)
+            }
+        })
+        .await
+        .expect("second bind succeeds");
+
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            listener.local_addr().expect("bound listener").ip(),
+            address.ip()
+        );
+    }
+
+    /// An assigned address takes the first bind path without entering the retry timer.
+    #[tokio::test]
+    async fn listener_bind_is_immediate_when_address_is_available() {
+        const SAMPLES: usize = 200;
+        let address = SocketAddr::from(([127, 0, 0, 1], 0));
+        let mut helper_nanos = 0_u128;
+        let mut direct_nanos = 0_u128;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            drop(
+                bind_listener_with_retry(address, std::net::TcpListener::bind)
+                    .await
+                    .expect("assigned address binds immediately"),
+            );
+            helper_nanos += started.elapsed().as_nanos();
+
+            let started = Instant::now();
+            drop(std::net::TcpListener::bind(address).expect("direct bind succeeds"));
+            direct_nanos += started.elapsed().as_nanos();
+        }
+
+        println!(
+            "METRIC listener_bind_helper_ns_per={} direct_bind_ns_per={} samples={SAMPLES}",
+            helper_nanos / SAMPLES as u128,
+            direct_nanos / SAMPLES as u128,
+        );
+    }
+
+    /// Bind errors other than an absent address return after one attempt.
+    #[tokio::test]
+    async fn listener_bind_does_not_retry_other_errors() {
+        for kind in [
+            std::io::ErrorKind::AddrInUse,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let bind_attempts = Arc::clone(&attempts);
+            let error =
+                bind_listener_with_retry(SocketAddr::from(([127, 0, 0, 1], 0)), move |_| {
+                    bind_attempts.fetch_add(1, Ordering::Relaxed);
+                    Err(std::io::Error::from(kind))
+                })
+                .await
+                .expect_err("non-retryable bind error is returned");
+
+            assert_eq!(error.kind(), kind);
+            assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    /// A missing address cannot extend startup beyond the configured retry window.
+    #[tokio::test(start_paused = true)]
+    async fn listener_bind_stops_at_the_retry_deadline() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let bind_attempts = Arc::clone(&attempts);
+        let started = tokio::time::Instant::now();
+        let error = bind_listener_with_retry(SocketAddr::from(([198, 18, 0, 1], 0)), move |_| {
+            bind_attempts.fetch_add(1, Ordering::Relaxed);
+            Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable))
+        })
+        .await
+        .expect_err("missing address reaches its deadline");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            LISTENER_BIND_RETRY_WINDOW
+        );
+        let attempt_count =
+            u64::try_from(attempts.load(Ordering::Relaxed)).expect("retry count fits in u64");
+        assert_eq!(attempt_count, LISTENER_BIND_RETRY_WINDOW.as_secs() + 1);
+    }
+
+    /// The serve loop's shutdown select can cancel a bind retry while it is sleeping.
+    #[tokio::test]
+    async fn listener_bind_retry_exits_promptly_when_shutdown_is_selected() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let bind_attempts = Arc::clone(&attempts);
+        let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_signal => false,
+                _ = bind_listener_with_retry(
+                    SocketAddr::from(([198, 18, 0, 1], 0)),
+                    move |_| {
+                        bind_attempts.fetch_add(1, Ordering::Relaxed);
+                        Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable))
+                    },
+                ) => true,
+            }
+        });
+
+        while attempts.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+        shutdown.send(()).expect("signal shutdown");
+        let completed = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("shutdown should cancel the retry sleep promptly")
+            .expect("retry task joins");
+
+        assert!(!completed, "the bind completed instead of being cancelled");
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    /// The real kernel reports `AddrNotAvailable` until this namespace receives its listen address.
+    #[tokio::test]
+    #[ignore = "Run in a disposable user/network namespace"]
+    async fn listener_bind_retries_until_address_is_assigned_in_network_namespace() {
+        const CHILD: &str = "INFRATERNA_LISTENER_NETNS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let executable = std::env::current_exe().expect("test executable");
+            let output = std::process::Command::new("unshare")
+                .args(["--user", "--map-root-user", "--net", "--fork", "--kill-child"])
+                .arg(executable)
+                .args([
+                    "--exact",
+                    "runtime::tests::listener_bind_retries_until_address_is_assigned_in_network_namespace",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("start isolated test process");
+            assert!(
+                output.status.success(),
+                "unshare child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let loopback = std::process::Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .status()
+            .expect("start loopback");
+        assert!(loopback.success(), "could not start loopback");
+
+        let address = SocketAddr::from(([198, 18, 0, 1], 0));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let bind_attempts = Arc::clone(&attempts);
+        let listener = tokio::spawn(async move {
+            bind_listener_with_retry(address, move |address| {
+                bind_attempts.fetch_add(1, Ordering::Relaxed);
+                std::net::TcpListener::bind(address)
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.load(Ordering::Relaxed) < 4 {
+                // sleep: wait about three seconds and confirm four real EADDRNOTAVAIL attempts.
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("listener should retry before address assignment");
+
+        let assigned = std::process::Command::new("ip")
+            .args(["address", "add", "198.18.0.1/32", "dev", "lo"])
+            .output()
+            .expect("assign test address");
+        assert!(
+            assigned.status.success(),
+            "could not assign address: {}",
+            String::from_utf8_lossy(&assigned.stderr)
+        );
+
+        let listener = listener
+            .await
+            .expect("listener task")
+            .expect("bind succeeds after address assignment");
+        assert!(attempts.load(Ordering::Relaxed) >= 3);
+        assert_eq!(
+            listener.local_addr().expect("bound listener").ip(),
+            address.ip()
+        );
+    }
+
+    /// The real kernel keeps reporting `AddrNotAvailable` when an address stays absent.
+    #[tokio::test]
+    #[ignore = "Run in a disposable user/network namespace"]
+    async fn listener_bind_times_out_if_address_stays_absent_in_network_namespace() {
+        const CHILD: &str = "INFRATERNA_LISTENER_TIMEOUT_NETNS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let executable = std::env::current_exe().expect("test executable");
+            let output = std::process::Command::new("unshare")
+                .args(["--user", "--map-root-user", "--net", "--fork", "--kill-child"])
+                .arg(executable)
+                .args([
+                    "--exact",
+                    "runtime::tests::listener_bind_times_out_if_address_stays_absent_in_network_namespace",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("start isolated test process");
+            assert!(
+                output.status.success(),
+                "unshare child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let loopback = std::process::Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .status()
+            .expect("start loopback");
+        assert!(loopback.success(), "could not start loopback");
+
+        let started = Instant::now();
+        let error = bind_listener_with_retry(
+            SocketAddr::from(([198, 18, 0, 2], 0)),
+            std::net::TcpListener::bind,
+        )
+        .await
+        .expect_err("an absent address must not bind");
+        let elapsed = started.elapsed();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+        assert!(elapsed >= LISTENER_BIND_RETRY_WINDOW);
+        assert!(elapsed <= LISTENER_BIND_RETRY_WINDOW + Duration::from_secs(1));
+        println!(
+            "METRIC missing_address_retry_window_ms={} error={error}",
+            elapsed.as_millis()
+        );
     }
 
     /// The production sqlx pool hands out an idle connection without first
@@ -1311,6 +1697,99 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// A pinned reader may grow the WAL, but a later reuse must release its retained high-water size.
+    /// Hold every pool connection to verify the pragma also covers lazily opened writers.
+    #[tokio::test]
+    async fn sqlx_wal_shrinks_after_a_pinned_burst() {
+        let data_dir = temp_dir();
+        let pool = super::open_database(&data_dir).await.unwrap();
+        // Keep the session pool open but idle: SQLx commits cannot rely on its checkpoint hook.
+        let sessions = infraternal_db::Database::open(
+            data_dir.join("infraternal.sqlite"),
+            infraternal_db::Options {
+                readers: 2,
+                create_if_missing: false,
+                ..infraternal_db::Options::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut connections = Vec::new();
+        for _ in 0..8 {
+            connections.push(pool.acquire().await.unwrap());
+        }
+        let mut limits = {
+            let mut limits = Vec::new();
+            for connection in &mut connections {
+                limits.push(
+                    sqlx::query_scalar::<_, i64>("PRAGMA journal_size_limit")
+                        .fetch_one(&mut **connection)
+                        .await
+                        .unwrap(),
+                );
+            }
+            limits
+        };
+        let mut writer = connections.pop().unwrap();
+        let mut reader = connections.pop().unwrap();
+        sqlx::query("CREATE TABLE burst(v BLOB)")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN").execute(&mut *reader).await.unwrap();
+        let _: i64 = sqlx::query_scalar("SELECT count(*) FROM burst")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            sqlx::query("INSERT INTO burst VALUES(zeroblob(1048576))")
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+        }
+        let wal = data_dir.join("infraternal.sqlite-wal");
+        let burst = std::fs::metadata(&wal).unwrap().len();
+        let pinned: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("ROLLBACK").execute(&mut *reader).await.unwrap();
+        // A normal passive checkpoint and subsequent write reuse the WAL without a forced TRUNCATE.
+        let released: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO burst VALUES(zeroblob(8))")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let retained = std::fs::metadata(&wal).unwrap().len();
+        // Every other connection remains checked out, so acquisition must open a replacement.
+        writer.close().await.unwrap();
+        let mut replacement = pool.acquire().await.unwrap();
+        limits.push(
+            sqlx::query_scalar::<_, i64>("PRAGMA journal_size_limit")
+                .fetch_one(&mut *replacement)
+                .await
+                .unwrap(),
+        );
+        println!(
+            "SQLX_WAL burst_bytes={burst} retained_bytes={retained} connection_limits={limits:?} pinned_checkpoint={pinned:?} released_checkpoint={released:?}"
+        );
+        drop(connections);
+        drop(reader);
+        drop(replacement);
+        pool.close().await;
+        sessions.close().await;
+        std::fs::remove_dir_all(data_dir).unwrap();
+        assert!(burst > 8 * 1024 * 1024);
+        assert!(
+            retained <= 8 * 1024 * 1024,
+            "WAL retained {retained} bytes after reuse"
+        );
+        assert!(limits.iter().all(|limit| *limit == 8 * 1024 * 1024));
     }
 
     /// J696 P3 (#473): with `server --data ./x` (and the `./data` default)
@@ -2746,6 +3225,9 @@ pub(crate) async fn test_open_database(
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
+        // Bound retained high-water allocation on every SQLx writer, including lazy replacements.
+        // Active readers can still pin a larger live WAL; reuse shrinks it after they release.
+        .pragma("journal_size_limit", SQLX_WAL_RETAINED_BYTES.to_string())
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

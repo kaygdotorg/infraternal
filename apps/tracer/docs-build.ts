@@ -302,6 +302,16 @@ function pageList(heading: string, pages: readonly { slug: string; title: string
   return `<h2>${heading}</h2>\n<ul class="pages">\n${rows}\n</ul>`;
 }
 
+/**
+ * The body of `/docs/404.html`, which the server answers with (status `404`) for any address under `/docs/` that has no page (#527).
+ * The app's own page cannot stand in: it cannot render a docs address and shows blank. Links are absolute (`/docs/...`), because this
+ * one file is served at any depth. "Search the docs" opens the same search as the top bar (`data-open-search`, doc-page.ts) and is
+ * a link to the docs home for a reader without scripts.
+ */
+export function notFoundBody(): string {
+  return `<div class="plain"><p class="code404">404</p><h1>That page is not in the docs</h1><p class="lede">It may have moved, or the address has a typo. Start from the docs home, or search for what you were looking for.</p><p><a href="/docs/">Docs home</a> · <a href="/docs/" data-open-search>Search the docs</a></p></div>\n`;
+}
+
 /** The page that stands at a former address: it sends the reader on, keeping the `#heading` the old link had (a refresh alone would drop it). */
 export function redirectPage(to: string, title: string, base = "/docs"): string {
   const target = `${base}/${to}/`;
@@ -426,6 +436,8 @@ export async function buildDocs(out: string, source: string = USER_DOCS_DIR, sca
     await mkdir(resolve(tree, former), { recursive: true });
     await writeFile(resolve(tree, former, "index.html"), redirectPage(slug, made.get(slug)!.title, mount));
   }
+  // Served by the server for a missing address under /docs/ (not per audience: the site build writes its own, with the guides).
+  if (!audience) await writeFile(resolve(out, "404.html"), sitePage({ title: "Not in the docs", here: "Docs / Not found", area: "docs", main: "site", body: notFoundBody(), searchRoots: ["/docs"] }));
   await writeFile(resolve(tree, "index.json"), JSON.stringify({ pages: index }));
   // The words of every page, for ⌘K (docs-search-index.ts). Fetched only when a search is about to start, never with the index.
   await writeFile(resolve(tree, "search.json"), JSON.stringify({ pages: all.map((doc) => doc.search) }));

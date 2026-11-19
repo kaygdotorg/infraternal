@@ -65,9 +65,39 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
         reason = "Keep the fallible registry API identical when every optional component is compiled out."
     )
 )]
+/// Build a plugin registry whose state is rooted at `state`.
+/// # Errors
+/// Returns an error if the selected plugins cannot be registered.
 pub(crate) fn registry_at(
     mode: ExecutionMode,
     state: Option<&std::path::Path>,
+    installation: Option<&Installation>,
+) -> Result<PluginRegistry, PluginError> {
+    registry_at_with_mesh_state(mode, state, None, installation)
+}
+
+/// Create a registry whose embedded Mesh node may keep state apart from sessions.
+///
+/// `mesh_state` is an internal server override. Remote hosts continue to use `state` for Mesh,
+/// matching their installed `--state` directory.
+/// # Errors
+/// Returns an error if the compiled plugin descriptors conflict with the plugin API.
+#[cfg_attr(
+    not(any(
+        feature = "plugin-host-facts",
+        feature = "proxy",
+        feature = "remote",
+        all(feature = "mesh", any(target_os = "linux", target_os = "macos"))
+    )),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "Keep the fallible registry API identical when every optional component is compiled out."
+    )
+)]
+pub(crate) fn registry_at_with_mesh_state(
+    mode: ExecutionMode,
+    state: Option<&std::path::Path>,
+    mesh_state: Option<&std::path::Path>,
     installation: Option<&Installation>,
 ) -> Result<PluginRegistry, PluginError> {
     #[cfg(any(
@@ -100,7 +130,7 @@ pub(crate) fn registry_at(
     #[cfg(not(feature = "plugin-host-facts"))]
     let _ = mode;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
-    let mesh_plugin = state.map_or_else(
+    let mesh_plugin = mesh_state.or(state).map_or_else(
         infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
         infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
     );
@@ -165,9 +195,14 @@ pub(crate) fn registry_at(
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
     #[cfg(all(feature = "mesh", target_os = "macos"))]
-    registry.register(Box::new(darwin_mesh_plugin(state, installation)?))?;
+    registry.register(Box::new(darwin_mesh_plugin(
+        mesh_state.or(state),
+        installation,
+    )?))?;
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;
+    #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
+    let _ = mesh_state;
     Ok(registry)
 }
 
@@ -290,6 +325,7 @@ pub fn set_mesh_service(factory: MeshServiceFactory) {
 #[cfg(all(feature = "mesh", target_os = "linux"))]
 fn mesh_view(
     config: &infraternal_plugin_mesh::dataplane::Config,
+    userspace_filter: bool,
 ) -> infraternal_plugin_api::mesh_view::MeshView {
     use infraternal_plugin_api::mesh_view::{MeshPeer, MeshView};
     use std::net::IpAddr;
@@ -300,6 +336,7 @@ fn mesh_view(
             IpAddr::V6(config.addresses.ipv6),
         ],
         interface: infraternal_plugin_mesh::wireguard::INTERFACE.to_owned(),
+        userspace_filter,
         peers: config
             .peers
             .iter()
@@ -328,8 +365,12 @@ fn observe_mesh(
     let Some(service) = service else {
         return mesh_plugin;
     };
-    mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config| {
-        service(config.as_ref().map(mesh_view));
+    mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config, userspace_filter| {
+        service(
+            config
+                .as_ref()
+                .map(|config| mesh_view(config, userspace_filter)),
+        );
         Ok(())
     }))
 }
@@ -352,9 +393,13 @@ fn connect_proxy_and_mesh(
         .set_mesh_ingress_observer(mesh_plugin.proxy_ingress_observer())
         .map_err(|_| PluginError::Rejected)?;
     Ok(mesh_plugin
-        .with_configuration_observer(std::sync::Arc::new(move |config| {
+        .with_configuration_observer(std::sync::Arc::new(move |config, userspace_filter| {
             if let Some(service) = &service {
-                service(config.as_ref().map(mesh_view));
+                service(
+                    config
+                        .as_ref()
+                        .map(|config| mesh_view(config, userspace_filter)),
+                );
             }
             let context = config
                 .as_ref()
@@ -472,6 +517,7 @@ mod proxy_mesh_context_tests {
                     ipv6: format!("fd00::{id:x}").parse().expect("IPv6 mesh address"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound,
@@ -493,6 +539,7 @@ mod proxy_mesh_context_tests {
         let config = Config {
             local_key: None,
             authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
             #[cfg(feature = "mesh")]

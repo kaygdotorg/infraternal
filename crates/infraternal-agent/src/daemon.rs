@@ -1,14 +1,42 @@
 //! Shared inherited and authenticated remote leg-B dispatcher and bounded session registry for the tracer bullet [9][13][41].
 //!
-//! Each terminal owns one pending output frame. Input/Resize commands have eight slots;
+//! Each terminal owns one credit-waiting shim frame and at most one extra raw frame
+//! already charged to that stream's output credit. Input/Resize commands have eight slots;
 //! shared-stream Credit is accumulated in constant space without occupying that FIFO;
 //! Input/Resize overload retires only that stream; probes may be skipped. Unacknowledged
-//! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots
-//! and awaits capacity. Control replies use a separate eight-slot lane, selected
+//! input is replayed on attachment using shim-owned per-writer cursors. Bulk output has eight slots;
+//! raw-output enqueue never awaits capacity. While one raw frame waits for writer capacity, the
+//! shim reader can fill one extra bounded pending slot so `InputAck` and liveness replies still
+//! move; it pauses again once that slot is occupied. Commands and timers stay live throughout.
+//! Control replies use a separate eight-slot lane, selected
 //! first at frame boundaries; reply producers wait for bounded FIFO capacity. Native
 //! terminal dispatch continues on its independent streams. Starved sessions close
 //! their shim socket after 250 ms, then reconnect for a fresh credit-funded
 //! ring replay or a flagged bounded repaint. Unviewed sessions stay disconnected so their PTYs keep progressing.
+//!
+//! D381 keeps four relay invariants: no Snapshot reaches the writer before its full
+//! payload length is approved by this stream's credit ledger; input cannot mint credit.
+//! A repaint spends the separate 64 KiB reserve or borrows only from raw output this
+//! stream drops for the replacement; each raw byte backs at most one repaint until
+//! its credit returns, and borrowed bytes become debt. Raw output cannot spend the
+//! remaining reserve. A key-triggered capture follows that key's shim `InputAck` and
+//! leaves one frame for its PTY echo.
+//! Dropping stalled output affects only its own stream. Coalesced key input
+//! cannot mint credit or create unbounded captures. After the latest coalesced
+//! key is acknowledged, its capture waits one 8 ms terminal frame so the PTY
+//! program can render the echo. A funded key that replaces a stalled raw frame
+//! starts its own 250 ms capture deadline, independent of bulk credit and shared
+//! by coalesced keys. Ordinary unfunded frames keep their bulk starvation
+//! deadline. A key preempts when raw output is waiting for bulk credit or has
+//! built the backlog threshold, including a pending shim frame
+//! when no earlier raw bytes remain in flight. When bulk credit is exhausted
+//! and repaint credit remains, a key also triggers before its echo is queued;
+//! the key itself supplies the output that would otherwise wait. A small quiet
+//! write alone does not trigger a repaint. The bounded writer
+//! priority lane sends only shim-confirmed key acknowledgments and credit-approved
+//! Snapshots; it drops or trims only same-stream raw bytes covered by the cursor.
+//! A 1 MiB Snapshot may borrow from the bulk output it replaces, while a hostile
+//! key burst still shares the same finite credit ledger and coalesced capture.
 //! A closed shim or failed terminal task closes only its mux stream. A session
 //! whose shim is gone answers its stream with the final Close 4404 (#158).
 use crate::{
@@ -20,17 +48,162 @@ use crate::{
 use infraternal_protocol::Frame;
 use infraternal_shim::frame::{APPROXIMATE_SNAPSHOT, Frame as Shim, SEQUENCED_INPUT};
 use serde::Deserialize;
-use std::{collections::HashMap, io, path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 
 pub use crate::daemon_writer::approximate_snapshots_total;
-use crate::daemon_writer::{Message, reply, writer};
+use crate::daemon_writer::{Message, PRIORITY_CAPACITY, PriorityMessage, reply, writer};
 #[cfg(test)]
 use crate::{daemon_writer::deferred_reply, transport::Transmit};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
+    time::Instant,
 };
+
+/// Give the PTY program one 120 Hz display frame to render an acknowledged key.
+const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Wait for a relay operation while its active repaint still has time to finish.
+///
+/// Prefer expiry when both become ready. The relay drops the old shim link
+/// after cancellation because an interrupted frame write may be partial.
+async fn during_key_capture<T>(
+    deadline: Option<Instant>,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => None,
+            result = operation => Some(result),
+        }
+    } else {
+        Some(operation.await)
+    }
+}
+
+/// Request one capture once its acknowledged input has had a frame to render.
+///
+/// The cumulative target coalesces key bursts. This common gate keeps credit
+/// returns and completed captures from bypassing the frame grace, and it spends
+/// no credit itself; the later `Snapshot` must still fit the current repaint
+/// budget, including raw bytes that this capture replaces.
+async fn request_key_repaint_if_ready(
+    session: &mut Option<Link>,
+    target: Option<u64>,
+    requested: &mut Option<u64>,
+    acknowledged: u64,
+    repaint_budget: u64,
+    ready: &mut bool,
+    finished_peer: bool,
+) -> io::Result<()> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    if finished_peer
+        || session.is_none()
+        || requested.is_some()
+        || target > acknowledged
+        || repaint_budget == 0
+        || !*ready
+    {
+        return Ok(());
+    }
+
+    session
+        .as_mut()
+        .ok_or_else(|| sessions::invalid("missing shim"))?
+        .send(&Shim::SnapshotRequest)
+        .await?;
+    *requested = Some(target);
+    *ready = false;
+    Ok(())
+}
+
+/// Forward the shim's confirmation that input through `seq` reached the PTY.
+///
+/// The shim keeps a single reply slot per peer, so a key's confirmation arrives either as an
+/// `InputAck` or, when a route proof's `InputStateRequest` was outstanding, inside that proof's
+/// `InputState` (#477). Both replies come here. While a key repaint is pending the Ack takes the
+/// writer's priority lane: that keeps it ahead of the Snapshot showing the key's echo and lets the
+/// writer drop the raw output the Snapshot replaces. An `InputAck` is always forwarded (`always`);
+/// a state reply only when it advances the cursor. Returns whether it advanced.
+async fn forward_input_confirmation(
+    tx: &mpsc::Sender<Message>,
+    priority: &mpsc::Sender<PriorityMessage>,
+    stream: u32,
+    attachment: u64,
+    seq: u64,
+    output_cursor: u64,
+    repaint_pending: bool,
+    always: bool,
+    acknowledged: &mut u64,
+) -> io::Result<bool> {
+    let advanced = seq > *acknowledged;
+    if advanced || always {
+        if repaint_pending {
+            emit_priority(
+                priority,
+                PriorityMessage::InputAck {
+                    stream,
+                    attachment,
+                    seq,
+                    output_cursor,
+                },
+            )
+            .await?;
+        } else {
+            emit(tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
+        }
+    }
+    *acknowledged = (*acknowledged).max(seq);
+    Ok(advanced)
+}
+
+/// Whether a confirmation through `seq` should start the pending key repaint's frame grace.
+///
+/// It must, whichever shim reply carried it: the relay discards raw output while a key repaint is
+/// pending, so a key confirmed without starting its grace would never be repainted and the screen
+/// would stay frozen with the client's credit unused (#477). A confirmation that does not advance
+/// still starts a grace that is neither running nor finished, for a key whose cursor advanced on
+/// another path first.
+fn key_repaint_grace_due(
+    target: Option<u64>,
+    requested: Option<u64>,
+    seq: u64,
+    advanced: bool,
+    ready: bool,
+    ready_at_set: bool,
+) -> bool {
+    target.is_some_and(|target| {
+        requested.is_none_or(|requested| target > requested)
+            && seq >= target
+            && (advanced || (!ready && !ready_at_set))
+    })
+}
+
+/// Decide whether a key should replace output that is waiting for flow-control credit.
+///
+/// A writer-staged raw frame or already-sent backlog shows that output is
+/// waiting. The credit-starved shim frame is also waiting, even when every
+/// earlier raw byte has been returned; its bytes have not been charged yet.
+/// With bulk credit exhausted, the next key's own echo would wait too, so a
+/// still-funded repaint can be requested before another raw frame is staged.
+fn output_waiting_for_key_repaint(
+    pending: Option<&Shim>,
+    pending_bulk: Option<&Message>,
+    output: &relay::Output,
+) -> bool {
+    let unreturned = output.unreturned_output_credit();
+    pending_bulk.is_some()
+        || (matches!(pending, Some(Shim::Output(..))) && output.bulk_starved())
+        || (output.bulk_starved() && output.repaint_budget() > 0)
+        || (unreturned > 0 && (output.bulk_starved() || unreturned >= relay::KEY_REPAINT_BACKLOG))
+}
 
 #[path = "session_commands.rs"]
 mod session_commands;
@@ -46,10 +219,28 @@ enum Command {
     Cursor(u64),
     Ping(u64, u64),
 }
-// Dropping cancellation retires a stalled handshake as well as queued commands.
+/// One terminal stream the shared dispatcher has attached: where its commands go,
+/// and how to stop its relay task.
 struct Stream {
+    /// The relay task's bounded command queue.
     commands: session_commands::Sender,
-    _cancel: oneshot::Sender<()>,
+    /// Stops the relay task. Dropping it retires a stalled handshake as well as
+    /// queued commands; [`Stream::retire`] also tells the task to clear the
+    /// writer's per-stream state.
+    cancel: oneshot::Sender<u64>,
+}
+
+impl Stream {
+    /// Stop this stream's relay because the server closed it (or dispatch retired it).
+    ///
+    /// Sends a fresh attachment id as a floor: every attachment this relay ever
+    /// announced is older, and any relay that later reattaches the same stream
+    /// id is newer. The cancelled task forwards it as [`Message::Forget`] on the
+    /// bulk lane, after everything the old relay queued, so the writer's
+    /// per-stream cursor state goes away without touching a replacement's (#477).
+    fn retire(self) {
+        let _ = self.cancel.send(crate::daemon_writer::next_attachment());
+    }
 }
 
 #[cfg(feature = "remote")]
@@ -608,6 +799,120 @@ async fn emit(tx: &mpsc::Sender<Message>, message: Message) -> io::Result<()> {
         .map_err(|_| io::ErrorKind::BrokenPipe.into())
 }
 
+/// Queue an already credit-approved raw frame without waiting on the shared writer FIFO.
+///
+/// When the FIFO is full, retain one frame in `staged`; the caller may read one more shim frame
+/// into its bounded `pending` slot so acknowledgments and liveness replies stay live. A key
+/// repaint may discard the staged frame, and then retracts it from the relay ledger
+/// ([`relay::Output::retract`]): it was charged but is never sent. No caller may stage a second
+/// frame.
+/// # Errors
+/// Returns `WouldBlock` if a frame is already staged, or `BrokenPipe` if the writer is closed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn queue_raw_output(
+    tx: &mpsc::Sender<Message>,
+    staged: &mut Option<Message>,
+    stream: u32,
+    seq: u64,
+    bytes: Vec<u8>,
+) -> io::Result<()> {
+    if staged.is_some() {
+        return Err(io::ErrorKind::WouldBlock.into());
+    }
+    let message = Message::Shim(stream, Shim::Output(seq, bytes));
+    match tx.try_send(message) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(message)) => {
+            *staged = Some(message);
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(io::ErrorKind::BrokenPipe.into()),
+    }
+}
+
+/// Send the raw Output that [`queue_raw_output`] staged, if any, ahead of an
+/// ordered message whose meaning depends on the bytes before it.
+///
+/// A staged frame is otherwise sent only from the relay's `reserve_owned`
+/// select arm. An ordered message the relay awaits directly (`emit`) takes
+/// the next free FIFO slot instead, so without this flush it overtakes the
+/// staged bytes: a `ReplayComplete` names a cursor the client does not hold
+/// yet, and an exit notice or Close ends the stream while the relay drops
+/// the bytes (#477, J775). Call it before every replay completion, exit,
+/// end, Close, snapshot-unavailable notice and attachment marker that can
+/// follow staged output. Flushing waits for the same FIFO the next message
+/// waits for anyway, so it adds no wait of its own.
+/// # Errors
+/// Returns `BrokenPipe` if the writer is closed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn flush_staged(tx: &mpsc::Sender<Message>, staged: &mut Option<Message>) -> io::Result<()> {
+    match staged.take() {
+        Some(message) => emit(tx, message).await,
+        None => Ok(()),
+    }
+}
+
+/// Keep the shim reader live while one raw Output waits for the shared writer.
+///
+/// The pending slot is the one-frame read-ahead bound beside `pending_bulk`.
+/// Reading control replies in that slot keeps input acknowledgments and liveness
+/// state moving while writer backpressure holds raw bytes. Once that slot is
+/// occupied, stop reading until the pending frame is sent, retried, or replaced
+/// by a key repaint.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn can_read_shim_frame(pending: Option<&Shim>, pending_bulk: Option<&Message>) -> bool {
+    pending.is_none()
+        && pending_bulk.is_none_or(|message| matches!(message, Message::Shim(_, Shim::Output(..))))
+}
+
+/// Queue a trusted key acknowledgment or repaint on the bounded writer priority lane.
+async fn emit_priority(
+    tx: &mpsc::Sender<PriorityMessage>,
+    message: PriorityMessage,
+) -> io::Result<()> {
+    tx.send(message)
+        .await
+        .map_err(|_| io::ErrorKind::BrokenPipe.into())
+}
+
+/// Tell the writer this relay gave up its pending key repaint, so the raw output the key's
+/// acknowledgment held is written in order (#477, J799).
+///
+/// Call it wherever a pending repaint ends without its Snapshot: the starvation timer, a shim
+/// that cannot capture, and every exit or close. The relay's cursor already counts those bytes
+/// as sent, so without it the client misses them and the next replay starts after a gap. It
+/// rides the priority lane, so the writer applies it before anything this relay queues later.
+/// With no key repaint pending there is nothing held and nothing is sent.
+async fn release_key_cover(
+    priority: &mpsc::Sender<PriorityMessage>,
+    stream: u32,
+    attachment: u64,
+    key_repaint_target: Option<u64>,
+) -> io::Result<()> {
+    if key_repaint_target.is_none() {
+        return Ok(());
+    }
+    emit_priority(priority, PriorityMessage::Release { stream, attachment }).await
+}
+
+/// The relay's next command: the client's next one, or raw output the writer dropped under a
+/// key repaint, presented as the Credit the client can no longer send for it (#477, J799).
+///
+/// A refund is exactly a return of charged bytes, so it takes the same path as the client's
+/// own Credit: it pays repaint debt first, then refills the reserve and the bulk window. Only
+/// a relay whose reserve is ACTIVE sends key repaints, so a refund never lands in reserve
+/// setup, where a grant's meaning is still being worked out. Cancel-safe, like both sources.
+async fn next_command(
+    commands: &mut session_commands::Receiver,
+    refunds: &mut crate::daemon_writer::RefundReceiver,
+) -> Option<Command> {
+    tokio::select! {
+        biased;
+        command = commands.next() => command,
+        bytes = refunds.next() => Some(Command::Credit(bytes)),
+    }
+}
+
 /// Publishes the authoritative live-shim set without ever parking terminal dispatch on a slow writer.
 /// True establishes the ordered open fence; false leaves the census pending for retry.
 fn publish_session_snapshot(
@@ -637,6 +942,17 @@ fn publish_session_snapshot(
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
 pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
+    run_with_mesh_state(fd, state, None).await
+}
+
+/// Run the trusted embedded channel with separate session and Mesh state paths.
+/// # Errors
+/// Rejects an invalid fd, unsafe state, malformed wire requests and resource limits.
+pub async fn run_with_mesh_state(
+    fd: i32,
+    state: Option<PathBuf>,
+    mesh_state: Option<PathBuf>,
+) -> io::Result<()> {
     // The launch isolation wrapper closes fd 3 before exec. Other inherited
     // descriptors need their own audited CLOEXEC boundary before being supported.
     if fd != 3 {
@@ -644,12 +960,19 @@ pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     }
     let socket = Socket::inherited(fd)?;
     let state = sessions::state(state)?;
-    let service = crate::plugin_control::Service::start(
-        &state,
-        crate::plugins::ExecutionMode::Embedded,
-        None,
-    )
-    .await?;
+    let service = match mesh_state.as_deref() {
+        Some(mesh_state) => {
+            crate::plugin_control::Service::start_with_mesh_state(&state, mesh_state).await?
+        }
+        None => {
+            crate::plugin_control::Service::start(
+                &state,
+                crate::plugins::ExecutionMode::Embedded,
+                None,
+            )
+            .await?
+        }
+    };
     run_channel::<false>(
         &socket,
         state,
@@ -926,6 +1249,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
     };
     let (tx, rx) = mpsc::channel(8);
     let (control, control_rx) = mpsc::channel(8);
+    let (priority, priority_rx) = mpsc::channel(PRIORITY_CAPACITY);
     #[cfg(test)]
     let control_observer = census_retry_tests::observer(&state);
 
@@ -1000,7 +1324,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                     let (call_id,result)=result?;
                     match result {
                         Ok(result)=>reply(&control,Message::Deferred(0,call_id,result))?,
-                        Err(_)=>reply(&control,Message::Result(0,call_id,false,b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                        Err(error)=>reply(&control,Message::Result(0,call_id,false,error.control_error_json()))?,
                     }
                 }
                 event=async {
@@ -1165,7 +1489,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             match plugin_calls.start(call_id, action_id, input_json, registry.context()) {
                                 Ok(Some(result)) => reply(&control, Message::Deferred(0, call_id, result))?,
                                 Ok(None) => {},
-                                Err(_) => reply(&control, Message::Result(0, call_id, false, b"{\"error\":\"plugin action rejected\"}".to_vec()))?,
+                                Err(error) => reply(&control, Message::Result(0, call_id, false, error.control_error_json()))?,
                             }
                         }
                         // A registry-less reattach (#230) refuses actions as the image does.
@@ -1188,12 +1512,24 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             let id = *session_id;
                             let (commands, rx) = session_commands::channel();
                             let (cancel, cancelled) = oneshot::channel();
-                            streams.insert(stream, Stream { commands, _cancel: cancel });
+                            streams.insert(stream, Stream { commands, cancel });
                             let tx = tx.clone();
+                            let forget = tx.clone();
+                            let priority = priority.clone();
                             jobs.spawn(async move {
                                 let result = tokio::select! {
-                                    result = terminal(path, id, stream, last_out_seq, last_in_seq, rx, tx) => result,
-                                    _ = cancelled => Ok(()),
+                                    // Cancellation first: retiring a stream also drops its
+                                    // command sender, which can end the relay in the same
+                                    // poll and would otherwise skip the Forget.
+                                    biased;
+                                    floor = cancelled => match floor {
+                                        // Ordered after the dropped relay's queued output, so
+                                        // its marker cannot re-create the state (#477, J730 P3).
+                                        Ok(floor) => emit(&forget, Message::Forget(stream, floor)).await,
+                                        // Dispatch itself ended: the writer goes with it.
+                                        Err(_) => Ok(()),
+                                    },
+                                    result = terminal_with_priority(path, id, stream, last_out_seq, last_in_seq, rx, tx, priority) => result,
                                 };
                                 (stream, result)
                             });
@@ -1206,7 +1542,9 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 Frame::Credit {bytes} => Command::Credit(bytes),
                                 Frame::Resize {cols, rows, px_w, px_h} => Command::Resize(cols, rows, px_w, px_h),
                                 Frame::Close {..} => {
-                                    streams.remove(&stream);
+                                    if let Some(entry) = streams.remove(&stream) {
+                                        entry.retire();
+                                    }
                                     registry.refresh();
                                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
                                     continue;
@@ -1221,7 +1559,9 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 matches!(entry.commands.try_send(command), Err(mpsc::error::TrySendError::Full(_)))
                             });
                             if overloaded {
-                                streams.remove(&stream);
+                                if let Some(entry) = streams.remove(&stream) {
+                                    entry.retire();
+                                }
                                 reply(&control, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input"))?;
                             }
                             // Frames already in flight after a stream closes are
@@ -1238,6 +1578,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
             socket,
             rx,
             Some(control_rx),
+            Some(priority_rx),
             true,
             renewal.is_some(),
             crate::daemon_writer::supports_identity_rotation(renewal),
@@ -1353,6 +1694,7 @@ async fn run_bound_terminal_mode(
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
     let path = sessions::rendezvous(&state, id);
     let (tx, rx) = mpsc::channel(8);
+    let (priority, priority_rx) = mpsc::channel(PRIORITY_CAPACITY);
     let (commands, command_rx) = mpsc::channel(8);
     let dispatch = async {
         loop {
@@ -1388,12 +1730,12 @@ async fn run_bound_terminal_mode(
             }
         }
     };
-    let writer = writer(channel, rx, None, false, false, false, 0);
+    let writer = writer(channel, rx, None, Some(priority_rx), false, false, false, 0);
     tokio::pin!(writer);
     tokio::select! {
         result = dispatch => result,
         result = &mut writer => result,
-        result = terminal_mode(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx, primed) => {
+        result = terminal_mode(path, id, writer_id, cursor, input, session_commands::Receiver::Native(command_rx), tx, priority, primed) => {
             result?;
             // Successful terminal returns can queue a final Close (gone session,
             // unsupported shim or refused request). Its sole sender is now gone:
@@ -1589,6 +1931,24 @@ async fn relink(
 }
 
 /// All relay errors preserve a sealed exit, including incomplete final handshakes.
+async fn terminal_with_priority(
+    path: PathBuf,
+    id: [u8; 16],
+    stream: u32,
+    cursor: u64,
+    last_input: u64,
+    commands: session_commands::Receiver,
+    tx: mpsc::Sender<Message>,
+    priority: mpsc::Sender<PriorityMessage>,
+) -> io::Result<()> {
+    terminal_mode(
+        path, id, stream, cursor, last_input, commands, tx, priority, false,
+    )
+    .await
+}
+
+/// Preserve existing terminal fixtures while collecting priority replies into their FIFO.
+#[cfg(test)]
 async fn terminal(
     path: PathBuf,
     id: [u8; 16],
@@ -1598,9 +1958,54 @@ async fn terminal(
     commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
 ) -> io::Result<()> {
-    terminal_mode(path, id, stream, cursor, last_input, commands, tx, false).await
+    let (priority, mut priority_rx) = mpsc::channel(PRIORITY_CAPACITY);
+    let forwarded = tx.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(message) = priority_rx.recv().await {
+            match message {
+                PriorityMessage::InputAck { stream, seq, .. } => {
+                    emit(&forwarded, Message::Shim(stream, Shim::InputAck(seq))).await?;
+                }
+                PriorityMessage::Snapshot {
+                    stream,
+                    seq,
+                    bytes,
+                    approximate,
+                    notice,
+                    ..
+                } => {
+                    if let Some(notice) = notice {
+                        emit(&forwarded, Message::Event(stream, notice)).await?;
+                    }
+                    let frame = if approximate {
+                        Shim::SnapshotWithFlags(seq, 1, bytes)
+                    } else {
+                        Shim::Snapshot(seq, bytes)
+                    };
+                    emit(&forwarded, Message::Shim(stream, frame)).await?;
+                }
+                // Nothing is held without a real writer.
+                PriorityMessage::Release { .. } => {}
+            }
+        }
+        Ok::<(), io::Error>(())
+    });
+    let result =
+        terminal_with_priority(path, id, stream, cursor, last_input, commands, tx, priority).await;
+    collector.await.map_err(io::Error::other)??;
+    result
 }
 
+/// Relay one terminal stream (see `terminal_run`), and when the relay fails, report the
+/// session's saved exit if it has one.
+///
+/// Before that report, a failed relay releases any raw output a key's acknowledgment still
+/// holds in the writer (#477, J813). Every way the relay's loop ends a pending key repaint on
+/// purpose sends its own release, but an error can end the loop anywhere: a shim reply it did
+/// not ask for, or a write to a shim that has just gone. Those held bytes were charged and the
+/// relay's cursor counts them, so without the release they would never reach the client, and
+/// the exit reported next would claim output the client never got. A release that finds
+/// nothing held writes nothing, so it is sent unconditionally.
 async fn terminal_mode(
     path: PathBuf,
     id: [u8; 16],
@@ -1609,9 +2014,12 @@ async fn terminal_mode(
     last_input: u64,
     commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
+    priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
 ) -> io::Result<()> {
-    match terminal_run(
+    let mut attachment = 0;
+    let release = priority.clone();
+    let result = terminal_run(
         path.clone(),
         id,
         stream,
@@ -1619,10 +2027,18 @@ async fn terminal_mode(
         last_input,
         commands,
         tx.clone(),
+        priority,
         primed,
+        &mut attachment,
     )
-    .await
-    {
+    .await;
+    if result.is_err() {
+        // The writer may be gone too; then there is nobody left to deliver to.
+        let _ = emit_priority(&release, PriorityMessage::Release { stream, attachment }).await;
+    }
+    // A bound terminal's writer stops taking priority messages once every sender is gone.
+    drop(release);
+    match result {
         Err(error) => {
             // EOF may occur in Hello, ownership confirmation or input-state
             // recovery before the steady-state select can observe owner EOF.
@@ -1636,6 +2052,9 @@ async fn terminal_mode(
     }
 }
 
+/// The relay loop of one terminal stream: shim output to the writer under the client's credit,
+/// client commands to the shim. `announced` tracks the attachment it last announced to the
+/// writer (see `terminal_mode`).
 async fn terminal_run(
     path: PathBuf,
     id: [u8; 16],
@@ -1644,8 +2063,22 @@ async fn terminal_run(
     last_input: u64,
     mut commands: session_commands::Receiver,
     tx: mpsc::Sender<Message>,
+    priority: mpsc::Sender<PriorityMessage>,
     primed: bool,
+    announced: &mut u64,
 ) -> io::Result<()> {
+    // Announce this attachment before any of its frames. The writer then stops
+    // trimming this stream's output by repaints of an earlier attachment that
+    // reused the stream id (a resumed browser), and ignores that attachment's
+    // late priority frames (#477). `announced` always holds the latest one, so
+    // `terminal_mode` can release what it holds if this relay fails.
+    #[cfg_attr(not(feature = "remote"), allow(unused_mut))]
+    let mut attachment = crate::daemon_writer::next_attachment();
+    *announced = attachment;
+    // Raw bytes of this attachment that the writer drops under a key repaint
+    // come back here as credit (#477, J799).
+    let (refund_cell, mut refunds) = crate::daemon_writer::refunds();
+    emit(&tx, Message::Attached(stream, attachment, refund_cell)).await?;
     // Install ownership before output requests can exhaust credit. Dropping this
     // guard on cancellation/ordered exit releases only this window, even when
     // several windows or daemon connections share a shim.
@@ -1716,20 +2149,72 @@ async fn terminal_run(
     }
     #[cfg(feature = "plugin-host-facts")]
     let _window = crate::lifecycle::windows::Attachment::new(path.clone());
-    let mut output = relay::Output::attach(cursor);
+    let mut output = relay::Output::attach_with_repaint_reserve(cursor);
     if replay_until.is_some_and(|fence| output.cursor() >= fence) {
         replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
         replay_until = None;
     }
     let mut pending: Option<Shim> = None;
+    // One credit-charged Output may wait here if the shared writer FIFO is full.
+    // Invariant: it reaches the writer before any ordered message emitted
+    // after it was staged (see `flush_staged`), unless a key repaint
+    // discards it on purpose and retracts it from the ledger.
+    let mut pending_bulk: Option<Message> = None;
     let mut deadline = None;
+    // The latest input offset a repaint must show, and the offset covered by
+    // the one SnapshotRequest already sent to the shim, if any.
+    let mut key_repaint_target: Option<u64> = None;
+    let mut key_repaint_requested: Option<u64> = None;
+    let mut key_repaint_ready_at: Option<Instant> = None;
+    let mut key_repaint_ready = false;
+    let mut capture_deadline = None;
+    // A canceled write may have sent a frame prefix. Keep the complete command
+    // for the fresh link, which starts at a frame boundary.
+    let mut retry_shim_write = None;
+    // The shim may confirm input while the priority lane cannot accept its Ack.
+    let mut unpublished_ack = None;
     let mut finished_peer = false;
     // One state fence in flight bounds shim work even if probes are pipelined over the network.
     // It belongs to the data socket: parking that socket must clear its pending fence.
     let mut probe = None;
     let mut reply_unavailable_announced = false;
-    loop {
-        if let Some(frame) = pending.take() {
+    'relay: loop {
+        // A branch can await a writer slot or a shim write after the main
+        // select has picked it. Race those waits against this same deadline.
+        macro_rules! capture_io {
+            ($operation:expr $(, $on_expiry:expr)?) => {
+                match during_key_capture(capture_deadline, $operation).await {
+                    Some(result) => result,
+                    None => {
+                        $( $on_expiry; )?
+                        continue 'relay;
+                    }
+                }
+            };
+        }
+
+        if capture_deadline.is_some_and(|end| Instant::now() >= end) {
+            // Close before waiting for writer capacity. Release makes already
+            // queued raw bytes deliverable, so recovery can continue from the
+            // cursor that includes them. An unqueued Snapshot never moves it.
+            session = None;
+            probe = None;
+            pending = None;
+            output.abandon_repaint();
+            capture_deadline = None;
+            key_repaint_ready_at = None;
+            key_repaint_ready = false;
+            key_repaint_requested = None;
+            release_key_cover(&priority, stream, attachment, key_repaint_target.take()).await?;
+            if let Some(seq) = unpublished_ack.take()
+                && seq > acknowledged
+            {
+                input_progress(&tx, stream, &mut acknowledged, seq).await?;
+            }
+        }
+        if pending_bulk.is_none()
+            && let Some(frame) = pending.take()
+        {
             match frame {
                 Shim::Output(seq, bytes) => {
                     let frame_len = bytes.len();
@@ -1744,42 +2229,45 @@ async fn terminal_run(
                         // Whole frames transfer their payload ownership to the
                         // writer. Only partial credit/overlap needs a suffix copy.
                         if range.start == 0 && end == frame_len {
-                            emit(
+                            queue_raw_output(
                                 &tx,
-                                Message::Shim(stream, Shim::Output(output.cursor(), bytes)),
-                            )
-                            .await?;
+                                &mut pending_bulk,
+                                stream,
+                                output.cursor(),
+                                bytes,
+                            )?;
                             output
                                 .forward(length)
                                 .map_err(|_| sessions::invalid("output credit invariant"))?;
                             if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                                flush_staged(&tx, &mut pending_bulk).await?;
                                 replay_complete(&tx, stream, id, output.cursor(), replay_size)
                                     .await?;
                                 replay_until = None;
                             }
                             continue;
                         }
-                        emit(
+                        queue_raw_output(
                             &tx,
-                            Message::Shim(
-                                stream,
-                                Shim::Output(output.cursor(), bytes[range.start..end].to_vec()),
-                            ),
-                        )
-                        .await?;
+                            &mut pending_bulk,
+                            stream,
+                            output.cursor(),
+                            bytes[range.start..end].to_vec(),
+                        )?;
                         output
                             .forward(length)
                             .map_err(|_| sessions::invalid("output credit invariant"))?;
                     }
                     if replay_until.is_some_and(|fence| output.cursor() >= fence) {
+                        flush_staged(&tx, &mut pending_bulk).await?;
                         replay_complete(&tx, stream, id, output.cursor(), replay_size).await?;
                         replay_until = None;
                     }
                     if end < frame_len {
                         pending = Some(Shim::Output(seq, bytes));
                         deadline = output
-                            .pending(Instant::now())
-                            .map(tokio::time::Instant::from_std);
+                            .pending(Instant::now().into_std())
+                            .map(Instant::from_std);
                         // This relay stops reading the shim while a frame is
                         // pending, and re-enters `pending` only at the top of
                         // this loop. After a pass that forwarded bytes, the remainder
@@ -1806,33 +2294,88 @@ async fn terminal_run(
                     if seq < output.cursor() {
                         return Err(sessions::invalid("snapshot cursor regressed"));
                     }
-                    if output.repaint(seq, length).is_ok() {
+                    // A capture that raced ahead of the key's InputAck cannot
+                    // prove that it contains the echo, so discard it.
+                    if key_repaint_target.is_some() && key_repaint_requested.is_none() {
+                        continue;
+                    }
+                    let reserved = key_repaint_requested.is_some();
+                    // Preserve the delivered cursor and charged credit if
+                    // expiry cancels a reserved Snapshot's writer admission.
+                    let mut next_output = output.clone();
+                    let repainted = if reserved {
+                        next_output.repaint_reserved(seq, length)
+                    } else {
+                        next_output.repaint(seq, length)
+                    };
+                    if repainted.is_ok() {
                         deadline = None;
-                        if approximate {
-                            let json = terminal_events::Notice::Snapshot {
-                                session_id: uuid::Uuid::from_bytes(id),
+                        let notice = if approximate {
+                            Some(
+                                terminal_events::Notice::Snapshot {
+                                    session_id: uuid::Uuid::from_bytes(id),
+                                    seq,
+                                    approximate: true,
+                                }
+                                .json()?,
+                            )
+                        } else {
+                            None
+                        };
+                        if reserved {
+                            let (Shim::Snapshot(_, bytes) | Shim::SnapshotWithFlags(_, _, bytes)) =
+                                frame
+                            else {
+                                return Err(sessions::invalid("invalid key repaint Snapshot"));
+                            };
+                            let permit = capture_io!(priority.reserve())
+                                .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                            permit.send(PriorityMessage::Snapshot {
+                                stream,
+                                attachment,
                                 seq,
-                                approximate: true,
+                                bytes,
+                                approximate,
+                                notice,
+                            });
+                        } else {
+                            if let Some(notice) = notice {
+                                emit(&tx, Message::Event(stream, notice)).await?;
                             }
-                            .json()?;
-                            emit(&tx, Message::Event(stream, json)).await?;
+                            emit(&tx, Message::Shim(stream, frame)).await?;
                         }
-                        emit(&tx, Message::Shim(stream, frame)).await?;
+                        output = next_output;
+                        if let Some(requested) = key_repaint_requested.take()
+                            && key_repaint_target.is_some_and(|target| target <= requested)
+                        {
+                            capture_deadline = None;
+                            key_repaint_target = None;
+                            key_repaint_ready_at = None;
+                            key_repaint_ready = false;
+                        }
                         if replay_until.is_some_and(|fence| seq >= fence) {
                             // Repaint bytes contain state through seq, so the
                             // ordered completion event uses the repaint cursor.
-                            replay_complete(&tx, stream, id, seq, replay_size).await?;
+                            capture_io!(replay_complete(&tx, stream, id, seq, replay_size))?;
                             replay_until = None;
                         }
+                        capture_io!(request_key_repaint_if_ready(
+                            &mut session,
+                            key_repaint_target,
+                            &mut key_repaint_requested,
+                            acknowledged,
+                            output.repaint_budget(),
+                            &mut key_repaint_ready,
+                            finished_peer,
+                        ))?;
                     } else {
+                        output = next_output;
                         pending = Some(frame);
-                        // A repaint is indivisible. Positive credit below its
-                        // cost needs the same bounded pause as zero-credit raw
-                        // output; expiry preserves the client cursor and parks
-                        // serialization until the remembered cost is affordable.
-                        deadline = output
-                            .pending(Instant::now())
-                            .map(tokio::time::Instant::from_std);
+                        if !reserved {
+                            deadline = output
+                                .pending(Instant::now().into_std())
+                                .map(Instant::from_std);
+                        }
                     }
                 }
                 _ => return Err(sessions::invalid("invalid pending frame")),
@@ -1843,13 +2386,24 @@ async fn terminal_run(
         if finished_peer {
             deadline = None;
         }
-        if output.needs_snapshot() && session.is_none() {
+        if session.is_none() && (output.needs_snapshot() || retry_shim_write.is_some()) {
+            // The relink may end the stream, and the replay it restarts
+            // continues after the staged bytes.
+            flush_staged(&tx, &mut pending_bulk).await?;
             let Some(mut next) = relink(&path, id, stream, &tx, primed).await? else {
                 return Ok(());
             };
             let written = input_state(&mut next).await?;
             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
             acknowledged = acknowledged.max(written);
+            if let Some(frame) = retry_shim_write.take() {
+                next.send(&frame).await?;
+                let written = input_state(&mut next).await?;
+                input_progress(&tx, stream, &mut acknowledged, written).await?;
+                if !output.needs_snapshot() {
+                    continue;
+                }
+            }
             // A credit deadline discards only the daemon's pending frame,
             // never the client's offset. Let the shim select retained replay
             // first, then faithful or negotiated approximate repaint on a gap.
@@ -1883,15 +2437,32 @@ async fn terminal_run(
                     finished_peer = true;
                     continue;
                 }
+                release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
+                flush_staged(&tx, &mut pending_bulk).await?;
                 if recorded_end(&path, id, stream, &tx).await? {
                     return Ok(());
                 }
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
-            command = commands.next() => {
+            command = next_command(&mut commands, &mut refunds) => {
                 let Some(command) = command else { return Ok(()); };
                 match command {
-                    Command::Credit(bytes) => { output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?; if session.is_none() && bytes > 0 { output.retry_recovery(); } deadline = None; }
+                    Command::Credit(bytes) => {
+                        output.grant(bytes).map_err(|_| sessions::invalid("credit overflow"))?;
+                        if session.is_none() && bytes > 0 {
+                            output.retry_recovery();
+                        }
+                        capture_io!(request_key_repaint_if_ready(
+                            &mut session,
+                            key_repaint_target,
+                            &mut key_repaint_requested,
+                            acknowledged,
+                            output.repaint_budget(),
+                            &mut key_repaint_ready,
+                            finished_peer,
+                        ))?;
+                        deadline = None;
+                    }
                     _ if finished_peer => {}
                     #[cfg(feature = "remote")]
                     Command::Cursor(cursor) if primed => {
@@ -1899,9 +2470,32 @@ async fn terminal_run(
                         // Reset only this shadow relay, before its ordered Credit;
                         // already queued duplicates remain bounded and are trimmed
                         // by the server rather than charged to browser credit again.
-                        output = relay::Output::attach(cursor);
+                        // The marker below ends the old attachment's cover.
+                        // An in-flight capture on its shim cannot answer this replay.
+                        if capture_deadline.take().is_some() {
+                            session = None;
+                            probe = None;
+                        }
+                        output.reset_cursor(cursor);
+                        // The rewind starts a new replay below any cursor an
+                        // earlier key repaint covered: scope it afresh (#477).
+                        attachment = crate::daemon_writer::next_attachment();
+                        *announced = attachment;
+                        // The server's reissued credit already excludes
+                        // anything the writer drops from before the rewind,
+                        // so only the new ledger takes refunds.
+                        let (refund_cell, next_refunds) = crate::daemon_writer::refunds();
+                        refunds = next_refunds;
+                        // Output the old attachment staged belongs before
+                        // the marker, where the writer may still trim it.
+                        flush_staged(&tx, &mut pending_bulk).await?;
+                        emit(&tx, Message::Attached(stream, attachment, refund_cell)).await?;
                         pending = None;
                         deadline = None;
+                        key_repaint_target = None;
+                        key_repaint_requested = None;
+                        key_repaint_ready_at = None;
+                        key_repaint_ready = false;
                         if session.is_none() {
                             let Some(mut next) = relink(&path, id, stream, &tx, true).await? else { return Ok(()); };
                             let written = input_state(&mut next).await?;
@@ -1926,6 +2520,7 @@ async fn terminal_run(
                     other => {
                         let detached = session.is_none();
                         if detached {
+                            flush_staged(&tx, &mut pending_bulk).await?;
                             let Some(mut next) = relink(&path, id, stream, &tx, primed).await? else { return Ok(()); };
                             let written = input_state(&mut next).await?;
                             input_progress(&tx, stream, &mut acknowledged, written).await?;
@@ -1937,15 +2532,66 @@ async fn terminal_run(
                                 // An older surviving shim cannot accept the extension. Drop
                                 // rather than interpreting a renderer reply as typing [307].
                                 if peer.session.caps & infraternal_shim::frame::QUERY_REPLIES != 0 {
-                                    peer.send(&Shim::QueryReply(bytes)).await?;
+                                    let frame = Shim::QueryReply(bytes);
+                                    capture_io!(peer.send(&frame), retry_shim_write = Some(frame))?;
                                 } else if !reply_unavailable_announced {
                                     reply_unavailable_announced = true;
                                     let json = terminal_events::Notice::QueryRepliesUnavailable { session_id: uuid::Uuid::from_bytes(id) }.json()?;
-                                    emit(&tx, Message::Event(stream, json)).await?;
+                                    capture_io!(emit(&tx, Message::Event(stream, json)))?;
                                 }
                             }
-                            Command::Input(seq, bytes) => peer.send(&Shim::SequencedInput(seq, bytes)).await?,
-                            Command::Resize(cols, rows, px_w, px_h) => peer.send(&Shim::Resize {cols, rows, px_w, px_h}).await?,
+                            Command::Input(seq, bytes) => {
+                                if !bytes.is_empty() {
+                                    // A small prior write is not a blocked flood;
+                                    // this also catches a key just before bulk credit runs out.
+                                    let output_waiting = output_waiting_for_key_repaint(
+                                        pending.as_ref(),
+                                        pending_bulk.as_ref(),
+                                        &output,
+                                    );
+                                    if key_repaint_target.is_some()
+                                        || (output_waiting && output.repaint_budget() > 0)
+                                    {
+                                        let length = u64::try_from(bytes.len())
+                                            .map_err(|_| sessions::invalid("input length overflow"))?;
+                                        let target = seq
+                                            .checked_add(length)
+                                            .ok_or_else(|| sessions::invalid("input sequence overflow"))?;
+                                        if output_waiting && key_repaint_target.is_none() {
+                                            // This stream is starved even when
+                                            // its next frame has not been read.
+                                            // Discard only this stream's pending
+                                            // raw payload so the repaint replaces it.
+                                            pending = None;
+                                            // The staged frame was charged but is
+                                            // never sent: give its credit and
+                                            // cursor back, or the window shrinks
+                                            // for good and a recovery that skips
+                                            // the repaint resumes after a gap
+                                            // (#477, J794).
+                                            if let Some(Message::Shim(_, Shim::Output(seq, bytes))) = pending_bulk.take() {
+                                                output
+                                                    .retract(seq, bytes.len())
+                                                    .map_err(|_| sessions::invalid("output credit invariant"))?;
+                                            }
+                                            // The old bulk timer no longer has a
+                                            // frame to protect. Credit grants do
+                                            // not change the capture's deadline.
+                                            deadline = None;
+                                            capture_deadline = Some(Instant::now() + relay::STARVATION);
+                                        }
+                                        key_repaint_target = Some(
+                                            key_repaint_target.map_or(target, |seen| seen.max(target)),
+                                        );
+                                    }
+                                }
+                                let frame = Shim::SequencedInput(seq, bytes);
+                                capture_io!(peer.send(&frame), retry_shim_write = Some(frame))?;
+                            }
+                            Command::Resize(cols, rows, px_w, px_h) => {
+                                let frame = Shim::Resize {cols, rows, px_w, px_h};
+                                capture_io!(peer.send(&frame), retry_shim_write = Some(frame))?;
+                            }
                             Command::Ping(nonce, sent_us) => {
                                 if detached {
                                     // The preceding relink/state exchange crossed this shim, even when output is parked.
@@ -1953,8 +2599,21 @@ async fn terminal_run(
                                     session = None; probe = None;
                                     continue;
                                 }
+                                // A frame held for client credit means this relay is not
+                                // reading the shim, so its state reply could not be read
+                                // until the 250 ms starvation recovery, which can exceed
+                                // the server's route budget under a flood (#477). The
+                                // agent is alive and answering, and a shim that has
+                                // closed still takes the fenced path below.
+                                if pending.is_some()
+                                    && probe.is_none()
+                                    && !peer.read_closed().await?
+                                {
+                                    capture_io!(emit(&tx, Message::Pong(stream, nonce, sent_us)))?;
+                                    continue;
+                                }
                                 if probe.is_none() {
-                                    peer.send(&Shim::InputStateRequest).await?;
+                                    capture_io!(peer.send(&Shim::InputStateRequest))?;
                                     probe = Some((nonce, sent_us));
                                 }
                             }
@@ -1962,12 +2621,14 @@ async fn terminal_run(
                             #[cfg(feature = "remote")]
                             Command::Cursor(_) => return Err(sessions::invalid("unnegotiated terminal cursor")),
                         }
-                        if detached {
+                        if detached && key_repaint_target.is_none() {
                             // Reconnecting the same writer can supersede
                             // this socket before it reads an already-written
                             // command. An ordered State reply proves input was
                             // accepted (or resize handled) before peer loss;
                             // accepted input survives until the PTY writes it.
+                            // A key-triggered repaint keeps this replacement
+                            // link until its SnapshotRequest and capture finish.
                             let written = input_state(peer).await?;
                             emit(&tx, Message::Shim(stream, Shim::InputAck(written))).await?;
                             acknowledged = acknowledged.max(written);
@@ -1977,32 +2638,122 @@ async fn terminal_run(
                     }
                 }
             }
+            permit = tx.clone().reserve_owned(), if pending_bulk.is_some() => {
+                let permit = permit.map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                let message = pending_bulk
+                    .take()
+                    .ok_or_else(|| sessions::invalid("missing staged raw output"))?;
+                permit.send(message);
+            }
+            () = async {
+                if let Some(ready_at) = key_repaint_ready_at {
+                    tokio::time::sleep_until(ready_at).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                key_repaint_ready_at = None;
+                key_repaint_ready = true;
+                capture_io!(request_key_repaint_if_ready(
+                    &mut session,
+                    key_repaint_target,
+                    &mut key_repaint_requested,
+                    acknowledged,
+                    output.repaint_budget(),
+                    &mut key_repaint_ready,
+                    finished_peer,
+                ))?;
+            }
+            () = async {
+                if let Some(end) = capture_deadline {
+                    tokio::time::sleep_until(end).await;
+                }
+            }, if capture_deadline.is_some() => {},
             () = async { if let Some(deadline) = deadline { tokio::time::sleep_until(deadline).await; } else { std::future::pending::<()>().await; } } => {
                 finished_peer = match session.as_ref() {
                     Some(peer) => peer.read_closed().await?,
                     None => false,
                 };
                 if !finished_peer {
-                    output.expire(Instant::now()); session = None; probe = None; pending = None;
+                    output.expire(Instant::now().into_std());
+                    session = None;
+                    probe = None;
+                    pending = None;
                 }
                 deadline = None;
             }
             frame = async {
                 if let Some(session) = &mut session { session.read().await }
                 else { std::future::pending().await }
-            }, if pending.is_none() => {
-                match frame? {
-                    frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
-                    Shim::InputAck(seq) => {
-                        emit(&tx, Message::Shim(stream, Shim::InputAck(seq))).await?;
-                        acknowledged = acknowledged.max(seq);
+            }, if can_read_shim_frame(pending.as_ref(), pending_bulk.as_ref()) => {
+                let frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        // The link failed, but bytes the shim sent before it are
+                        // good and already charged: deliver them ahead of the
+                        // saved exit `terminal_mode` reports next (#477, J799).
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
+                        flush_staged(&tx, &mut pending_bulk).await?;
+                        return Err(error);
                     }
-                    Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
-                        input_progress(&tx, stream, &mut acknowledged, written).await?;
-                        let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
-                        emit(&tx, Message::Pong(stream, nonce, sent_us)).await?;
+                };
+                match frame {
+                    Shim::Output(..) if key_repaint_target.is_some() => {}
+                    Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)
+                        if key_repaint_target.is_some() && key_repaint_requested.is_none() => {}
+                    frame @ (Shim::Output(..) | Shim::Snapshot(..) | Shim::SnapshotWithFlags(..)) => pending = Some(frame),
+                    reply @ (Shim::InputAck(_) | Shim::InputState(..)) => {
+                        let (seq, is_ack) = match reply {
+                            Shim::InputAck(seq) => (seq, true),
+                            Shim::InputState(written, accepted) if written <= accepted && probe.is_some() => {
+                                if written < acknowledged {
+                                    return Err(sessions::invalid("shim input cursor regressed"));
+                                }
+                                (written, false)
+                            }
+                            _ => return Err(sessions::invalid("unexpected shim relay frame")),
+                        };
+                        let advanced = capture_io!(forward_input_confirmation(
+                            &tx,
+                            &priority,
+                            stream,
+                            attachment,
+                            seq,
+                            output.cursor(),
+                            key_repaint_target.is_some(),
+                            is_ack,
+                            &mut acknowledged,
+                        ), unpublished_ack = Some(seq))?;
+                        if key_repaint_grace_due(
+                            key_repaint_target,
+                            key_repaint_requested,
+                            seq,
+                            advanced,
+                            key_repaint_ready,
+                            key_repaint_ready_at.is_some(),
+                        ) {
+                            key_repaint_ready_at =
+                                Some(Instant::now() + KEY_REPAINT_GRACE);
+                            key_repaint_ready = false;
+                        }
+                        capture_io!(request_key_repaint_if_ready(
+                            &mut session,
+                            key_repaint_target,
+                            &mut key_repaint_requested,
+                            acknowledged,
+                            output.repaint_budget(),
+                            &mut key_repaint_ready,
+                            finished_peer,
+                        ))?;
+                        // A state reply also answers the route proof that asked for it.
+                        if !is_ack {
+                            let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
+                            capture_io!(emit(&tx, Message::Pong(stream, nonce, sent_us)))?;
+                        }
                     }
                     Shim::Exited(status, final_seq) => {
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
+                        flush_staged(&tx, &mut pending_bulk).await?;
                         exited(&tx, stream, id, status, final_seq, false).await?;
                         return Ok(());
                     }
@@ -2013,10 +2764,24 @@ async fn terminal_run(
                         let json = terminal_events::Notice::SnapshotUnavailable {
                             session_id: uuid::Uuid::from_bytes(id), seq: output.cursor(),
                         }.json()?;
+                        // The notice's seq already counts the staged bytes,
+                        // and the bytes the key's Ack passed.
+                        session = None;
+                        probe = None;
+                        capture_deadline = None;
+                        key_repaint_requested = None;
+                        key_repaint_ready_at = None;
+                        key_repaint_ready = false;
+                        release_key_cover(&priority, stream, attachment, key_repaint_target.take()).await?;
+                        flush_staged(&tx, &mut pending_bulk).await?;
                         emit(&tx, Message::Event(stream, json)).await?;
-                        session = None; probe = None;
                     }
-                    Shim::Error(..) => { emit(&tx, Message::Close(stream, "shim refused terminal request")).await?; return Ok(()); }
+                    Shim::Error(..) => {
+                        release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
+                        flush_staged(&tx, &mut pending_bulk).await?;
+                        emit(&tx, Message::Close(stream, "shim refused terminal request")).await?;
+                        return Ok(());
+                    }
                     _ => return Err(sessions::invalid("unexpected shim relay frame")),
                 }
             }
@@ -2051,9 +2816,29 @@ mod readiness_exit_tests;
 #[path = "daemon_liveness_tests.rs"]
 mod liveness_tests;
 
+/// Exercise bounded, input-triggered repaint ordering with real shim sockets.
+#[cfg(test)]
+#[path = "daemon_key_repaint_tests.rs"]
+mod key_repaint_tests;
+
 #[cfg(test)]
 #[path = "daemon_replay_fence_tests.rs"]
 mod replay_fence_tests;
+
+/// Staged raw output survives the end of its shim link (#477).
+#[cfg(test)]
+#[path = "daemon_link_end_tests.rs"]
+mod link_end_tests;
+
+/// A relay and the real writer together: output a key repaint passes keeps its credit and order.
+#[cfg(test)]
+#[path = "daemon_writer_credit_tests.rs"]
+mod writer_credit_tests;
+
+/// A server Close leaves no per-stream state in the shared writer (#477).
+#[cfg(test)]
+#[path = "daemon_close_forget_tests.rs"]
+mod close_forget_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "daemon_authenticated_tests.rs"]

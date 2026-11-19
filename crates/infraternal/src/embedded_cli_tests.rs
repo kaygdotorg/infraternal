@@ -2,6 +2,7 @@
 
 use super::*;
 
+/// Keeps inherited startup flags aligned with the public parser's validation.
 #[test]
 fn inherited_flags_keep_public_parser_validation_and_values() {
     for flags in [
@@ -24,6 +25,7 @@ fn inherited_flags_keep_public_parser_validation_and_values() {
                 .get_one::<i64>("fd")
                 .and_then(|fd| i32::try_from(*fd).ok()),
             state: parsed.matches.get_one::<String>("state").map(PathBuf::from),
+            mesh_state: None,
         };
         let inherited = Inherited::try_parse_from(
             std::iter::once("infraternal agent").chain(flags.iter().copied()),
@@ -31,6 +33,7 @@ fn inherited_flags_keep_public_parser_validation_and_values() {
         .unwrap();
         assert_eq!(boot.fd, inherited.options.fd);
         assert_eq!(boot.state, inherited.options.state);
+        assert_eq!(boot.mesh_state, inherited.options.mesh_state);
     }
     for invalid in [
         vec!["--fd=2147483648"],
@@ -43,6 +46,23 @@ fn inherited_flags_keep_public_parser_validation_and_values() {
                 .is_err()
         );
     }
+}
+
+/// Lets the server select only the embedded mesh files while sessions keep their runtime state.
+#[test]
+fn inherited_agent_accepts_a_mesh_only_state_override() {
+    let parsed = Inherited::try_parse_from([
+        "infraternal agent",
+        "--fd=3",
+        "--mesh-state=/var/lib/infraternal/mesh",
+    ])
+    .expect("parse the internal Mesh state override");
+    assert_eq!(parsed.options.state, None);
+    assert_eq!(
+        parsed.options.mesh_state,
+        Some(PathBuf::from("/var/lib/infraternal/mesh"))
+    );
+    assert!(Inherited::try_parse_from(["infraternal agent", "--fd=3", "--mesh-state",]).is_err());
 }
 
 #[test]

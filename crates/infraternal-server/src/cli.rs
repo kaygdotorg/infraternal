@@ -11,6 +11,7 @@ pub const ID: &str = "server";
 #[cfg(feature = "cli-plugin")]
 const SETUP_TOKEN_COMMAND: [&str; 2] = ["server", "setup-token"];
 
+/// Build the server's CLI actions, including the read-only Mesh identity check.
 #[cfg(feature = "cli-plugin")]
 #[must_use]
 pub fn plugin() -> PluginDefinition {
@@ -42,12 +43,57 @@ pub fn plugin() -> PluginDefinition {
         }
     }
     #[cfg(feature = "remote")]
-    plugin
-        .actions
-        .push(infraternal_plugin_remote::cli::restart_action());
+    {
+        plugin = plugin.with_group("server mesh", "Check the running server's Mesh identity.");
+        plugin
+            .actions
+            .push(infraternal_plugin_remote::cli::restart_action());
+        plugin.actions.push(server_mesh_status_action());
+    }
     plugin
 }
 
+/// Define the command that reads the running server's public Mesh fingerprint.
+#[cfg(all(feature = "cli-plugin", feature = "remote"))]
+fn server_mesh_status_action() -> ActionDefinition {
+    let data = JsonSchema::object(
+        [
+            (
+                "running".to_owned(),
+                JsonSchema::boolean("The running server answered its private control socket."),
+            ),
+            (
+                "public_key_fingerprint".to_owned(),
+                JsonSchema::string("SHA-256 fingerprint of the server's public Mesh key."),
+            ),
+        ],
+        ["running".to_owned(), "public_key_fingerprint".to_owned()],
+    );
+    ActionDefinition::new(
+        ["server", "mesh", "status"],
+        "Show the running server's Mesh public-key fingerprint.",
+        "Use this command on the server host, as the account that runs the server, to verify Mesh identity continuity.",
+        [
+            "Pass the server's private data directory with --data.",
+            "The command checks the live server control socket and prints only the public-key fingerprint.",
+        ],
+        JsonSchema::empty_object(),
+        JsonSchema::command_result_with(data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Read,
+            "server.status",
+            DryRun::Unsupported,
+        ),
+    )
+    .with_cli_handler(CliHandler::ServerMeshStatus)
+    .with_example(
+        "server mesh status --data /var/lib/infraternal --json",
+        "Read the running server's public Mesh fingerprint.",
+    )
+}
+
+/// Register the command that runs the server in the current terminal.
 #[cfg(feature = "cli-plugin")]
 fn server_run_action() -> ActionDefinition {
     let server_data = JsonSchema::object(
@@ -70,6 +116,7 @@ fn server_run_action() -> ActionDefinition {
         [
             "Choose where it listens and a private folder for its data.",
             "Give it HTTPS files, or say that a trusted reverse proxy handles HTTPS.",
+            "For a system service, the product owns its host input rules and installs a boot-time firewall unit, replacing any hand-installed infraternal-firewall.service. Add trusted admin paths with --host-firewall-allow.",
             "Start it. It runs until you stop it.",
         ],
         JsonSchema::object(server_input_fields(), std::iter::empty()),
@@ -85,6 +132,7 @@ fn server_run_action() -> ActionDefinition {
     .with_example("server --listen 127.0.0.1:7443", "Run a local server.")
 }
 
+/// Register first-time system and user server installation.
 #[cfg(feature = "cli-plugin")]
 fn server_init_action() -> ActionDefinition {
     let mut inputs = server_input_fields();
@@ -112,6 +160,12 @@ fn server_init_action() -> ActionDefinition {
             JsonSchema::boolean("Replace a different service that has the same name."),
         ),
         (
+            "host_firewall_off".to_owned(),
+            JsonSchema::boolean(
+                "For a system install, clear the server host policy and remove the shared table and loader when no agent policy remains.",
+            ),
+        ),
+        (
             "name".to_owned(),
             JsonSchema::string("Service name, without .service."),
         ),
@@ -122,6 +176,9 @@ fn server_init_action() -> ActionDefinition {
         "Use this the first time you set up a server on this machine.",
         [
             "Choose where it listens, its data folder and its public address.",
+            "A system install also takes over infraternal-firewall.service and writes the configured default-drop host policy.",
+            "Use --host-firewall-allow and --host-firewall-accept-interface to keep administrator paths, then inspect the complete plan with --dry-run.",
+            "On an existing system install, --host-firewall-off clears only the server policy; an agent role keeps the shared table active.",
             "Run with --dry-run to see exactly what would be installed.",
             "Run it again and confirm, or pass --yes when no one is at the terminal.",
         ],
@@ -140,6 +197,8 @@ fn server_init_action() -> ActionDefinition {
         dry_run_first: true,
         notes: vec![
             "Without --dry-run, setup enables and starts the selected service after confirmation."
+                .to_owned(),
+            "--host-firewall-off removes the server's default-drop table when no agent policy remains, which opens input."
                 .to_owned(),
         ],
     })
@@ -322,6 +381,7 @@ fn server_init_result_schema() -> JsonSchema {
     )
 }
 
+/// Describe the server and host-firewall settings accepted by run and init.
 #[cfg(feature = "cli-plugin")]
 fn server_input_fields() -> Vec<(String, JsonSchema)> {
     vec![
@@ -370,6 +430,35 @@ fn server_input_fields() -> Vec<(String, JsonSchema)> {
             JsonSchema::array(
                 JsonSchema::string("Proxy peer address or CIDR."),
                 "Addresses or networks of the reverse proxies to trust.",
+            ),
+        ),
+        (
+            "host_firewall_listen_interface".to_owned(),
+            JsonSchema::string("Interface that receives the main server listener."),
+        ),
+        (
+            "host_firewall_remote_interface".to_owned(),
+            JsonSchema::string("Interface that receives the remote agent listener."),
+        ),
+        (
+            "host_firewall_remote_source".to_owned(),
+            JsonSchema::array(
+                JsonSchema::string("Remote listener peer address or CIDR."),
+                "Peer addresses or networks allowed to reach the remote listener.",
+            ),
+        ),
+        (
+            "host_firewall_accept_interface".to_owned(),
+            JsonSchema::array(
+                JsonSchema::string("Host interface name."),
+                "Interfaces whose existing broad input allowance should be kept.",
+            ),
+        ),
+        (
+            "host_firewall_allow".to_owned(),
+            JsonSchema::array(
+                JsonSchema::string("INTERFACE,SOURCE,tcp|udp,PORT; use * for any."),
+                "Additional typed host input rules, including administrator SSH paths.",
             ),
         ),
     ]
