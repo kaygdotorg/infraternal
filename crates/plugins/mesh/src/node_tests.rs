@@ -163,6 +163,7 @@ fn config_delta_can_advance_the_local_key_after_rotation_commit() {
             dns_names: cfg!(target_os = "linux"),
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: true,
             public_key: candidate_key,
             port: 44000,
         }),
