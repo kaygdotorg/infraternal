@@ -169,7 +169,10 @@ async fn embedded_agent_restart_recertifies_the_new_host_key() {
         expected_principals.push(format!("{}.{}", exposure.machine_name, exposure.dns_suffix));
         expected_principals.push(exposure.machine_name);
     }
-    expected_principals.extend([config.addresses.ipv4.to_string(), config.addresses.ipv6.to_string()]);
+    expected_principals.extend([
+        config.addresses.ipv4.to_string(),
+        config.addresses.ipv6.to_string(),
+    ]);
     let old_host_key = host_key_fixture(17);
     sqlx::query("INSERT INTO mesh_ssh_hosts(host, enabled) VALUES (?, 1)")
         .bind("server")
