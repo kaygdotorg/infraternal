@@ -1,0 +1,20 @@
+--- a/crates/plugins/mesh/src/handshake_admission.rs
++++ b/crates/plugins/mesh/src/handshake_admission.rs
+@@ -924,6 +924,17 @@
+         time::{Duration, Instant},
+     };
+
++    /// A macOS receive guard has no timestamp storage because its socket never stamps packets.
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn macos_receive_guard_keeps_the_native_batch_buffer_size() {
++        use super::{GotaUdpSocket, PeerAdmissionUdpReceiver, UdpRecv};
++        let wrapped = size_of::<<PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf>();
++        let socket = size_of::<<GotaUdpSocket as UdpRecv>::RecvManyBuf>();
++        eprintln!("macOS receive buffer sizes: wrapper={wrapped} socket={socket}");
++        assert_eq!(wrapped, socket, "macOS has no receive stamps to retain");
++    }
++
+     /// How many X25519 key agreements `admission` has run so far.
+     fn key_agreements(admission: &PeerAdmission) -> u32 {
+         admission.key_agreements.load(Ordering::Relaxed)
