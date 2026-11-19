@@ -781,9 +781,9 @@ fn review_j912_verifies_a_hardened_user_server() {
     drop(child.stdin.take());
     assert!(child.wait().unwrap().success());
     assert!(opened, "fixture never opened its database");
-    assert_eq!(
-        wrong_peer.unwrap_err().kind(),
-        io::ErrorKind::PermissionDenied
+    assert!(
+        matches!(wrong_peer, Err(error) if error.kind() == io::ErrorKind::PermissionDenied),
+        "the database query accepted the wrong process"
     );
     assert!(replaced.is_err(), "a replacement pathname was accepted");
     assert!(
