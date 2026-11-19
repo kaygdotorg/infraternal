@@ -49,7 +49,7 @@ use log::{debug, error, trace, warn};
 use russh_util::time::Instant;
 use ssh_encoding::{Decode, Encode};
 use ssh_key::{Algorithm, Certificate, HashAlg, PrivateKey, PublicKey};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::pin;
 use tokio::sync::mpsc::{
     Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel,
@@ -1414,7 +1414,7 @@ impl Session {
 
     async fn run_inner<H: Handler + Send, R: AsyncRead + AsyncWrite + Unpin + Send>(
         &mut self,
-        stream_read: SshRead<ReadHalf<R>>,
+        stream_read: BufReader<SshRead<ReadHalf<R>>>,
         stream_write: &mut WriteHalf<R>,
         handler: &mut H,
         kex_done_signal: &mut Option<
