@@ -765,6 +765,53 @@ async fn bulk_starvation_does_not_cancel_an_acknowledged_key_repaint() {
     );
 }
 
+/// Returning output credit while capture is in flight must preserve the original wait bound.
+#[tokio::test(start_paused = true)]
+async fn capture_wait_stays_bounded_after_credit_returns() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window(&mut fixture).await;
+    let started = Instant::now();
+    assert!(type_key_and_wait_for_repaint_request(&mut fixture, 0).await);
+
+    let commands = fixture.commands.as_mut().unwrap();
+    commands.try_send(Command::Credit(1)).unwrap();
+    commands.try_send(Command::Ping(7, 9)).unwrap();
+    // The ping crosses the shim socket only after the earlier credit is applied.
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::InputStateRequest
+    );
+
+    // Deliberately withhold the snapshot. Allow one frame for the timer and EOF to be observed.
+    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "returned credit disarmed the in-flight capture deadline: {closed:?}"
+    );
+}
+
+/// A replacement capture needs a deadline even when the bulk window still has room.
+#[tokio::test(start_paused = true)]
+async fn capture_wait_stays_bounded_with_available_bulk_credit() {
+    let mut fixture = start_relay(2).await;
+    fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
+    let started = Instant::now();
+    assert!(type_key_and_wait_for_repaint_request(&mut fixture, 0).await);
+
+    // The capture replaces unreturned output. No unaffordable frame has armed a bulk timer.
+    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "capture started without a deadline while bulk credit was available: {closed:?}"
+    );
+}
+
 /// A key still preempts raw bytes that are in flight before the bulk window empties.
 #[tokio::test]
 async fn key_repaint_preempts_unreturned_bulk_before_window_is_empty() {
