@@ -76,11 +76,12 @@ pub(super) async fn run_worker(
                         budgets,
                         reply,
                     } => {
-                        let before = state.engine_addresses(&config).await;
                         let result = state.replace_authority(*config, budgets).await;
                         let applied = result.is_ok();
                         let _ = reply.send(result);
-                        state.after_apply(applied, &before).await;
+                        if applied {
+                            state.refresh_walks(&BTreeMap::new()).await;
+                        }
                     }
                     WorkerCommand::SetPrivateKey { private_key, reply } => {
                         let result = state.set_private_key(private_key).await;

@@ -1672,6 +1672,9 @@ impl RuntimeState {
                 });
             }
         }
+        // Full replacement retires the old engine sessions and their walk positions.
+        self.handshakes.abort_all();
+        self.walks.clear();
         self.apply_with_rollback(config, budgets, false).await
     }
 
@@ -1776,9 +1779,14 @@ impl RuntimeState {
         } else {
             None
         };
-        if let Err(error) =
+        // An authority replacement may have reached this path because the installed keys
+        // disagreed with the snapshot. Rebuild from the complete list in that case.
+        let peers_applied = if rollback_on_failure {
             walks::update_peers(device, old_config.as_ref(), &config, &admitted).await
-        {
+        } else {
+            replace_peers(device, peers).await
+        };
+        if let Err(error) = peers_applied {
             if rollback_on_failure {
                 rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
             }
