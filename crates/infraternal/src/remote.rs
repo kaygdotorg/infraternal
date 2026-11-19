@@ -784,9 +784,11 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
 pub(crate) fn foreign_mesh_restore(error: &io::Error) -> bool {
     #[cfg(all(target_os = "linux", feature = "plugin-mesh"))]
     {
-        error
-            .get_ref()
-            .is_some_and(|source| source.is::<infraternal_plugin_mesh::node::ForeignMachine>())
+        error.get_ref().is_some_and(
+            <dyn std::error::Error + Send + Sync>::is::<
+                infraternal_plugin_mesh::node::ForeignMachine,
+            >,
+        )
     }
     #[cfg(not(all(target_os = "linux", feature = "plugin-mesh")))]
     {
