@@ -1536,6 +1536,19 @@ mod tests {
         })
     }
 
+    /// Wait until a migration publishes the temporary file that keeps its copy phase open.
+    fn wait_for_migration_temporary(directory: &Path, file_name: &str) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if migration_temporary_exists(directory, file_name) {
+                return true;
+            }
+            // sleep: poll the actual staging file while giving the migration thread CPU time.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        migration_temporary_exists(directory, file_name)
+    }
+
     /// Copies the old private identity and public snapshot into a private durable directory.
     ///
     /// The runtime copy stays, so a previous build started cold still finds it (J595 P1).
@@ -2069,13 +2082,7 @@ mod tests {
         let first_source = volatile.clone();
         let first_durable = durable.clone();
         let first = std::thread::spawn(move || migrate(&first_source, &first_durable, &owned));
-        for _ in 0..1_000_000 {
-            if migration_temporary_exists(&durable, "mesh-public.json") {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        let temporary_was_published = migration_temporary_exists(&durable, "mesh-public.json");
+        let temporary_was_published = wait_for_migration_temporary(&durable, "mesh-public.json");
         let second = migrate(&volatile, &durable, &owned);
         let first = first.join().expect("first migration thread");
         let durable_key = fs::read(durable.join("mesh-private-key")).ok();
@@ -2195,13 +2202,7 @@ mod tests {
         let migration_target = durable.clone();
         let migration =
             std::thread::spawn(move || migrate(&migration_source, &migration_target, &owned));
-        for _ in 0..1_000_000 {
-            if migration_temporary_exists(&durable, "mesh-public.json") {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        let temporary_was_published = migration_temporary_exists(&durable, "mesh-public.json");
+        let temporary_was_published = wait_for_migration_temporary(&durable, "mesh-public.json");
         let writer_temporary = volatile.join("mesh-private-key.4242.new");
         fs::write(&writer_temporary, [0x24; 32]).expect("write synthetic rotated key");
         fs::set_permissions(&writer_temporary, fs::Permissions::from_mode(0o600))
