@@ -2130,6 +2130,8 @@ mod tests {
     fn the_unit_relabels_its_binary_before_every_start() {
         let unit = super::systemd_unit();
         let lines: Vec<&str> = unit.lines().collect();
+        assert!(lines.contains(&"After=network-online.target"));
+        assert!(lines.contains(&"Wants=network-online.target"));
         let relabel = lines.iter().position(|line| {
             *line
                 == r#"ExecStartPre=-+/bin/sh -c "[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t /var/lib/infraternal/bin/infraternal""#
