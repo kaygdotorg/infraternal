@@ -135,7 +135,11 @@ async fn restart_refuses_a_mismatched_enrolled_key_before_connecting() {
         "This machine's saved private key does not match its enrollment certificate."
     );
     assert!(!state.exists());
-    assert!(std::fs::read(data.join("identity.json")).unwrap() == *document);
+    let identity_unchanged = std::fs::read(data.join("identity.json")).unwrap() == *document;
+    assert!(
+        identity_unchanged,
+        "refusal must leave the saved identity in place"
+    );
 }
 
 #[tokio::test]
