@@ -1302,9 +1302,8 @@ impl RouteMonitor {
                 PollFd::new(cancel, PollFlags::POLLIN),
             ];
             match poll(&mut descriptors, timeout) {
-                Ok(0) => continue,
+                Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
                 Ok(_) => {}
-                Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => return Err(error.into()),
             }
             if descriptors[1].revents().is_some_and(|flags| {

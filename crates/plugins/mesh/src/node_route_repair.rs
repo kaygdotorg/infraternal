@@ -261,7 +261,7 @@ pub(super) fn repair_accepted_routes(
     };
     let mut first_error = None;
     let mut probe = EndpointProbe::default();
-    for target in targets {
+    for target in &targets {
         if let Err(error) = repair_target(link, state, &missing, target, &mut probe) {
             first_error.get_or_insert(error);
         }
@@ -282,7 +282,7 @@ fn repair_target(
     link: &ActiveLink,
     state: &Mutex<PeerRouteState>,
     missing: &BTreeSet<IpAddr>,
-    target: RepairTarget,
+    target: &RepairTarget,
     probe: &mut EndpointProbe,
 ) -> io::Result<()> {
     let direct_mtu = target
