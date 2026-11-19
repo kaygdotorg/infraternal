@@ -93,8 +93,8 @@ const AUTHORITY_READ_TIMEOUT: Duration = Duration::from_millis(25);
 // A read that misses its deadline is a busy store, not a refusal (#240): it is
 // retried while the socket's work stays held, and fails closed after this wait.
 const AUTHORITY_WAIT: Duration = Duration::from_secs(1);
-// Pause between attempts: 5 ms, doubling to 100 ms. A socket stalled for the
-// whole wait makes about 11 attempts, each a read-only SELECT.
+// Pause between attempts: 5 ms, doubling to 100 ms. A read still in flight
+// also has to finish before its checker can attempt another SELECT.
 const AUTHORITY_RETRY_PAUSE: Duration = Duration::from_millis(5);
 const AUTHORITY_RETRY_PAUSE_MAX: Duration = Duration::from_millis(100);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
@@ -2731,11 +2731,11 @@ async fn authority_deadline(
 
 /// Read the session's expiry, and start its renewal when `renew` is set and it
 /// is due. Each attempt has the fixed per-read deadline. An attempt that misses
-/// it is a busy store, not a refusal (#240): it is dropped and tried again after
-/// a pause (5 ms doubling to 100 ms) until `wait` has passed (`AUTHORITY_WAIT`
-/// everywhere but teardown, which passes zero for a single attempt), then the
-/// read fails closed. A store that answers (no live session, or a storage
-/// error) fails at once and is never retried. The caller does no work
+/// it is a busy store, not a refusal (#240). The checker discards the late
+/// answer and retries after a pause (5 ms doubling to 100 ms). All attempts fit
+/// inside `wait` (`AUTHORITY_WAIT` everywhere but teardown, which passes zero
+/// for one attempt with the full read deadline). A store that answers with no
+/// live session or a storage error fails at once. The caller does no work
 /// meanwhile: every call site awaits this before it polls the operation it
 /// guards, so input stays queued in order behind the read instead of being
 /// dropped with the socket. One non-generic function serves every call site so
@@ -2783,14 +2783,15 @@ async fn read_expiry(
     let read_timeout = state.authority_read_timeout;
     #[cfg(not(test))]
     let read_timeout = AUTHORITY_READ_TIMEOUT;
-    let give_up = tokio::time::Instant::now() + wait;
+    let mut started = tokio::time::Instant::now();
+    let give_up = started + if wait.is_zero() { read_timeout } else { wait };
     let mut pause = AUTHORITY_RETRY_PAUSE;
     // This call's SELECT, from the moment it holds a place until it finishes.
     // It lives outside the attempt so a missed attempt leaves it here for the
     // retry to wait out; dropping it with the call detaches it (see above).
     let mut in_flight = None;
     let expiry = loop {
-        let attempt_deadline = tokio::time::Instant::now() + read_timeout;
+        let attempt_deadline = (started + read_timeout).min(give_up);
         let read = async {
             let reads = &state.authority.reads;
             let place = match reads.try_acquire() {
@@ -2817,7 +2818,7 @@ async fn read_expiry(
             // A future that does not yield can finish after the timer. Keep the
             // explicit post-result check so such a completion still retries.
             Ok(Some(result)) if tokio::time::Instant::now() <= attempt_deadline => break result?,
-            _ if tokio::time::Instant::now() + pause < give_up => {
+            _ if !wait.is_zero() && tokio::time::Instant::now() + pause < give_up => {
                 let resume = tokio::time::Instant::now() + pause;
                 // Let the missed SELECT finish before the next one starts; its
                 // answer is stale by now and is discarded. The pause still
@@ -2829,6 +2830,10 @@ async fn read_expiry(
                     in_flight = None;
                 }
                 tokio::time::sleep_until(resume).await;
+                started = tokio::time::Instant::now();
+                if started >= give_up {
+                    return Err(AuthorityMiss::Unavailable);
+                }
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
             }
             _ => return Err(AuthorityMiss::Unavailable),
