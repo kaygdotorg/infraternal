@@ -227,7 +227,7 @@ impl Kernel {
         retire: |_| Ok(Vec::new()),
     };
 }
-pub use crate::left_line;
+pub use crate::{left_line, uninstall_request::decode_request};
 
 /// Enabled only for a checked managed remote installation, without an idle task.
 pub struct UninstallPlugin {
@@ -255,33 +255,6 @@ impl UninstallPlugin {
             launcher: "systemd-run",
         })
     }
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-/// An exact host identity and dry-run choice, without filesystem input.
-pub struct Request {
-    host: String,
-    dry_run: bool,
-}
-/// Decode the same bounded object used by the authenticated uninstall handler.
-/// # Errors
-/// Refuses positional input, foreign fields, duplicate keys and invalid host identities.
-pub fn decode_request(input: &[u8]) -> Result<Request, PluginError> {
-    if input.len() > infraternal_plugin_api::MAX_ACTION_BYTES
-        || input.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{')
-    {
-        return Err(PluginError::Rejected);
-    }
-    let request: Request = serde_json::from_slice(input).map_err(|_| PluginError::Rejected)?;
-    if request.host.len() != 32
-        || !request
-            .host
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(PluginError::Rejected);
-    }
-    Ok(request)
 }
 impl AgentPlugin for UninstallPlugin {
     fn descriptor(&self) -> &'static PluginDescriptor {

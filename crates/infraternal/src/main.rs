@@ -186,6 +186,10 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
+    #[cfg(all(machine_up, target_os = "macos"))]
+    if let Some(result) = infraternal_plugin_mesh::macos_service::remove_if_requested() {
+        return result;
+    }
     // The root agent retiring the rootless install it replaced (D376, #399).
     #[cfg(all(feature = "remote", target_os = "linux"))]
     if let Some(result) = remote::promotion_retire_if_requested() {

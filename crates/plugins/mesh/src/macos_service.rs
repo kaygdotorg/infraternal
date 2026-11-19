@@ -2,10 +2,11 @@
 
 use std::{
     fs::{self, File, Metadata, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
 };
 
 const LABEL: &str = "org.infraternal.mesh";
@@ -26,6 +27,11 @@ pub const MACHINE_DATA: &str = "/Library/Application Support/infraternal/agent";
 pub const MACHINE_STATE: &str = "/Library/Application Support/infraternal/state";
 /// Records the host and whether its installer created the short PATH alias.
 pub const MACHINE_OWNER: &str = ".machine-owner";
+/// Canonical PATH link for a device-approved root install.
+const MACHINE_LINK: &str = "/usr/local/bin/infraternal";
+/// Private child entry used only by the authenticated uninstall handler.
+const REMOVE_HANDOFF: &str = "--macos-remove-after-reply";
+
 /// Publish the ownership receipt before launchd can accept any removal request.
 ///
 /// # Errors
@@ -45,12 +51,132 @@ pub fn record_installation(host: &str, alias_created: bool) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Inspect the exact device-approved install before any destructive action.
+///
+/// # Errors
+/// Refuses a foreign, altered or unsafe install, or a different host identity.
+pub fn validate_installation(host: &str) -> io::Result<bool> {
+    if !valid_host(host) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let binary = trusted_executable(Path::new(MACHINE_BINARY))?;
+    if binary != Path::new(MACHINE_BINARY) {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    ensure_plist_directory()?;
+    let plist = Path::new(PLIST);
+    require_owned_plist(&fs::symlink_metadata(plist)?)?;
+    let expected = render_plist(&binary)?;
+    let mut actual = String::new();
+    File::open(plist)?
+        .take(expected.len() as u64 + 1)
+        .read_to_string(&mut actual)?;
+    if actual != expected {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let receipt = Path::new(MACHINE_BASE).join(MACHINE_OWNER);
+    require_owned_plist(&fs::symlink_metadata(&receipt)?)?;
+    let mut contents = String::new();
+    File::open(receipt)?
+        .take(36)
+        .read_to_string(&mut contents)?;
+    receipt_alias(&contents, host).ok_or_else(|| io::ErrorKind::PermissionDenied.into())
+}
+
+/// Read alias ownership only from a receipt for the exact enrolled host.
+fn receipt_alias(receipt: &str, host: &str) -> Option<bool> {
+    let (recorded, alias) = receipt.split_once(' ')?;
+    if recorded != host {
+        return None;
+    }
+    match alias {
+        "1\n" => Some(true),
+        "0\n" => Some(false),
+        _ => None,
+    }
+}
+
+/// Start an independent child that waits for the accepted reply before stopping launchd.
+///
+/// The service manager reaps the service's process group on bootout. A new
+/// process group lets this child finish removing the stopped installation.
+///
+/// # Errors
+/// Refuses an unowned installation or a child that cannot be started.
+pub fn prepare_removal(host: &str) -> io::Result<Child> {
+    validate_installation(host)?;
+    Command::new(MACHINE_BINARY)
+        .arg(REMOVE_HANDOFF)
+        .arg(host)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+/// Handle a checked local removal or an authenticated after-reply child invocation.
+#[must_use]
+pub fn remove_if_requested() -> Option<std::process::ExitCode> {
+    let mut arguments = std::env::args_os().skip(1);
+    let action = arguments.next()?;
+    let waits = action == REMOVE_HANDOFF;
+    if !waits && action != "--bootstrap-uninstall" {
+        return None;
+    }
+    let Some(host) = arguments
+        .next()
+        .and_then(|arg| arg.into_string().ok())
+        .filter(|host| valid_host(host) && arguments.next().is_none())
+    else {
+        return Some(std::process::ExitCode::FAILURE);
+    };
+    if waits {
+        let mut armed = [0];
+        if std::io::stdin().read_exact(&mut armed).is_err() || armed != [1] {
+            return Some(std::process::ExitCode::FAILURE);
+        }
+    }
+    Some(match remove_installation(&host) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "Could not remove the owned infraternal installation ({:?}).",
+                error.kind()
+            );
+            std::process::ExitCode::FAILURE
+        }
+    })
+}
+
 /// Accept the same lowercase UUID form used in removal receipts.
 fn valid_host(host: &str) -> bool {
     host.len() == 32
         && host
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Stop the live utun owner before retiring only the approved install's files.
+fn remove_installation(host: &str) -> io::Result<()> {
+    require_root()?;
+    let alias_created = validate_installation(host)?;
+    stop()?;
+    let link = Path::new(MACHINE_LINK);
+    if fs::read_link(link).is_ok_and(|target| target == Path::new(MACHINE_BINARY))
+        && link.ancestors().skip(1).all(|parent| {
+            fs::symlink_metadata(parent).is_ok_and(|metadata| {
+                metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+            })
+        })
+    {
+        if alias_created {
+            infraternal_plugin_api::cli_alias::remove(link, 0)?;
+        }
+        fs::remove_file(link)?;
+    }
+    fs::remove_file(PLIST)?;
+    fs::remove_dir_all(MACHINE_BASE)
 }
 
 /// The mesh state an `agent join` into `data` must forget, if any (#265, J162 F4).
@@ -410,6 +536,26 @@ mod tests {
         let legacy = render_plist(Path::new("/usr/local/bin/infraternal")).unwrap();
         assert!(legacy.contains(DATA_DIRECTORY));
         assert!(legacy.contains(STATE_DIRECTORY));
+    }
+
+    /// A stale removal request cannot claim the new install or its PATH alias.
+    #[test]
+    fn uninstall_receipt_is_scoped_to_the_enrolled_host() {
+        let host = "cccccccccccccccccccccccccccccccc";
+        let previous = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(
+            super::receipt_alias(&format!("{host} 1\n"), host),
+            Some(true)
+        );
+        assert_eq!(
+            super::receipt_alias(&format!("{host} 0\n"), host),
+            Some(false)
+        );
+        assert_eq!(super::receipt_alias(&format!("{previous} 1\n"), host), None);
+        assert_eq!(
+            super::receipt_alias(&format!("{host} 1\nextra"), host),
+            None
+        );
     }
 
     /// J162 F4: a join for another data directory leaves the service's mesh state alone.
