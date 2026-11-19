@@ -235,6 +235,33 @@ fn a_readdressed_established_peer_handshakes_at_once() {
     );
 }
 
+/// A changed authority snapshot rebuilds peers and restarts the walks it still authorizes.
+#[test]
+#[ignore = "Run on the macOS VM with root privileges under the Mac lock."]
+fn changed_authority_rebuilds_peers_and_restarts_candidate_walks() {
+    use super::super::J472_REBUILDS;
+    use std::sync::atomic::Ordering;
+
+    let mut fixture = Fixture::start(75);
+    let dead = UdpSocket::bind("127.0.0.1:0").expect("hold an unanswered address");
+    fixture.address(dead.local_addr().unwrap(), vec![fixture.live]);
+    fixture.install(3);
+    assert!(fixture.first_echo(Duration::from_secs(10)).is_some());
+
+    let before = J472_REBUILDS.load(Ordering::SeqCst);
+    fixture.add_unrelated_peer();
+    fixture.config.authority_epoch = Some(super::AUTHORITY_EPOCH_B.to_owned());
+    fixture
+        .node
+        .worker
+        .as_ref()
+        .expect("running worker")
+        .replace_authority(fixture.config.clone())
+        .expect("replace authority");
+    assert_eq!(J472_REBUILDS.load(Ordering::SeqCst), before + 1);
+    assert!(fixture.first_echo(Duration::from_secs(10)).is_some());
+}
+
 /// A peer whose first candidate is dead is walked to its live second candidate within about one
 /// walk step, and a later unrelated snapshot neither restarts the finished walk nor sends that
 /// peer another handshake.
