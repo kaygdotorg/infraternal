@@ -21,6 +21,11 @@ from wd import Session  # noqa: E402  (shipped next to this file as wd.py)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = "/tmp/j509/sw-state.json"
+# The app theme a run asks for in the page URL: "mocha" (the dark default) for a dark run, "latte" (light) otherwise.
+# A run's tag is argv[4] ("light"/"dark" or a theme name); main() sets this before any page loads. The URL is how a dark
+# run is dark WITHOUT touching the Mac's own appearance (no AppleScript to the console session): the app's theme wins over
+# the system scheme, and `theme_check` fails the run when the page did not take it.
+APP_THEME = "latte"
 
 
 def result(ok, name, detail=""):
@@ -91,7 +96,7 @@ def labels(s):
 
 
 def owner_setup(s, origin, out):
-    s.get("%s/?r=%d&theme=latte" % (origin, time.time()))
+    s.get("%s/?r=%d&theme=%s" % (origin, time.time(), APP_THEME))
     time.sleep(6)
     result(inject_sw(s, origin), "inject-software-authenticator")
     result(s.type_into("#setup-token", secret("setup-token.txt")), "token-typed")
@@ -117,7 +122,7 @@ def owner_setup(s, origin, out):
 
 def signin(s, origin, out, unlock=True):
     """Signs in with the saved throwaway credential (a fresh session has no cookie)."""
-    s.get("%s/?r=%d&theme=latte" % (origin, time.time()))
+    s.get("%s/?r=%d&theme=%s" % (origin, time.time(), APP_THEME))
     time.sleep(6)
     result(inject_sw(s, origin), "inject-software-authenticator")
     if s.wait("document.querySelector('#login-passkey')", 5):
@@ -129,6 +134,8 @@ def signin(s, origin, out, unlock=True):
     if unlock:
         result(unlock_hosts(s), "host-connections-unlocked")
         time.sleep(5)
+    pick_theme(s)
+    theme_check(s)
 
 
 def unlock_hosts(s, out=None):
@@ -605,8 +612,38 @@ def phase_c392(s, origin, out, tag):
     print("MAC_LABELS " + json.dumps([l for l in labels(s) if 'Settings' not in l and 'Themes' not in l][:14]))
 
 
+def pick_theme(s):
+    """Picks the colour theme the run asked for through the palette ("Mocha" dark, "Latte" light). An account that has picked a
+    theme ignores both the system scheme and ?theme= (D352, D390), so a run only has the look it asks for once it is picked."""
+    s.keys(["\ue03d", "k"])
+    time.sleep(1.5)
+    type_text(s, "Mocha" if APP_THEME == "mocha" else "Latte")
+    time.sleep(1.5)
+    s.keys(["\ue007"])
+    time.sleep(3)
+
+
+def theme_check(s):
+    """Fails unless the page LOOKS like the theme the run asked for (so a "dark" run that stayed light cannot pass).
+
+    It measures what a person sees, the first opaque background under the middle of the page, not an attribute: the theme id
+    attribute is not visible to a WebDriver script on this page (measured 2026-11-15: only `data-qa-sw` is on the root).
+    Dark means a relative luminance below 0.4."""
+    bg = s.js("""let e = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+      while (e) { const m = getComputedStyle(e).backgroundColor.match(/[\\d.]+/g); if (m && (m.length < 4 || +m[3] > 0.9)) return m.slice(0, 3).map(Number); e = e.parentElement; }
+      const m = getComputedStyle(document.documentElement).backgroundColor.match(/[\\d.]+/g); return m ? m.slice(0, 3).map(Number) : [255, 255, 255];""")
+    lum = (0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]) / 255
+    prefers = bool(s.js("return matchMedia('(prefers-color-scheme: dark)').matches"))
+    looks_dark = lum < 0.4
+    print("MAC_METRIC theme asked=%s page-bg=%s luminance=%.2f prefers-dark=%s" % (APP_THEME, bg, lum, prefers))
+    result(looks_dark == (APP_THEME == "mocha"), "theme-looks-" + ("dark" if APP_THEME == "mocha" else "light"), "luminance %.2f" % lum)
+
+
 def main():
+    global APP_THEME
     origin, out, cmd = sys.argv[1].rstrip("/"), sys.argv[2], sys.argv[3]
+    if len(sys.argv) > 4 and sys.argv[4] in ("dark", "mocha"):
+        APP_THEME = "mocha"
     os.makedirs(out, exist_ok=True)
     s = Session()
     try:
@@ -716,7 +753,7 @@ def main():
         elif cmd == "c392":
             phase_c392(s, origin, out, sys.argv[4] if len(sys.argv) > 4 else "latte")
         elif cmd == "probe":
-            s.get("%s/?r=%d&theme=latte" % (origin, time.time()))
+            s.get("%s/?r=%d&theme=%s" % (origin, time.time(), APP_THEME))
             time.sleep(8)
             inject_sw(s, origin)
             print("MAC_LABELS " + json.dumps(labels(s)))

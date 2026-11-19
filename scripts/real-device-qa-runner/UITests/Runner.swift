@@ -50,6 +50,20 @@ final class DeviceQA: XCTestCase {
         return safari.descendants(matching: .any).matching(NSPredicate(format: format, text, text)).firstMatch
     }
 
+    /// Splits a label argument on `/` into alternatives ("Use Passkey/Use Selected Passkey"). A control's wording can
+    /// differ between OS releases or builds, and a recorded step should name every wording it accepts instead of
+    /// silently failing on the next one. No label we tap contains a `/`.
+    func alternatives(_ text: String) -> [String] {
+        text.split(separator: "/").map { String($0) }
+    }
+
+    /// The first element of a system sheet (the passkey prompt) whose label contains any of the `/`-separated wordings.
+    func sheetElement(_ text: String) -> XCUIElement {
+        let options = alternatives(text)
+        let format = options.map { _ in "label CONTAINS[c] %@" }.joined(separator: " OR ")
+        return springboard.descendants(matching: .any).matching(NSPredicate(format: format, argumentArray: options)).firstMatch
+    }
+
     /// One element of the page as the hierarchy dump describes it.
     struct Row { let kind: String; let frame: CGRect; let label: String; let line: String }
 
@@ -78,9 +92,10 @@ final class DeviceQA: XCTestCase {
     func findRow(_ text: String, contains: Bool = false, timeout: TimeInterval = 15, onScreen: Bool = true) -> Row? {
         let screen = safari.frame
         let deadline = Date().addingTimeInterval(timeout)
+        let options = alternatives(text)
         repeat {
             let found = rows().first { row in
-                (contains ? row.label.localizedCaseInsensitiveContains(text) : row.label == text)
+                options.contains { contains ? row.label.localizedCaseInsensitiveContains($0) : row.label == $0 }
                     && row.frame.width > 0 && row.frame.height > 0
                     && (!onScreen || screen.contains(CGPoint(x: row.frame.midX, y: row.frame.midY)))
             }
@@ -130,6 +145,12 @@ final class DeviceQA: XCTestCase {
                 let found = findRow(a[1], timeout: Double(a.count > 2 ? a[2] : "5")!)
                 if found != nil { tapRow(found) }
                 print("QA_NOTE tapif \(a[1]) \(found != nil ? "tapped" : "absent")")
+            case "tapifx":
+                // tapifx~PART~SECONDS: like tapif, but matches a label that merely CONTAINS PART (palette rows carry a hint
+                // after their title), and a missing row is fine.
+                let found = findRow(a[1], contains: true, timeout: Double(a.count > 2 ? a[2] : "5")!)
+                if found != nil { tapRow(found) }
+                print("QA_NOTE tapifx \(a[1]) \(found != nil ? "tapped" : "absent")")
             case "tapx":
                 result("tap~contains \(a[1])", tapRow(findRow(a[1], contains: true)))
             case "field":
@@ -146,7 +167,7 @@ final class DeviceQA: XCTestCase {
                 result("field \(a[1])", focused)
             case "tapsb":
                 // tapsb~LABEL: taps a button in a system sheet (the passkey prompt belongs to the system, not to Safari).
-                let sheet = springboard.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", a[1])).firstMatch
+                let sheet = sheetElement(a[1])
                 var hit = sheet.waitForExistence(timeout: 10)
                 if hit { let f = sheet.frame; springboard.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.midX, dy: f.midY)).tap() }
                 else { hit = false }
@@ -154,7 +175,7 @@ final class DeviceQA: XCTestCase {
                 sleep(1)
             case "tapsbif":
                 // tapsbif~LABEL~SECONDS: like tapsb, but a missing sheet is fine (sign-in sheets only show without a session).
-                let sheet = springboard.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", a[1])).firstMatch
+                let sheet = sheetElement(a[1])
                 if sheet.waitForExistence(timeout: Double(a.count > 2 ? a[2] : "5")!) {
                     let f = sheet.frame
                     springboard.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: f.midX, dy: f.midY)).tap()
