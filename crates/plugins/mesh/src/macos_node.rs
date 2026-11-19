@@ -44,11 +44,14 @@ use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::{
         RwLock,
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        mpsc::{self, UnboundedSender},
         watch,
     },
 };
 use zeroize::Zeroizing;
+
+/// The worker loop, session-keeping peer updates and candidate walks (#515).
+mod walks;
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
@@ -1352,7 +1355,9 @@ impl PendingWorker {
                 }
                 let state = RuntimeState {
                     utun: Some(utun),
-                    device: Some(device),
+                    device: Some(Arc::new(device)),
+                    handshakes: tokio::task::JoinSet::new(),
+                    walks: crate::candidate_walks::Walks::default(),
                     config,
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
@@ -1365,7 +1370,7 @@ impl PendingWorker {
                     #[cfg(feature = "mesh-dns")]
                     dns_integration,
                 };
-                runtime.block_on(run_worker(receiver, state));
+                runtime.block_on(walks::run_worker(receiver, state));
             })?;
         let info = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
             Ok(info) => info,
@@ -1574,7 +1579,12 @@ mod peer_stats;
 /// `route_mtus` mirrors installed metrics so a failed update can restore them.
 struct RuntimeState {
     utun: Option<MacUtun>,
-    device: Option<GotaDevice>,
+    /// Shared only with handshake tasks, which `stop` ends before stopping the device.
+    device: Option<Arc<GotaDevice>>,
+    /// Running `rehandshake` waits ([`walks`]).
+    handshakes: tokio::task::JoinSet<()>,
+    /// Each peer's direct-path candidate walk (#515).
+    walks: crate::candidate_walks::Walks,
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
     route_mtus: BTreeMap<IpAddr, u16>,
@@ -1589,63 +1599,6 @@ struct RuntimeState {
     dns_resolver: Option<crate::dns::Resolver>,
     #[cfg(feature = "mesh-dns")]
     dns_integration: crate::dns_integration::DnsIntegration,
-}
-
-/// Applies queued requests on the Mac worker and stops cleanly when its queue closes.
-///
-/// Between requests it scans the device's confirmed endpoints every
-/// [`peer_stats::CONFIRMED_ENDPOINT_SCAN`] for the admission guard, as the Linux worker does.
-async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
-    let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
-    confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        let command = tokio::select! {
-            command = commands.recv() => command,
-            _ = confirmed_scan.tick() => {
-                state.admit_confirmed_endpoints().await;
-                continue;
-            }
-        };
-        let Some(command) = command else {
-            break;
-        };
-        match command {
-            WorkerCommand::Apply {
-                config,
-                budgets,
-                reply,
-            } => {
-                let result = state.apply(*config, budgets).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ReplaceAuthority {
-                config,
-                budgets,
-                reply,
-            } => {
-                let result = state.replace_authority(*config, budgets).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::SetPrivateKey { private_key, reply } => {
-                let result = state.set_private_key(private_key).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Counters(reply) => {
-                let counters = state.counters().await.unwrap_or_default();
-                let _ = reply.send(counters);
-            }
-            WorkerCommand::Stop(reply) => {
-                let result = state.stop().await;
-                let _ = reply.send(result);
-                return;
-            }
-            #[cfg(test)]
-            WorkerCommand::Admission(reply) => {
-                let _ = reply.send(Arc::clone(&state.admission));
-            }
-        }
-    }
-    let _ = state.stop().await;
 }
 
 impl RuntimeState {
@@ -1719,6 +1672,9 @@ impl RuntimeState {
                 });
             }
         }
+        // Full replacement retires the old engine sessions and their walk positions.
+        self.handshakes.abort_all();
+        self.walks.clear();
         self.apply_with_rollback(config, budgets, false).await
     }
 
@@ -1823,7 +1779,14 @@ impl RuntimeState {
         } else {
             None
         };
-        if let Err(error) = replace_peers(device, peers).await {
+        // An authority replacement may have reached this path because the installed keys
+        // disagreed with the snapshot. Rebuild from the complete list in that case.
+        let peers_applied = if rollback_on_failure {
+            walks::update_peers(device, old_config.as_ref(), &config, &admitted).await
+        } else {
+            replace_peers(device, peers).await
+        };
+        if let Err(error) = peers_applied {
             if rollback_on_failure {
                 rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
             }
@@ -1912,7 +1875,11 @@ impl RuntimeState {
         admission.set_configured_endpoints(admitted_endpoints);
         drop(admission);
         utun.filter.publish_policy(policy);
+        let readdressed = walks::readdressed(old_config.as_ref(), &config);
         self.config = Some(config);
+        for key in readdressed {
+            self.rehandshake(key);
+        }
         Ok(RuntimeInfo {
             interface,
             port: self.port,
@@ -1943,7 +1910,11 @@ impl RuntimeState {
             .utun
             .as_ref()
             .map_or(Ok(()), |utun| remove_routes(utun.name(), &self.routes));
-        if let Some(device) = self.device.take() {
+        // Ending every handshake task drops its device handle, so this one is the last.
+        self.handshakes.abort_all();
+        while self.handshakes.join_next().await.is_some() {}
+        self.walks.clear();
+        if let Some(device) = self.device.take().and_then(Arc::into_inner) {
             device.stop().await;
         }
         self.utun.take();
@@ -3199,6 +3170,8 @@ mod tests {
     mod retirement;
     /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
     mod roamed_peer;
+    /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
+    mod walks;
 
     use super::{
         Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, Worker, WorkerCommand,
@@ -3284,6 +3257,7 @@ mod tests {
                             ipv6: "fd01::4".parse().expect("peer IPv6"),
                         },
                         endpoint: Some("192.0.2.4:51820".parse::<SocketAddr>().expect("endpoint")),
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -3357,6 +3331,7 @@ mod tests {
                     ipv6: format!("fd01::{id}").parse().expect("peer IPv6"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound: TrafficPolicy::All,

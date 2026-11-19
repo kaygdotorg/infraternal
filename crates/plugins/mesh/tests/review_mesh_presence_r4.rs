@@ -7,6 +7,7 @@ use infraternal_plugin_mesh::{
 
 const START: u64 = 1_800_000_000;
 
+/// Record one reading of node 3 at `at` and return whether it is live then.
 fn record(tracker: &mut Tracker, at: u64, handshake: u64, received: u64) -> bool {
     tracker.record(
         Some((
@@ -16,6 +17,7 @@ fn record(tracker: &mut Tracker, at: u64, handshake: u64, received: u64) -> bool
                 handshake,
                 received,
                 keepalive: 25,
+                endpoint: None,
             }],
         )),
         START + at,
