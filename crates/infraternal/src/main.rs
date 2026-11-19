@@ -3012,7 +3012,9 @@ fn run_remote_agent(
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
                     Some(remote::Failure::Challenge) => "CHALLENGE",
-                    Some(remote::Failure::Refused) | None => "REFUSED",
+                    Some(remote::Failure::Refused | remote::Failure::IdentityMismatch) | None => {
+                        "REFUSED"
+                    }
                 };
                 println!("PREPARE-REFUSED {class}");
             }
@@ -3108,7 +3110,9 @@ fn run_remote_agent(
                 .as_ref()
                 .err()
                 .map_or(Exit::Failed, |error| match remote::Failure::of(error) {
-                    Some(remote::Failure::Tls) => Exit::NotAllowed,
+                    Some(remote::Failure::Tls | remote::Failure::IdentityMismatch) => {
+                        Exit::NotAllowed
+                    }
                     Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
                     Some(
                         remote::Failure::Refused
