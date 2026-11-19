@@ -2436,6 +2436,7 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove socket cleanup fixture");
     }
 
+    /// A newly created data directory supports a private, explicitly requested setup token.
     #[cfg(unix)]
     #[tokio::test]
     async fn setup_token_socket_is_private_and_requires_explicit_request() {

@@ -2,6 +2,7 @@
 //! path until the final unit and firewall policy are durable and the new
 //! service has answered. A private journal pins both trees and the unit set.
 
+/// Pins the data and unit paths used by the recovery transaction.
 #[path = "install_move_fs.rs"]
 mod disk;
 
