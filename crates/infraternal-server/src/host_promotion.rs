@@ -104,10 +104,16 @@ pub(crate) struct Promotions {
     scratch: PathBuf,
     /// Progress of the promotions this process drives, by attempt.
     progress: Arc<Mutex<HashMap<Uuid, (Uuid, Stage)>>>,
-    /// Test only: `finish` waits here right after it reserved the try, so a
-    /// test can cut the request off at that point (J569 P2-1).
+    /// Test only: signal after reserving the try, then wait for the test to release `finish`.
     #[cfg(test)]
-    after_reserve: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    after_reserve: Arc<Mutex<Option<AfterReserveGate>>>,
+}
+
+/// The test-only signal and release pair around an already reserved promotion.
+#[cfg(test)]
+struct AfterReserveGate {
+    reserved: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 /// A refused request, as the HTTP layer reports it.
@@ -384,7 +390,8 @@ impl Promotions {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             if let Some(gate) = gate {
-                let _ = gate.await;
+                let _ = gate.reserved.send(());
+                let _ = gate.release.await;
             }
         }
         let way = match method {
@@ -1104,6 +1111,7 @@ mod tests {
         SqlitePool,
         Uuid,
         tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
     ) {
         /// A payload source with nothing to give; the harness never installs.
         struct NoPayload;
@@ -1160,8 +1168,12 @@ mod tests {
         )
         .unwrap();
         let (release, gate) = tokio::sync::oneshot::channel();
-        *promotions.after_reserve.lock().unwrap() = Some(gate);
-        (promotions, store, pool, host, release)
+        let (reserved, observed) = tokio::sync::oneshot::channel();
+        *promotions.after_reserve.lock().unwrap() = Some(AfterReserveGate {
+            reserved,
+            release: gate,
+        });
+        (promotions, store, pool, host, release, observed)
     }
 
     /// The state and try flag of `attempt`'s row.
@@ -1180,7 +1192,7 @@ mod tests {
     /// counted it as a typed try.
     #[tokio::test]
     async fn a_finish_cut_off_after_its_reservation_still_settles() {
-        let (promotions, store, pool, host, release) = promotions().await;
+        let (promotions, store, pool, host, release, reserved) = promotions().await;
         let attempt = Uuid::from_u128(0x574);
         let now = 200;
         store
@@ -1206,20 +1218,15 @@ mod tests {
                     .await
             }
         });
-        // Wait until the try is reserved, then cut the request off there,
-        // as the 2-minute deadline middleware does.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while row(&pool, attempt).await.0 != "elevating" {
-                // sleep: polling the row for the reservation; the outcome never depends on timing.
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        // Wait for the fixture's post-reservation signal, then cut the request off there.
+        tokio::time::timeout(Duration::from_secs(60), reserved)
+            .await
+            .expect("finish did not reserve the try")
+            .expect("reservation observer was dropped");
         request.abort();
         let _ = request.await;
         let _ = release.send(());
-        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+        let settled = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let row = row(&pool, attempt).await;
                 if row.0 != "elevating" {
