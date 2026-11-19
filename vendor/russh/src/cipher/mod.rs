@@ -408,6 +408,10 @@ pub(crate) const MAXIMUM_DECOMPRESSED_PACKET_LEN: usize = MAXIMUM_PACKET_LEN;
 #[cfg(feature = "_bench")]
 pub mod benchmark;
 
+/// Exercise packet reads through the same buffered transport used by sessions.
+#[cfg(test)]
+mod read_ahead_tests;
+
 #[cfg(all(test, feature = "des"))]
 mod tests {
     use super::*;

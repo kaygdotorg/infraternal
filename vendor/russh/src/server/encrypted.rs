@@ -817,6 +817,7 @@ mod tests {
         packet
     }
 
+    /// Build an unauthenticated server session with empty request queues.
     fn test_auth_session() -> Session {
         let mut config = Config::default();
         config.preferred = Preferred {
@@ -861,6 +862,7 @@ mod tests {
             pending_len: 0,
             channels: std::collections::HashMap::new(),
             open_global_requests: std::collections::VecDeque::new(),
+            channel_replies: std::collections::HashMap::new(),
             kex: SessionKexState::Idle,
         }
     }
