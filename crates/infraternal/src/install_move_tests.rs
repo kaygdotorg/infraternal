@@ -235,13 +235,22 @@ async fn pre_switch_retry_preserves_committed_wal_rows() {
         Err(io::Error::other("interrupted before switching the unit"))
     });
     assert!(failure.is_err());
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&mut writer)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO receipt VALUES (42)")
         .execute(&mut writer)
         .await
         .unwrap();
     // Keep the idle connection open to model committed WAL pages left by an
     // abrupt exit. A last clean close can checkpoint and remove the WAL.
-    assert!(fixture.old.join("infraternal.sqlite-wal").is_file());
+    assert!(
+        fs::metadata(fixture.old.join("infraternal.sqlite-wal"))
+            .unwrap()
+            .len()
+            > 32
+    );
     fixture.apply(&fixture.old, &service).unwrap();
     let options = SqliteConnectOptions::new().filename(fixture.new.join("infraternal.sqlite"));
     let mut moved = SqliteConnection::connect_with(&options).await.unwrap();
@@ -250,7 +259,11 @@ async fn pre_switch_retry_preserves_committed_wal_rows() {
         .await
         .unwrap();
     assert_eq!(rows, [42]);
-    assert!(plan(&fixture.new, &fixture.new, &fixture.unit).unwrap().is_none());
+    assert!(
+        plan(&fixture.new, &fixture.new, &fixture.unit)
+            .unwrap()
+            .is_none()
+    );
     drop(writer);
 }
 
