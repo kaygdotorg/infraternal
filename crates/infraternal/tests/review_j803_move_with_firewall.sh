@@ -126,10 +126,10 @@ chmod 755 "$S/systemctl" "$S/evil/systemctl"
 mount --bind "$S/systemctl" /usr/bin/systemctl
 printf 'Port 22\n' > "$S/cfg"
 mount --bind "$S/cfg" /etc/ssh/sshd_config
-/usr/sbin/sshd -D -f /etc/ssh/sshd_config -o PidFile=none -E "$S/sshd.log" &
+setsid /usr/sbin/sshd -D -f /etc/ssh/sshd_config -o PidFile=none -E "$S/sshd.log" &
 SSHD=$!
 sleep 0.5 # sleep: let sshd bind before /proc/net is read
-trap 'while read -r pid; do kill -TERM -- "-$pid" 2>/dev/null; done < "$S/health.pids"; kill $SSHD 2>/dev/null; wait $SSHD 2>/dev/null; rm -rf "$S"' EXIT
+trap 'while read -r pid; do kill -TERM -- "-$pid" 2>/dev/null; done < "$S/health.pids"; kill -TERM -- "-$SSHD" 2>/dev/null; wait $SSHD 2>/dev/null; rm -rf "$S"' EXIT
 : > "$S/health.pids"
 
 # init ARGS...: the real install with a clean environment, the decoy first in PATH.
@@ -252,7 +252,10 @@ status=$?
 echo "    exit=$status (target still holds step 3's server data): $(tr '\n' ' ' < "$S/err" | grep -o 'already holds[^;]*' | head -c 300)"
 check NONEMPTY_REFUSED 1 "$([ $status -ne 0 ] && echo 1 || echo 0)"
 check NONEMPTY_NAMES_ONLY_FOREIGN 0 "$(grep -o 'already holds[^;]*' "$S/err" | grep -c 'host-firewall\|bootstrap\|promotion\|superseded\|bin\b\|agent\b')"
-rm -rf $D/infraternal.sqlite $D/mesh
+# The first fake server created its own database control directory.
+# Stop it before clearing the target down to its allowed firewall files.
+/usr/bin/systemctl stop "$server"
+rm -rf "$D/infraternal.sqlite" "$D/mesh" "$D/restart"
 init --host-firewall-allow '*,*,tcp,22'
 status=$?
 echo "    exit=$status stdout: $(tr '\n' ' ' < "$S/out" | head -c 300)"
