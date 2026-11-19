@@ -296,7 +296,8 @@ fn live_endpoint_refresh_probes_only_after_underlay_changes() {
         .collect();
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(&peers);
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     // Count lookups and writes of one refresh.
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
@@ -466,23 +467,24 @@ fn review_j552_relay_fallback_does_not_derive_budget_from_relay_shim() {
     }
 }
 
-/// J552 review (#489): the cost of one steady live refresh at mesh scale, as a receipt.
+/// Build a mesh of `peer_count` peers for the scale tests, in the current (disposable)
+/// network namespace, and return the peers with the endpoint each one was learned at.
 ///
-/// Under any continuous traffic, the `GotaTun` worker refreshes up to four times a second
-/// and each refresh probes every installed peer's underlay route (one route and one link
-/// netlink request, each on a fresh socket) while holding the shared route-state mutex
-/// that relay callbacks, route repair and configuration also take. This prints the time
-/// of steady refreshes (no route writes) for 4,096 peers with distinct endpoints, or for
-/// `J552_PEERS` peers when that is set. It asserts only the write count, never speed
-/// (ENGINEERING P3); the numbers are the receipt.
-#[test]
-#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
-fn review_j552_steady_refresh_cost_at_4096_peers() {
+/// It brings `lo` up, adds a 1500-byte dummy underlay `under0` carrying `100.64.0.0/10`, and
+/// marks a TUN as this node's (see [`review_marked_tun`]). Every peer has its own mesh
+/// addresses (`10.200.x.y` and `fd02::…`), the same configured endpoint, and a distinct learned
+/// endpoint `100.65.x.y:51820` on the underlay, so each derives a 1408-byte budget with its own
+/// route lookup. No peer route is written: the caller's first refresh does that.
+fn review_scale_mesh(
+    peer_count: u16,
+) -> (
+    Vec<crate::dataplane::Peer>,
+    Vec<(
+        crate::policy::model::PublicKey,
+        Option<std::net::SocketAddr>,
+    )>,
+) {
     use crate::policy::model::{Addresses, PublicKey};
-    let peer_count: u16 = std::env::var("J552_PEERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(4096);
     review_route_command(&["link", "set", "lo", "up"]);
     review_route_command(&["link", "add", "under0", "type", "dummy"]);
     review_route_command(&["link", "set", "under0", "mtu", "1500", "up"]);
@@ -512,11 +514,32 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
             Some(std::net::SocketAddr::from(([100, 65, high, low], 51820))),
         ));
     }
+    (peers, learned)
+}
+
+/// J552 review (#489): the cost of one steady live refresh at mesh scale, as a receipt.
+///
+/// Under any continuous traffic, the `GotaTun` worker refreshes up to four times a second
+/// and each refresh probes every installed peer's underlay route (one route and one link
+/// netlink request, each on a fresh socket) while holding the shared route-state mutex
+/// that relay callbacks, route repair and configuration also take. This prints the time
+/// of steady refreshes (no route writes) for 4,096 peers with distinct endpoints, or for
+/// `J552_PEERS` peers when that is set. It asserts only the write count, never speed
+/// (ENGINEERING P3); the numbers are the receipt.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn review_j552_steady_refresh_cost_at_4096_peers() {
+    let peer_count: u16 = std::env::var("J552_PEERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4096);
+    let (peers, learned) = review_scale_mesh(peer_count);
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(&peers);
     // Run the route-repair worker as a node does: it proves and publishes the link, and its
     // route listener is the one a running node has while refreshes happen (J571).
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let first = std::time::Instant::now();
     let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
     let first = first.elapsed();
@@ -539,6 +562,11 @@ fn review_j552_steady_refresh_cost_at_4096_peers() {
         median.as_secs_f64() * 4e3,
     );
     worker.stop();
+    eprintln!(
+        "METRIC j552_route_repair passes={} overflow_recoveries={}",
+        ROUTE_REPAIR_PASSES.load(std::sync::atomic::Ordering::Acquire),
+        crate::wireguard::OVERFLOW_RECOVERIES.load(std::sync::atomic::Ordering::Acquire)
+    );
 }
 
 /// J609 review (#489): a policy-routing rule change moves a peer endpoint's underlay path, and
@@ -590,7 +618,8 @@ fn review_j609_policy_rule_change_rederives_route_budgets() {
     ];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(&peers);
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -724,7 +753,8 @@ fn live_endpoint_refresh_rederives_after_nexthop_replace() {
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -791,7 +821,8 @@ fn live_endpoint_refresh_retries_a_failed_lookup() {
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -887,7 +918,8 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
     lock_route_state(&state).set_peers(std::slice::from_ref(&peer));
-    let mut worker = RouteRepairWorker::start(Arc::clone(&state)).expect("start route repair");
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let refresh = || {
         ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
         let written = update_live_peer_endpoints(&state, &learned).expect("refresh");
@@ -937,6 +969,240 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
     assert!(after.0.contains("mtu 1216"), "{after:?}");
 }
 
+/// Wait until `counter` reaches `target`, or fail after 60 s with `what`.
+///
+/// The namespace tests use it to wait for the route-repair worker and its listener, which run
+/// on their own thread, instead of guessing a delay.
+fn review_wait_for(counter: &std::sync::atomic::AtomicUsize, target: usize, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while counter.load(std::sync::atomic::Ordering::Acquire) < target {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        // sleep: polls a counter another thread bumps; there is no event to block on.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// J780 (#483): an overflow recovery right after the node's own large route burst rewrites
+/// only the peer routes whose budget really changed.
+///
+/// A refresh at mesh scale writes two routes per peer, and the kernel echoes every write to the
+/// route listener. When that listener falls behind (a loaded host), the echoes overflow its
+/// socket (`ENOBUFS`), and the recovery asks for a full inventory check and a re-derivation of
+/// every budget. Both are correct, but neither may rewrite a route whose budget is already the
+/// one written: J767 measured the first steady refresh after such a recovery rewriting all
+/// 4,096 peers and holding the route-state lock for 80-90 s under load.
+///
+/// The overflow is forced: the test holds the route-state lock, deletes one peer route so the
+/// worker wakes and waits on that lock (its listener stops reading), and rewrites every other
+/// peer's routes at the same budget. Afterwards exactly one peer differs (the deleted one, which
+/// the repair re-adds at its configured budget), so one steady refresh writes exactly one peer
+/// and the next writes none. `J780_PEERS` overrides the peer count (default 4,096).
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
+    use crate::wireguard::OVERFLOW_RECOVERIES;
+    use std::sync::atomic::Ordering;
+    let peer_count: u16 = std::env::var("J780_PEERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4096);
+    let (peers, learned) = review_scale_mesh(peer_count);
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(&peers);
+    let mut worker =
+        RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
+    let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
+    assert_eq!(written, usize::from(peer_count));
+    // The first refresh's own burst may overflow the listener already; settle that first, so
+    // the forced overflow below is the only one the assertions measure.
+    for _ in 0..3 {
+        if update_live_peer_endpoints(&state, &learned).expect("settling refresh") == 0 {
+            break;
+        }
+    }
+
+    let overflows = OVERFLOW_RECOVERIES.load(Ordering::Acquire);
+    let repairs = ROUTE_REPAIR_PASSES.load(Ordering::Acquire);
+    let deleted = peers[0].addresses.ipv4.to_string();
+    {
+        let guard = lock_route_state(&state);
+        let link = guard.link.expect("the worker proved the link");
+        review_route_command(&[
+            "route",
+            "del",
+            &format!("{deleted}/32"),
+            "dev",
+            "infraternal0",
+        ]);
+        // The overflow assertion below fails if the listener did not block, so the delay
+        // cannot hide a bug.
+        // sleep: lets the listener read the deletion and block on the lock this test holds.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let burst: Vec<_> = peers[1..]
+            .iter()
+            .map(|peer| (guard.route_peer(peer), guard.written[&peer.key]))
+            .collect();
+        let burst: Vec<_> = burst.iter().map(|(peer, mtu)| (peer, *mtu)).collect();
+        Device::replace_peer_routes_on(&link, &burst).expect("rewrite every other peer");
+    }
+    // One pass repairs the deletion; after it the listener reads the overflow, and its
+    // recovery asks for a second pass: the full inventory check.
+    review_wait_for(
+        &OVERFLOW_RECOVERIES,
+        overflows + 1,
+        "the burst overflowed the listener",
+    );
+    review_wait_for(&ROUTE_REPAIR_PASSES, repairs + 2, "the inventory check ran");
+
+    let mut writes = Vec::new();
+    for _ in 0..3 {
+        let started = std::time::Instant::now();
+        let written = update_live_peer_endpoints(&state, &learned).expect("steady refresh");
+        writes.push((written, started.elapsed()));
+    }
+    eprintln!("METRIC j780_overflow_rewrite peers={peer_count} refreshes={writes:?}");
+    worker.stop();
+    assert_eq!(
+        writes
+            .iter()
+            .map(|(written, _)| *written)
+            .collect::<Vec<_>>(),
+        [1, 0, 0],
+        "after an overflow only the re-added peer route differs, so only it is rewritten"
+    );
+}
+
+/// J780 (#483): a repair that finds the route already in place leaves its written budget alone.
+///
+/// The exclusive add returns `EEXIST` when the route is there: nothing changed at that
+/// destination, so the next live refresh must not rewrite it. Forgetting the budget anyway is
+/// what turned one full inventory check into a rewrite of every peer.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn repair_of_a_present_route_keeps_its_budget() {
+    use crate::policy::model::{Addresses, PublicKey};
+    review_route_command(&["link", "set", "lo", "up"]);
+    let link = review_marked_tun(PublicKey([9; 32]));
+    let learned = review_learned_underlay(1500);
+    let key = PublicKey([7; 32]);
+    let peer = crate::dataplane::Peer {
+        key,
+        previous_key: None,
+        previous_active: false,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().expect("IPv4"),
+            ipv6: "fd01::2".parse().expect("IPv6"),
+        },
+        endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
+        candidates: Vec::new(),
+    };
+    let state = Mutex::new(PeerRouteState::default());
+    {
+        let mut route_state = lock_route_state(&state);
+        route_state.set_peers(std::slice::from_ref(&peer));
+        route_state.link = Some(link);
+    }
+    let refresh = [(key, Some(learned))];
+    assert_eq!(
+        update_live_peer_endpoints(&state, &refresh).expect("first"),
+        1
+    );
+    {
+        for address in [
+            IpAddr::V4(peer.addresses.ipv4),
+            IpAddr::V6(peer.addresses.ipv6),
+        ] {
+            repair_accepted_routes(&link, &state, Some(address))
+                .expect("a present route is not an error");
+        }
+        assert_eq!(lock_route_state(&state).written.get(&key), Some(&1408));
+    }
+    assert_eq!(
+        update_live_peer_endpoints(&state, &refresh).expect("steady"),
+        0,
+        "the repair changed no route, so nothing is rewritten"
+    );
+}
+
+/// J780 (#483): a full inventory check looks an underlay up only for a peer whose route is
+/// missing.
+///
+/// The check runs every 30 s and after netlink notification loss.
+/// It used to derive a budget for every installed peer first (a socket and two route-netlink
+/// requests each), so at 4,096 peers on a starved thread it held the lock for 37-107 s with
+/// nothing to repair. With nothing missing it now looks nothing up; with one route missing it
+/// looks up that one peer's path, once, and re-adds the route.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn a_full_check_looks_up_only_peers_with_missing_routes() {
+    use crate::mesh_mtu::ROUTE_LOOKUPS;
+    let (peers, learned) = review_scale_mesh(64);
+    let state = Mutex::new(PeerRouteState::default());
+    let link = Device::active_link()
+        .expect("read the mesh link")
+        .expect("the marked TUN holds the shared name");
+    {
+        let mut route_state = lock_route_state(&state);
+        route_state.set_peers(&peers);
+        route_state.link = Some(link);
+    }
+    assert_eq!(
+        update_live_peer_endpoints(&state, &learned).expect("first"),
+        64
+    );
+    let full_check = || {
+        ROUTE_LOOKUPS.with(|lookups| lookups.set(0));
+        repair_accepted_routes(&link, &state, None).expect("full check");
+        ROUTE_LOOKUPS.with(std::cell::Cell::get)
+    };
+    assert_eq!(
+        full_check(),
+        0,
+        "nothing is missing, so nothing is looked up"
+    );
+    let deleted = format!("{}/32", peers[5].addresses.ipv4);
+    review_route_command(&["route", "del", &deleted, "dev", "infraternal0"]);
+    assert_eq!(
+        full_check(),
+        1,
+        "only the peer with a missing route is looked up"
+    );
+    assert!(
+        review_route_command(&["route", "show", "exact", &deleted]).contains("proto 250"),
+        "the missing route is back"
+    );
+    assert_eq!(full_check(), 0);
+}
+
+/// A relay can change its budget during inventory repair's direct-path lookup. The lookup
+/// must leave route state available and the exclusive addition must use the new relay budget.
+#[test]
+#[ignore = "Run as root, alone, inside a disposable network namespace with ip."]
+fn repair_lookup_leaves_route_state_available_and_rechecks_the_relay() {
+    use crate::mesh_mtu::BEFORE_ROUTE_LOOKUP;
+
+    let (peers, _) = review_scale_mesh(1);
+    let peer = &peers[0];
+    let key = peer.key;
+    let link = Device::active_link()
+        .expect("read the mesh link")
+        .expect("the marked TUN holds the shared name");
+    let state = Arc::new(Mutex::new(PeerRouteState::default()));
+    lock_route_state(&state).set_peers(&peers);
+    let callback_state = Arc::clone(&state);
+    BEFORE_ROUTE_LOOKUP.set(Some(Box::new(move || {
+        let mut accepted = callback_state
+            .try_lock()
+            .expect("repair must release route state before a path lookup");
+        accepted.overrides.insert(key, 1152);
+    })));
+    repair_accepted_routes(&link, &state, None).expect("repair the missing routes");
+    assert!(BEFORE_ROUTE_LOOKUP.take().is_none(), "the checkpoint ran");
+    let destination = format!("{}/32", peer.addresses.ipv4);
+    let repaired = review_route_command(&["route", "show", "exact", &destination]);
+    assert!(repaired.contains("mtu 1152"), "{repaired}");
+}
+
 /// #525: the route listener survives a burst of announcements that overflows its socket.
 ///
 /// A node's first refresh at mesh scale writes thousands of peer routes, and the kernel
@@ -954,8 +1220,8 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
     review_route_command(&["link", "set", "lo", "up"]);
     let link = review_marked_tun(PublicKey([0xee; 32]));
     let underlay = Arc::new(crate::wireguard::UnderlayWatch::default());
-    let mut listener =
-        Device::route_monitor(&link, Arc::clone(&underlay)).expect("open the route listener");
+    let mut listener = Device::route_monitor(&link, Arc::clone(&underlay), Arc::default())
+        .expect("open the route listener");
     underlay.set_watched(true);
     let before = underlay.generation();
     // 2,048 peers announce 4,096 routes while nobody reads: far more than the default
@@ -981,13 +1247,15 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
         .collect();
     let routes: Vec<_> = peers.iter().map(|peer| (peer, 1408_u16)).collect();
     Device::replace_peer_routes_on(&link, &routes).expect("write the route burst");
+    let deleted = format!("{}/32", peers[0].addresses.ipv4);
+    review_route_command(&["route", "del", &deleted, "dev", "infraternal0"]);
     let (cancel_read, _cancel) = UnixStream::pair().expect("cancel stream");
     let wake = listener.wait_for_deleted_peer_route(
         cancel_read.as_fd(),
         std::time::Instant::now() + std::time::Duration::from_secs(5),
     );
     assert!(
-        matches!(wake, Ok(crate::wireguard::RouteWake::Reconcile)),
+        matches!(wake, Ok(crate::wireguard::RouteWake::Overflow)),
         "an overflow asks for an inventory check: {:?}",
         wake.as_ref().map(|_| ()).map_err(ToString::to_string)
     );
@@ -999,5 +1267,12 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
         underlay.generation(),
         before,
         "the overflow moved the watch"
+    );
+    let state = Mutex::new(PeerRouteState::default());
+    lock_route_state(&state).set_peers(&peers[..1]);
+    repair_accepted_routes(&link, &state, None).expect("reconcile after overflow");
+    assert!(
+        review_route_command(&["route", "show", "exact", &deleted]).contains("proto 250"),
+        "the inventory pass must recover the deletion lost in the overflow"
     );
 }

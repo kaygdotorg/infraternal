@@ -1,5 +1,4 @@
-//! Coalesced wakeups and the underlay endpoint announce, shared by the Linux and macOS
-//! userspace mesh engines (#483).
+//! Coalesced wakeups and underlay endpoint announcements for the Linux and macOS userspace mesh (#483).
 //!
 //! When the host's underlay changes in a way that can move our own endpoint (a new or removed
 //! address, a route or link change), every peer with a live session should hear one
@@ -8,9 +7,8 @@
 //! [`UnderlayAnnounce::changed`]; the engine's worker waits on an [`AnnouncementWaiter`] and asks
 //! `GotaTun` for one keepalive per live session (`request_keepalives`).
 //!
-//! The coalescing here is the same for both platforms, so a Mac and a Linux node announce at
-//! the same rate for the same churn: a 25 ms debounce, at most one announcement per 250 ms, the
-//! trailing edge kept, and no timer at all while nothing changed (D81).
+//! The schedule debounces changes for 25 ms, sends at most one announcement per 250 ms, keeps
+//! the trailing edge, and arms no timer while the underlay is quiet (D81).
 
 use std::{
     sync::{
@@ -76,7 +74,7 @@ impl CoalescedWake {
 pub(crate) struct CoalescedSchedule {
     /// When the scheduled run is due; `None` while nothing is scheduled.
     due: Option<Instant>,
-    /// When the previous run started.
+    /// When the previous run last recorded its dispatch or completion.
     last: Option<Instant>,
 }
 
@@ -108,7 +106,7 @@ impl CoalescedSchedule {
         self.due = None;
     }
 
-    /// The run finished at `now`; the floor counts from here.
+    /// Record the caller's rate-limit reference time.
     pub(crate) fn finish(&mut self, now: Instant) {
         self.last = Some(now);
     }
@@ -120,15 +118,13 @@ impl CoalescedSchedule {
 /// A peer learns our endpoint only from an authenticated packet. A node that is only receiving
 /// sends nothing until `WireGuard`'s keepalive-plus-rekey timeout, so after an address change the
 /// peer kept sending to the old address for 15.2 s (J561's break-it matrix, against D41's 300 ms).
-/// The node's underlay listener calls [`Self::changed`]: on Linux the route-netlink
-/// `RouteMonitor` in `wireguard.rs`, on macOS the routing-socket `UnderlayMonitor` in
-/// `macos_node/underlay.rs`. The worker asks `GotaTun` for one keepalive per live session. Peers
-/// without a session get nothing (the fork's `request_keepalives`), so the cost per change is
-/// the number of live sessions.
+/// The Linux route-netlink listener and the macOS routing-socket listener call
+/// [`Self::changed`]. The worker asks `GotaTun` for one keepalive per live session via
+/// `request_keepalives`, so the send count follows the number of live sessions.
 ///
-/// On Linux it lives as long as the node, across route-listener restarts and engine rebuilds,
-/// and with the kernel engine nobody waits on it, so a change costs one atomic swap. On macOS
-/// each worker owns one, next to its listener.
+/// The Linux node owns the wake across listener restarts and engine rebuilds. With the
+/// kernel engine nobody waits on it, so a change costs one atomic swap. Each macOS worker
+/// owns its wake alongside its listener.
 #[derive(Debug, Default)]
 pub(crate) struct UnderlayAnnounce {
     wake: CoalescedWake,
@@ -190,6 +186,15 @@ impl AnnouncementWaiter {
     }
 }
 
+impl Drop for AnnouncementWaiter {
+    /// Return a consumed wakeup if the worker stops before dispatching the armed announcement.
+    fn drop(&mut self) {
+        if self.schedule.is_armed() {
+            self.announce.wake.notify.notify_one();
+        }
+    }
+}
+
 /// Coalesce closely spaced requests (packet deliveries, kernel notifications) into one run.
 pub(crate) const COALESCE_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Bound each coalesced kind of work (route refreshes and endpoint scans) to four runs a second.
@@ -202,7 +207,7 @@ pub(crate) const COALESCE_MIN_INTERVAL: Duration = Duration::from_millis(250);
 /// for every lifetime refresh (DHCP renewals, IPv6 router advertisements), and a route can be
 /// re-installed with only its lifetime changed. Each listener reduces a notification to a key
 /// (what the fact is) and a value (the parts of it that can move our endpoint, never its
-/// lifetime), and asks the book whether that is news. Both platforms use this one comparison.
+/// lifetime), and asks the book whether it changed.
 ///
 /// A fact the book has not seen counts, so a book that starts empty (or is rebuilt after lost
 /// notifications) costs at most one extra announcement per fact, never a missed one.
@@ -341,6 +346,25 @@ mod tests {
             !waiter.schedule.is_armed(),
             "no timer may be armed while nothing changed"
         );
+    }
+
+    /// A worker replaced during the debounce returns its wakeup for the next worker to dispatch.
+    #[tokio::test(start_paused = true)]
+    async fn a_replaced_waiter_preserves_the_armed_announcement() {
+        let announce = Arc::new(super::UnderlayAnnounce::default());
+        let mut waiter = super::AnnouncementWaiter::new(Arc::clone(&announce));
+        announce.changed();
+        let before_due = tokio::time::Instant::now() + Duration::from_millis(1);
+        assert_eq!(
+            announcements_until(&mut waiter, before_due).await,
+            Vec::new()
+        );
+        assert!(waiter.schedule.is_armed());
+        drop(waiter);
+
+        let mut replacement = super::AnnouncementWaiter::new(announce);
+        let until = tokio::time::Instant::now() + Duration::from_millis(500);
+        assert_eq!(announcements_until(&mut replacement, until).await.len(), 1);
     }
 
     /// A refresh repeats a known fact and is not a change; a new value, a new key or any

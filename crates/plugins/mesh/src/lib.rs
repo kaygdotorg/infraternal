@@ -86,6 +86,10 @@ pub mod gotatun_node;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
 
+/// Coalesces endpoint announcements from the Linux and Mac route listeners (#483).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+mod underlay_announce;
+
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Drops handshake initiations from ungranted keys before the userspace engine sees them.
 mod handshake_admission;
@@ -143,7 +147,3 @@ mod rotation;
 
 #[cfg(feature = "server")]
 pub mod presence;
-
-/// Coalesced Mac underlay announcements, ported from J710/J780 (#483, #260).
-#[cfg(all(feature = "agent", target_os = "macos"))]
-mod underlay_announce;
