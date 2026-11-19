@@ -2239,6 +2239,7 @@ dependencies = [
  "infraternal-plugin-relay",
  "infraternal-protocol",
  "ipnetwork",
+ "libc",
  "nix 0.32.0",
  "openssl",
  "security-framework",

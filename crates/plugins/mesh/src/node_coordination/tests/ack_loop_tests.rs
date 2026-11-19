@@ -87,7 +87,7 @@ async fn coalesced_peer_progress_is_read_before_overlap_retires() {
         PublicKey([2; 32]),
     )
     .await;
-    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    let boot = crate::rotation::read_boot_id().unwrap();
     let clock = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).unwrap();
     let nanos = clock.tv_sec() * 1_000_000_000 + clock.tv_nsec();
     let revision = store
@@ -96,7 +96,7 @@ async fn coalesced_peer_progress_is_read_before_overlap_retires() {
             &operation.operation_id,
             PublicKey([3; 32]),
             100,
-            boot.trim(),
+            &boot,
             nanos,
         )
         .await
@@ -162,6 +162,7 @@ async fn coalesced_peer_progress_is_read_before_overlap_retires() {
 }
 
 /// Read Linux process CPU ticks and disk write accounting for the focused before/after receipt run.
+#[cfg(target_os = "linux")]
 fn process_counters() -> (u64, u64) {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
     let fields: Vec<_> = stat
@@ -259,6 +260,7 @@ async fn unchanged_views_do_not_loop_acknowledgments() {
             for configured in &channels {
                 configured.wait().await;
             }
+            #[cfg(target_os = "linux")]
             let counters = process_counters();
             let started = std::time::Instant::now();
             // sleep: measure absence of autonomous receipt commits over a fixed quiet window.
@@ -283,14 +285,22 @@ async fn unchanged_views_do_not_loop_acknowledgments() {
                     "self-wake: {initial_finish_attempts} initial finishes"
                 ));
             }
-            let (ticks, writes) = process_counters();
             let wal_bytes = std::fs::metadata(directory.join("mesh.sqlite-wal"))
                 .unwrap()
                 .len();
+            #[cfg(target_os = "linux")]
+            let process_io = {
+                let (ticks, writes) = process_counters();
+                format!(
+                    "cpu_ticks={} disk_write_bytes={}",
+                    ticks.saturating_sub(counters.0),
+                    writes.saturating_sub(counters.1)
+                )
+            };
+            #[cfg(not(target_os = "linux"))]
+            let process_io = "cpu_ticks=unavailable disk_write_bytes=unavailable";
             println!(
-                "ACK_IO workers={workers} pending={pending} seconds={first_window:.3} cpu_ticks={} disk_write_bytes={} wal_bytes={wal_bytes}",
-                ticks.saturating_sub(counters.0),
-                writes.saturating_sub(counters.1)
+                "ACK_IO workers={workers} pending={pending} seconds={first_window:.3} {process_io} wal_bytes={wal_bytes}"
             );
             // Inject one external source event and verify it does not restart the progress chain.
             service.rotation_applied(&mut progress);
