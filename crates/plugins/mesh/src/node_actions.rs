@@ -412,6 +412,9 @@ struct IdentityProbe {
     key_rotation: bool,
     #[serde(default)]
     authority_epoch: bool,
+    /// Opt in to operation-bound rotation continuity metadata.
+    #[serde(default)]
+    rotation_continuity: bool,
     /// The coordinator can send ordered direct-path candidates and wants this node's LAN
     /// addresses (#515). Asked on its own, so a strict older node refuses only this probe.
     #[serde(default)]
@@ -466,6 +469,9 @@ pub enum Request {
         dns_names: bool,
         key_rotation: bool,
         authority_epoch: bool,
+        /// Whether the caller accepts rotation continuity metadata.
+        rotation_continuity: bool,
+        /// Whether the caller accepts direct-path candidates and requests LAN addresses.
         candidates: bool,
     },
     RotationPrepare(RotationOperation),
@@ -490,6 +496,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 dns_names: probe.dns_names,
                 key_rotation: probe.key_rotation,
                 authority_epoch: probe.authority_epoch,
+                rotation_continuity: probe.rotation_continuity,
                 candidates: probe.candidates,
             })
         }
@@ -554,6 +561,7 @@ fn identity_response(
         compact_access: identity.compact_access && requested.compact_access,
         key_rotation: identity.key_rotation && requested.key_rotation,
         authority_epoch: identity.authority_epoch && requested.authority_epoch,
+        rotation_continuity: identity.rotation_continuity && requested.rotation_continuity,
         #[cfg(feature = "mesh-dns")]
         dns_names: identity.dns_names && requested.dns_names,
         candidates: requested.candidates,
@@ -577,6 +585,9 @@ struct IdentityResponse {
     key_rotation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     authority_epoch: bool,
+    /// True only when both sides negotiated operation continuity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    rotation_continuity: bool,
     #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dns_names: bool,
@@ -650,6 +661,7 @@ impl AgentPlugin for MeshNodePlugin {
                     dns_names,
                     key_rotation,
                     authority_epoch,
+                    rotation_continuity,
                     candidates,
                 } => {
                     let requested = IdentityProbe {
@@ -658,6 +670,7 @@ impl AgentPlugin for MeshNodePlugin {
                         dns_names,
                         key_rotation,
                         authority_epoch,
+                        rotation_continuity,
                         // Offered only by an engine that walks the list it would receive.
                         candidates: candidates && walks_candidates(node),
                     };
@@ -943,6 +956,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: false,
+            rotation_continuity: false,
         }));
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
@@ -1033,6 +1047,7 @@ mod tests {
         let accepted = Chunk {
             access_updates: Vec::new(),
             authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            rotation_operation: None,
             server: Some(NodeId(2)),
             local_key: Some(identity.public_key),
             node: NodeId(1),
@@ -1115,6 +1130,7 @@ mod tests {
         let mut chunk = Chunk {
             access_updates: Vec::new(),
             authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
@@ -1248,6 +1264,7 @@ mod tests {
         let (_, peer_key) = Key::generate().expect("peer key");
         let chunk = Chunk {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -1419,6 +1436,7 @@ mod tests {
         let chunk = Chunk {
             access_updates: Vec::new(),
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -1508,6 +1526,7 @@ mod identity_upgrade_tests {
             dns_names: true,
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let legacy = serde_json::json!(super::identity_response(
             Some(identity.clone()),
@@ -1525,6 +1544,7 @@ mod identity_upgrade_tests {
                 dns_names: true,
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
                 candidates: false,
             },
             Vec::new(),
@@ -1532,6 +1552,7 @@ mod identity_upgrade_tests {
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
         assert_eq!(negotiated["authority_epoch"], true);
+        assert_eq!(negotiated["rotation_continuity"], true);
         #[cfg(feature = "mesh-dns")]
         assert_eq!(negotiated["dns_names"], true);
         let compact_only = serde_json::json!(super::identity_response(
@@ -1545,6 +1566,7 @@ mod identity_upgrade_tests {
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
         assert!(compact_only.get("authority_epoch").is_none());
+        assert!(compact_only.get("rotation_continuity").is_none());
         #[cfg(feature = "mesh-dns")]
         assert!(compact_only.get("dns_names").is_none());
     }
@@ -1561,6 +1583,7 @@ mod identity_upgrade_tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: false,
+            rotation_continuity: false,
         };
         let lan: Vec<std::net::SocketAddr> = vec!["10.9.0.3:10254".parse().expect("LAN fixture")];
         let asked = serde_json::json!(super::identity_response(
@@ -1609,6 +1632,7 @@ mod peer_page_tests {
         };
         Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(1),

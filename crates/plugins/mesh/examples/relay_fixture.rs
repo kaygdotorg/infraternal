@@ -324,6 +324,7 @@ async fn node() {
             Command::Peers(list) => {
                 let mut next = Config {
                     authority_epoch: None,
+                    rotation_operation: None,
                     local_key: Some(public),
                     server: None,
                     node: NodeId(1),

@@ -18,6 +18,7 @@ use std::{
 fn config() -> Config {
     Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),

@@ -96,6 +96,7 @@ fn configuration(granted_ports: &[u16]) -> Config {
 fn configuration_with(grants: &[(u8, &[u16])]) -> Config {
     Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: None,
         node: NodeId(1),

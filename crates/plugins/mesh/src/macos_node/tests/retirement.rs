@@ -7,7 +7,7 @@
 
 use super::{
     AUTHORITY_EPOCH_B, Arc, DefaultPolicy, Identity, Mutex, Node, PUBLIC_STATE, SavedState,
-    chunks_with_epoch, config, fs, read_public_state, recording_worker,
+    chunks_with_epoch, config, fs, mac_private_public, read_public_state, recording_worker,
     recording_worker_with_replace_hook, route_addresses, write_public_state,
 };
 use std::os::unix::fs::PermissionsExt;
@@ -86,6 +86,7 @@ fn failed_retirement_case(open_store: bool) {
         dns_names: false,
         key_rotation: false,
         authority_epoch: true,
+        rotation_continuity: false,
     };
     let applied_configs = Arc::new(Mutex::new(Vec::new()));
     let mut node = Node {
@@ -179,6 +180,7 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
         dns_names: false,
         key_rotation: false,
         authority_epoch: true,
+        rotation_continuity: false,
     };
     let at_fence = Arc::new(Mutex::new(None));
     let observed = Arc::clone(&at_fence);
@@ -230,4 +232,259 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
     assert!(denied.peers.is_empty(), "retired peers were persisted");
     assert_eq!(denied.default_policy, DefaultPolicy::Deny);
     assert!(saved_before_worker.authority_reset_pending);
+}
+
+/// A changed authority retires its old rotation journal but keeps the active interface marker.
+#[test]
+fn authority_change_discards_old_rotation_journal() {
+    authority_rotation_receipt_case(false, false, false);
+}
+
+/// A new coordinator process keeps the completed receipt for the same database operation.
+#[test]
+fn authority_change_keeps_the_matching_rotation_receipt() {
+    authority_rotation_receipt_case(true, false, false);
+}
+
+/// An interrupted reset cannot retire a matching receipt from an unfinished snapshot header.
+#[test]
+fn j862_incomplete_reset_snapshot_retains_the_mac_rotation_receipt() {
+    authority_rotation_receipt_case(true, true, false);
+}
+
+/// A rejected new authority stops old peers without deleting their pending completion receipt.
+#[test]
+fn rejected_new_authority_fences_peers_and_retains_the_mac_receipt() {
+    authority_rotation_receipt_case(true, false, true);
+}
+
+/// Compare valid replacement, interrupted reset and rejected content against one active Mac key.
+fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: bool) {
+    let private_key = [9; 32];
+    let active_key = mac_private_public(&private_key);
+    let mut current = config();
+    current.local_key = Some(active_key);
+    let directory = std::env::temp_dir().join(format!(
+        "infraternal-j363-mac-rotation-retirement-{}-{continues}-{incomplete}-{rejected}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).expect("state directory");
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .expect("private state directory");
+    let state_path = directory.join(PUBLIC_STATE);
+    let store = crate::node_state::Store::open_for_macos(&directory).expect("open node store");
+    store
+        .record_interface(&active_key)
+        .expect("record active key");
+    store
+        .replace_private_key(&private_key)
+        .expect("save active key");
+    store
+        .save_rotation_secret(&crate::node_state::RotationSecret {
+            operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+            sequence: 11,
+            previous: [3; 32],
+            candidate: private_key,
+            commit_requested: true,
+            completed: true,
+        })
+        .expect("save old authority journal");
+    let identity = Identity {
+        public_key: active_key,
+        port: 51820,
+        compact_access: true,
+        #[cfg(feature = "mesh-dns")]
+        dns_names: false,
+        key_rotation: true,
+        authority_epoch: true,
+        rotation_continuity: true,
+    };
+    let store = Some(store);
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let mut node = Node {
+        enabled: true,
+        worker: Some(recording_worker(Arc::clone(&applied))),
+        identity: Some(identity),
+        store,
+        config: Some(current.clone()),
+        authority_reset_pending: false,
+        pending: None,
+        routes: route_addresses(&current),
+        interface: Some("utun-test".to_owned()),
+        port: 51820,
+        path: Some(state_path),
+        binding: None,
+    };
+
+    let mut replacement = current.clone();
+    replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
+    replacement.rotation_operation = continues.then(|| crate::dataplane::RotationContinuation {
+        operation_id: "00000000-0000-4000-8000-000000000367".into(),
+        sequence: 11,
+    });
+    if rejected {
+        let mut chunk = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        chunk.rotation_operation = None;
+        chunk.upserted.values_mut().next().unwrap().peer.key = active_key;
+        assert_eq!(
+            node.chunk(chunk).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            node.config
+                .as_ref()
+                .is_some_and(
+                    |config| config.authority_epoch.as_deref() == Some(AUTHORITY_EPOCH_B)
+                        && config.peers.is_empty()
+                        && config.default_policy == DefaultPolicy::Deny
+                )
+        );
+        assert!(node.worker.is_none());
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        let saved = read_public_state(node.path.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(saved.authority_reset_pending && !saved.enabled);
+        assert!(saved.config.unwrap().peers.is_empty());
+        drop(node);
+        fs::remove_dir_all(directory).unwrap();
+        return;
+    }
+    node.prepare_authority_replacement(&replacement)
+        .expect("persist the new authority's reset");
+    if incomplete {
+        let mut chunk = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        chunk.rotation_operation = None;
+        chunk.last = false;
+        assert!(!node.chunk(chunk).expect("stage the first chunk only"));
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        let mut inconsistent = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        inconsistent.index = 1;
+        assert_eq!(
+            node.chunk(inconsistent).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+        let mut rejected = crate::configuration::chunks(None, &replacement)
+            .unwrap()
+            .remove(0);
+        rejected.rotation_operation = None;
+        rejected.upserted.values_mut().next().unwrap().peer.key = active_key;
+        assert_eq!(
+            node.chunk(rejected).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+    #[cfg(feature = "mesh-dns")]
+    if incomplete {
+        // DNS is validated on the assembled config, not by an unfinished chunk header.
+        let mut invalid_dns = replacement.clone();
+        invalid_dns.rotation_operation = None;
+        invalid_dns.dns_suffix = "bad..suffix".into();
+        let chunk = crate::configuration::chunks(None, &invalid_dns)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            node.chunk(chunk).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_some()
+        );
+    }
+    let journal = node
+        .store
+        .as_ref()
+        .expect("node store")
+        .rotation_secret()
+        .expect("read journal");
+    let retained_key = node
+        .store
+        .as_ref()
+        .expect("node store")
+        .recorded_interface()
+        .expect("read interface marker");
+    let retained_private_key = node
+        .store
+        .as_ref()
+        .expect("node store")
+        .read_private_key()
+        .expect("read active key");
+    if continues && !incomplete {
+        for chunk in crate::configuration::chunks(None, &replacement).expect("continuing snapshot")
+        {
+            node.chunk(chunk)
+                .expect("complete interrupted authority adoption");
+        }
+        replacement.rotation_operation = None;
+        for chunk in crate::configuration::chunks(None, &replacement).expect("completed snapshot") {
+            node.chunk(chunk)
+                .expect("clear operation metadata at the same policy revision");
+        }
+    }
+    if incomplete {
+        // Cached operation metadata must not substitute for the complete incoming proof.
+        replacement.rotation_operation = None;
+        for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+            node.chunk(chunk).expect("accept a validated replacement");
+        }
+        assert!(
+            node.store
+                .as_ref()
+                .unwrap()
+                .rotation_secret()
+                .unwrap()
+                .is_none()
+        );
+    }
+    node.down().expect("stop test worker");
+    fs::remove_dir_all(directory).expect("remove state directory");
+
+    println!(
+        "J862_MAC_RESET incomplete={incomplete} retained_receipt={}",
+        journal.is_some()
+    );
+    assert_eq!(
+        journal.is_some(),
+        continues,
+        "only the matching receipt may remain"
+    );
+    assert_eq!(retained_key, Some(active_key));
+    assert!(
+        retained_private_key
+            .as_ref()
+            .is_some_and(|key| key.as_slice() == private_key)
+    );
 }

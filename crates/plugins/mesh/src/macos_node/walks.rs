@@ -3,7 +3,7 @@
 //!
 //! Linux and macOS both run `GotaTun`, so the Mac drives the same walk bookkeeping as Linux
 //! ([`crate::candidate_walks`]) with the same engine call: after moving a peer's address it sends
-//! a handshake there with `Device::rehandshake` (fork `1f646d4`), which sends even over a live
+//! a handshake there with `Device::rehandshake`, which sends even over a live
 //! session and keeps that session carrying data until the new one is up.
 //!
 //! That only works if a snapshot leaves the sessions of unchanged peers alone. The Mac used to

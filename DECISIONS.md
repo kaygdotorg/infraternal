@@ -340,6 +340,13 @@ access (#341 B19).
     session, the size of the device that typed last wins (tmux's default
     `window-size latest`). The other devices show the same screen, scaled to
     fit.
+    - **Amended (owner, 2026-11-16, #521):** a device that typed last keeps
+      the size only while it is attached. Once it has disconnected, the next
+      device that reports a size takes it. Why: a reopened tab could not
+      take the size until it typed, so a narrower or shorter reopen (for
+      example a phone turned to landscape) kept a garbled replay (J792,
+      J795). Asked "D74: session size after a reopen", the owner chose,
+      verbatim: "Disconnected last typist gives up the size".
 75. **Nothing depends on the browser.** Each session, each SSH connection
     and each job starts and runs on the server side: in an agent, which can
     be the server's embedded agent. Hosts without an agent (routers,
@@ -5044,7 +5051,10 @@ access (#341 B19).
        per Gbit and +3.68% loaded p99 against dev, consistent in all 8
        dev-vs-head holds. That is over the 3% performance gate. The filter is
        what lets a Nix-only host like prod enforce grants without depending
-       on the kernel firewall path. Memory is about 55 MB per 1,000 peers.
+       on the kernel firewall path. Memory is about 52 MB per 1,000 peers
+       with flows (the 52 KiB flow table each) and 68.7 MB when every
+       peer's fragment table is in use too (68,672 bytes per peer; J797,
+       #265; corrected by the owner on 2026-11-16, was "about 55 MB").
      - **Decision:** the owner chose, by quoting it, "Ship D384 now, then make
        the filter's hot path faster as a measured follow-up. Grants are
        enforced everywhere, and these security fixes land."

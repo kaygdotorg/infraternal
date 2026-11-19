@@ -504,6 +504,12 @@ mod measurements;
 #[path = "../tests/unit/snapshot_fidelity.rs"]
 mod fidelity;
 
+/// Program modes and input flags survive both the faithful and the
+/// approximate repaint (#524).
+#[cfg(test)]
+#[path = "../tests/unit/approximate_modes.rs"]
+mod approximate_modes;
+
 #[cfg(test)]
 #[path = "../tests/unit/resize_recovery.rs"]
 mod resize_recovery;

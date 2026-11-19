@@ -81,7 +81,7 @@ async fn output_frame_crossing_the_replay_fence_is_delivered_without_another_com
     // A relay first announces its attachment to the writer (#477).
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,
@@ -241,7 +241,7 @@ async fn order_behind_a_full_writer(head: u64, after: AfterOutput) -> Vec<Wire> 
     let task = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,
@@ -477,7 +477,7 @@ async fn order_after_a_starvation_detach(after: AfterDetach) -> Vec<Wire> {
     let task = tokio::spawn(terminal(path.clone(), id, 2, 0, 0, receiver, tx));
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,
@@ -656,7 +656,7 @@ async fn a_cursor_rewind_marker_never_overtakes_an_output_held_for_the_writer() 
         priority,
         true,
     ));
-    let Some(Message::Attached(2, first)) = messages.recv().await else {
+    let Some(Message::Attached(2, first, _)) = messages.recv().await else {
         panic!("a relay first announces its attachment");
     };
     assert!(matches!(
@@ -665,7 +665,7 @@ async fn a_cursor_rewind_marker_never_overtakes_an_output_held_for_the_writer() 
     ));
     // The server's first delivered cursor starts output and a fresh attachment.
     command_tx.send(Command::Cursor(0)).await.unwrap();
-    let Some(Message::Attached(2, delivered)) = messages.recv().await else {
+    let Some(Message::Attached(2, delivered, _)) = messages.recv().await else {
         panic!("a cursor command announces a new attachment");
     };
     assert!(delivered > first);
@@ -694,7 +694,7 @@ async fn a_cursor_rewind_marker_never_overtakes_an_output_held_for_the_writer() 
             Some(Message::Shim(2, Shim::Output(seq, bytes))) => {
                 wire.push(Wire::Output(seq, bytes.len()));
             }
-            Some(Message::Attached(2, rewound)) => {
+            Some(Message::Attached(2, rewound, _)) => {
                 assert!(rewound > delivered);
                 wire.push(Wire::Attached);
             }

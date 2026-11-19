@@ -549,7 +549,17 @@ pub async fn elevate(
         }
     })
     .await
-    .unwrap_or(Ok(Outcome::Timeout))?;
+    .unwrap_or(Ok(Outcome::Timeout));
+    // J729 (J727 P3-2): an I/O error in the loop (reading the terminal, waiting for the
+    // command, typing the password) must end the try the same way every other path does,
+    // with the hangup and the refused-kill retry, never by dropping the child.
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            end_session(child, master, session).await;
+            return Err(error);
+        }
+    };
     let typed = transcript.was_typed();
     if outcome == Outcome::Started {
         // B5: type the relay's one-time token to its terminal, with echo off
@@ -567,7 +577,10 @@ pub async fn elevate(
         }
         let mut line = zeroize::Zeroizing::new(hex(token).into_bytes());
         line.push(b'\n');
-        nix::unistd::write(master.get_ref(), &line).map_err(io::Error::from)?;
+        if let Err(error) = nix::unistd::write(master.get_ref(), &line) {
+            end_session(child, master, session).await;
+            return Err(io::Error::from(error));
+        }
         return Ok(Try {
             outcome,
             typed,

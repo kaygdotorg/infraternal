@@ -328,6 +328,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
             local_key: Some(identity.public_key),
             server: Some(NodeId(1)),
             authority_epoch: None,
+            rotation_operation: None,
             node: NodeId(2),
             #[cfg(feature = "mesh-dns")]
             name: None,

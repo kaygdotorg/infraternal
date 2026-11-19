@@ -10,8 +10,8 @@
 # tscontrol in Go, tmux from source with the pinned Zig), downloads every
 # pinned third-party file into $H2H_DL and refuses any SHA-256 mismatch, then
 # writes h2h-kit-<arch>-<commit>.tar.gz (sorted, fixed mtime and owners) and
-# its .sha256. Needs: cargo/rustup (repo toolchain), go, curl, python3, a yacc
-# (YACC, default "bison -y").
+# its .sha256. Run it through `nix develop <worktree>#head-to-head-kit` for the
+# repo toolchain and the Go and Bison versions from the root flake's lockfile.
 set -euo pipefail
 arch=$1 out=$2
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)

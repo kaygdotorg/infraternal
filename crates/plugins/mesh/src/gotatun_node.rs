@@ -2183,6 +2183,7 @@ mod tests {
     fn one_peer_config(endpoint: Option<SocketAddr>) -> Config {
         Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),

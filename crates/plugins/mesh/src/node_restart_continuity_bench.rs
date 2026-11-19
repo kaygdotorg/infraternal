@@ -167,6 +167,7 @@ fn snapshot(
 ) -> Config {
     Config {
         authority_epoch: Some(epoch.to_owned()),
+        rotation_operation: None,
         local_key: Some(local_key),
         server: None,
         node,
@@ -459,6 +460,7 @@ fn restart_continuity_same_content_snapshot() {
     let counters_before = node.counters().unwrap()[&live.public_key].clone();
     let after = Config {
         authority_epoch: Some(EPOCH_AFTER.to_owned()),
+        rotation_operation: None,
         ..before
     };
     let swap_started = Instant::now();

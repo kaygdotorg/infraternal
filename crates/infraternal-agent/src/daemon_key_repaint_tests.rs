@@ -21,7 +21,7 @@ const STARVING_OUTPUT: usize = 128 * 1024;
 /// Each spam repaint consumes one quarter of the finite reserve.
 const SPAM_SNAPSHOT: usize = REPAINT_CREDIT as usize / 4;
 /// A generous guard for a missing fixture event, never a performance assertion.
-const EVENT_GUARD: Duration = Duration::from_secs(3);
+pub(super) const EVENT_GUARD: Duration = Duration::from_secs(3);
 
 /// Include a credit-starved shim frame even when returned output left no bytes in flight.
 #[test]
@@ -72,19 +72,26 @@ struct RelayFixture {
     task: Option<JoinHandle<io::Result<()>>>,
 }
 
-/// Start one relay and complete the real Unix-socket shim handshake.
-async fn start_relay(stream: u32) -> RelayFixture {
-    let id = *uuid::Uuid::new_v4().as_bytes();
+/// A fresh short state root and the rendezvous path a fake shim for `id` listens on.
+///
+/// The root is short because Unix socket paths are capped at 108 bytes.
+pub(super) fn shim_rendezvous(id: [u8; 16]) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!(
         "k{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));
     let state = sessions::state(Some(root.clone())).unwrap();
     let path = sessions::rendezvous(&state, id);
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let (commands, receiver) = session_commands::channel();
-    let (tx, messages) = mpsc::channel(16);
-    let task = tokio::spawn(terminal(path, id, stream, 0, 0, receiver, tx));
+    (root, path)
+}
+
+/// Accept a relay's shim link on `listener` and answer its handshake up to `ReadFrom(0)`,
+/// as a fresh shim with no output and no input yet. Returns the fake shim's side of the link.
+pub(super) async fn greet_relay(
+    listener: &tokio::net::UnixListener,
+    id: [u8; 16],
+    stream: u32,
+) -> (UnixStream, Reader) {
     let (mut peer, _) = tokio::time::timeout(EVENT_GUARD, listener.accept())
         .await
         .expect("terminal relay did not connect to the fake shim")
@@ -122,6 +129,18 @@ async fn start_relay(stream: u32) -> RelayFixture {
         .await
         .unwrap();
     assert_eq!(read_shim(&mut reader, &mut peer).await, Shim::ReadFrom(0));
+    (peer, reader)
+}
+
+/// Start one relay and complete the real Unix-socket shim handshake.
+async fn start_relay(stream: u32) -> RelayFixture {
+    let id = *uuid::Uuid::new_v4().as_bytes();
+    let (root, path) = shim_rendezvous(id);
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let (commands, receiver) = session_commands::channel();
+    let (tx, messages) = mpsc::channel(16);
+    let task = tokio::spawn(terminal(path, id, stream, 0, 0, receiver, tx));
+    let (peer, reader) = greet_relay(&listener, id, stream).await;
 
     let mut fixture = RelayFixture {
         root,
@@ -137,7 +156,7 @@ async fn start_relay(stream: u32) -> RelayFixture {
     // A relay first announces its attachment to the writer (#477).
     assert!(matches!(
         next_message(&mut fixture).await,
-        Message::Attached(id, _) if id == stream
+        Message::Attached(id, ..) if id == stream
     ));
     assert!(matches!(
         next_message(&mut fixture).await,
@@ -151,7 +170,7 @@ async fn start_relay(stream: u32) -> RelayFixture {
 }
 
 /// Read the next complete shim frame under a deadlock guard.
-async fn read_shim(reader: &mut Reader, peer: &mut UnixStream) -> Shim {
+pub(super) async fn read_shim(reader: &mut Reader, peer: &mut UnixStream) -> Shim {
     tokio::time::timeout(EVENT_GUARD, reader.read(peer))
         .await
         .expect("fake shim did not receive the expected relay frame")

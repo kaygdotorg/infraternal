@@ -12,6 +12,7 @@ fn revision(version: u64) -> State {
         enabled: true,
         config: Some(Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(1),

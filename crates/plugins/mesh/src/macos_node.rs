@@ -1038,6 +1038,7 @@ fn stage_chunk(
         } else {
             Config {
                 authority_epoch: chunk.authority_epoch.clone(),
+                rotation_operation: chunk.rotation_operation.clone(),
                 local_key: chunk.local_key,
                 server: chunk.server,
                 node: chunk.node,
@@ -1054,6 +1055,10 @@ fn stage_chunk(
                 peer_names: std::collections::BTreeMap::new(),
             }
         };
+        let mut config = config;
+        config
+            .rotation_operation
+            .clone_from(&chunk.rotation_operation);
         #[cfg(feature = "mesh-dns")]
         let config = {
             let mut config = config;
@@ -1081,6 +1086,7 @@ fn stage_chunk(
     let dns_suffix_changed = false;
     if staged.server != chunk.server
         || staged.config.authority_epoch != chunk.authority_epoch
+        || staged.config.rotation_operation != chunk.rotation_operation
         || staged.next != chunk.index
         || staged.config.local_key != chunk.local_key
         || staged.config.node != chunk.node
@@ -2361,6 +2367,7 @@ impl Node {
             // macOS GotaTun supports journaled key rotation (#367) and authenticated authority epochs.
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         self.identity = Some(identity.clone());
         Ok(identity)
@@ -2645,7 +2652,7 @@ impl Node {
     /// # Errors
     /// Refuses wrong identity bindings, incomplete chunks, unsafe routes, or failed engine updates.
     pub fn chunk(&mut self, chunk: crate::dataplane::Chunk) -> io::Result<bool> {
-        let Some(mut identity) = self.identity.clone() else {
+        let Some(identity) = self.identity.clone() else {
             self.pending = None;
             tracing::warn!("Mac mesh configuration chunk refused while the node is not up");
             return Err(io::ErrorKind::NotConnected.into());
@@ -2717,17 +2724,6 @@ impl Node {
             );
             return Err(io::ErrorKind::InvalidData.into());
         }
-        if self.authority_reset_pending
-            && chunk.index == 0
-            && chunk.from_version.is_none()
-            && self
-                .config
-                .as_ref()
-                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
-        {
-            self.retire_settled_authority_rotation()?;
-            identity = self.identity.clone().ok_or(io::ErrorKind::NotConnected)?;
-        }
         // With a Store, a lower same-epoch revision is accepted on purpose: a database restored
         // under a running server keeps its epoch but rewinds revisions (#382, J418 P3-a). The
         // exact-base write (`write_public_state_full_snapshot`) keeps that swap atomic.
@@ -2748,35 +2744,54 @@ impl Node {
         let Some(config) = result? else {
             return Ok(false);
         };
-        validate_config(&config, identity.public_key)?;
+        let validation = (|| {
+            validate_config(&config, identity.public_key)?;
+            // A complete snapshot may replay its revision only with identical contents. Authority
+            // reset is handled separately because the new epoch may reuse a revision.
+            if !self.authority_reset_pending
+                && self.config.as_ref().is_some_and(|accepted| {
+                    accepted.authority_epoch == config.authority_epoch
+                        && accepted.version == config.version
+                        && !crate::dataplane::same_runtime_content(accepted, &config)
+                })
+            {
+                tracing::warn!(
+                    authority_epoch = ?config.authority_epoch,
+                    version = config.version,
+                    "Mac mesh configuration conflict at an accepted authority revision"
+                );
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if self
+                .config
+                .as_ref()
+                .is_some_and(|old| old.node == config.node && old.addresses != config.addresses)
+            {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+            let desired_routes = route_addresses(&config);
+            validate_underlay_routes(&config, &desired_routes)?;
+            if authority_changed || self.authority_reset_pending {
+                #[cfg(feature = "mesh-dns")]
+                crate::dns::Records::from_config(&config)?;
+                PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
+            }
+            Ok::<_, io::Error>(desired_routes)
+        })();
+        let desired_routes = match validation {
+            Ok(routes) => routes,
+            Err(error) if authority_changed => {
+                return self.stop_after_retirement_failure(error, &config);
+            }
+            Err(error) => return Err(error),
+        };
+        // Preserve the receipt through incomplete or rejected snapshots. Only the fully
+        // validated incoming operation can authorize continuity or journal retirement.
         if authority_changed {
             self.prepare_authority_replacement(&config)?;
+        } else if self.authority_reset_pending {
+            self.retire_settled_authority_rotation(config.rotation_operation.as_ref())?;
         }
-        // A complete snapshot may replay its revision only with identical contents. Authority
-        // reset is handled separately because the new epoch may reuse a revision.
-        if !self.authority_reset_pending
-            && self.config.as_ref().is_some_and(|accepted| {
-                accepted.authority_epoch == config.authority_epoch
-                    && accepted.version == config.version
-                    && accepted != &config
-            })
-        {
-            tracing::warn!(
-                authority_epoch = ?config.authority_epoch,
-                version = config.version,
-                "Mac mesh configuration conflict at an accepted authority revision"
-            );
-            return Err(io::ErrorKind::InvalidData.into());
-        }
-        if self
-            .config
-            .as_ref()
-            .is_some_and(|old| old.node == config.node && old.addresses != config.addresses)
-        {
-            return Err(io::ErrorKind::Unsupported.into());
-        }
-        let desired_routes = route_addresses(&config);
-        validate_underlay_routes(&config, &desired_routes)?;
         let completes_authority_reset = self.authority_reset_pending;
         let reset_config = completes_authority_reset
             .then(|| self.config.clone())
@@ -2847,7 +2862,8 @@ impl Node {
     ///
     /// The full replacement has already been authenticated and staged. This peer-free durable
     /// checkpoint is therefore crash-safe, while the serialized worker receives the complete
-    /// replacement only after the checkpoint succeeds.
+    /// replacement only after the checkpoint succeeds. Only an exact operation match retains
+    /// the rotation journal for commit or finish retries.
     /// # Errors
     /// Stops the worker if snapshot persistence or rotation-journal retirement fails.
     fn prepare_authority_replacement(&mut self, replacement: &Config) -> io::Result<()> {
@@ -2857,22 +2873,34 @@ impl Node {
         #[cfg(feature = "mesh-dns")]
         denied.peer_names.clear();
         self.pending = None;
-        let rotation_error = self.settle_authority_rotation().err();
+        let continuity = self
+            .store
+            .as_ref()
+            .map(|store| store.rotation_matches(replacement.rotation_operation.as_ref()))
+            .transpose()
+            .map(|matched| matched.unwrap_or(false));
+        let continues_rotation = matches!(continuity, Ok(true));
+        let rotation_error = match continuity {
+            Ok(true) => None,
+            Ok(false) => self.settle_authority_rotation().err(),
+            Err(error) => Some(error),
+        };
         if let Some(identity) = &self.identity {
             denied.local_key = Some(identity.public_key);
         }
         self.config = Some(denied.clone());
         self.authority_reset_pending = true;
         let persistence_error = self.persist_retired_snapshot(&denied).err();
-        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
-            self.store
-                .as_ref()
-                .map(crate::node_state::Store::discard_rotation_journal)
-                .transpose()
-                .err()
-        } else {
-            None
-        };
+        let journal_error =
+            if persistence_error.is_none() && rotation_error.is_none() && !continues_rotation {
+                self.store
+                    .as_ref()
+                    .map(crate::node_state::Store::discard_rotation_journal)
+                    .transpose()
+                    .err()
+            } else {
+                None
+            };
         if let Some(error) = persistence_error.or(rotation_error).or(journal_error) {
             return self.stop_after_retirement_failure(error, &denied);
         }
@@ -2905,17 +2933,21 @@ impl Node {
         Ok(())
     }
 
-    /// Retry journal retirement before accepting a full snapshot after a reset was interrupted.
+    /// Retry journal retirement after validating a full snapshot for an interrupted reset.
     ///
     /// The peer-free reset record makes startup safe. This retry saves the settled live key binding
-    /// before removing the previous authority's rotation journal.
+    /// before removing the previous authority's rotation journal. An exact operation match from
+    /// the incoming full snapshot retains it; cached metadata alone never proves continuity.
     /// # Errors
     /// Refuses a journal that does not prove the active key or a failed state write.
-    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+    fn retire_settled_authority_rotation(
+        &mut self,
+        operation: Option<&crate::dataplane::RotationContinuation>,
+    ) -> io::Result<()> {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        if store.rotation_secret()?.is_none() {
+        if store.rotation_secret()?.is_none() || store.rotation_matches(operation)? {
             return Ok(());
         }
         self.settle_authority_rotation()?;
@@ -2970,6 +3002,14 @@ impl Node {
         reset_error: io::Error,
         denied: &Config,
     ) -> io::Result<T> {
+        // A complete but rejected new authority retires peers without retiring its receipt.
+        let mut denied = denied.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns")]
+        denied.peer_names.clear();
+        // Fence restore first; the disabled write below retries any failure.
+        let _ = self.persist_retired_snapshot(&denied);
         self.enabled = false;
         let stop_result = self
             .worker
@@ -3182,6 +3222,7 @@ mod tests {
     fn config() -> Config {
         Config {
             authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
+            rotation_operation: None,
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -3400,6 +3441,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         assert_eq!(installed_keys(&old), BTreeSet::from([[2; 32]]));
 
@@ -3459,6 +3501,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(Vec::new()));
         let mut node = Node {
@@ -3511,6 +3554,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(Vec::new()));
         let mut node = Node {
@@ -3561,6 +3605,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(Vec::new()));
         let mut node = Node {
@@ -3615,6 +3660,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let applied_configs = Arc::new(Mutex::new(vec![current.clone()]));
         let mut node = Node {
@@ -3669,98 +3715,6 @@ mod tests {
         assert_eq!(runtime, vec![current, replacement]);
     }
 
-    /// A changed authority retires its old rotation journal but keeps the active interface marker.
-    #[test]
-    fn authority_change_discards_old_rotation_journal() {
-        let private_key = [9; 32];
-        let active_key = mac_private_public(&private_key);
-        let mut current = config();
-        current.local_key = Some(active_key);
-        let directory = std::env::temp_dir().join(format!(
-            "infraternal-j363-mac-rotation-retirement-{}",
-            std::process::id()
-        ));
-        fs::create_dir(&directory).expect("state directory");
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .expect("private state directory");
-        let state_path = directory.join(PUBLIC_STATE);
-        let store = crate::node_state::Store::open_for_macos(&directory).expect("open node store");
-        store
-            .record_interface(&active_key)
-            .expect("record active key");
-        store
-            .replace_private_key(&private_key)
-            .expect("save active key");
-        store
-            .save_rotation_secret(&crate::node_state::RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
-                sequence: 11,
-                previous: [3; 32],
-                candidate: private_key,
-                commit_requested: true,
-                completed: true,
-            })
-            .expect("save old authority journal");
-        let identity = Identity {
-            public_key: active_key,
-            port: 51820,
-            compact_access: true,
-            #[cfg(feature = "mesh-dns")]
-            dns_names: false,
-            key_rotation: true,
-            authority_epoch: true,
-        };
-        let store = Some(store);
-        let applied = Arc::new(Mutex::new(Vec::new()));
-        let mut node = Node {
-            enabled: true,
-            worker: Some(recording_worker(Arc::clone(&applied))),
-            identity: Some(identity),
-            store,
-            config: Some(current.clone()),
-            authority_reset_pending: false,
-            pending: None,
-            routes: route_addresses(&current),
-            interface: Some("utun-test".to_owned()),
-            port: 51820,
-            path: Some(state_path),
-            binding: None,
-        };
-
-        let mut replacement = current.clone();
-        replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
-        node.prepare_authority_replacement(&replacement)
-            .expect("persist the new authority's reset");
-        let journal = node
-            .store
-            .as_ref()
-            .expect("node store")
-            .rotation_secret()
-            .expect("read journal");
-        let retained_key = node
-            .store
-            .as_ref()
-            .expect("node store")
-            .recorded_interface()
-            .expect("read interface marker");
-        let retained_private_key = node
-            .store
-            .as_ref()
-            .expect("node store")
-            .read_private_key()
-            .expect("read active key");
-        node.down().expect("stop test worker");
-        fs::remove_dir_all(directory).expect("remove state directory");
-
-        assert!(journal.is_none(), "retired rotation journal remained");
-        assert_eq!(retained_key, Some(active_key));
-        assert!(
-            retained_private_key
-                .as_ref()
-                .is_some_and(|key| key.as_slice() == private_key)
-        );
-    }
-
     #[test]
     fn accepted_configuration_rejects_duplicate_peer_identity_and_addresses() {
         let mut config = config();
@@ -3787,6 +3741,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let mut chunks = crate::configuration::chunks(None, &config).expect("full snapshot");
         assert_eq!(chunks.len(), 1);
@@ -3833,6 +3788,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: true,
+            rotation_continuity: true,
         };
 
         let mut pending = None;

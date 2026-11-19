@@ -4,7 +4,8 @@
 
 Two subcommands:
 
-  mac_pool.py orders ENGINE...         one comma-separated Williams order per line
+  mac_pool.py orders [--repeat N] ENGINE...   one comma-separated Williams order per line,
+                                       the whole design N times (default 1)
   mac_pool.py report BASELINE WINDOW_DIR...   pooled tables, baseline-relative
 
 A window is one `mac-window.sh` run: every engine once, in one order, and a `rows.tsv`
@@ -113,8 +114,23 @@ def verdict(ratios: list[float], higher_better: bool) -> str:
     return "unclear"
 
 
+def refuse_duplicates(windows: list[Path]) -> None:
+    """Exit when two arguments name the same window directory.
+
+    A repeated Williams order must get its own window id. When a driver reuses an id the later
+    window overwrites the earlier one, and the report would count the survivor twice (J814).
+    """
+    seen: dict[Path, Path] = {}
+    for window in windows:
+        key = window.resolve()
+        if key in seen:
+            raise SystemExit(f"window {window} is listed twice: give every repeated order its own window id")
+        seen[key] = window
+
+
 def report(baseline: str, windows: list[Path]) -> str:
     """The pooled markdown tables for `windows`, relative to the `baseline` engine."""
+    refuse_duplicates(windows)
     engines = sorted({p.name for w in windows for p in w.iterdir() if p.is_dir()})
     if baseline not in engines:
         raise SystemExit(f"baseline engine {baseline!r} not found in {[str(w) for w in windows]}")
@@ -147,8 +163,14 @@ def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "report":
         print(report(sys.argv[2], [Path(a) for a in sys.argv[3:]]))
         return 0
-    if len(sys.argv) >= 4 and sys.argv[1] == "orders":
-        for order in williams(sys.argv[2:]):
+    if len(sys.argv) >= 3 and sys.argv[1] == "orders":
+        args, repeat = sys.argv[2:], 1
+        if args[0] == "--repeat":
+            if len(args) < 3 or not args[1].isdigit() or int(args[1]) < 1:
+                print("--repeat needs a count of at least 1", file=sys.stderr)
+                return 2
+            repeat, args = int(args[1]), args[2:]
+        for order in williams(args) * repeat:
             print(",".join(order))
         return 0
     print(__doc__, file=sys.stderr)

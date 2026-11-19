@@ -86,7 +86,7 @@ interface GhosttyActivityControls {
 /** How a terminal reports to the window that shows it: attach, output, disconnects, exit, refusals and session ids. All optional. */
 export interface TerminalHooks {
   /** Return true when a product surface presents the refusal and its session-list action. */
-  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction) => boolean;
+  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction, calm: boolean) => boolean;
   /** Only a public session id; writer/resume capabilities remain in memory. */
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
@@ -1276,7 +1276,7 @@ export class TerminalClient {
       this.openCallSent = false;
       if (!this.closed && this.conn.isOpen) {
         const refusal = terminalRefusal(error, this.config.hostName);
-        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action)) this.setStatus(refusal.message);
+        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action, refusal.calm === true)) this.setStatus(refusal.message);
       }
     });
   }
@@ -1808,6 +1808,12 @@ export class TerminalClient {
       this.pendingWriteCompletion = onSnapshotWritten;
       this.pendingWriteSynchronizedBatch = false;
       this.writeSuppressingTerminalResponses(snapshot.bytes, onSnapshotWritten);
+      // #528: `reset()` above wiped the canvas, and the render loop draws only in its own animation-frame callback.
+      // During a flood this drain runs from an earlier write's callback, which comes after the render loop in the
+      // same frame, so the browser would show the wiped canvas for a frame. Drawing the parsed repaint here, in the
+      // task that reset it, means a frame shows the old screen or the new one, never neither. The render loop then
+      // finds no dirty rows, so a repaint costs one full draw either way.
+      this.repaintAll();
       return;
     }
 
@@ -2318,6 +2324,10 @@ export class TerminalClient {
     this.wakeTerminal();
   }
 
+  /**
+   * Draws every row of the current terminal state into the canvas now, in this task. A no-op while the renderer is
+   * silenced (frozen or released surface) or a synchronized-output batch holds paint, through the render wrapper.
+   */
   private repaintAll(): void {
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
