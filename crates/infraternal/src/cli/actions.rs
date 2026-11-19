@@ -133,6 +133,7 @@ fn release_plugin() -> PluginDefinition {
     }
 }
 
+/// Register the commands available in the current platform and feature set.
 fn cli_plugin() -> PluginDefinition {
     let plugin = PluginDefinition::new(
         "cli",
@@ -1264,6 +1265,7 @@ mod default_build_tests {
     //! A default build carries no declaration of a component that is not built yet (D243).
     use super::registry;
 
+    /// Check that the default registry exposes only built commands, including native machine enrollment.
     #[test]
     fn default_build_registers_no_unbuilt_command() {
         let registry = registry().expect("registry");

@@ -517,6 +517,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Exercise launchd arguments, privileged checks and installation receipts.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
