@@ -126,6 +126,10 @@ struct Fake {
     after_ready: RefCell<Option<AfterReady>>,
     /// Simulate the service stopping immediately after answering.
     stop_after_ready: Cell<bool>,
+    /// Drop HTTP health after a successful observation while keeping SQLite open.
+    lose_health_after_ready: Cell<bool>,
+    /// Whether the HTTP route can still report healthy.
+    unhealthy: Cell<bool>,
 }
 
 impl Service for Fake {
@@ -156,8 +160,11 @@ impl Service for Fake {
 
     fn ready(&self, _path: &Path, _data: &File) -> io::Result<()> {
         self.calls.borrow_mut().push("ready");
-        if self.fail_ready.get() {
+        if self.fail_ready.get() || self.unhealthy.get() {
             return Err(io::Error::other("server did not answer"));
+        }
+        if self.lose_health_after_ready.replace(false) {
+            self.unhealthy.set(true);
         }
         if let Some(after_ready) = self.after_ready.borrow_mut().take() {
             after_ready();
@@ -203,6 +210,48 @@ fn pre_switch_retry_snapshots_data_written_after_old_unit_booted() {
     fixture.apply(&fixture.old, &service).unwrap();
     assert_eq!(Install::data(&fixture.new), "old server wrote after reboot");
     assert!(!fixture.old.exists());
+}
+
+/// A retry preserves commits that are still in the original SQLite WAL.
+#[cfg(all(target_os = "linux", feature = "release"))]
+#[tokio::test]
+async fn pre_switch_retry_preserves_committed_wal_rows() {
+    use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+
+    let fixture = Install::new();
+    let service = Fake::default();
+    let original = fixture.old.join("infraternal.sqlite");
+    fs::remove_file(&original).unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(&original)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+    let mut writer = SqliteConnection::connect_with(&options).await.unwrap();
+    sqlx::query("CREATE TABLE receipt (id INTEGER PRIMARY KEY)")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let failure = apply(&fixture.plan(&fixture.old), &service, UNIX_EPOCH, || {
+        Err(io::Error::other("interrupted before switching the unit"))
+    });
+    assert!(failure.is_err());
+    sqlx::query("INSERT INTO receipt VALUES (42)")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    // Keep the idle connection open to model committed WAL pages left by an
+    // abrupt exit. A last clean close can checkpoint and remove the WAL.
+    assert!(fixture.old.join("infraternal.sqlite-wal").is_file());
+    fixture.apply(&fixture.old, &service).unwrap();
+    let options = SqliteConnectOptions::new().filename(fixture.new.join("infraternal.sqlite"));
+    let mut moved = SqliteConnection::connect_with(&options).await.unwrap();
+    let rows: Vec<i64> = sqlx::query_scalar("SELECT id FROM receipt")
+        .fetch_all(&mut moved)
+        .await
+        .unwrap();
+    assert_eq!(rows, [42]);
+    assert!(plan(&fixture.new, &fixture.new, &fixture.unit).unwrap().is_none());
+    drop(writer);
 }
 
 /// A legacy old unit booted from an empty replacement. Keep both copies.
@@ -590,6 +639,21 @@ fn review_j899_restarts_stopped_service_during_cleanup_retry() {
         "resume reported success with the server stopped"
     );
     assert_eq!(Install::data(&fixture.new), "original");
+}
+
+/// A responsive database control socket alone cannot authorize source retirement.
+#[test]
+#[ignore = "D395 review regression: cleanup does not renew HTTP health"]
+fn review_j925_keeps_original_when_http_health_is_lost() {
+    let (fixture, manager, journal) = ready_with_original();
+    manager.lose_health_after_ready.set(true);
+    let result = fixture.apply(&fixture.new, &manager);
+    assert!(manager.active.get());
+    assert!(manager.unhealthy.get());
+    assert!(
+        (fixture.old.exists() || journal.backup.exists()) && result.is_err(),
+        "cleanup discarded the original after HTTP health was lost"
+    );
 }
 
 /// A replacement SQLite file cannot authorize removal even inside the same directory.
