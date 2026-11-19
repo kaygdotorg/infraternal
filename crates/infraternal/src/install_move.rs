@@ -5,12 +5,13 @@
 /// Pins the data and unit paths used by the recovery transaction.
 #[path = "install_move_fs.rs"]
 mod disk;
-/// Runs the cutover as a persistent systemd job.
+/// Runs recovery and readiness in the server's systemd start transaction.
 #[cfg(target_os = "linux")]
 #[path = "install_move_manager.rs"]
 pub(super) mod manager;
 
 use self::disk::Identity;
+use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{OsStr, OsString},
@@ -45,10 +46,13 @@ impl MoveError {
 /// Manager operations for one service, with a readiness check for the moved data.
 pub trait Service {
     /// Whether the service may be running.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn active(&self) -> io::Result<bool>;
     /// Stop the service and wait for the manager to finish the stop job.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn stop(&self) -> io::Result<()>;
     /// Stop current work before copying. Managers can also cancel an outstanding start.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn quiesce(&self) -> io::Result<()> {
         if self.active()? {
             self.stop()?;
@@ -56,12 +60,15 @@ pub trait Service {
         Ok(())
     }
     /// Make the manager read the unit files from disk.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn reload(&self) -> io::Result<()>;
     /// Confirm no unrelated server already occupies the expected listener.
     fn listener_is_idle(&self) -> io::Result<()>;
     /// Start the unit the manager has loaded.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn start(&self) -> io::Result<()>;
     /// Enable the service after it has started and answered.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn enable(&self) -> io::Result<()>;
     /// Wait for the new server to answer against its database.
     fn ready(&self, path: &Path, data: &File) -> io::Result<()>;
@@ -243,19 +250,23 @@ impl Systemd {
 
 impl Service for Systemd {
     /// Only a confirmed inactive or failed unit counts as stopped.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn active(&self) -> io::Result<bool> {
         Ok(!matches!(self.state()?.as_str(), "inactive" | "failed"))
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
     fn stop(&self) -> io::Result<()> {
         self.checked(&["stop", &self.service])
     }
 
-    /// Cancel even a start job queued alongside the recovery unit at boot.
+    /// Stop any start already queued before this direct move.
+    #[cfg(any(test, not(target_os = "linux")))]
     fn quiesce(&self) -> io::Result<()> {
         self.stop()
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
     fn reload(&self) -> io::Result<()> {
         self.checked(&["daemon-reload"])
     }
@@ -271,10 +282,12 @@ impl Service for Systemd {
         }
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
     fn start(&self) -> io::Result<()> {
         self.checked(&["start", &self.service])
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
     fn enable(&self) -> io::Result<()> {
         self.checked(&["enable", "--now", &self.service])
     }
@@ -424,7 +437,7 @@ fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocati
                 "recorded data path does not match the pending move",
             ));
         }
-        let current = read_units(unit)?;
+        let current = read_units(unit, to)?;
         current_side(&journal, &current)?;
         return Ok(Some(Relocation {
             same_filesystem: same_filesystem(&journal.from, to)?,
@@ -583,6 +596,7 @@ pub fn apply(
 }
 
 /// Finish the cutover with a durable receipt before erasing the journal.
+#[cfg(any(test, not(target_os = "linux")))]
 fn apply_recorded(
     relocation: &Relocation,
     service: &dyn Service,
@@ -590,180 +604,241 @@ fn apply_recorded(
     publish: impl FnOnce() -> io::Result<()>,
     complete: impl FnOnce(&Journal, &Outcome) -> io::Result<()>,
 ) -> Result<Outcome, MoveError> {
-    use nix::fcntl::{Flock, FlockArg};
-    let result = (|| {
-        let (parent, target_name) = disk::parent(&relocation.to, true)?;
-        let parent = Flock::lock(parent, FlockArg::LockExclusiveNonblock)
-            .map_err(|(_, error)| io::Error::from(error))?;
-        let (old_parent, old_name) = disk::parent(&relocation.from, false)?;
-        let work_name = work_name(target_name);
-        let existing = optional_tree(&parent, &work_name)?;
-        let work = match existing {
-            Some(work) => work,
-            None => disk::make_dir(&parent, &work_name)?,
-        };
-        if work.metadata()?.mode() & 0o077 != 0 {
-            return Err(disk::invalid("move journal directory is not private"));
-        }
-        let mut journal =
-            if let Some(journal) = load_record(&work, &relocation.to, &relocation.unit)? {
-                journal
-            } else {
-                if disk::names(&work)?
-                    .iter()
-                    .any(|name| name != "journal.next")
-                {
-                    return Err(disk::invalid("unclaimed journal directory is not empty"));
+    let result = with_journal(
+        relocation,
+        now,
+        || service.active(),
+        |transaction, journal| {
+            let Transaction {
+                parent,
+                target_name,
+                work,
+                work_name,
+                old_parent,
+                old_name,
+            } = transaction;
+            let switched = current_side(journal, &read_units(&journal.unit, &journal.to)?)?;
+            let prepare = (|| {
+                if journal.ready {
+                    let target = selected_target(parent, target_name, journal)?;
+                    if !service.active()? {
+                        service.reload()?;
+                        service.start()?;
+                    }
+                    service.ready(&journal.to, &target)?;
+                    selected_target(parent, target_name, journal)?;
+                    return Ok(());
                 }
-                let current = plan_inner(&relocation.from, &relocation.to, &relocation.unit)?
-                    .ok_or_else(|| disk::invalid("move no longer applies"))?;
-                if current.from != relocation.from
-                    || current
-                        .units
-                        .iter()
-                        .map(|f| &f.after)
-                        .ne(relocation.units.iter().map(|f| &f.after))
-                {
-                    return Err(disk::invalid(
-                        "move changed after confirmation; run init again",
-                    ));
+                service.quiesce()?;
+                if service.active()? {
+                    return Err(io::Error::other("the service did not stop"));
                 }
-                let source = optional_tree(&old_parent, old_name)?
-                    .as_ref()
-                    .map(Identity::of)
-                    .transpose()?;
-                let target = optional_tree(&parent, target_name)?
-                    .as_ref()
-                    .map(Identity::of)
-                    .transpose()?;
-                let backup = backup_path(&current.from, now)?;
-                let journal = Journal {
-                    from: current.from,
-                    to: current.to,
-                    unit: current.unit,
-                    source,
-                    target,
-                    database: None,
-                    staging: relocation.to.with_file_name(&work_name).join(STAGING),
-                    staged: None,
-                    backup,
-                    backup_action: if current.same_filesystem && !current.legacy_target {
-                        Backup::Remove
-                    } else {
-                        Backup::Retain
-                    },
-                    legacy_target: current.legacy_target,
-                    ready: false,
-                    was_running: service.active()?,
-                    units: current.units,
-                    effective: current.effective,
-                };
-                save(&work, &journal)?;
-                journal
-            };
-        let switched = current_side(&journal, &read_units(&journal.unit)?)?;
-        let prepare = (|| {
-            if journal.ready {
-                let target = selected_target(&parent, target_name, &journal)?;
-                if !service.active()? {
-                    service.reload()?;
-                    service.start()?;
-                }
-                service.ready(&journal.to, &target)?;
-                selected_target(&parent, target_name, &journal)?;
-                return Ok(());
-            }
-            if switched && journal.backup_action == Backup::Remove {
-                // A former worker could have started a process before proving which
-                // database it opened. Its writes to either tree must survive.
-                journal.backup_action = Backup::Retain;
-                save(&work, &journal)?;
-            }
-            service.quiesce()?;
-            if service.active()? {
-                return Err(io::Error::other("the service did not stop"));
-            }
-            service.listener_is_idle()?;
-            reconcile_staging(&parent, target_name, &work, &mut journal)?;
-            if !switched && !journal.legacy_target {
-                prepare_data(
-                    &parent,
-                    target_name,
-                    &work,
-                    &old_parent,
-                    old_name,
-                    &mut journal,
-                )?;
-            }
-            let target = disk::tree(&parent, target_name)?;
-            if journal.target != Some(Identity::of(&target)?) {
-                return Err(disk::invalid("destination identity changed"));
-            }
-            if !switched || journal.database.is_none() {
-                if switched {
-                    // Older journals did not pin the database before first start.
-                    journal.backup_action = Backup::Retain;
-                }
-                journal.database = Some(database_identity(&target)?);
-                save(&work, &journal)?;
-            }
-            selected_target(&parent, target_name, &journal)?;
-            publish()?;
-            write_units(&journal)?;
-            let startup = service
-                .reload()
-                .and_then(|()| service.start())
-                .and_then(|()| service.ready(&journal.to, &target))
-                .and_then(|()| service.enable())
-                .and_then(|()| service.ready(&journal.to, &target))
-                .and_then(|()| selected_target(&parent, target_name, &journal).map(drop));
-            if let Err(error) = startup {
-                // A service whose startup cannot be confirmed may have written
-                // to either tree. Preserve both for inspection after any retry.
-                journal.backup_action = Backup::Retain;
-                let recorded = save(&work, &journal);
-                let stopped = service.stop();
-                recorded.and(stopped).map_err(|recovery| {
-                    io::Error::other(format!(
-                        "{error}; preserving both trees and stopping the service: {recovery}"
-                    ))
-                })?;
-                return Err(error);
-            }
-            journal.ready = true;
-            save(&work, &journal)
-        })();
-        let result = prepare.and_then(|()| {
-            let outcome = finish(&old_parent, old_name, &journal, service)?;
-            complete(&journal, &outcome)?;
-            remove_journal(&parent, &work_name, &work)?;
-            Ok(outcome)
-        });
-        if let Err(error) = &result
-            && !journal.ready
-            && !journal.legacy_target
-            && !current_side(&journal, &read_units(&journal.unit)?)?
-        {
-            if journal.was_running {
-                service
+                stage_start(transaction, journal, switched, service, publish)?;
+                let target = selected_target(parent, target_name, journal)?;
+                let startup = service
                     .reload()
                     .and_then(|()| service.start())
-                    .map_err(|restart| {
+                    .and_then(|()| service.ready(&journal.to, &target))
+                    .and_then(|()| service.enable())
+                    .and_then(|()| service.ready(&journal.to, &target))
+                    .and_then(|()| selected_target(parent, target_name, journal).map(drop));
+                if let Err(error) = startup {
+                    // A service whose startup cannot be confirmed may have written
+                    // to either tree. Preserve both for inspection after any retry.
+                    journal.backup_action = Backup::Retain;
+                    let recorded = save(work, journal);
+                    let stopped = service.stop();
+                    recorded.and(stopped).map_err(|recovery| {
                         io::Error::other(format!(
-                            "{error}; restarting the original service failed: {restart}"
+                            "{error}; preserving both trees and stopping the service: {recovery}"
                         ))
                     })?;
-            }
-            if journal.target.is_none() {
-                reconcile_staging(&parent, target_name, &work, &mut journal)?;
+                    return Err(error);
+                }
+                journal.ready = true;
+                save(work, journal)
+            })();
+            let result = prepare.and_then(|()| {
+                let outcome = finish(old_parent, old_name, journal, service)?;
+                complete(journal, &outcome)?;
+                remove_journal(parent, work_name, work)?;
+                Ok(outcome)
+            });
+            if let Err(error) = &result
+                && !journal.ready
+                && !journal.legacy_target
+                && !current_side(journal, &read_units(&journal.unit, &journal.to)?)?
+            {
+                if journal.was_running {
+                    service
+                        .reload()
+                        .and_then(|()| service.start())
+                        .map_err(|restart| {
+                            io::Error::other(format!(
+                                "{error}; restarting the original service failed: {restart}"
+                            ))
+                        })?;
+                }
                 if journal.target.is_none() {
-                    remove_journal(&parent, &work_name, &work)?;
+                    reconcile_staging(parent, target_name, work, journal)?;
+                    if journal.target.is_none() {
+                        remove_journal(parent, work_name, work)?;
+                    }
                 }
             }
-        }
-        result
-    })();
+            result
+        },
+    );
     result.map_err(|error| MoveError::io("moving data to", &relocation.to, &error))
+}
+
+/// The pinned filesystem entries held while staging or completing a move.
+struct Transaction<'a> {
+    /// Parent of the destination and journal, locked by the caller.
+    parent: &'a File,
+    /// Destination name relative to its pinned parent.
+    target_name: &'a OsStr,
+    /// Private journal directory.
+    work: &'a File,
+    /// Journal directory name relative to the destination parent.
+    work_name: &'a OsStr,
+    /// Pinned parent of the original.
+    old_parent: &'a File,
+    /// Original name relative to its pinned parent.
+    old_name: &'a OsStr,
+}
+
+/// Open the existing record, or durably record the snapshot plan before staging.
+fn with_journal<T>(
+    relocation: &Relocation,
+    now: SystemTime,
+    was_running: impl FnOnce() -> io::Result<bool>,
+    run: impl FnOnce(&Transaction<'_>, &mut Journal) -> io::Result<T>,
+) -> io::Result<T> {
+    let (parent, target_name) = disk::parent(&relocation.to, true)?;
+    let parent = Flock::lock(parent, FlockArg::LockExclusiveNonblock)
+        .map_err(|(_, error)| io::Error::from(error))?;
+    let (old_parent, old_name) = disk::parent(&relocation.from, false)?;
+    let work_name = work_name(target_name);
+    let existing = optional_tree(&parent, &work_name)?;
+    let work = match existing {
+        Some(work) => work,
+        None => disk::make_dir(&parent, &work_name)?,
+    };
+    if work.metadata()?.mode() & 0o077 != 0 {
+        return Err(disk::invalid("move journal directory is not private"));
+    }
+    let mut journal = if let Some(journal) = load_record(&work, &relocation.to, &relocation.unit)? {
+        journal
+    } else {
+        if disk::names(&work)?
+            .iter()
+            .any(|name| name != "journal.next")
+        {
+            return Err(disk::invalid("unclaimed journal directory is not empty"));
+        }
+        let current = plan_inner(&relocation.from, &relocation.to, &relocation.unit)?
+            .ok_or_else(|| disk::invalid("move no longer applies"))?;
+        if current.from != relocation.from
+            || current
+                .units
+                .iter()
+                .map(|f| &f.after)
+                .ne(relocation.units.iter().map(|f| &f.after))
+        {
+            return Err(disk::invalid(
+                "move changed after confirmation; run init again",
+            ));
+        }
+        let source = optional_tree(&old_parent, old_name)?
+            .as_ref()
+            .map(Identity::of)
+            .transpose()?;
+        let target = optional_tree(&parent, target_name)?
+            .as_ref()
+            .map(Identity::of)
+            .transpose()?;
+        let backup = backup_path(&current.from, now)?;
+        let journal = Journal {
+            from: current.from,
+            to: current.to,
+            unit: current.unit,
+            source,
+            target,
+            database: None,
+            staging: relocation.to.with_file_name(&work_name).join(STAGING),
+            staged: None,
+            backup,
+            backup_action: if current.same_filesystem && !current.legacy_target {
+                Backup::Remove
+            } else {
+                Backup::Retain
+            },
+            legacy_target: current.legacy_target,
+            ready: false,
+            was_running: was_running()?,
+            units: current.units,
+            effective: current.effective,
+        };
+        save(&work, &journal)?;
+        journal
+    };
+    run(
+        &Transaction {
+            parent: &parent,
+            target_name,
+            work: &work,
+            work_name: &work_name,
+            old_parent: &old_parent,
+            old_name,
+        },
+        &mut journal,
+    )
+}
+
+/// Prepare the destination while the listener is idle and commit the unit change.
+fn stage_start(
+    transaction: &Transaction<'_>,
+    journal: &mut Journal,
+    switched: bool,
+    service: &dyn Service,
+    publish: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let Transaction {
+        parent,
+        target_name,
+        work,
+        old_parent,
+        old_name,
+        ..
+    } = transaction;
+    if switched && journal.backup_action == Backup::Remove {
+        // A former worker could have started a process before proving which
+        // database it opened. Its writes to either tree must survive.
+        journal.backup_action = Backup::Retain;
+        save(work, journal)?;
+    }
+    service.listener_is_idle()?;
+    reconcile_staging(parent, target_name, work, journal)?;
+    if !switched && !journal.legacy_target {
+        prepare_data(parent, target_name, work, old_parent, old_name, journal)?;
+    }
+    let target = disk::tree(parent, target_name)?;
+    if journal.target != Some(Identity::of(&target)?) {
+        return Err(disk::invalid("destination identity changed"));
+    }
+    if !switched || journal.database.is_none() {
+        if switched {
+            // Older journals did not pin the database before first start.
+            journal.backup_action = Backup::Retain;
+        }
+        journal.database = Some(database_identity(&target)?);
+        save(work, journal)?;
+    }
+    selected_target(parent, target_name, journal)?;
+    publish()?;
+    write_units(journal)?;
+    Ok(())
 }
 
 /// Resume or discard the exact prepared staging tree by its saved identity.
@@ -1162,7 +1237,7 @@ fn is_shared(name: &OsStr) -> bool {
 }
 
 /// Read the base unit and its drop-ins through pinned, trusted parents.
-fn read_units(unit: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+fn read_units(unit: &Path, _to: &Path) -> io::Result<Vec<(PathBuf, String)>> {
     let (parent, leaf) = disk::parent(unit, false)?;
     let text = String::from_utf8(disk::read(&parent, leaf, false)?).map_err(io::Error::other)?;
     let mut files = vec![(unit.to_owned(), text)];
@@ -1177,6 +1252,10 @@ fn read_units(unit: &Path) -> io::Result<Vec<(PathBuf, String)>> {
         {
             let text =
                 String::from_utf8(disk::read(&dropins, &name, false)?).map_err(io::Error::other)?;
+            #[cfg(target_os = "linux")]
+            if manager::is_recovery_hook(&name, &text, _to)? {
+                continue;
+            }
             files.push((unit.with_file_name(&drop_name).join(name), text));
         }
     }
@@ -1203,7 +1282,7 @@ fn unit_rewrites(unit: &Path, from: &Path, to: &Path) -> io::Result<(Vec<Rewrite
     };
     let mut units = Vec::new();
     let mut effective = None;
-    for (path, before) in read_units(unit)? {
+    for (path, before) in read_units(unit, to)? {
         if exec_assignment(&before).is_some() {
             effective = live_data(&before).map(|_| units.len());
         }
@@ -1299,7 +1378,7 @@ fn current_side(journal: &Journal, current: &[(PathBuf, String)]) -> io::Result<
 
 /// Replace shadowed files first, then atomically switch the effective `ExecStart`.
 fn write_units(journal: &Journal) -> io::Result<()> {
-    current_side(journal, &read_units(&journal.unit)?)?;
+    current_side(journal, &read_units(&journal.unit, &journal.to)?)?;
     let effective = &journal.units[journal.effective];
     for file in journal
         .units

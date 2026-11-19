@@ -50,19 +50,29 @@ for stub in systemctl evil/systemctl; do
     cat > "$S/$stub" <<STUB
 #!/bin/sh
 case "\$*" in
-    "start infraternal-d395-infraternal-server.service")
+    *ExecStartPre*|*ExecStartPost*)
         echo "$tag\$*" >> $S/systemctl.log
-        sed -n 's/^ExecStart=://p' /etc/systemd/system/infraternal-d395-infraternal-server.service |
-            /usr/bin/xargs -r /bin/sh -c 'exec "\$@"' sh
-        exit \$?;;
+        command=\$(printf '%s' "\$3" | sed 's/^ExecStart//')
+        sed -n "s/^ExecStart\$command=:/argv[]=/p" /etc/systemd/system/infraternal-server.service.d/zz-infraternal-d395.conf
+        exit 0;;
     *MainPID*) echo "$tag\$*" >> $S/systemctl.log; tail -1 "$S/health.pids"; exit 0;;
     *ActiveState*) echo "$tag\$*" >> $S/systemctl.log; cat $S/active-state; exit 0;;
     "stop "*) echo inactive > $S/active-state
         while read -r pid; do kill -TERM "-\$pid" 2>/dev/null; done < "$S/health.pids"
         : > "$S/health.pids";;
-    "start "*) echo active > $S/active-state
+    "start infraternal-server.service")
+        echo "$tag\$*" >> $S/systemctl.log
+        hook=/etc/systemd/system/infraternal-server.service.d/zz-infraternal-d395.conf
+        if [ -f "\$hook" ]; then
+            sed -n 's/^ExecStartPre=://p' "\$hook" | /usr/bin/xargs -r /bin/sh -c 'exec "\$@"' sh || exit \$?
+        fi
+        echo active > $S/active-state
         /usr/bin/setsid /usr/bin/python3 "$S/health.py" </dev/null >/dev/null 2>&1 &
-        echo \$! >> "$S/health.pids";;
+        echo \$! >> "$S/health.pids"
+        if [ -f "\$hook" ]; then
+            sed -n 's/^ExecStartPost=://p' "\$hook" | /usr/bin/xargs -r /bin/sh -c 'exec "\$@"' sh || exit \$?
+        fi
+        exit 0;;
     "enable --now "*) echo active > $S/active-state;;
 esac
 case "\$1" in show) echo "System has not been booted with systemd" >&2; exit 1;; is-enabled) exit 1;; esac
@@ -73,6 +83,7 @@ cat > "$S/health.py" <<'PY_PROOF'
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import BaseRequestHandler, UnixStreamServer
+import hashlib
 import json
 import os
 import struct
@@ -91,8 +102,10 @@ class DatabaseControl(BaseRequestHandler):
         with self.request.makefile("rb") as request:
             if request.read(3) != b"\0\0\2":
                 return
+            challenge = request.read(32)
         info = os.fstat(database.fileno())
-        reply = json.dumps(dict(path=str(path), device=info.st_dev, inode=info.st_ino)).encode()
+        db = dict(path=str(path), device=info.st_dev, inode=info.st_ino)
+        reply = json.dumps(dict(database=db, health=hashlib.sha256(challenge).hexdigest())).encode()
         self.request.sendall(struct.pack("!H", len(reply)) + reply)
 
 endpoint = UnixStreamServer(str(control), DatabaseControl)
@@ -103,6 +116,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def do_GET(self):
         self.send_response(200 if self.path == "/healthz" else 404)
+        if challenge := self.headers.get("x-infraternal-move-health"):
+            self.send_header("x-infraternal-move-health", hashlib.sha256(challenge.encode()).hexdigest())
         self.end_headers()
 
 HTTPServer(("127.0.0.1", 7443), Handler).serve_forever()
@@ -211,13 +226,11 @@ check MOVE_NO_LEFTOVERS 0 "$(ls -A $D | grep -c '^\.infraternal-\(incoming\|move
 check MOVE_FIREWALL_UNIT 1 "$(ls /etc/systemd/system | grep -c '^infraternal-firewall\.service$')"
 check MOVE_NO_PATH_SYSTEMCTL 0 "$(evil)"
 server=infraternal-server.service
-worker=infraternal-d395-$server
 active="show -p ActiveState --value $server"
 pid="show -p MainPID --value $server"
 verify="$pid|$active|$pid"
-ready="$active|$verify"
 check MOVE_SYSTEMCTL_ORDER \
-    "enable $worker|start $worker|$active|stop $server|$active|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|start $server|$ready|enable --now $server|$ready|$verify|disable $worker|$ready" \
+    "daemon-reload|show -p ExecStartPre --value $server|show -p ExecStartPost --value $server|stop $server|start $server|daemon-reload|enable infraternal-firewall.service|restart infraternal-firewall.service|daemon-reload|$verify|enable --no-reload $server|$verify|$verify" \
     "$(paste -sd'|' "$S/systemctl.log")"
 
 echo "### 4. re-running again is a no-op for the folder and the unit"

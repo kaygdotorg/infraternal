@@ -118,15 +118,22 @@ firewall policy, and then switches the unit and its drop-ins. The effective
 `ExecStart` is switched last. The old path remains available until the new
 server answers its health check and the main process reported by systemd confirms
 the open database's path, device and inode over the private control socket.
+A fresh challenge ties the HTTP response to that same process.
 Across filesystems, or after an unconfirmed startup, init keeps a dated,
 read-only backup and prints its location. Otherwise,
-init reopens the configured destination and asks the live server again before
-removing the original. An inconclusive check leaves the original available.
+init reopens the configured destination and renews the database and HTTP proof
+just before removing the original. An inconclusive check leaves the original
+available, possibly at the recorded backup path.
 
-After confirmation, init asks systemd to run the cutover. The move continues
-if the CLI exits. A server start, including after reboot, also pulls in any
-pending cutover. Its private journal records the data paths and identities,
-staging and backup locations, and complete unit set. If the moved server
+After confirmation, init loads recovery hooks on the server unit, stops the
+original service, records the request, and asks systemd to start the server.
+The systemd job continues if the CLI exits. The next start, including after
+reboot, can process a recorded request even if the CLI never submitted its
+start. The pre-start hook prepares and selects the destination. The post-start
+hook verifies it before systemd reports a successful start. A failure surfaces
+as a failed start and leaves the request available for retry. The private journal
+records the data paths and identities, staging and backup locations, and
+complete unit set. If the moved server
 may have accepted writes, recovery keeps both trees and retries the selected
 destination. Init refuses a move from or into a shared infraternal install
 base before stopping the service. Init also refuses a destination with

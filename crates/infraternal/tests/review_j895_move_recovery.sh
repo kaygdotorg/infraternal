@@ -37,14 +37,14 @@ from pathlib import Path
 unit = Path(os.environ["UNIT"])
 root = Path(os.environ["PROOF_ROOT"])
 pid_path = root / "server.pid"
-worker = unit.with_name("infraternal-d395-" + unit.name)
+hook = Path(f"{unit}.d/zz-infraternal-d395.conf")
 client = root / "cutover-client"
 target = Path("/var/lib/infraternal")
 
 def cut(point, data):
     """Write to the selected database, then kill only the installer client."""
     marker = root / (point + "-kill")
-    if not marker.is_file() or not client.is_file():
+    if not marker.is_file() or not client.is_file() or not (data / "infraternal.sqlite").is_file():
         return
     marker.unlink()
     with sqlite3.connect(data / "infraternal.sqlite") as database:
@@ -74,26 +74,37 @@ def wait_for(ready):
             raise RuntimeError("service state did not change before deadline")
         time.sleep(0.1)
 
+def hook_command(phase):
+    """Read an effective recovery command from the installer-owned drop-in."""
+    if not hook.exists():
+        return None
+    prefix = f"ExecStart{phase}=:"
+    return next(shlex.split(line.removeprefix(prefix))
+                for line in hook.read_text().splitlines() if line.startswith(prefix))
+
+
+def run_hook(phase):
+    """Model the manager owning the start job across both recovery commands."""
+    command = hook_command(phase)
+    with (root / "worker.log").open("ab") as log:
+        status = subprocess.call(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                 cwd=root, start_new_session=True)
+    if status:
+        (root / "worker.exit").write_text(str(status))
+        if pid := active():
+            os.killpg(pid, signal.SIGTERM)
+            wait_for(lambda: not active())
+        sys.exit(status)
+
+
 args = sys.argv[1:]
 with (root / "systemctl.log").open("a") as log:
     print(shlex.join(args), file=log)
-if args in (["enable", worker.name], ["disable", worker.name]):
-    pass
-elif args == ["start", worker.name]:
-    # Model a manager-owned process with a different process group and no
-    # dependency on the waiting CLI or the CLI's output pipes.
-    client.write_text(str(os.getppid()))
-    os.setsid()
-    line = next(line for line in worker.read_text().splitlines() if line.startswith("ExecStart=:"))
-    command = shlex.split(line.removeprefix("ExecStart=:"))
-    with (root / "worker.log").open("ab") as log:
-        job = subprocess.Popen(
-            command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-            cwd=root, start_new_session=True,
-        )
-        status = job.wait()
-    (root / "worker.exit").write_text(str(status))
-    sys.exit(status)
+if args[:2] == ["show", "-p"] and args[2] in ("ExecStartPre", "ExecStartPost"):
+    if command := hook_command(args[2].removeprefix("ExecStart")):
+        print(f"argv[]={shlex.join(command)} ;")
+elif args == ["enable", "--no-reload", unit.name]:
+    cut("after-enable", target)
 elif args == ["show", "-p", "ActiveState", "--value", unit.name]:
     print("active" if active() else "inactive")
 elif args == ["show", "-p", "MainPID", "--value", unit.name]:
@@ -102,9 +113,13 @@ elif args == ["stop", unit.name]:
     if pid := active():
         os.killpg(pid, signal.SIGTERM)
         wait_for(lambda: not active())
-    cut("post-stop", Path("/var/lib/j895-old"))
 elif args in (["start", unit.name], ["enable", "--now", unit.name]):
-    if args[0] == "start":
+    cutover = hook.exists() and not active()
+    if cutover:
+        client.write_text(str(os.getppid()))
+        os.setsid()
+        cut("post-stop", Path("/var/lib/j895-old"))
+        run_hook("Pre")
         cut("before-start", target)
     if not active():
         snippets = sorted(Path(f"{unit}.d").glob("*.conf"))
@@ -123,10 +138,10 @@ elif args in (["start", unit.name], ["enable", "--now", unit.name]):
         wait_for(lambda: child.poll() is not None or (data / "setup-token.sock").is_socket())
         if child.poll() is not None:
             raise RuntimeError(f"server exited {child.returncode} before socket readiness")
-    if args[0] == "start":
+    if cutover:
         cut("after-start", target)
-    else:
-        cut("after-enable", target)
+        run_hook("Post")
+        (root / "worker.exit").write_text("0")
 elif args == ["daemon-reload"]:
     cut("cutover", target)
 elif args != ["daemon-reload"]:
@@ -290,7 +305,7 @@ if [[ "$method" == full ]]; then
     check ENOSPC_REPORTED grep -qi 'No space left on device' "$P/full.json"
     check ENOSPC_OLD_UNIT test "$unit_before" = "$(fp "$UNIT")"
     check ENOSPC_OLD_DATA test "$(cat "$old/probe")" = "J895 full proof"
-    check ENOSPC_OLD_SERVER_ANSWERS wait_token_ready "$old"
+    check ENOSPC_START_FAILED test "$(/usr/bin/systemctl show -p ActiveState --value "$UNIT_NAME")" = inactive
     check ENOSPC_TARGET_ABSENT test ! -e "$target"
     check ENOSPC_NO_STAGING test -z "$(find /var/lib -maxdepth 1 -name '.infraternal.partial-*' -print)"
     check ENOSPC_OLD_MARKER_ABSENT test ! -e "$old/.infraternal-move"

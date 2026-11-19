@@ -1660,7 +1660,7 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
                 tls: args.tls_cert.is_some(),
             };
             #[cfg(target_os = "linux")]
-            let result = install_move::manager::trigger(relocation, service, admitted, name);
+            let result = install_move::manager::trigger(relocation, service, admitted);
             #[cfg(not(target_os = "linux"))]
             let result =
                 install_move::apply(relocation, &service, std::time::SystemTime::now(), || {
