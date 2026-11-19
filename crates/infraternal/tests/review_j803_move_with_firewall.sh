@@ -90,7 +90,7 @@ trap 'while read -r pid; do kill -TERM -- "-$pid" 2>/dev/null; done < "$S/health
 # init ARGS...: the real install with a clean environment, the decoy first in PATH.
 init() {
     : > "$S/systemctl.log"
-    env -i PATH="$S/evil:/usr/bin:/bin" HOME="$S" "$BIN" server init --system --yes \
+    env -i PATH="$S/evil:/usr/bin:/bin" HOME="$S" "$BIN" --json server init --system --yes \
         --behind-proxy --trusted-proxy 127.0.0.1 "$@" > "$S/out" 2> "$S/err"
 }
 D=/var/lib/infraternal

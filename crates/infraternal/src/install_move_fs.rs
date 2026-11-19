@@ -353,10 +353,10 @@ fn retire_contents(dir: &File, keep: bool) -> io::Result<()> {
                     unlinkat(dir, name.as_os_str(), UnlinkatFlags::NoRemoveDir)?;
                 }
             }
+            SFlag::S_IFLNK if keep => {}
             SFlag::S_IFLNK | SFlag::S_IFSOCK => {
-                if !keep {
-                    unlinkat(dir, name.as_os_str(), UnlinkatFlags::NoRemoveDir)?;
-                }
+                // A stopped service's socket has no data to retain.
+                unlinkat(dir, name.as_os_str(), UnlinkatFlags::NoRemoveDir)?;
             }
             _ => return Err(invalid("unsupported entry in backup or staging folder")),
         }

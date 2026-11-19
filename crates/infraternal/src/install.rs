@@ -44,6 +44,9 @@ pub enum InstallError {
     /// A different unit already exists and `--force` was not specified.
     #[error("a different unit already exists; pass --force to replace it")]
     ExistingUnit,
+    /// The requested migration would change the active service configuration.
+    #[error(transparent)]
+    Move(#[from] super::install_move::MoveError),
     /// systemd rejected the requested reload or enable operation.
     #[error("systemctl failed")]
     Systemctl,
@@ -212,10 +215,7 @@ pub fn prepare_move(
         .clone()
         .unwrap_or_else(|| origin_for_listener(args.listen));
     let unit = render_unit(args, &options.name, &origin, user)?;
-    relocation
-        .check_command(&unit)
-        .map_err(std::io::Error::other)
-        .map_err(InstallError::Io)?;
+    relocation.check_command(&unit)?;
     Ok(MoveInstall {
         systemctl: systemctl_program()?,
         firewall,
