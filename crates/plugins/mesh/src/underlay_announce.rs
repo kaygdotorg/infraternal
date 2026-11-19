@@ -354,10 +354,9 @@ mod tests {
         let mut waiter = super::AnnouncementWaiter::new(Arc::clone(&announce));
         announce.changed();
         let before_due = tokio::time::Instant::now() + Duration::from_millis(1);
-        assert!(
-            announcements_until(&mut waiter, before_due)
-                .await
-                .is_empty()
+        assert_eq!(
+            announcements_until(&mut waiter, before_due).await,
+            Vec::new()
         );
         assert!(waiter.schedule.is_armed());
         drop(waiter);
