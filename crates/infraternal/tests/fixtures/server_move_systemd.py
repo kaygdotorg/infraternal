@@ -375,7 +375,9 @@ def cli_admission(workspace):
     old = root / "old"
     new = state / "infraternal"
     request = state / ".infraternal.cutover/request.json"
-    config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    # Use the manager's private runtime units. The host's persistent config
+    # may have group-writable parents and must stay untouched by the fixture.
+    config = Path(os.environ["XDG_RUNTIME_DIR"])
     port = port_number()
     name = f"d395-{os.getpid()}-admit"
     server = f"{name}.service"
@@ -426,6 +428,7 @@ def cli_admission(workspace):
         if moving is not None:
             moving.communicate(timeout=60)
         systemctl("stop", server, check=False)
+        systemctl("--runtime", "disable", server, check=False)
         systemctl("disable", server, check=False)
         systemctl("reset-failed", server, check=False)
         for path in (stop, hook, unit):
