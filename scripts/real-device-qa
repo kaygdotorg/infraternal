@@ -9,6 +9,7 @@
 #   scripts/real-device-qa stage [BUNDLE_DIR]       # install/refresh the QA server beside J479's on mesh-staging
 #   scripts/real-device-qa host-account             # throwaway rootless account + sshd on dev-02 (the host to add)
 #   scripts/real-device-qa owner-setup              # first-run owner with a real Face ID passkey (fresh server only)
+#   scripts/real-device-qa qa1-reset [LABEL]        # fresh QA1 data dir (old kept), then owner-setup + host-account + add-host: the simulator's sign-in route
 #   scripts/real-device-qa add-host                 # Add host through the phone UI (fresh server only)
 #   scripts/real-device-qa check [--themes light,dark] [--phases "shell pill"] [--out DIR]
 #   scripts/real-device-qa mac-setup                # once: second QA server (stage2), host account 2, first-run owner in Mac Safari
@@ -82,8 +83,11 @@ new_setup_token() {
     | std "umask 077; cat > $SIM/qa/setup-token.txt"
 }
 
-# The keyboard's accessory checkmark closes it; the page's own accessibility frames are stale while it is up.
-KBD='xy~0.898~0.586'
+# The keyboard's accessory checkmark closes it; the page's own accessibility frames are stale while it is up, so it is
+# tapped by position. On iPhone 18 Pro / iOS 27 the accessory bar's checkmark sits at y = 0.6175 of the screen (1235 of 2000
+# px in the 920x2000 view of the screenshot). The old 0.586 landed above the bar, on the page, so the keyboard stayed up
+# (J941, #510: reproduced on infraternal-01, fixed value proved by the keyboard closing and the page regaining its full height).
+KBD='xy~0.898~0.6175'
 
 cmd_owner_setup() {
   # First-run owner: token, identity, passkey (simulated Face ID), recovery step. The recovery words are shown on
@@ -104,10 +108,25 @@ cmd_add_host() {
   # CA creation (one passkey tap), host key, password sign-in, install, shell. The password field makes Safari offer
   # "Use Strong Password?"; a system sheet stalls later taps, so typing and closing the sheet are separate runs.
   local f="/Users/kayg/Developer/infraternal-sim/qa"
-  runner "./run.sh run host-1 \"open~$QA_URL/?r=$(date +%s)|wait~9|tap~Add host|wait~3|field~Hosts to add|type~qa-device@$HOST_ADDR:$HOST_PORT|$KBD|wait~2|tap~Continue|wait~8|tapsbif~Use Passkey~6|face|wait~8|tapif~Trust and continue~10|wait~4\""
+  runner "./run.sh run host-1 \"open~$QA_URL/?r=$(date +%s)|wait~9|tap~Add host|wait~3|field~Hosts to add|type~qa-device@$HOST_ADDR:$HOST_PORT|$KBD|wait~2|tap~Continue|wait~8|tapif~Confirm with passkey~6|tapsbif~Use Passkey/Use Selected Passkey~6|face|wait~8|tapif~Trust and continue~10|tapsbif~Use Passkey/Use Selected Passkey~6|face|wait~4\""
   runner "./run.sh run host-2 \"swipe~0.5~0.62~0.5~0.5~0.4|wait~1|swipe~0.5~0.62~0.5~0.5~0.4|wait~1|swipe~0.5~0.62~0.5~0.5~0.4|wait~2|tap~Sign in with a password|wait~2|field~Password for $HOST_ADDR|typefile~$f/host-password.txt\""
   runner "./run.sh run host-3 \"xy~0.922~0.663|wait~2|shot~sheet-closed\""
   runner "./run.sh run host-4 \"tap~Sign in|wait~25|shot~host-added\""
+}
+
+cmd_qa1_reset() {
+  # The simulator can never sign in to test.ssh.kayg.org's shared account (#500: the account key is wrapped by a passkey
+  # that must live in the same browser), and a QA1 data dir that still holds a previous owner offers passkeys the simulator
+  # no longer has ("This passkey could not sign in"). So the simulator's sign-in route is: QA1 with an empty data dir, a
+  # first-run owner created in the simulator, and the throwaway host added through the phone UI. The old data dir is kept
+  # beside the new one. The setup token and the host password only ever travel as 0600 files on the Studio (owner-setup,
+  # host-account), never through argv or a log.
+  local label="${1:-qa1-reset}"
+  scp -q "$RUNNER_SRC/stage/qa1-fresh-data.sh" "$STAGING:/tmp/qa1-fresh-data.sh"
+  ssh "$STAGING" "sudo bash /tmp/qa1-fresh-data.sh '$label'; rm -f /tmp/qa1-fresh-data.sh"
+  cmd_host_account
+  cmd_owner_setup
+  cmd_add_host
 }
 
 cmd_check() {
@@ -138,7 +157,7 @@ mac() { timeout "${QA_TIMEOUT:-1200}" ssh -o ConnectTimeout=20 "$MAC" "$@"; }
 # Ships the desktop-Safari driver files to the Mac VM (they live in /tmp/j509 there; secrets are 0600 files in it).
 mac_ship() {
   mac 'mkdir -p /tmp/j509/out && chmod 700 /tmp/j509'
-  for f in real-device-qa-mac-flow.py:real-device-qa-mac-flow.py real-device-qa-mac-wd.py:wd.py real-device-qa-sw-authenticator.js:sw-authenticator.js; do
+  for f in real-device-qa-mac-flow.py:real-device-qa-mac-flow.py real-device-qa-mac-wd.py:wd.py real-device-qa-sw-authenticator.js:sw-authenticator.js real-device-qa-mac-appearance.sh:appearance.sh; do
     mac "cat > /tmp/j509/${f#*:}" < "$HERE/${f%%:*}"
   done
 }
@@ -172,11 +191,16 @@ cmd_mac() {
   mac_ship
   for theme in ${themes//,/ }; do
     mkdir -p "$out/$theme"
+    # A dark run is dark twice over: the page URL asks for the dark app theme (real-device-qa-mac-flow.py) and the VM's own
+    # appearance is dark, so `prefers-color-scheme` agrees. No AppleScript: see real-device-qa-mac-appearance.sh.
+    case "$theme" in mocha|dark) mode=dark;; *) mode=light;; esac
+    mac "lockf -k -t 1800 /tmp/mac-bench.lock bash /tmp/j509/appearance.sh $mode" | tee -a "$out/$theme/log.txt"
     for flow in all extras; do
       mac_flow "$QA2_URL" /tmp/j509/out $flow $theme | tee -a "$out/$theme/log.txt"
     done
     mac 'tar -C /tmp/j509/out -cf - .' | tar -C "$out/$theme" -xf - 2>/dev/null || true
   done
+  mac "lockf -k -t 1800 /tmp/mac-bench.lock bash /tmp/j509/appearance.sh light" >/dev/null   # leave the VM as found
   grep -h -E 'MAC_RESULT' "$out"/*/log.txt | sort | uniq -c | sort -rn | head -40
   echo "evidence: $out (log.txt = every MAC_RESULT and MAC_METRIC line; screenshots). Attach it to the issue; never commit it."
 }
@@ -234,6 +258,7 @@ case "${1:-}" in
   prepare) cmd_prepare;;
   stage) shift; cmd_stage "$@";;
   host-account) cmd_host_account;;
+  qa1-reset) shift; cmd_qa1_reset "$@";;
   owner-setup) cmd_owner_setup;;
   add-host) cmd_add_host;;
   check) shift; cmd_check "$@";;
@@ -242,5 +267,5 @@ case "${1:-}" in
   mac-shot-setup) cmd_mac_shot_setup;;
   mac-shot) shift; cmd_mac_shot "$@";;
   teardown) cmd_teardown;;
-  *) sed -n 2,22p "$0"; exit 2;;
+  *) sed -n 2,23p "$0"; exit 2;;
 esac
