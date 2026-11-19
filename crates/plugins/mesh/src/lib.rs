@@ -74,6 +74,7 @@ pub(crate) mod firewall_tools;
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_state;
 
+/// The public enrollment identity recorded beside saved node state.
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 mod enrolment;
 
