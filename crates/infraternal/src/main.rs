@@ -40,7 +40,7 @@ mod ssh_askpass;
 mod ssh_internal;
 #[cfg(test)]
 mod test_executable;
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 mod up;
 
 #[cfg(feature = "plugin-server")]
@@ -438,7 +438,7 @@ fn dispatch_action(
     }
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 fn dispatch_up_action(
     action: &ActionDefinition,
     matches: &ArgMatches,
@@ -451,7 +451,7 @@ fn dispatch_up_action(
     }
 }
 
-#[cfg(not(all(feature = "remote", target_os = "linux")))]
+#[cfg(not(machine_up))]
 fn dispatch_up_action(
     action: &ActionDefinition,
     matches: &ArgMatches,
@@ -656,7 +656,7 @@ fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bo
     }
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 /// Run the `up` action with its server origin and typed host rules.
 fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let Some(server) = matches.get_one::<String>("server") else {
@@ -668,19 +668,25 @@ fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
             Exit::Usage,
         );
     };
-    #[cfg(any(feature = "plugin-server", feature = "plugin-mesh"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-server", feature = "plugin-mesh")
+    ))]
     let host_firewall_allow = matches
         .get_many::<String>("host_firewall_allow")
         .into_iter()
         .flatten()
         .cloned()
         .collect::<Vec<_>>();
-    #[cfg(not(any(feature = "plugin-server", feature = "plugin-mesh")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(feature = "plugin-server", feature = "plugin-mesh")
+    )))]
     let host_firewall_allow = Vec::new();
     up::run(server, &host_firewall_allow, json_output)
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 fn run_up_system(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let Some(server) = matches.get_one::<String>("server") else {
         return report_failure_as(

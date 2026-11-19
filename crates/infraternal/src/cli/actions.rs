@@ -147,12 +147,12 @@ fn cli_plugin() -> PluginDefinition {
     let mut plugin = plugin;
     #[cfg(all(feature = "remote", feature = "plugin-server"))]
     plugin.actions.extend(hosted_server_actions());
-    #[cfg(all(feature = "remote", target_os = "linux"))]
+    #[cfg(machine_up)]
     {
         plugin.actions.push(up_action());
         plugin.actions.push(up_system_action());
     }
-    #[cfg(not(all(feature = "remote", target_os = "linux")))]
+    #[cfg(not(machine_up))]
     plugin
         .actions
         .extend(infraternal_plugin_api::placeholders(|| [up_action()]));
@@ -489,14 +489,17 @@ fn up_action() -> ActionDefinition {
     );
     // Only builds with the host firewall code add its input below.
     #[cfg_attr(
-        not(any(feature = "plugin-mesh", feature = "plugin-server")),
+        not(all(
+            target_os = "linux",
+            any(feature = "plugin-mesh", feature = "plugin-server")
+        )),
         allow(unused_mut)
     )]
     let mut inputs = vec![(
         "server".to_owned(),
         JsonSchema::string("HTTPS origin of the server."),
     )];
-    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    #[cfg(all(target_os = "linux", any(feature = "plugin-mesh", feature = "plugin-server")))]
     inputs.push((
         "host_firewall_allow".to_owned(),
         JsonSchema::array(
@@ -506,13 +509,13 @@ fn up_action() -> ActionDefinition {
     ));
     let action = ActionDefinition::new(
         ["up"],
-        "Add this Linux machine to a server.",
-        "Use this command on a Linux machine that should join an existing server.",
+        "Add this machine to a server.",
+        "Use this command on a Linux machine or a Mac that should join an existing server.",
         [
             "Approve this machine with a fresh passkey in the browser before the request expires.",
-            "This command installs the Linux system service with one sudo prompt.",
+            "This command installs the system service with one sudo prompt.",
             "After approval, it enrolls this machine over HTTPS and reports service status.",
-            "System installs open the mesh's input before networking and block nothing else.",
+            "On Linux, the system service opens mesh input before networking and blocks nothing else.",
         ],
         JsonSchema::object(inputs, ["server".to_owned()]),
         JsonSchema::command_result_with(data),
@@ -529,17 +532,20 @@ fn up_action() -> ActionDefinition {
         "up https://infra.example.org",
         "Add this machine to the server.",
     );
-    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
     let action = action.with_example(
         "up https://infra.example.org --host-firewall-allow wt0,10.69.69.0/24,tcp,22",
         "Keep another SSH path after the host firewall is installed.",
     );
-    #[cfg(not(all(feature = "remote", target_os = "linux")))]
+    #[cfg(not(machine_up))]
     let action = action.not_available_yet();
     action
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 fn up_system_action() -> ActionDefinition {
     ActionDefinition::new(
         ["__up-system"],
@@ -1263,9 +1269,12 @@ mod default_build_tests {
         let registry = registry().expect("registry");
         assert!(registry.actions().all(|a| a.action.availability
             != infraternal_plugin_api::ActionAvailability::NotAvailableYet),);
-        #[cfg(all(feature = "remote", target_os = "linux"))]
-        assert!(registry.find(&["up"]).is_some(), "Linux remote up is built");
-        #[cfg(not(all(feature = "remote", target_os = "linux")))]
+        #[cfg(machine_up)]
+        assert!(
+            registry.find(&["up"]).is_some(),
+            "machine enrollment is built"
+        );
+        #[cfg(not(machine_up))]
         assert!(
             registry.find(&["up"]).is_none(),
             "up is not built on this target"

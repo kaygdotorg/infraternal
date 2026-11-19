@@ -16,6 +16,42 @@ const SUDO: &str = "/usr/bin/sudo";
 const DATA_DIRECTORY: &str = "/var/lib/infraternal/agent";
 /// The system service's mesh state directory.
 pub const STATE_DIRECTORY: &str = "/var/lib/infraternal/state";
+/// Data directory of device-approved system installs (D395).
+pub const MACHINE_BASE: &str = "/Library/Application Support/infraternal";
+/// Root-owned binary published by the device-approved installer.
+pub const MACHINE_BINARY: &str = "/Library/Application Support/infraternal/bin/infraternal";
+/// Private enrollment for the device-approved system service.
+pub const MACHINE_DATA: &str = "/Library/Application Support/infraternal/agent";
+/// Mesh and local control state for the device-approved system service.
+pub const MACHINE_STATE: &str = "/Library/Application Support/infraternal/state";
+/// Records the host and whether its installer created the short PATH alias.
+pub const MACHINE_OWNER: &str = ".machine-owner";
+/// Publish the ownership receipt before launchd can accept any removal request.
+///
+/// # Errors
+/// Refuses another receipt at the same name or an incomplete disk write.
+pub fn record_installation(host: &str, alias_created: bool) -> io::Result<()> {
+    require_root()?;
+    if !valid_host(host) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let receipt = Path::new(MACHINE_BASE).join(MACHINE_OWNER);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(receipt)?;
+    writeln!(file, "{host} {}", u8::from(alias_created))?;
+    file.sync_all()
+}
+
+/// Accept the same lowercase UUID form used in removal receipts.
+fn valid_host(host: &str) -> bool {
+    host.len() == 32
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 /// The mesh state an `agent join` into `data` must forget, if any (#265, J162 F4).
 ///
@@ -174,8 +210,9 @@ fn install(executable: &Path) -> io::Result<()> {
     if !infraternal_plugin_api::cli_alias::install(executable, 0)? {
         eprintln!("infraternal: skipped infra; an existing path belongs to another command.");
     }
-    ensure_root_directory(DATA_DIRECTORY, true)?;
-    ensure_root_directory(STATE_DIRECTORY, true)?;
+    let (data, state) = service_paths(executable);
+    ensure_root_directory(data, true)?;
+    ensure_root_directory(state, true)?;
     ensure_plist_directory()?;
     let plist = render_plist(executable)?;
     write_plist(&plist)?;
@@ -309,10 +346,21 @@ fn require_owned_plist(metadata: &Metadata) -> io::Result<()> {
     }
 }
 
+/// Keep manually configured legacy services on their original paths.
+fn service_paths(executable: &Path) -> (&'static str, &'static str) {
+    if executable == Path::new(MACHINE_BINARY) {
+        (MACHINE_DATA, MACHINE_STATE)
+    } else {
+        (DATA_DIRECTORY, STATE_DIRECTORY)
+    }
+}
+
+/// Describe the launchd job using fixed platform paths.
 fn render_plist(executable: &Path) -> io::Result<String> {
     if !executable.is_absolute() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
+    let (data, state) = service_paths(executable);
     let executable = xml_escape(&executable.to_string_lossy());
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -321,8 +369,8 @@ fn render_plist(executable: &Path) -> io::Result<String> {
          <key>Label</key><string>{LABEL}</string>\n\
          <key>ProgramArguments</key><array>\n\
          <string>{executable}</string><string>agent</string><string>run</string>\n\
-         <string>--data</string><string>{DATA_DIRECTORY}</string>\n\
-         <string>--state</string><string>{STATE_DIRECTORY}</string>\n\
+         <string>--data</string><string>{data}</string>\n\
+         <string>--state</string><string>{state}</string>\n\
          </array>\n\
          <key>RunAtLoad</key><true/>\n\
          <key>KeepAlive</key><true/>\n\
@@ -351,6 +399,18 @@ mod tests {
         trusted_binary_metadata,
     };
     use std::path::Path;
+
+    /// Fresh installs use Apple data paths while legacy launchd jobs remain valid.
+    #[test]
+    fn approved_install_renders_its_own_launchd_paths() {
+        let managed = render_plist(Path::new(super::MACHINE_BINARY)).unwrap();
+        assert!(managed.contains(super::MACHINE_DATA));
+        assert!(managed.contains(super::MACHINE_STATE));
+        assert!(!managed.contains(STATE_DIRECTORY));
+        let legacy = render_plist(Path::new("/usr/local/bin/infraternal")).unwrap();
+        assert!(legacy.contains(DATA_DIRECTORY));
+        assert!(legacy.contains(STATE_DIRECTORY));
+    }
 
     /// J162 F4: a join for another data directory leaves the service's mesh state alone.
     #[test]
