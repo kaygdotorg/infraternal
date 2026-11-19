@@ -43,6 +43,7 @@ fn orphan_route_retirement_preserves_foreign_routes() {
         access_updates: Vec::new(),
         local_key: None,
         authority_epoch: None,
+        rotation_operation: None,
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns")]
@@ -78,6 +79,7 @@ fn orphan_route_retirement_preserves_foreign_routes() {
             ipv6: "fd01::2".parse().unwrap(),
         },
         endpoint: None,
+        candidates: Vec::new(),
     };
     // Model a stop after peers/routes reached the kernel, before public-state
     // fsync. Node deliberately has no Drop cleanup so existing sessions survive.
@@ -238,11 +240,13 @@ fn review_j519_restart_repairs_missing_routes() {
             ipv6: "fd01::2".parse().unwrap(),
         },
         endpoint: None,
+        candidates: Vec::new(),
     };
     node.chunk(Chunk {
         access_updates: Vec::new(),
         local_key: None,
         authority_epoch: None,
+        rotation_operation: None,
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns")]
@@ -349,11 +353,13 @@ fn review_j519_networkd_reload_repairs_peer_routes() {
             ipv6: "fd01::2".parse().unwrap(),
         },
         endpoint: None,
+        candidates: Vec::new(),
     };
     node.chunk(Chunk {
         access_updates: Vec::new(),
         local_key: None,
         authority_epoch: None,
+        rotation_operation: None,
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns")]
@@ -763,6 +769,7 @@ fn review_j529_networkd_reload_recovers_all_peers() {
                 ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
             },
             endpoint: None,
+            candidates: Vec::new(),
         };
         peers.insert(
             NodeId(u64::from(id)),
@@ -787,6 +794,7 @@ fn review_j529_networkd_reload_recovers_all_peers() {
         access_updates: Vec::new(),
         local_key: None,
         authority_epoch: None,
+        rotation_operation: None,
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns")]
@@ -922,11 +930,13 @@ fn review_j529_repair_does_not_follow_a_reused_interface_name() {
             ipv6: "fd01::2".parse().unwrap(),
         },
         endpoint: None,
+        candidates: Vec::new(),
     };
     node.chunk(Chunk {
         access_updates: Vec::new(),
         local_key: None,
         authority_epoch: None,
+        rotation_operation: None,
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns")]

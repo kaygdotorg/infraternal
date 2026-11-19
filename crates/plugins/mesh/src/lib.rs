@@ -26,6 +26,13 @@ pub mod host_firewall;
 /// Chooses the stable mesh UDP listener and its configured fallback behavior.
 mod listen_port;
 
+/// Direct-path candidates and the order nodes try them in (#515, D391).
+pub mod candidates;
+
+/// The per-peer candidate walks both `GotaTun` engines drive, Linux and macOS alike (#515).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+mod candidate_walks;
+
 pub mod configuration;
 
 pub mod access_updates;
@@ -79,8 +86,8 @@ pub mod gotatun_node;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
 
-/// Coalesced underlay endpoint announcements, shared by the Linux and macOS engines (#483).
-#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+/// Coalesces underlay endpoint announcements on the node's route listener (#483).
+#[cfg(all(feature = "agent", target_os = "linux"))]
 mod underlay_announce;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]

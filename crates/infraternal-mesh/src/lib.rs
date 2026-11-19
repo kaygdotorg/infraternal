@@ -21,7 +21,7 @@ pub mod proxy_ports;
 /// Shares exact-address mesh SSH listener ports with the GotaTun packet filter.
 pub mod mesh_ssh;
 
-#[cfg(feature = "relay")]
+/// Observation bounds for relay discovery, and the address rules every candidate follows (#515).
 pub mod discovery;
 
 pub mod cli;

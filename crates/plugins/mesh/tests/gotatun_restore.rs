@@ -328,6 +328,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
             local_key: Some(identity.public_key),
             server: Some(NodeId(1)),
             authority_epoch: None,
+            rotation_operation: None,
             node: NodeId(2),
             #[cfg(feature = "mesh-dns")]
             name: None,
@@ -355,6 +356,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
                             ipv6: "fd01::1".parse().unwrap(),
                         },
                         endpoint: Some("192.0.2.1:44000".parse().unwrap()),
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

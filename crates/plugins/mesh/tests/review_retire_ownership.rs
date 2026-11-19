@@ -185,6 +185,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
     let chunk = Chunk {
         local_key: Some(local_key),
         authority_epoch: None,
+        rotation_operation: None,
         server: Some(NodeId(1)),
         node: NodeId(2),
         #[cfg(feature = "mesh-dns")]
@@ -207,6 +208,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
                     previous_active: false,
                     addresses: addresses(1),
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,

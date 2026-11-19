@@ -35,10 +35,14 @@ pub(crate) fn stopped(runtime: tokio::runtime::Runtime, result: io::Result<()>) 
     ))
 }
 
+/// Tests the service wrapper's failure reporting and bounded shutdown.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Confirms that a polling panic is reported after bounded runtime shutdown.
+    /// The blocking worker stays held until the completion event proves that
+    /// shutdown returned without waiting for that worker to finish.
     #[test]
     fn polling_panic_reaches_bounded_shutdown() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -57,7 +61,7 @@ mod tests {
             let result = run(runtime, async { panic!("fixture polling failure") });
             finished.send(result.map_err(|error| error.kind())).unwrap();
         });
-        let result = completion.recv_timeout(std::time::Duration::from_secs(5));
+        let result = completion.recv();
         release.send(()).unwrap();
         thread.join().unwrap();
         assert_eq!(result.unwrap(), Err(io::ErrorKind::Other));

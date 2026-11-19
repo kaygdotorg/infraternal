@@ -72,13 +72,18 @@ fn write_wrapper(path: &Path, script: &str) {
     );
 }
 
+/// Read contiguous PTY output through `marker`, skipping input acknowledgments that may arrive first.
 async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
     let mut reader = Reader::default();
     let mut tail = Vec::new();
     timeout(Duration::from_secs(10), async {
         loop {
-            let Frame::Output(seq, bytes) = reader.read(peer).await.unwrap() else {
-                panic!("expected raw shim output");
+            let (seq, bytes) = match reader.read(peer).await.unwrap() {
+                Frame::Output(seq, bytes) => (seq, bytes),
+                // The shim queues an input acknowledgment as soon as the PTY accepts input;
+                // under concurrent load that independent reply can precede the shell's output.
+                Frame::InputAck(_) | Frame::InputState(_, _) => continue,
+                frame => panic!("expected raw shim output, got {frame:?}"),
             };
             assert_eq!(
                 seq, *cursor,
@@ -106,6 +111,7 @@ async fn until(peer: &mut UnixStream, cursor: &mut u64, marker: &[u8]) {
     });
 }
 
+/// Discovers a detached shim and resumes only after the new peer's read request is ordered.
 #[tokio::test(flavor = "current_thread")]
 async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset() {
     let fixture = fixture_state::fixture_state();
@@ -191,6 +197,13 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
     send(&mut session.peer, &Frame::ReadFrom(cursor))
         .await
         .unwrap();
+    // The shell is held at its FIFO, so this harmless no-op line is echoed by
+    // the PTY. Its output proves the earlier ReadFrom was consumed before the
+    // shell can produce replay-sensitive output after the barrier is released.
+    send(&mut session.peer, &Frame::Input(b":\n".to_vec()))
+        .await
+        .unwrap();
+    until(&mut session.peer, &mut cursor, b":\r\n").await;
     barrier.write_all(b"resume\n").unwrap();
     until(&mut session.peer, &mut cursor, b"AFTER_DROP\r\n").await;
     send(

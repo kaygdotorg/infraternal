@@ -19,7 +19,7 @@ const OVERLAP_NANOS: i64 = 120_000_000_000;
 /// Back-off after a failed step. Each step is idempotent, so retrying it is safe.
 const RETRY: Duration = Duration::from_secs(5);
 
-/// Kernel clocks and the Linux boot ID keep schedule cadence and overlap independent of wall steps.
+/// Kernel clocks and the boot ID keep schedule cadence and overlap independent of wall steps.
 #[derive(Clone, Debug)]
 struct Clock {
     wall_secs: i64,
@@ -38,12 +38,7 @@ impl Clock {
                 .as_secs(),
         )
         .map_err(io::Error::other)?;
-        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
-            .trim()
-            .to_owned();
-        if boot_id.len() != 36 {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
+        let boot_id = read_boot_id()?;
         let monotonic = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
             .map_err(io::Error::other)?;
         let monotonic_secs = monotonic.tv_sec();
@@ -57,6 +52,106 @@ impl Clock {
             monotonic_secs,
             monotonic_nanos,
         })
+    }
+}
+
+/// Read the kernel's boot UUID so persisted monotonic timestamps are only reused within the same boot.
+pub(crate) fn read_boot_id() -> io::Result<String> {
+    #[cfg(target_os = "macos")]
+    let raw_id = read_macos_boot_session_uuid()?;
+    #[cfg(not(target_os = "macos"))]
+    let raw_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+
+    parse_boot_id(&raw_id)
+}
+
+/// Read macOS's stable boot-session UUID through its named kernel control.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn read_macos_boot_session_uuid() -> io::Result<String> {
+    let name = c"kern.bootsessionuuid";
+    let mut size: libc::size_t = 0;
+    // SAFETY: `name` is a static NUL-terminated name, `size` is writable, and a null output
+    // pointer requests only the current value length as specified by `sysctlbyname`.
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if size == 0 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+
+    let mut bytes = vec![0_u8; size];
+    let mut read_size: libc::size_t = size;
+    // SAFETY: `name` is NUL-terminated, `bytes` owns `size` writable bytes, `read_size` is
+    // writable, and this read-only call passes no replacement value.
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut read_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if read_size > bytes.len() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    bytes.truncate(read_size);
+    String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+/// Validate a kernel boot ID and remove only its platform's expected terminator.
+fn parse_boot_id(raw_id: &str) -> io::Result<String> {
+    let id = raw_id.strip_suffix('\0').unwrap_or(raw_id).trim();
+    if id.len() != 36 || uuid::Uuid::parse_str(id).is_err() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(id.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Keep UUID parsing portable so Linux tests cover the macOS kernel value format too.
+
+    use super::parse_boot_id;
+    use std::io;
+
+    /// Accept a UUID with Linux's newline or macOS's optional NUL terminator.
+    #[test]
+    fn parses_kernel_boot_uuid_terminators() {
+        const UUID: &str = "00000000-0000-4000-8000-000000000001";
+
+        for raw in [UUID.to_owned(), format!("{UUID}\n"), format!("{UUID}\0")] {
+            assert!(matches!(parse_boot_id(&raw), Ok(id) if id == UUID));
+        }
+    }
+
+    /// Reject malformed UUIDs even when their text has the expected length.
+    #[test]
+    fn rejects_invalid_boot_uuids() {
+        for raw in [
+            "",
+            "not-a-uuid",
+            "00000000-0000-4000-8000-00000000000g",
+            "00000000-0000-4000-8000-000000000001\0\0",
+        ] {
+            assert_eq!(
+                parse_boot_id(raw).err().map(|error| error.kind()),
+                Some(io::ErrorKind::InvalidData)
+            );
+        }
     }
 }
 

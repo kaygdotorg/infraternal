@@ -77,7 +77,7 @@ async fn ownership_eof_does_not_discard_private_terminal_output() {
     // A relay first announces its attachment to the writer (#477).
     assert!(matches!(
         messages.recv().await,
-        Some(Message::Attached(2, _))
+        Some(Message::Attached(2, ..))
     ));
     assert!(matches!(
         messages.recv().await,

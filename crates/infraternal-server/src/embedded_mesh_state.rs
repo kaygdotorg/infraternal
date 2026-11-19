@@ -121,15 +121,32 @@ impl FileIdentity {
 /// configuration.
 /// # Errors
 /// Refuses unsafe owners, permissions, file types, or any failed filesystem operation.
-pub(crate) fn migrate(
-    volatile: &Path,
-    durable: &Path,
-    owns: &dyn Fn(&[u8; 32]) -> bool,
-) -> io::Result<()> {
+#[cfg(test)]
+fn migrate(volatile: &Path, durable: &Path, owns: &dyn Fn(&[u8; 32]) -> bool) -> io::Result<()> {
     migrate_on_host(volatile, durable, owns, &host_identity())
 }
 
-/// [`migrate`] with an explicit host identity, so tests can play two machines.
+/// Prepare startup state while preserving a runtime-only receipt if the database still owns a rotation.
+/// The receipt is retained for validation, never adopted as durable identity on this hint alone.
+/// # Errors
+/// Refuses the same unsafe or unrecoverable state as [`migrate_with_receipt_policy`].
+pub(crate) fn migrate_preserving_rotation(
+    volatile: &Path,
+    durable: &Path,
+    owns: &dyn Fn(&[u8; 32]) -> bool,
+    rotation_open: bool,
+) -> io::Result<()> {
+    migrate_with_receipt_policy(
+        volatile,
+        durable,
+        owns,
+        &host_identity(),
+        LOCK_WAIT_LIMIT,
+        rotation_open,
+    )
+}
+
+/// [`migrate_preserving_rotation`] with an explicit host identity, so tests can play two machines.
 ///
 /// A data directory restored or copied to another machine would bring its Mesh identity along,
 /// and two nodes would then share one key and overlay address. Before anything moves, a durable
@@ -137,8 +154,9 @@ pub(crate) fn migrate(
 /// A host without a persistent machine ID records no binding, and refuses an identity that was
 /// bound elsewhere, because it cannot tell a copy from the original (J628).
 /// # Errors
-/// Everything [`migrate`] refuses, plus `PermissionDenied` for an identity bound to another host
+/// Everything [`migrate_preserving_rotation`] refuses, plus `PermissionDenied` for an identity bound to another host
 /// or bound at all on a host without a persistent machine ID.
+#[cfg(test)]
 fn migrate_on_host(
     volatile: &Path,
     durable: &Path,
@@ -156,12 +174,27 @@ fn migrate_on_host(
 /// longer budget instead of failing for the queue it built (J647).
 /// # Errors
 /// Everything [`migrate_on_host`] refuses, with `TimedOut` after `lock_limit` per lock.
+#[cfg(test)]
 fn migrate_on_host_within(
     volatile: &Path,
     durable: &Path,
     owns: &dyn Fn(&[u8; 32]) -> bool,
     host: &HostIdentity,
     lock_limit: std::time::Duration,
+) -> io::Result<()> {
+    migrate_with_receipt_policy(volatile, durable, owns, host, lock_limit, false)
+}
+
+/// Hold both directory leases while applying the database's runtime receipt retention policy.
+/// # Errors
+/// Refuses unsafe state, foreign host bindings, lock timeouts and failed durable copies.
+fn migrate_with_receipt_policy(
+    volatile: &Path,
+    durable: &Path,
+    owns: &dyn Fn(&[u8; 32]) -> bool,
+    host: &HostIdentity,
+    lock_limit: std::time::Duration,
+    rotation_open: bool,
 ) -> io::Result<()> {
     let uid = nix::unistd::Uid::effective().as_raw();
     ensure_mesh_directory(durable, uid)?;
@@ -181,14 +214,14 @@ fn migrate_on_host_within(
         HostIdentity::Stable(host) => check_host_binding(durable, host, uid)?,
         HostIdentity::Unusable(reason) => check_unbound_host(durable, reason, uid)?,
     }
-    migrate_locked(volatile, durable, owns, legacy_exists, uid)?;
+    migrate_locked(volatile, durable, owns, legacy_exists, uid, rotation_open)?;
     match host {
         HostIdentity::Stable(host) => record_host_binding(durable, host, uid),
         HostIdentity::Unusable(_) => Ok(()),
     }
 }
 
-/// The body of [`migrate`] once both directory locks are held and temporaries are swept.
+/// The body of [`migrate_preserving_rotation`] once both directory locks are held and temporaries are swept.
 /// # Errors
 /// Refuses unsafe entries, an unrecoverable marker, or any failed filesystem operation.
 fn migrate_locked(
@@ -197,6 +230,7 @@ fn migrate_locked(
     owns: &dyn Fn(&[u8; 32]) -> bool,
     legacy_exists: bool,
     uid: u32,
+    rotation_open: bool,
 ) -> io::Result<()> {
     let marker = durable.join(MIGRATION_MARKER);
     if let Some(mut pending) = read_marker(&marker, uid)? {
@@ -235,7 +269,7 @@ fn migrate_locked(
         }
         finish_marker(&marker, uid)?;
         sync_directory(durable)?;
-        return mirror_locked(durable, volatile, legacy_exists, uid);
+        return mirror_locked(durable, volatile, legacy_exists, uid, rotation_open);
     }
 
     let durable_files = present_files(durable, uid)?;
@@ -291,7 +325,7 @@ fn migrate_locked(
             }
         }
     }
-    mirror_locked(durable, volatile, legacy_exists, uid)
+    mirror_locked(durable, volatile, legacy_exists, uid, rotation_open)
 }
 
 /// What a start does when the durable and runtime directories hold different keys.
@@ -437,7 +471,13 @@ fn adopt(
 /// creates the directory if needed and takes the lock, after the durable lock (stable order).
 /// # Errors
 /// Refuses unsafe runtime entries and reports any copy, removal, or sync failure.
-fn mirror_locked(durable: &Path, volatile: &Path, legacy_locked: bool, uid: u32) -> io::Result<()> {
+fn mirror_locked(
+    durable: &Path,
+    volatile: &Path,
+    legacy_locked: bool,
+    uid: u32,
+    rotation_open: bool,
+) -> io::Result<()> {
     let Some(key) = read_private_key(durable, uid)? else {
         return Ok(());
     };
@@ -465,7 +505,14 @@ fn mirror_locked(durable: &Path, volatile: &Path, legacy_locked: bool, uid: u32)
         copy_one(&durable.join(name), &volatile.join(name), uid)?
             .ok_or(io::ErrorKind::InvalidData)?;
     }
-    remove_other_files(volatile, &files, uid)?;
+    // A prior build may have retired only the durable receipt while its coordinator still
+    // owns the operation (#534). Keep the runtime-only journal for validated recovery;
+    // do not adopt its keys or overwrite a newer durable receipt.
+    let mut mirror_files = files.clone();
+    if rotation_open && !mirror_files.contains(&"mesh-key-rotation.bin") {
+        mirror_files.push("mesh-key-rotation.bin");
+    }
+    remove_other_files(volatile, &mirror_files, uid)?;
     validate_private_key(volatile, &present_files(volatile, uid)?, uid)?;
     sync_directory(volatile)?;
     let public = public_key(&key)?;
@@ -683,18 +730,28 @@ fn remove_other_files(directory: &Path, keep: &[&str], uid: u32) -> io::Result<(
     remove_files(directory, &stale, uid)
 }
 
-/// Read every public key this data directory records for the server's own Mesh node.
+/// Database ownership used before startup touches the shared runtime mirror.
+pub(crate) struct ServerNodeOwnership {
+    /// Current and open-rotation keys belonging to the embedded server node.
+    pub(crate) keys: Vec<[u8; 32]>,
+    /// An open operation may still need a runtime-only completion receipt.
+    pub(crate) rotation_open: bool,
+}
+
+/// Read the embedded node's owned keys and open-operation status in one database query.
 ///
 /// The server's embedded node attaches under the fixed host name `server`. Its current key and
 /// any key in an open rotation (candidate or previous) count as its own, so an identity caught
 /// mid-rotation is still recognised.
 /// # Errors
 /// Returns the database error; the caller fails start closed instead of guessing.
-pub(crate) async fn server_node_keys(pool: &sqlx::SqlitePool) -> io::Result<Vec<[u8; 32]>> {
+pub(crate) async fn server_node_ownership(
+    pool: &sqlx::SqlitePool,
+) -> io::Result<ServerNodeOwnership> {
     use sqlx::Row as _;
 
     let rows = sqlx::query(
-        "SELECT n.public_key, r.candidate_public_key, r.previous_public_key \
+        "SELECT n.public_key, r.candidate_public_key, r.previous_public_key, r.rotation_phase \
          FROM mesh_nodes n LEFT JOIN mesh_node_key_rotation r ON r.node_id = n.id \
          WHERE n.dataplane_host = 'server'",
     )
@@ -702,7 +759,12 @@ pub(crate) async fn server_node_keys(pool: &sqlx::SqlitePool) -> io::Result<Vec<
     .await
     .map_err(io::Error::other)?;
     let mut keys = Vec::new();
+    let mut rotation_open = false;
     for row in rows {
+        rotation_open |= row
+            .try_get::<Option<String>, _>("rotation_phase")
+            .map_err(io::Error::other)?
+            .is_some();
         for column in ["public_key", "candidate_public_key", "previous_public_key"] {
             let value: Option<Vec<u8>> = row.try_get(column).map_err(io::Error::other)?;
             if let Some(key) = value.and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()) {
@@ -710,7 +772,10 @@ pub(crate) async fn server_node_keys(pool: &sqlx::SqlitePool) -> io::Result<Vec<
             }
         }
     }
-    Ok(keys)
+    Ok(ServerNodeOwnership {
+        keys,
+        rotation_open,
+    })
 }
 
 /// Mirror current mesh state to the legacy /run path before another binary starts.
@@ -751,7 +816,7 @@ pub fn rollback_handoff(durable: &Path, volatile: &Path) -> io::Result<()> {
         log_foreign_identity(volatile, durable, &public_key(&legacy_key)?);
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    mirror_locked(durable, volatile, true, uid)
+    mirror_locked(durable, volatile, true, uid, false)
 }
 
 /// Create a mesh directory privately or tighten one owned by this service.
@@ -1878,6 +1943,7 @@ mod tests {
             local_key: Some(PublicKey(RFC7748_PUBLIC)),
             server: Some(NodeId(1)),
             authority_epoch: None,
+            rotation_operation: None,
             node: NodeId(1),
             name: None,
             dns_suffix: infraternal_plugin_mesh::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
@@ -2530,11 +2596,12 @@ mod tests {
         .await
         .expect("insert server and peer nodes");
 
-        let keys = super::server_node_keys(&pool)
+        let keys = super::server_node_ownership(&pool)
             .await
             .expect("read server node keys");
 
-        assert_eq!(keys, vec![RFC7748_PUBLIC]);
+        assert_eq!(keys.keys, vec![RFC7748_PUBLIC]);
+        assert!(!keys.rotation_open);
     }
 
     /// A legacy key the database does not record is left in place, and nothing is adopted.
@@ -2664,6 +2731,42 @@ mod tests {
         assert_eq!(durable_key.as_deref(), Some([0x42; 32].as_slice()));
         assert_eq!(runtime_key.as_deref(), Some([0x42; 32].as_slice()));
         assert_eq!(runtime_journal.as_deref(), Some(b"journal".as_slice()));
+    }
+
+    /// A runtime-only receipt survives startup until an operation-aware recovery can validate it.
+    #[test]
+    fn startup_mirror_preserves_a_runtime_only_rotation_receipt() {
+        let root = fixture_root();
+        let (volatile, durable) = private_directories(&root);
+        write_private(&durable.join("mesh-private-key"), &[0x41; 32]);
+        migrate(&volatile, &durable, &owned).expect("first mirror");
+        write_private(
+            &volatile.join("mesh-key-rotation.bin"),
+            b"preserved-receipt",
+        );
+        super::migrate_preserving_rotation(&volatile, &durable, &owned, true)
+            .expect("mirror without durable receipt");
+        assert_eq!(
+            fs::read(volatile.join("mesh-key-rotation.bin")).unwrap(),
+            b"preserved-receipt"
+        );
+        assert!(
+            !durable.join("mesh-key-rotation.bin").exists(),
+            "unvalidated receipt was adopted"
+        );
+        super::migrate_preserving_rotation(&volatile, &durable, &owned, false)
+            .expect("no open operation");
+        assert!(
+            !volatile.join("mesh-key-rotation.bin").exists(),
+            "abandoned receipt survived"
+        );
+        write_private(&durable.join("mesh-key-rotation.bin"), b"newer-receipt");
+        migrate(&volatile, &durable, &owned).expect("mirror authoritative receipt");
+        assert_eq!(
+            fs::read(volatile.join("mesh-key-rotation.bin")).unwrap(),
+            b"newer-receipt"
+        );
+        fs::remove_dir_all(root).expect("remove fixture root");
     }
 
     /// A key the previous build rotated or minted after a cold rollback is adopted on re-upgrade,

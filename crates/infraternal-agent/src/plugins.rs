@@ -517,6 +517,7 @@ mod proxy_mesh_context_tests {
                     ipv6: format!("fd00::{id:x}").parse().expect("IPv6 mesh address"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound,
@@ -538,6 +539,7 @@ mod proxy_mesh_context_tests {
         let config = Config {
             local_key: None,
             authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
             #[cfg(feature = "mesh")]

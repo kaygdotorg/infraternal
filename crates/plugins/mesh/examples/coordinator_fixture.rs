@@ -1,22 +1,43 @@
-//! Supplies production-schema coordinator configurations to the isolated real-daemon proof [165,169,216].
+//! Supplies production-schema coordinator snapshots to isolated real-daemon proofs [165,169,216].
+//!
+//! Each JSON line creates or updates two or three test identities and prints the exact
+//! snapshot chunks consumed by production mesh nodes. With three, the first is the server's own
+//! node, and the proof can drive the product's direct-path candidates (#515): `probes` carries
+//! each node's real reply to the candidate identity probe, and `observe` carries the server
+//! node's real presence pages. The fixture feeds both through the same code the server runs
+//! (`node_coordination::parse_candidates`, `Store::record_candidates`, `presence::Tracker`,
+//! `presence::publish_reflexive`), so the proof relays bytes and the product decides.
+
 use infraternal_plugin_mesh::{
     api::MeshService,
     configuration,
     dataplane::{Config, DefaultPolicy, Identity},
-    policy::model::PublicKey,
+    policy::model::{NodeId, PublicKey},
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::io::{self, BufRead, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
+
+/// One line of test input for compiling production-schema mesh snapshots.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-/// One interactive request for the real-schema coordinator fixture.
 struct Request {
-    /// Initial identities for the first snapshot, omitted for later operations.
+    /// The authenticated identities to attach on the first request: two, or three with the
+    /// server's own node first.
     #[serde(default)]
-    identities: Option<[Identity; 2]>,
-    /// The policy or lifecycle operation to execute.
+    identities: Option<Vec<Identity>>,
+    /// The coordinator-observed UDP endpoints (control IP plus listen port) for those identities.
+    #[serde(default)]
+    endpoints: Option<Vec<SocketAddr>>,
+    /// Each identity's raw reply to `mesh.identity {"candidates":true}`, in identity order.
+    #[serde(default)]
+    probes: Option<Vec<serde_json::Value>>,
+    /// The server node's raw `mesh.peers {"presence":true}` pages from one poll.
+    #[serde(default)]
+    observe: Option<Vec<serde_json::Value>>,
+    /// The access or enrollment operation to apply.
     mode: String,
     /// Identifies the key rotation that owns each rekey phase.
     #[serde(default)]
@@ -28,6 +49,8 @@ struct Request {
     #[serde(default)]
     count: Option<u64>,
 }
+/// The dataplane host names the fixture attaches, in identity order; the first is the server.
+const HOSTS: [&str; 3] = ["server", "proof", "peer"];
 /// Adds `count` extra members with valid unique public keys and no private key
 /// or traffic, so tests can measure a larger mesh and trigger real handshakes.
 async fn seed_extra_members(
@@ -39,12 +62,15 @@ async fn seed_extra_members(
     let endpoint = format!("10.220.0.2:{endpoint_port}").parse()?;
     let mut node_ids = Vec::with_capacity(usize::try_from(count)?);
     for index in first_index..first_index.saturating_add(count) {
-        let public_key = infraternal_plugin_mesh::wireguard::Key::generate()?.1;
-        // These public-only fixtures share the live endpoint so traffic to their routes triggers real handshake attempts.
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&index.to_le_bytes());
+        // Give every fixture a distinct public key and send its handshake attempts to the
+        // local test endpoint. These peers have no private keys and cannot complete a handshake.
+        key[31] = 64;
         let (node, _) = store
             .attach(
                 &format!("public-{index}"),
-                public_key,
+                PublicKey(key),
                 Some(endpoint),
                 false,
             )
@@ -52,6 +78,27 @@ async fn seed_extra_members(
         node_ids.push(node.0);
     }
     Ok(node_ids)
+}
+/// Attach every identity with its observed endpoint, as the coordinator does on each connection.
+async fn attach_all(
+    store: &infraternal_plugin_mesh::store::Store,
+    identities: &[Identity],
+    endpoints: &[SocketAddr],
+) -> Result<Vec<NodeId>, Box<dyn std::error::Error>> {
+    let mut members = Vec::new();
+    for (index, identity) in identities.iter().enumerate() {
+        let (node, _) = store
+            .attach_named(
+                HOSTS[index],
+                identity.public_key,
+                endpoints.get(index).copied(),
+                index == 0,
+                Some(HOSTS[index]),
+            )
+            .await?;
+        members.push(node);
+    }
+    Ok(members)
 }
 /// Serve production-schema coordinator requests over stdin and return JSON responses.
 ///
@@ -80,56 +127,104 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query("INSERT OR IGNORE INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('owner','owner',1,'fixture','owner','Owner')").execute(&pool).await?;
     let service = MeshService::new(pool.clone());
     let store = service.dataplane();
-    let mut members = None;
-    let mut applied: Option<[Config; 2]> = None;
+    let mut members: Option<Vec<NodeId>> = None;
+    let mut peer_identities: Option<Vec<Identity>> = None;
+    let mut applied: Option<Vec<Config>> = None;
+    let mut tracker = infraternal_plugin_mesh::presence::Tracker::default();
     let mut extra_member_ids = Vec::new();
     let mut next_extra_member = 0_u64;
     let mut peer_endpoint_port = None;
     for line in io::stdin().lock().lines() {
-        let request: Request = serde_json::from_str(&line?)?;
-        if request.mode == "unbound-identity" {
-            return enrollment_policy(&service, request.identities.ok_or("identities required")?)
-                .await;
+        let Request {
+            identities: request_identities,
+            endpoints,
+            probes,
+            observe,
+            mode,
+            operation_id,
+            candidate_public_key,
+            count,
+        } = serde_json::from_str(&line?)?;
+        if mode == "unbound-identity" {
+            let identities: [Identity; 2] = request_identities
+                .ok_or("identities required")?
+                .try_into()
+                .map_err(|_| "two identities required")?;
+            return enrollment_policy(&service, identities).await;
         }
-        if let Some(identities) = request.identities {
+        if let Some(identities) = request_identities {
             if members.is_some() {
                 return Err("already enrolled".into());
             }
-            // These stable reported names keep the fixture's peers out of the intentionally hidden placeholder state.
-            let (server, _) = store
-                .attach_named(
-                    "server",
-                    identities[0].public_key,
-                    Some(format!("10.220.0.1:{}", identities[0].port).parse()?),
-                    true,
-                    Some("server"),
-                )
-                .await?;
-            let (node, _) = store
-                .attach_named(
-                    "proof",
-                    identities[1].public_key,
-                    Some(format!("10.220.0.2:{}", identities[1].port).parse()?),
-                    false,
-                    Some("proof"),
-                )
-                .await?;
-            members = Some([server, node]);
-            peer_endpoint_port = Some(identities[1].port);
-            for node_id in [server, node] {
+            if !(2..=3).contains(&identities.len()) {
+                return Err("two or three identities required".into());
+            }
+            if identities.len() == 3 {
+                // The server's own node peers with every member through its control plane, as in production,
+                // so it can observe them even while Access denies the pair (D215, D352).
+                let control_plane = infraternal_plugin_mesh::policy::rules::TrafficPolicy::Ports(
+                    [infraternal_plugin_mesh::policy::rules::Port {
+                        protocol: infraternal_plugin_mesh::policy::rules::Protocol::Tcp,
+                        number: 7443,
+                    }]
+                    .into(),
+                );
+                store.set_control_plane(std::sync::Arc::new(move || control_plane.clone()));
+            }
+            let endpoints = match endpoints {
+                Some(endpoints) => endpoints,
+                None => identities
+                    .iter()
+                    .enumerate()
+                    .map(|(index, identity)| {
+                        format!("10.220.0.{}:{}", index + 1, identity.port).parse()
+                    })
+                    .collect::<Result<_, _>>()?,
+            };
+            let attached = attach_all(&store, &identities, &endpoints).await?;
+            for node_id in &attached {
                 sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
                     .bind(i64::try_from(node_id.0)?)
                     .execute(&pool)
                     .await?;
             }
+            members = Some(attached);
+            peer_endpoint_port = Some(identities[1].port);
             extra_member_ids =
                 seed_extra_members(&store, 0, extra_members_count, identities[1].port).await?;
             next_extra_member = extra_members_count;
+            peer_identities = Some(identities);
+        } else if let Some(endpoints) = endpoints {
+            let identities = peer_identities.as_ref().ok_or("identities required")?;
+            attach_all(&store, identities, &endpoints).await?;
         }
-        let members = members.ok_or("identities required")?;
+        let members = members.clone().ok_or("identities required")?;
+        if let Some(probes) = probes {
+            for (node, reply) in members.iter().zip(probes) {
+                let reported = infraternal_plugin_mesh::node_coordination::parse_candidates(
+                    &serde_json::to_vec(&reply)?,
+                );
+                store.record_candidates(*node, reported.as_deref()).await?;
+            }
+        }
+        if let Some(pages) = observe {
+            let mut rows = Vec::new();
+            for page in pages {
+                infraternal_plugin_mesh::presence::read_peers(
+                    &serde_json::to_vec(&page)?,
+                    &mut rows,
+                )
+                .ok_or("presence page invalid")?;
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs();
+            tracker.record(Some((true, rows)), now);
+            infraternal_plugin_mesh::presence::publish_reflexive(&service, &tracker).await;
+        }
         let now = 1_800_000_000;
-        if request.mode == "peer-add" {
-            let count = request.count.ok_or("count required")?;
+        if mode == "peer-add" {
+            let count = count.ok_or("count required")?;
             if count == 0 || next_extra_member.saturating_add(count) > 200 {
                 return Err("simulated peer limit exceeded".into());
             }
@@ -138,8 +233,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .extend(seed_extra_members(&store, next_extra_member, count, endpoint_port).await?);
             next_extra_member += count;
             service.invalidate_dataplane().await;
-        } else if request.mode == "peer-remove" {
-            let count = request.count.ok_or("count required")?;
+        } else if mode == "peer-remove" {
+            let count = count.ok_or("count required")?;
             if count == 0 || count > extra_member_ids.len() as u64 {
                 return Err("simulated peer removal exceeds current inventory".into());
             }
@@ -156,35 +251,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             service.invalidate_dataplane().await;
         }
-        if matches!(
-            request.mode.as_str(),
-            "rotation-begin" | "rotation-timer-begin"
-        ) {
+        if matches!(mode.as_str(), "rotation-begin" | "rotation-timer-begin") {
             let node_id = i64::try_from(members[1].0)?;
-            let operation_id = request
-                .operation_id
-                .as_deref()
-                .ok_or("operation_id required")?;
-            let timer_expired = request.mode == "rotation-timer-begin";
+            let operation_id = operation_id.as_deref().ok_or("operation_id required")?;
+            let timer_expired = mode == "rotation-timer-begin";
             let rotation =
                 begin_fixture_rotation(&pool, node_id, operation_id, timer_expired).await?;
             println!("{}", json!({"rotation":rotation}));
             io::stdout().flush()?;
             continue;
         }
-        let rotation = match request.mode.as_str() {
+        let rotation = match mode.as_str() {
             "rotation-overlap" => Some(
                 update_fixture_rotation(
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request
-                        .operation_id
-                        .as_deref()
-                        .ok_or("operation_id required")?,
-                    request
-                        .candidate_public_key
-                        .ok_or("candidate key required")?,
+                    operation_id.as_deref().ok_or("operation_id required")?,
+                    candidate_public_key.ok_or("candidate key required")?,
                     "overlap",
                 )
                 .await?,
@@ -194,10 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request
-                        .operation_id
-                        .as_deref()
-                        .ok_or("operation_id required")?,
+                    operation_id.as_deref().ok_or("operation_id required")?,
                     PublicKey([0; 32]),
                     "retiring",
                 )
@@ -208,10 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request
-                        .operation_id
-                        .as_deref()
-                        .ok_or("operation_id required")?,
+                    operation_id.as_deref().ok_or("operation_id required")?,
                     PublicKey([0; 32]),
                     "cleanup",
                 )
@@ -222,22 +300,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &pool,
                     &service,
                     i64::try_from(members[1].0)?,
-                    request
-                        .operation_id
-                        .as_deref()
-                        .ok_or("operation_id required")?,
+                    operation_id.as_deref().ok_or("operation_id required")?,
                 )
                 .await?,
             ),
             _ => None,
         };
-        if request.mode == "port" {
+        if mode == "port" {
             service.execute("owner", "mesh.grant.create", &serde_json::to_vec(&json!({"name":"proof-port","from":{"Node":members[0].0},"to":{"Node":members[1].0},"both_ways":false,"ports":{"Ports":[{"protocol":"Tcp","number":5211}]}}))?, now).await.map_err(|_|"Access grant refused")?;
-        } else if matches!(request.mode.as_str(), "allow" | "deny") {
-            let policy = if request.mode == "allow" {
-                DefaultPolicy::Allow
-            } else {
-                DefaultPolicy::Deny
+        } else if matches!(mode.as_str(), "allow" | "deny") {
+            let policy = match mode.as_str() {
+                "allow" => DefaultPolicy::Allow,
+                "deny" => DefaultPolicy::Deny,
+                _ => return Err("unknown mode".into()),
             };
             let preview = service
                 .execute(
@@ -259,28 +334,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await
                 .map_err(|_| "default refused")?;
-        } else if matches!(request.mode.as_str(), "peer-add" | "peer-remove") {
-            // Peer inventory changes above are compiled into the same ordered snapshot as policy changes.
-        } else if rotation.is_none() {
+        } else if !matches!(mode.as_str(), "keep" | "peer-add" | "peer-remove")
+            && rotation.is_none()
+        {
             return Err("unknown mode".into());
         }
-        let next = [
-            store
-                .config(members[0])
-                .await
-                .map_err(|_| "server configuration refused")?,
-            store
-                .config(members[1])
-                .await
-                .map_err(|_| "node configuration refused")?,
-        ];
-        let chunks = [
-            configuration::chunks(applied.as_ref().map(|old| &old[0]), &next[0])?,
-            configuration::chunks(applied.as_ref().map(|old| &old[1]), &next[1])?,
-        ];
+        let mut next = Vec::new();
+        for node in &members {
+            next.push(
+                store
+                    .config(*node)
+                    .await
+                    .map_err(|_| "node configuration refused")?,
+            );
+        }
+        let mut chunks = Vec::new();
+        for (index, config) in next.iter().enumerate() {
+            chunks.push(configuration::chunks(
+                applied.as_ref().map(|old| &old[index]),
+                config,
+            )?);
+        }
+        let addresses: Vec<_> = next.iter().map(|config| config.addresses).collect();
         println!(
             "{}",
-            json!({"addresses":[next[0].addresses,next[1].addresses],"chunks":chunks,"rotation":rotation})
+            json!({"addresses":addresses,"chunks":chunks,"rotation":rotation})
         );
         io::stdout().flush()?;
         applied = Some(next);

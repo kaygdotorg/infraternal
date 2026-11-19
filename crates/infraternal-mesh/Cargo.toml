@@ -7,7 +7,8 @@ license = "AGPL-3.0-only"
 
 [features]
 default = []
-# Peer-socket observations are used only by the opt-in mesh relay path [220,313].
+# The opt-in mesh relay path [220,313]. The discovery module itself is always built: its
+# address rules also filter direct-path candidates (#515).
 relay = []
 
 [dependencies]

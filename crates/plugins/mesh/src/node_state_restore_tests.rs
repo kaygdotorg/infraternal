@@ -38,6 +38,7 @@ fn prior_reader<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Optio
 fn public_state(peers: u16) -> State {
     let mut config = Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),
@@ -72,6 +73,7 @@ fn public_state(peers: u16) -> State {
                         ipv6: std::net::Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, index),
                     },
                     endpoint: Some(([10, 220, a, b], 7443).into()),
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::None,

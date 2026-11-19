@@ -62,6 +62,7 @@ fn configure(node: &mut Node) {
                         previous_active: false,
                         addresses: addresses(id),
                         endpoint: None,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -77,6 +78,7 @@ fn configure(node: &mut Node) {
             local_key: None,
             server: None,
             authority_epoch: None,
+            rotation_operation: None,
             node: NodeId(1),
             #[cfg(feature = "mesh-dns")]
             name: None,

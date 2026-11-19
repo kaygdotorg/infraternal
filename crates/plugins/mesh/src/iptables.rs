@@ -1022,6 +1022,7 @@ mod tests {
         };
         Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(0),
@@ -1045,6 +1046,7 @@ mod tests {
                                 previous_active: false,
                                 addresses: address(*id),
                                 endpoint: None,
+                                candidates: Vec::new(),
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
