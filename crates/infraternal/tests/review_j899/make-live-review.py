@@ -60,7 +60,7 @@ if [[ "$method" == post-stop || "$method" == before-start || "$method" == after-
     status=0
     init --yes > "$P/interrupted.json" 2> "$P/interrupted.err" || status=$?
     check INSTALLER_KILLED test "$status" = 137
-    check INTERUPTED_SOURCE_RETAINED test -f "$old/probe"
+    check INTERRUPTED_SOURCE_RETAINED test -f "$old/probe"
     live_data=$target
     if [[ "$method" == post-stop ]]; then live_data=$old; fi
     active=$(/usr/bin/systemctl show -p ActiveState --value infraternal-server.service)
@@ -87,4 +87,6 @@ if [[ "$method" == post-stop || "$method" == before-start || "$method" == after-
     exit
 fi
 ''' + marker, 1)
+script = script.replace('os.kill(os.getppid(), signal.SIGKILL)', 'os.killpg(os.getpgid(os.getppid()), signal.SIGKILL)')
+script = script.replace('"$BIN" --json server init', 'setsid --wait "$BIN" --json server init')
 output.write_text(script)
