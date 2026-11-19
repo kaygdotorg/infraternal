@@ -53,7 +53,7 @@ case "\$*" in
     "start infraternal-d395-infraternal-server.service")
         echo "$tag\$*" >> $S/systemctl.log
         sed -n 's/^ExecStart=://p' /etc/systemd/system/infraternal-d395-infraternal-server.service |
-            xargs -r
+            /usr/bin/xargs -r /bin/sh -c 'exec "\$@"' sh
         exit \$?;;
     *MainPID*) echo "$tag\$*" >> $S/systemctl.log; tail -1 "$S/health.pids"; exit 0;;
     *ActiveState*) echo "$tag\$*" >> $S/systemctl.log; cat $S/active-state; exit 0;;
