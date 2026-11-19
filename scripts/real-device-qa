@@ -83,8 +83,11 @@ new_setup_token() {
     | std "umask 077; cat > $SIM/qa/setup-token.txt"
 }
 
-# The keyboard's accessory checkmark closes it; the page's own accessibility frames are stale while it is up.
-KBD='xy~0.898~0.586'
+# The keyboard's accessory checkmark closes it; the page's own accessibility frames are stale while it is up, so it is
+# tapped by position. On iPhone 18 Pro / iOS 27 the accessory bar's checkmark sits at y = 0.6175 of the screen (1235 of 2000
+# px in the 920x2000 view of the screenshot). The old 0.586 landed above the bar, on the page, so the keyboard stayed up
+# (J941, #510: reproduced on infraternal-01, fixed value proved by the keyboard closing and the page regaining its full height).
+KBD='xy~0.898~0.6175'
 
 cmd_owner_setup() {
   # First-run owner: token, identity, passkey (simulated Face ID), recovery step. The recovery words are shown on
