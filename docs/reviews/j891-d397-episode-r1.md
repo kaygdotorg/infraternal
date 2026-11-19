@@ -25,18 +25,26 @@ controller and its own fresh-controller control.
 | Stable clock | 0/10 | 0/10 |
 | +1 hour | 0/10 | 0/10 |
 | −1 hour | 4/10 | 0/10 |
+| −7 ms | 4/10 | 0/10 |
 
 `gotatun/src/aqm.rs:367–375` requires agreement between the monotonic gap
 and the receive timestamp's comparison to the previous wall clock. After a
 backward step the new receive stamp sorts before the previous dequeue wall
 time. The monotonic gap is shorter than 10 ms, so the expiry rule also does
 not clear the old evidence. The new run inherits the previous run's deferred
-signals before it can establish a new episode.
+signals before it can establish a new episode. In the −7 ms case, the resumed
+dequeue wall time is still 2.9 ms ahead of the previous dequeue wall time.
 
 Clear the episode and deferred signals when a valid age puts the arrival
 after the previous dequeue on the monotonic timeline but the wall comparison
 disagrees. Keep the two-clock agreement for immediate byte-credit renewal.
-Retain the continuous-overload wall-step traces as controls for that change.
+A test-only candidate keeps the original drain test and adds an episode reset
+when the monotonic gap exceeds the valid age while elapsed realtime does not.
+It passes all 247 fork tests (ten ignored) and reproduces 3,523 signals per
+100,000 fresh-stamped packets under stable and stepped realtime, for both
+Not-ECT and ECT. All four mutations fail via assertions, covering drain
+recognition, evidence expiration, overdue rebasing and equality at the
+catch-up boundary.
 
 The actual fork library fails by assertion on the independent red test.
 The other two tests check strictly future scheduling at the exact catch-up
@@ -44,5 +52,6 @@ boundary and saturating timing arithmetic with zero and huge configuration
 values. The unmodified fork library passes 244 tests with ten ignored.
 Logs live on dev-02 under
 `/home/claude/.cache/codex-scratch/j891/evidence/`, including
-`independent.log` and `fork-lib.log`. Product and native Mac gate receipts
+`independent.log`, `short-step-original.log`, `clock-disagreement-candidate.log`,
+`fork-followup-run.log` and `fork-lib.log`. Product and native Mac gate receipts
 are tracked on #260.

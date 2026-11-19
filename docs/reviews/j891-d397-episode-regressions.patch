@@ -1,8 +1,8 @@
 diff --git a/gotatun/src/aqm.rs b/gotatun/src/aqm.rs
-index 5ecc964..4372e67 100644
+index 5ecc964..f5133d0 100644
 --- a/gotatun/src/aqm.rs
 +++ b/gotatun/src/aqm.rs
-@@ -1667,4 +1667,104 @@ mod tests {
+@@ -1667,4 +1667,109 @@ mod tests {
              assert_eq!(codel.deadline_ns, at.mono_ns + cfg.interval_ns);
          }
      }
@@ -13,7 +13,12 @@ index 5ecc964..4372e67 100644
 +        let cfg = ecn_1_10();
 +        let epoch = 1_800_000_000_000_000_000;
 +        let mut results = Vec::new();
-+        for shift in [0_i64, 3_600_000 * MS as i64, -3_600_000 * MS as i64] {
++        for shift in [
++            0_i64,
++            3_600_000 * MS as i64,
++            -3_600_000 * MS as i64,
++            -7 * MS as i64,
++        ] {
 +            let mut warm = Codel::default();
 +            let (_, _) = drive_bulk(&mut warm, &cfg, 1, 0, epoch, 200);
 +            for _ in 0..MAX_OWED_SIGNALS {
@@ -52,7 +57,7 @@ index 5ecc964..4372e67 100644
 +            );
 +            results.push((warm_drops, fresh_drops));
 +        }
-+        assert_eq!(results, vec![(0, 0); 3]);
++        assert_eq!(results, vec![(0, 0); 4]);
 +    }
 +
 +    /// An overdue deadline equal to the candidate next deadline only earns one signal.
