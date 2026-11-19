@@ -489,6 +489,43 @@ mod cap_review_r3 {
         drop(held);
     }
 
+    /// Model descheduling between permitting a retry and arming its backoff.
+    #[tokio::test(start_paused = true)]
+    async fn j943_backoff_cannot_extend_cutoff_after_descheduling() {
+        let _clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let mut state = state.with_authority_read_timeout(Duration::from_millis(989));
+        state.yield_before_authority_backoff = true;
+        let admission = state
+            .authority
+            .reads
+            .acquire_many(u32::try_from(AUTHORITY_READS).unwrap())
+            .await
+            .unwrap();
+        let mut read = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+        assert!(read.as_mut().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(991)).await;
+        assert!(read.as_mut().now_or_never().is_none()); // Yield after the guard.
+        tokio::time::advance(Duration::from_millis(7)).await;
+        assert!(read.as_mut().now_or_never().is_none()); // Arm backoff at t=998 ms.
+        tokio::time::advance(Duration::from_millis(3)).await;
+        drop(admission);
+        assert!(
+            matches!(
+                read.as_mut().now_or_never(),
+                Some(Err(AuthorityMiss::Unavailable))
+            ),
+            "retry backoff was still pending at t=1001 ms"
+        );
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+    }
+
     /// Disconnect and shutdown both drop the enclosing read future. Cancelling
     /// while queued must release nothing; cancelling a query must detach it.
     #[tokio::test(start_paused = true)]

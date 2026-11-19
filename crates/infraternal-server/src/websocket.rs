@@ -180,6 +180,9 @@ pub(crate) struct WebSocketState {
     handshake_timeout: Duration,
     #[cfg(test)]
     authority_read_timeout: Duration,
+    /// Let the paused-clock test advance time after the retry guard.
+    #[cfg(test)]
+    yield_before_authority_backoff: bool,
     #[cfg(test)]
     terminal_connect_timeout: Duration,
     connections: Arc<Semaphore>,
@@ -316,6 +319,8 @@ impl WebSocketState {
             handshake_timeout: HANDSHAKE_TIMEOUT,
             #[cfg(test)]
             authority_read_timeout: AUTHORITY_READ_TIMEOUT,
+            #[cfg(test)]
+            yield_before_authority_backoff: false,
             #[cfg(test)]
             terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
@@ -2754,7 +2759,9 @@ async fn authority_deadline(
 /// throws its answer away, then starts a fresh SELECT with a fresh clock under
 /// a fresh attempt deadline. A missed answer is never used, however soon it
 /// arrives after its deadline, and every retry reads the authority as it is
-/// when the retry starts, so a revocation during a stall is seen. Before #525
+/// when the retry starts, so a revocation during a stall is seen. The retry
+/// pause also ends by the original deadline, even if scheduling delayed
+/// setting its wake time. Before #525
 /// each retry queued a new SELECT behind its own abandoned ones: one stalled
 /// caller could take all four places and keep every other socket's reads out
 /// of them, and after the stall each fresh SELECT waited behind its
@@ -2819,7 +2826,11 @@ async fn read_expiry(
             // explicit post-result check so such a completion still retries.
             Ok(Some(result)) if tokio::time::Instant::now() <= attempt_deadline => break result?,
             _ if !wait.is_zero() && tokio::time::Instant::now() + pause < give_up => {
-                let resume = tokio::time::Instant::now() + pause;
+                #[cfg(test)]
+                if state.yield_before_authority_backoff {
+                    tokio::task::yield_now().await;
+                }
+                let resume = (tokio::time::Instant::now() + pause).min(give_up);
                 // Let the missed SELECT finish before the next one starts; its
                 // answer is stale by now and is discarded. The pause still
                 // separates attempts when it finished sooner.
