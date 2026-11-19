@@ -77,6 +77,7 @@ async fn oversized_or_invalid_invitation_fails_before_local_state_is_created() {
     }
 }
 
+/// An infraternal agent only loads an identity from its own private regular file.
 #[tokio::test]
 async fn local_identity_load_refuses_symlink_and_shared_file() {
     let directory = Directory::new();
