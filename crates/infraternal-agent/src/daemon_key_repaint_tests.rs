@@ -134,12 +134,26 @@ pub(super) async fn greet_relay(
 
 /// Start one relay and complete the real Unix-socket shim handshake.
 async fn start_relay(stream: u32) -> RelayFixture {
+    start_relay_with_priority(stream, None).await
+}
+
+/// Start a relay with an optional test-controlled priority lane to exercise writer backpressure.
+async fn start_relay_with_priority(
+    stream: u32,
+    priority: Option<mpsc::Sender<PriorityMessage>>,
+) -> RelayFixture {
     let id = *uuid::Uuid::new_v4().as_bytes();
     let (root, path) = shim_rendezvous(id);
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
     let (commands, receiver) = session_commands::channel();
     let (tx, messages) = mpsc::channel(16);
-    let task = tokio::spawn(terminal(path, id, stream, 0, 0, receiver, tx));
+    let task = tokio::spawn(async move {
+        if let Some(priority) = priority {
+            terminal_with_priority(path, id, stream, 0, 0, receiver, tx, priority).await
+        } else {
+            terminal(path, id, stream, 0, 0, receiver, tx).await
+        }
+    });
     let (peer, reader) = greet_relay(&listener, id, stream).await;
 
     let mut fixture = RelayFixture {
@@ -714,6 +728,195 @@ async fn key_repaint_waits_a_frame_for_pty_echo_after_input_ack() {
     assert_eq!(
         repaint,
         Some((u64::from(BULK_CREDIT) + 6, b"echo:k".to_vec()))
+    );
+}
+
+/// A key arriving just before bulk starvation gets its own chance to repaint (#546).
+#[tokio::test(start_paused = true)]
+async fn bulk_starvation_does_not_cancel_an_acknowledged_key_repaint() {
+    let mut fixture = start_relay(2).await;
+    fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
+    let remaining = BULK_CREDIT as usize - PARTIAL_BULK_OUTPUT;
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Output(PARTIAL_BULK_OUTPUT as u64, vec![b'f'; remaining + 1]),
+    )
+    .await
+    .unwrap();
+    // The affordable prefix is forwarded. The last byte arms the bulk timer in the same turn.
+    assert!(matches!(
+        next_message(&mut fixture).await,
+        Message::Shim(2, Shim::Output(seq, bytes))
+            if seq == PARTIAL_BULK_OUTPUT as u64 && bytes.len() == remaining
+    ));
+    // Leave half of the echo grace before the bulk deadline expires.
+    let before_starvation = relay::STARVATION
+        .checked_sub(KEY_REPAINT_GRACE / 2)
+        .unwrap();
+    tokio::time::advance(before_starvation).await;
+    assert!(type_key_and_wait_for_ack(&mut fixture, 0).await);
+    let requested = matches!(
+        tokio::time::timeout(EVENT_GUARD, fixture.reader.read(&mut fixture.peer)).await,
+        Ok(Ok(Shim::SnapshotRequest))
+    );
+    let repaint = if requested {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Snapshot(u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec()),
+        )
+        .await
+        .unwrap();
+        wait_for_repaint(&mut fixture).await
+    } else {
+        None
+    };
+    stop_relay(&mut fixture).await;
+
+    assert_eq!(
+        repaint,
+        Some((u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec())),
+        "the old bulk deadline must not abandon a key once the PTY acknowledged it"
+    );
+}
+
+/// Returning output credit while capture is in flight must preserve the original wait bound.
+#[tokio::test(start_paused = true)]
+async fn capture_wait_stays_bounded_after_credit_returns() {
+    let mut fixture = start_relay(2).await;
+    fill_bulk_window(&mut fixture).await;
+    let started = Instant::now();
+    assert!(type_key_and_wait_for_repaint_request(&mut fixture, 0).await);
+
+    let commands = fixture.commands.as_mut().unwrap();
+    commands.try_send(Command::Credit(1)).unwrap();
+    commands.try_send(Command::Ping(7, 9)).unwrap();
+    // The ping crosses the shim socket only after the earlier credit is applied.
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::InputStateRequest
+    );
+
+    // Deliberately withhold the snapshot. Allow one frame for the timer and EOF to be observed.
+    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "returned credit disarmed the in-flight capture deadline: {closed:?}"
+    );
+}
+
+/// A replacement capture needs a deadline even when the bulk window still has room.
+#[tokio::test(start_paused = true)]
+async fn capture_wait_stays_bounded_with_available_bulk_credit() {
+    let mut fixture = start_relay(2).await;
+    fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
+    let started = Instant::now();
+    assert!(type_key_and_wait_for_repaint_request(&mut fixture, 0).await);
+
+    // The capture replaces unreturned output. No unaffordable frame has armed a bulk timer.
+    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "capture started without a deadline while bulk credit was available: {closed:?}"
+    );
+}
+
+/// Delivering the first Snapshot must leave a deadline for the already-coalesced key.
+#[tokio::test(start_paused = true)]
+async fn capture_wait_stays_bounded_for_a_coalesced_follow_up() {
+    let mut fixture = start_relay(2).await;
+    fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
+    assert!(type_key_and_wait_for_repaint_request(&mut fixture, 0).await);
+    assert!(type_key_and_wait_for_ack(&mut fixture, 1).await);
+    let seq = PARTIAL_BULK_OUTPUT as u64 + 1;
+    sessions::send(&mut fixture.peer, &Shim::Snapshot(seq, b"echo:k".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_for_repaint(&mut fixture).await,
+        Some((seq, b"echo:k".to_vec()))
+    );
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SnapshotRequest
+    );
+
+    let end = Instant::now() + relay::STARVATION + KEY_REPAINT_GRACE;
+    let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
+    if matches!(closed, Ok(Ok(0))) {
+        accept_relinked_peer(&mut fixture).await;
+        assert_eq!(
+            read_shim(&mut fixture.reader, &mut fixture.peer).await,
+            Shim::ReadFrom(seq)
+        );
+    }
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "the coalesced follow-up must detach if its snapshot never arrives: {closed:?}"
+    );
+}
+
+/// A blocked priority send must still close the shim and resume before its unqueued Snapshot.
+#[tokio::test(start_paused = true)]
+async fn capture_expiry_cancels_snapshot_writer_admission() {
+    let (priority, mut queued) = mpsc::channel(1);
+    let mut fixture = start_relay_with_priority(2, Some(priority)).await;
+    fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
+    let started = Instant::now();
+    fixture
+        .commands
+        .as_mut()
+        .unwrap()
+        .try_send(Command::Input(0, vec![b'k']))
+        .unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SequencedInput(0, vec![b'k'])
+    );
+    sessions::send(&mut fixture.peer, &Shim::InputAck(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_shim(&mut fixture.reader, &mut fixture.peer).await,
+        Shim::SnapshotRequest
+    );
+    let delivered = PARTIAL_BULK_OUTPUT as u64;
+    // Leave the Ack in the one-slot queue so the Snapshot cannot enter it.
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Snapshot(delivered + 1, b"echo:k".to_vec()),
+    )
+    .await
+    .unwrap();
+    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
+    assert!(matches!(
+        queued.try_recv(),
+        Ok(PriorityMessage::InputAck { seq: 1, .. })
+    ));
+    if matches!(closed, Ok(Ok(0))) {
+        assert!(matches!(
+            tokio::time::timeout(EVENT_GUARD, queued.recv()).await,
+            Ok(Some(PriorityMessage::Release { .. }))
+        ));
+        accept_relinked_peer(&mut fixture).await;
+        assert_eq!(
+            read_shim(&mut fixture.reader, &mut fixture.peer).await,
+            Shim::ReadFrom(delivered)
+        );
+    }
+    stop_relay(&mut fixture).await;
+
+    assert!(
+        matches!(closed, Ok(Ok(0))),
+        "writer backpressure delayed capture expiry: {closed:?}"
     );
 }
 

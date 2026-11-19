@@ -143,3 +143,7 @@ mod rotation;
 
 #[cfg(feature = "server")]
 pub mod presence;
+
+/// Coalesced Mac underlay announcements, ported from J710/J780 (#483, #260).
+#[cfg(all(feature = "agent", target_os = "macos"))]
+mod underlay_announce;
