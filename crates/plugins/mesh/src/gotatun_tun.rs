@@ -9,7 +9,7 @@
 use crate::policy::model::PublicKey;
 use bytes::BytesMut;
 use gotatun::{
-    packet::{Ip, Packet, PacketBufPool},
+    packet::{Ip, Packet, PacketBufPool, WgData},
     tun::{IpRecv, IpSend, MtuWatcher},
 };
 use infraternal_linux_tun::Device as TunDevice;
@@ -36,6 +36,8 @@ const WRITE_QUEUE: usize = 256;
 const GRO_BATCH: usize = 64;
 /// Most TCP segments merged into one GSO frame.
 const GRO_MAX_SEGMENTS: usize = 64;
+/// Writable space after each TCP segment for 16-byte alignment and the transport envelope.
+const TCP_SEGMENT_TAILROOM: usize = 15 + WgData::OVERHEAD;
 const TCP_FIN: u8 = 0x01;
 const TCP_PSH: u8 = 0x08;
 const TCP_ACK: u8 = 0x10;
@@ -836,22 +838,21 @@ fn segment_tcp(
     )
 }
 
+/// Build TCP segments in one allocation with independent writable space after each IP packet.
 fn segment_tcp_packets(packet: &[u8], plan: TcpSegmentation) -> io::Result<Vec<Packet<Ip>>> {
     let segment_count = plan.payload_len.max(1).div_ceil(plan.segment_payload_len);
-    let output_capacity = plan
-        .header_len
+    let output_capacity = (plan.header_len + TCP_SEGMENT_TAILROOM)
         .checked_mul(segment_count)
         .and_then(|headers| headers.checked_add(plan.payload_len))
         .ok_or_else(|| invalid_tun("TCP GSO packet size overflow"))?;
     let mut output = BytesMut::with_capacity(output_capacity);
-    let mut segment_lengths = Vec::with_capacity(segment_count);
+    let mut packets = Vec::with_capacity(segment_count);
     let mut payload_offset = 0;
     for index in 0..segment_count {
         let current_payload_len = plan
             .payload_len
             .saturating_sub(payload_offset)
             .min(plan.segment_payload_len);
-        let start = output.len();
         append_tcp_segment(
             &mut output,
             packet,
@@ -860,20 +861,20 @@ fn segment_tcp_packets(packet: &[u8], plan: TcpSegmentation) -> io::Result<Vec<P
             payload_offset,
             current_payload_len,
         )?;
-        segment_lengths.push(output.len() - start);
-        payload_offset += current_payload_len;
-    }
-    let mut packets = Vec::with_capacity(segment_count);
-    for length in segment_lengths {
-        let segment = output.split_to(length);
+        // Split the capacity past the IP length without initializing or copying the suffix.
+        // The transport can fill it without reaching the next segment.
+        let rest = output.split_off(output.len() + TCP_SEGMENT_TAILROOM);
+        let segment = std::mem::replace(&mut output, rest);
         let packet = Packet::from_bytes(segment)
             .try_into_ip()
             .map_err(|error| invalid_tun_owned(error.to_string()))?;
         packets.push(packet);
+        payload_offset += current_payload_len;
     }
     Ok(packets)
 }
 
+/// Copy and repair one segment in the current window of the output allocation.
 fn append_tcp_segment(
     output: &mut BytesMut,
     packet: &[u8],
@@ -882,7 +883,6 @@ fn append_tcp_segment(
     payload_offset: usize,
     payload_len: usize,
 ) -> io::Result<()> {
-    let start = output.len();
     output.extend_from_slice(&packet[..plan.header_len]);
     if payload_len != 0 {
         output.extend_from_slice(
@@ -890,8 +890,7 @@ fn append_tcp_segment(
                 [plan.header_len + payload_offset..plan.header_len + payload_offset + payload_len],
         );
     }
-    let end = output.len();
-    let segment = &mut output[start..end];
+    let segment = &mut output[..];
     let sequence_offset =
         u32::try_from(payload_offset).map_err(|_| invalid_tun("TCP sequence offset overflow"))?;
     segment[plan.tcp_offset + 4..plan.tcp_offset + 8]
@@ -1035,9 +1034,9 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TunWriter, build_gso_frame, coalescible_run,
-        decode_frame, internet_checksum, ip_details, recompute_ipv4_checksum,
-        recompute_transport_checksum,
+        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TCP_SEGMENT_TAILROOM, TunWriter,
+        build_gso_frame, coalescible_run, decode_frame, internet_checksum, ip_details,
+        recompute_ipv4_checksum, recompute_transport_checksum,
     };
     use bytes::BytesMut;
     use gotatun::packet::{Ip, Packet, PacketBufPool};
@@ -1482,6 +1481,33 @@ mod tests {
         pseudo[9] = 6;
         pseudo[10..12].copy_from_slice(&transport_len.to_be_bytes());
         internet_checksum(&[&pseudo, &packet[20..]])
+    }
+
+    /// Both TCP versions leave space for the complete envelope without touching nearby segments.
+    #[test]
+    fn tcp_segments_keep_independent_transport_tailroom() {
+        let pool = PacketBufPool::new(1);
+        for frame in [ipv4_tcp_frame(2300), ipv6_hop_by_hop_tcp_frame(2300)] {
+            let mut packets: Vec<_> = decode_frame(&frame, true, &pool)
+                .unwrap()
+                .into_iter()
+                .map(Packet::into_bytes)
+                .collect();
+            assert_eq!(packets.len(), 3);
+            let original: Vec<_> = packets.iter().map(|packet| packet.to_vec()).collect();
+            for packet in &mut packets {
+                let bytes = packet.buf_mut();
+                let capacity = bytes.len() + TCP_SEGMENT_TAILROOM;
+                assert_eq!(bytes.capacity(), capacity);
+                let pointer = bytes.as_ptr();
+                bytes.resize(capacity, 0xef);
+                assert_eq!(bytes.as_ptr(), pointer);
+            }
+            for (packet, expected) in packets.iter().zip(&original) {
+                assert_eq!(&packet[..expected.len()], expected);
+                assert_eq!(&packet[expected.len()..], &[0xef; TCP_SEGMENT_TAILROOM]);
+            }
+        }
     }
 
     #[test]
