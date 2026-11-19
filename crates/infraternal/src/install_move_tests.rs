@@ -265,7 +265,7 @@ fn legacy_mixed_unit_is_repaired_and_restarted_without_force() {
     assert_eq!(fs::metadata(dropin).unwrap().mode() & 0o777, 0o600);
     assert_eq!(
         *manager.calls.borrow(),
-        ["reload", "start", "ready", "enable"]
+        ["reload", "start", "ready", "enable", "ready"]
     );
 }
 
@@ -347,7 +347,7 @@ fn publishes_policy_before_switch_and_restarts_once() {
     .unwrap();
     assert_eq!(
         *manager.calls.borrow(),
-        ["stop", "publish", "reload", "start", "ready", "enable"]
+        ["stop", "publish", "reload", "start", "ready", "enable", "ready"]
     );
 }
 
@@ -438,5 +438,68 @@ fn does_not_adopt_an_unclaimed_staging_tree() {
         fs::read_to_string(stage.join("unrelated")).unwrap(),
         "untouched"
     );
+    assert_eq!(Install::data(&fixture.old), "original");
+}
+
+/// A backup collision leaves the old tree available after health was recorded.
+fn ready_with_original() -> (Install, Fake, Journal) {
+    let fixture = Install::new();
+    let manager = Fake::default();
+    let result = apply(&fixture.plan(&fixture.old), &manager, UNIX_EPOCH, || {
+        let journal = load(&fixture.new, &fixture.unit)?.unwrap();
+        fs::create_dir(&journal.backup)?;
+        fs::write(journal.backup.join("unrelated"), "untouched")
+    });
+    assert!(result.is_err());
+    let journal = load(&fixture.new, &fixture.unit).unwrap().unwrap();
+    assert!(journal.ready);
+    assert_eq!(Install::data(&fixture.old), "original");
+    assert_eq!(Install::data(&fixture.new), "original");
+    assert_eq!(fs::read_to_string(journal.backup.join("unrelated")).unwrap(), "untouched");
+    fs::remove_dir_all(&journal.backup).unwrap();
+    (fixture, manager, journal)
+}
+
+/// Reject a changed destination before the journal can retire the original.
+#[test]
+fn review_j899_checks_destination_before_retiring_original() {
+    let (fixture, manager, journal) = ready_with_original();
+    let previous = fixture.root.join("saved-candidate");
+    fs::rename(&fixture.new, &previous).unwrap();
+    fs::create_dir(&fixture.new).unwrap();
+    fs::write(fixture.new.join("infraternal.sqlite"), "replacement").unwrap();
+    assert!(fixture.apply(&fixture.new, &manager).is_err());
+    assert_eq!(Install::data(&fixture.new), "replacement");
+    assert_eq!(Install::data(&previous), "original");
+    assert!(
+        fixture.old.join("infraternal.sqlite").exists()
+            || journal.backup.join("infraternal.sqlite").exists(),
+        "the journal refused the replacement after deleting the original"
+    );
+}
+
+/// A ready journal can survive the managed service that originally answered.
+#[test]
+fn review_j899_restarts_stopped_service_during_cleanup_retry() {
+    let (fixture, manager, _) = ready_with_original();
+    manager.stop().unwrap();
+
+    fixture.apply(&fixture.new, &manager).unwrap();
+    assert!(
+        manager.active().unwrap(),
+        "resume reported success with the server stopped"
+    );
+    assert_eq!(Install::data(&fixture.new), "original");
+}
+
+/// A replacement SQLite file cannot authorize removal even inside the same directory.
+#[test]
+fn ready_retry_rejects_a_replaced_database() {
+    let (fixture, manager, _) = ready_with_original();
+    let database = fixture.new.join("infraternal.sqlite");
+    fs::rename(&database, fixture.new.join("previous.sqlite")).unwrap();
+    fs::write(database, "replacement").unwrap();
+
+    assert!(fixture.apply(&fixture.new, &manager).is_err());
     assert_eq!(Install::data(&fixture.old), "original");
 }

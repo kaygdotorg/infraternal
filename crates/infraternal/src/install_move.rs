@@ -275,6 +275,9 @@ struct Journal {
     target: Option<Identity>,
     /// The exact staging path inside the pinned journal directory.
     staging: PathBuf,
+    /// The database inode selected before the moved service could start.
+    #[serde(default)]
+    database: Option<Identity>,
     /// The staged object, saved before any swap.
     staged: Option<Identity>,
     /// The exact backup path, allocated before the original data is touched.
@@ -544,6 +547,7 @@ pub fn apply(
                     unit: current.unit,
                     source,
                     target,
+                    database: None,
                     staging: relocation.to.with_file_name(&work_name).join(STAGING),
                     staged: None,
                     backup,
@@ -564,6 +568,13 @@ pub fn apply(
         let switched = current_side(&journal, &read_units(&journal.unit)?)?;
         let result = (|| {
             if journal.ready {
+                let target = selected_target(&parent, target_name, &journal)?;
+                if !service.active()? {
+                    service.reload()?;
+                    service.start()?;
+                }
+                service.ready(&target)?;
+                selected_target(&parent, target_name, &journal)?;
                 return finish(&parent, &work_name, &work, &old_parent, old_name, &journal);
             }
             if service.active()? {
@@ -588,13 +599,24 @@ pub fn apply(
             if journal.target != Some(Identity::of(&target)?) {
                 return Err(disk::invalid("destination identity changed"));
             }
+            if !switched || journal.database.is_none() {
+                if switched {
+                    // Older journals did not pin the database before first start.
+                    journal.backup_action = Backup::Retain;
+                }
+                journal.database = Some(database_identity(&target)?);
+                save(&work, &journal)?;
+            }
+            selected_target(&parent, target_name, &journal)?;
             publish()?;
             write_units(&journal)?;
             let startup = service
                 .reload()
                 .and_then(|()| service.start())
                 .and_then(|()| service.ready(&target))
-                .and_then(|()| service.enable());
+                .and_then(|()| service.enable())
+                .and_then(|()| service.ready(&target))
+                .and_then(|()| selected_target(&parent, target_name, &journal).map(drop));
             if let Err(error) = startup {
                 // A service whose startup cannot be confirmed may have written
                 // to either tree. Preserve both for inspection after any retry.
@@ -735,6 +757,23 @@ fn prepare_data(
     reconcile_staging(parent, target_name, work, journal)
 }
 
+/// Pin the exact SQLite file that the selected server is expected to open.
+fn database_identity(data: &File) -> io::Result<Identity> {
+    Identity::of(&disk::regular(data, OsStr::new("infraternal.sqlite"))?)
+}
+
+/// Reopen the published directory and verify both identities before retirement.
+fn selected_target(parent: &File, name: &OsStr, journal: &Journal) -> io::Result<File> {
+    let target = disk::tree(parent, name)?;
+    if journal.target != Some(Identity::of(&target)?) {
+        return Err(disk::invalid("destination identity changed during cleanup"));
+    }
+    if journal.database != Some(database_identity(&target)?) {
+        return Err(disk::invalid("destination database does not match the move journal"));
+    }
+    Ok(target)
+}
+
 /// Once the new process answers, retire the original by its saved identity.
 fn finish(
     parent: &File,
@@ -744,6 +783,18 @@ fn finish(
     old_name: &OsStr,
     journal: &Journal,
 ) -> io::Result<Outcome> {
+    let target_name = journal
+        .to
+        .file_name()
+        .ok_or_else(|| disk::invalid("target lacks a name"))?;
+    let target = selected_target(parent, target_name, journal)?;
+    if journal.legacy_target
+        && let Some(previous) = read_legacy_marker(&target)?
+    {
+        if previous != journal.from {
+            return Err(disk::invalid("legacy move marker changed"));
+        }
+    }
     let mut leftover = None;
     if let Some(source) = journal.source {
         let (_, backup) = disk::parent(&journal.backup, false)?;
@@ -774,20 +825,7 @@ fn finish(
             ));
         }
     }
-    let target_name = journal
-        .to
-        .file_name()
-        .ok_or_else(|| disk::invalid("target lacks a name"))?;
-    let target = disk::tree(parent, target_name)?;
-    if journal.target != Some(Identity::of(&target)?) {
-        return Err(disk::invalid("destination identity changed during cleanup"));
-    }
-    if journal.legacy_target
-        && let Some(previous) = read_legacy_marker(&target)?
-    {
-        if previous != journal.from {
-            return Err(disk::invalid("legacy move marker changed"));
-        }
+    if journal.legacy_target && read_legacy_marker(&target)?.is_some() {
         disk::unlink(&target, OsStr::new(MARKER), false)?;
     }
     remove_journal(parent, work_name, work)?;
