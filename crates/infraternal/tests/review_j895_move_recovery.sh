@@ -307,7 +307,7 @@ if [[ "$method" == full ]]; then
     check ENOSPC_OLD_DATA test "$(cat "$old/probe")" = "J895 full proof"
     check ENOSPC_START_FAILED test "$(/usr/bin/systemctl show -p ActiveState --value "$UNIT_NAME")" = inactive
     check ENOSPC_TARGET_ABSENT test ! -e "$target"
-    check ENOSPC_NO_STAGING test -z "$(find /var/lib -maxdepth 1 -name '.infraternal.partial-*' -print)"
+    check ENOSPC_NO_STAGING test ! -e /var/lib/.infraternal-move-infraternal
     check ENOSPC_OLD_MARKER_ABSENT test ! -e "$old/.infraternal-move"
     /usr/bin/systemctl stop infraternal-server.service
     echo RESULT=0

@@ -680,10 +680,7 @@ fn apply_recorded(
                         })?;
                 }
                 if journal.target.is_none() {
-                    reconcile_staging(parent, target_name, work, journal)?;
-                    if journal.target.is_none() {
-                        remove_journal(parent, work_name, work)?;
-                    }
+                    discard_unpublished(transaction, journal)?;
                 }
             }
             result
@@ -838,6 +835,20 @@ fn stage_start(
     selected_target(parent, target_name, journal)?;
     publish()?;
     write_units(journal)?;
+    Ok(())
+}
+
+/// Free the staging space while the original is still selected for startup.
+fn discard_unpublished(transaction: &Transaction<'_>, journal: &mut Journal) -> io::Result<()> {
+    reconcile_staging(
+        transaction.parent,
+        transaction.target_name,
+        transaction.work,
+        journal,
+    )?;
+    if journal.target.is_none() {
+        remove_journal(transaction.parent, transaction.work_name, transaction.work)?;
+    }
     Ok(())
 }
 

@@ -3,9 +3,9 @@
 //! to stop or start the server it is running for.
 
 use super::{
-    MoveError, Outcome, Relocation, Service, Systemd, current_side, database_identity, disk,
-    exec_assignment, finish, live_data, optional_tree, pending, read_units, remove_journal, save,
-    selected_target, stage_start, with_journal,
+    MoveError, Outcome, Relocation, Service, Systemd, current_side, database_identity,
+    discard_unpublished, disk, exec_assignment, finish, live_data, optional_tree, pending,
+    read_units, remove_journal, save, selected_target, stage_start, with_journal,
 };
 use crate::install::{self, MoveInstall};
 use disk::Identity;
@@ -318,7 +318,11 @@ fn run_hook(control: &Path, run: impl FnOnce(&File, &Request) -> io::Result<()>)
     }
     if let Err(error) = run(&dir, &request) {
         let receipt = Receipt::Error(error.to_string());
-        disk::write_record(&dir, OsStr::new(RECEIPT), &serde_json::to_vec(&receipt)?)?;
+        if let Err(record_error) =
+            disk::write_record(&dir, OsStr::new(RECEIPT), &serde_json::to_vec(&receipt)?)
+        {
+            eprintln!("could not record the cutover error: {record_error}");
+        }
         return Err(error);
     }
     Ok(())
@@ -339,10 +343,22 @@ fn prepare_start(_dir: &File, request: &Request) -> io::Result<()> {
             let switched = current_side(journal, &read_units(&journal.unit, &journal.to)?)?;
             if journal.ready {
                 selected_target(transaction.parent, transaction.target_name, journal)?;
-            } else {
-                stage_start(transaction, journal, switched, &request.service, || {
-                    request.install.publish()
-                })?;
+                return request.service.checked(&["daemon-reload"]);
+            }
+            let staged = stage_start(transaction, journal, switched, &request.service, || {
+                request.install.publish()
+            });
+            if let Err(error) = staged {
+                if !journal.legacy_target
+                    && !current_side(journal, &read_units(&journal.unit, &journal.to)?)?
+                {
+                    discard_unpublished(transaction, journal).map_err(|cleanup| {
+                        io::Error::other(format!(
+                            "{error}; discarding the unfinished snapshot: {cleanup}"
+                        ))
+                    })?;
+                }
+                return Err(error);
             }
             request.service.checked(&["daemon-reload"])
         },
