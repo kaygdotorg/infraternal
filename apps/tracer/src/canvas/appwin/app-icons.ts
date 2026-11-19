@@ -2,9 +2,8 @@
  * App icons, fetched one at a time by content hash and kept by hash (#146, D349).
  *
  * A window row names its app's icon by the SHA-256 of the PNG (`iconHash`). The first time a hash is shown, `AppIcons` asks the
- * server for it once (`desktop.icon`), checks what comes back, and keeps it: the same hash is always the same image, so it is never
- * asked for again while the page lives, whichever machine lists it. Until it arrives, or if it never does, the row keeps its letter
- * tile.
+ * server for it (`desktop.icon`), checks what comes back, and caches the result by hash across machines. Only one fetch runs
+ * at a time. Until a fetch arrives, or if the bounded queue is full, the row keeps its letter tile.
  *
  * The bytes come from another machine through the server, so they are checked here too: at most 16 KiB, the PNG signature, and a
  * SHA-256 equal to the name asked for. The image is shown from a `blob:` URL, never as HTML.
@@ -64,7 +63,7 @@ export class AppIcons {
   private tail: Promise<unknown> = Promise.resolve();
   /** Queued loads are dropped and late replies cannot create URLs after disposal. */
   private disposed = false;
-  /** Hashes that failed once: they are not asked for again while the page lives. */
+  /** Most recent rejected hashes, capped at the same size as the successful cache. */
   private readonly failed = new Set<string>();
   private readonly listeners = new Set<() => void>();
 
@@ -90,6 +89,7 @@ export class AppIcons {
     if (this.disposed || !isIconHash(hash) || this.failed.has(hash)) return Promise.resolve(undefined);
     const running = this.loading.get(hash);
     if (running) return running;
+    if (this.loading.size >= MAX_ICONS) return Promise.resolve(undefined);
     const job = this.tail.then(async () => {
       if (this.disposed) return undefined;
       const reply = await this.call("desktop.icon", { host_id: hostId, sha256: hash });
@@ -97,7 +97,14 @@ export class AppIcons {
     })
       .then((bytes) => {
         if (this.disposed) return undefined;
-        if (!bytes) { this.failed.add(hash); return undefined; }
+        if (!bytes) {
+          if (this.failed.size >= MAX_ICONS) {
+            const oldest = this.failed.values().next().value;
+            if (oldest !== undefined) this.failed.delete(oldest);
+          }
+          this.failed.add(hash);
+          return undefined;
+        }
         const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
         this.urls.set(hash, url);
         this.trim();
@@ -106,7 +113,7 @@ export class AppIcons {
       }, () => undefined)
       .finally(() => { this.loading.delete(hash); });
     this.loading.set(hash, job);
-    this.tail = job;
+    this.tail = job.catch(() => undefined);
     return job;
   }
 
