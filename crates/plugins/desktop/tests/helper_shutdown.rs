@@ -91,7 +91,7 @@ fn signal_stop_joins_capture_without_waiting_for_a_blocked_encoder() {
     let executable = dir.join("native-fixture.py");
     fs::write(
         &executable,
-        r#"#!/usr/bin/env python3
+        r"#!/usr/bin/env python3
 # Role: acknowledge control cleanup but stop draining the encoder pixel packet.
 import json, signal, struct, sys
 source = sys.stdin.buffer
@@ -112,7 +112,7 @@ while True:
     reply = 66 if kind == 2 else 68
     sink.write(struct.pack('>IBB', len(body)+2, 1, reply)+body)
     sink.flush()
-"#,
+",
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
