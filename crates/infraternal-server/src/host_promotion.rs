@@ -106,14 +106,14 @@ pub(crate) struct Promotions {
     progress: Arc<Mutex<HashMap<Uuid, (Uuid, Stage)>>>,
     /// Test only: signal after reserving the try, then wait for the test to release `finish`.
     #[cfg(test)]
-    after_reserve: Arc<
-        Mutex<
-            Option<(
-                tokio::sync::oneshot::Sender<()>,
-                tokio::sync::oneshot::Receiver<()>,
-            )>,
-        >,
-    >,
+    after_reserve: Arc<Mutex<Option<AfterReserveGate>>>,
+}
+
+/// The test-only signal and release pair around an already reserved promotion.
+#[cfg(test)]
+struct AfterReserveGate {
+    reserved: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 /// A refused request, as the HTTP layer reports it.
@@ -389,9 +389,9 @@ impl Promotions {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
-            if let Some((reserved, gate)) = gate {
-                let _ = reserved.send(());
-                let _ = gate.await;
+            if let Some(gate) = gate {
+                let _ = gate.reserved.send(());
+                let _ = gate.release.await;
             }
         }
         let way = match method {
@@ -1169,7 +1169,10 @@ mod tests {
         .unwrap();
         let (release, gate) = tokio::sync::oneshot::channel();
         let (reserved, observed) = tokio::sync::oneshot::channel();
-        *promotions.after_reserve.lock().unwrap() = Some((reserved, gate));
+        *promotions.after_reserve.lock().unwrap() = Some(AfterReserveGate {
+            reserved,
+            release: gate,
+        });
         (promotions, store, pool, host, release, observed)
     }
 
