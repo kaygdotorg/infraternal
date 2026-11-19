@@ -4,9 +4,18 @@ use std::{env, fs, path::PathBuf};
 #[path = "build_support/migrations.rs"]
 mod migrations;
 
+/// Generates compact migration data and sets the server's build-time trust values.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Directory tracking also rebuilds SQLx when a new migration is added.
+    // Track the directory so additions and removals invalidate this build script.
     println!("cargo:rerun-if-changed=migrations");
+    // Track each existing file too, so edits to migration contents rebuild both
+    // the compact list and any `sqlx::migrate!` expansion in this crate.
+    for entry in fs::read_dir("migrations")? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            println!("cargo:rerun-if-changed={}", entry.path().display());
+        }
+    }
     let output = PathBuf::from(env::var_os("OUT_DIR").ok_or("Cargo output directory missing")?);
     migrations::generate(std::path::Path::new("migrations"), &output)?;
     println!("cargo:rerun-if-env-changed=INFRATERNAL_RELEASE_BUILD");
