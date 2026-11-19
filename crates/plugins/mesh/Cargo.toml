@@ -66,7 +66,7 @@ url = { workspace = true, optional = true }
 # can bind beside it before or after start (#260, J826, J834). A port another
 # socket already holds is refused (EADDRINUSE), the same as a port taken
 # outright.
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "987cfdbaa5dca8f0e7d1f70129dd3b7e4985a7b6", default-features = false, features = ["device", "ring"], optional = true }
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "fd0a64e8552cdba282e4161139136f9b86294dd2", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

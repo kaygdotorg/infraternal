@@ -423,12 +423,14 @@ fn a_hex_ipv4_spelling_never_becomes_a_name() {
     }
 }
 
+/// One presence row for node 3 with the given handshake time and received bytes, and no address.
 fn row(handshake: u64, received: u64) -> PeerRow {
     PeerRow {
         node: NodeId(3),
         handshake,
         received,
         keepalive: 25,
+        endpoint: None,
     }
 }
 

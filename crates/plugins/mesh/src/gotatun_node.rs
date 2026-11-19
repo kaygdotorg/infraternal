@@ -38,6 +38,7 @@ use tokio::{
 use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 use crate::{
+    candidate_walks::{HANDSHAKE_WAIT, Observed, Walks, active_peer_key, kept_address},
     dataplane::Config,
     gotatun_tun::LinuxTun,
     packet_filter::{Direction, PacketFilter, PreparedPolicy},
@@ -120,11 +121,6 @@ async fn endpoint_refresh_due(at: Option<tokio::time::Instant>) {
 const ENDPOINT_REFRESH_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Bound route refreshes and authenticated endpoint scans to four per second.
 const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(250);
-
-/// How long a forced relay handshake may wait; `GotaTun`'s own wait has no deadline.
-/// One `WireGuard` handshake attempt is 5 s, after which the peer timers retry.
-#[cfg(feature = "relay")]
-const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 
 /// Selects the node's data plane. `GotaTun` is the Linux default (D346), so the product runs on
 /// it and its bugs surface; kernel `WireGuard` stays an explicit per-machine opt-out. Reaching
@@ -394,6 +390,8 @@ impl Engine {
                     info,
                     health: worker_health,
                     restart_at: None,
+                    walks: Walks::default(),
+                    relayed: BTreeMap::new(),
                 };
                 runtime.block_on(run_worker(
                     receiver,
@@ -730,6 +728,8 @@ fn engine_runtime() -> io::Result<(tokio::runtime::Runtime, bool)> {
     Ok((runtime, thp_disabled))
 }
 
+/// Everything the engine worker owns: the TUN, the live device, its rebuild material, the applied
+/// configuration and each peer's candidate walk (#515).
 struct RuntimeState {
     tun: Option<LinuxPacketIo>,
     /// Shared only with forced-handshake tasks, which `stop` ends before stopping the device.
@@ -744,6 +744,22 @@ struct RuntimeState {
     health: Arc<Health>,
     /// When a device that stopped on a fatal error is rebuilt.
     restart_at: Option<Instant>,
+    /// Each peer's walk through its direct-path candidates (#515), by the key that owns its
+    /// endpoint, with the peer it was started for: a re-installed peer starts a new walk.
+    walks: Walks,
+    /// The relay address each relayed peer was last pointed at, by device key (J699 P3-1).
+    /// While the engine sends a peer's packets there (or nowhere, mid-preparation), no walk runs
+    /// for it and a re-install keeps it there ([`on_relay`], [`kept_address`]): D391 makes the
+    /// relay the fallback once direct paths failed, and moving back to a direct path is the
+    /// relay controller's decision. Only relay builds fill it; an entry goes when its peer
+    /// leaves the configuration.
+    relayed: BTreeMap<PublicKey, SocketAddr>,
+}
+
+/// Whether a peer sits on its relay: the worker pointed it at `relay`, and the engine still
+/// sends there, or nowhere because the relay is preparing its handshake (J699 P3-1).
+fn on_relay(engine_at: Option<SocketAddr>, relay: Option<SocketAddr>) -> bool {
+    relay.is_some() && (engine_at.is_none() || engine_at == relay)
 }
 
 struct PendingDevice {
@@ -768,11 +784,31 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the worker.
+/// What the candidate walks need from the engine's counters ([`crate::candidate_walks::observe`]).
+fn observed(counters: &CounterMap) -> Observed {
+    let unix = crate::candidate_walks::unix_now();
+    counters
+        .iter()
+        .map(|(key, stats)| {
+            let seen = crate::candidate_walks::observe(
+                stats.received_bytes,
+                stats.handshake_secs,
+                stats.endpoint,
+                unix,
+            );
+            (*key, seen)
+        })
+        .collect()
+}
+
+/// Serializes device, relay, endpoint-refresh, health-recovery, and shutdown work on the `GotaTun`
+/// worker, and steps candidate walks when one is due.
 ///
 /// A bounded peer snapshot scan detects control-only authenticated roaming, while TUN traffic in
 /// either direction requests re-derivation after underlay changes. Both use one coalesced signal, and route-netlink
-/// writes run on Tokio's blocking pool.
+/// writes run on Tokio's blocking pool. The scan reads each peer's *confirmed* endpoint, so a walk
+/// step that only moves where this node sends does not move a route. The route follows once an
+/// authenticated packet arrives from the walked address, which is exactly when the walk finds it.
 async fn run_worker(
     mut commands: UnboundedReceiver<WorkerCommand>,
     mut state: RuntimeState,
@@ -784,17 +820,26 @@ async fn run_worker(
     let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
     endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
+    // A restored configuration may already carry candidates; no session predates it.
+    state.refresh_walks(&BTreeMap::new()).await;
     // Hands the peers' confirmed endpoints to the admission guard's reserve on a change.
     let mut confirmed_feed = ConfirmedEndpointFeed::default();
     loop {
+        let next_walk = state.walks.next_due();
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
-                    let result = state.apply(*config).await;
-                    if result.is_ok() {
+                    let before = state.engine_addresses(&config).await;
+                    let result = state.apply(*config, &before).await;
+                    let applied = result.is_ok();
+                    if applied {
                         observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
                     }
                     let _ = reply.send(result);
+                    // After the reply: a walk reads the counters once, off the apply path.
+                    if applied {
+                        state.refresh_walks(&before).await;
+                    }
                 }
                 Some(WorkerCommand::SetMtu { mtu, reply }) => {
                     let _ = reply.send(state.update_mtu(mtu));
@@ -862,6 +907,9 @@ async fn run_worker(
             }
             () = restart_due(state.restart_at), if state.restart_at.is_some() => {
                 state.restart().await;
+            }
+            () = crate::candidate_walks::walk_due(next_walk), if next_walk.is_some() => {
+                state.step_walks().await;
             }
         }
     }
@@ -990,8 +1038,9 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Install a relay endpoint on the peer whose key currently owns its host routes.
-    #[cfg(feature = "relay")]
+    /// Install `endpoint` on the peer whose key currently owns its host routes: a relay address,
+    /// or the next direct-path candidate of a walk (#515). Keys, routes and keepalive stay as the
+    /// configuration says; only the address the next packet goes to changes.
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         let policy = self
             .config
@@ -1014,12 +1063,136 @@ impl RuntimeState {
             .ok_or(io::ErrorKind::NotConnected)?
             .write(async |device| device.add_or_update_peers(peers).await)
             .await
-            .map_err(|_| io::Error::other("GotaTun relay endpoint could not be installed."))
+            .map_err(|_| io::Error::other("GotaTun peer endpoint could not be installed."))
+    }
+
+    /// Bring the candidate walks in line with the applied configuration (#515): drop walks whose
+    /// peer left, start one for each peer that is new or changed, and start again for a peer
+    /// whose walk once found it and whose path has since gone silent.
+    ///
+    /// A peer that is unchanged keeps its walk, finished or not (J585 F4). `apply` re-installs a
+    /// peer, and with it the first candidate, only when the peer itself changed, so an unrelated
+    /// snapshot never sends a working peer back through its list. `before` holds where the engine
+    /// sent each peer's packets before that apply ([`Self::engine_addresses`]). A re-installed
+    /// peer's live session proves its first candidate only if the engine was already there: after
+    /// a change to the rest of its list, the session may live on a later candidate (J602 F1).
+    /// `apply` keeps the engine on such a candidate while the new list still holds it
+    /// ([`kept_address`], J699 P3-3), and moves it to the first one otherwise.
+    ///
+    /// A relayed peer gets no walk while the engine sends to its relay (J699 P3-1, [`on_relay`]).
+    ///
+    /// Each walk that starts running begins with a real handshake on its address
+    /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
+    ///
+    /// Cost: at most one counter read per applied snapshot, on the worker after the apply reply;
+    /// [`Self::engine_addresses`] adds one before the apply only when the snapshot changes a
+    /// walking or relayed peer. No timer runs for a finished walk, so an idle node stays idle
+    /// (D81). Known follow-up (J699 P3-2, D393): once any walk has found its peer, `watching` is
+    /// true, so every applied snapshot reads every peer's counters, an O(peers) read not yet
+    /// measured at 1,000 and 4,096 peers. #515 holds the measurement plan; a per-walk "earliest
+    /// silent deadline" would skip the read until a found walk can actually have gone silent.
+    async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
+        let Some(config) = self.config.as_ref() else {
+            self.walks.clear();
+            self.relayed.clear();
+            return;
+        };
+        let members: BTreeSet<PublicKey> = config
+            .peers
+            .values()
+            .map(|policy| active_peer_key(&policy.peer))
+            .collect();
+        self.relayed.retain(|key, _| members.contains(key));
+        // `walking_peers` keeps only peers with network access, the ones `peers_for_config`
+        // installs.
+        let mut wanted = crate::candidate_walks::walking_peers(config.peers.values());
+        if !self.walks.prepare(&wanted) {
+            return;
+        }
+        let Ok(counters) = self.counters().await else {
+            return;
+        };
+        let observed = observed(&counters);
+        // A relayed peer is not walked off its relay (J699 P3-1).
+        wanted.retain(|key, _| {
+            let engine_at = observed.get(key).and_then(|seen| seen.endpoint);
+            let relayed = on_relay(engine_at, self.relayed.get(key).copied());
+            if relayed {
+                self.walks.abandon(*key);
+            }
+            !relayed
+        });
+        let started = self
+            .walks
+            .start(wanted, &observed, before, std::time::Instant::now());
+        // A walk starts on the engine's address when that is on the list (J602 F2), else on the
+        // first candidate, which a re-installed peer already has. Anything else is moved there,
+        // or the walk's first tick would read the engine's address as the peer having roamed.
+        // Then the walk's address gets a real handshake, so a working one answers at once.
+        for walk in started {
+            if walk.engine_at != Some(walk.address)
+                && self.set_endpoint(walk.key, walk.address).await.is_err()
+            {
+                // The engine could not be moved; the next applied snapshot starts the walk again.
+                self.walks.abandon(walk.key);
+                continue;
+            }
+            let _ = self.rehandshake(walk.key);
+        }
+    }
+
+    /// Where the engine sends each peer's packets before `next` is applied, by device key, for
+    /// [`Self::refresh_walks`] (J602 F1).
+    ///
+    /// Read only when `next` changes a peer that walks or is relayed, because only then can
+    /// `apply` keep a re-installed peer's address ([`kept_address`]). Every other snapshot reads
+    /// nothing here.
+    async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, Option<SocketAddr>> {
+        let watched = |peer: &crate::dataplane::Peer| {
+            !peer.candidates.is_empty() || self.relayed.contains_key(&active_peer_key(peer))
+        };
+        if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, watched) {
+            return BTreeMap::new();
+        }
+        self.counters()
+            .await
+            .map(|counters| {
+                counters
+                    .into_iter()
+                    .map(|(key, counters)| (key, counters.endpoint))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Step every due walk with the peers' counters and install the addresses they move to. A
+    /// stopped device has no counters to judge by, so nothing moves until it is back.
+    async fn step_walks(&mut self) {
+        if self.device.is_none() {
+            return;
+        }
+        let Ok(counters) = self.counters().await else {
+            return;
+        };
+        let moves = self
+            .walks
+            .step(std::time::Instant::now(), &observed(&counters));
+        for (key, endpoint) in moves {
+            if self.set_endpoint(key, endpoint).await.is_ok() {
+                let _ = self.rehandshake(key);
+            } else {
+                // The engine still holds the old address; the walk's next step tries again.
+                self.walks.install_failed(key);
+            }
+        }
     }
 
     /// Prepare a peer for relayed traffic while preserving any session it already established.
     #[cfg(feature = "relay")]
     async fn prepare_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        // From here the relay owns this peer's address: no walk moves it (J699 P3-1).
+        self.walks.abandon(key);
+        self.relayed.insert(key, endpoint);
         // GotaTun records a handshake as soon as either side derives a session, including a
         // responder that has just answered a relayed initiation. Keep that session.
         let has_session = self
@@ -1058,16 +1231,54 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("GotaTun relay peer could not be reset."))
     }
 
+    /// Point `key` at a relay `endpoint` and start a handshake through it at once.
     #[cfg(feature = "relay")]
     async fn force_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        self.walks.abandon(key);
+        self.relayed.insert(key, endpoint);
         self.set_endpoint(key, endpoint).await?;
+        self.initiate(key)
+    }
+
+    /// Send a handshake initiation to `key`'s current address now, unless it has a live session
+    /// or an initiation is already in flight, without waiting for it. Only the relay path uses it.
+    #[cfg(feature = "relay")]
+    fn initiate(&mut self, key: PublicKey) -> io::Result<()> {
+        self.spawn_handshake(key, false)
+    }
+
+    /// Send a new handshake initiation to `key`'s current address now, even over a live session,
+    /// without waiting for it (#515, J604).
+    ///
+    /// A new address on a peer sends nothing by itself: the engine only uses it for the next
+    /// packet, and an idle peer has none for up to a keepalive interval. Behind a filtering NAT
+    /// that first packet is what opens this side for the peer's replies, so a changed or walked
+    /// address starts a handshake at once. `initiate` cannot do it: the engine's forced
+    /// handshake sends nothing while the session is younger than two minutes, which is exactly
+    /// the rebind case (J587's finding). The engine's `rehandshake` sends the initiation its
+    /// rekey retry would send, and keeps the session carrying data until the new one is up, so
+    /// a working session is never dropped. An unanswered initiation is retried by the engine's
+    /// own rekey timer, to wherever the endpoint is by then; nothing new is scheduled here.
+    fn rehandshake(&mut self, key: PublicKey) -> io::Result<()> {
+        self.spawn_handshake(key, true)
+    }
+
+    /// The body of `initiate` (`fresh` false, relay only) and [`Self::rehandshake`].
+    fn spawn_handshake(&mut self, key: PublicKey, fresh: bool) -> io::Result<()> {
         let device = Arc::clone(self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?);
         let key = X25519PublicKey::from(key.0);
         // GotaTun sends the initiation, then waits for the session without holding its device
         // lock. Wait in a task: callers of this serialized loop block their own threads, and
         // the relay shim that must deliver the response may run on one of them.
         self.handshakes.spawn(async move {
-            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.force_handshake(&key)).await;
+            let wait = async {
+                if fresh {
+                    device.rehandshake(&key).await
+                } else {
+                    device.force_handshake(&key).await
+                }
+            };
+            let _ = tokio::time::timeout(HANDSHAKE_WAIT, wait).await;
         });
         Ok(())
     }
@@ -1131,7 +1342,11 @@ impl RuntimeState {
     /// The caller installs the new per-peer route MTUs before lowering the shared interface.
     /// # Errors
     /// Reports a missing TUN, route-netlink failure, or peer update failure.
-    async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+    async fn apply(
+        &mut self,
+        config: Config,
+        before: &BTreeMap<PublicKey, Option<SocketAddr>>,
+    ) -> io::Result<RuntimeInfo> {
         let mtu = crate::mesh_mtu::for_config(Some(&config));
         let previous_mtu = self
             .tun
@@ -1159,6 +1374,8 @@ impl RuntimeState {
                 .admission,
         );
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        // Re-installed peers that stay where the engine already sends ([`kept_address`]).
+        let mut kept = BTreeSet::new();
         let changed_policies = config
             .peers
             .iter()
@@ -1170,9 +1387,44 @@ impl RuntimeState {
                         .and_then(|old| old.peers.get(id))
                         .is_none_or(|old| !old.has_network_access() || old.peer != policy.peer)
             })
-            .map(|(_, policy)| peer_for_policy(policy))
+            .map(|(_, policy)| {
+                let mut peers = peer_for_policy(policy)?;
+                let key = active_peer_key(&policy.peer);
+                let engine_at = before.get(&key).copied().flatten();
+                let relay = self.relayed.get(&key).copied();
+                if let Some(at) = kept_address(&policy.peer, engine_at, relay)
+                    && let Some(active) = peers
+                        .iter_mut()
+                        .find(|peer| peer.public_key.as_bytes() == &key.0)
+                {
+                    active.endpoint = Some(at);
+                    kept.insert(key);
+                }
+                Ok(peers)
+            })
             .collect::<io::Result<Vec<_>>>()?;
         let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
+        // Peers that keep their access but get a new first address: tell them at once
+        // (`rehandshake`, which sends even over the live session the old address carried). A peer
+        // with candidates gets that handshake when its new walk starts (`refresh_walks`).
+        let readdressed: Vec<PublicKey> = config
+            .peers
+            .iter()
+            .filter(|(id, policy)| {
+                policy.has_network_access()
+                    && policy.peer.endpoint.is_some()
+                    && policy.peer.candidates.is_empty()
+                    && self
+                        .config
+                        .as_ref()
+                        .and_then(|old| old.peers.get(id))
+                        .is_some_and(|old| {
+                            old.has_network_access() && old.peer.endpoint != policy.peer.endpoint
+                        })
+            })
+            .map(|(_, policy)| active_peer_key(&policy.peer))
+            .filter(|key| !kept.contains(key))
+            .collect();
         let previous_keys = self
             .config
             .as_ref()
@@ -1189,7 +1441,8 @@ impl RuntimeState {
             // One device transaction: packet workers never see a half-applied snapshot.
             //
             // Known limit (J555 note, #483): `add_or_update_peers` overwrites every field of a
-            // changed peer, including the endpoint. When a snapshot changes a peer for another
+            // changed peer, including the endpoint, unless [`kept_address`] keeps a walking or
+            // relayed peer where it is. When a snapshot changes any other peer for another
             // reason (its access, addresses or rotation keys), the coordinator's endpoint, or
             // none, replaces an endpoint the device learned from that peer's authenticated
             // traffic after a NAT rebinding. The peer's next keepalive (at most 25 s) or data
@@ -1221,6 +1474,9 @@ impl RuntimeState {
         guard.set_configured_endpoints(configured_endpoints);
         drop(guard);
         self.config = Some(config);
+        for key in readdressed {
+            let _ = self.rehandshake(key);
+        }
         Ok(self.info.clone())
     }
 
@@ -1270,6 +1526,7 @@ impl RuntimeState {
         Ok(counters)
     }
 
+    /// Stop the device and drop the TUN, the configuration and every walk.
     async fn stop(&mut self) {
         // Ending every handshake task drops its device handle, so this one is the last.
         self.handshakes.abort_all();
@@ -1281,6 +1538,8 @@ impl RuntimeState {
         self.tun.take();
         self.config = None;
         self.restart_at = None;
+        self.walks.clear();
+        self.relayed.clear();
     }
 }
 
@@ -1535,15 +1794,6 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
     Ok(vec![previous_peer, current_peer])
 }
 
-/// Select the identity that currently owns this peer's host routes.
-fn active_peer_key(peer: &crate::dataplane::Peer) -> PublicKey {
-    if peer.previous_active {
-        peer.previous_key.unwrap_or(peer.key)
-    } else {
-        peer.key
-    }
-}
-
 /// Include every configured identity so cleanup removes only keys no longer in overlap.
 fn policy_keys(policy: &crate::dataplane::PeerPolicy) -> impl Iterator<Item = PublicKey> {
     std::iter::once(policy.peer.key).chain(policy.peer.previous_key)
@@ -1567,12 +1817,85 @@ fn admitted_peer_keys(config: &Config) -> BTreeSet<PublicKey> {
     peer_keys_with_network_access(config)
 }
 
+/// Turn a stored 32-byte private key into the engine's secret and this node's public key.
+///
+/// The raw bytes are copied into a zeroizing buffer, so the copy made for the conversion is
+/// wiped when it drops.
+/// # Errors
+/// Returns `InvalidData` when `bytes` is not exactly 32 bytes long.
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {
     let raw: [u8; 32] = bytes.try_into().map_err(|_| io::ErrorKind::InvalidData)?;
     let raw = zeroize::Zeroizing::new(raw);
     let secret = StaticSecret::from(*raw);
     let public = X25519PublicKey::from(&secret);
     Ok((secret, PublicKey(*public.as_bytes())))
+}
+
+/// Checks the two rules that keep a peer where the engine already sends (J699 P3-1, P3-3).
+#[cfg(test)]
+mod keep_tests {
+    #![allow(clippy::expect_used)]
+    use super::{kept_address, on_relay};
+    use crate::{
+        dataplane::Peer,
+        policy::model::{Addresses, PublicKey},
+    };
+    use std::net::SocketAddr;
+
+    /// Parse a fixture socket address.
+    fn at(address: &str) -> SocketAddr {
+        address.parse().expect("fixture address")
+    }
+
+    /// A walking peer whose list is `first` then `rest`.
+    fn walking(first: &str, rest: &[&str]) -> Peer {
+        Peer {
+            key: PublicKey([3; 32]),
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.1".parse().expect("peer IPv4"),
+                ipv6: "fd01::1".parse().expect("peer IPv6"),
+            },
+            endpoint: Some(at(first)),
+            candidates: rest.iter().map(|address| at(address)).collect(),
+        }
+    }
+
+    /// J699 P3-1: a peer on its relay (or mid-preparation, with no address) is not walked; one
+    /// the engine has moved elsewhere, or never relayed, is.
+    #[test]
+    fn a_relayed_peer_is_on_its_relay_until_the_engine_leaves_it() {
+        let relay = Some(at("127.0.0.1:40000"));
+        assert!(on_relay(relay, relay));
+        assert!(on_relay(None, relay), "preparing the relayed handshake");
+        assert!(!on_relay(Some(at("192.0.2.2:10254")), relay));
+        assert!(!on_relay(Some(at("192.0.2.2:10254")), None));
+        assert!(!on_relay(None, None));
+    }
+
+    /// J699 P3-1: a re-install keeps a relayed peer on its relay, which no list ever holds.
+    #[test]
+    fn a_reinstall_keeps_a_relayed_peer_on_its_relay() {
+        let relay = at("127.0.0.1:40000");
+        let peer = walking("192.0.2.2:10254", &["198.51.100.2:10254"]);
+        assert_eq!(kept_address(&peer, Some(relay), Some(relay)), Some(relay));
+        let single = walking("192.0.2.2:10254", &[]);
+        assert_eq!(kept_address(&single, Some(relay), Some(relay)), Some(relay));
+    }
+
+    /// J699 P3-3: a re-install keeps a walking peer on an address its new list still holds, and
+    /// takes the snapshot's first address when the list dropped the engine's or has one entry.
+    #[test]
+    fn a_reinstall_keeps_a_found_address_the_list_still_holds() {
+        let peer = walking("10.0.0.2:10254", &["198.51.100.2:10254", "198.51.100.2:9"]);
+        let found = at("198.51.100.2:10254");
+        assert_eq!(kept_address(&peer, Some(found), None), Some(found));
+        assert_eq!(kept_address(&peer, Some(at("203.0.113.1:1")), None), None);
+        assert_eq!(kept_address(&peer, None, None), None);
+        let single = walking("10.0.0.2:10254", &[]);
+        assert_eq!(kept_address(&single, Some(at("203.0.113.1:1")), None), None);
+    }
 }
 
 /// Checks engine selection, `GotaTun` peer conversion, and mesh-link lifecycle behavior.
@@ -1819,6 +2142,8 @@ mod tests {
             },
             health: Arc::clone(&health),
             restart_at: None,
+            walks: crate::candidate_walks::Walks::default(),
+            relayed: BTreeMap::new(),
         };
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
         let endpoint_refresh = Arc::new(EndpointRefreshSignal::default());
@@ -1884,6 +2209,7 @@ mod tests {
                             ipv6: "fd01::1".parse().expect("peer IPv6"),
                         },
                         endpoint,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1941,6 +2267,8 @@ mod tests {
         assert!(filter_ip_packet(packet, &filter, Direction::HostToMesh).is_none());
     }
 
+    /// A coordinator peer becomes one `GotaTun` peer with its key, address, host routes and the
+    /// keepalive for its role.
     #[test]
     fn peer_conversion_uses_coordinator_keys_endpoints_and_host_allowed_ips() {
         let endpoint: SocketAddr = "192.0.2.4:51831".parse().expect("endpoint");
