@@ -13,6 +13,7 @@ import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { registerGlassGrid, type GlassGridRead } from "../../../packages/ui/src/glass-under";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -604,6 +605,7 @@ export class TerminalClient {
       client.remeasureFont();
       client.keepLigaturesOff();
       client.installCursorLayerHook();
+      client.registerGlass();
       client.loadStyledFaces();
       // An already opened terminal has paid the same first-renderer cost. Also
       // supersede an optional warm-up still waiting for resources on this font.
@@ -1023,6 +1025,8 @@ export class TerminalClient {
     this.pendingLinkRows.clear();
     this.forcedLinkRows.clear();
     this.disposeTouch();
+    this.unregisterGlass?.();
+    this.glassListeners.clear();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
@@ -2566,6 +2570,67 @@ export class TerminalClient {
     if (!hidden && cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
   }
 
+  /** Glass cards open over this screen, each called after a render pass (glass-under.ts); empty almost always. */
+  private readonly glassListeners = new Set<() => void>();
+  /** Takes this screen out of the glass registry (see {@link registerGlass}). */
+  private unregisterGlass: (() => void) | undefined;
+
+  /**
+   * Lets glass cards read what this screen shows under them (`packages/ui/src/glass-under.ts`): the registry holds the host,
+   * a card over it subscribes to render passes only while it is open, and nothing here runs otherwise.
+   */
+  private registerGlass(): void {
+    this.unregisterGlass = registerGlassGrid({
+      element: this.config.host,
+      subscribe: (listener) => { this.glassListeners.add(listener); return () => { this.glassListeners.delete(listener); }; },
+      read: (rect, base) => this.readGlassCells(rect, base),
+    });
+  }
+
+  /**
+   * The cells of the visible screen under `rect`, as the colour each shows to the glass. A cell shows its background (its
+   * foreground when inverted); a default-background cell stands for `base`, which is what the window shows there. A cell
+   * holding a character mixes in a fifth of its text colour, the share of a cell that glyph strokes cover once blurred.
+   * Reads the buffer, never the canvas, so there is no pixel readback.
+   */
+  private readGlassCells(rect: DOMRect, base: readonly [number, number, number]): GlassGridRead | null {
+    const canvas = this.ghostty.renderer?.getCanvas();
+    const { cols, rows } = this.terminal;
+    if (!canvas || !cols || !rows) return null;
+    const box = canvas.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return null;
+    const cellW = box.width / cols, cellH = box.height / rows;
+    const c0 = Math.min(cols - 1, Math.max(0, Math.floor((rect.left - box.left) / cellW)));
+    const c1 = Math.min(cols - 1, Math.max(c0, Math.ceil((rect.right - box.left) / cellW) - 1));
+    const r0 = Math.min(rows - 1, Math.max(0, Math.floor((rect.top - box.top) / cellH)));
+    const r1 = Math.min(rows - 1, Math.max(r0, Math.ceil((rect.bottom - box.top) / cellH) - 1));
+    const buffer = this.terminal.buffer.active;
+    const first = buffer.length - rows - buffer.viewportY;
+    const theme = (this.ghostty.renderer as unknown as { themeBackgroundRgb?: number[] } | undefined)?.themeBackgroundRgb;
+    const defaultBg = theme ? (theme[0]! << 16) | (theme[1]! << 8) | theme[2]! : -1;
+    const out = new Uint8Array((r1 - r0 + 1) * (c1 - c0 + 1) * 3);
+    let at = 0;
+    for (let r = r0; r <= r1; r++) {
+      const line = buffer.getLine(first + r);
+      for (let c = c0; c <= c1; c++) {
+        const cell = line?.getCell(c);
+        let bg = base[0] << 16 | base[1] << 8 | base[2], fg = bg, ink = false;
+        if (cell) {
+          const inverse = cell.isInverse() !== 0;
+          const back = inverse ? cell.getFgColor() : cell.getBgColor(), front = inverse ? cell.getBgColor() : cell.getFgColor();
+          if (back !== defaultBg) bg = back;
+          fg = front === defaultBg ? bg : front;
+          ink = cell.getCodepoint() > 32 && cell.isInvisible() === 0;
+        }
+        for (let shift = 16; shift >= 0; shift -= 8) {
+          const b = (bg >> shift) & 255;
+          out[at++] = ink ? Math.round(b * 0.8 + ((fg >> shift) & 255) * 0.2) : b;
+        }
+      }
+    }
+    return { x: box.left + c0 * cellW, y: box.top + r0 * cellH, cellW, cellH, cols: c1 - c0 + 1, rows: r1 - r0 + 1, rgb: out };
+  }
+
   /** Wraps the renderer once: the cursor draw honours the hidden flag, and the cursor layer follows every pass. */
   private installCursorLayerHook(): void {
     const renderer = this.ghostty.renderer;
@@ -2583,6 +2648,7 @@ export class TerminalClient {
       if (changedRows) this.queueLinkRows(changedRows.rows, changedRows.force);
       this.renderPasses += 1;
       this.syncCursorLayer();
+      for (const listener of this.glassListeners) listener();
     };
   }
 

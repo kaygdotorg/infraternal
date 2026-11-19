@@ -1,5 +1,6 @@
 /** Curated UI and terminal palettes; one theme keeps both color systems coherent. */
 import { entityPaletteCss } from "./entity-palette";
+import { watchGlassSurfaces } from "./glass-under";
 import { ANY_BACKDROP, MAX_DRIFT, MAX_SHIFT, hexToRgb, luminanceOf, solveGlass, type BackdropRange, type GlassFills, type GlassRole, type GlassSolution, type Rgb } from "./glass-contrast";
 
 import { contrastRatio } from "./color";
@@ -324,7 +325,8 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
  */
 let levelRules = false;
 /** Every element that reads the card tint (see styles.css, tooltip.ts and the key tray's lock mark). */
-const TINT_USERS = ".ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button";
+/** The elements the glass rules style, and the ones `glass-under.ts` watches. */
+export const TINT_USERS = ".ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button";
 function installLevelRules(): void {
   if (levelRules || typeof CSSStyleSheet === "undefined") return;
   levelRules = true;
@@ -355,7 +357,7 @@ function installLevelRules(): void {
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
 }
 
-/** Names of the glass variables a backdrop sampler may write on a `data-glass-under` element (see `glass-adapt.ts`). */
+/** Names of the glass variables a backdrop sampler may write on a `data-glass-under` element (see `glass-adapt.on-demand.ts`). */
 export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", role: (role: string): string => `--ui-glass-adapt-${role}` } as const;
 
 /** The one adopted sheet that holds the glass contrast rules; created on first use and rewritten on a theme change. */
@@ -412,6 +414,7 @@ export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT
   installLevelRules();
   installGlassRules(active);
   applied = { theme: active, level: cardLevel };
+  watchGlassSurfaces();
   root.dataset.scheme = active.dark ? "dark" : "light";
   root.dataset.card = levelName(cardLevel).toLowerCase();
   root.dataset.windowLevel = levelName(windowLevel).toLowerCase();

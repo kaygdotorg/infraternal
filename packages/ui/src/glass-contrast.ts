@@ -22,7 +22,7 @@
  * card and not a grey slab.
  *
  * Everything here is pure arithmetic on `#rrggbb` strings. It runs when a theme is applied (`themes.ts`) and when a
- * backdrop is sampled (`glass-adapt.ts`), never per frame. The audit test (`glass-contrast.test.ts`) calls the same
+ * backdrop is sampled (`glass-adapt.on-demand.ts`), never per frame. The audit test (`glass-contrast.test.ts`) calls the same
  * functions, so the guarantee and the shipped values cannot drift apart.
  */
 import { hexToOklab, oklabToHex } from "./color";
