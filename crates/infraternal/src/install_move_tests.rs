@@ -613,6 +613,7 @@ fn review_j912_verifies_a_hardened_user_server() {
         crate::harden_startup().unwrap();
         let database = File::open(path).unwrap();
         writeln!(io::stdout(), "\n{open_marker}").unwrap();
+        io::stdout().flush().unwrap();
         let mut line = String::new();
         io::stdin().read_line(&mut line).unwrap();
         assert!(database.metadata().unwrap().is_file());
@@ -631,8 +632,8 @@ fn review_j912_verifies_a_hardened_user_server() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let stdout = BufReader::new(child.stdout.take().unwrap());
-    let opened = stdout
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let opened = (&mut stdout)
         .lines()
         .any(|line| line.is_ok_and(|line| line == open_marker));
     let systemctl = fixture.root.join("systemctl");
