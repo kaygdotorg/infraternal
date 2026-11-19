@@ -41,6 +41,9 @@ thread_local! {
     /// Underlay route lookups this thread made, so tests can show which refreshes probed the
     /// underlay without timing them (#489 J552 P2-2).
     pub(crate) static ROUTE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// One-shot checkpoint for a namespace test to change route state during its next lookup.
+    pub(crate) static BEFORE_ROUTE_LOOKUP: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
     /// How many of this thread's next underlay route lookups fail as if the kernel refused them,
     /// so tests can show what a refresh does after a failed lookup (#489 J609 P3).
     pub(crate) static FAIL_ROUTE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -139,6 +142,10 @@ impl EndpointProbe {
     fn route_mtu(&mut self, endpoint: SocketAddr) -> io::Result<u32> {
         #[cfg(test)]
         ROUTE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+        #[cfg(test)]
+        if let Some(before) = BEFORE_ROUTE_LOOKUP.take() {
+            before();
+        }
         #[cfg(test)]
         if FAIL_ROUTE_LOOKUPS.with(|failures| {
             let remaining = failures.get();

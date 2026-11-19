@@ -121,6 +121,67 @@ fn inactive_engines_refuse_rotation_without_reading_or_mutating_state() {
     );
 }
 
+/// A committed D166 key must be accepted as the binding of the next config delta.
+#[test]
+fn config_delta_can_advance_the_local_key_after_rotation_commit() {
+    use crate::policy::model::{Addresses, NodeId};
+    let previous_key = Key::generate().expect("previous key").1;
+    let candidate_key = Key::generate().expect("candidate key").1;
+    let previous = Config {
+        authority_epoch: None,
+        rotation_operation: None,
+        local_key: Some(previous_key),
+        server: Some(NodeId(1)),
+        node: NodeId(2),
+        #[cfg(feature = "mesh-dns")]
+        name: None,
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+        version: 4,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().expect("IPv4"),
+            ipv6: "fd01::2".parse().expect("IPv6"),
+        },
+        default_policy: crate::dataplane::DefaultPolicy::Allow,
+        exposure: None,
+        peers: BTreeMap::new(),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: std::collections::BTreeMap::new(),
+    };
+    let mut next = previous.clone();
+    next.local_key = Some(candidate_key);
+    next.version = 5;
+    let mut chunk = crate::configuration::chunks(Some(&previous), &next)
+        .expect("coordinator delta")
+        .remove(0);
+    // Stop after the binding stage so this unit test does not configure a real interface.
+    chunk.last = false;
+    let mut node = Node {
+        identity: Some(Identity {
+            compact_access: true,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: cfg!(target_os = "linux"),
+            key_rotation: true,
+            authority_epoch: true,
+            rotation_continuity: true,
+            public_key: candidate_key,
+            port: 44000,
+        }),
+        config: Some(previous),
+        ..Node::default()
+    };
+
+    assert!(!node.stage(chunk).expect("stage committed key binding"));
+    assert_eq!(
+        node.pending
+            .as_ref()
+            .expect("complete staged config")
+            .config
+            .local_key,
+        Some(candidate_key)
+    );
+}
+
 /// A staged snapshot cannot change the server's identity.
 #[test]
 fn server_identity_cannot_change_inside_a_staged_snapshot() {
