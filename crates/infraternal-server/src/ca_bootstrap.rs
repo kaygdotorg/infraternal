@@ -332,6 +332,7 @@ pub fn install(source: &Arc<MemoryCaSource>, material: CaMaterial) -> Result<(),
     source.provision(material)
 }
 
+/// Tests for creating and checking bootstrap certificate material.
 #[cfg(test)]
 mod tests {
     use super::*;

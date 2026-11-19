@@ -443,6 +443,7 @@ fn private_health_ping_rejects_an_unhealthy_response() {
     server.join().expect("health fixture thread");
 }
 
+/// Reports a running proxy unhealthy when its private health check never succeeds.
 #[test]
 fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
     const HEALTHY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
