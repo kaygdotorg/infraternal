@@ -1330,8 +1330,11 @@ impl RouteMonitor {
                     Ok(length) => length,
                     Err(nix::errno::Errno::ENOBUFS) => {
                         let now = Instant::now();
-                        loss.get_or_insert_with(|| NotificationLoss::new(now))
-                            .received(now);
+                        let pending = loss.get_or_insert_with(|| NotificationLoss::new(now));
+                        // Clear the stale queue in one batch. Traffic arriving after the
+                        // drain still belongs to this recovery until the quiet deadline.
+                        self.discard_queued_notifications();
+                        pending.received(Instant::now());
                         continue;
                     }
                     Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
@@ -1379,6 +1382,17 @@ impl RouteMonitor {
     /// nothing). Route budgets are always re-derived, and the caller asks for a full inventory
     /// check, since a lost notification may have been a deleted peer route.
     fn lost_notifications(&mut self) {
+        self.discard_queued_notifications();
+        if self.books.resync(self.interface_index) {
+            self.announce.changed();
+        }
+        self.underlay.changed();
+        #[cfg(test)]
+        OVERFLOW_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Drop stale datagrams in one bounded batch before returning to poll or rebuilding state.
+    fn discard_queued_notifications(&mut self) {
         // Bounded, so a storm that refills the queue as fast as it drains cannot hold us here.
         for _ in 0..LOST_NOTIFICATION_DRAIN_LIMIT {
             match recv(
@@ -1390,12 +1404,10 @@ impl RouteMonitor {
                 Err(_) => break,
             }
         }
-        if self.books.resync(self.interface_index) {
-            self.announce.changed();
-        }
-        self.underlay.changed();
         #[cfg(test)]
-        OVERFLOW_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some(after) = AFTER_NOTIFICATION_DRAIN.take() {
+            after();
+        }
     }
 }
 
@@ -1439,6 +1451,13 @@ pub(crate) static OVERFLOW_RECOVERIES: std::sync::atomic::AtomicUsize =
 /// How many queued datagrams an overflow recovery discards at most before it re-reads the host.
 /// The default receive buffer holds a few hundred; the bound only matters in an endless storm.
 const LOST_NOTIFICATION_DRAIN_LIMIT: usize = 4096;
+
+#[cfg(test)]
+thread_local! {
+    /// Run the trailing portion of a namespace fixture's burst after the socket drains.
+    static AFTER_NOTIFICATION_DRAIN: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
 
 /// What one or more kernel notifications mean for the mesh.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3410,12 +3429,12 @@ mod endpoint_announce_tests {
         }
     }
 
-    /// Run one `ip -batch` of `verb` lines for 20,000 unrelated /32 routes via `d0`, as a
-    /// routing daemon loading or dropping a table does.
-    fn route_storm(verb: &str) {
+    /// Run one `ip -batch` for unrelated /32 routes via `d0`, as a routing daemon loading or
+    /// dropping a table does.
+    fn route_storm(verb: &str, count: u32) {
         use std::fmt::Write as _;
         let mut batch = String::new();
-        for index in 0..20_000_u32 {
+        for index in 0..count {
             let [_, high, middle, low] = index.to_be_bytes();
             writeln!(
                 batch,
@@ -3447,6 +3466,33 @@ mod endpoint_announce_tests {
         assert_eq!(loss.due(), start + Duration::from_millis(250));
     }
 
+    /// A second overflow after the first drain belongs to the same burst until recovery
+    /// starts. The two phases add and remove the same routes, so only one inventory pass
+    /// is due and there is no endpoint change to announce.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn overflow_coalesces_when_the_burst_refills_the_queue() {
+        use nix::sys::socket::{setsockopt, sockopt};
+        use std::sync::atomic::Ordering;
+
+        let mut listener = namespace();
+        setsockopt(&listener.monitor.fd, sockopt::RcvBuf, &4096).unwrap();
+        route_storm("add", 256);
+        let before = OVERFLOW_RECOVERIES.load(Ordering::Acquire);
+        AFTER_NOTIFICATION_DRAIN.set(Some(Box::new(|| route_storm("del", 256))));
+        read_everything(&mut listener);
+        assert!(
+            AFTER_NOTIFICATION_DRAIN.take().is_none(),
+            "the socket overflowed"
+        );
+        assert_eq!(
+            OVERFLOW_RECOVERIES.load(Ordering::Acquire) - before,
+            1,
+            "the queue refill is part of the same burst"
+        );
+        assert!(!listener.announce.take_for_test());
+    }
+
     /// #483 J707 P2: a route storm overflows the notification socket while the listener is
     /// busy. The overflow is reported as `POLLERR`; the listener must read it as `ENOBUFS`,
     /// recover, and announce, both when the storm adds routes and when it removes them (the
@@ -3459,7 +3505,7 @@ mod endpoint_announce_tests {
     #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
     fn namespace_route_storm_overflow_still_announces() {
         let mut listener = namespace();
-        route_storm("add");
+        route_storm("add", 20_000);
         read_everything(&mut listener);
         assert!(
             listener.announce.take_for_test(),
@@ -3470,7 +3516,7 @@ mod endpoint_announce_tests {
             !listener.announce.take_for_test(),
             "the listener kept announcing after the storm ended"
         );
-        route_storm("del");
+        route_storm("del", 20_000);
         read_everything(&mut listener);
         assert!(
             listener.announce.take_for_test(),
@@ -3486,8 +3532,8 @@ mod endpoint_announce_tests {
     #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
     fn overflow_with_no_net_change_is_quiet() {
         let mut listener = namespace();
-        route_storm("add");
-        route_storm("del");
+        route_storm("add", 20_000);
+        route_storm("del", 20_000);
         read_everything(&mut listener);
         assert!(
             !listener.announce.take_for_test(),
@@ -3502,7 +3548,7 @@ mod endpoint_announce_tests {
     #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
     fn address_change_lost_in_overflow_announces() {
         let mut listener = namespace();
-        route_storm("add");
+        route_storm("add", 20_000);
         ip(&[
             "-6",
             "addr",
@@ -3516,7 +3562,7 @@ mod endpoint_announce_tests {
             "preferred_lft",
             "0",
         ]);
-        route_storm("del");
+        route_storm("del", 20_000);
         read_everything(&mut listener);
         assert!(
             listener.announce.take_for_test(),
