@@ -55,3 +55,28 @@ Logs live on dev-02 under
 `independent.log`, `short-step-original.log`, `clock-disagreement-candidate.log`,
 `fork-followup-run.log` and `fork-lib.log`. Product and native Mac gate receipts
 are tracked on #260.
+
+## P3. Packet order within a run can concentrate every mark on one inner flow
+
+The device samples one dequeue time per ordered receive run. An independent
+test supplies 12,000 runs at 80 µs intervals with 32 packets per run. Eight
+equal ECT flows each contribute four 1,400-byte packets to every run. The
+offered inner rate is 4.48 Gbit/s and all receive ages are 3 ms.
+
+| Flow at the head of each run | Marks per flow |
+| --- | --- |
+| Fixed | 2326, 0, 0, 0, 0, 0, 0, 0 |
+| Rotated | 277, 286, 288, 316, 283, 279, 296, 301 |
+
+Both fork pins, `abc97d5` and `08a9cdc`, produce the identical result.
+Each independently fails the assertion that all eight equal senders get
+some marks in the fixed-order trace. This receive-run selection bias exists
+in the predecessor. The earlier eight-flow test advances time after each
+packet, so it misses the device's clock granularity. The replay establishes
+deterministic controller behavior. It does not measure how often the packet
+order occurs on real sockets or how TCP senders respond.
+
+Track the within-peer bias separately from the episode repair. The bounded
+small-packet allowance and separate per-peer state remain correct.
+[j891-d397-run-fairness.patch](j891-d397-run-fairness.patch) preserves the
+trace. Evidence resides in `fairness-{08a9cdc,abc97d5}.log` on dev-02.
