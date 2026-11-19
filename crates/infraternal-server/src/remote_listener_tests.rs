@@ -385,6 +385,72 @@ async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usa
     drop(primary);
 }
 
+/// A fresh listener restores enrolled access from the ledger and refuses the same certificate after removal.
+#[tokio::test]
+async fn fresh_listener_admits_enrolled_host_but_never_readmits_removed_host() {
+    let (server, node, root, _) = identities();
+    let (store, pool, host_id, fingerprint) = super::revocation::admitted_store(&node, &root).await;
+    for _ in 0..2 {
+        let hosts = RemoteHosts::default();
+        let listener = RemoteListeners::start(
+            "127.0.0.1:0".parse().unwrap(),
+            &server,
+            std::slice::from_ref(&root),
+            EnrollmentStore::new(pool.clone()),
+            hosts.clone(),
+        )
+        .await
+        .unwrap();
+        let peer = control(listener.local_addr().unwrap(), "127.0.0.1:0", &node, &root).await;
+        assert!(hosts.actor(host_id).await.is_some());
+        drop((peer, listener));
+    }
+    store.revoke("owner", host_id, now().unwrap()).await.unwrap();
+
+    let cold_store = EnrollmentStore::new(pool.clone());
+    assert!(cold_store.admit(&fingerprint, now().unwrap()).await.is_err());
+    let hosts = RemoteHosts::default();
+    let listener = RemoteListeners::start(
+        "127.0.0.1:0".parse().unwrap(),
+        &server,
+        std::slice::from_ref(&root),
+        cold_store,
+        hosts.clone(),
+    )
+    .await
+    .unwrap();
+    let config = remote_tls::client_config(&node, std::slice::from_ref(&root)).unwrap();
+    let attempt = async {
+        let connection = remote_tls::dial(listener.local_addr().unwrap(), "localhost", &config)
+            .await?;
+        Transmit::default()
+            .send(
+                &connection.channel,
+                0,
+                &Frame::Hello {
+                    version: 1,
+                    caps: remote_quic::REMOTE_WRITER_BINDING,
+                    client_info: "fixture",
+                },
+            )
+            .await?;
+        Receive::default().next(&connection.channel).await.map(|_| ())
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), attempt)
+            .await
+            .expect("removed identity was not disconnected")
+            .is_err(),
+        "removed identity received application data"
+    );
+    assert!(hosts.actor(host_id).await.is_none());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_hosts")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "listener restarts must not enroll a second host");
+}
+
 /// Round-trips one control Ping on the admitted connection.
 async fn ping(channel: &NativeChannel, receive: &mut Receive, nonce: u64) {
     Transmit::default()

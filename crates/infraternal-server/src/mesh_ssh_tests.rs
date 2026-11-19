@@ -152,7 +152,7 @@ fn host_key_fixture(subject: u8) -> PublicKey {
 async fn embedded_agent_restart_recertifies_the_new_host_key() {
     let plugin = fixture_with_ca(Arc::new(crate::ca::tests::source(true))).await;
     // The mesh snapshot needs its coordinator node; the server's own host has no person key.
-    plugin
+    let (coordinator, _) = plugin
         .store
         .attach_named(
             "server",
@@ -163,6 +163,13 @@ async fn embedded_agent_restart_recertifies_the_new_host_key() {
         )
         .await
         .unwrap();
+    let config = plugin.store.config(coordinator).await.unwrap();
+    let mut expected_principals = Vec::new();
+    if let Some(exposure) = config.exposure {
+        expected_principals.push(format!("{}.{}", exposure.machine_name, exposure.dns_suffix));
+        expected_principals.push(exposure.machine_name);
+    }
+    expected_principals.extend([config.addresses.ipv4.to_string(), config.addresses.ipv6.to_string()]);
     let old_host_key = host_key_fixture(17);
     sqlx::query("INSERT INTO mesh_ssh_hosts(host, enabled) VALUES (?, 1)")
         .bind("server")
@@ -173,7 +180,7 @@ async fn embedded_agent_restart_recertifies_the_new_host_key() {
     let node = Arc::new(RestartableNode::new(
         "server".to_owned(),
         true,
-        old_host_key,
+        old_host_key.clone(),
     ));
     let task = tokio::spawn(plugin.node_connected(node.clone()).unwrap());
     node.wait_configurations(1).await;
@@ -184,13 +191,28 @@ async fn embedded_agent_restart_recertifies_the_new_host_key() {
     node.wait_configurations(2).await;
 
     let configurations = node.configurations.lock().await;
+    let previous = Certificate::from_openssh(
+        configurations[0]["host_certificate"]
+            .as_str()
+            .expect("initial configuration has a host certificate"),
+    )
+    .expect("initial certificate parses");
     let certificate = Certificate::from_openssh(
         configurations[1]["host_certificate"]
             .as_str()
             .expect("restart has a host certificate"),
     )
     .expect("restart certificate parses");
+    assert_eq!(previous.public_key(), old_host_key.key_data());
+    expected_principals.sort();
+    let mut previous_principals = previous.valid_principals().to_vec();
+    previous_principals.sort();
+    let mut replacement_principals = certificate.valid_principals().to_vec();
+    replacement_principals.sort();
+    assert_eq!(previous_principals, expected_principals);
+    assert_eq!(replacement_principals, expected_principals);
     assert_eq!(certificate.public_key(), new_host_key.key_data());
+    assert_ne!(certificate.public_key(), previous.public_key());
     assert_eq!(
         node.host_key_requests
             .load(std::sync::atomic::Ordering::SeqCst),
