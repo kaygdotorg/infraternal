@@ -177,6 +177,7 @@ fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
 fn aad(user: &str, kind: &str) -> Vec<u8> {
     format!("infraternal/keywrap/v1|{user}|{kind}").into_bytes()
 }
+/// Build the browser key-wrap fixture with the production envelope and HKDF context.
 fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
     let salt = rand::random::<[u8; 32]>();
     let nonce = rand::random::<[u8; 12]>();
@@ -188,7 +189,7 @@ fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
     let ciphertext = Aes256Gcm::new_from_slice(&key)
         .unwrap()
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             Payload {
                 msg: dek,
                 aad: &aad,
@@ -201,6 +202,7 @@ fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
         ciphertext: B64.encode(ciphertext),
     }
 }
+/// Decrypt a browser key-wrap fixture while authenticating its original account context.
 fn unwrap_browser(
     ikm: &[u8],
     wrap: &Wrap,
@@ -216,7 +218,7 @@ fn unwrap_browser(
         .expand(&aad, &mut key)
         .unwrap();
     Aes256Gcm::new_from_slice(&key).unwrap().decrypt(
-        Nonce::from_slice(&nonce),
+        &Nonce::from(<[u8; 12]>::try_from(nonce.as_slice()).unwrap()),
         Payload {
             msg: &ciphertext,
             aad: &aad,
@@ -541,6 +543,7 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
 }
 
 #[tokio::test]
+/// Verify recovery delay, cancellation and replacement revoke all obsolete capabilities.
 async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -552,7 +555,9 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         f.auth
             .recovery_start(
                 &f.user,
-                bip39::Mnemonic::generate(24).unwrap().to_string(),
+                bip39::Mnemonic::generate(bip39::WordCount::Words24)
+                    .unwrap()
+                    .to_string(),
                 NOW
             )
             .await
@@ -1922,6 +1927,7 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
     std::fs::remove_dir_all(data_dir).expect("remove temporary server data");
 }
 
+/// Complete the HTTP registration fixture with a full-strength 24-word recovery phrase.
 pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
     let (status, start_headers, start) = http_post_json(
         app,
@@ -1931,7 +1937,9 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let user_id = str_field(&start, "user_id").to_owned();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
@@ -2739,7 +2747,9 @@ async fn setup_start_accepts_username_and_display_name() {
     );
 
     let user_id = str_field(&body, "user_id").to_owned();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
@@ -3605,8 +3615,11 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
 // Explicit legacy-enrollment fixtures keep old PHC/envelope migration coverage.
 // Production ceremonies never generate mnemonic entropy or retain a phrase hash.
 impl Auth {
+    /// Create the legacy enrollment fixture with a complete 24-word recovery phrase.
     async fn legacy_enrollment(&self, mut start: Value) -> Value {
-        let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+        let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+            .unwrap()
+            .to_string();
         let stored = crypto::recovery_hash_fixture(words.clone()).await.unwrap();
         self.pending
             .lock()
@@ -3629,6 +3642,7 @@ impl Auth {
             .await)
     }
 }
+/// Derive the purpose-separated recovery fixture bytes from the phrase entropy.
 fn recovery_material(words: &str, kind: &str) -> [u8; 32] {
     let entropy = recovery_ikm(words);
     let mut output = [0; 32];
@@ -4063,10 +4077,12 @@ async fn review_sqlx_retention_session_commit_latency() {
                 connections.push(pool.acquire().await.unwrap());
             }
             for connection in &mut connections {
-                sqlx::query(&format!("PRAGMA journal_size_limit={limit}"))
-                    .execute(&mut **connection)
-                    .await
-                    .unwrap();
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "PRAGMA journal_size_limit={limit}"
+                )))
+                .execute(&mut **connection)
+                .await
+                .unwrap();
             }
             drop(connections);
             let (auth, token) = empty_with_pool(pool.clone()).await;

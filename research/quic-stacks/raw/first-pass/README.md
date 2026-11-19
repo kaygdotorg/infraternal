@@ -4,3 +4,5 @@
 # First-pass data
 
 This complete initial matrix is retained for auditability. Its Quinn delayed-handshake samples are excluded because the client closed connections before server-side acceptance completed. Its OpenSSL 1,000-connection memory sample is incomplete because the process ran with a 1,024 soft file-descriptor limit. The final report uses the corrected matrix in the parent `raw/` directory.
+
+These historical probe dependencies are frozen on purpose so the recorded measurements remain reproducible (#538, 2026-11-18).
