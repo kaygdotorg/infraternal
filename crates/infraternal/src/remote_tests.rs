@@ -432,6 +432,121 @@ fn self_signed(key: &PKey<openssl::pkey::Private>) -> X509 {
     certificate.build()
 }
 
+/// Build a disposable CA certificate that OpenSSL can accept when an environment path is trusted.
+fn environment_ca(key: &PKey<openssl::pkey::Private>) -> X509 {
+    let mut certificate = X509::builder().unwrap();
+    certificate.set_version(2).unwrap();
+    let name = openssl::x509::X509NameBuilder::new().unwrap().build();
+    certificate.set_subject_name(&name).unwrap();
+    certificate.set_issuer_name(&name).unwrap();
+    certificate.set_pubkey(key).unwrap();
+    certificate
+        .set_not_before(&openssl::asn1::Asn1Time::from_unix(1_700_000_000).unwrap())
+        .unwrap();
+    certificate
+        .set_not_after(&openssl::asn1::Asn1Time::from_unix(2_000_000_000).unwrap())
+        .unwrap();
+    certificate
+        .append_extension(
+            openssl::x509::extension::BasicConstraints::new()
+                .critical()
+                .ca()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    certificate.sign(key, MessageDigest::null()).unwrap();
+    certificate.build()
+}
+
+/// Prove environment-selected roots cannot widen the system-root TLS connector's trust store.
+#[test]
+fn system_https_connector_rejects_environment_selected_roots() {
+    let directory = Directory::new();
+    let key = PKey::generate_ed25519().unwrap();
+    let certificate = environment_ca(&key);
+    let certificate_path = directory.0.join("environment-ca.pem");
+    std::fs::write(&certificate_path, certificate.to_pem().unwrap()).unwrap();
+    let hash_dir = directory.0.join("hash-dir");
+    std::fs::create_dir(&hash_dir).unwrap();
+    std::fs::write(
+        hash_dir.join(format!("{:08x}.0", certificate.subject_name_hash())),
+        certificate.to_pem().unwrap(),
+    )
+    .unwrap();
+
+    let mut results = Vec::new();
+    for (variable, path) in [
+        ("SSL_CERT_FILE", certificate_path.clone()),
+        ("SSL_CERT_DIR", hash_dir),
+    ] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "remote::tests::environment_root_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env_remove("SSL_CERT_FILE")
+            .env_remove("SSL_CERT_DIR")
+            .env(variable, path);
+        let output = child.output().unwrap();
+        results.push((
+            variable,
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ));
+    }
+    assert!(
+        results.iter().all(|(_, passed, _)| *passed),
+        "environment-selected roots were trusted:\n{}",
+        results
+            .iter()
+            .map(|(variable, _, output)| format!("{variable}:\n{output}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Verify the connector's final store in a child with one attacker-controlled OpenSSL path.
+#[test]
+#[ignore = "child of system_https_connector_rejects_environment_selected_roots"]
+fn environment_root_probe() {
+    let certificate_path = std::env::var_os("SSL_CERT_FILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::fs::read_dir(std::env::var_os("SSL_CERT_DIR")?)
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "0"))
+        })
+        .expect("the child has one explicit test CA path");
+    let certificate = X509::from_pem(&std::fs::read(certificate_path).unwrap()).unwrap();
+    let connector = outbound_tls_connector(None).unwrap();
+    let ssl = connector
+        .configure()
+        .unwrap()
+        .into_ssl("environment-root.invalid")
+        .unwrap();
+    let store = ssl.ssl_context().cert_store();
+    let mut context = openssl::x509::X509StoreContext::new().unwrap();
+    let chain = openssl::stack::Stack::new().unwrap();
+    let accepted = context
+        .init(
+            store,
+            &certificate,
+            &chain,
+            openssl::x509::X509StoreContextRef::verify_cert,
+        )
+        .unwrap_or(false);
+    assert!(
+        !accepted,
+        "the OpenSSL environment path widened public HTTPS trust"
+    );
+}
+
 /// SSH setup copies the host's enrolled identity into its transaction before
 /// joining, and a published-setup Retry joins again for the same host (#230).
 /// Join must re-enroll that host's own key instead of refusing the identity;

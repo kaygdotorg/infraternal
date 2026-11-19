@@ -30,7 +30,7 @@ remote = ["infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infra
 
 ssh = ["dep:infraternal-plugin-ssh", "dep:hyper", "dep:hyper-util", "dep:tokio-openssl", "dep:http-body-util"]
 
-release = ["dep:infraternal-plugin-release", "dep:hyper", "dep:hyper-util", "dep:tokio-openssl", "dep:http-body-util"]
+release = ["dep:infraternal-plugin-release", "dep:hyper", "dep:hyper-util", "dep:tokio-openssl", "dep:http-body-util", "infraternal-plugin-api/tls-roots"]
 
 [dependencies]
 infraternal-plugin-desktop = { path = "../plugins/desktop", version = "0.1.0", default-features = false, optional = true }

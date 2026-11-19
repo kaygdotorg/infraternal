@@ -33,6 +33,8 @@ pub mod stop_hook;
 #[cfg(feature = "socket-host")]
 pub mod storage;
 pub mod streams;
+/// Shared list of system TLS root bundles, including the macOS one (#483).
+pub mod tls_roots;
 
 #[cfg(feature = "socket-host")]
 use bytes::Bytes;

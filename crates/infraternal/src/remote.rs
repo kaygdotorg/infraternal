@@ -754,21 +754,11 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
             .map_err(|_| ClientFailure::TlsConfiguration)?;
         tls.set_cert_store(trust.build());
     } else {
-        tls.set_default_verify_paths()
-            .map_err(|_| ClientFailure::TlsConfiguration)?;
-        // Vendored OpenSSL may have a build-time prefix absent on this host.
-        // Use the system's public bundle, never an enrollment TOFU pin.
-        for bundle in [
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/ca-bundle.pem",
-        ] {
-            if Path::new(bundle).is_file() {
-                tls.set_ca_file(bundle)
-                    .map_err(|_| ClientFailure::TlsConfiguration)?;
-                break;
-            }
-        }
+        // Replace OpenSSL's initial environment-derived store with only the approved bundle.
+        tls.set_cert_store(
+            infraternal_plugin_api::tls_roots::public_root_store()
+                .map_err(|_| ClientFailure::TlsConfiguration)?,
+        );
     }
     Ok(tls.build())
 }

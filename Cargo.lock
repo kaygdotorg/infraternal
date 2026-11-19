@@ -2253,6 +2253,7 @@ name = "infraternal-plugin-api"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "openssl",
  "serde",
  "serde_json",
  "sqlx",
