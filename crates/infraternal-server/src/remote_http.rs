@@ -686,7 +686,11 @@ async fn join(
             .admit_successor(&certificate.record.fingerprint, now()?)
             .await
             .map(|_| 0)
-            .map_err(|_| StatusCode::FORBIDDEN)?,
+            .map_err(|_| {
+                tracing::debug!(event = "remote_join_refused", host_id = %request.host_id,
+                    reason = "post_commit_admission", "Machine join refused");
+                StatusCode::FORBIDDEN
+            })?,
     };
     Ok(Json(JoinResponse {
         certificate_der: B64.encode(certificate.der),
