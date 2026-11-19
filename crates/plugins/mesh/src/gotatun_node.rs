@@ -1419,8 +1419,7 @@ impl RuntimeState {
                         .as_ref()
                         .and_then(|old| old.peers.get(id))
                         .is_some_and(|old| {
-                            old.has_network_access()
-                                && old.peer.endpoint != policy.peer.endpoint
+                            old.has_network_access() && old.peer.endpoint != policy.peer.endpoint
                         })
             })
             .map(|(_, policy)| active_peer_key(&policy.peer))
