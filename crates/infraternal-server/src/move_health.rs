@@ -4,7 +4,7 @@
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use std::{fmt::Write as _, sync::OnceLock};
 
-/// The request challenge and response proof use the same private header.
+/// The installer sends its challenge and expects the answer under this header.
 pub const HEADER: &str = "x-infraternal-move-health";
 
 /// Produce a process-bound answer for a fresh 128-bit, lowercase hex challenge.

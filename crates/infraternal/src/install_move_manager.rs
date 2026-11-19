@@ -306,7 +306,7 @@ fn journal_pending(request: &Request) -> io::Result<bool> {
     pending(&request.relocation.to, &request.relocation.unit).map_err(io::Error::other)
 }
 
-/// Commit the effective unit and reload it before systemd advances to ExecStart.
+/// Commit the effective unit and reload it before systemd advances to `ExecStart`.
 fn prepare_start(_dir: &File, request: &Request) -> io::Result<()> {
     with_journal(
         &request.relocation,
@@ -326,7 +326,7 @@ fn prepare_start(_dir: &File, request: &Request) -> io::Result<()> {
     )
 }
 
-/// Complete the journal within ExecStartPost, before systemd can report success.
+/// Complete the journal within `ExecStartPost`, before systemd can report success.
 fn complete_start(dir: &File, request: &Request) -> io::Result<()> {
     let plan = &request.relocation;
     if !journal_pending(request)? {

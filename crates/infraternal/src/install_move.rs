@@ -179,7 +179,7 @@ fn health(
     mut stream: impl io::Read + io::Write,
     challenge: Option<(&str, &str)>,
 ) -> io::Result<()> {
-    use std::io::{BufRead, BufReader, Read};
+    use std::io::{BufRead, BufReader};
     write!(
         stream,
         "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
@@ -225,7 +225,7 @@ fn health(
 
 #[cfg(target_os = "linux")]
 impl Systemd {
-    /// Match the selected file against the credential-checked MainPID's report.
+    /// Match the selected file against the credential-checked `MainPID`'s report.
     fn verify_database(path: &Path, data: &File, pid: u32, challenge: &str) -> io::Result<String> {
         use crate::server_control::{DATABASE_NAME, Database, query_database};
 
