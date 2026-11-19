@@ -90,11 +90,11 @@ server-reflexive address (the public address and port the server's own mesh
 device last saw its packets come from), and the server-observed control IP
 combined with the node's advertised UDP port. The coordinator sends
 `candidates` only to a node whose identity reply to `{"candidates":true}` said
-it accepts them, because `Peer` refuses unknown fields. Only an engine that
-walks the list says so: GotaTun on Linux today. Kernel WireGuard and the macOS
-runtime install only the first address, so they answer like an older node and
-report no LAN addresses. A peer the Access policy gives no network access
-gets no list either. Any other node gets the
+it accepts them, because `Peer` refuses unknown fields. GotaTun on Linux and
+macOS walks the list. Kernel WireGuard installs only the first address and
+reports no LAN addresses. The coordinator gives a peer a list only if the
+Access policy grants network access in at least one direction. A node without
+candidate support gets the
 reflexive address, or the control-IP guess before one is observed, as its one
 `endpoint`, and so does the server's own node, which only answers its nodes
 and reads their reflexive addresses from its device. Two nodes sit behind one
