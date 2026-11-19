@@ -113,8 +113,7 @@ impl Install {
             interrupted: None,
         };
         super::check_directory(&fs::symlink_metadata("/Library/Application Support")?, 0)?;
-        fs::DirBuilder::new().mode(0o711).create(MACHINE_BASE)?;
-        install.record(Path::new(MACHINE_BASE), false)?;
+        install.create_directory(Path::new(MACHINE_BASE), 0o711, false)?;
         install.directory(Path::new(SERVICE_DATA), 0o700, true)?;
         install.directory(Path::new(MACHINE_BASE).join("bin").as_path(), 0o755, false)?;
         Ok(install)
@@ -155,6 +154,14 @@ impl Install {
         if let Some(metadata) = existing(path)? {
             return super::check_directory(&metadata, 0);
         }
+        self.create_directory(path, mode, recursive)
+    }
+
+    /// Claim a fresh directory privately, then publish its intended traversal permissions.
+    ///
+    /// Sudo can preserve a restrictive umask. After recording the new inode,
+    /// explicitly allow traversal where the CLI link needs it. Enrollment stays private.
+    fn create_directory(&mut self, path: &Path, mode: u32, recursive: bool) -> io::Result<()> {
         fs::DirBuilder::new().mode(0o700).create(path)?;
         self.record(path, recursive)?;
         fs::set_permissions(path, fs::Permissions::from_mode(mode))
