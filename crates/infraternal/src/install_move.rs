@@ -402,6 +402,9 @@ fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocati
     }
     let (old_parent, old_name) = disk::parent(old, false)?;
     let source = optional_tree(&old_parent, old_name)?;
+    if let Some(source) = &source {
+        reject_shared(source, "source")?;
+    }
     let old_marker = source
         .as_ref()
         .map(read_legacy_marker)
@@ -428,7 +431,7 @@ fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocati
                 "legacy target is a shared base; preserve both folders",
             ));
         }
-        reject_shared(&target)?;
+        reject_shared(&target, "target")?;
     }
     let (units, effective) = unit_rewrites(unit, old, to)?;
     Ok(Some(Relocation {
@@ -1037,7 +1040,7 @@ fn inspect_target(to: &Path) -> io::Result<()> {
     let Some(folder) = optional_tree(&parent, name)? else {
         return Ok(());
     };
-    reject_shared(&folder)?;
+    reject_shared(&folder, "target")?;
     let mut foreign = Vec::new();
     for name in disk::names(&folder)? {
         if is_firewall(&name) {
@@ -1061,11 +1064,11 @@ fn inspect_target(to: &Path) -> io::Result<()> {
 }
 
 /// Refuse a shared install base without listing or altering its component files.
-fn reject_shared(folder: &File) -> io::Result<()> {
+fn reject_shared(folder: &File, side: &str) -> io::Result<()> {
     if disk::names(folder)?.iter().any(|name| is_shared(name)) {
-        return Err(disk::invalid(
-            "the target is a shared install base; pass --data to keep the current folder",
-        ));
+        return Err(io::Error::other(format!(
+            "the {side} is a shared install base; pass --data to keep the current folder",
+        )));
     }
     Ok(())
 }

@@ -116,24 +116,28 @@ The move stops the service and copies its data into a private staging folder.
 It syncs the copy, verifies file contents and metadata, publishes the checked
 firewall policy, and then switches the unit and its drop-ins. The effective
 `ExecStart` is switched last. The old path remains available until the new
-server answers its health check and the service manager identifies it using
-the moved database. Across filesystems, or after an unconfirmed startup,
-init keeps a dated, read-only backup and prints its location. Otherwise,
-init removes the original after the health check.
+server answers its health check and the main process reported by systemd confirms
+the open database's path, device and inode over the private control socket.
+Across filesystems, or after an unconfirmed startup, init keeps a dated,
+read-only backup and prints its location. Otherwise,
+init reopens the configured destination and asks the live server again before
+removing the original. An inconclusive check leaves the original available.
 
 After confirmation, init asks systemd to run the cutover. The move continues
 if the CLI exits. A server start, including after reboot, also pulls in any
 pending cutover. Its private journal records the data paths and identities,
 staging and backup locations, and complete unit set. If the moved server
 may have accepted writes, recovery keeps both trees and retries the selected
-destination. Init refuses a move into a shared infraternal install base or into
-a folder with unrelated files. It also refuses a concurrent configuration
-change, such as a new listen port, even with `--force`. Use the existing
+destination. Init refuses a move from or into a shared infraternal install
+base before stopping the service. Init also refuses a destination with
+unrelated files or a concurrent configuration change, such as a new listen
+port, even with `--force`. Use the existing
 service flags for relocation and apply changes separately.
 
-An install already at its standard folder, such as a system server in
-`/var/lib/infraternal`, is left exactly as it is. Sockets in `/run` are never
-touched. The server's updater (#211) is meant to call the same move while
+Relocation is a no-op for an install already at its standard folder, such as
+a system server in `/var/lib/infraternal`. Ordinary `server init` still
+reconciles the service and firewall. Relocation leaves sockets in `/run`
+alone. The server's updater (#211) is meant to call the same move while
 the service is stopped; `server restart --binary` keeps the service running
 and never moves the folder. On macOS, `server init` does not install a
 launchd service yet, so there is no macOS server install to move; the move

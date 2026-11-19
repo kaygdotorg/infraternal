@@ -322,7 +322,6 @@ fn shared_agent_base_is_refused_without_changing_modes() {
 
 /// A shared source needs the same refusal as a shared destination before stopping either role.
 #[test]
-#[ignore = "D395 round-three review regression"]
 fn review_j912_refuses_a_shared_source_during_planning() {
     let fixture = Install::new();
     let agent_root = fixture.old.join("agent");
