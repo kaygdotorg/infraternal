@@ -597,6 +597,69 @@ fn ready_retry_rejects_a_replaced_database() {
     assert_eq!(Install::data(&fixture.old), "original");
 }
 
+/// The per-user worker must identify its server with startup dump protection enabled.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "D395 round-three review regression"]
+fn review_j912_verifies_a_hardened_user_server() {
+    use std::io::{BufRead, BufReader, Write as _};
+    use std::process::Stdio;
+
+    // The child re-enters this test, holds the database open, and waits for EOF.
+    let test_name = "install_move::tests::review_j912_verifies_a_hardened_user_server";
+    let database_env = "INFRATERNAL_D395_TEST_DATABASE";
+    let open_marker = "D395_DATABASE_OPEN";
+    if let Some(path) = std::env::var_os(database_env) {
+        crate::harden_startup().unwrap();
+        let database = File::open(path).unwrap();
+        writeln!(io::stdout(), "\n{open_marker}").unwrap();
+        let mut line = String::new();
+        io::stdin().read_line(&mut line).unwrap();
+        assert!(database.metadata().unwrap().is_file());
+        return;
+    }
+    assert!(
+        !nix::unistd::Uid::effective().is_root(),
+        "this fixture needs the same privileges as a per-user cutover"
+    );
+
+    let fixture = Install::new();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--ignored", "--nocapture"])
+        .env(database_env, fixture.old.join("infraternal.sqlite"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let opened = stdout
+        .lines()
+        .any(|line| line.is_ok_and(|line| line == open_marker));
+    let systemctl = fixture.root.join("systemctl");
+    fs::write(
+        &systemctl,
+        format!("#!/bin/sh\nprintf '%s\\n' {}\n", child.id()),
+    )
+    .unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+    let manager = Systemd {
+        program: systemctl,
+        user: true,
+        service: "infraternal-server.service".into(),
+        listen: "127.0.0.1:47361".parse().unwrap(),
+        tls: false,
+    };
+
+    let verified = manager.verify_database(&File::open(&fixture.old).unwrap());
+    drop(child.stdin.take());
+    assert!(child.wait().unwrap().success());
+    assert!(opened, "fixture never opened its database");
+    assert!(
+        verified.is_ok(),
+        "per-user cutover cannot verify its server: {verified:?}"
+    );
+}
+
 /// A moved parent can leave the pinned tree intact while replacing its live path.
 #[test]
 #[ignore = "D395 round-three review regression"]
