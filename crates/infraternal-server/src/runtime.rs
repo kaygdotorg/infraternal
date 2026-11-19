@@ -1329,8 +1329,9 @@ mod tests {
     //! Verifies startup storage, setup-token socket lifecycle, and proxy validation with local fixtures.
 
     use super::{
-        ProxyNetwork, ServerConfig, TlsFiles, bind_listener_with_retry, logging_color,
-        router_with_agent, set_private_directory, start_setup_token_socket, validate_config,
+        LISTENER_BIND_RETRY_WINDOW, ProxyNetwork, ServerConfig, TlsFiles, bind_listener_with_retry,
+        logging_color, router_with_agent, set_private_directory, start_setup_token_socket,
+        validate_config,
     };
     use crate::embedded::EmbeddedAgent;
     use axum::{body::Body, http::Request};
@@ -1343,7 +1344,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
     use tower::ServiceExt;
 
@@ -1388,6 +1389,113 @@ mod tests {
             listener.local_addr().expect("bound listener").ip(),
             address.ip()
         );
+    }
+
+    /// An assigned address takes the first bind path without entering the retry timer.
+    #[tokio::test]
+    async fn listener_bind_is_immediate_when_address_is_available() {
+        const SAMPLES: usize = 200;
+        let address = SocketAddr::from(([127, 0, 0, 1], 0));
+        let mut helper_nanos = 0_u128;
+        let mut direct_nanos = 0_u128;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            drop(
+                bind_listener_with_retry(address, std::net::TcpListener::bind)
+                    .await
+                    .expect("assigned address binds immediately"),
+            );
+            helper_nanos += started.elapsed().as_nanos();
+
+            let started = Instant::now();
+            drop(std::net::TcpListener::bind(address).expect("direct bind succeeds"));
+            direct_nanos += started.elapsed().as_nanos();
+        }
+
+        println!(
+            "METRIC listener_bind_helper_ns_per={} direct_bind_ns_per={} samples={SAMPLES}",
+            helper_nanos / SAMPLES as u128,
+            direct_nanos / SAMPLES as u128,
+        );
+    }
+
+    /// Bind errors other than an absent address return after one attempt.
+    #[tokio::test]
+    async fn listener_bind_does_not_retry_other_errors() {
+        for kind in [
+            std::io::ErrorKind::AddrInUse,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let bind_attempts = Arc::clone(&attempts);
+            let error =
+                bind_listener_with_retry(SocketAddr::from(([127, 0, 0, 1], 0)), move |_| {
+                    bind_attempts.fetch_add(1, Ordering::Relaxed);
+                    Err(std::io::Error::from(kind))
+                })
+                .await
+                .expect_err("non-retryable bind error is returned");
+
+            assert_eq!(error.kind(), kind);
+            assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    /// A missing address cannot extend startup beyond the configured retry window.
+    #[tokio::test(start_paused = true)]
+    async fn listener_bind_stops_at_the_retry_deadline() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let bind_attempts = Arc::clone(&attempts);
+        let started = tokio::time::Instant::now();
+        let error = bind_listener_with_retry(SocketAddr::from(([198, 18, 0, 1], 0)), move |_| {
+            bind_attempts.fetch_add(1, Ordering::Relaxed);
+            Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable))
+        })
+        .await
+        .expect_err("missing address reaches its deadline");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            LISTENER_BIND_RETRY_WINDOW
+        );
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            LISTENER_BIND_RETRY_WINDOW.as_secs() as usize + 1
+        );
+    }
+
+    /// The serve loop's shutdown select can cancel a bind retry while it is sleeping.
+    #[tokio::test]
+    async fn listener_bind_retry_exits_promptly_when_shutdown_is_selected() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let bind_attempts = Arc::clone(&attempts);
+        let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_signal => false,
+                _ = bind_listener_with_retry(
+                    SocketAddr::from(([198, 18, 0, 1], 0)),
+                    move |_| {
+                        bind_attempts.fetch_add(1, Ordering::Relaxed);
+                        Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable))
+                    },
+                ) => true,
+            }
+        });
+
+        while attempts.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+        shutdown.send(()).expect("signal shutdown");
+        let completed = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("shutdown should cancel the retry sleep promptly")
+            .expect("retry task joins");
+
+        assert!(!completed, "the bind completed instead of being cancelled");
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 
     /// The real kernel reports `AddrNotAvailable` until this namespace receives its listen address.
@@ -1436,8 +1544,8 @@ mod tests {
         });
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            while attempts.load(Ordering::Relaxed) < 2 {
-                // sleep: poll for two real EADDRNOTAVAIL attempts before assigning the address.
+            while attempts.load(Ordering::Relaxed) < 4 {
+                // sleep: wait about three seconds and confirm four real EADDRNOTAVAIL attempts.
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
@@ -1462,6 +1570,58 @@ mod tests {
         assert_eq!(
             listener.local_addr().expect("bound listener").ip(),
             address.ip()
+        );
+    }
+
+    /// The real kernel keeps reporting `AddrNotAvailable` when an address stays absent.
+    #[tokio::test]
+    #[ignore = "Run in a disposable user/network namespace"]
+    async fn listener_bind_times_out_if_address_stays_absent_in_network_namespace() {
+        const CHILD: &str = "INFRATERNA_LISTENER_TIMEOUT_NETNS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let executable = std::env::current_exe().expect("test executable");
+            let output = std::process::Command::new("unshare")
+                .args(["--user", "--map-root-user", "--net", "--fork", "--kill-child"])
+                .arg(executable)
+                .args([
+                    "--exact",
+                    "runtime::tests::listener_bind_times_out_if_address_stays_absent_in_network_namespace",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("start isolated test process");
+            assert!(
+                output.status.success(),
+                "unshare child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let loopback = std::process::Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .status()
+            .expect("start loopback");
+        assert!(loopback.success(), "could not start loopback");
+
+        let started = Instant::now();
+        let error = bind_listener_with_retry(
+            SocketAddr::from(([198, 18, 0, 2], 0)),
+            std::net::TcpListener::bind,
+        )
+        .await
+        .expect_err("an absent address must not bind");
+        let elapsed = started.elapsed();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+        assert!(elapsed >= LISTENER_BIND_RETRY_WINDOW);
+        assert!(elapsed <= LISTENER_BIND_RETRY_WINDOW + Duration::from_secs(1));
+        println!(
+            "METRIC missing_address_retry_window_ms={} error={error}",
+            elapsed.as_millis()
         );
     }
 
