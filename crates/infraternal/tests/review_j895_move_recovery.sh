@@ -159,6 +159,11 @@ common=(--system --listen 127.0.0.1:47941 --behind-proxy --trusted-proxy 127.0.0
 init() { common[2]="${LISTEN:-127.0.0.1:47941}"; "$BIN" --json server init "${common[@]}" "$@"; }
 check() { local name=$1; shift; "$@" || { echo "CASE $name BAD"; exit 1; }; echo "CASE $name ok"; }
 fp() { stat -c '%d:%i %a %s %y' "$1"; sha256sum < "$1"; }
+# The legacy record must be private regardless of the launcher's umask.
+mark_legacy_move() {
+    install -m 0600 /dev/null "$old/.infraternal-move"
+    printf '%s' "$old" > "$old/.infraternal-move"
+}
 token_ready() { "$BIN" server setup-token --data "$1" >/dev/null 2>&1; }
 wait_token_ready() {
     local deadline=$((SECONDS+15))
@@ -175,7 +180,7 @@ printf 'J895 %s proof\n' "$method" > "$old/probe"
 unit_before=$(fp "$UNIT")
 if [[ "$method" == partial ]]; then
     /usr/bin/systemctl stop infraternal-server.service
-    printf '%s' "$old" > "$old/.infraternal-move"
+    mark_legacy_move
     mv -- "$old" "$target"
     mkdir "$UNIT.d"
     {
@@ -315,7 +320,7 @@ if [[ "$method" == full ]]; then
 fi
 if [[ "$method" == resume ]]; then
     /usr/bin/systemctl stop infraternal-server.service
-    printf '%s' "$old" > "$old/.infraternal-move"
+    mark_legacy_move
     mv -- "$old" "$target"
     check INTERRUPTED_RENAME_HAS_DATA test -f "$target/probe"
     check INTERRUPTED_RENAME_HAS_OLD_UNIT test "$unit_before" = "$(fp "$UNIT")"
