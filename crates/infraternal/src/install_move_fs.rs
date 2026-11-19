@@ -217,13 +217,13 @@ pub(super) fn copy_entry(from: &File, to: &File, name: &OsStr) -> io::Result<()>
             let source = tree(from, name)?;
             let child = make_dir(to, name)?;
             copy_tree(&source, &child)?;
-            preserve(&child, &source.metadata()?)?;
+            preserve_copy(&source, &child)?;
         }
         SFlag::S_IFREG => {
             let mut source = regular(from, name)?;
             let mut child = new_file(to, name)?;
             io::copy(&mut source, &mut child)?;
-            preserve(&child, &source.metadata()?)?;
+            preserve_copy(&source, &child)?;
             source.rewind_and_compare(child)?;
         }
         SFlag::S_IFLNK => {
@@ -279,34 +279,35 @@ fn preserve(file: &File, source: &Metadata) -> io::Result<()> {
     Ok(())
 }
 
-/// Apply the original data root's metadata once the private copy is complete.
-pub(super) fn preserve_root(source: &File, target: &File) -> io::Result<()> {
+/// Finish a copied entry with the source ownership, mode, and Linux attributes.
+/// Apply directory ACLs after copying children so inheritance cannot alter them.
+pub(super) fn preserve_copy(source: &File, target: &File) -> io::Result<()> {
     let metadata = source.metadata()?;
-    // The tree checks require both roots to belong to this effective user.
+    // The tree checks require both entries to belong to this effective user.
     // Set the group before the mode, since chown can clear setgid.
     preserve(target, &metadata)?;
     #[cfg(target_os = "linux")]
-    copy_root_attributes(source, target)?;
+    copy_attributes(source, target)?;
     if target.metadata()?.mode() & 0o7777 != metadata.mode() & 0o7777 {
-        return Err(invalid("copied root ACL changed the directory mode"));
+        return Err(invalid("copied ACL changed the entry mode"));
     }
     target.sync_all()
 }
 
 /// Copy Linux xattrs by descriptor. POSIX access and default ACLs are xattrs.
 #[cfg(target_os = "linux")]
-fn copy_root_attributes(source: &File, target: &File) -> io::Result<()> {
+fn copy_attributes(source: &File, target: &File) -> io::Result<()> {
     use rustix::fs::{XattrFlags, fgetxattr, fgetxattr_query, fremovexattr, fsetxattr};
 
-    let attributes = root_attributes(source)?;
-    for name in root_attributes(target)? {
+    let source_names = attributes(source)?;
+    for name in attributes(target)? {
         let is_acl = name.as_bytes().starts_with(b"system.posix_acl_");
-        if is_acl && !attributes.contains(&name) {
+        if is_acl && !source_names.contains(&name) {
             // The staging parent may carry a default ACL absent on the source.
             fremovexattr(target, name.as_os_str())?;
         }
     }
-    for name in attributes {
+    for name in source_names {
         let name = name.as_os_str();
         let mut value = vec![0; fgetxattr_query(source, name)?];
         let size = fgetxattr(source, name, value.as_mut_slice())?;
@@ -315,9 +316,9 @@ fn copy_root_attributes(source: &File, target: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// Read the attribute names the source filesystem exposes on a pinned root.
+/// Read the attribute names the filesystem exposes on a pinned entry.
 #[cfg(target_os = "linux")]
-fn root_attributes(dir: &File) -> io::Result<Vec<OsString>> {
+fn attributes(dir: &File) -> io::Result<Vec<OsString>> {
     use rustix::fs::{flistxattr, flistxattr_query};
 
     let size = match flistxattr_query(dir) {

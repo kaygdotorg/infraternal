@@ -754,7 +754,6 @@ fn review_j906_preserves_original_when_server_stops_after_health() {
 /// A nested directory and regular file retain their attributes on a whole-tree move.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "D395 round-three review regression"]
 fn review_j906_preserves_nested_attributes() {
     use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
 
@@ -763,25 +762,41 @@ fn review_j906_preserves_nested_attributes() {
     let file = directory.join("fixture");
     fs::create_dir(fixture.old.join(directory)).unwrap();
     fs::write(fixture.old.join(&file), b"nested data").unwrap();
-    let name = "user.infraternal.test";
-    for relative in [directory, file.as_path()] {
+    // Linux stores version 2 ACLs as little-endian tag, mode and qualifier entries.
+    let mut acl = 2_u32.to_le_bytes().to_vec();
+    let unnamed = u32::MAX;
+    for (tag, mode, who) in [
+        (1_u16, 7_u16, unnamed),
+        (2, 5, 1_234_567),
+        (4, 5, unnamed),
+        (16, 5, unnamed),
+        (32, 0, unnamed),
+    ] {
+        acl.extend(tag.to_le_bytes());
+        acl.extend(mode.to_le_bytes());
+        acl.extend(who.to_le_bytes());
+    }
+    let attrs = [
+        ("user.infraternal.test", b"nested attribute".as_slice()),
+        ("system.posix_acl_access", acl.as_slice()),
+        ("system.posix_acl_default", acl.as_slice()),
+    ];
+    for (relative, attrs) in [(directory, &attrs[..]), (&file, &attrs[..2])] {
         let old = File::open(fixture.old.join(relative)).unwrap();
-        fsetxattr(&old, name, b"nested attribute", XattrFlags::empty()).unwrap();
+        for (name, value) in attrs {
+            fsetxattr(&old, *name, value, XattrFlags::empty()).unwrap();
+        }
     }
 
     fixture.apply(&fixture.old, &Fake::default()).unwrap();
-    let attributes = [directory, file.as_path()].map(|relative| {
+    for (relative, attrs) in [(directory, &attrs[..]), (&file, &attrs[..2])] {
         let new = File::open(fixture.new.join(relative)).unwrap();
-        let mut copied = [0; 64];
-        fgetxattr(&new, name, copied.as_mut_slice()).map(|size| copied[..size].to_vec())
-    });
-    assert_eq!(
-        attributes,
-        [
-            Ok(b"nested attribute".to_vec()),
-            Ok(b"nested attribute".to_vec())
-        ]
-    );
+        for (name, expected) in attrs {
+            let mut copied = [0; 64];
+            let size = fgetxattr(&new, *name, copied.as_mut_slice()).unwrap();
+            assert_eq!(&copied[..size], *expected, "{relative:?}: {name}");
+        }
+    }
 }
 
 /// Copy preserves the top-level setgid bit and the original owner and group.
