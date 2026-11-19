@@ -4,6 +4,7 @@ use std::{env, fs, path::PathBuf};
 #[path = "build_support/migrations.rs"]
 mod migrations;
 
+/// Generates compact migration data and sets the server's build-time trust values.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Track the directory so additions and removals invalidate this build script.
     println!("cargo:rerun-if-changed=migrations");
