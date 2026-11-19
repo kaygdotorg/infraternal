@@ -87,6 +87,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
                         ipv6: "fd01::2".parse().unwrap(),
                     },
                     endpoint: Some(initial),
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,

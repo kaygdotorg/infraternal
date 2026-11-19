@@ -79,6 +79,7 @@ fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
                     ipv6: format!("fd01::{id}").parse().unwrap(),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound: TrafficPolicy::None,

@@ -971,6 +971,7 @@ fn j363_config(key: crate::policy::model::PublicKey) -> Config {
                         ipv6: "fd01::2".parse().unwrap(),
                     },
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound: crate::policy::rules::TrafficPolicy::All,
                 outbound: crate::policy::rules::TrafficPolicy::All,

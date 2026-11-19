@@ -120,6 +120,7 @@ fn snapshot(local: (u32, PublicKey), peer: (u32, PublicKey), endpoint: SocketAdd
                     previous_active: false,
                     addresses: addresses(peer.0),
                     endpoint: Some(endpoint),
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,

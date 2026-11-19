@@ -356,6 +356,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
                             ipv6: "fd01::1".parse().unwrap(),
                         },
                         endpoint: Some("192.0.2.1:44000".parse().unwrap()),
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
