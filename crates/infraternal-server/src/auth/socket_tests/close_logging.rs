@@ -1040,15 +1040,15 @@ async fn revocation_stall(stall: RevocationStall) {
         .await
         .expect("the revocation wake must begin an authority read");
         let started = tokio::time::Instant::now();
-        // There are at most two socket checkers. Three held queries prove that
-        // a missed attempt was retried, while the explicit clock stays below
-        // the one-second authority wait. Freeze again as soon as a retry starts
-        // so real SQL completion cannot lose its budget to host scheduling.
-        while pending_reads() < 3 {
-            assert!(
-                started.elapsed() < Duration::from_millis(300),
-                "no retry before the short stall ended"
-            );
+        // Hold the store past the first attempt's 100 ms deadline and its first
+        // retry pause, so the first SELECT's answer is discarded and the
+        // verdict must come from a retry, while the explicit clock stays far
+        // below the one-second authority wait. A retry waits for its missed
+        // SELECT instead of queueing another (#525), so a retry is proven by
+        // the clock, not by a third held place. Freeze before the release so
+        // real SQL completion cannot lose its budget to host scheduling.
+        while started.elapsed() < Duration::from_millis(150) {
+            assert_ne!(pending_reads(), 0, "the stalled read gave up its place");
             tokio::time::advance(Duration::from_millis(5)).await;
             tokio::task::yield_now().await;
         }

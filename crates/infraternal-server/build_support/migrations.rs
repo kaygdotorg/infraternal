@@ -74,7 +74,7 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
         }
         let executable = compact_sql::compact(&sql);
         writeln!(generated,
-            "sqlx::migrate::Migration {{ version: {}, description: std::borrow::Cow::Borrowed({description:?}), migration_type: sqlx::migrate::MigrationType::{kind}, sql: std::borrow::Cow::Borrowed({executable:?}), checksum: std::borrow::Cow::Borrowed(&{:?}), no_tx: {no_tx} }},",
+            "sqlx::migrate::Migration {{ version: {}, description: std::borrow::Cow::Borrowed({description:?}), migration_type: sqlx::migrate::MigrationType::{kind}, sql: sqlx::SqlStr::from_static({executable:?}), checksum: std::borrow::Cow::Borrowed(&{:?}), no_tx: {no_tx} }},",
             grouped(version), &checksum[..]).map_err(io::Error::other)?;
         // Down migrations never run forward; the previous runner skips them too.
         if kind != "ReversibleDown" {

@@ -1415,6 +1415,7 @@ impl MeshService {
         ))
     }
 
+    /// Update one endpoint using only the two permitted column pairs.
     async fn move_grant(
         &self,
         actor: &str,
@@ -1443,12 +1444,17 @@ impl MeshService {
         )
         .await?;
         let (kind, value) = endpoint_fields(&request.endpoint)?;
-        let column = match request.side {
-            EndpointSide::From => "from",
-            EndpointSide::To => "to",
+        let (column, sql) = match request.side {
+            EndpointSide::From => (
+                "from",
+                "UPDATE mesh_grants SET from_kind=?,from_value=? WHERE name=?",
+            ),
+            EndpointSide::To => (
+                "to",
+                "UPDATE mesh_grants SET to_kind=?,to_value=? WHERE name=?",
+            ),
         };
-        let sql = format!("UPDATE mesh_grants SET {column}_kind=?,{column}_value=? WHERE name=?");
-        let changed = sqlx::query(&sql)
+        let changed = sqlx::query(sql)
             .bind(kind)
             .bind(value)
             .bind(&request.name)

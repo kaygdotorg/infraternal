@@ -477,8 +477,8 @@ pub(super) async fn record(
     Ok(())
 }
 
-// Recovery delay/lifetime use the same elapsed clock as admission and status.
-// The short, process-local ceremony separately retains its wall expiry policy.
+/// Consume a recovery capability and retire the prior account credentials.
+/// The durable delay follows the admission clock, while the short ceremony uses wall time.
 pub(super) async fn complete(
     auth: &Auth,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -507,11 +507,14 @@ pub(super) async fn complete(
         return Err(Error::Denied);
     }
     record(tx, user, "complete", now).await?;
-    for table in ["sessions", "api_keys", "approvals", "passkeys", "wraps"] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE user_id=?"))
-            .bind(user)
-            .execute(&mut **tx)
-            .await?;
+    for statement in [
+        "DELETE FROM sessions WHERE user_id=?",
+        "DELETE FROM api_keys WHERE user_id=?",
+        "DELETE FROM approvals WHERE user_id=?",
+        "DELETE FROM passkeys WHERE user_id=?",
+        "DELETE FROM wraps WHERE user_id=?",
+    ] {
+        sqlx::query(statement).bind(user).execute(&mut **tx).await?;
     }
     sqlx::query(
         "UPDATE users SET recovery_hash=?,recovery_version=?,recovery_wrap_version=? WHERE id=?",

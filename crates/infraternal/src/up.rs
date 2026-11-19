@@ -1307,6 +1307,7 @@ fn permission_error() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "system install refused")
 }
 
+/// Map remote setup errors to the operator-facing install outcomes.
 fn map_remote_failure(error: &io::Error) -> Failure {
     match crate::remote::Failure::of(error) {
         None => Failure::LocalState,
@@ -1317,7 +1318,9 @@ fn map_remote_failure(error: &io::Error) -> Failure {
             | crate::remote::Failure::Upgrade
             | crate::remote::Failure::Challenge,
         ) => Failure::Unreachable,
-        Some(crate::remote::Failure::Refused) => Failure::Permission,
+        Some(crate::remote::Failure::Refused | crate::remote::Failure::IdentityMismatch) => {
+            Failure::Permission
+        }
     }
 }
 

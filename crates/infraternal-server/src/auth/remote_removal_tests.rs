@@ -631,12 +631,13 @@ async fn forget_retired_host_keeps_audit_and_denial() {
         "remote_login_cleanup",
         "remote_host_bootstrap",
     ] {
-        let count: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE host_id=?"))
-                .bind(host.as_bytes().as_slice())
-                .fetch_one(&f.auth.pool)
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {table} WHERE host_id=?"
+        )))
+        .bind(host.as_bytes().as_slice())
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
         assert_eq!(count, 0, "{table}");
     }
     let detail: String = sqlx::query_scalar(
