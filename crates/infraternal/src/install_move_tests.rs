@@ -571,7 +571,11 @@ fn ready_retry_refuses_an_original_effective_unit() {
     fs::write(&fixture.unit, unit_text(&fixture.old)).unwrap();
 
     let error = plan(&fixture.old, &fixture.new, &fixture.unit).unwrap_err();
-    assert!(error.to_string().contains("confirmed unit no longer points"));
+    assert!(
+        error
+            .to_string()
+            .contains("confirmed unit no longer points")
+    );
     assert_eq!(Install::data(&fixture.old), "original");
 }
 
