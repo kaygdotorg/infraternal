@@ -834,10 +834,9 @@ fn finish(
     let target = selected_target(parent, target_name, journal)?;
     if journal.legacy_target
         && let Some(previous) = read_legacy_marker(&target)?
+        && previous != journal.from
     {
-        if previous != journal.from {
-            return Err(disk::invalid("legacy move marker changed"));
-        }
+        return Err(disk::invalid("legacy move marker changed"));
     }
     let mut leftover = None;
     if let Some(source) = journal.source {

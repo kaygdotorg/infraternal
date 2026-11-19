@@ -165,8 +165,7 @@ fn unit_text(control: &Path, service: &str) -> io::Result<String> {
         "[Unit]\nDescription=infraternal server data cutover\n\
          [Service]\nType=oneshot\nExecStart=:{exe} {COMMAND} {control}\n\
          Restart=on-abnormal\nRestartSec=1s\nTimeoutStartSec=infinity\n\
-         [Install]\nWantedBy={}\n",
-        service
+         [Install]\nWantedBy={service}\n"
     ))
 }
 
