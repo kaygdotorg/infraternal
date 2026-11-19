@@ -838,16 +838,55 @@ fn stage_start(
     Ok(())
 }
 
-/// Free the staging space while the original is still selected for startup.
+/// Free uncommitted staging while the original is still selected for startup.
 fn discard_unpublished(transaction: &Transaction<'_>, journal: &mut Journal) -> io::Result<()> {
-    reconcile_staging(
-        transaction.parent,
-        transaction.target_name,
-        transaction.work,
-        journal,
-    )?;
+    let target = optional_tree(transaction.parent, transaction.target_name)?
+        .as_ref()
+        .map(Identity::of)
+        .transpose()?;
+    if target != journal.target && target != journal.staged {
+        // A different destination blocks recovery, but it does not own the
+        // separately journaled staging inode that this transaction created.
+        discard_recorded_staging(transaction.work, journal)?;
+    } else {
+        reconcile_staging(
+            transaction.parent,
+            transaction.target_name,
+            transaction.work,
+            journal,
+        )?;
+    }
     if journal.target.is_none() {
         remove_journal(transaction.parent, transaction.work_name, transaction.work)?;
+    }
+    Ok(())
+}
+
+/// Remove only the staging directory whose identity the journal recorded.
+/// An unrecorded or replaced entry stays untouched so cleanup cannot delete a
+/// tree that this move did not create.
+fn discard_recorded_staging(work: &File, journal: &mut Journal) -> io::Result<()> {
+    let stage_name = OsStr::new(STAGING);
+    let stage = optional_tree(work, stage_name)?;
+    match (journal.staged, stage) {
+        (Some(expected), Some(stage)) => {
+            if Identity::of(&stage)? != expected {
+                return Err(disk::invalid("staging identity changed during move"));
+            }
+            disk::retire(work, stage_name, expected, false)?;
+            journal.staged = None;
+            save(work, journal)?;
+        }
+        (Some(_), None) => {
+            journal.staged = None;
+            save(work, journal)?;
+        }
+        (None, Some(_)) => {
+            return Err(disk::invalid(
+                "staging directory is not recorded in the move journal",
+            ));
+        }
+        (None, None) => {}
     }
     Ok(())
 }

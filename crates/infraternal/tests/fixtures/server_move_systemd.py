@@ -490,7 +490,7 @@ def cli_admission(workspace):
 if __name__ == "__main__":
     failed = []
     with tempfile.TemporaryDirectory(prefix="d395-", dir=os.environ["XDG_RUNTIME_DIR"]) as workspace:
-        for scenario in sys.argv[1:] or (*CASES, "cli-admission", "staging-refusal"):
+        for scenario in sys.argv[1:] or (*CASES, "cli-admission", "staging-refusal", "destination-drift"):
             try:
                 if scenario == "cli-admission":
                     cli_admission(Path(workspace))
