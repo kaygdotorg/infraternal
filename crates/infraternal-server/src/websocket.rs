@@ -249,6 +249,8 @@ impl WebSocketState {
         )
         .await
     }
+
+    /// Build the shared socket state and its plugin runtime for this server.
     async fn new_inner(
         auth: Auth,
         pool: SqlitePool,
