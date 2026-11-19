@@ -1,5 +1,5 @@
 /**
- * What sampling the picture behind a glass card costs (D365, `packages/ui/src/glass-adapt.ts`).
+ * What sampling the picture behind a glass card costs (D365, `packages/ui/src/glass-adapt.on-demand.ts`).
  *
  * Adaptive glass density reads an 8x8 average of the part of a remote window's picture under a card, at most every 250 ms
  * while the card is open. Latency comes first (D375), so this measures the price before anyone wires it into a window:
@@ -27,7 +27,7 @@ const uiSrc = resolve(import.meta.dirname, "../../../packages/ui/src");
 function bundle(): string {
   const dir = mkdtempSync(join(tmpdir(), "glass-cost-"));
   const entry = join(dir, "entry.ts");
-  writeFileSync(entry, `export * from ${JSON.stringify(join(uiSrc, "glass-adapt.ts"))};\nexport { THEMES } from ${JSON.stringify(join(uiSrc, "themes.ts"))};\n`);
+  writeFileSync(entry, `export * from ${JSON.stringify(join(uiSrc, "glass-adapt.on-demand.ts"))};\nexport { THEMES } from ${JSON.stringify(join(uiSrc, "themes.ts"))};\n`);
   const out = join(dir, "glass.js");
   execFileSync("bun", ["build", entry, "--target=browser", "--format=esm", `--outfile=${out}`], { stdio: "pipe" });
   return readFileSync(out, "utf8");
@@ -49,7 +49,7 @@ test("sampling a 1080p picture: cost of one sample and its effect on frame inter
   await page.goto("http://glass.test/");
   const report: Report = await page.evaluate(async () => {
     const moduleUrl = "http://glass.test/glass.js";
-    const GA = await import(moduleUrl) as typeof import("../../../packages/ui/src/glass-adapt") & { THEMES: Record<string, import("../../../packages/ui/src/themes").Theme> };
+    const GA = await import(moduleUrl) as typeof import("../../../packages/ui/src/glass-adapt.on-demand") & { THEMES: Record<string, import("../../../packages/ui/src/themes").Theme> };
     const stats = (xs: number[]): Stats => {
       const s = [...xs].sort((a, b) => a - b);
       const at = (q: number): number => s[Math.min(s.length - 1, Math.floor(q * s.length))]!;
