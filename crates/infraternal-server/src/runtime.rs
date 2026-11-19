@@ -1460,10 +1460,9 @@ mod tests {
             tokio::time::Instant::now() - started,
             LISTENER_BIND_RETRY_WINDOW
         );
-        assert_eq!(
-            attempts.load(Ordering::Relaxed),
-            LISTENER_BIND_RETRY_WINDOW.as_secs() as usize + 1
-        );
+        let attempt_count =
+            u64::try_from(attempts.load(Ordering::Relaxed)).expect("retry count fits in u64");
+        assert_eq!(attempt_count, LISTENER_BIND_RETRY_WINDOW.as_secs() + 1);
     }
 
     /// The serve loop's shutdown select can cancel a bind retry while it is sleeping.
