@@ -3217,6 +3217,39 @@ mod tests {
     /// A second process epoch for restored-server cases.
     const AUTHORITY_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
 
+    /// The worker's send handle keeps the mesh port while the factory is gone. Dropping that last
+    /// handle lets a new worker bind the same port, including with connected sends enabled.
+    #[tokio::test]
+    async fn worker_send_handle_releases_the_port_on_drop() {
+        let key = || super::StaticSecret::from([42; 32]);
+        let (factory, port) = super::bind_udp(
+            crate::listen_port::Request {
+                port: 0,
+                allow_fallback: false,
+            },
+            key(),
+        )
+        .await
+        .expect("bind a mesh port");
+        let exact = crate::listen_port::Request {
+            port,
+            allow_fallback: false,
+        };
+        let worker_send = factory.send.clone();
+        drop(factory);
+
+        assert!(matches!(
+            super::bind_udp(exact, key()).await,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse
+        ));
+        drop(worker_send);
+
+        let (_replacement, rebound_port) = super::bind_udp(exact, key())
+            .await
+            .expect("rebind the released mesh port");
+        assert_eq!(rebound_port, port);
+    }
+
     /// Encode a complete snapshot with one epoch repeated across every chunk.
     fn chunks_with_epoch(
         old: Option<&Config>,
