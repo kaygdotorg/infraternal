@@ -154,7 +154,7 @@ impl Input {
 }
 
 /// Constant-space output flow state; bytes remain in the shim or one frame.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Output {
     cursor: u64,
     credit: u64,
@@ -431,16 +431,6 @@ impl Output {
         }
     }
 
-    /// Arm the unchanged starvation deadline for a reserved repaint that is too large.
-    pub fn pending_reserved_repaint(&mut self, now: Instant) -> Option<Instant> {
-        if self.repaint_budget() < self.required && !self.snapshot {
-            let start = *self.stalled.get_or_insert(now);
-            Some(start + STARVATION)
-        } else {
-            None
-        }
-    }
-
     /// Mark snapshot catch-up after the one-shot starvation deadline fires.
     pub fn expire(&mut self, now: Instant) -> bool {
         if self
@@ -471,6 +461,15 @@ impl Output {
     pub fn retry_recovery(&mut self) {
         self.snapshot = true;
         self.stalled = None;
+    }
+
+    /// Recover raw replay after abandoning a key repaint at the current cursor.
+    ///
+    /// A fresh raw frame can make progress with one byte. Only an ordinary
+    /// recovery Snapshot can set a new minimum if the shim's ring has a gap.
+    pub(crate) fn abandon_repaint(&mut self) {
+        self.required = 1;
+        self.retry_recovery();
     }
 
     /// Commit a repaint; its byte length consumes credit but never advances seq.
