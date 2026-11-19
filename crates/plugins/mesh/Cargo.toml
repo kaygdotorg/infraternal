@@ -62,9 +62,9 @@ url = { workspace = true, optional = true }
 # per-endpoint sends on macOS stay opt-in (GOTATUN_BENCH_MAC_CONNECTED=1).
 # J815/J826's startup-only pools now bind per family on J834's exclusive
 # AF_INET / IPv6-only pair. Before/after audits refuse silent port sharing;
-# endpoints only reconnect already-bound sockets. The Mac route listener
-# invalidates cached sources before requesting live-session keepalives.
-# S-off keeps the two exclusive sockets without a private socket-list audit.
+# endpoints only reconnect already-bound sockets. The Mac route listener and its
+# immediate keepalive request run only with S enabled; S-off keeps the default
+# roaming behavior and the two exclusive sockets without a private socket-list audit.
 gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "0d709bad5166dcffda7eecb8d65be42c0f0ba4fa", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
