@@ -216,9 +216,9 @@ fn foreign_machine_mesh_restore_is_refused_before_network_setup() {
     )
     .unwrap();
     fs::set_permissions(&binding, fs::Permissions::from_mode(0o600)).unwrap();
-    let error = Store::open(&directory.0)
-        .err()
-        .expect("a copied Mesh directory must be refused");
+    let Err(error) = Store::open(&directory.0) else {
+        panic!("a copied Mesh directory must be refused");
+    };
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert!(error.to_string().contains("different machine"));
 }

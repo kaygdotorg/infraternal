@@ -1017,7 +1017,8 @@ impl Node {
             Ok(meta)
                 if meta.is_dir()
                     && meta.uid() == nix::unistd::Uid::effective().as_raw()
-                    && meta.mode() & 0o077 == 0 =>
+                    // The low six mode bits are group and other permissions.
+                    && meta.mode().trailing_zeros() >= 6 =>
             {
                 crate::node_state::read_enrolment(path).map(|_| ())
             }
