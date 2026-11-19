@@ -780,8 +780,26 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
     Ok(tls.build())
 }
 
+/// Recognize a copied Linux Mesh directory without exposing raw local errors.
+pub(crate) fn foreign_mesh_restore(error: &io::Error) -> bool {
+    #[cfg(all(target_os = "linux", feature = "plugin-mesh"))]
+    {
+        error
+            .get_ref()
+            .is_some_and(|source| source.is::<infraternal_plugin_mesh::node::ForeignMachine>())
+    }
+    #[cfg(not(all(target_os = "linux", feature = "plugin-mesh")))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 /// CLI output can carry only these authored public sentences, never arbitrary errors.
 pub(crate) fn public_error(error: &io::Error) -> &'static str {
+    if foreign_mesh_restore(error) {
+        return "Saved Mesh state belongs to a different machine or this machine has no persistent ID.";
+    }
     match Failure::of(error) {
         Some(Failure::Dns(sentence)) => sentence,
         Some(Failure::Connect) => {

@@ -1,4 +1,5 @@
 //! Owns the root-only Mesh node, staged public configuration and synchronous data-plane lifecycle [163,166,198].
+pub use crate::enrolment::{Enrolment, ForeignMachine};
 pub use crate::gotatun_node::{EngineKind, EngineReason, EngineSelection};
 use crate::{
     dataplane::Config,
@@ -1003,6 +1004,76 @@ impl Node {
             EngineSource::Default
         };
         Self::restore_requesting(path, requested, source)
+    }
+
+    /// Read the saved machine binding before starting the remote connection supervisor.
+    ///
+    /// An installation whose directory has not been created has no prior binding.
+    /// # Errors
+    /// Refuses a copied Mesh directory, an unsafe directory or a damaged binding.
+    pub fn check_enrolled_machine(path: &std::path::Path) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        match std::fs::symlink_metadata(path) {
+            Ok(meta)
+                if meta.is_dir()
+                    && meta.uid() == nix::unistd::Uid::effective().as_raw()
+                    && meta.mode() & 0o077 == 0 =>
+            {
+                crate::node_state::read_enrolment(path).map(|_| ())
+            }
+            Ok(_) => Err(io::ErrorKind::PermissionDenied.into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Bind a remote Mesh directory before the service can restore it or contact the server.
+    ///
+    /// The caller holds the process-owned runtime lock. A changed or legacy enrollment
+    /// loses stale peers and keys after ownership-checked retirement. A different machine
+    /// is refused before either state or networking can change.
+    /// # Errors
+    /// Refuses unsafe state, unowned kernel objects and incomplete retirement or publication.
+    pub fn prepare_enrolled_restore(
+        path: &std::path::Path,
+        enrolment: Enrolment,
+    ) -> io::Result<()> {
+        use crate::node_state::{EnrolmentRecord, Store, machine_fingerprint, read_enrolment};
+
+        let saved = read_enrolment(path)?;
+        let machine = machine_fingerprint();
+        let matches = saved
+            .as_ref()
+            .is_some_and(|saved| saved.enrolment == enrolment);
+        if matches && saved.as_ref().and_then(|saved| saved.machine) == machine {
+            return Ok(());
+        }
+        let (store, state) = Store::open(path)?;
+        if !matches && store.has_mesh_state()? {
+            // A link or filter can only be ours if saved state has an ownership proof.
+            if state.backend.is_some()
+                || state
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.local_key.is_some())
+                || store.recorded_interface()?.is_some()
+            {
+                let plan = Self::plan_retirement(path)?;
+                if !plan.left().is_empty() {
+                    return Err(unproven_enrolment_retirement(plan.left()));
+                }
+                // Removing the proven link also retires its old peer routes.
+                let left = plan.execute()?;
+                if !left.is_empty() {
+                    return Err(unproven_enrolment_retirement(&left));
+                }
+            } else {
+                store.discard_rotation_state()?;
+                store.remove_private_key()?;
+            }
+            store.reset_enrolment_state(state.enabled)?;
+        }
+        store.record_enrolment(path, &EnrolmentRecord { machine, enrolment })
     }
 
     /// Restore with an engine chosen in code, in place of `INFRATERNAL_MESH_ENGINE`.
@@ -3916,6 +3987,17 @@ impl Node {
     }
 }
 // No Drop cleanup: kernel state and established flows survive control process loss [166].
+
+/// Report which kernel objects could not be proven to belong to the previous enrollment.
+fn unproven_enrolment_retirement(left: &[&'static str]) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "Mesh enrollment changed; could not retire kernel state with unproven ownership: {}",
+            left.join(", ")
+        ),
+    )
+}
 
 /// The kernel objects host uninstall removes, decided before any is deleted (#235).
 pub struct Retirement {

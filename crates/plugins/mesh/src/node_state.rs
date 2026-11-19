@@ -233,6 +233,62 @@ pub(crate) fn lock_mesh_state_update(path: &Path) -> io::Result<MeshStateUpdateG
     })
 }
 
+/// Private sidecar keeps the public snapshot compatible with older executables.
+#[cfg(target_os = "linux")]
+const ENROLMENT_FILE: &str = "mesh-enrolment.json";
+
+/// The enrollment and, where available, the original machine for a remote Mesh directory.
+#[cfg(target_os = "linux")]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnrolmentRecord {
+    /// Domain-separated fingerprint of the persistent machine ID, if the host has one.
+    pub(crate) machine: Option<[u8; 32]>,
+    /// Public authority, host ID and key from the enrolled infraternal agent.
+    pub(crate) enrolment: crate::enrolment::Enrolment,
+}
+
+/// Read only a persistent Linux machine ID and store its fingerprint, never the original ID.
+#[cfg(target_os = "linux")]
+pub(crate) fn machine_fingerprint() -> Option<[u8; 32]> {
+    let primary = Path::new("/etc/machine-id");
+    let dbus = Path::new("/var/lib/dbus/machine-id");
+    let (path, id) = match fs::read_to_string(primary) {
+        Ok(id) => (primary, id),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            (dbus, fs::read_to_string(dbus).ok()?)
+        }
+        Err(_) => return None,
+    };
+    let id = id.trim();
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    // A value mounted over the systemd file from /run may change on each boot.
+    if fs::symlink_metadata(path).ok()?.dev() != fs::metadata(path.parent()?).ok()?.dev() {
+        return None;
+    }
+    let mut digest = openssl::sha::Sha256::new();
+    digest.update(b"infraternal remote mesh machine binding v1\0");
+    digest.update(id.as_bytes());
+    Some(digest.finish())
+}
+
+/// Read the sidecar and refuse a copy bound to a different or unavailable machine ID.
+#[cfg(target_os = "linux")]
+pub(crate) fn read_enrolment(parent: &Path) -> io::Result<Option<EnrolmentRecord>> {
+    let record: Option<EnrolmentRecord> = read_public(&parent.join(ENROLMENT_FILE))?;
+    if let Some(machine) = record.as_ref().and_then(|record| record.machine)
+        && Some(machine) != machine_fingerprint()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            crate::enrolment::ForeignMachine,
+        ));
+    }
+    Ok(record)
+}
+
 impl Store {
     /// Read an owned private directory's public snapshot without following symlinks.
     /// # Errors
@@ -246,6 +302,8 @@ impl Store {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let directory_lease = lock_mesh_directory_shared(parent)?;
+        #[cfg(target_os = "linux")]
+        read_enrolment(parent)?;
         let path = parent.join("mesh-public.json");
         let route_path = parent.join("mesh-routes.json");
         let interface_path = parent.join("mesh-interface.json");
@@ -292,6 +350,56 @@ impl Store {
             },
             state,
         ))
+    }
+
+    /// Whether a pre-binding directory already owns Mesh intent, proofs, or key material.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn has_mesh_state(&self) -> io::Result<bool> {
+        for path in [
+            &self.path,
+            &self.route_path,
+            &self.interface_path,
+            &self.rotation_path,
+            &self.engine_path,
+            &self.key_path,
+            &self.authority_path,
+        ] {
+            match fs::symlink_metadata(path) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Drop stale peer and engine intent after retiring the owned kernel state and keys.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reset_enrolment_state(&self, enabled: bool) -> io::Result<()> {
+        self.save(&State {
+            enabled,
+            ..State::default()
+        })?;
+        self.record_routes(&BTreeSet::new())?;
+        match fs::remove_file(&self.engine_path) {
+            Ok(()) => FileSync::parent(&self.engine_path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Publish the binding only after stale state is fully retired, so restart can retry cleanup.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn record_enrolment(
+        &self,
+        parent: &Path,
+        record: &EnrolmentRecord,
+    ) -> io::Result<()> {
+        let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
+        write_public(
+            &parent.join(ENROLMENT_FILE),
+            &serde_json::to_vec(record).map_err(io::Error::other)?,
+        )
     }
 
     /// Open the shared journal beside the Mac public snapshot without decoding that platform's state.

@@ -204,3 +204,71 @@ fn public_state_restore_at_1000_peers() {
         fs::read_to_string("/proc/loadavg").unwrap().trim(),
     );
 }
+
+/// A restored remote Mesh directory cannot start on a machine with a different ID.
+#[test]
+fn foreign_machine_mesh_restore_is_refused_before_network_setup() {
+    let directory = super::tests::Directory::new();
+    let binding = directory.0.join("mesh-enrolment.json");
+    fs::write(
+        &binding,
+        br#"{"machine":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"enrolment":{"coordinator":"ca","host":"host","agent_key":"key"}}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&binding, fs::Permissions::from_mode(0o600)).unwrap();
+    let error = Store::open(&directory.0)
+        .err()
+        .expect("a copied Mesh directory must be refused");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("different machine"));
+}
+
+/// Restart reuses a matching enrollment, while re-enrollment retires the prior key and routes.
+#[test]
+fn enrollment_restore_preserves_matching_state_and_retires_a_changed_key() {
+    use crate::node::{Enrolment, Node};
+
+    let directory = super::tests::Directory::new();
+    let enrolled = || Enrolment::new(b"coordinator", "host", b"original agent key");
+    Node::prepare_enrolled_restore(&directory.0, enrolled()).unwrap();
+    let (store, _) = Store::open(&directory.0).unwrap();
+    let mut state = public_state(1);
+    // No kernel objects are needed to test the retained intent and private key.
+    state.config.as_mut().unwrap().local_key = None;
+    state.backend = None;
+    store.save(&state).unwrap();
+    store
+        .record_routes(&["10.254.0.3".parse().unwrap()].into_iter().collect())
+        .unwrap();
+    store.write_private_key(&[17; 32]).unwrap();
+    drop(store);
+
+    Node::prepare_enrolled_restore(&directory.0, enrolled()).unwrap();
+    let (store, same) = Store::open(&directory.0).unwrap();
+    assert_eq!(same.config, state.config);
+    assert!(store.read_private_key().unwrap().is_some());
+    assert_eq!(store.route_inventory().unwrap().len(), 1);
+    drop(store);
+
+    let replacement = Enrolment::new(b"coordinator", "host", b"replacement agent key");
+    Node::prepare_enrolled_restore(&directory.0, replacement).unwrap();
+    let (store, fresh) = Store::open(&directory.0).unwrap();
+    assert!(!fresh.enabled);
+    assert!(fresh.config.is_none());
+    assert!(store.read_private_key().unwrap().is_none());
+    assert!(store.route_inventory().unwrap().is_empty());
+}
+
+/// An unbound directory with a key alone must retire it before claiming the enrollment.
+#[test]
+fn enrollment_restore_retires_a_legacy_key_without_a_snapshot() {
+    let directory = super::tests::Directory::new();
+    let (store, _) = Store::open(&directory.0).unwrap();
+    store.write_private_key(&[23; 32]).unwrap();
+    drop(store);
+
+    let enrolment = crate::node::Enrolment::new(b"coordinator", "host", b"agent key");
+    crate::node::Node::prepare_enrolled_restore(&directory.0, enrolment).unwrap();
+    let (restored, _) = Store::open(&directory.0).unwrap();
+    assert!(restored.read_private_key().unwrap().is_none());
+}
