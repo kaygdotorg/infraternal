@@ -123,12 +123,19 @@ async function echoPaintSamples(page: Page, keys: string): Promise<number[]> {
   return samples;
 }
 
+/** Count decoded app-window traffic in the worker without forwarding every frame through Playwright. */
+const receivedVideo = (page: Page): Promise<number> => page.evaluate(async () => {
+  const preview = window as unknown as { __appwin: { report(): Promise<Array<{ stats?: { received: number } }>> } };
+  return (await preview.__appwin.report())[0]?.stats?.received ?? 0;
+});
+
 /** The page must route video, icons and terminal data over separate sockets. */
 test("terminal input and echo stay on their own socket while app video streams", async ({ page }) => {
   test.setTimeout(120_000);
   const terminals = new Set<WebSocket>();
+  const echoes = new Set<WebSocket>();
   const icons = new Set<WebSocket>();
-  const video = new Map<WebSocket, number>();
+  const video = new Set<WebSocket>();
   page.on("websocket", (socket) => {
     socket.on("framesent", ({ payload }) => {
       if (typeof payload === "string") return;
@@ -136,25 +143,33 @@ test("terminal input and echo stay on their own socket while app video streams",
       if (frame.type === "Input") terminals.add(socket);
       if (frame.type === "Call" && frame.actionId === "desktop.icon") icons.add(socket);
     });
-    socket.on("framereceived", ({ payload }) => {
+    const receive = ({ payload }: { payload: string | Buffer }): void => {
       if (typeof payload === "string") return;
       const { frame } = decodeMuxedFrame(payload);
-      if (frame.type === "Desktop" && frame.message.kind === "video") video.set(socket, (video.get(socket) ?? 0) + 1);
-    });
+      if (frame.type === "Output") echoes.add(socket);
+      if (frame.type === "Desktop" && frame.message.kind === "video") {
+        video.add(socket);
+        socket.off("framereceived", receive);
+      }
+    };
+    socket.on("framereceived", receive);
   });
   await openCanvas(page);
   await expect.poll(() => page.evaluate(() => window.__tracerProductTestDouble?.isConnected())).toBe(true);
   const idle = await echoPaintSamples(page, "qqrstuvwxyzzqtwvuyxrwszt");
   await openEditor(page);
   expect(video.size).toBe(1);
-  const [desktop, before] = [...video.entries()][0]!;
+  const [desktop] = video;
+  const before = await receivedVideo(page);
   // Type into the terminal while the app card is visible but idle.
   const loaded = await echoPaintSamples(page, "jjklmnpqqrsxtpqlnjrxxlmn");
-  expect(video.get(desktop)!).toBeGreaterThan(before);
-  expect(icons.has(desktop)).toBe(true);
+  const framesWhileTyping = await receivedVideo(page) - before;
+  console.log(`APPWIN_TERMINAL_PAINT ${JSON.stringify({ idle, loaded, framesWhileTyping })}`);
+  expect(framesWhileTyping).toBeGreaterThan(0);
+  expect(icons.has(desktop!)).toBe(true);
   expect(terminals.size).toBe(1);
-  expect(terminals.has(desktop)).toBe(false);
-  console.log(`APPWIN_TERMINAL_PAINT ${JSON.stringify({ idle, loaded, framesWhileTyping: video.get(desktop)! - before })}`);
+  expect(echoes).toEqual(terminals);
+  expect(terminals.has(desktop!)).toBe(false);
 });
 
 test("the picker lists every machine's shell, screen and windows, narrows with one field and follows the machine live", async ({ page }) => {
