@@ -73,6 +73,34 @@ async fn read_identity(channel: &dyn NodeChannel) -> Option<IdentityProbe> {
     Some(identity)
 }
 
+/// Asks a node about direct-path candidates (#515, D391) on its own, the way DNS support is asked: a strict
+/// older node refuses this probe alone and keeps its identity. `Some(lan)` when the node walks ordered candidate
+/// lists, with the LAN addresses it reported; `None` for an older node or no answer.
+async fn read_candidates(channel: &dyn NodeChannel) -> Option<Vec<std::net::SocketAddr>> {
+    let reply = channel
+        .call("mesh.identity", br#"{"candidates":true}"#.to_vec())
+        .await
+        .ok()?;
+    parse_candidates(&reply)
+}
+
+/// Reads the candidate fields of a `mesh.identity` reply to a `{"candidates":true}` probe; the identity fields
+/// it also carries are read elsewhere. The store keeps at most two private, sendable LAN addresses of what this
+/// returns ([`crate::candidates::valid_lan`]).
+#[must_use]
+pub fn parse_candidates(reply: &[u8]) -> Option<Vec<std::net::SocketAddr>> {
+    /// The two fields this probe adds to the identity reply.
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        candidates: bool,
+        #[serde(default)]
+        lan: Vec<std::net::SocketAddr>,
+    }
+    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    reply.candidates.then_some(reply.lan)
+}
+
 /// Requests DNS support on its own so a strict pre-DNS node can reject it without losing identity.
 #[cfg(feature = "mesh-dns")]
 async fn read_dns_names(channel: &dyn NodeChannel) -> bool {
@@ -273,10 +301,16 @@ pub async fn run(
                     .then_some(UNKNOWN_SUPPORT_RETRY);
                 if let Ok((node, updated)) = attached {
                     binding = Some(node);
-                    if updated {
-                        let Ok(_permit) = work.acquire().await else {
-                            return;
-                        };
+                    // Ask before the first snapshot, so a new node's first peers already carry candidates.
+                    let reported = read_candidates(channel.as_ref()).await;
+                    let Ok(_permit) = work.acquire().await else {
+                        return;
+                    };
+                    let recorded = matches!(
+                        store.record_candidates(node, reported.as_deref()).await,
+                        Ok(true)
+                    );
+                    if updated || recorded {
                         service.invalidate_dataplane().await;
                     }
                 } else {
@@ -2551,18 +2585,21 @@ mod tests {
                 handshake: now - 10,
                 received: 100,
                 keepalive: 0,
+                endpoint: None,
             },
             crate::presence::PeerRow {
                 node: relay_peer,
                 handshake: 0,
                 received: 200,
                 keepalive: 0,
+                endpoint: None,
             },
             crate::presence::PeerRow {
                 node: offline_peer,
                 handshake: 0,
                 received: 0,
                 keepalive: 0,
+                endpoint: None,
             },
         ];
         tracker.record(Some((true, rows.clone())), now);

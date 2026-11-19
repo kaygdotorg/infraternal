@@ -44,11 +44,14 @@ use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::{
         RwLock,
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        mpsc::{self, UnboundedSender},
         watch,
     },
 };
 use zeroize::Zeroizing;
+
+/// The worker loop, session-keeping peer updates and candidate walks (#515).
+mod walks;
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
@@ -1357,7 +1360,9 @@ impl PendingWorker {
                 let state = RuntimeState {
                     udp,
                     utun: Some(utun),
-                    device: Some(device),
+                    device: Some(Arc::new(device)),
+                    handshakes: tokio::task::JoinSet::new(),
+                    walks: crate::candidate_walks::Walks::default(),
                     config,
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
@@ -1370,7 +1375,7 @@ impl PendingWorker {
                     #[cfg(feature = "mesh-dns")]
                     dns_integration,
                 };
-                runtime.block_on(run_worker(receiver, state));
+                runtime.block_on(walks::run_worker(receiver, state));
             })?;
         let info = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
             Ok(info) => info,
@@ -1581,7 +1586,12 @@ struct RuntimeState {
     /// The worker's live UDP listener; clones share the connected pools with the device.
     udp: GotaUdpSocket,
     utun: Option<MacUtun>,
-    device: Option<GotaDevice>,
+    /// Shared only with handshake tasks, which `stop` ends before stopping the device.
+    device: Option<Arc<GotaDevice>>,
+    /// Running `rehandshake` waits ([`walks`]).
+    handshakes: tokio::task::JoinSet<()>,
+    /// Each peer's direct-path candidate walk (#515).
+    walks: crate::candidate_walks::Walks,
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
     route_mtus: BTreeMap<IpAddr, u16>,
@@ -1596,104 +1606,6 @@ struct RuntimeState {
     dns_resolver: Option<crate::dns::Resolver>,
     #[cfg(feature = "mesh-dns")]
     dns_integration: crate::dns_integration::DnsIntegration,
-}
-
-/// Applies queued requests on the Mac worker, announces underlay changes to live sessions, and
-/// stops cleanly when its queue closes.
-///
-/// The worker owns the node's one routing-socket listener ([`underlay::UnderlayAnnouncer`]) for
-/// as long as its utun lives (#483 J707 P2-3). When an announcement is due, `GotaTun` sends one
-/// keepalive to each peer with a live session, so a peer follows our new address within tens of
-/// milliseconds instead of at our next 25 s keepalive (D392). Applies write host routes while the
-/// socket is not read, so each is followed by a resync.
-///
-/// Between requests it also scans the device's confirmed endpoints every
-/// [`peer_stats::CONFIRMED_ENDPOINT_SCAN`] for the admission guard, as the Linux worker does.
-async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
-    let mut announcer = state
-        .utun
-        .as_ref()
-        .map(|utun| underlay::UnderlayAnnouncer::start(utun.name()));
-    let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
-    confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        let command = tokio::select! {
-            command = commands.recv() => command,
-            () = announcement_due(announcer.as_mut()) => {
-                if let Some(device) = &state.device {
-                    let sessions = announce_underlay(device, &state.udp).await;
-                    tracing::debug!(sessions, "underlay changed; live sessions announce our endpoint");
-                }
-                continue;
-            }
-            _ = confirmed_scan.tick() => {
-                state.admit_confirmed_endpoints().await;
-                continue;
-            }
-        };
-        let Some(command) = command else {
-            break;
-        };
-        match command {
-            WorkerCommand::Apply {
-                config,
-                budgets,
-                reply,
-            } => {
-                let result = state.apply(*config, budgets).await;
-                if let Some(announcer) = announcer.as_mut() {
-                    announcer.resync();
-                }
-                let _ = reply.send(result);
-            }
-            WorkerCommand::ReplaceAuthority {
-                config,
-                budgets,
-                reply,
-            } => {
-                let result = state.replace_authority(*config, budgets).await;
-                if let Some(announcer) = announcer.as_mut() {
-                    announcer.resync();
-                }
-                let _ = reply.send(result);
-            }
-            WorkerCommand::SetPrivateKey { private_key, reply } => {
-                let result = state.set_private_key(private_key).await;
-                let _ = reply.send(result);
-            }
-            WorkerCommand::Counters(reply) => {
-                let counters = state.counters().await.unwrap_or_default();
-                let _ = reply.send(counters);
-            }
-            WorkerCommand::Stop(reply) => {
-                let result = state.stop().await;
-                let _ = reply.send(result);
-                return;
-            }
-            #[cfg(test)]
-            WorkerCommand::Admission(reply) => {
-                let _ = reply.send(Arc::clone(&state.admission));
-            }
-        }
-    }
-    let _ = state.stop().await;
-}
-
-/// Refresh the live listener's cached sources before sessions announce on the new underlay.
-/// The listener and its startup pools share state with the device, including after peer or
-/// private-key updates. A busy session therefore reconnects on its next data send instead of
-/// waiting for the protocol's next handshake (#260, J826 finding 2).
-async fn announce_underlay(device: &GotaDevice, udp: &GotaUdpSocket) -> usize {
-    udp.underlay_changed();
-    device.request_keepalives().await
-}
-
-/// When `announcer` next has an announcement due, or never without one (no utun).
-async fn announcement_due(announcer: Option<&mut underlay::UnderlayAnnouncer>) {
-    match announcer {
-        Some(announcer) => announcer.due().await,
-        None => std::future::pending().await,
-    }
 }
 
 impl RuntimeState {
@@ -1767,6 +1679,9 @@ impl RuntimeState {
                 });
             }
         }
+        // Full replacement retires the old engine sessions and their walk positions.
+        self.handshakes.abort_all();
+        self.walks.clear();
         self.apply_with_rollback(config, budgets, false).await
     }
 
@@ -1871,7 +1786,14 @@ impl RuntimeState {
         } else {
             None
         };
-        if let Err(error) = replace_peers(device, peers).await {
+        // An authority replacement may have reached this path because the installed keys
+        // disagreed with the snapshot. Rebuild from the complete list in that case.
+        let peers_applied = if rollback_on_failure {
+            walks::update_peers(device, old_config.as_ref(), &config, &admitted).await
+        } else {
+            replace_peers(device, peers).await
+        };
+        if let Err(error) = peers_applied {
             if rollback_on_failure {
                 rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
             }
@@ -1960,7 +1882,11 @@ impl RuntimeState {
         admission.set_configured_endpoints(admitted_endpoints);
         drop(admission);
         utun.filter.publish_policy(policy);
+        let readdressed = walks::readdressed(old_config.as_ref(), &config);
         self.config = Some(config);
+        for key in readdressed {
+            self.rehandshake(key);
+        }
         Ok(RuntimeInfo {
             interface,
             port: self.port,
@@ -1991,7 +1917,11 @@ impl RuntimeState {
             .utun
             .as_ref()
             .map_or(Ok(()), |utun| remove_routes(utun.name(), &self.routes));
-        if let Some(device) = self.device.take() {
+        // Ending every handshake task drops its device handle, so this one is the last.
+        self.handshakes.abort_all();
+        while self.handshakes.join_next().await.is_some() {}
+        self.walks.clear();
+        if let Some(device) = self.device.take().and_then(Arc::into_inner) {
             device.stop().await;
         }
         self.utun.take();
@@ -3247,6 +3177,8 @@ mod tests {
     mod retirement;
     /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
     mod roamed_peer;
+    /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
+    mod walks;
 
     use super::{
         Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, Worker, WorkerCommand,
@@ -3333,6 +3265,7 @@ mod tests {
                             ipv6: "fd01::4".parse().expect("peer IPv6"),
                         },
                         endpoint: Some("192.0.2.4:51820".parse::<SocketAddr>().expect("endpoint")),
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -3406,6 +3339,7 @@ mod tests {
                     ipv6: format!("fd01::{id}").parse().expect("peer IPv6"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound: TrafficPolicy::All,

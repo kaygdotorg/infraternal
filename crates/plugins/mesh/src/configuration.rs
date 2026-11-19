@@ -174,6 +174,17 @@ fn compile_inner(
             // The same directional policy installed for this receiver decides whether it learns a name.
             peer_names.insert(other, member.node.host.clone());
         }
+        // A private-scope address (the guess of a node that reaches the server over its LAN, a
+        // CGNAT or VPN range, link-local or ULA) only goes to a peer with network access in some
+        // direction (J699 P2-1, D164), the rule LAN candidates follow. Without access the peer
+        // could never use it, and it would learn where the node sits. A grant recompiles this
+        // snapshot, so the address arrives with the access. A public address stays, so a later
+        // grant still finds the peer without a fresh walk.
+        let endpoint = endpoints.get(&other).copied().filter(|address| {
+            !crate::candidates::is_private_scope(address.ip())
+                || has_access(&inbound)
+                || has_access(&outbound)
+        });
         // Retain keys even for denied pairs: a rule change needs only policy, not a fresh tunnel setup.
         peers.insert(
             other,
@@ -186,7 +197,8 @@ fn compile_inner(
                         .allocation
                         .get(other)
                         .ok_or(MeshError::InvalidAllocation)?,
-                    endpoint: endpoints.get(&other).copied(),
+                    endpoint,
+                    candidates: Vec::new(),
                 },
                 inbound,
                 outbound,
@@ -215,6 +227,15 @@ fn compile_inner(
         #[cfg(feature = "mesh-dns")]
         peer_names,
     })
+}
+
+/// Whether `policy` lets any traffic through: all ports, or a non-empty port list.
+fn has_access(policy: &TrafficPolicy) -> bool {
+    match policy {
+        TrafficPolicy::All => true,
+        TrafficPolicy::Ports(ports) => !ports.is_empty(),
+        TrafficPolicy::None => false,
+    }
 }
 
 #[cfg(any(feature = "mesh-dns", test))]

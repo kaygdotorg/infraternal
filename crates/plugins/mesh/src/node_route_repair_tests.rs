@@ -36,6 +36,7 @@ fn fixture(peers: u32) -> (Node, std::path::PathBuf) {
                 ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
             },
             endpoint: None,
+            candidates: Vec::new(),
         })
         .collect::<Vec<_>>();
     Device::routes(&inventory, false).expect("accepted routes");
