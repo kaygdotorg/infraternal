@@ -4,8 +4,8 @@
 
 use super::{
     MoveError, Outcome, Relocation, Service, Systemd, current_side, database_identity, disk,
-    finish, optional_tree, pending, read_units, remove_journal, save, selected_target, stage_start,
-    with_journal,
+    exec_assignment, finish, live_data, optional_tree, pending, read_units, remove_journal, save,
+    selected_target, stage_start, with_journal,
 };
 use crate::install::{self, MoveInstall};
 use disk::Identity;
@@ -208,12 +208,27 @@ fn same_request(old: &Request, new: &Request) -> io::Result<bool> {
         && serde_json::to_vec(&old.install)? == serde_json::to_vec(&new.install)?)
 }
 
+/// A completed receipt can answer a racing client only while its unit still
+/// selects that completed move's destination.
+fn destination_is_selected(request: &Request) -> io::Result<bool> {
+    let plan = &request.relocation;
+    let units = read_units(&plan.unit, &plan.to)?;
+    Ok(units
+        .iter()
+        .rev()
+        .find(|(_, text)| exec_assignment(text).is_some())
+        .and_then(|(_, text)| live_data(text))
+        .as_deref()
+        == Some(plan.to.as_path()))
+}
+
 /// Stop any pre-admission start, then publish while later starts wait at the hook.
 fn admit(control: &Path, request: &Request) -> io::Result<()> {
     let dir = lock(control_dir(control, true)?)?;
+    let receipt = read::<Receipt>(&dir, RECEIPT)?;
     if let Some(previous) = read::<Request>(&dir, REQUEST)? {
-        let completed = !journal_pending(&previous)?
-            && matches!(read::<Receipt>(&dir, RECEIPT)?, Some(Receipt::Ready { .. }));
+        let completed =
+            !journal_pending(&previous)? && matches!(&receipt, Some(Receipt::Ready { .. }));
         if !completed {
             if !same_request(&previous, request)? {
                 return Err(disk::invalid(
@@ -222,10 +237,18 @@ fn admit(control: &Path, request: &Request) -> io::Result<()> {
             }
             return install_hook(control, request);
         }
-        if same_request(&previous, request)? {
-            return Ok(());
+        if destination_is_selected(request)? {
+            if same_request(&previous, request)? {
+                return Ok(());
+            }
+            return Err(disk::invalid(
+                "the service changed after move confirmation; run init again",
+            ));
         }
         disk::unlink(&dir, OsStr::new(REQUEST), false)?;
+    }
+    // A crash may have removed the completed request before its receipt.
+    if receipt.is_some() {
         disk::unlink(&dir, OsStr::new(RECEIPT), false)?;
     }
     install_hook(control, request)?;

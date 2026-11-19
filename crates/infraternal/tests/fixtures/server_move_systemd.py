@@ -423,6 +423,23 @@ def cli_admission(workspace):
         assert health(port) and sqlite_values(new) == [("source",)]
         assert not old.exists() and not hook.exists()
         print("CASE cli-admission hook loaded before stop and publication, moved server ready", flush=True)
+
+        # An explicit reinstall at the old path can start a new move with the
+        # same arguments. A receipt for the previous destination is obsolete.
+        systemctl("stop", server)
+        shutil.rmtree(new)
+        new.mkdir(mode=0o700)
+        result = subprocess.run(
+            [*cmd, "--data", str(old), "--force"], env=env, timeout=45, capture_output=True
+        )
+        assert result.returncode == 0, result
+        assert wait_for(lambda: health(port))
+        assert sqlite_values(old, "second source") == [("second source",)]
+        result = subprocess.run(cmd, env=env, timeout=60, capture_output=True)
+        assert result.returncode == 0, result
+        assert health(port) and sqlite_values(new) == [("second source",)]
+        assert not old.exists()
+        print("CASE repeated-move old receipt did not suppress a new cutover", flush=True)
     finally:
         release.touch()
         if moving is not None:
