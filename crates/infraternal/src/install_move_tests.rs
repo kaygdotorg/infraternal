@@ -110,6 +110,9 @@ fn unit_text(path: &Path) -> String {
     )
 }
 
+/// A filesystem change that runs once after the fake manager answers.
+type AfterReady = Box<dyn FnOnce()>;
+
 /// A manager whose start, readiness and active state are observable.
 #[derive(Default)]
 struct Fake {
@@ -119,6 +122,10 @@ struct Fake {
     fail_ready: Cell<bool>,
     /// Exact sequence of side effects and health confirmation.
     calls: RefCell<Vec<&'static str>>,
+    /// A filesystem change immediately after the health observation.
+    after_ready: RefCell<Option<AfterReady>>,
+    /// Simulate the service stopping immediately after answering.
+    stop_after_ready: Cell<bool>,
 }
 
 impl Service for Fake {
@@ -151,6 +158,13 @@ impl Service for Fake {
         self.calls.borrow_mut().push("ready");
         if self.fail_ready.get() {
             return Err(io::Error::other("server did not answer"));
+        }
+        if let Some(after_ready) = self.after_ready.borrow_mut().take() {
+            after_ready();
+        }
+        if self.stop_after_ready.replace(false) {
+            self.stop()?;
+            self.fail_ready.set(true);
         }
         Ok(())
     }
@@ -524,6 +538,95 @@ fn ready_retry_rejects_a_replaced_database() {
 
     assert!(fixture.apply(&fixture.new, &manager).is_err());
     assert_eq!(Install::data(&fixture.old), "original");
+}
+
+/// A moved parent can leave the pinned tree intact while replacing its live path.
+#[test]
+#[ignore = "D395 round-three review regression"]
+fn review_j906_preserves_original_when_destination_parent_moves() {
+    let mut fixture = Install::new();
+    let destination_parent = fixture.root.join("destination");
+    fs::create_dir(&destination_parent).unwrap();
+    fixture.new = destination_parent.join("new");
+    let service = Fake::default();
+    let relocation = fixture.plan(&fixture.old);
+    let result = apply(&relocation, &service, UNIX_EPOCH, || {
+        let journal = load(&fixture.new, &fixture.unit)?.unwrap();
+        fs::create_dir(journal.backup)
+    });
+    assert!(result.is_err());
+    let journal = load(&fixture.new, &fixture.unit).unwrap().unwrap();
+    assert!(journal.ready);
+    fs::remove_dir(&journal.backup).unwrap();
+
+    let displaced = fixture.root.join("displaced");
+    let saved_path = displaced.join("new");
+    let replacement = fixture.new.clone();
+    service.after_ready.replace(Some(Box::new(move || {
+        fs::rename(destination_parent, displaced).unwrap();
+        fs::create_dir_all(&replacement).unwrap();
+        fs::write(replacement.join("infraternal.sqlite"), "replacement").unwrap();
+    })));
+    let result = fixture.apply(&fixture.new, &service);
+    assert_eq!(Install::data(&saved_path), "original");
+    assert_eq!(Install::data(&fixture.new), "replacement");
+    assert!(
+        fixture.old.join("infraternal.sqlite").is_file()
+            || journal.backup.join("infraternal.sqlite").is_file(),
+        "retirement deleted the original after the destination path changed"
+    );
+    assert!(result.is_err());
+}
+
+/// A final health reply cannot authorize deletion after the server has stopped.
+#[test]
+#[ignore = "D395 round-three review regression"]
+fn review_j906_preserves_original_when_server_stops_after_health() {
+    let (fixture, service, journal) = ready_with_original();
+    service.stop_after_ready.set(true);
+
+    let result = fixture.apply(&fixture.new, &service);
+    assert!(!service.active().unwrap());
+    assert_eq!(Install::data(&fixture.new), "original");
+    assert!(
+        fixture.old.join("infraternal.sqlite").is_file()
+            || journal.backup.join("infraternal.sqlite").is_file(),
+        "retirement deleted the original after the moved server stopped"
+    );
+    assert!(result.is_err());
+}
+
+/// A nested directory and regular file retain their attributes on a whole-tree move.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "D395 round-three review regression"]
+fn review_j906_preserves_nested_attributes() {
+    use rustix::fs::{XattrFlags, fgetxattr, fsetxattr};
+
+    let fixture = Install::new();
+    let directory = Path::new("nested");
+    let file = directory.join("fixture");
+    fs::create_dir(fixture.old.join(directory)).unwrap();
+    fs::write(fixture.old.join(&file), b"nested data").unwrap();
+    let name = "user.infraternal.test";
+    for relative in [directory, file.as_path()] {
+        let old = File::open(fixture.old.join(relative)).unwrap();
+        fsetxattr(&old, name, b"nested attribute", XattrFlags::empty()).unwrap();
+    }
+
+    fixture.apply(&fixture.old, &Fake::default()).unwrap();
+    let attributes = [directory, file.as_path()].map(|relative| {
+        let new = File::open(fixture.new.join(relative)).unwrap();
+        let mut copied = [0; 64];
+        fgetxattr(&new, name, copied.as_mut_slice()).map(|size| copied[..size].to_vec())
+    });
+    assert_eq!(
+        attributes,
+        [
+            Ok(b"nested attribute".to_vec()),
+            Ok(b"nested attribute".to_vec())
+        ]
+    );
 }
 
 /// Copy preserves the top-level setgid bit and the original owner and group.
