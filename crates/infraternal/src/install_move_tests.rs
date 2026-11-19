@@ -322,10 +322,7 @@ fn review_j912_refuses_a_shared_source_during_planning() {
     fs::write(agent_root.join("state"), "agent state").unwrap();
 
     let error = plan(&fixture.old, &fixture.new, &fixture.unit).unwrap_err();
-    assert!(
-        error.to_string().contains("shared install base"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("shared install base"), "{error}");
     assert_eq!(Install::data(&fixture.old), "original");
     assert_eq!(
         fs::read_to_string(agent_root.join("state")).unwrap(),
@@ -345,14 +342,23 @@ fn standard_data_path_needs_no_move() {
     let before = paths.map(|path| path.metadata().unwrap());
 
     for _ in 0..2 {
-        assert!(plan(&fixture.new, &fixture.new, &fixture.unit).unwrap().is_none());
+        assert!(
+            plan(&fixture.new, &fixture.new, &fixture.unit)
+                .unwrap()
+                .is_none()
+        );
     }
 
     for (path, previous) in paths.into_iter().zip(before) {
         let current = path.metadata().unwrap();
         assert_eq!(
             (current.ino(), current.uid(), current.gid(), current.mode()),
-            (previous.ino(), previous.uid(), previous.gid(), previous.mode())
+            (
+                previous.ino(),
+                previous.uid(),
+                previous.gid(),
+                previous.mode()
+            )
         );
     }
     assert_eq!(
