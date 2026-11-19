@@ -60,7 +60,7 @@ def main() -> None:
 
     version = "20991231235959"
     migration_name = f"{version}_target_invalidation_proof.sql"
-    generated_description = 'description: "target invalidation proof"'
+    generated_description = '"target invalidation proof"'
     print(f"MIGRATION_INVALIDATION_BEGIN version={version}", flush=True)
     run_migration_metadata_test(source, target)
     before = generated_migration_list(target).read_text(encoding="utf-8")
