@@ -717,6 +717,54 @@ async fn key_repaint_waits_a_frame_for_pty_echo_after_input_ack() {
     );
 }
 
+/// A key arriving just before bulk starvation gets its own chance to repaint (#546).
+#[tokio::test(start_paused = true)]
+async fn bulk_starvation_does_not_cancel_an_acknowledged_key_repaint() {
+    let mut fixture = start_relay(2).await;
+    fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
+    let remaining = BULK_CREDIT as usize - PARTIAL_BULK_OUTPUT;
+    sessions::send(
+        &mut fixture.peer,
+        &Shim::Output(PARTIAL_BULK_OUTPUT as u64, vec![b'f'; remaining + 1]),
+    )
+    .await
+    .unwrap();
+    // The affordable prefix is forwarded. The last byte arms the bulk timer in the same turn.
+    assert!(matches!(
+        next_message(&mut fixture).await,
+        Message::Shim(2, Shim::Output(seq, bytes))
+            if seq == PARTIAL_BULK_OUTPUT as u64 && bytes.len() == remaining
+    ));
+    // Leave half of the echo grace before the bulk deadline expires.
+    let before_starvation = relay::STARVATION
+        .checked_sub(KEY_REPAINT_GRACE / 2)
+        .unwrap();
+    tokio::time::advance(before_starvation).await;
+    assert!(type_key_and_wait_for_ack(&mut fixture, 0).await);
+    let requested = matches!(
+        tokio::time::timeout(EVENT_GUARD, fixture.reader.read(&mut fixture.peer)).await,
+        Ok(Ok(Shim::SnapshotRequest))
+    );
+    let repaint = if requested {
+        sessions::send(
+            &mut fixture.peer,
+            &Shim::Snapshot(u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec()),
+        )
+        .await
+        .unwrap();
+        wait_for_repaint(&mut fixture).await
+    } else {
+        None
+    };
+    stop_relay(&mut fixture).await;
+
+    assert_eq!(
+        repaint,
+        Some((u64::from(BULK_CREDIT) + 1, b"echo:k".to_vec())),
+        "the old bulk deadline must not abandon a key once the PTY acknowledged it"
+    );
+}
+
 /// A key still preempts raw bytes that are in flight before the bulk window empties.
 #[tokio::test]
 async fn key_repaint_preempts_unreturned_bulk_before_window_is_empty() {

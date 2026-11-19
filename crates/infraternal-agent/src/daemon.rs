@@ -24,8 +24,9 @@
 //! Dropping stalled output affects only its own stream. Coalesced key input
 //! cannot mint credit or create unbounded captures. After the latest coalesced
 //! key is acknowledged, its capture waits one 8 ms terminal frame so the PTY
-//! program can render the echo. The 250 ms starvation deadline stays independent
-//! of this repaint grace. A key preempts when raw output is waiting for bulk
+//! program can render the echo. A funded key that replaces a stalled raw frame
+//! starts its own bounded wait for capture. Unfunded frames keep the original
+//! 250 ms starvation deadline. A key preempts when raw output is waiting for bulk
 //! credit or has built the backlog threshold, including a pending shim frame
 //! when no earlier raw bytes remain in flight. When bulk credit is exhausted
 //! and repaint credit remains, a key also triggers before its echo is queued;
@@ -46,7 +47,7 @@ use crate::{
 use infraternal_protocol::Frame;
 use infraternal_shim::frame::{APPROXIMATE_SNAPSHOT, Frame as Shim, SEQUENCED_INPUT};
 use serde::Deserialize;
-use std::{collections::HashMap, io, path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 
 pub use crate::daemon_writer::approximate_snapshots_total;
 use crate::daemon_writer::{Message, PRIORITY_CAPACITY, PriorityMessage, reply, writer};
@@ -56,6 +57,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
+    time::Instant,
 };
 
 /// Give the PTY program one 120 Hz display frame to render an acknowledged key.
@@ -2140,7 +2142,7 @@ async fn terminal_run(
     // the one SnapshotRequest already sent to the shim, if any.
     let mut key_repaint_target: Option<u64> = None;
     let mut key_repaint_requested: Option<u64> = None;
-    let mut key_repaint_ready_at: Option<tokio::time::Instant> = None;
+    let mut key_repaint_ready_at: Option<Instant> = None;
     let mut key_repaint_ready = false;
     let mut finished_peer = false;
     // One state fence in flight bounds shim work even if probes are pipelined over the network.
@@ -2202,8 +2204,8 @@ async fn terminal_run(
                     if end < frame_len {
                         pending = Some(Shim::Output(seq, bytes));
                         deadline = output
-                            .pending(Instant::now())
-                            .map(tokio::time::Instant::from_std);
+                            .pending(Instant::now().into_std())
+                            .map(Instant::from_std);
                         // This relay stops reading the shim while a frame is
                         // pending, and re-enters `pending` only at the top of
                         // this loop. After a pass that forwarded bytes, the remainder
@@ -2307,13 +2309,13 @@ async fn terminal_run(
                         pending = Some(frame);
                         // Reserved captures wait only for the protected budget;
                         // ordinary recovery remains funded by the bulk window.
-                        let now = Instant::now();
+                        let now = Instant::now().into_std();
                         deadline = if reserved {
                             output.pending_reserved_repaint(now)
                         } else {
                             output.pending(now)
                         }
-                        .map(tokio::time::Instant::from_std);
+                        .map(Instant::from_std);
                     }
                 }
                 _ => return Err(sessions::invalid("invalid pending frame")),
@@ -2498,9 +2500,15 @@ async fn terminal_run(
                                                     .retract(seq, bytes.len())
                                                     .map_err(|_| sessions::invalid("output credit invariant"))?;
                                             }
+                                            // Give the replacement capture its own
+                                            // bounded wait. The old raw timer could
+                                            // fire during the key's echo grace.
+                                            // Keep the original stall in the ledger
+                                            // for a capture that lacks credit.
+                                            let now = Instant::now();
                                             deadline = output
-                                                .pending(Instant::now())
-                                                .map(tokio::time::Instant::from_std);
+                                                .pending(now.into_std())
+                                                .map(|_| now + relay::STARVATION);
                                         }
                                         key_repaint_target = Some(
                                             key_repaint_target.map_or(target, |seen| seen.max(target)),
@@ -2592,7 +2600,7 @@ async fn terminal_run(
                     // The pending key repaint is abandoned: the client must
                     // still get the output its Ack passed.
                     release_key_cover(&priority, stream, attachment, key_repaint_target).await?;
-                    output.expire(Instant::now()); session = None; probe = None; pending = None;
+                    output.expire(Instant::now().into_std()); session = None; probe = None; pending = None;
                     key_repaint_target = None;
                     key_repaint_requested = None;
                     key_repaint_ready_at = None;
@@ -2652,7 +2660,7 @@ async fn terminal_run(
                             key_repaint_ready_at.is_some(),
                         ) {
                             key_repaint_ready_at =
-                                Some(tokio::time::Instant::now() + KEY_REPAINT_GRACE);
+                                Some(Instant::now() + KEY_REPAINT_GRACE);
                             key_repaint_ready = false;
                         }
                         request_key_repaint_if_ready(
