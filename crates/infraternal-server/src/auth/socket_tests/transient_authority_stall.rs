@@ -103,6 +103,12 @@ async fn authority_read_stall_beyond_the_wait_still_fails_closed() {
 /// and input typed during it never reaches the host. Production read deadline
 /// (25 ms) throughout.
 ///
+/// Count the application's held read before releasing SQLite so the test
+/// catches retries queueing behind their own missed reads (#525). The
+/// browser parks its keepalive probes using the regular hidden-viewer
+/// control. This keeps the paused clock from treating a real loopback
+/// Pong delay as loss of the connection during an authority stall.
+///
 /// Runtime time is paused and moves 1 ms at a time, only while the store is
 /// held or no authority read is in flight (#525). A SELECT runs on its worker
 /// thread in real time while the runtime clock stands still, so the test
@@ -149,12 +155,37 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
         0,
         &Frame::Hello {
             version: 1,
-            caps: 0,
+            caps: 1 << 2, // Viewer visibility notices.
             client_info: "terminal stall",
         },
     )
     .await;
     read_welcome(&mut browser).await;
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Event {
+            sub_id: 0,
+            event_json: br#"{"topic":"connection.visibility","hidden":true}"#,
+        },
+    )
+    .await;
+    // The transport handles control frames in order. Its reply confirms
+    // that it parked automatic probes before the clock starts moving.
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Ping {
+            nonce: 244,
+            sent_us: 244,
+        },
+    )
+    .await;
+    let reply = read_client_frame(&mut browser).await;
+    assert!(matches!(
+        decode_muxed_frame(&reply).unwrap().frame,
+        Frame::Pong { nonce: 244, .. }
+    ));
     client_ws_send(
         &mut browser,
         1,
@@ -167,9 +198,9 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
     .await;
     client_ws_send(&mut browser, 1, &Frame::Credit { bytes: 1 << 20 }).await;
     let (mut in_seq, mut out_seq) = (0_u64, 0_u64);
+    let mut acked = 0;
     for stall_ms in [100_u64, 300, 800] {
         let stall = Duration::from_millis(stall_ms);
-        let started = tokio::time::Instant::now();
         let mut held = Some(f.auth.pool.acquire().await.unwrap());
         let mut typed = Vec::new();
         let mut written = Vec::new();
@@ -192,10 +223,23 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
         }
         let typed_from = in_seq - typed.len() as u64;
         let (mut received, mut host) = (Vec::new(), Vec::new());
-        let mut stalled_read = false;
         // Only a hang bound: runtime time, not this, decides every deadline.
         let real = std::time::Instant::now();
-        while held.is_some() || received.len() < written.len() || host.len() < typed.len() {
+        while pending_reads() == 0 {
+            assert!(
+                real.elapsed() < Duration::from_secs(60),
+                "no authority read began for the {stall_ms} ms stall"
+            );
+            tokio::task::yield_now().await;
+        }
+        let started = tokio::time::Instant::now();
+        // Wait for the last acknowledgement too. Observing the key at the
+        // host only proves delivery; its reply may still need the store.
+        while held.is_some()
+            || received.len() < written.len()
+            || host.len() < typed.len()
+            || acked < in_seq
+        {
             assert!(
                 real.elapsed() < Duration::from_secs(60),
                 "the socket made no progress after a {stall_ms} ms stall"
@@ -204,8 +248,7 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
                 started.elapsed() < stall + Duration::from_secs(2),
                 "no output or input within the authority wait after a {stall_ms} ms stall"
             );
-            // The browser keeps reading and answering liveness probes through
-            // the stall, as a real one does.
+            // Drain the browser's socket while driving the stall clock.
             if let Some(wire) = browser.next().now_or_never() {
                 // Answer native liveness probes as a browser does [#317].
                 if let Some(Ok(Message::Ping(payload))) = wire {
@@ -222,6 +265,10 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
                         assert_eq!(at, out_seq, "terminal output reordered or lost");
                         out_seq += bytes.len() as u64;
                         received.extend_from_slice(bytes);
+                    }
+                    Frame::Ack { in_seq_acked } if decoded.stream_id == 1 => {
+                        assert!(in_seq_acked <= in_seq, "terminal acknowledged unsent input");
+                        acked = acked.max(in_seq_acked);
                     }
                     Frame::Close { code, reason } => {
                         panic!("a {stall_ms} ms stall closed the socket: {code} {reason}")
@@ -251,7 +298,11 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
                 tokio::task::yield_now().await;
             }
             if held.is_some() {
-                stalled_read |= pending_reads() != 0;
+                let reads = pending_reads();
+                assert!(
+                    reads <= 1,
+                    "the stalled terminal socket held {reads} authority read places"
+                );
             }
             if held.is_some() && started.elapsed() >= stall {
                 held = None;
@@ -259,7 +310,6 @@ async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
                 tokio::time::advance(Duration::from_millis(1)).await;
             }
         }
-        assert!(stalled_read, "no authority read waited out the {stall_ms} ms stall");
         assert_eq!(received, written);
         assert_eq!(host, typed);
     }
