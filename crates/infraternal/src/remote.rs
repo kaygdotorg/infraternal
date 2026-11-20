@@ -112,6 +112,9 @@ fn decode_candidate_key(encoded: &str) -> io::Result<Zeroizing<Vec<u8>>> {
 const IDENTITY_MISMATCH: &str =
     "This machine's saved private key does not match its enrollment certificate.";
 
+/// Public refusal for identity or key files that others can read. No path: it is public text.
+const SHARED_FILE: &str = "A saved identity or key file is readable by other users, so the infraternal agent refuses to use it. Make the files private (`chmod 600`) and their directory `chmod 700`, then try again.";
+
 const PENDING_JOIN_KEY: &str = "join-key.pk8";
 
 /// Why a join step failed, in the classes a caller acts on.
@@ -135,6 +138,11 @@ pub(crate) enum Failure {
     Challenge,
     /// The saved private key differs from the key certified at enrollment.
     IdentityMismatch,
+    /// A saved identity or key file (or its directory) can be read by the group or by everyone.
+    ///
+    /// Named on its own because the fix is one `chmod`, and "operation failed" sent a person
+    /// who copied the files to another machine (mode 0644) hunting through network settings (#554).
+    SharedFile,
 }
 
 impl std::fmt::Display for Failure {
@@ -146,6 +154,7 @@ impl std::fmt::Display for Failure {
             Self::Tls => "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
             Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again.",
             Self::IdentityMismatch => IDENTITY_MISMATCH,
+            Self::SharedFile => SHARED_FILE,
             Self::Challenge => "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
         })
     }
@@ -166,6 +175,17 @@ impl Failure {
 
 fn refused() -> io::Error {
     Failure::Refused.error(io::ErrorKind::PermissionDenied)
+}
+
+/// The refusal for a file or directory that is not private to its owner.
+fn shared_file() -> io::Error {
+    Failure::SharedFile.error(io::ErrorKind::PermissionDenied)
+}
+
+/// Pick the refusal for a checked file: the group/world-readable case gets its own sentence,
+/// but only when the file is otherwise ours, so a foreign file is still plainly refused.
+fn unsafe_file(owned: bool, mode: u32) -> io::Error {
+    if owned && mode & 0o077 != 0 { shared_file() } else { refused() }
 }
 
 pub(crate) fn default_data() -> io::Result<PathBuf> {
@@ -407,7 +427,10 @@ fn read_pending_key(data: &Path) -> io::Result<Option<PKey<openssl::pkey::Privat
         || metadata.len() == 0
         || metadata.len() > 4096
     {
-        return Err(refused());
+        return Err(unsafe_file(
+            metadata.is_file() && metadata.uid() == nix::unistd::Uid::effective().as_raw(),
+            metadata.permissions().mode(),
+        ));
     }
     let capacity = usize::try_from(metadata.len()).map_err(|_| refused())?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
@@ -813,6 +836,7 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
             "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again."
         }
         Some(Failure::IdentityMismatch) => IDENTITY_MISMATCH,
+        Some(Failure::SharedFile) => SHARED_FILE,
         Some(Failure::Refused) | None => "Remote infraternal agent operation failed",
     }
 }
@@ -887,7 +911,10 @@ fn prepare_directory(data: &Path) -> io::Result<()> {
         || metadata.uid() != nix::unistd::Uid::effective().as_raw()
         || metadata.permissions().mode() & 0o077 != 0
     {
-        return Err(refused());
+        return Err(unsafe_file(
+            metadata.is_dir() && metadata.uid() == nix::unistd::Uid::effective().as_raw(),
+            metadata.permissions().mode(),
+        ));
     }
     Ok(())
 }
@@ -940,7 +967,10 @@ fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.len() > 8192
     {
-        return Err(refused());
+        return Err(unsafe_file(
+            metadata.is_file() && metadata.uid() == nix::unistd::Uid::effective().as_raw(),
+            metadata.permissions().mode(),
+        ));
     }
     let mut bytes = Zeroizing::new(Vec::with_capacity(8192));
     file.take(8193).read_to_end(&mut bytes)?;
