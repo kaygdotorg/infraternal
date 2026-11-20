@@ -2,10 +2,11 @@
 
 use std::{
     fs::{self, File, Metadata, OpenOptions},
-    io::{self, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    io::{self, Read, Write},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
 };
 
 const LABEL: &str = "org.infraternal.mesh";
@@ -16,6 +17,308 @@ const SUDO: &str = "/usr/bin/sudo";
 const DATA_DIRECTORY: &str = "/var/lib/infraternal/agent";
 /// The system service's mesh state directory.
 pub const STATE_DIRECTORY: &str = "/var/lib/infraternal/state";
+/// Data directory of device-approved system installs (D395).
+pub const MACHINE_BASE: &str = "/Library/Application Support/infraternal";
+/// Root-owned binary published by the device-approved installer.
+pub const MACHINE_BINARY: &str = "/Library/Application Support/infraternal/bin/infraternal";
+/// Private enrollment for the device-approved system service.
+pub const MACHINE_DATA: &str = "/Library/Application Support/infraternal/agent";
+/// Mesh and local control state for the device-approved system service.
+pub const MACHINE_STATE: &str = "/Library/Application Support/infraternal/state";
+/// Records the host and whether its installer created the short PATH alias.
+pub const MACHINE_OWNER: &str = ".machine-owner";
+/// Canonical PATH link for a device-approved root install.
+const MACHINE_LINK: &str = "/usr/local/bin/infraternal";
+/// Private child entry used only by the authenticated uninstall handler.
+const REMOVE_HANDOFF: &str = "--macos-remove-after-reply";
+/// Private system state that survives replacement of the machine directory.
+const LIFECYCLE_DIRECTORY: &str = "/Library/Application Support/.infraternal-lifecycle";
+
+/// Holds the system-wide lock until publication, rollback or retirement finishes.
+pub struct MachineLock {
+    /// Keep the locked descriptor open, including while launchctl runs.
+    _file: File,
+}
+
+impl MachineLock {
+    /// Serialize launchd and machine path changes across root helpers.
+    ///
+    /// # Errors
+    /// Refuses unsafe filesystem ownership or an unavailable lock.
+    pub fn acquire() -> io::Result<Self> {
+        require_root()?;
+        let directory = Path::new(LIFECYCLE_DIRECTORY);
+        let parent = directory.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        require_root_directories(parent)?;
+        match fs::DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(directory)?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(directory.join("lock"))?;
+        require_owned_plist(&file.metadata()?)?;
+        // Keep this inode across runs. Unlinking a live lock would let another
+        // helper open a second inode and enter while the first still owns it.
+        file.lock()?;
+        Ok(Self { _file: file })
+    }
+
+    /// Publish or stop the fixed launchd service while holding the lifecycle lock.
+    ///
+    /// # Errors
+    /// Refuses an unsafe executable or failed launchd operation.
+    pub fn set_service(&self, action: &str, executable: &Path) -> io::Result<()> {
+        let executable = trusted_executable(executable)?;
+        match action {
+            "up" => install(&executable),
+            "down" => stop(),
+            _ => Err(io::ErrorKind::InvalidInput.into()),
+        }
+    }
+}
+
+/// Publish the ownership receipt before launchd can accept any removal request.
+///
+/// # Errors
+/// Refuses another receipt at the same name or an incomplete disk write.
+pub fn record_installation(host: &str, alias_created: bool) -> io::Result<()> {
+    require_root()?;
+    if !valid_host(host) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let receipt = Path::new(MACHINE_BASE).join(MACHINE_OWNER);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(receipt)?;
+    writeln!(file, "{host} {}", u8::from(alias_created))?;
+    file.sync_all()
+}
+
+/// Inspect the exact device-approved install before any destructive action.
+///
+/// # Errors
+/// Refuses a foreign, altered or unsafe install, or a different host identity.
+pub fn validate_installation(host: &str) -> io::Result<bool> {
+    let (_, alias_created) = installed_identity(host)?;
+    let binary = trusted_executable(Path::new(MACHINE_BINARY))?;
+    if binary != Path::new(MACHINE_BINARY) {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    if !owned_machine_plist()? {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    Ok(alias_created)
+}
+
+/// Read the recorded enrollment and its directory identity, independent of cleanup progress.
+fn installed_identity(host: &str) -> io::Result<((u64, u64), bool)> {
+    if !valid_host(host) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let base = Path::new(MACHINE_BASE);
+    require_root_directories(base)?;
+    let metadata = fs::symlink_metadata(base)?;
+    let receipt = base.join(MACHINE_OWNER);
+    require_owned_plist(&fs::symlink_metadata(&receipt)?)?;
+    let mut contents = String::new();
+    File::open(receipt)?
+        .take(36)
+        .read_to_string(&mut contents)?;
+    let alias = receipt_alias(&contents, host).ok_or(io::ErrorKind::PermissionDenied)?;
+    Ok(((metadata.dev(), metadata.ino()), alias))
+}
+
+/// Check the exact plist if it remains. A missing plist is an already retired step.
+fn owned_machine_plist() -> io::Result<bool> {
+    ensure_plist_directory()?;
+    let plist = Path::new(PLIST);
+    match fs::symlink_metadata(plist) {
+        Ok(metadata) => require_owned_plist(&metadata)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let expected = render_plist(Path::new(MACHINE_BINARY))?;
+    let mut actual = String::new();
+    File::open(plist)?
+        .take(expected.len() as u64 + 1)
+        .read_to_string(&mut actual)?;
+    if actual != expected {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(true)
+}
+
+/// Read alias ownership only from a receipt for the exact enrolled host.
+fn receipt_alias(receipt: &str, host: &str) -> Option<bool> {
+    let (recorded, alias) = receipt.split_once(' ')?;
+    if recorded != host {
+        return None;
+    }
+    match alias {
+        "1\n" => Some(true),
+        "0\n" => Some(false),
+        _ => None,
+    }
+}
+
+/// Start an independent child that waits for the accepted reply before stopping launchd.
+///
+/// The service manager reaps the service's process group on bootout. A new
+/// process group lets this child finish removing the stopped installation.
+///
+/// # Errors
+/// Refuses an unowned installation or a child that cannot be started.
+pub fn prepare_removal(host: &str) -> io::Result<Child> {
+    validate_installation(host)?;
+    Command::new(MACHINE_BINARY)
+        .arg(REMOVE_HANDOFF)
+        .arg(host)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+/// Handle a checked local removal or an authenticated after-reply child invocation.
+#[must_use]
+pub fn remove_if_requested() -> Option<std::process::ExitCode> {
+    let mut arguments = std::env::args_os().skip(1);
+    let action = arguments.next()?;
+    let waits = action == REMOVE_HANDOFF;
+    if !waits && action != "--bootstrap-uninstall" {
+        return None;
+    }
+    let Some(host) = arguments
+        .next()
+        .and_then(|arg| arg.into_string().ok())
+        .filter(|host| valid_host(host) && arguments.next().is_none())
+    else {
+        return Some(std::process::ExitCode::FAILURE);
+    };
+    if waits {
+        let mut armed = [0];
+        if std::io::stdin().read_exact(&mut armed).is_err() || armed != [1] {
+            return Some(std::process::ExitCode::FAILURE);
+        }
+    }
+    Some(match remove_installation(&host) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "Could not remove the owned infraternal installation ({:?}).",
+                error.kind()
+            );
+            std::process::ExitCode::FAILURE
+        }
+    })
+}
+
+/// Accept the same lowercase UUID form used in removal receipts.
+fn valid_host(host: &str) -> bool {
+    host.len() == 32
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Stop the live utun owner before retiring only the approved install's files.
+fn remove_installation(host: &str) -> io::Result<()> {
+    let _lock = MachineLock::acquire()?;
+    if !valid_host(host) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let lifecycle = Path::new(LIFECYCLE_DIRECTORY);
+    let retired = lifecycle.join(host);
+    match fs::symlink_metadata(&retired) {
+        // Only the verified rename below can publish this host-specific name.
+        // Its receipt may already be gone after an interrupted directory walk.
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == 0 => {
+            return fs::remove_dir_all(retired);
+        }
+        Ok(_) => return Err(io::ErrorKind::PermissionDenied.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let identity = installed_identity(host)?;
+    let verify = || -> io::Result<()> {
+        if installed_identity(host)? == identity {
+            Ok(())
+        } else {
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+    };
+    let binary = Path::new(MACHINE_BINARY);
+    if trusted_executable(binary)? != binary || (!owned_machine_plist()? && status()?.loaded) {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    verify()?;
+    stop()?;
+    verify()?;
+    remove_command_links(identity.1)?;
+    verify()?;
+    if owned_machine_plist()? {
+        fs::remove_file(PLIST)?;
+        File::open(PLIST_DIRECTORY)?.sync_all()?;
+    }
+    verify()?;
+    // Keep the receipt at the live path until every shared resource is gone.
+    // Once renamed, deletion can resume without touching any replacement.
+    let base = Path::new(MACHINE_BASE);
+    fs::rename(base, &retired)?;
+    File::open(lifecycle)?.sync_all()?;
+    File::open(base.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;
+    fs::remove_dir_all(retired)
+}
+
+/// Remove owned links in their trusted PATH directory and tolerate completed unlinks.
+fn remove_command_links(alias_created: bool) -> io::Result<()> {
+    let link = Path::new(MACHINE_LINK);
+    let parent = link.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    match require_root_directories(parent) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    }
+    let present = match fs::symlink_metadata(link) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                && metadata.uid() == 0
+                && fs::read_link(link)? == Path::new(MACHINE_BINARY) =>
+        {
+            true
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if alias_created {
+        infraternal_plugin_api::cli_alias::remove(link, 0)?;
+    }
+    if present {
+        fs::remove_file(link)?;
+    }
+    File::open(parent)?.sync_all()
+}
 
 /// The mesh state an `agent join` into `data` must forget, if any (#265, J162 F4).
 ///
@@ -70,13 +373,7 @@ pub fn control(
     executable: &Path,
 ) -> io::Result<Option<Status>> {
     if system_service {
-        require_root()?;
-        let executable = trusted_executable(executable)?;
-        match action {
-            "up" => install(&executable)?,
-            "down" => stop()?,
-            _ => return Err(io::ErrorKind::InvalidInput.into()),
-        }
+        MachineLock::acquire()?.set_service(action, executable)?;
         return Ok(None);
     }
     match action {
@@ -143,6 +440,7 @@ fn require_root() -> io::Result<()> {
     }
 }
 
+/// Require a root-owned executable whose directory and loaded libraries are trusted.
 fn trusted_executable(path: &Path) -> io::Result<PathBuf> {
     let path = fs::canonicalize(path)?;
     let metadata = fs::symlink_metadata(&path)?;
@@ -153,15 +451,21 @@ fn trusted_executable(path: &Path) -> io::Result<PathBuf> {
     ) {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    for parent in path.ancestors().skip(1) {
+    require_root_directories(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+    // A root-owned file can still make dyld load a user's library (J162 F2, #265).
+    crate::macos_image::check_file(&path)?;
+    Ok(path)
+}
+
+/// Verify each component of an absolute directory without following symlinks.
+fn require_root_directories(path: &Path) -> io::Result<()> {
+    for parent in path.ancestors() {
         let metadata = fs::symlink_metadata(parent)?;
         if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
     }
-    // A root-owned file can still make dyld load a user's library (J162 F2, #265).
-    crate::macos_image::check_file(&path)?;
-    Ok(path)
+    Ok(())
 }
 
 fn trusted_binary_metadata(uid: u32, mode: u32, regular_file: bool) -> bool {
@@ -174,8 +478,9 @@ fn install(executable: &Path) -> io::Result<()> {
     if !infraternal_plugin_api::cli_alias::install(executable, 0)? {
         eprintln!("infraternal: skipped infra; an existing path belongs to another command.");
     }
-    ensure_root_directory(DATA_DIRECTORY, true)?;
-    ensure_root_directory(STATE_DIRECTORY, true)?;
+    let (data, state) = service_paths(executable);
+    ensure_root_directory(data, true)?;
+    ensure_root_directory(state, true)?;
     ensure_plist_directory()?;
     let plist = render_plist(executable)?;
     write_plist(&plist)?;
@@ -309,10 +614,21 @@ fn require_owned_plist(metadata: &Metadata) -> io::Result<()> {
     }
 }
 
+/// Keep manually configured legacy services on their original paths.
+fn service_paths(executable: &Path) -> (&'static str, &'static str) {
+    if executable == Path::new(MACHINE_BINARY) {
+        (MACHINE_DATA, MACHINE_STATE)
+    } else {
+        (DATA_DIRECTORY, STATE_DIRECTORY)
+    }
+}
+
+/// Describe the launchd job using fixed platform paths.
 fn render_plist(executable: &Path) -> io::Result<String> {
     if !executable.is_absolute() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
+    let (data, state) = service_paths(executable);
     let executable = xml_escape(&executable.to_string_lossy());
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -321,8 +637,8 @@ fn render_plist(executable: &Path) -> io::Result<String> {
          <key>Label</key><string>{LABEL}</string>\n\
          <key>ProgramArguments</key><array>\n\
          <string>{executable}</string><string>agent</string><string>run</string>\n\
-         <string>--data</string><string>{DATA_DIRECTORY}</string>\n\
-         <string>--state</string><string>{STATE_DIRECTORY}</string>\n\
+         <string>--data</string><string>{data}</string>\n\
+         <string>--state</string><string>{state}</string>\n\
          </array>\n\
          <key>RunAtLoad</key><true/>\n\
          <key>KeepAlive</key><true/>\n\
@@ -343,6 +659,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Exercise launchd arguments, privileged checks and installation receipts.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -351,6 +668,38 @@ mod tests {
         trusted_binary_metadata,
     };
     use std::path::Path;
+
+    /// Fresh installs use Apple data paths while legacy launchd jobs remain valid.
+    #[test]
+    fn approved_install_renders_its_own_launchd_paths() {
+        let managed = render_plist(Path::new(super::MACHINE_BINARY)).unwrap();
+        assert!(managed.contains(super::MACHINE_DATA));
+        assert!(managed.contains(super::MACHINE_STATE));
+        assert!(!managed.contains(STATE_DIRECTORY));
+        let legacy = render_plist(Path::new("/usr/local/bin/infraternal")).unwrap();
+        assert!(legacy.contains(DATA_DIRECTORY));
+        assert!(legacy.contains(STATE_DIRECTORY));
+    }
+
+    /// A stale removal request cannot claim the new install or its PATH alias.
+    #[test]
+    fn uninstall_receipt_is_scoped_to_the_enrolled_host() {
+        let host = "cccccccccccccccccccccccccccccccc";
+        let previous = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(
+            super::receipt_alias(&format!("{host} 1\n"), host),
+            Some(true)
+        );
+        assert_eq!(
+            super::receipt_alias(&format!("{host} 0\n"), host),
+            Some(false)
+        );
+        assert_eq!(super::receipt_alias(&format!("{previous} 1\n"), host), None);
+        assert_eq!(
+            super::receipt_alias(&format!("{host} 1\nextra"), host),
+            None
+        );
+    }
 
     /// J162 F4: a join for another data directory leaves the service's mesh state alone.
     #[test]

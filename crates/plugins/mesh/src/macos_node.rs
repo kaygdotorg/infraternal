@@ -510,6 +510,12 @@ pub struct Enrolment {
 }
 
 impl Enrolment {
+    /// The enrolled public host identity used to scope authenticated removal.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     /// Bind to the identity in `identity.json`, given its public parts.
     #[must_use]
     pub fn new(coordinator_ca_der: &[u8], host: &str, agent_public_key_der: &[u8]) -> Self {

@@ -34,7 +34,7 @@ async fn live(f: &Fixture, host: Uuid) -> bool {
         .unwrap()
 }
 
-/// Offline removal records denial and reports pending; a durable receipt retires it.
+/// Offline removal survives a service restart and a second request until the host confirms it.
 #[tokio::test]
 async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
     let f = fixture().await;
@@ -96,11 +96,37 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
         live(&f, host).await,
         "pending denial is not a durable receipt"
     );
+    // A service restart drops review tokens and in-memory delivery state. A new
+    // review must leave the original offline request in charge of cleanup.
+    drop(service);
+    let restarted = removal(&f);
+    let repeat = restarted.start(&f.session, host, false, NOW).await.unwrap();
+    assert!(
+        restarted
+            .finish_host(&f.session, host, str_field(&repeat, "review"), NOW)
+            .await
+            .is_err(),
+        "a new request must not replace the pending uninstall with a retained install"
+    );
+    let pending: bool =
+        sqlx::query_scalar("SELECT confirmed=0 FROM remote_login_cleanup WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert!(
+        pending,
+        "only the original host receipt can complete cleanup"
+    );
     crate::enrollment::EnrollmentStore::new(f.auth.pool.clone())
         .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
         .await
         .unwrap();
     assert!(!live(&f, host).await);
+    assert!(
+        restarted.start(&f.session, host, true, NOW).await.is_err(),
+        "a completed removal refuses a fresh review"
+    );
     let coordinates: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap")
         .fetch_one(&f.auth.pool)
         .await

@@ -1,8 +1,14 @@
-//! Enrolls a Linux machine through device approval and starts its system service (#263).
+//! Enrolls a Linux machine or Mac through device approval and starts its system service (#263, #483).
 
 /// Keep fresh-host preflight, installation and rollback in one transaction.
+#[cfg(target_os = "linux")]
 #[path = "up_install.rs"]
 mod install;
+
+/// Install the Mac system service after device approval.
+#[cfg(target_os = "macos")]
+#[path = "up_macos.rs"]
+mod macos;
 
 /// Route termination signals through enrollment cancellation and transaction cleanup.
 #[path = "up_termination.rs"]
@@ -23,13 +29,17 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
+use tokio::time::Instant;
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "plugin-mesh", feature = "plugin-server")
+))]
 use infraternal_plugin_mesh::host_firewall;
 #[cfg(all(
     any(feature = "plugin-mesh", feature = "plugin-server"),
@@ -47,6 +57,7 @@ const MAX_HANDOFF_BYTES: usize = 16 * 1024;
 const MAX_HOST_FIREWALL_RULES: usize = 32;
 /// Reject oversized rule strings before they reach the root installer.
 const MAX_HOST_FIREWALL_RULE_BYTES: usize = 256;
+#[cfg(target_os = "linux")]
 const SERVICE_NAME: &str = "infraternal-agent.service";
 /// The shared boot unit that restores product-owned input rules before networking.
 ///
@@ -55,25 +66,33 @@ const SERVICE_NAME: &str = "infraternal-agent.service";
 /// install it is recovered by whichever build runs `up` next, and that
 /// rollback must stop our unit or restart the administrator's restored one
 /// (#530).
+#[cfg(target_os = "linux")]
 const HOST_FIREWALL_SERVICE: &str = "infraternal-firewall.service";
+#[cfg(target_os = "linux")]
 const SERVICE_BINARY: &str = "/var/lib/infraternal/bin/infraternal";
+#[cfg(target_os = "linux")]
 const SERVICE_DATA: &str = "/var/lib/infraternal/agent";
+#[cfg(target_os = "macos")]
+use macos::{SERVICE_DATA, SERVICE_NAME};
 const PATH_BINARY: &str = "/usr/local/bin/infraternal";
 /// The image this process is running. Root installs this, never the file the
 /// invoking user's path names: that file may be the user's to replace between
 /// sudo starting the helper and the copy (#263, J134 P3-4).
+#[cfg(target_os = "linux")]
 const RUNNING_IMAGE: &str = "/proc/self/exe";
 /// Where distributions (and `NixOS`) install the two programs `up` runs. PATH is
 /// never searched: the invoking user controls it, and a sudo policy can keep
 /// it for the root helper, so a PATH lookup could hand the machine key to
 /// another program or run one as root (#263, J122 P2).
 const SUDO_CANDIDATES: [&str; 3] = ["/usr/bin/sudo", "/bin/sudo", "/run/wrappers/bin/sudo"];
+#[cfg(target_os = "linux")]
 const SYSTEMCTL_CANDIDATES: [&str; 3] = [
     "/usr/bin/systemctl",
     "/bin/systemctl",
     "/run/current-system/sw/bin/systemctl",
 ];
 /// The only environment the root helper gives systemctl.
+#[cfg(target_os = "linux")]
 const HELPER_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A user-facing failure class with a stable D303 exit status.
@@ -92,6 +111,10 @@ enum Failure {
     SudoUnavailable,
     SudoDenied,
     UntrustedTool,
+    #[cfg_attr(
+        target_os = "macos",
+        expect(dead_code, reason = "launchd is present on every Mac")
+    )]
     NoSystemd,
     /// Local installation conflicts are distinct from a remote approval refusal.
     InstallConflict,
@@ -308,7 +331,10 @@ pub(crate) fn run(
     }
     // A redirected invocation exits before approval, so it should not fail a
     // host-policy check that only matters when installation can continue.
-    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
     let admin_rules = {
         let ssh_connection = match env::var("SSH_CONNECTION") {
             Ok(value) => Some(value),
@@ -326,7 +352,10 @@ pub(crate) fn run(
             }
         }
     };
-    #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    )))]
     let admin_rules = {
         // This build has no host firewall, and its command line never offers
         // the rules option, so the caller always passes an empty list.
@@ -342,6 +371,7 @@ pub(crate) fn run(
         Ok(command) => command,
         Err(failure) => return fail(json_output, failure),
     };
+    #[cfg(target_os = "linux")]
     if let Err(failure) = trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd) {
         return fail(json_output, failure);
     }
@@ -401,9 +431,15 @@ pub(crate) fn run(
     if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
         return fail(json_output, failure);
     }
-    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
     let host_firewall_service = Some(HOST_FIREWALL_SERVICE);
-    #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
+    #[cfg(not(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    )))]
     let host_firewall_service: Option<&str> = None;
     let success_message = if host_firewall_service.is_some() {
         "This machine joined; infraternal-firewall.service admits the mesh's input and blocks nothing else."
@@ -442,7 +478,10 @@ pub(crate) fn run(
 }
 
 /// Parse the small administrator-rule list used by a fresh system installation.
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "plugin-mesh", feature = "plugin-server")
+))]
 fn parse_agent_host_firewall_rules(values: &[String]) -> Result<Vec<AllowRule>, String> {
     if values.len() > MAX_HOST_FIREWALL_RULES
         || values
@@ -465,7 +504,10 @@ fn parse_agent_host_firewall_rules(values: &[String]) -> Result<Vec<AllowRule>, 
 ///
 /// An agent policy on its own renders the mesh-only, accept-policy table
 /// ([`host_firewall::InputMode::for_roles`]), so it needs no admin rule.
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "plugin-mesh", feature = "plugin-server")
+))]
 fn agent_host_firewall_policy(values: &[String]) -> Result<Policy, String> {
     let admin_rules = parse_agent_host_firewall_rules(values)?;
     let policy = Policy {
@@ -485,7 +527,10 @@ fn agent_host_firewall_policy(values: &[String]) -> Result<Policy, String> {
 /// SSH path if a default drop is ever applied on top of it. Rejected: pinning
 /// the installer's own address, which drops a second administrator or the same
 /// one after their address changes.
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "plugin-mesh", feature = "plugin-server")
+))]
 fn agent_host_firewall_rules(
     values: &[String],
     ssh_connection: Option<&str>,
@@ -528,7 +573,10 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     let server = server_url(server_input)?;
     let origin = server.origin().ascii_serialization();
     let handoff = read_handoff(&mut io::stdin().lock())?;
-    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
     let agent_policy = match agent_host_firewall_policy(&handoff.admin_rules) {
         Ok(policy) => policy,
         Err(error) => {
@@ -539,6 +587,7 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     // Resolved again as root: the caller's check proves nothing to this process.
     // After the handoff is read (the caller's write must not fail on a closed
     // pipe) and before enrollment, so a refusal leaves no half-joined machine.
+    #[cfg(target_os = "linux")]
     let systemctl =
         trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd).map_err(|_| Failure::Failed)?;
     let mut invitation = ApprovedInvitation(
@@ -548,17 +597,26 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     if crate::remote::key_digest_from_pkcs8(&handoff.key_pkcs8).ok() != Some(handoff.key_digest) {
         return Err(Failure::Permission);
     }
+    #[cfg(target_os = "macos")]
+    let host = invitation.0.host_id;
     invitation.wipe();
     install_preflight()?;
     let join_url = format!("{origin}/remote/join");
     termination::run(|interrupted| async move {
-        let install = install::Install::begin(Path::new("/"), 0, &systemctl)
+        #[cfg(target_os = "linux")]
+        let install = install::Install::begin(Path::new("/"), 0, &systemctl);
+        #[cfg(target_os = "macos")]
+        let install = macos::Install::begin();
+        let install = install
             .map_err(|error| {
                 eprintln!("{error}");
                 Failure::LocalState
             })?
             .interrupt_on(interrupted);
-        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        #[cfg(all(
+            target_os = "linux",
+            any(feature = "plugin-mesh", feature = "plugin-server")
+        ))]
         let install = install
             .with_host_firewall_policy(agent_policy)
             .map_err(|error| {
@@ -574,9 +632,19 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         )
         .await
         .map_err(|error| map_remote_failure(&error))?;
-        install
-            .activate(Path::new(RUNNING_IMAGE))
-            .map_err(|_| Failure::Partial)
+        #[cfg(target_os = "linux")]
+        let image = PathBuf::from(RUNNING_IMAGE);
+        #[cfg(target_os = "macos")]
+        let image = env::current_exe().map_err(|_| Failure::Partial)?;
+        #[cfg(target_os = "linux")]
+        let activation = install.activate(&image);
+        #[cfg(target_os = "macos")]
+        let activation = install.activate(&image, host);
+        activation.map_err(|_error| {
+            #[cfg(target_os = "macos")]
+            eprintln!("{_error}");
+            Failure::Partial
+        })
     })
     .map_err(|error| {
         eprintln!("{error}");
@@ -625,7 +693,12 @@ fn shown_hostname(name: &str) -> String {
         .trim_matches(|character| character == '-' || character == '.')
         .to_owned();
     if safe.is_empty() {
-        "linux-host".to_owned()
+        if cfg!(target_os = "macos") {
+            "mac-host"
+        } else {
+            "linux-host"
+        }
+        .to_owned()
     } else {
         safe
     }
@@ -755,8 +828,9 @@ fn print_approval(
     Ok(())
 }
 
+/// Start machine approval and check the server returned the expected capability shapes.
 async fn start_approval(server: &Url, body: &[u8]) -> Result<Approval, Failure> {
-    let response = post_json(server, "/auth/device-start", body).await?;
+    let response = post_json(server, "/auth/device-start", body, None, REQUEST_TIMEOUT).await?;
     if response.status != StatusCode::OK {
         return Err(map_http_status(response.status));
     }
@@ -775,6 +849,7 @@ async fn start_approval(server: &Url, body: &[u8]) -> Result<Approval, Failure> 
     })
 }
 
+/// Redeem as soon as approval arrives and retain the old cadence on polling-only servers.
 async fn wait_for_approval(
     server: &Url,
     approval: &Approval,
@@ -782,28 +857,34 @@ async fn wait_for_approval(
     origin: &str,
 ) -> Result<ApprovedInvitation, Failure> {
     let deadline = Instant::now() + approval.lifetime;
-    let mut delay = POLL_INTERVAL;
+    let body = Zeroizing::new(
+        serde_json::to_vec(&DeviceRedeemRequest {
+            token: &approval.poll_token,
+        })
+        .map_err(|_| Failure::Failed)?,
+    );
+    let mut next = Instant::now();
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep_until(next.min(deadline)).await;
+        let started = Instant::now();
+        let remaining = deadline.saturating_duration_since(started);
         if remaining.is_zero() {
             return Err(Failure::Expired);
         }
-        tokio::time::sleep(delay.min(remaining)).await;
-        if Instant::now() >= deadline {
-            return Err(Failure::Expired);
-        }
-        let body = Zeroizing::new(
-            serde_json::to_vec(&DeviceRedeemRequest {
-                token: &approval.poll_token,
-            })
-            .map_err(|_| Failure::Failed)?,
-        );
-        let response = match post_json(server, "/auth/device-redeem", &body).await {
+        next = started + POLL_INTERVAL;
+        // Older servers ignore Prefer and respond immediately; new servers
+        // spend the same interval waiting, with the usual request I/O budget.
+        let response = match post_json(
+            server,
+            "/auth/device-redeem",
+            &body,
+            Some("wait=10"),
+            remaining.min(POLL_INTERVAL + REQUEST_TIMEOUT),
+        )
+        .await
+        {
             Ok(response) => response,
-            Err(Failure::Unreachable) => {
-                delay = POLL_INTERVAL;
-                continue;
-            }
+            Err(Failure::Unreachable) => continue,
             Err(failure) => return Err(failure),
         };
         match response.status {
@@ -814,27 +895,32 @@ async fn wait_for_approval(
                 validate_invitation(&invitation.0, origin, Some(host_id))?;
                 return Ok(invitation);
             }
-            StatusCode::UNAUTHORIZED => delay = POLL_INTERVAL,
+            StatusCode::UNAUTHORIZED => {}
             StatusCode::TOO_MANY_REQUESTS => {
-                delay = response
+                let delay = response
                     .retry_after
                     .unwrap_or(POLL_INTERVAL)
-                    .max(Duration::from_secs(1));
+                    .max(Duration::from_secs(1))
+                    .min(remaining);
+                next = Instant::now() + delay;
             }
-            status if status.is_server_error() => delay = POLL_INTERVAL,
+            status if status.is_server_error() => {}
             status => return Err(map_http_status(status)),
         }
     }
 }
 
+/// Apply the caller's timeout to the shared, bounded JSON transport.
 async fn post_json(
     server: &Url,
     path: &'static str,
     body: &[u8],
+    preference: Option<&'static str>,
+    timeout: Duration,
 ) -> Result<crate::remote::ClientResponse, Failure> {
     let mut request_started = false;
     match tokio::time::timeout(
-        REQUEST_TIMEOUT,
+        timeout,
         crate::remote::post_json(
             server,
             path,
@@ -842,6 +928,7 @@ async fn post_json(
             None,
             MAX_RESPONSE_BYTES,
             &mut request_started,
+            preference,
         ),
     )
     .await
@@ -1120,7 +1207,11 @@ fn parse_result_marker(output: &[u8]) -> Option<u8> {
 
 /// Check the host before approval and repeat as root before installing anything.
 fn install_preflight() -> Result<(), Failure> {
-    let result = install::preflight(Path::new("/"), 0).and_then(|()| {
+    #[cfg(target_os = "linux")]
+    let system = install::preflight(Path::new("/"), 0);
+    #[cfg(target_os = "macos")]
+    let system = macos::preflight();
+    let result = system.and_then(|()| {
         if let Ok(data) = crate::remote::default_data() {
             match fs::symlink_metadata(data.join("identity.json")) {
                 Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "An infraternal agent identity already exists for this user. Manage that installation instead of running infraternal up.")),
@@ -1137,7 +1228,7 @@ fn install_preflight() -> Result<(), Failure> {
 }
 
 /// Exercise the same transaction as enrollment without contacting a server.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn install_system_service(
     root: &Path,
     source: &Path,
@@ -1185,6 +1276,7 @@ fn hash_stream(input: &mut impl Read, mut output: Option<&mut fs::File>) -> io::
 /// can never fail the unit, and the selinuxfs check makes it a no-op where
 /// `SELinux` is absent or disabled. The SSH installer's root unit carries the
 /// same step.
+#[cfg(target_os = "linux")]
 fn systemd_unit() -> String {
     format!(
         "[Unit]\nDescription=Infraternal machine service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStartPre=-+/bin/sh -c \"[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t {SERVICE_BINARY}\"\nExecStart={SERVICE_BINARY} agent run --data {SERVICE_DATA}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n"
@@ -1192,7 +1284,10 @@ fn systemd_unit() -> String {
 }
 
 /// Render the agent's root firewall unit so its saved input rules load before network setup.
-#[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "plugin-mesh", feature = "plugin-server")
+))]
 fn host_firewall_systemd_unit() -> String {
     format!(
         "{}\n[Unit]\nDescription=infraternal host input firewall\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=network-pre.target\nWants=network-pre.target\n\n[Service]\nType=oneshot\nExecStart={SERVICE_BINARY} __host-firewall-apply\nRemainAfterExit=yes\n\n[Install]\nWantedBy=network-pre.target\n",
@@ -1201,6 +1296,7 @@ fn host_firewall_systemd_unit() -> String {
 }
 
 /// Run a trusted service manager with a fixed environment and optional output check.
+#[cfg(target_os = "linux")]
 fn run_systemctl(
     systemctl: &Path,
     arguments: &[&str],
@@ -1257,7 +1353,7 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
 }
 
 /// Local enrollment, privilege, and transactional installation regressions.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
         Failure, JoinInvitation, Mode, SUDO_CANDIDATES, ToolError, approval_qr, encode_handoff,
