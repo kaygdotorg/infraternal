@@ -638,8 +638,21 @@ mod cap_review_r3 {
                 .await
                 .unwrap();
         // Drain initialization returns before placing the independent lock.
+        // Dropping a pooled connection only *spawns* its return task (sqlx's
+        // `PoolConnection::drop`), so right after the drop some of the eight
+        // still count as checked out. A late return then showed up as a fifth
+        // non-idle connection below (5 != 4) in loaded runs. Wait, on events and
+        // with a generous real-time bound, until every connection is idle again.
         let connections = futures_util::future::join_all((0..8).map(|_| pool.acquire())).await;
         drop(connections);
+        let returned_by = std::time::Instant::now() + Duration::from_secs(60);
+        while pool.size() as usize != 8 || pool.num_idle() != 8 {
+            assert!(
+                std::time::Instant::now() < returned_by,
+                "pooled connections were not returned to the pool"
+            );
+            tokio::task::yield_now().await;
+        }
         let mut locker = SqliteConnection::connect_with(&options).await.unwrap();
         sqlx::query("BEGIN EXCLUSIVE")
             .execute(&mut locker)

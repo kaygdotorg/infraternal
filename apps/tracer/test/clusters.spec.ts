@@ -241,7 +241,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   const edge = await centre('.ui-window[data-window-id="n-edge-arm"]');
   await page.mouse.move(head.x, head.y);
   await page.mouse.down();
-  await page.mouse.move(head.x + 10, head.y + 110, { steps: 5 }); // well clear of its own node: the end unsnaps
+  await page.mouse.move(head.x + 10, head.y + 180, { steps: 5 }); // well clear of its own node (a mesh card is 132 px high since #499): the end unsnaps
   await expect(page.locator('.cl-arrow[data-live]:not([data-snapped])')).toHaveCount(1); // unsnapped, following the pointer
   await page.mouse.move(edge.x, edge.y, { steps: 12 });
   await expect(page.locator('.ui-window[data-window-id="n-edge-arm"][data-drop]')).toHaveCount(1);
@@ -257,7 +257,7 @@ test("mesh: hover names a grant, dragging a head or tail unsnaps it, snaps to an
   const studio = await centre('.ui-window[data-window-id="n-studio-mac"]');
   await page.mouse.move(tail.x, tail.y);
   await page.mouse.down();
-  await page.mouse.move(tail.x - 10, tail.y + 110, { steps: 5 });
+  await page.mouse.move(tail.x - 10, tail.y + 180, { steps: 5 });
   await page.mouse.move(studio.x, studio.y, { steps: 14 });
   await page.mouse.up();
   await expect(page.locator(".ui-confirm-tip")).toContainText("Let studio-mac reach nix-cache instead of tag:ci?");
@@ -867,7 +867,7 @@ const SETTINGS_WINDOWS = {
   appearance: ["s-appearance-themes", "s-appearance-layout"],
   terminal: ["s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-terminal-multiplexer"],
   you: ["s-you-profile", "s-you-passkeys", "s-you-recovery", "s-you-apps", "s-you-devices"],
-  machines: ["s-machines-new-machines", "s-machines-updates"],
+  machines: ["s-machines-new-machines", "s-machines-updates", "s-machines-app-windows"],
   mesh: ["s-mesh-keys", "s-mesh-names", "s-mesh-access", "s-mesh-connections"],
   sharing: ["s-sharing-published-services", "s-sharing-certificates"],
   about: ["s-about-version", "s-about-licences"],

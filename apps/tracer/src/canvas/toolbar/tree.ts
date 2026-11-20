@@ -78,6 +78,13 @@ export function createTree(cx: Ctx): TreeModule {
   };
   let queued = false;
   let stale = false;
+  /**
+   * What the tree was last drawn from (the sections and the active leaf, as text). A change event that leaves it the same, such as the
+   * host list or the lock reporting the hosts it already had, draws nothing: a redraw replaces every row, so it took the keyboard focus from
+   * the row a menu had just given it back to and closed a revealed swipe under the person's finger (#443; since #500 these events arrive
+   * right after the sidebar opens).
+   */
+  let drawn = "";
   /** A host's name is being edited in the tree: it is not rebuilt under the person's hands (it is, once they are done). */
   let editing = false;
   /** A second tap on a host's name renames it; the sidebar on a phone therefore waits this long before it closes. */
@@ -109,7 +116,11 @@ export function createTree(cx: Ctx): TreeModule {
       if (editing) return;
       stale = false;
       loadRows();
-      treeMenu = core.setHostTree(sections(), current(), (picked) => {
+      const sectionList = sections();
+      const signature = JSON.stringify([sectionList, current()]);
+      if (treeMenu && signature === drawn && stage.querySelector("#tree")?.firstElementChild) return;
+      drawn = signature;
+      treeMenu = core.setHostTree(sectionList, current(), (picked) => {
         // A component leaf of Settings (#304) opens the first window of its row; a group leaf is the window's own id.
         // The inline "Unlock host connections" row under a locked host runs the passkey unlock; it opens no window.
         if (picked.startsWith("u:")) { void cx.adapters.authority?.unlock(); chosen(picked); return; }
