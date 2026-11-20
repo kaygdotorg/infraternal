@@ -89,7 +89,8 @@ test("glass chunk fails to load: no error, no layout change, surfaces still open
   const page = await ctx.newPage();
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(String(e)));
-  page.on("console", (m) => { if (m.type() === "error") errors.push(`console: ${m.text()}`); });
+  // The browser itself logs "Failed to load resource" for every request the test refuses; that line is the refusal, not an app error.
+  page.on("console", (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) errors.push(`console: ${m.text()}`); });
   await interceptGlass(page, (route) => route.abort("failed"));
   await ctx.request.post("/__mock/reset");
   await page.goto("/?mock=1&proto=clusters&scene=1&fps=0&removal=1&bg=none&theme=ink");
