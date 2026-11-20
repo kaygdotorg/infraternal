@@ -469,3 +469,25 @@ async fn pending_removal_releases_its_typed_machine_name() {
             .unwrap();
     assert_eq!(retained, 1);
 }
+
+/// D339 (#337): a host that joined by invitation has no SSH probe row, so its fallback name uses the OS its agent
+/// reported in the Hello, not `host`. The probe's OS still wins when both exist.
+#[tokio::test]
+async fn an_invited_host_with_no_name_falls_back_to_the_os_its_agent_reported() {
+    let pool = pool().await;
+    let c = "00000000-0000-4000-8000-00000000000c";
+    // An invitation host: a remote_hosts row, no bootstrap row.
+    let id = uuid::Uuid::parse_str(c).unwrap();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,reported_os) VALUES(?,'owner','rootful',0,1,'Linux')")
+        .bind(id.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    store
+        .attach_named(c, PublicKey([12; 32]), None, false, Some("localhost"))
+        .await
+        .unwrap();
+    assert_eq!(names(&service, "owner").await, ["linux-000000"]);
+}

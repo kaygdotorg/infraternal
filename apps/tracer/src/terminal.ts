@@ -459,6 +459,10 @@ export class TerminalClient {
     const write = terminal.write.bind(terminal);
     terminal.write = (data, callback) => {
       this.linkRowsArmed = true;
+      // Every write is new parsed output, including local ones that bypass the output pump (test-double helpers, the
+      // 10 MB/s benchmark): the cursor layer resyncs on a version change (#447, J468). The pump also bumps it; every
+      // reader compares with !==, so two bumps for one write are harmless.
+      this.parsedOutputVersion += 1;
       write(data, callback);
     };
     // Phones wait for a real tap before opening the keyboard (D191).
@@ -478,7 +482,10 @@ export class TerminalClient {
         host: config.host,
         optedIn: true,
         getPosition: () => this.predictionPosition(),
-        onVisible: (sequence, at) => config.hooks?.onTrace?.(sequence, "prediction", at),
+        // Stamped with the clock when the overlay was drawn, not the animation frame's start time `at`: the frame
+        // start can come before the keydown that the same frame draws (the D375 key-to-letter row then read below 0),
+        // and a stall between keydown and the draw (a slow input handler) would not show in the row at all (#447).
+        onVisible: (sequence) => config.hooks?.onTrace?.(sequence, "prediction", performance.now()),
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
       })
       : undefined;
@@ -2545,6 +2552,7 @@ export class TerminalClient {
     }
     this.cursorLayerShown = shown;
     this.setRendererCursorHidden(this.predictionCursorHidden || shown);
+    this.rememberCursorLayerInputs();
   }
 
   /** Any input, focus or visibility change: blinks again from the visible phase, only while the page is live and focused. */
@@ -2610,9 +2618,57 @@ export class TerminalClient {
       this.renderedOutputVersion = this.parsedOutputVersion;
       if (changedRows) this.queueLinkRows(changedRows.rows, changedRows.force);
       this.renderPasses += 1;
+      // The render loop runs every animation frame while output flows; most passes change nothing the cursor layer
+      // depends on, so they skip it (#447: its per-pass work was ~1.1 MB/s of garbage at uncapped frame rates).
+      // A forced full redraw (theme, font, resize) always resyncs.
+      if (args[1] !== true && !this.cursorLayerInputsChanged()) return;
       this.syncCursorLayer();
       for (const listener of this.glassListeners) listener();
     };
+  }
+
+  /** What the cursor layer last synced against, read without allocating (see cursorLayerInputsChanged). */
+  private readonly cursorSyncedFor = {
+    output: -1, viewportY: Number.NaN, cols: 0, rows: 0, canvasWidth: 0, canvasHeight: 0, flags: -1,
+    style: undefined as unknown, theme: undefined as unknown,
+  };
+
+  /**
+   * True when something the cursor layer depends on may have changed since its last sync: new parsed output (the
+   * only thing that moves the cursor), the viewport, the grid or canvas size, the cursor style or theme, or one of the
+   * flags `cursorLayerWanted` reads. Each is a plain field read; nothing is allocated and no layout is read, so a
+   * pass with no change costs a few comparisons. Paths that change other inputs (font, focus, prediction) call
+   * `syncCursorLayer` themselves.
+   */
+  private cursorLayerInputsChanged(): boolean {
+    const was = this.cursorSyncedFor;
+    const canvas = this.terminal.renderer?.getCanvas();
+    return was.output !== this.parsedOutputVersion || was.viewportY !== this.terminal.viewportY ||
+      was.cols !== this.terminal.cols || was.rows !== this.terminal.rows ||
+      was.canvasWidth !== (canvas?.width ?? 0) || was.canvasHeight !== (canvas?.height ?? 0) ||
+      was.flags !== this.cursorLayerFlags() || was.style !== this.terminal.options.cursorStyle ||
+      was.theme !== this.ghostty.renderer?.theme;
+  }
+
+  /** The booleans `cursorLayerWanted` reads, packed into one number for the change check. */
+  private cursorLayerFlags(): number {
+    return (this.closed ? 1 : 0) | (this.suspended ? 2 : 0) | (this.surfaceReleased ? 4 : 0) |
+      (this.cursorLayerOffForTest ? 8 : 0) | (this.typingReady ? 16 : 0) | (this.predictionCursorHidden ? 32 : 0);
+  }
+
+  /** Records the inputs a completed cursor-layer sync used. */
+  private rememberCursorLayerInputs(): void {
+    const was = this.cursorSyncedFor;
+    const canvas = this.terminal.renderer?.getCanvas();
+    was.output = this.parsedOutputVersion;
+    was.viewportY = this.terminal.viewportY;
+    was.cols = this.terminal.cols;
+    was.rows = this.terminal.rows;
+    was.canvasWidth = canvas?.width ?? 0;
+    was.canvasHeight = canvas?.height ?? 0;
+    was.flags = this.cursorLayerFlags();
+    was.style = this.terminal.options.cursorStyle;
+    was.theme = this.ghostty.renderer?.theme;
   }
 
   /** Reads the renderer's dirty rows before its pass clears them; no detection runs on the write or input path. */

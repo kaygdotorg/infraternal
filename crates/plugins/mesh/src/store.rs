@@ -488,16 +488,21 @@ async fn wanted_name(
             records.extend(name);
         }
     }
-    let cached = if let Ok(id) = uuid::Uuid::parse_str(host) {
-        sqlx::query_scalar::<_, Option<String>>("SELECT hostname FROM remote_hosts WHERE id=?")
-            .bind(id.as_bytes().as_slice())
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| "Mesh storage unavailable.")?
-            .flatten()
+    let (cached, reported_os) = if let Ok(id) = uuid::Uuid::parse_str(host) {
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT hostname,reported_os FROM remote_hosts WHERE id=?",
+        )
+        .bind(id.as_bytes().as_slice())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?
+        .unwrap_or((None, None))
     } else {
-        None
+        (None, None)
     };
+    // The SSH probe's OS name wins, as in the host list; a host that joined by invitation has no probe row, so
+    // the OS its agent reported in the Hello names its fallback (D339, #337).
+    let os = os.or(reported_os);
     let usable = |name: &String| name != SERVER_LABEL;
     let wanted = if server {
         reported.and_then(machine_name).map(|name| (name, "server"))

@@ -325,7 +325,7 @@ pub(crate) async fn writer(
                     } else {
                         wire_caps & infraternal_plugin_api::channel::SERVER_PATH_PROPOSALS
                     },
-                client_info: crate::host_os::CLIENT_INFO,
+                client_info: crate::host_os::client_info(),
             },
         )
         .await?;

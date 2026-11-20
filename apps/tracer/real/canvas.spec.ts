@@ -179,7 +179,7 @@ test("a page that opens and closes more than 32 windows keeps working: the conne
   await page.locator(".tab-add").click();
   await expect(windows(page)).toHaveCount(keep + 1);
   // The terminal starts after the window exists (font and renderer load); the keys go to it once it has focus.
-  await expect(windows(page).last().locator(".terminal-host")).toBeFocused({ timeout: 15_000 });
+  await expect(windows(page).last().locator(".terminal-host textarea")).toBeFocused({ timeout: 15_000 });
   await page.keyboard.type("echo after-rotation-$((5*5))\n", { delay: 5 });
   await expect.poll(() => [...(live().at(-1)?.output.values() ?? [])].join(""), { timeout: 20_000 }).toContain("after-rotation-25");
 });

@@ -57,8 +57,12 @@ export class TerminalCursorLayer {
   private readonly element: HTMLElement;
   /** The running blink, or `undefined` when steady. */
   private animation: Animation | undefined;
-  /** The placement last applied, as a string, so an unchanged cursor writes no style. */
-  private key = "";
+  /**
+   * The placement last applied, field by field, so an unchanged cursor writes no style. Compared as numbers and
+   * strings rather than one joined key: `place` runs after every renderer pass while output flows, and building a key
+   * string per frame was most of the page's garbage at high frame rates (#447).
+   */
+  private last = { left: Number.NaN, top: Number.NaN, column: -1, row: -1, cellWidth: 0, cellHeight: 0, style: "", color: "" };
   /** Whether the layer is visible. */
   private shown = false;
   /** The last placed rectangle, for {@link TerminalCursorLayer.snapshot}. */
@@ -80,15 +84,19 @@ export class TerminalCursorLayer {
   /** Puts the cursor on its cell. Writes style only when something changed, so a settled cursor costs nothing. */
   place(placement: TerminalCursorPlacement): void {
     const { canvas, column, row, cellWidth, cellHeight, style, color } = placement;
-    const key = `${canvas.offsetLeft}|${canvas.offsetTop}|${column}|${row}|${cellWidth}|${cellHeight}|${style}|${color}`;
-    if (key !== this.key) {
-      this.key = key;
+    const left = canvas.offsetLeft;
+    const top = canvas.offsetTop;
+    const last = this.last;
+    if (left !== last.left || top !== last.top || column !== last.column || row !== last.row ||
+      cellWidth !== last.cellWidth || cellHeight !== last.cellHeight || style !== last.style || color !== last.color) {
+      last.left = left; last.top = top; last.column = column; last.row = row;
+      last.cellWidth = cellWidth; last.cellHeight = cellHeight; last.style = style; last.color = color;
       let width = cellWidth;
       let height = cellHeight;
       if (style === "bar") width = Math.max(2, Math.floor(cellWidth * 0.15));
       if (style === "underline") height = Math.max(2, Math.floor(cellHeight * 0.15));
-      const x = canvas.offsetLeft + column * cellWidth;
-      const y = canvas.offsetTop + row * cellHeight + (style === "underline" ? cellHeight - height : 0);
+      const x = left + column * cellWidth;
+      const y = top + row * cellHeight + (style === "underline" ? cellHeight - height : 0);
       this.box = { x, y, width, height };
       this.color = color;
       const css = this.element.style;
