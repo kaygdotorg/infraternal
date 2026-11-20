@@ -826,10 +826,14 @@ impl Store {
         if port == 0 || port == 51_820 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        write_public(
-            &self.listen_port_path,
-            &serde_json::to_vec(&port).map_err(io::Error::other)?,
-        )
+        let body = serde_json::to_vec(&port).map_err(io::Error::other)?;
+        // Every start records the port it already has; leave an unchanged record alone (#221).
+        // Only this record and the Mac snapshot skip: the Linux journal and snapshot saves keep
+        // their write-always shape, which the failure-injection tests rely on.
+        if existing_matches(&self.listen_port_path, &body) {
+            return Ok(());
+        }
+        write_public(&self.listen_port_path, &body)
     }
 
     /// Read the saved automatic listener choice, if this node has started before.
@@ -1419,11 +1423,7 @@ pub(crate) fn existing_matches(path: &Path, body: &[u8]) -> bool {
 // Write the journal before kernel mutation and the accepted snapshot afterwards.
 // A crash between writes can recover ownership from the journal, the accepted
 // peer list and the retained kernel peer list; no cross-file atomicity is assumed.
-// An identical file is left in place (see `existing_matches`).
 fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
-    if existing_matches(path, body) {
-        return Ok(());
-    }
     let temporary = path.with_extension(format!("{}.new", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)
@@ -2436,11 +2436,15 @@ pub(crate) mod tests {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
         store.record_listen_port(10_254).expect("first save");
-        let inode = fs::metadata(&store.listen_port_path).expect("metadata").ino();
+        let inode = fs::metadata(&store.listen_port_path)
+            .expect("metadata")
+            .ino();
 
         store.record_listen_port(10_254).expect("repeat save");
         assert_eq!(
-            fs::metadata(&store.listen_port_path).expect("metadata").ino(),
+            fs::metadata(&store.listen_port_path)
+                .expect("metadata")
+                .ino(),
             inode,
             "an identical record must not be replaced"
         );
@@ -2448,7 +2452,9 @@ pub(crate) mod tests {
         store.record_listen_port(10_255).expect("changed save");
         assert_eq!(store.recorded_listen_port().expect("read"), Some(10_255));
         assert_ne!(
-            fs::metadata(&store.listen_port_path).expect("metadata").ino(),
+            fs::metadata(&store.listen_port_path)
+                .expect("metadata")
+                .ino(),
             inode,
             "a changed record is replaced atomically"
         );
@@ -2457,7 +2463,10 @@ pub(crate) mod tests {
             .expect("loosen mode");
         store.record_listen_port(10_255).expect("repair save");
         assert_eq!(
-            fs::metadata(&store.listen_port_path).expect("metadata").mode() & 0o777,
+            fs::metadata(&store.listen_port_path)
+                .expect("metadata")
+                .mode()
+                & 0o777,
             0o600,
             "equal bytes in a file with the wrong mode are rewritten, not trusted"
         );
