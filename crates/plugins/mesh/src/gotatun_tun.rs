@@ -1055,7 +1055,10 @@ mod tests {
         noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
         packet::{Ip, Packet, PacketBufPool, WgData, WgKind},
         tun::MtuWatcher,
-        udp::{UdpSend, socket::UdpSocket},
+        udp::{
+            UdpSend,
+            socket::{SockOpt, UdpSocket},
+        },
         x25519,
     };
     use std::{
@@ -1577,10 +1580,10 @@ mod tests {
         for (address, header_len, jumbo_mtu) in
             [("127.0.0.1:0", 40, 65_475), ("[::1]:0", 68, 65_456)]
         {
-            let socket = UdpSocket::bind(address.parse().unwrap(), Default::default()).unwrap();
+            let socket = UdpSocket::bind(address.parse().unwrap(), SockOpt::default()).unwrap();
             let sink = tokio::net::UdpSocket::bind(address).await.unwrap();
             let destination = sink.local_addr().unwrap();
-            let mut send_buffer = Default::default();
+            let mut send_buffer = <UdpSocket as UdpSend>::SendManyBuf::default();
             // Two full segments and a short one can share an ordinary UDP batch. The jumbo
             // segment fits alone and the following short segment takes the batch over budget.
             for (mtu, full_segments) in [(1420_usize, 2), (jumbo_mtu, 1)] {
