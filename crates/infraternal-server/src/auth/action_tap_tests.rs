@@ -52,7 +52,9 @@ impl Shown {
         match self.change {
             Change::AddPasskey => f.auth.add_start(token, now).await.map(drop),
             Change::RotateRecovery => {
-                let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+                let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+                    .unwrap()
+                    .to_string();
                 let wrap = browser_wrap(
                     &recovery_material(&words, "wrap"),
                     &f.dek,

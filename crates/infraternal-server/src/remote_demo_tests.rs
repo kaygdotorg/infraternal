@@ -8,7 +8,7 @@ use axum::{
     response::Response,
     routing::get,
 };
-use axum_server::{accept::Accept, tls_openssl::OpenSSLAcceptor};
+use axum_server::{accept::Accept, tls::TlsService, tls_openssl::OpenSSLAcceptor};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use futures_util::{SinkExt, StreamExt};
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
@@ -47,10 +47,15 @@ impl<S> Accept<TcpStream, S> for RecordingProxyAcceptor
 where
     S: Send + 'static,
 {
+    /// The negotiated OpenSSL connection used by the test proxy.
     type Stream = tokio_openssl::SslStream<TcpStream>;
-    type Service = S;
-    type Future = Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, S)>> + Send>>;
+    /// Preserve the TLS metadata service wrapper while recording ALPN.
+    type Service = TlsService<S>;
+    /// Return the same TLS connection and wrapped service as the inner acceptor.
+    type Future =
+        Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send>>;
 
+    /// Record the negotiated protocol after the inner TLS handshake completes.
     fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
         let accepted = self.inner.accept(stream, service);
         let negotiated = self.negotiated.clone();

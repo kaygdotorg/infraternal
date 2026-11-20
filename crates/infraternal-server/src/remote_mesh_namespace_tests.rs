@@ -586,20 +586,21 @@ async fn namespace_store_survives_cancelled_pool_checkout() {
     }
 }
 
+/// Build a rootful namespace test fixture while preserving the enrollment mode invariant.
 async fn root_store(host: &Identity, root: &X509) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
     let pool = namespace_pool(sqlx::sqlite::SqlitePoolOptions::new()).await;
     let (store, pool, id) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
     // The generic fixture has a synthetic rootless enrollment. Start a fresh
     // rootful fixture row rather than changing an enrolled execution mode.
     for table in ["remote_join_tokens", "remote_certificates", "remote_hosts"] {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {table} WHERE {}=?",
             if table == "remote_hosts" {
                 "id"
             } else {
                 "host_id"
             }
-        ))
+        )))
         .bind(id.as_bytes().as_slice())
         .execute(&pool)
         .await
