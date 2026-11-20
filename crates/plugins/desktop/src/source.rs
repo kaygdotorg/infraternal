@@ -273,12 +273,19 @@ impl SourceBridge {
     /// sessions (never more than the lane definition's maximum streams).
     #[must_use]
     pub fn new(runtime: PathBuf, executable: PathBuf, limit: usize) -> Self {
-        Self(Arc::new(Inner {
-            config: Config {
+        Self::build(
+            Config {
                 runtime,
                 executable,
                 cross_user: None,
             },
+            limit,
+        )
+    }
+    /// The bridge for `config`, disabled, with at most `limit` sessions.
+    fn build(config: Config, limit: usize) -> Self {
+        Self(Arc::new(Inner {
+            config,
             lifecycle: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
                 enabled: false,
@@ -291,16 +298,27 @@ impl SourceBridge {
             }),
         }))
     }
-    /// Makes a root agent start every helper as the console user and admit
-    /// it through the cross-user checks (D203 C2, #146). `runtime` should then
-    /// be [`crate::cross_user::BASE`]. Call before the bridge is registered;
-    /// a bridge that is already shared keeps its same-user path.
+    /// A disabled bridge for a root agent: every helper starts as the
+    /// console user and is admitted through the cross-user checks (D203 C2,
+    /// #146). `runtime` should be [`crate::cross_user::BASE`].
+    ///
+    /// A constructor rather than a builder on a shared bridge, so a root
+    /// agent can never end up on the same-user path by accident.
     #[must_use]
-    pub fn with_cross_user(mut self, cross_user: crate::cross_user::CrossUser) -> Self {
-        if let Some(inner) = Arc::get_mut(&mut self.0) {
-            inner.config.cross_user = Some(cross_user);
-        }
-        self
+    pub fn new_cross_user(
+        runtime: PathBuf,
+        executable: PathBuf,
+        limit: usize,
+        cross_user: crate::cross_user::CrossUser,
+    ) -> Self {
+        Self::build(
+            Config {
+                runtime,
+                executable,
+                cross_user: Some(cross_user),
+            },
+            limit,
+        )
     }
     /// Registers session `id` for `start` and returns its current size and
     /// sequence as JSON. Starts no helper.

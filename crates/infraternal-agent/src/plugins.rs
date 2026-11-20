@@ -204,11 +204,6 @@ pub(crate) fn registry_at_with_mesh_state(
         };
         // Construction retains trusted metadata only; desktop.up is the explicit
         // per-node component switch, and known Attach is the sole capture opener.
-        let bridge = infraternal_plugin_desktop::source::SourceBridge::new(
-            runtime,
-            helper,
-            infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
-        );
         let bridge = if root {
             // No leg exists yet, so any per-leg folder there is a killed
             // daemon's leftover (D203 C2).
@@ -220,9 +215,18 @@ pub(crate) fn registry_at_with_mesh_state(
                     error.kind()
                 );
             }
-            bridge.with_cross_user(desktop_console_user(folder))
+            infraternal_plugin_desktop::source::SourceBridge::new_cross_user(
+                runtime,
+                helper,
+                infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
+                desktop_console_user(folder),
+            )
         } else {
-            bridge
+            infraternal_plugin_desktop::source::SourceBridge::new(
+                runtime,
+                helper,
+                infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
+            )
         };
         registry.register(Box::new(bridge))?;
     }
