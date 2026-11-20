@@ -2276,6 +2276,138 @@ mod tests {
         stopped.recv().expect("stop reply");
     }
 
+    /// #483 (J1025) receipt: what one pre-apply engine read costs at mesh scale.
+    ///
+    /// `engine_addresses` now runs for every snapshot that changes an installed peer, so this
+    /// times it on a real device holding `J1025_PEERS` peers (4,096 by default) when one peer's
+    /// endpoint changes, plus the no-change case, which must read nothing. It prints a METRIC
+    /// line and asserts only that the read saw every peer; speed is never asserted (ENGINEERING
+    /// P3). Run: `cargo test -p infraternal-plugin-mesh --features agent,server,relay,test-support
+    /// --release --lib engine_address_read_cost -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "A measurement, run on demand with --ignored --nocapture."]
+    async fn engine_address_read_cost_at_scale() {
+        use super::{
+            Health, LinuxPacketIo, PacketFilter, PendingDevice, RuntimeInfo, RuntimeState,
+            bind_udp, build_device,
+        };
+        use gotatun::x25519::StaticSecret;
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        use std::sync::Arc;
+        let count: u32 = std::env::var("J1025_PEERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4096);
+        let mut config = one_peer_config(Some("198.51.100.1:10254".parse().unwrap()));
+        let template = config.peers.remove(&NodeId(1)).expect("template peer");
+        for n in 1..=u64::from(count) {
+            let mut peer = template.clone();
+            let [_, _, high, low] = u32::try_from(n).unwrap().to_be_bytes();
+            peer.peer.key = PublicKey({
+                let mut key = [3; 32];
+                key[..8].copy_from_slice(&n.to_le_bytes());
+                key
+            });
+            peer.peer.addresses = Addresses {
+                ipv4: std::net::Ipv4Addr::new(10, 100 + high, high, low),
+                ipv6: std::net::Ipv6Addr::new(
+                    0xfd01,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0x100 + u16::from(high),
+                    u16::from(low),
+                ),
+            };
+            peer.peer.endpoint = Some(SocketAddr::from((
+                [198, 51, 100, 1],
+                10_000 + u16::try_from(n % 50_000).unwrap(),
+            )));
+            config.peers.insert(NodeId(n), peer);
+        }
+        let private_key = StaticSecret::from([7; 32]);
+        let (_kernel, tun_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )
+        .expect("TUN stand-in");
+        let health = Arc::new(Health::default());
+        let filter = Arc::new(
+            PacketFilter::new(
+                &config,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
+        let tun = LinuxPacketIo::new(
+            crate::gotatun_tun::LinuxTun::from_fd(tun_fd, true, Arc::clone(&health.refused))
+                .expect("TUN stand-in registers"),
+            filter,
+        );
+        let (factory, port) = bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            private_key.clone(),
+        )
+        .await
+        .expect("engine socket");
+        let device = build_device(
+            factory.clone(),
+            private_key.clone(),
+            port,
+            peers_for_config(&config).expect("peers"),
+            admitted_peer_keys(&config),
+            tun.clone(),
+        )
+        .await
+        .expect("device");
+        let state = RuntimeState {
+            tun: Some(tun),
+            device: Some(Arc::new(device)),
+            handshakes: tokio::task::JoinSet::new(),
+            pending: Some(PendingDevice {
+                factory,
+                private_key,
+            }),
+            config: Some(config.clone()),
+            info: RuntimeInfo {
+                interface: "test-tun".to_owned(),
+                port,
+                thp_disabled: true,
+                offloads_enabled: true,
+            },
+            health,
+            restart_at: None,
+            walks: crate::candidate_walks::Walks::default(),
+            relayed: BTreeMap::new(),
+        };
+        let mut next = config.clone();
+        next.peers.get_mut(&NodeId(1)).unwrap().peer.endpoint =
+            Some("203.0.113.9:10254".parse().unwrap());
+        let unchanged = state.engine_addresses(&config).await;
+        assert!(unchanged.is_empty(), "an unchanged snapshot reads nothing");
+        let mut samples = Vec::new();
+        for _ in 0..21 {
+            let started = std::time::Instant::now();
+            let read = state.engine_addresses(&next).await;
+            samples.push(started.elapsed());
+            assert_eq!(read.len(), usize::try_from(count).unwrap());
+        }
+        samples.sort();
+        eprintln!(
+            "METRIC j1025_engine_read peers={count} median_ms={:.2} max_ms={:.2} min_ms={:.2}",
+            samples[10].as_secs_f64() * 1e3,
+            samples[20].as_secs_f64() * 1e3,
+            samples[0].as_secs_f64() * 1e3,
+        );
+    }
+
     /// A configuration with one peer at `endpoint`.
     fn one_peer_config(endpoint: Option<SocketAddr>) -> Config {
         Config {
