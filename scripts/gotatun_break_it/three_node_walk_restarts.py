@@ -382,16 +382,30 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         row["node_restart"] = restart_node(
             "B", nodes, identities, topology, binary, scratch, observer, addresses, ports
         )
+        assert_no_idle_handshakes(nodes)
+        row["node_restart"]["idle_handshake_check_seconds"] = IDLE_WINDOW_SECONDS
+        assert_peer_inventory(nodes, addresses, topology, ports)
         row["server_mesh_node_restart"] = restart_node(
             "S", nodes, identities, topology, binary, scratch, observer, addresses, ports
         )
+        assert_no_idle_handshakes(nodes)
+        row["server_mesh_node_restart"]["idle_handshake_check_seconds"] = IDLE_WINDOW_SECONDS
+        assert_peer_inventory(nodes, addresses, topology, ports)
 
         server = ServerProcessFixture(
             Path(binary),
             Path(scratch) / "server-state",
             stderr_path=Path(scratch) / "server.stderr.log",
         )
-        row["server_process_restart"] = server.restart()
+        server_restart_started = time.monotonic()
+        server_restart: dict[str, Any] = server.restart()
+        server_restart["recovery_ms"] = round(
+            (time.monotonic() - server_restart_started) * 1000, 1
+        )
+        row["server_process_restart"] = server_restart
+        assert_no_idle_handshakes(nodes)
+        row["server_process_restart"]["idle_handshake_check_seconds"] = IDLE_WINDOW_SECONDS
+        assert_peer_inventory(nodes, addresses, topology, ports)
 
         stop_pingers(pingers)
         pingers = []

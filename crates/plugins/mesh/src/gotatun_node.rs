@@ -63,7 +63,10 @@ use crate::underlay_announce::{
     AnnouncementWaiter, COALESCE_MIN_INTERVAL, CoalescedSchedule, CoalescedWake,
 };
 use crate::{
-    candidate_walks::{HANDSHAKE_WAIT, Observed, Walks, active_peer_key, kept_address},
+    candidate_walks::{
+        EngineEndpoint, HANDSHAKE_WAIT, Observed, Walks, active_peer_key, engine_endpoint,
+        kept_address,
+    },
     dataplane::Config,
     gotatun_tun::LinuxTun,
     packet_filter::{Direction, PacketFilter, PreparedPolicy},
@@ -1113,8 +1116,9 @@ impl RuntimeState {
     /// sent each peer's packets before that apply ([`Self::engine_addresses`]). A re-installed
     /// peer's live session proves its first candidate only if the engine was already there: after
     /// a change to the rest of its list, the session may live on a later candidate (J602 F1).
-    /// `apply` keeps the engine on such a candidate while the new list still holds it
-    /// ([`kept_address`], J699 P3-3), and moves it to the first one otherwise.
+    /// `apply` keeps the engine on a candidate the new list still holds (J699 P3-3), or on a
+    /// recent authenticated endpoint even if the snapshot dropped it (#483), and moves it to
+    /// the first candidate otherwise.
     ///
     /// A relayed peer gets no walk while the engine sends to its relay (J699 P3-1, [`on_relay`]).
     ///
@@ -1128,7 +1132,7 @@ impl RuntimeState {
     /// true, so every applied snapshot reads every peer's counters, an O(peers) read not yet
     /// measured at 1,000 and 4,096 peers. #515 holds the measurement plan; a per-walk "earliest
     /// silent deadline" would skip the read until a found walk can actually have gone silent.
-    async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
+    async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, EngineEndpoint>) {
         let Some(config) = self.config.as_ref() else {
             self.walks.clear();
             self.relayed.clear();
@@ -1178,28 +1182,37 @@ impl RuntimeState {
         }
     }
 
-    /// Where the engine sends each peer's packets before `next` is applied, by device key, for
-    /// [`Self::refresh_walks`] (J602 F1).
+    /// Each peer's send and recent confirmed endpoints before `next` is applied, by device key,
+    /// for [`Self::refresh_walks`] (J602 F1).
     ///
     /// Read only when `next` changes a peer that walks or is relayed, because only then can
     /// `apply` keep a re-installed peer's address ([`kept_address`]). Every other snapshot reads
     /// nothing here.
-    async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, Option<SocketAddr>> {
+    async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, EngineEndpoint> {
         let watched = |peer: &crate::dataplane::Peer| {
             !peer.candidates.is_empty() || self.relayed.contains_key(&active_peer_key(peer))
         };
         if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, watched) {
             return BTreeMap::new();
         }
-        self.counters()
+        let Some(device) = self.device.as_ref() else {
+            return BTreeMap::new();
+        };
+        device
+            .read(async |read| read.peers().await)
             .await
-            .map(|counters| {
-                counters
-                    .into_iter()
-                    .map(|(key, counters)| (key, counters.endpoint))
-                    .collect()
+            .into_iter()
+            .filter(|peer| !peer.peer.allowed_ips.is_empty())
+            .map(|peer| {
+                let key = PublicKey(*peer.peer.public_key.as_bytes());
+                let endpoint = engine_endpoint(
+                    peer.peer.endpoint,
+                    peer.stats.confirmed_endpoint,
+                    peer.stats.last_handshake,
+                );
+                (key, endpoint)
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Step every due walk with the peers' counters and install the addresses they move to. A
@@ -1382,7 +1395,7 @@ impl RuntimeState {
     async fn apply(
         &mut self,
         config: Config,
-        before: &BTreeMap<PublicKey, Option<SocketAddr>>,
+        before: &BTreeMap<PublicKey, EngineEndpoint>,
     ) -> io::Result<RuntimeInfo> {
         let mtu = crate::mesh_mtu::for_config(Some(&config));
         let previous_mtu = self
@@ -1427,7 +1440,7 @@ impl RuntimeState {
             .map(|(_, policy)| {
                 let mut peers = peer_for_policy(policy)?;
                 let key = active_peer_key(&policy.peer);
-                let engine_at = before.get(&key).copied().flatten();
+                let engine_at = before.get(&key).copied().unwrap_or_default();
                 let relay = self.relayed.get(&key).copied();
                 if let Some(at) = kept_address(&policy.peer, engine_at, relay)
                     && let Some(active) = peers
@@ -1477,14 +1490,9 @@ impl RuntimeState {
         if !changed.is_empty() || !retired.is_empty() {
             // One device transaction: packet workers never see a half-applied snapshot.
             //
-            // Known limit (J555 note, #483): `add_or_update_peers` overwrites every field of a
-            // changed peer, including the endpoint, unless [`kept_address`] keeps a walking or
-            // relayed peer where it is. When a snapshot changes any other peer for another
-            // reason (its access, addresses or rotation keys), the coordinator's endpoint, or
-            // none, replaces an endpoint the device learned from that peer's authenticated
-            // traffic after a NAT rebinding. The peer's next keepalive (at most 25 s) or data
-            // packet moves it back, so a rebinding that coincides with such a snapshot can take
-            // up to 25 s to recover. Peers the snapshot leaves unchanged keep their endpoint.
+            // `add_or_update_peers` overwrites every field of a changed peer, including the
+            // endpoint. `kept_address` preserves a listed walk address, a relay, or a recent
+            // authenticated endpoint so a stale snapshot cannot undo a NAT roam (#483).
             if let Err(error) = device
                 .write(async |device| {
                     device.add_or_update_peers(changed).await;
@@ -1878,6 +1886,7 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
 mod keep_tests {
     #![allow(clippy::expect_used)]
     use super::{kept_address, on_relay};
+    use crate::candidate_walks::EngineEndpoint;
     use crate::{
         dataplane::Peer,
         policy::model::{Addresses, PublicKey},
@@ -1921,9 +1930,13 @@ mod keep_tests {
     fn a_reinstall_keeps_a_relayed_peer_on_its_relay() {
         let relay = at("127.0.0.1:40000");
         let peer = walking("192.0.2.2:10254", &["198.51.100.2:10254"]);
-        assert_eq!(kept_address(&peer, Some(relay), Some(relay)), Some(relay));
+        let engine = EngineEndpoint {
+            send: Some(relay),
+            ..EngineEndpoint::default()
+        };
+        assert_eq!(kept_address(&peer, engine, Some(relay)), Some(relay));
         let single = walking("192.0.2.2:10254", &[]);
-        assert_eq!(kept_address(&single, Some(relay), Some(relay)), Some(relay));
+        assert_eq!(kept_address(&single, engine, Some(relay)), Some(relay));
     }
 
     /// J699 P3-3: a re-install keeps a walking peer on an address its new list still holds, and
@@ -1932,11 +1945,41 @@ mod keep_tests {
     fn a_reinstall_keeps_a_found_address_the_list_still_holds() {
         let peer = walking("10.0.0.2:10254", &["198.51.100.2:10254", "198.51.100.2:9"]);
         let found = at("198.51.100.2:10254");
-        assert_eq!(kept_address(&peer, Some(found), None), Some(found));
-        assert_eq!(kept_address(&peer, Some(at("203.0.113.1:1")), None), None);
-        assert_eq!(kept_address(&peer, None, None), None);
+        assert_eq!(
+            kept_address(
+                &peer,
+                EngineEndpoint {
+                    send: Some(found),
+                    ..EngineEndpoint::default()
+                },
+                None,
+            ),
+            Some(found)
+        );
+        assert_eq!(
+            kept_address(
+                &peer,
+                EngineEndpoint {
+                    send: Some(at("203.0.113.1:1")),
+                    ..EngineEndpoint::default()
+                },
+                None,
+            ),
+            None
+        );
+        assert_eq!(kept_address(&peer, EngineEndpoint::default(), None), None);
         let single = walking("10.0.0.2:10254", &[]);
-        assert_eq!(kept_address(&single, Some(at("203.0.113.1:1")), None), None);
+        assert_eq!(
+            kept_address(
+                &single,
+                EngineEndpoint {
+                    send: Some(at("203.0.113.1:1")),
+                    ..EngineEndpoint::default()
+                },
+                None,
+            ),
+            None
+        );
     }
 }
 

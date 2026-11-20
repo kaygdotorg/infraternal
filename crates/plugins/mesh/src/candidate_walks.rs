@@ -33,7 +33,7 @@ use std::{
 };
 
 use crate::{
-    candidates::{Rotation, Seen},
+    candidates::{Rotation, SILENT, Seen},
     dataplane::{Config, Peer, PeerPolicy},
     policy::model::PublicKey,
 };
@@ -41,6 +41,39 @@ use crate::{
 /// What the engine reports for each installed peer, by device key, as a walk reads it
 /// ([`observe`]). A peer missing from the map reads as silent: no bytes, no handshake.
 pub(crate) type Observed = BTreeMap<PublicKey, Seen>;
+
+/// One peer's send address and the address a recent authenticated session confirmed.
+///
+/// `live_confirmed` is populated only when the last handshake is younger than [`SILENT`]. It
+/// may preserve an address that a stale coordinator snapshot no longer lists, but only while
+/// the engine is still sending there and the peer's session remains live.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EngineEndpoint {
+    /// Where the engine currently sends packets for this peer.
+    pub(crate) send: Option<SocketAddr>,
+    /// The last authenticated source address, while its handshake is still recent.
+    pub(crate) live_confirmed: Option<SocketAddr>,
+}
+
+/// Build an endpoint snapshot from `GotaTun` without treating an unconfirmed roam as reachable.
+///
+/// The send endpoint can move when the engine accepts a handshake initiation, before that
+/// sender proves its key. Only its separately confirmed endpoint is retained, and only for a
+/// session that has not exceeded [`SILENT`].
+#[must_use]
+pub(crate) fn engine_endpoint(
+    send: Option<SocketAddr>,
+    confirmed: Option<SocketAddr>,
+    last_handshake_age: Option<std::time::Duration>,
+) -> EngineEndpoint {
+    let live_confirmed = last_handshake_age
+        .filter(|age| *age < SILENT)
+        .and(confirmed);
+    EngineEndpoint {
+        send,
+        live_confirmed,
+    }
+}
 
 /// One walk that has just started running: the peer's device key, the address the walk is on,
 /// and where the engine sent that peer's packets when the walk started. The worker moves the
@@ -113,23 +146,27 @@ pub(crate) fn reinstalls_a_peer(
 /// The address a re-installed peer keeps instead of its new first candidate, if any.
 ///
 /// A worker re-installs a peer whose snapshot changed, and a fresh install aims at the first
-/// candidate. Two cases keep where the engine already sends (`engine_at`):
+/// candidate. Three cases keep where the engine already sends:
 /// - a relayed peer stays on its `relay` (J699 P3-1; Linux relay builds only, `None` elsewhere);
 /// - a walking peer stays on an address its new list still holds (J699 P3-3): its walk may have
 ///   found the peer there, and the new walk starts on the engine's address anyway (J602 F2), so
 ///   moving away first would cost a working session up to one walk step.
+/// - any peer stays on an off-list address that a recent authenticated session confirmed, so a
+///   changed snapshot cannot replace a live NAT-roamed endpoint with an older candidate (#483).
 ///
-/// A peer with a single address, or an engine address the list dropped, takes the snapshot's.
+/// An unconfirmed send endpoint, or a confirmed endpoint whose handshake is no longer live,
+/// takes the snapshot's.
 #[must_use]
 pub(crate) fn kept_address(
     peer: &Peer,
-    engine_at: Option<SocketAddr>,
+    engine: EngineEndpoint,
     relay: Option<SocketAddr>,
 ) -> Option<SocketAddr> {
-    let at = engine_at?;
+    let at = engine.send?;
     let listed =
         !peer.candidates.is_empty() && (peer.endpoint == Some(at) || peer.candidates.contains(&at));
-    (relay == Some(at) || listed).then_some(at)
+    let confirmed = engine.live_confirmed == Some(at);
+    (relay == Some(at) || listed || confirmed).then_some(at)
 }
 
 /// How long a worker's handshake task waits for the session it asked for; `GotaTun`'s own wait
@@ -206,17 +243,18 @@ impl Walks {
     /// that start running; a walk that starts finished needs nothing.
     ///
     /// A peer that is unchanged keeps its walk, finished or not (J585 F4), so an unrelated
-    /// snapshot never sends a working peer back through its list. `before` holds where the
-    /// engine sent each peer's packets before the apply (empty unless
-    /// [`reinstalls_a_peer`]). A re-installed peer's live session proves its first
-    /// candidate only if the engine was already there: after a change to the rest of its list,
-    /// the session may live on a later candidate (J602 F1). The re-install keeps the engine on
-    /// such a candidate while the new list still holds it ([`kept_address`], J699 P3-3).
+    /// snapshot never sends a working peer back through its list. `before` holds the engine's
+    /// send endpoint and its recent authenticated endpoint before the apply (empty unless
+    /// [`reinstalls_a_peer`]). A changed peer may be live on a later candidate (J602 F1), and
+    /// [`kept_address`] keeps that address if the new list still holds it (J699 P3-3). If a
+    /// recent authenticated address fell off the list, it becomes the first item in this walk's
+    /// private list too; otherwise the new walk would immediately undo the endpoint the apply
+    /// just kept (#483).
     pub(crate) fn start(
         &mut self,
         wanted: BTreeMap<PublicKey, Peer>,
         observed: &Observed,
-        before: &BTreeMap<PublicKey, Option<SocketAddr>>,
+        before: &BTreeMap<PublicKey, EngineEndpoint>,
         now: Instant,
     ) -> Vec<Started> {
         let mut started = Vec::new();
@@ -231,16 +269,27 @@ impl Walks {
                 }
                 _ => {
                     // The apply moved the engine here, so its live session was made elsewhere.
-                    if before.get(&key) != Some(&engine_at) {
+                    if before.get(&key).map(|endpoint| endpoint.send) != Some(engine_at) {
                         seen.endpoint = None;
                     }
                 }
             }
-            let list = peer
+            let mut list: Vec<_> = peer
                 .endpoint
                 .into_iter()
-                .chain(peer.candidates.iter().copied());
-            match Rotation::new(list.collect(), now, seen) {
+                .chain(peer.candidates.iter().copied())
+                .collect();
+            let live_off_list = before.get(&key).and_then(|engine| {
+                (engine.send == engine_at && engine.live_confirmed == engine_at)
+                    .then_some(engine.send)
+                    .flatten()
+            });
+            if let Some(endpoint) = live_off_list
+                && !list.contains(&endpoint)
+            {
+                list.insert(0, endpoint);
+            }
+            match Rotation::new(list, now, seen) {
                 Some(walk) => {
                     if !walk.settled() {
                         started.push(Started {
@@ -332,6 +381,63 @@ mod tests {
         }
     }
 
+    /// A changed snapshot cannot move a live off-list endpoint when its replacement walk starts.
+    #[test]
+    fn a_reinstall_starts_settled_on_a_live_authenticated_off_list_endpoint() {
+        let mut walks = Walks::default();
+        let peer = walking(8).peer;
+        let key = peer.key;
+        let live = at("10.9.0.44:10254");
+        let observed = BTreeMap::from([(
+            key,
+            Seen {
+                received: 42,
+                handshake: 1,
+                endpoint: Some(live),
+            },
+        )]);
+        let before = BTreeMap::from([(
+            key,
+            engine_endpoint(Some(live), Some(live), Some(Duration::from_secs(1))),
+        )]);
+        let started = walks.start(
+            BTreeMap::from([(key, peer)]),
+            &observed,
+            &before,
+            Instant::now(),
+        );
+
+        assert_eq!(started, Vec::<Started>::new());
+        let recorded = walks
+            .walks
+            .get(&key)
+            .map(|(_, walk)| (walk.list().first().copied(), walk.settled()));
+        assert_eq!(recorded, Some((Some(live), true)));
+        assert_eq!(walks.next_due(), None);
+    }
+
+    /// A recent authenticated endpoint survives a stale list, but old or unconfirmed endpoints do not.
+    #[test]
+    fn a_reinstall_keeps_only_a_live_authenticated_off_list_endpoint() {
+        let peer = walking(4).peer;
+        let learned = at("10.9.0.44:10254");
+        let live = engine_endpoint(Some(learned), Some(learned), Some(Duration::from_secs(179)));
+        assert_eq!(kept_address(&peer, live, None), Some(learned));
+
+        let expired = engine_endpoint(Some(learned), Some(learned), Some(SILENT));
+        assert_eq!(kept_address(&peer, expired, None), None);
+
+        let unconfirmed = engine_endpoint(Some(learned), None, Some(Duration::from_secs(1)));
+        assert_eq!(kept_address(&peer, unconfirmed, None), None);
+
+        let different = engine_endpoint(
+            Some(learned),
+            Some(at("10.9.0.45:10254")),
+            Some(Duration::from_secs(1)),
+        );
+        assert_eq!(kept_address(&peer, different, None), None);
+    }
+
     /// An idle peer with a live session on its first address starts finished: no address to
     /// install, so no handshake, no timer, and later snapshots that leave it unchanged (and its
     /// session live) start nothing either.
@@ -350,7 +456,13 @@ mod tests {
                 endpoint: policy.peer.endpoint,
             },
         )]);
-        let before = BTreeMap::from([(key, policy.peer.endpoint)]);
+        let before = BTreeMap::from([(
+            key,
+            EngineEndpoint {
+                send: policy.peer.endpoint,
+                ..EngineEndpoint::default()
+            },
+        )]);
         let none: Vec<Started> = Vec::new();
         assert_eq!(
             walks.start(wanted.clone(), &observed, &before, Instant::now()),
