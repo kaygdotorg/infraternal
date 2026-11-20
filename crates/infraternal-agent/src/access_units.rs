@@ -231,20 +231,43 @@ fn environment_file(text: &str) -> Option<Vec<(String, String)>> {
 /// Read every `EnvironmentFile=` of a unit, in order. A missing file adds
 /// nothing (the manager skips an optional one and refuses to start without a
 /// required one); any other failure is unknown. Returns the files' variables.
+///
+/// The manager also accepts a wildcard (`/etc/app/env.d/*.conf`) and reads
+/// every match. Such a value names no file of its own, so it is unknown
+/// rather than "missing", or a matched file the account can edit would go
+/// unseen (J1013). A file is opened once, without blocking, and checked and
+/// read through that one descriptor with a size bound, so swapping it for a
+/// FIFO or `/dev/zero` cannot stall or exhaust the root scan.
 fn environment_files(files: &[(String, bool)]) -> Option<Vec<(String, String)>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let mut pairs = Vec::new();
     for (path, _optional) in files {
+        if path.contains(['*', '?', '[']) {
+            return None;
+        }
         let path = Path::new(path);
         if !path.is_absolute() {
             return None;
         }
-        match std::fs::metadata(path) {
+        let file = match std::fs::File::options()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return None,
-            Ok(meta) if !meta.is_file() || meta.len() > 65536 => return None,
-            Ok(_) => {}
+        };
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.len() > 65536 {
+            return None;
         }
-        let text = std::fs::read_to_string(path).ok()?;
+        let mut text = String::new();
+        file.take(65537).read_to_string(&mut text).ok()?;
+        if text.len() > 65536 {
+            return None;
+        }
         pairs.extend(environment_file(&text)?);
     }
     Some(pairs)
@@ -610,6 +633,38 @@ mod tests {
         for text in ["export A=1\n", "A=\"x\\\"y\"\n", "A=$B\n", "A=x\\\n"] {
             assert!(environment_file(text).is_none(), "{text:?}");
         }
+    }
+
+    /// J1013: a wildcard environment file, a FIFO, a device or an oversized
+    /// file is unknown; a plain file is read; a missing one adds nothing.
+    #[test]
+    fn environment_files_are_read_once_and_bounded() {
+        let root = nix::unistd::mkdtemp("/tmp/rvenv-XXXXXX").unwrap();
+        let plain = root.join("plain");
+        std::fs::write(&plain, "A=1\n").unwrap();
+        let fifo = root.join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let big = root.join("big");
+        std::fs::write(&big, "#".repeat(65537)).unwrap();
+        let file = |path: &Path| (path.display().to_string(), true);
+        assert_eq!(
+            environment_files(&[file(&plain), file(&root.join("missing"))]).unwrap(),
+            vec![("A".to_owned(), "1".to_owned())]
+        );
+        for unknown in [
+            format!("{}/*.conf", root.display()),
+            format!("{}/pl?in", root.display()),
+            fifo.display().to_string(),
+            "/dev/zero".to_owned(),
+            big.display().to_string(),
+            "relative".to_owned(),
+        ] {
+            assert!(
+                environment_files(&[(unknown.clone(), true)]).is_none(),
+                "{unknown}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// `Environment=` feeds expansion, and every `EnvironmentFile=` is an input.
