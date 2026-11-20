@@ -117,17 +117,24 @@ def start_node(
     listen_port: int,
     state_path: str | None = None,
 ) -> BinaryNode:
-    """Start one real node with a distinct NAT-safe UDP port, restoring the parent environment."""
+    """Start one real node with an exact NAT-safe UDP port and verify its published identity."""
     variable = "INFRATERMINAL_MESH_PORT"
-    previous = os.environ.get(variable)
-    os.environ[variable] = str(listen_port)
-    try:
-        return BinaryNode(binary, scratch, namespace_pid, state_path=state_path)
-    finally:
-        if previous is None:
-            os.environ.pop(variable, None)
-        else:
-            os.environ[variable] = previous
+    node = BinaryNode(
+        binary,
+        scratch,
+        namespace_pid,
+        state_path=state_path,
+        env_overrides={variable: str(listen_port)},
+    )
+    identity = json.loads(node.stdout.readline())
+    if identity.get("port") != listen_port:
+        node.close()
+        raise RuntimeError(
+            f"mesh listener ignored its fixture override: requested {listen_port}, "
+            f"published {identity.get('port')}"
+        )
+    node.stdout.seek(0)
+    return node
 
 
 def expected_endpoint(source: str, target: str, topology: ThreeNodeTopology, ports: dict[str, int]) -> str:

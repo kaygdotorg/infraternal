@@ -14,11 +14,14 @@ from agent_fixture import exact, integer, varint
 
 class BinaryNode:
     """Own one daemon, its private runtime directory and a trusted inherited leg-B socket."""
-    def __init__(self, binary, scratch, namespace_pid=None, state_path=None):
+    def __init__(self, binary, scratch, namespace_pid=None, state_path=None, env_overrides=None):
+        """Start the daemon with isolated state and optional fixture-only environment values."""
         self.state = Path(state_path) if state_path else Path(tempfile.mkdtemp(prefix="node-", dir=scratch))
         self.sock, peer = socket.socketpair()
         self.sock.settimeout(60)
         env = os.environ.copy()
+        if env_overrides:
+            env.update(env_overrides)
         prefix = [] if namespace_pid is None else [shutil.which("nsenter"), "-t", str(namespace_pid), "-n"]
         command = prefix + [shutil.which("bash"), "-c", 'leg_b_fd=$1; if [ "$leg_b_fd" != 3 ]; then exec 3<&"$leg_b_fd"; exec {leg_b_fd}<&-; fi; shift; exec "$@"',
                             "leg-b", str(peer.fileno()), str(binary), "agent", "--fd", "3", "--state", str(self.state)]
