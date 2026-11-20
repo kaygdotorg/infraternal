@@ -15,12 +15,12 @@ import { SIZES, SURFACES, openScene, putPicture, removePicture, type Size } from
 
 /** Where the screenshots and the report lines land. */
 const OUT = tracerEvidencePath("glass-review");
-/** Looks under review: none, and the product's default Tinted (75% tint, 25% blur). */
-const LOOKS = [["none", ""], ["tinted", "&look=tinted"]] as const;
+/** Looks under review: the product always has one active (the default is Tinted, 75% tint 25% blur), so "none" is not a state a page can be in. */
+const LOOKS = [["tinted", "&look=tinted"], ["frosted", "&look=frosted"], ["solid", "&look=solid"]] as const;
 
 /** Opens a browser context at `size` for `scheme`. */
 async function context(browser: import("playwright/test").Browser, size: Size, scheme: "ink" | "paper") {
-  return browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, colorScheme: scheme === "ink" ? "dark" : "light", ...(size.phone ? { hasTouch: true, isMobile: true } : {}) });
+  return browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, serviceWorkers: "block", colorScheme: scheme === "ink" ? "dark" : "light", ...(size.phone ? { hasTouch: true, isMobile: true } : {}) });
 }
 
 /** Routes every script that carries a glass chunk (found by the marker attributes it writes) through `handle`. */
@@ -150,7 +150,7 @@ test("look switch in a running page: the rules follow --look-tint", async ({ bro
   await glassReady(page);
   await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible();
-  const alpha = (): Promise<number> => page.evaluate(() => { const m = /\/\s*([\d.]+)\)|rgba\([^)]*,\s*([\d.]+)\)/.exec(getComputedStyle(document.querySelector("#palette")!).getPropertyValue("--overlay")); return Number(m?.[1] ?? m?.[2] ?? NaN); });
+  const alpha = (): Promise<number> => page.evaluate(() => { const v = getComputedStyle(document.querySelector("#palette")!).getPropertyValue("--overlay"); const m = /calc\(([\d.]+) \* 100%\)|\/\s*([\d.]+)\)/.exec(v); return Number(m?.[1] ?? m?.[2] ?? NaN); });
   const set = async (tint: string | null): Promise<void> => {
     await page.evaluate((t) => { const r = document.documentElement; if (t === null) { r.removeAttribute("data-look"); r.style.removeProperty("--look-tint"); } else { r.setAttribute("data-look", "x"); r.style.setProperty("--look-tint", t); } }, tint);
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
