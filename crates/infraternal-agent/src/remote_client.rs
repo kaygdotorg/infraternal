@@ -283,7 +283,8 @@ async fn run_inner(
     }
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     if let Ok(path) = crate::sessions::state_path(state.clone()) {
-        // Refuse a foreign restore before any transport attempt, including recovery.
+        // Check the machine binding before transport, including recovery, so the link
+        // supervisor cannot turn a persistent configuration error into reconnects.
         tokio::task::spawn_blocking(move || {
             infraternal_plugin_mesh::node::Node::check_enrolled_machine(&path)
         })

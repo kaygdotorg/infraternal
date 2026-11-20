@@ -1587,6 +1587,7 @@ pub(crate) mod tests {
 
     pub(crate) struct Directory(pub(crate) PathBuf);
     impl Directory {
+        /// Create a private fixture under the test's temporary directory.
         pub(crate) fn new() -> Self {
             Self::new_in(&std::env::temp_dir())
         }

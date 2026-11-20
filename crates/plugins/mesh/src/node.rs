@@ -1006,13 +1006,16 @@ impl Node {
         Self::restore_requesting(path, requested, source)
     }
 
-    /// Read the saved machine binding before starting the remote connection supervisor.
+    /// Check the persistent machine ID before starting the remote connection supervisor.
     ///
     /// An installation whose directory has not been created has no prior binding.
     /// # Errors
-    /// Refuses a copied Mesh directory, an unsafe directory or a damaged binding.
+    /// Refuses a missing persistent ID, foreign Mesh state, or an unsafe or damaged binding.
     pub fn check_enrolled_machine(path: &std::path::Path) -> io::Result<()> {
+        use crate::node_state::{machine_fingerprint, read_enrolment_with};
         use std::os::unix::fs::MetadataExt as _;
+
+        let machine = require_enrolment_machine(machine_fingerprint())?;
         match std::fs::symlink_metadata(path) {
             Ok(meta)
                 if meta.is_dir()
@@ -1020,7 +1023,7 @@ impl Node {
                     // The low six mode bits are group and other permissions.
                     && meta.mode().trailing_zeros() >= 6 =>
             {
-                crate::node_state::read_enrolment(path).map(|_| ())
+                read_enrolment_with(path, || Some(machine)).map(|_| ())
             }
             Ok(_) => Err(io::ErrorKind::PermissionDenied.into()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1055,12 +1058,7 @@ impl Node {
     ) -> io::Result<()> {
         use crate::node_state::{Store, read_enrolment_with};
 
-        let machine = machine.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                MachineBindingError::MissingId,
-            )
-        })?;
+        let machine = require_enrolment_machine(machine)?;
         let saved = read_enrolment_with(path, || Some(machine))?;
         if saved
             .as_ref()
@@ -4007,6 +4005,16 @@ impl Node {
     }
 }
 // No Drop cleanup: kernel state and established flows survive control process loss [166].
+
+/// Require a stable fingerprint before a remote host can start or publish its Mesh binding.
+fn require_enrolment_machine(machine: Option<[u8; 32]>) -> io::Result<[u8; 32]> {
+    machine.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            MachineBindingError::MissingId,
+        )
+    })
+}
 
 /// Report which kernel objects could not be proven to belong to the previous enrollment.
 fn unproven_enrolment_retirement(left: &[&'static str]) -> io::Error {
