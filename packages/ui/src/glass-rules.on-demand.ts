@@ -3,8 +3,9 @@
  * The glass contrast rules (D365) and the solutions they are made of, for the active theme, level and look.
  *
  * This is an on-demand chunk (D188): it holds everything that needs the contrast solver (`glass-contrast.ts`), so the critical
- * path of the app carries none of that arithmetic. `themes.ts` requests it from the first `applyTheme` (the start of boot, in
- * parallel with the first paint), and `glass-adapt.on-demand.ts` shares it, so both ask the solver the same question the same way.
+ * path of the app carries none of that arithmetic. `themes.ts` requests it, through `glass-adapt.on-demand.ts` (which imports it and re-exports `installGlassRules`), from the first
+ * `applyTheme` (the start of boot, in parallel with the first paint). The rules and the adaptive trackers ask the solver the same
+ * question the same way, and they travel as one chunk.
  *
  * What the solver starts from. The level's own opacity when no look is active. When a look is active (D322, D338: the person's
  * theme sets the floating cards' fill through `--look-tint` on the root, Tinted 75% for instance), the look's tint is the starting

@@ -28,8 +28,8 @@
  *
  * This module is an on-demand chunk (D188), requested by the first `applyTheme` (the start of boot, in parallel with the first
  * paint) and by each terminal as it opens, so none of the glass code is on the critical path. It starts by scanning the surfaces
- * already in the document, so one that appeared before it arrived is covered when it does. The adaptive code, the contrast
- * solver and the terminal's cell reader are chunks of their own (the adaptive one is prefetched when the first terminal registers).
+ * already in the document, so one that appeared before it arrived is covered when it does. The adaptive code (with the contrast
+ * solver and the rules, requested by `applyTheme`) and the terminal's cell reader are chunks of their own.
  * A surface marked here before they arrive is covered as soon as they do: the rules in `glass-rules.on-demand.ts` are keyed on
  * the mark, not on when it was written.
  */

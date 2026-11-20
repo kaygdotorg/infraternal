@@ -291,15 +291,16 @@ function installLevelRules(): void {
 export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", role: (role: string): string => `--ui-glass-adapt-${role}` } as const;
 
 /**
- * Puts the glass contrast rules (D365) in place for the theme and card level last applied. The solver that works them out is a
- * separate on-demand chunk (`glass-rules.on-demand.ts`), so the critical path carries no contrast arithmetic: the chunk is
+ * Puts the glass contrast rules (D365) in place for the theme and card level last applied. The solver that works them out is in
+ * an on-demand chunk (`glass-rules.on-demand.ts`, loaded together with the adaptive code of `glass-adapt.on-demand.ts`, which uses
+ * the same solver and re-exports it), so the critical path carries no contrast arithmetic: the chunk is
  * requested by the first `applyTheme`, at the start of boot, in parallel with the first paint, and writes the rules as soon as it
  * arrives (and `data-glass-rules` on the root says so). After that every call is a synchronous write, only when the theme changed.
  */
-let rulesModule: typeof import("./glass-rules.on-demand") | undefined;
+let rulesModule: typeof import("./glass-adapt.on-demand") | undefined;
 function glassRules(): void {
   if (rulesModule) rulesModule.installGlassRules();
-  else void import("./glass-rules.on-demand").then((m) => { rulesModule = m; m.installGlassRules(); });
+  else void import("./glass-adapt.on-demand").then((m) => { rulesModule = m; m.installGlassRules(); });
 }
 
 /** Whether the watcher that finds what is under glass surfaces (`glass-under.on-demand.ts`) has been requested. */

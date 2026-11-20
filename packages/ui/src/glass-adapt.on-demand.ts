@@ -17,10 +17,9 @@
  * `data-glass-stats` on the root makes this module count its updates in `globalThis.__glassStats`.
  */
 import { activeGlass, glassTint, GLASS_ADAPT_VARS, type Theme } from "./themes";
-// The solver module is imported dynamically, not statically: a static import would make the bundler hoist it into a chunk shared
-// by this module and `themes.ts`'s own on-demand request for it, behind a tiny entry chunk that the transfer gate would count as
-// critical. This chunk is only ever loaded on demand, so waiting for it here costs nothing the person can see.
-const { glassFor, nominalOpacity } = await import("./glass-rules.on-demand");
+import { glassFor, nominalOpacity } from "./glass-rules.on-demand";
+// The rules are written by the same chunk: `themes.ts` requests this module at the start of boot and calls `installGlassRules`.
+export { installGlassRules } from "./glass-rules.on-demand";
 import { hexToRgb, luminanceOf, type BackdropRange, type Rgb } from "./glass-contrast";
 import type { GlassGrid, GlassGridRead } from "./glass-under.on-demand";
 
