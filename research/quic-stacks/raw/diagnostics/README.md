@@ -4,3 +4,5 @@
 # Diagnostic measurements
 
 These single-run checks verified harness corrections. They are evidence for the issue log but are excluded from the five-repeat tables in `REPORT.md`.
+
+These historical probe dependencies are frozen on purpose so the recorded measurements remain reproducible (#538, 2026-11-18).

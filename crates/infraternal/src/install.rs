@@ -23,6 +23,7 @@ const FIREWALL_UNIT_PATH: &str = "/etc/systemd/system/infraternal-firewall.servi
 
 #[cfg(target_os = "linux")]
 /// Files and policy that one system server install publishes together.
+#[derive(serde::Deserialize, serde::Serialize)]
 struct FirewallInstall {
     /// The generated boot-time unit that supersedes the hand-installed service.
     unit: String,
@@ -44,6 +45,9 @@ pub enum InstallError {
     /// A different unit already exists and `--force` was not specified.
     #[error("a different unit already exists; pass --force to replace it")]
     ExistingUnit,
+    /// The requested migration would change the active service configuration.
+    #[error(transparent)]
+    Move(#[from] super::install_move::MoveError),
     /// systemd rejected the requested reload or enable operation.
     #[error("systemctl failed")]
     Systemctl,
@@ -163,11 +167,74 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     })
 }
 
+/// Admission and fixed manager program for a move of an existing service.
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct MoveInstall {
+    /// The same manager used for both the firewall and server restart.
+    pub systemctl: PathBuf,
+    /// Policy checked before any change to data or units.
+    firewall: FirewallPlan,
+}
+
+impl MoveInstall {
+    /// Publish the policy before the migration can switch `ExecStart`.
+    pub fn publish(&self) -> std::io::Result<()> {
+        publish_planned_firewall(&self.firewall, &self.systemctl)
+            .map(drop)
+            .map_err(std::io::Error::other)
+    }
+}
+
+/// Validate the final command and firewall before the migration can stop the service.
+pub fn prepare_move(
+    args: &ServerArgs,
+    options: &InstallArgs,
+    relocation: &super::install_move::Relocation,
+) -> Result<MoveInstall, InstallError> {
+    validate_name(&options.name)?;
+    let user = !options.system || options.user;
+    if (args.host_firewall_off && (user || cfg!(not(target_os = "linux"))))
+        || (options.system && options.name == "infraternal-firewall")
+    {
+        return Err(InstallError::Invalid);
+    }
+    let firewall = plan_firewall(args, options)?;
+    #[cfg(target_os = "linux")]
+    if matches!(firewall, FirewallPlan::ClearServerRole)
+        && host_firewall::read_policy_file(Path::new(host_firewall::SERVER_POLICY_PATH))
+            .map_err(|error| InstallError::HostFirewall(error.to_string()))?
+            .is_some()
+    {
+        return Err(InstallError::HostFirewall(
+            "move with the existing host firewall policy before clearing it".to_owned(),
+        ));
+    }
+    if args.listen.port() == 0 {
+        return Err(InstallError::Invalid);
+    }
+    let origin = args
+        .public_origin
+        .clone()
+        .unwrap_or_else(|| origin_for_listener(args.listen));
+    let unit = render_unit(args, &options.name, &origin, user)?;
+    relocation.check_command(&unit)?;
+    Ok(MoveInstall {
+        systemctl: systemctl_program()?,
+        firewall,
+    })
+}
+
+/// Publish the convenience link after the moved service is healthy.
+pub fn finish_move(user: bool) {
+    eprintln!("{}", link_note(user));
+}
+
 /// What a server install does to the host firewall, decided before anything is written.
 ///
 /// Only a system install on Linux touches the host firewall (D392): it
 /// either publishes the server's default-drop policy or, with
 /// `--host-firewall-off`, clears the server role.
+#[derive(serde::Deserialize, serde::Serialize)]
 enum FirewallPlan {
     /// A user install, or a platform without the host firewall.
     Untouched,
@@ -404,14 +471,14 @@ fn restore_previous(path: &Path, bytes: Option<&[u8]>, mode: u32) -> std::io::Re
 /// directory early in `PATH` must not be able to supply its own
 /// `systemctl` (J658). The same binary serves `--user` installs.
 #[cfg(target_os = "linux")]
-fn systemctl_program() -> Result<PathBuf, InstallError> {
+pub(super) fn systemctl_program() -> Result<PathBuf, InstallError> {
     host_firewall::discover_systemctl(None)
         .map_err(|error| InstallError::HostFirewall(error.to_string()))
 }
 
 /// Elsewhere there is no systemd, so a real install stops here with [`InstallError::Systemctl`].
 #[cfg(not(target_os = "linux"))]
-fn systemctl_program() -> Result<PathBuf, InstallError> {
+pub(super) fn systemctl_program() -> Result<PathBuf, InstallError> {
     Err(InstallError::Systemctl)
 }
 
@@ -577,6 +644,24 @@ fn render_firewall_unit() -> Result<String, InstallError> {
     ))
 }
 
+/// The program the unit runs and the PATH link points at: one path for both (J719 P2).
+///
+/// The link must name exactly what the service runs, so it can never be left
+/// pointing at a binary the service no longer uses. `server init` does not
+/// copy itself into an install folder, so that program is the running binary.
+/// It is canonicalised so neither the unit nor the link records a symlink:
+/// on macOS the running path may be the PATH link itself, and a link to
+/// itself would loop. On Linux `current_exe` is already the resolved
+/// `/proc/self/exe`, so units written before this keep their exact text.
+pub(super) fn service_program() -> std::io::Result<PathBuf> {
+    env::current_exe().and_then(fs::canonicalize)
+}
+
+/// Whether `binary` lives under the temporary folder, where it may vanish.
+fn in_temporary_folder(binary: &Path) -> bool {
+    fs::canonicalize(env::temp_dir()).is_ok_and(|temporary| binary.starts_with(temporary))
+}
+
 /// The scope and binary the PATH link is made for, from the real environment.
 fn link_target(
     user: bool,
@@ -588,9 +673,7 @@ fn link_target(
     ),
     InstallError,
 > {
-    let binary = env::current_exe()
-        .and_then(fs::canonicalize)
-        .map_err(InstallError::Io)?;
+    let binary = service_program().map_err(InstallError::Io)?;
     let scope = if user {
         super::install_paths::Scope::User
     } else {
@@ -619,7 +702,16 @@ fn link_note(user: bool) -> String {
             .map(|outcome| outcome.describe(&binary))
             .map_err(|error| InstallError::Io(std::io::Error::other(error.to_string())))
     });
-    result.unwrap_or_else(|error| format!("Could not set up the `infraternal` command: {error}"))
+    let note = result
+        .unwrap_or_else(|error| format!("Could not set up the `infraternal` command: {error}"));
+    match service_program() {
+        Ok(binary) if in_temporary_folder(&binary) => format!(
+            "{note} Note: the service and the link use {}, which is in the temporary folder; \
+             move the binary somewhere permanent and run init again from there.",
+            binary.display()
+        ),
+        _ => note,
+    }
 }
 
 fn validate_name(name: &str) -> Result<(), InstallError> {
@@ -634,7 +726,8 @@ fn validate_name(name: &str) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
+/// The unit file `server init` writes for this scope and name.
+pub(super) fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
     let basename = format!("{name}.service");
     if user {
         let directory = match env::var_os("XDG_CONFIG_HOME") {
@@ -650,6 +743,7 @@ fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
 
 /// Render the server process unit and preserve all typed runtime options.
 ///
+/// Every path in `ExecStart` is absolute and quoted.
 /// System services wait for network-online and pull that target into the boot
 /// transaction. The user manager has no system-wide network target, so its
 /// existing ordering stays unchanged; the listener's bounded bind retry covers
@@ -660,7 +754,7 @@ fn render_unit(
     origin: &str,
     user: bool,
 ) -> Result<String, InstallError> {
-    let binary = env::current_exe().map_err(InstallError::Io)?;
+    let binary = service_program().map_err(InstallError::Io)?;
     let data = absolute(&args.data)?;
     let mut command = vec![binary.into_os_string()];
     command.extend([
@@ -759,7 +853,8 @@ fn absolute(path: &Path) -> Result<PathBuf, InstallError> {
     }
 }
 
-fn quote_systemd(value: &std::ffi::OsStr) -> Result<String, InstallError> {
+/// Quote one `ExecStart` word as `server init` writes it; control characters are refused.
+pub(super) fn quote_systemd(value: &std::ffi::OsStr) -> Result<String, InstallError> {
     let value = value.to_str().ok_or(InstallError::Invalid)?;
     if value
         .bytes()
@@ -773,7 +868,8 @@ fn quote_systemd(value: &std::ffi::OsStr) -> Result<String, InstallError> {
     ))
 }
 
-fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+/// Replace a file by writing a fsynced sibling and renaming it over the original.
+pub(super) fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "unit path has no parent")
     })?;
@@ -802,10 +898,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    if let Ok(directory) = OpenOptions::new().read(true).open(parent) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
+    OpenOptions::new().read(true).open(parent)?.sync_all()
 }
 
 #[cfg(test)]
@@ -1291,6 +1384,51 @@ mod tests {
         assert_eq!(fs::read_to_string(&unit).unwrap(), "new");
         assert!(data.is_dir());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The unit's program and the PATH link's target are the same canonical path (J719 P2).
+    #[test]
+    fn the_link_points_at_exactly_what_the_unit_runs() {
+        let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
+            listen: SocketAddr::from(([127, 0, 0, 1], 47361)),
+            data: PathBuf::from("/srv/state"),
+            public_origin: Some("https://localhost:47361".to_owned()),
+            web_root: None,
+            tls_cert: None,
+            tls_key: None,
+            behind_proxy: false,
+            trusted_proxies: Vec::new(),
+            host_firewall_listen_interface: None,
+            host_firewall_remote_interface: None,
+            host_firewall_remote_sources: Vec::new(),
+            host_firewall_accept_interfaces: Vec::new(),
+            host_firewall_allow: Vec::new(),
+            host_firewall_off: true,
+        };
+        let unit = render_unit(&args, "x", "https://localhost:47361", true).unwrap();
+        let (_, _, linked) = link_target(true).unwrap();
+        let program = service_program().unwrap();
+        assert_eq!(linked, program);
+        assert_eq!(
+            fs::canonicalize(&program).unwrap(),
+            program,
+            "no symlink recorded"
+        );
+        let exec = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .unwrap();
+        let words = infraternal_status::exec_words(exec).unwrap();
+        assert_eq!(Path::new(&words[0]), program);
+        assert!(in_temporary_folder(
+            &fs::canonicalize(env::temp_dir())
+                .unwrap()
+                .join("infraternal")
+        ));
+        assert!(!in_temporary_folder(Path::new(
+            "/usr/local/bin/infraternal"
+        )));
     }
 
     /// A refused firewall check creates no data folder, publishes nothing and writes no unit (J755 P3-1).

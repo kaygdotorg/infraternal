@@ -31,6 +31,12 @@ mod restart;
 mod restart_binary;
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_image;
+/// Owns the server's private, credential-checked control endpoint.
+#[cfg(all(
+    feature = "plugin-server",
+    any(feature = "remote", target_os = "linux")
+))]
+mod server_control;
 mod shim_cli;
 #[cfg(feature = "remote")]
 mod sign_in;
@@ -45,6 +51,9 @@ mod up;
 
 #[cfg(feature = "plugin-server")]
 mod install;
+/// Moves an existing install's data folder to the D395 default [#516].
+#[cfg(feature = "plugin-server")]
+mod install_move;
 /// OS-standard default folders for `server init` [D395].
 #[cfg(feature = "plugin-server")]
 mod install_paths;
@@ -160,6 +169,10 @@ fn run_invocation() -> ExitCode {
         target_os = "linux"
     ))]
     if let Some(result) = run_internal_host_firewall_command() {
+        return result;
+    }
+    #[cfg(all(feature = "plugin-server", target_os = "linux"))]
+    if let Some(result) = install_move::manager::run_if_requested() {
         return result;
     }
     // The macOS PTY child's private entry runs before any runtime or thread
@@ -1551,12 +1564,49 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
         }
     }
+    // An existing unit's non-standard folder moves to the D395 one (owner,
+    // 2026-11-15: "change for existing installs too"); `--data` keeps any folder.
+    let relocation = match plan_server_data_move(
+        matches.get_one::<String>("data").is_some(),
+        installed
+            .unit
+            .as_ref()
+            .and_then(|unit| unit.data.as_deref()),
+        scope,
+        &environment,
+        &roots,
+        name,
+    ) {
+        Ok(relocation) => relocation,
+        Err(error) => {
+            return report_failure(
+                "server init",
+                "The existing data folder cannot be moved to its standard location.",
+                error,
+                json_output,
+            );
+        }
+    };
+    if let Some(relocation) = &relocation {
+        args.data.clone_from(&relocation.to);
+        relocation.relocate_path(&mut args.web_root);
+        relocation.relocate_path(&mut args.tls_cert);
+        relocation.relocate_path(&mut args.tls_key);
+        relocation.relocate_path(&mut args.remote.remote_ca_dir);
+    }
     let yes = matches.get_flag("yes");
     if let Err(error) = confirm_server_setup(
         yes,
         dry_run,
         args.listen,
-        &args.data,
+        &match &relocation {
+            Some(relocation) => format!(
+                "{} (moved from {})",
+                args.data.display(),
+                relocation.from.display()
+            ),
+            _ => args.data.display().to_string(),
+        },
         if matches.get_flag("system") {
             "system"
         } else {
@@ -1585,15 +1635,134 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         force: matches.get_flag("force"),
         name: name.to_owned(),
     };
-    install_server("server init", &args, &install_args, json_output)
+    let moved = match &relocation {
+        None => None,
+        Some(relocation) if dry_run => {
+            Some((relocation.describe(), relocation_json(relocation, None)))
+        }
+        Some(relocation) => {
+            let admitted = match install::prepare_move(&args, &install_args, relocation) {
+                Ok(admitted) => admitted,
+                Err(error) => {
+                    return report_failure(
+                        "server init",
+                        "The data move was refused.",
+                        error.to_string(),
+                        json_output,
+                    );
+                }
+            };
+            let service = install_move::Systemd {
+                program: admitted.systemctl.clone(),
+                user: !install_args.system,
+                service: format!("{name}.service"),
+                listen: args.listen,
+                tls: args.tls_cert.is_some(),
+            };
+            #[cfg(target_os = "linux")]
+            let result = install_move::manager::trigger(relocation, service, admitted);
+            #[cfg(not(target_os = "linux"))]
+            let result =
+                install_move::apply(relocation, &service, std::time::SystemTime::now(), || {
+                    admitted.publish()
+                });
+            match result {
+                Ok(outcome) => {
+                    install::finish_move(!install_args.system);
+                    Some((
+                        outcome.describe(relocation),
+                        relocation_json(relocation, Some(&outcome)),
+                    ))
+                }
+                Err(error) => {
+                    return report_failure(
+                        "server init",
+                        "The data move could not finish.",
+                        error.to_string(),
+                        json_output,
+                    );
+                }
+            }
+        }
+    };
+    install_server("server init", &args, &install_args, moved, json_output)
 }
 
+/// Plan the move of an existing unit's data folder to the D395 default [#516].
+///
+/// Nothing is planned for a fresh install, an explicit `--data`, or a unit
+/// already at the standard folder with no unfinished move.
+#[cfg(feature = "plugin-server")]
+fn plan_server_data_move(
+    explicit_data: bool,
+    recorded: Option<&Path>,
+    scope: install_paths::Scope,
+    environment: &install_paths::Environment,
+    roots: &infraternal_status::Roots,
+    name: &str,
+) -> Result<Option<install_move::Relocation>, String> {
+    let Some(recorded) = recorded else {
+        return Ok(None);
+    };
+    let target =
+        install_paths::server_data_dir(scope, environment).map_err(|error| error.to_string())?;
+    // Rewrite the unit the recorded folder was read from, found the way
+    // `recorded_server_unit` finds it, so reading and rewriting never disagree.
+    let file = format!("{name}.service");
+    let directories: Vec<&PathBuf> = match scope {
+        install_paths::Scope::System => roots.system_units.iter().collect(),
+        install_paths::Scope::User => roots.user_units.iter().collect(),
+    };
+    let unit = match directories
+        .into_iter()
+        .map(|directory| directory.join(&file))
+        .find(|path| path.exists())
+    {
+        Some(path) => path,
+        None => install::unit_path(scope == install_paths::Scope::User, name)
+            .map_err(|error| error.to_string())?,
+    };
+    if explicit_data {
+        #[cfg(target_os = "linux")]
+        let requested =
+            install_move::manager::requested(&target).map_err(|error| error.to_string())?;
+        #[cfg(not(target_os = "linux"))]
+        let requested = false;
+        if requested || install_move::pending(&target, &unit).map_err(|error| error.to_string())? {
+            return Err("a data move is in progress; run init with the original service flags and without --data to finish it".to_owned());
+        }
+        return Ok(None);
+    }
+    install_move::plan(recorded, &target, &unit).map_err(|error| error.to_string())
+}
+
+/// The move as JSON for `--json`: folders, method and any leftover to remove.
+#[cfg(feature = "plugin-server")]
+fn relocation_json(
+    relocation: &install_move::Relocation,
+    outcome: Option<&install_move::Outcome>,
+) -> serde_json::Value {
+    json!({
+        "from": relocation.from,
+        "to": relocation.to,
+        "same_filesystem": relocation.same_filesystem,
+        "unit_files": relocation.unit_files().collect::<Vec<_>>(),
+        "moved": outcome.is_some(),
+        "leftover": outcome.and_then(|outcome| outcome.leftover.as_ref()),
+        "warning": null,
+    })
+}
+
+/// Ask before creating the service on a terminal; `--yes` and `--dry-run` skip it.
+///
+/// `data_dir` is the text shown for the data folder, which names the old
+/// folder too when init is about to move it.
 #[cfg(feature = "plugin-server")]
 fn confirm_server_setup(
     yes: bool,
     dry_run: bool,
     listen: SocketAddr,
-    data_dir: &Path,
+    data_dir: &str,
     scope: &str,
 ) -> Result<(), String> {
     if yes || dry_run {
@@ -1603,8 +1772,7 @@ fn confirm_server_setup(
         return Err("pass --yes in non-interactive mode, or use --dry-run first".to_owned());
     }
     print!(
-        "Create and start the {scope} server service on {listen} with data in {}? [y/N] ",
-        data_dir.display()
+        "Create and start the {scope} server service on {listen} with data in {data_dir}? [y/N] ",
     );
     io::stdout()
         .flush()
@@ -1632,20 +1800,36 @@ fn run_server_install_compat(_matches: &ArgMatches, json_output: bool) -> ExitCo
     emit(result, json_output, Exit::Usage)
 }
 
+/// Install (or plan) the unit and print the result, with any data-folder move told first.
 #[cfg(feature = "plugin-server")]
 fn install_server(
     command: &str,
     args: &ServerArgs,
     install_args: &InstallArgs,
+    moved: Option<(String, serde_json::Value)>,
     json_output: bool,
 ) -> ExitCode {
-    match install::install(args, install_args) {
+    let installed = if moved.is_some() && !install_args.dry_run {
+        Ok(String::new())
+    } else {
+        install::install(args, install_args)
+    };
+    match installed {
         Ok(plan) => {
             let mut data = json!({
                 "service": format!("{}.service", install_args.name),
                 "enabled": !install_args.dry_run,
                 "dry_run": install_args.dry_run,
             });
+            // The move is told first: in a dry run it is the first step, and
+            // after a real one its leftover note must not scroll away.
+            let (moved_text, plan) = match moved {
+                Some((text, value)) => {
+                    data["data_move"] = value;
+                    (text.clone(), format!("{text}{plan}"))
+                }
+                None => (String::new(), plan),
+            };
             if install_args.dry_run {
                 data["plan"] = json!(plan);
             }
@@ -1668,6 +1852,8 @@ fn install_server(
                 // The unit file is data for a person to read and copy: the generic renderer
                 // would reflow its lines into prose and break it.
                 result = result.with_body(plan);
+            } else if !moved_text.is_empty() {
+                result = result.with_body(moved_text);
             }
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
@@ -2826,7 +3012,9 @@ fn run_remote_agent(
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
                     Some(remote::Failure::Challenge) => "CHALLENGE",
-                    Some(remote::Failure::Refused) | None => "REFUSED",
+                    Some(remote::Failure::Refused | remote::Failure::IdentityMismatch) | None => {
+                        "REFUSED"
+                    }
                 };
                 println!("PREPARE-REFUSED {class}");
             }
@@ -2922,7 +3110,9 @@ fn run_remote_agent(
                 .as_ref()
                 .err()
                 .map_or(Exit::Failed, |error| match remote::Failure::of(error) {
-                    Some(remote::Failure::Tls) => Exit::NotAllowed,
+                    Some(remote::Failure::Tls | remote::Failure::IdentityMismatch) => {
+                        Exit::NotAllowed
+                    }
                     Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
                     Some(
                         remote::Failure::Refused

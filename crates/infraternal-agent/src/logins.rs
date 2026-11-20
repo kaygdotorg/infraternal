@@ -993,6 +993,7 @@ async fn stop_user_services(uid: u32) -> io::Result<bool> {
     // no user manager back (J295 P1, #355). A few rounds absorb a request
     // that was already in flight; one that keeps coming back fails this
     // attempt, and the owner retries.
+    let mut linger_disabled = false;
     for _ in 0..LINGER_ROUNDS {
         kill_cgroup(&manager)?;
         // The cgroup check below decides; a manager that is already gone may
@@ -1010,22 +1011,27 @@ async fn stop_user_services(uid: u32) -> io::Result<bool> {
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
         cgroup_emptied(&manager).await?;
-        let linger = tokio::time::timeout(
-            SYSTEMD_QUERY_HANG,
-            loginctl()
-                .args(["disable-linger", &uid.to_string()].as_slice())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-        if !linger.success() {
-            return Err(io::Error::other(
-                "host account linger could not be turned off",
-            ));
+        // Disabling linger is a state change. Repeat it only if an in-flight
+        // request has made the flag visible again during another drain round.
+        if !linger_disabled || linger_file(&name).exists() {
+            let linger = tokio::time::timeout(
+                SYSTEMD_QUERY_HANG,
+                loginctl()
+                    .args(["disable-linger", &uid.to_string()].as_slice())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .status(),
+            )
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+            if !linger.success() {
+                return Err(io::Error::other(
+                    "host account linger could not be turned off",
+                ));
+            }
+            linger_disabled = true;
         }
         if !linger_file(&name).exists() && cgroup_empty(&manager)? {
             // Code of the account running outside the login (a cron or `at`
@@ -1860,11 +1866,27 @@ mod tests {
                     "case \"$1\" in\nshow) printf 'LoadState=%s\\nActiveState=%s\\nControlGroup=/system.slice/{service}\\nMainPID=0\\n' \"$(cat \"$d/load\")\" \"$(cat \"$d/active\")\" ;;\nstop) echo inactive > \"$d/active\"; echo not-found > \"$d/load\"; exit 5 ;;\nesac\n"
                 ),
             );
-            // disable-linger removes the linger files, except once while
-            // `relinger` exists: a queued enable-linger that lands after it.
+            // The second marker keeps the manager populated for one extra
+            // drain round after linger is off, exposing redundant disables.
             let loginctl = script(
                 "loginctl",
-                "if [ \"$1\" = disable-linger ]; then if [ -e \"$d/relinger\" ]; then rm \"$d/relinger\"; else rm -f \"$d\"/linger/*; fi; if [ -e \"$d/comeback\" ]; then rm \"$d/comeback\"; (sleep 0.1; : > \"$d/linger/$(cat \"$d/comeback-name\")\") & fi; fi\nexit 0\n",
+                &format!(
+                    r#"if [ "$1" = disable-linger ]; then
+  if [ -e "$d/relinger" ]; then
+    rm "$d/relinger"
+  elif [ -e "$d/manager-returns" ]; then
+    rm "$d/manager-returns"
+    rm -f "$d"/linger/*
+    : > "$d/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.kill"
+    printf 'populated 1\n' > "$d/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.events"
+  else
+    rm -f "$d"/linger/*
+  fi
+  if [ -e "$d/comeback" ]; then rm "$d/comeback"; (sleep 0.1; : > "$d/linger/$(cat "$d/comeback-name")") & fi
+fi
+exit 0
+"#
+                ),
             );
             std::fs::create_dir_all(host.join("linger")).unwrap();
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2067,10 +2089,10 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// J295 `lingerloop`: the account's service keeps asking for linger, and
-    /// one request lands after `disable-linger`. The revocation reports
-    /// success only once linger is verified off (and the user manager stays
-    /// gone): it kills first, then disables, then checks, and repeats.
+    /// J295 `lingerloop`: one linger request lands after the first disable,
+    /// and the manager stays populated for another cleanup round after the
+    /// second. Revocation must turn linger off again without issuing a third
+    /// disable while it finishes draining the manager.
     #[tokio::test]
     async fn a_linger_request_landing_after_disable_never_survives_revocation() {
         let (root, person, uid, unit) = system_login_fixture().await;
@@ -2078,6 +2100,7 @@ mod tests {
         let name = User::from_uid(Uid::from_raw(uid)).unwrap().unwrap().name;
         std::fs::write(host.host.join("linger").join(&name), b"").unwrap();
         std::fs::write(host.host.join("relinger"), b"").unwrap();
+        std::fs::write(host.host.join("manager-returns"), b"").unwrap();
         record_scope(
             &root,
             &unit,

@@ -301,6 +301,7 @@ pub(crate) struct EmbeddedAgent {
     #[cfg(feature = "remote")]
     cleanup: mpsc::UnboundedSender<Retirement>,
     changes: tokio::sync::watch::Receiver<()>,
+    restarts: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
     session_inventory: watch::Sender<SessionInventoryState>,
 }
@@ -347,6 +348,13 @@ impl EmbeddedAgent {
         changes
     }
 
+    /// Subscribe to future embedded infraternal agent process replacements.
+    pub(crate) fn restarts(&self) -> tokio::sync::watch::Receiver<()> {
+        let mut restarts = self.restarts.clone();
+        restarts.borrow_and_update();
+        restarts
+    }
+
     /// Start the on-demand agent supervisor for the server's own executable.
     #[cfg(any(not(target_os = "linux"), test))]
     pub fn spawn(executable: PathBuf) -> Self {
@@ -365,6 +373,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
@@ -376,6 +385,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         Self {
@@ -383,6 +393,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
         }
@@ -395,6 +406,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (_changes, notice) = tokio::sync::watch::channel(());
+        let (_restarts, restart_notice) = tokio::sync::watch::channel(());
         drop(receiver);
         #[cfg(feature = "remote")]
         drop(cleanup_rx);
@@ -404,6 +416,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
         }
@@ -416,6 +429,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (accepts, incoming) = mpsc::channel(1);
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
@@ -428,6 +442,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         (
@@ -436,6 +451,7 @@ impl EmbeddedAgent {
                 #[cfg(feature = "remote")]
                 cleanup,
                 changes: notice,
+                restarts: restart_notice,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
                 session_inventory,
             },
@@ -784,6 +800,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
@@ -795,6 +812,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         Self {
@@ -802,6 +820,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
         }
@@ -1274,11 +1293,13 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
+/// Run the embedded host actor and notify observers whenever its infraternal agent reconnects.
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
     #[cfg(feature = "remote")] mut cleanup: mpsc::UnboundedReceiver<Retirement>,
     changes: tokio::sync::watch::Sender<()>,
+    restarts: tokio::sync::watch::Sender<()>,
     session_inventory: watch::Sender<SessionInventoryState>,
 ) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
@@ -1291,6 +1312,7 @@ async fn run_actor(
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
+    let mut connected_once = false;
     #[cfg(feature = "remote")]
     let mut hot = priming::State::default();
     #[cfg(feature = "remote")]
@@ -1368,6 +1390,14 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
+                // Remote admission replaces plugin workers itself, including
+                // after path promotion. The embedded worker survives replacement.
+                if !source.remote() {
+                    if connected_once {
+                        restarts.send_replace(());
+                    }
+                    connected_once = true;
+                }
                 fresh_host_lease(&mut liveness, &mut doubted);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");

@@ -77,6 +77,7 @@ async fn oversized_or_invalid_invitation_fails_before_local_state_is_created() {
     }
 }
 
+/// An infraternal agent only loads an identity from its own private regular file.
 #[tokio::test]
 async fn local_identity_load_refuses_symlink_and_shared_file() {
     let directory = Directory::new();
@@ -93,6 +94,51 @@ async fn local_identity_load_refuses_symlink_and_shared_file() {
     assert_eq!(
         run(&data, None).await.unwrap_err().to_string(),
         "remote infraternal agent operation refused"
+    );
+}
+
+/// Restart refuses an enrolled certificate whose saved private key no longer matches.
+#[tokio::test]
+async fn restart_refuses_a_mismatched_enrolled_key_before_connecting() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let state = directory.0.join("runtime");
+    let enrolled = self_signed(&PKey::generate_ed25519().unwrap());
+    let replacement = PKey::generate_ed25519().unwrap();
+    let stored = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: None,
+        server_name: "localhost".into(),
+        public_origin: Some("https://localhost:1".into()),
+        https_der: None,
+        https_system_roots: false,
+        ca_der: B64.encode(enrolled.to_der().unwrap()),
+        certificate_der: B64.encode(enrolled.to_der().unwrap()),
+        key_der: B64.encode(replacement.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
+    };
+    let document = serialize_identity_document(&stored).unwrap();
+    publish(&data, &document).unwrap();
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        Box::pin(run(&data, Some(state.clone()))),
+    )
+    .await
+    .expect("restart should refuse the mismatch without trying to connect")
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        public_error(&error),
+        "This machine's saved private key does not match its enrollment certificate."
+    );
+    assert!(!state.exists());
+    let identity_unchanged = std::fs::read(data.join("identity.json")).unwrap() == *document;
+    assert!(
+        identity_unchanged,
+        "refusal must leave the saved identity in place"
     );
 }
 

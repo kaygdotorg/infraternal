@@ -5090,6 +5090,11 @@ access (#341 B19).
        removes the link only if it still points at our binary.
      - **Existing installs** keep working: the old locations are read and moved
        on the next update, never broken in place.
+     - **Amendment (owner, 2026-11-15, #516):** told that `server init` used
+       the standard folders only for fresh installs and left existing ones
+       untouched, the owner said, verbatim: "change for existing installs
+       too". `server init` now moves an existing server's data folder to its
+       standard location (J740; the steps are in docs/CLI.md).
 396. **Deploys lock the CA until auto-update ships; no interim signed-deploy path (owner, 2026-11-14, #211, #514; amends D217's deploy rule for now, keeps D251):**
      - **Context:** `deploy.sh` replaces production by a plain stop/start, a cold start that locks the CA (D168) until an admin unlocks it with a passkey. The warm restart that keeps the CA unlocked already exists (`infraternal server … restart --binary`), but it only accepts a signed release (D184). The orchestrator asked for either (a) about 2 days to sign deploy builds through the edge release channel, which needs Cloudflare and release credentials, or (b) building the server's own auto-update first, 1.5–2.5 weeks.
      - **The owner chose (b), verbatim:** "lock on restart, build auto-update directly".

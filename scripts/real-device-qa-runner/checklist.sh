@@ -30,10 +30,11 @@ fresh="open~$url/?r=$(date +%s)&theme=$app_theme|wait~12"
 # canvas/windows/session-ui.on-demand.ts and canvas/toolbar/palette-rows.on-demand. QA_HOST_NAME is the QA host's name as the
 # palette shows it.
 #
-# KNOWN LIMIT (measured 2026-11-15, #510): while the server's host CA is locked, the page can stay on a single, never-connecting
-# "SSH shell" pane of the server's own host. Its key bar hides the toolbar and the views pill, the QA host is not listed, and
-# every phase after sign-in then reports missing controls. The `unlock` phase below is what clears it; if a run starts in that
-# state, run `check --phases unlock` by hand first and look at its screenshot.
+# LOCKED CA (re-measured 2026-11-20, J970, #510): after a server restart the stored shell window of the QA host comes back
+# showing its old prompt with a green dot, and a toast reads "The server restarted. Confirm your passkey once to reconnect your
+# hosts." with an Unlock button. No ghost pane holds focus; the toolbar, the views pill and the palette stay usable. The
+# palette offers "Unlock host connections", and "Open shell on <host>" is listed with "offline". The `locked` phase records this;
+# the `unlock` phase clears it. The older "never-connecting SSH shell pane" (J752) was not reproduced.
 QA_HOST_NAME=${QA_HOST_NAME:-infraternal-dev-02}
 OPEN="tapif~Open shell/New shell~6|wait~2|tapifx~Open shell on $QA_HOST_NAME~4|wait~6"
 
@@ -53,6 +54,10 @@ run theme "$fresh|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|type~$pick|w
 # 1b. Unlock host connections. After a server restart (or a new session) the host CA is locked until one passkey tap, and a
 # locked host is offline: its shell opens but takes no input. The palette row exists only while the CA is locked.
 run unlock "$fresh|xy~$TOP_PILL|wait~2|tapx~Search everything|wait~3|type~Unlock host connections|wait~3|return|wait~4|tapsbif~Use Passkey/Use Selected Passkey~8|face|wait~10|shot~unlocked"
+
+# 1c. Locked shell (J970, #510): with the host CA locked, record what a user sees on a fresh load, after "Open shell", and in the
+# palette. Run it only while the CA is locked (`systemctl restart infraternal-qa-server` on QA1 locks it); it looks, it does not unlock.
+run locked "$fresh|shot~locked-load|labels|tapx~Search and actions|wait~3|shot~locked-palette|labels|type~Open shell|wait~3|shot~locked-open-shell-rows|labels|type~ |wait~1"
 
 # 2 and 3. Open a shell, type, `exit`: does the window close, and does every window fit the 402 pt viewport?
 run shell "$fresh|$OPEN|xy~0.5~0.3|wait~2|shot~shell-opened|frames~region~regions-before|type~echo qa-ok|return|wait~2|shot~shell-typed|type~exit|return|wait~5|shot~after-exit|absent~shell ended~exit-closes-window|frames~shell, region~win-after-exit"
