@@ -158,6 +158,7 @@ export function mix(left: string, right: string, amount: number): string {
   return `#${from.map((value, index) => Math.round(value + ((to[index] ?? value) - value) * amount).toString(16).padStart(2, "0")).join("")}`;
 }
 
+/** The floating-card material of one theme and level: the fill, the line, the shadows and the composite the contrast audit measures. Made by {@link overlayMaterial}; carries no text shadow (TASTE: no glow behind text). */
 export interface OverlayMaterial {
   overlay: string;
   /** Large floating panels (the sidebar): thinner than pills so content visibly blurs through. */
@@ -254,6 +255,7 @@ let levelRules = false;
 /** Every element that reads the card tint (see styles.css, tooltip.ts and the key tray's lock mark). */
 /** The elements the glass rules style, and the ones `glass-under.on-demand.ts` watches. */
 export const TINT_USERS = ".ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button";
+/** Writes the glass level rules (tint and blur per theme and level) once, as one adopted sheet; later calls do nothing. */
 function installLevelRules(): void {
   if (levelRules || typeof CSSStyleSheet === "undefined") return;
   levelRules = true;
