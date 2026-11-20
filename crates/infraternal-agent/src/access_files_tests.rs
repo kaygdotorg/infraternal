@@ -273,6 +273,39 @@ fn a_big_file_changed_past_its_start_is_reported() {
     );
 }
 
+/// J1013: only the first 8 MiB of a big file are hashed, so an edit past
+/// them that keeps the size (a patched binary in `~/.local/bin`) must still
+/// be reported, through the file's change time.
+#[test]
+fn a_same_size_edit_past_the_hashed_start_is_reported() {
+    use std::io::{Seek as _, SeekFrom, Write as _};
+    let size = usize::try_from(HASH_BYTES).unwrap() + 4096;
+    let granted = Granted::new(
+        |home| {
+            std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+            std::fs::write(home.join(".local/bin/tool"), vec![b'a'; size]).unwrap();
+        },
+        &no_extra,
+    );
+    // Unchanged when nothing touched it.
+    let untouched = granted.files(&no_extra);
+    assert_eq!(untouched.len(), 0, "{untouched:?}");
+    // sleep: the change time must move past the grant's to be told apart on coarse clocks.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(granted.home.join(".local/bin/tool"))
+        .unwrap();
+    file.seek(SeekFrom::Start(u64::try_from(size).unwrap() - 10))
+        .unwrap();
+    file.write_all(b"patched!!!").unwrap();
+    drop(file);
+    let files = granted.files(&no_extra);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].path, "~/.local/bin/tool");
+    assert_eq!(files[0].change, ChangeKind::Changed);
+}
+
 /// J322 P2: a rootless agent runs as the account, so a person can rewrite
 /// the record to match their plant. Rootless reports are never "unchanged":
 /// they read "not checked: unverified", with what was found as a hint.

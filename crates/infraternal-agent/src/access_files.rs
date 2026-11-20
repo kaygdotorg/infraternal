@@ -320,6 +320,13 @@ struct Entry {
     /// Why it was not fully hashed, or the error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     note: Option<String>,
+    /// For a file larger than `HASH_BYTES` only: its inode and change time
+    /// (`ino:seconds.nanoseconds`). The hash covers only the file's start,
+    /// so a same-size edit past it would otherwise compare equal (J1013).
+    /// The account cannot set a change time: any write, rename over or
+    /// metadata change moves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changed: Option<String>,
 }
 
 impl Entry {
@@ -334,6 +341,7 @@ impl Entry {
             &self.sha256,
             &self.target,
             &self.note,
+            &self.changed,
         ) == (
             &now.kind,
             now.mode,
@@ -342,6 +350,7 @@ impl Entry {
             &now.sha256,
             &now.target,
             &now.note,
+            &now.changed,
         )
     }
 }
@@ -1076,6 +1085,12 @@ impl<'a> Scan<'a> {
             entry.note = Some(format!(
                 "only the first {} MiB are compared",
                 HASH_BYTES / (1024 * 1024)
+            ));
+            entry.changed = Some(format!(
+                "{}:{}.{:09}",
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec()
             ));
         }
         // A file that grew past the bound while it was read shows no lines.
