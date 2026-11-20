@@ -4,6 +4,7 @@ use super::*;
 use crate::protocol::{Size, Target};
 use std::{future::Future, task::Poll};
 
+/// A valid window capture request for tests that exercise bridge lifecycle.
 fn start() -> Start {
     Start {
         passive_geometry: false,

@@ -104,6 +104,7 @@ impl NodeHost for Host {
         })
     }
 }
+/// A valid capture request for the server lifecycle fixture.
 fn request() -> Start {
     Start {
         passive_geometry: false,

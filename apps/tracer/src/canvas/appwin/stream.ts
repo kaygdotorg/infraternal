@@ -327,6 +327,7 @@ export class AppStream {
     this.streamId = this.o.connection.openStream(handler);
   }
 
+  /** Retires the current attachment and resets the decoder while retaining its surface. */
   private detach(): void {
     if (this.streamId === undefined) return;
     const id = this.streamId;
@@ -341,6 +342,7 @@ export class AppStream {
     this.shapeTimer = 0;
   }
 
+  /** Handles viewer retirement and admits encoded video within the worker handoff budget. */
   private frame(frame: WireFrame): void {
     if (frame.type === "Close") {
       // Close retires this viewer; the server may still retain native capture.
@@ -386,6 +388,7 @@ export class AppStream {
 
   private readonly measuring = traceEnabled();
 
+  /** Creates the canvas and its worker once, until the surface is released. */
   private ensureSurface(): void {
     window.clearTimeout(this.releaseTimer);
     if (this.worker) return;
@@ -404,6 +407,7 @@ export class AppStream {
     this.o.events.surface(canvas);
   }
 
+  /** Retires the worker and frees its surface and outstanding video credits. */
   private releaseSurface(): void {
     if (!this.worker) return;
     this.worker.postMessage({ t: "close" } satisfies ToWorker);

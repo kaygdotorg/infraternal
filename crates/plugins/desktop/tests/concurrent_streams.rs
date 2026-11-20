@@ -202,6 +202,7 @@ impl SocketHost for Socket {
     }
 }
 
+/// Gives each concurrent capture its own window target.
 fn start(index: usize) -> Start {
     Start {
         passive_geometry: false,

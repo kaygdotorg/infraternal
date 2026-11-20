@@ -25,6 +25,7 @@ fn replay_repairs_coalesce_at_the_source_interval() {
     );
 }
 
+/// A valid preparation for the fake source helper.
 fn start() -> Start {
     Start {
         passive_geometry: false,

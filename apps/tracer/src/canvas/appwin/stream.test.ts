@@ -27,6 +27,7 @@ afterAll(() => {
   }
 });
 
+/** Makes a reattachable stream and records frames without running the worker. */
 async function fixture(deferControl = false, onControl: (control: ControlState) => void = () => undefined) {
   const shapes: number[] = [];
   let controlReply: ((allowed: boolean) => void) | undefined;

@@ -438,6 +438,7 @@ mod startup_recovery_tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
 
+    /// Repairs a missing startup keyframe before forwarding native video.
     #[test]
     fn delta_before_startup_keyframe_requests_repair_before_delivery() {
         let root = std::env::temp_dir().join(format!(
