@@ -32,6 +32,8 @@ export interface Surface {
   selector: string;
   /** Where its backdrop picture goes: over the whole screen, or inside the window the surface opens in (a window's own menu mounts there). */
   host: "screen" | "window";
+  /** Whether it exists on a phone-sized screen (the ⋯ menu does not: a phone window has only its close control). */
+  phone: boolean;
   /** Opens the surface on a page that already has its picture; resolves when it is on screen. */
   open(page: Page): Promise<void>;
   /** Closes it again, so the next picture can be laid and the surface opened afresh over it. */
@@ -54,13 +56,13 @@ declare global {
 
 /** The command palette, opened with its keyboard shortcut. */
 const palette: Surface = {
-  id: "palette", selector: "#palette", host: "screen",
+  id: "palette", phone: true, selector: "#palette", host: "screen",
   async open(page) { await page.keyboard.press("Control+Shift+K"); },
   close: escape,
 };
 /** A plain notice. */
 const toast: Surface = {
-  id: "toast", host: "screen", selector: '.ui-toast[data-hidden="false"]',
+  id: "toast", phone: true, host: "screen", selector: '.ui-toast[data-hidden="false"]',
   async open(page) {
     await page.evaluate(() => { (globalThis as { __glassToasts?: string[] }).__glassToasts = [window.__toast!.show({ message: "Screenshot saved to your downloads", duration: 0 })]; });
   },
@@ -68,7 +70,7 @@ const toast: Surface = {
 };
 /** An error notice with an action: the danger colour and a button, the hardest text a toast carries. */
 const toastError: Surface = {
-  id: "toast-error", host: "screen", selector: '.ui-toast[data-hidden="false"]',
+  id: "toast-error", phone: true, host: "screen", selector: '.ui-toast[data-hidden="false"]',
   async open(page) {
     await page.evaluate(() => { (globalThis as { __glassToasts?: string[] }).__glassToasts = [window.__toast!.show({ message: "Could not open a shell on this host.", tone: "error", duration: 0, action: { label: "Try again" } })]; });
   },
@@ -76,7 +78,7 @@ const toastError: Surface = {
 };
 /** The glass confirmation card, anchored on a window's pill (the product's own host-removal question). */
 const confirm: Surface = {
-  id: "confirm", host: "screen", selector: '.ui-confirm-tip[data-open="true"]',
+  id: "confirm", phone: true, host: "screen", selector: '.ui-confirm-tip[data-open="true"]',
   async open(page) {
     await page.evaluate(() => { window.__removalCard!(document.querySelector<HTMLElement>(".ui-window .ui-window-pill")!); });
   },
@@ -84,7 +86,7 @@ const confirm: Surface = {
 };
 /** A window's ⋯ menu (split, sessions, close): the popover every window carries. Pressed by a DOM click, as the picture covers the page. */
 const menu: Surface = {
-  id: "menu", selector: ".ui-window-menu", host: "window",
+  id: "menu", phone: false, selector: ".ui-window-menu", host: "window",
   async open(page) {
     await page.locator(".ui-window .ui-window-more").first().evaluate((b) => { (b as HTMLElement).click(); });
   },
@@ -93,6 +95,9 @@ const menu: Surface = {
 
 /** Every glass surface the specs measure. */
 export const SURFACES: readonly Surface[] = [palette, toast, toastError, confirm, menu];
+
+/** The surfaces that exist at `size`. */
+export const surfacesFor = (size: Size): readonly Surface[] => SURFACES.filter((s) => s.phone || !size.phone);
 
 /** The page of the review: the clusters scene (windows, ⋯ menus, a pill to anchor the card to) in a named theme and card level. */
 export async function openScene(page: Page, scheme: "ink" | "paper", card: number): Promise<void> {

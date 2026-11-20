@@ -22,7 +22,7 @@ const WITH_CONTROLS = SURFACES.filter((s) => s.id === "menu" || s.id === "confir
 
 for (const size of SIZES) {
   for (const scheme of ["ink", "paper"] as const) {
-    for (const surface of WITH_CONTROLS) {
+    for (const surface of WITH_CONTROLS.filter((s) => s.phone || !size.phone)) {
       for (const card of [2, 3, 4]) {
         test(`${size.id} ${scheme === "ink" ? "Ink" : "Paper"} card ${card}: the ${surface.id}'s controls hovered and pressed reach ${LINE}:1`, async ({ browser }) => {
           const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, colorScheme: scheme === "ink" ? "dark" : "light", ...(size.phone ? { hasTouch: true, isMobile: true } : {}) });

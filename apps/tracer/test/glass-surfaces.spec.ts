@@ -15,7 +15,7 @@
 import { appendFileSync } from "node:fs";
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
-import { frames, LINE, openScene, PICTURES, putPicture, removePicture, SIZES, SURFACES, watchFirstFrame } from "./glass-scenes";
+import { frames, LINE, openScene, PICTURES, putPicture, removePicture, SIZES, surfacesFor, watchFirstFrame } from "./glass-scenes";
 import { measure } from "./glass-pixels";
 import { settled } from "./glass-settled";
 
@@ -24,7 +24,7 @@ const OUT = tracerEvidencePath("glass-surfaces");
 
 for (const size of SIZES) {
   for (const scheme of ["ink", "paper"] as const) {
-    for (const surface of SURFACES) {
+    for (const surface of surfacesFor(size)) {
       for (const pass of ["adaptive", "floor"] as const) {
         for (const card of [2, 3, 4]) {
           test(`${size.id} ${scheme === "ink" ? "Ink" : "Paper"} card ${card} ${pass}: the ${surface.id} over white, black, grey and split pictures reaches ${LINE}:1`, async ({ browser }) => {
