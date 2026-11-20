@@ -78,6 +78,39 @@ due before exercising the real infraternal agent's rotation actions. These
 fixture boundaries are recorded in the case details so they are not mistaken
 for an independently scheduled background worker.
 
+## Three-client candidate walk and restart proof (#483)
+
+`three_node_walk_restarts.py` uses four real mesh agents: the server's mesh
+node and three clients behind one non-hairpin NAT. It requires all six
+client-to-client directions and the server links to settle on direct paths,
+then checks idle handshake counters. It kills and starts one client process
+and the server mesh-node process separately, requiring all affected routes and
+traffic to recover within 30 seconds. It also restarts the actual server
+process and checks its health endpoint, changes one client's LAN address, and
+checks that the other clients learn the new endpoint from the live-session
+announcement without user traffic. A changed stale candidate snapshot then
+checks that a still-authenticated endpoint is retained. The runner deletes all
+of its named namespaces before it exits.
+
+Run this root-only proof on compute01. Build the product and four-identity
+coordinator fixture with the job target, then use a private short scratch path
+for the row and its report:
+
+```sh
+mkdir -m 700 -p ~/.j967
+~/infraternal-ops/build-slot nice -n10 nix develop . -c cargo build --release --locked \
+  -p infraternal --bin infraternal \
+  -p infraternal-plugin-mesh --example coordinator_fixture \
+  --features infraternal-plugin-mesh/agent
+
+~/infraternal-ops/build-slot nice -n10 nix shell \
+  nixpkgs#iproute2 nixpkgs#nftables nixpkgs#conntrack-tools nixpkgs#util-linux \
+  --command python3 scripts/gotatun_break_it/three_node_walk_restarts.py \
+    --binary /mnt/build/targets/J967/release/infraternal \
+    --coordinator /mnt/build/targets/J967/release/examples/coordinator_fixture \
+    --scratch /root/.j967 --report /root/.j967/three-node-report.json
+```
+
 ## Continuous loaded-latency soak
 
 Run the one-to-two-hour leak and latency soak on compute01 under one build-slot
