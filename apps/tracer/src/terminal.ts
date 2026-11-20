@@ -482,7 +482,10 @@ export class TerminalClient {
         host: config.host,
         optedIn: true,
         getPosition: () => this.predictionPosition(),
-        onVisible: (sequence, at) => config.hooks?.onTrace?.(sequence, "prediction", at),
+        // Stamped with the clock when the overlay was drawn, not the animation frame's start time `at`: the frame
+        // start can come before the keydown that the same frame draws (the D375 key-to-letter row then read below 0),
+        // and a stall between keydown and the draw (a slow input handler) would not show in the row at all (#447).
+        onVisible: (sequence) => config.hooks?.onTrace?.(sequence, "prediction", performance.now()),
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
       })
       : undefined;
