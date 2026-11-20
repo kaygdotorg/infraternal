@@ -185,7 +185,11 @@ fn shared_file() -> io::Error {
 /// Pick the refusal for a checked file: the group/world-readable case gets its own sentence,
 /// but only when the file is otherwise ours, so a foreign file is still plainly refused.
 fn unsafe_file(owned: bool, mode: u32) -> io::Error {
-    if owned && mode & 0o077 != 0 { shared_file() } else { refused() }
+    if owned && mode & 0o077 != 0 {
+        shared_file()
+    } else {
+        refused()
+    }
 }
 
 pub(crate) fn default_data() -> io::Result<PathBuf> {

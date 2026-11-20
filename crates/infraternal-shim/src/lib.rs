@@ -44,10 +44,10 @@ pub mod login_ready;
 /// of a root upgrade (#399, D274).
 #[cfg(target_os = "linux")]
 pub mod private_pty;
-/// Thread quality-of-service classes on macOS, a no-op elsewhere (#554).
-pub mod qos;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty;
+/// Thread quality-of-service classes on macOS, a no-op elsewhere (#554).
+pub mod qos;
 #[cfg(feature = "async-fd")]
 pub mod readiness;
 pub mod ring;
