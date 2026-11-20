@@ -750,6 +750,58 @@ async fn key_repaint_leaves_time_in_the_frame_after_pty_echo_grace() {
     assert_eq!(repaint, Some((cursor, b"echo:k".to_vec())));
 }
 
+/// A whole echo produced after capture follows the repaint exactly once, at its cursor.
+#[tokio::test(start_paused = true)]
+async fn delayed_key_echo_follows_a_snapshot_without_an_echo() {
+    for delay in [3, 10, 50] {
+        let mut fixture = start_relay(2).await;
+        fill_bulk_window(&mut fixture).await;
+        assert!(type_key_and_wait_for_ack(&mut fixture, 0).await);
+        let echo_at = Instant::now() + Duration::from_millis(delay);
+        assert_eq!(
+            read_shim(&mut fixture.reader, &mut fixture.peer).await,
+            Shim::SnapshotRequest
+        );
+
+        let cursor = u64::from(BULK_CREDIT) + STARVING_OUTPUT as u64;
+        let screen = b"\x1b[Hprompt> ";
+        sessions::send(&mut fixture.peer, &Shim::Snapshot(cursor, screen.to_vec()))
+            .await
+            .unwrap();
+
+        // sleep: put the redraw at the chosen delay after the PTY acknowledgment.
+        tokio::time::sleep_until(echo_at).await;
+        let redraw = b"\r\x1b[2Kprompt> k";
+        sessions::send(&mut fixture.peer, &Shim::Output(cursor, redraw.to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_message(&mut fixture).await,
+            Message::Shim(2, Shim::Snapshot(seq, bytes)) if seq == cursor && bytes == screen
+        ));
+        fixture
+            .commands
+            .as_mut()
+            .unwrap()
+            .try_send(Command::Credit(REPAINT_CREDIT))
+            .unwrap();
+        assert!(matches!(
+            next_message(&mut fixture).await,
+            Message::Shim(2, Shim::Output(seq, bytes)) if seq == cursor && bytes == redraw
+        ));
+
+        let tail = cursor + redraw.len() as u64;
+        sessions::send(&mut fixture.peer, &Shim::Output(tail, b"!".to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_message(&mut fixture).await,
+            Message::Shim(2, Shim::Output(seq, bytes)) if seq == tail && bytes == b"!"
+        ));
+        stop_relay(&mut fixture).await;
+    }
+}
+
 /// A key arriving just before bulk starvation gets its own chance to repaint (#546).
 #[tokio::test(start_paused = true)]
 async fn bulk_starvation_does_not_cancel_an_acknowledged_key_repaint() {
