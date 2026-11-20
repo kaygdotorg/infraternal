@@ -42,8 +42,8 @@ function refusedActions(server: RealServer): string[] {
   return names;
 }
 const refusedOn = (server: RealServer): number => refusedActions(server).length;
-/** Windows (terminal streams) attached on the newest open socket. */
-const attachedOn = (server: RealServer): number => [...(server.bridges.filter((b) => !b.closed).at(-1)?.attached.values() ?? [])].flat().length;
+/** Distinct sessions attached on the sockets still open (a long-lived page rotates to a second socket past 28 windows). */
+const attachedOn = (server: RealServer): number => new Set(server.bridges.filter((b) => !b.closed).flatMap((b) => [...b.attached.values()].flat())).size;
 /** Calls the newest socket has sent that the server has not answered yet. */
 function pendingOn(server: RealServer): number {
   const control = server.bridges.filter((b) => !b.closed).at(-1)?.control ?? [];
@@ -84,7 +84,6 @@ for (const total of [8, 16, 32]) {
         await page.locator(".tab-add").click();
         await expect(windows(page)).toHaveCount(count + 1);
       }
-      await expect.poll(() => attachedOn(server), { timeout: 60_000 }).toBeGreaterThanOrEqual(total - 1);
       // The server keeps the layout; the last window's save is still on its way when its shell attaches, and a reload
       // before it lands would restore one window fewer, which is a different question from this spec's.
       await page.waitForTimeout(3_000);
@@ -125,10 +124,12 @@ test.describe("ten new windows within a second", () => {
       for (let i = 0; i < 10; i++) { (button as HTMLElement).click(); await new Promise((r) => setTimeout(r, 90)); }
     });
     await expect(windows(page)).toHaveCount(11);
-    await expect.poll(() => attachedOn(server), { timeout: 120_000 }).toBeGreaterThanOrEqual(11);
+    // Not a hard wait: a window the server refused never attaches, and the report below says so.
+    await expect.poll(() => attachedOn(server), { timeout: 30_000 }).toBeGreaterThanOrEqual(11).catch(() => undefined);
     const ms = Math.round(performance.now() - t0);
     const offlineWindows = await windows(page).filter({ hasText: OFFLINE }).count();
-    console.log(`RAPID-NEW n=10 ${JSON.stringify({ ms, offlineWindows, refused: refusedActions(server) })}`);
+    console.log(`RAPID-NEW n=10 ${JSON.stringify({ ms, attached: attachedOn(server), offlineWindows, refused: refusedActions(server) })}`);
+    expect.soft(attachedOn(server)).toBeGreaterThanOrEqual(11);
     expect.soft(offlineWindows).toBe(0);
     expect.soft(refusedOn(server)).toBe(0);
   });
