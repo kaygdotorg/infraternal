@@ -157,16 +157,26 @@ export const FADE_MS = 160;
 function crossFade(surface: HTMLElement, change: () => void): void {
   const drawn = surface.isConnected && !surface.hidden && typeof surface.animate === "function" && !matchMedia("(prefers-reduced-motion: reduce)").matches;
   const before = drawn ? getComputedStyle(surface) : undefined;
+  // What the card shows now, read while any earlier fade is still running (so a change that lands mid-fade continues from where the eye is).
   const from = before && { backgroundColor: before.backgroundColor, backdropFilter: before.backdropFilter };
+  // An earlier fade must end before the new value is read: a running animation overrides the computed style, so `after` would be the
+  // earlier fade's value and the card would pop to the real one when that fade ended (J1020).
+  const earlier = drawn ? surface.getAnimations().filter((a) => fades.has(a)) : [];
+  for (const a of earlier) a.cancel();
   change();
   if (!from) return;
   const after = getComputedStyle(surface);
   if (after.backgroundColor === from.backgroundColor && after.backdropFilter === from.backdropFilter) return;
-  surface.animate(
+  const fade = surface.animate(
     [{ backgroundColor: from.backgroundColor, backdropFilter: from.backdropFilter, webkitBackdropFilter: from.backdropFilter }, { backgroundColor: after.backgroundColor, backdropFilter: after.backdropFilter, webkitBackdropFilter: after.backdropFilter }],
     { duration: FADE_MS, easing: "ease-out" },
   );
+  fades.add(fade);
+  fade.finished.then(() => fades.delete(fade), () => fades.delete(fade));
 }
+
+/** The cross-fades this module started and that are still running, so a later change can end them before it reads the new value. */
+const fades = new WeakSet<Animation>();
 
 /** Writes a solved opacity, blur and text colours onto `surface`, where the glass rules read them in place of the static floor. */
 function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassSeen>, theme: Theme): void {
