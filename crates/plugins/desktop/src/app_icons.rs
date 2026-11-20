@@ -55,12 +55,17 @@ pub struct IconKey {
 
 impl IconKey {
     /// True when both parts are non-empty, bounded and free of control characters.
+    ///
+    /// The bundle identifier's bound is the List validator's own
+    /// (`protocol::MAX_ICON_KEY_TEXT`): the agent sends every stored key back
+    /// in `known_icons`, so a key the store keeps but the validator refuses
+    /// would make every later window list fail.
     #[must_use]
     pub fn valid(&self) -> bool {
         let part = |text: &str, max: usize| {
             !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
         };
-        part(&self.bundle_id, 256) && part(&self.app_version, 128)
+        part(&self.bundle_id, crate::protocol::MAX_ICON_KEY_TEXT) && part(&self.app_version, 128)
     }
 }
 

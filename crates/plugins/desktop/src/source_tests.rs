@@ -168,3 +168,32 @@ fn a_console_change_during_a_leg_latches_gone() {
     assert!(metadata.gone.load(Ordering::Acquire));
 }
 
+/// Every window list after the first carries the icons the agent holds, and
+/// `Helper::send` refuses a body the validator refuses, which left the picker
+/// unanswered until the agent restarted (J992, #146). This drives the real
+/// path: icons absorbed from a helper's inventory, then the next List body,
+/// then the validator. It covers the full key count and the longest bundle
+/// identifier the store keeps, so the store and the validator cannot drift.
+#[test]
+fn every_later_window_list_passes_the_helpers_validator() {
+    use base64::Engine;
+    let png =
+        base64::engine::general_purpose::STANDARD.encode(crate::app_icons::tests::png(64, 64, 0));
+    let mut icons = crate::app_icons::IconStore::default();
+    let first = list_request(&icons).unwrap();
+    crate::protocol::validate_command(Kind::List, &first).unwrap();
+    let longest = "a".repeat(256);
+    let mut entries: Vec<Value> = (0..crate::protocol::MAX_KNOWN_ICONS + 4)
+        .map(|n| json!({"bundle_id": format!("org.example.app{n}"), "app_version": "1.0+1", "png_64": png}))
+        .collect();
+    entries.push(json!({"bundle_id": longest, "app_version": "v".repeat(128), "png_64": png}));
+    let mut inventory = json!({"windows": [], "app_icons": entries});
+    icons.absorb(&mut inventory);
+    let later = list_request(&icons).unwrap();
+    let request: Value = serde_json::from_slice(&later).unwrap();
+    assert_eq!(
+        request["known_icons"].as_array().map(Vec::len),
+        Some(crate::protocol::MAX_KNOWN_ICONS)
+    );
+    crate::protocol::validate_command(Kind::List, &later).unwrap();
+}

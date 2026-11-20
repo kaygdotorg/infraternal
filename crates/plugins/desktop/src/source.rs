@@ -259,6 +259,20 @@ impl Drop for WireLease {
         self.0.retire();
     }
 }
+/// The body of a window-list request: `{}`, or the icons `icons` already
+/// holds as `known_icons`, so the helper leaves their images out (#146).
+///
+/// `Helper::send` checks it with `protocol::validate_command` before it
+/// leaves, so the store must never hold a key the validator refuses: one such
+/// key made every later window list fail until the agent restarted.
+fn list_request(icons: &crate::app_icons::IconStore) -> Result<Vec<u8>, PluginError> {
+    let known = icons.known();
+    let mut request = json!({});
+    if !known.is_empty() {
+        request["known_icons"] = json!(known);
+    }
+    serde_json::to_vec(&request).map_err(|_| PluginError::Rejected)
+}
 /// Cancels the worker when dropped. Held while awaiting it so that a cancelled
 /// caller does not leave the helper running.
 struct Wait(Arc<Worker>);
@@ -537,18 +551,14 @@ impl SourceBridge {
             }
             return snapshot.page();
         }
-        let known = self
-            .0
-            .state
-            .lock()
-            .map_err(|_| PluginError::Rejected)?
-            .icons
-            .known();
-        let mut request = json!({});
-        if !known.is_empty() {
-            request["known_icons"] = json!(known);
-        }
-        let body = serde_json::to_vec(&request).map_err(|_| PluginError::Rejected)?;
+        let body = list_request(
+            &self
+                .0
+                .state
+                .lock()
+                .map_err(|_| PluginError::Rejected)?
+                .icons,
+        )?;
         let mut inventory = self.idle_request(Kind::List, body).await?;
         let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
         if !state.enabled {

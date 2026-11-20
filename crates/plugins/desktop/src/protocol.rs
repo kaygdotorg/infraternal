@@ -348,7 +348,7 @@ impl Input {
 /// The most `known_icons` keys a List request may carry (#146, D349).
 pub const MAX_KNOWN_ICONS: usize = 32;
 /// The longest bundle identifier or app version a known-icon key may name.
-const MAX_ICON_KEY_TEXT: usize = 255;
+pub const MAX_ICON_KEY_TEXT: usize = 255;
 
 /// A window-list request: `{}`, or the app icons the infraternal agent
 /// already holds, so the helper can leave their images out of its reply.
