@@ -3,7 +3,7 @@
 use std::{
     fs::{self, File, Metadata, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -31,6 +31,61 @@ pub const MACHINE_OWNER: &str = ".machine-owner";
 const MACHINE_LINK: &str = "/usr/local/bin/infraternal";
 /// Private child entry used only by the authenticated uninstall handler.
 const REMOVE_HANDOFF: &str = "--macos-remove-after-reply";
+/// Private system state that survives replacement of the machine directory.
+const LIFECYCLE_DIRECTORY: &str = "/Library/Application Support/.infraternal-lifecycle";
+
+/// Holds the system-wide lock until publication, rollback or retirement finishes.
+pub struct MachineLock {
+    /// Keep the locked descriptor open, including while launchctl runs.
+    _file: File,
+}
+
+impl MachineLock {
+    /// Serialize launchd and machine path changes across root helpers.
+    ///
+    /// # Errors
+    /// Refuses unsafe filesystem ownership or an unavailable lock.
+    pub fn acquire() -> io::Result<Self> {
+        require_root()?;
+        let directory = Path::new(LIFECYCLE_DIRECTORY);
+        let parent = directory.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        require_root_directories(parent)?;
+        match fs::DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(directory)?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(directory.join("lock"))?;
+        require_owned_plist(&file.metadata()?)?;
+        // Keep this inode across runs. Unlinking a live lock would let another
+        // helper open a second inode and enter while the first still owns it.
+        file.lock()?;
+        Ok(Self { _file: file })
+    }
+
+    /// Publish or stop the fixed launchd service while holding the lifecycle lock.
+    ///
+    /// # Errors
+    /// Refuses an unsafe executable or failed launchd operation.
+    pub fn set_service(&self, action: &str, executable: &Path) -> io::Result<()> {
+        let executable = trusted_executable(executable)?;
+        match action {
+            "up" => install(&executable),
+            "down" => stop(),
+            _ => Err(io::ErrorKind::InvalidInput.into()),
+        }
+    }
+}
 
 /// Publish the ownership receipt before launchd can accept any removal request.
 ///
@@ -56,17 +111,45 @@ pub fn record_installation(host: &str, alias_created: bool) -> io::Result<()> {
 /// # Errors
 /// Refuses a foreign, altered or unsafe install, or a different host identity.
 pub fn validate_installation(host: &str) -> io::Result<bool> {
-    if !valid_host(host) {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
+    let (_, alias_created) = installed_identity(host)?;
     let binary = trusted_executable(Path::new(MACHINE_BINARY))?;
     if binary != Path::new(MACHINE_BINARY) {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
+    if !owned_machine_plist()? {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    Ok(alias_created)
+}
+
+/// Read the recorded enrollment and its directory identity, independent of cleanup progress.
+fn installed_identity(host: &str) -> io::Result<((u64, u64), bool)> {
+    if !valid_host(host) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let base = Path::new(MACHINE_BASE);
+    require_root_directories(base)?;
+    let metadata = fs::symlink_metadata(base)?;
+    let receipt = base.join(MACHINE_OWNER);
+    require_owned_plist(&fs::symlink_metadata(&receipt)?)?;
+    let mut contents = String::new();
+    File::open(receipt)?
+        .take(36)
+        .read_to_string(&mut contents)?;
+    let alias = receipt_alias(&contents, host).ok_or(io::ErrorKind::PermissionDenied)?;
+    Ok(((metadata.dev(), metadata.ino()), alias))
+}
+
+/// Check the exact plist if it remains. A missing plist is an already retired step.
+fn owned_machine_plist() -> io::Result<bool> {
     ensure_plist_directory()?;
     let plist = Path::new(PLIST);
-    require_owned_plist(&fs::symlink_metadata(plist)?)?;
-    let expected = render_plist(&binary)?;
+    match fs::symlink_metadata(plist) {
+        Ok(metadata) => require_owned_plist(&metadata)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let expected = render_plist(Path::new(MACHINE_BINARY))?;
     let mut actual = String::new();
     File::open(plist)?
         .take(expected.len() as u64 + 1)
@@ -74,13 +157,7 @@ pub fn validate_installation(host: &str) -> io::Result<bool> {
     if actual != expected {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    let receipt = Path::new(MACHINE_BASE).join(MACHINE_OWNER);
-    require_owned_plist(&fs::symlink_metadata(&receipt)?)?;
-    let mut contents = String::new();
-    File::open(receipt)?
-        .take(36)
-        .read_to_string(&mut contents)?;
-    receipt_alias(&contents, host).ok_or_else(|| io::ErrorKind::PermissionDenied.into())
+    Ok(true)
 }
 
 /// Read alias ownership only from a receipt for the exact enrolled host.
@@ -159,24 +236,88 @@ fn valid_host(host: &str) -> bool {
 
 /// Stop the live utun owner before retiring only the approved install's files.
 fn remove_installation(host: &str) -> io::Result<()> {
-    require_root()?;
-    let alias_created = validate_installation(host)?;
-    stop()?;
-    let link = Path::new(MACHINE_LINK);
-    if fs::read_link(link).is_ok_and(|target| target == Path::new(MACHINE_BINARY))
-        && link.ancestors().skip(1).all(|parent| {
-            fs::symlink_metadata(parent).is_ok_and(|metadata| {
-                metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
-            })
-        })
-    {
-        if alias_created {
-            infraternal_plugin_api::cli_alias::remove(link, 0)?;
+    let _lock = MachineLock::acquire()?;
+    if !valid_host(host) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let lifecycle = Path::new(LIFECYCLE_DIRECTORY);
+    let retired = lifecycle.join(host);
+    match fs::symlink_metadata(&retired) {
+        // Only the verified rename below can publish this host-specific name.
+        // Its receipt may already be gone after an interrupted directory walk.
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == 0 => {
+            return fs::remove_dir_all(retired);
         }
+        Ok(_) => return Err(io::ErrorKind::PermissionDenied.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let identity = installed_identity(host)?;
+    let verify = || {
+        if installed_identity(host)? == identity {
+            Ok(())
+        } else {
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+    };
+    let binary = Path::new(MACHINE_BINARY);
+    if trusted_executable(binary)? != binary || (!owned_machine_plist()? && status()?.loaded) {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    verify()?;
+    stop()?;
+    verify()?;
+    remove_command_links(identity.1)?;
+    verify()?;
+    if owned_machine_plist()? {
+        fs::remove_file(PLIST)?;
+        File::open(PLIST_DIRECTORY)?.sync_all()?;
+    }
+    verify()?;
+    // Keep the receipt at the live path until every shared resource is gone.
+    // Once renamed, deletion can resume without touching any replacement.
+    let base = Path::new(MACHINE_BASE);
+    fs::rename(base, &retired)?;
+    File::open(lifecycle)?.sync_all()?;
+    File::open(base.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;
+    fs::remove_dir_all(retired)
+}
+
+/// Remove owned links in their trusted PATH directory and tolerate completed unlinks.
+fn remove_command_links(alias_created: bool) -> io::Result<()> {
+    let link = Path::new(MACHINE_LINK);
+    let parent = link.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    match require_root_directories(parent) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    }
+    let present = match fs::symlink_metadata(link) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                && metadata.uid() == 0
+                && fs::read_link(link)? == Path::new(MACHINE_BINARY) =>
+        {
+            true
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    if alias_created {
+        infraternal_plugin_api::cli_alias::remove(link, 0)?;
+    }
+    if present {
         fs::remove_file(link)?;
     }
-    fs::remove_file(PLIST)?;
-    fs::remove_dir_all(MACHINE_BASE)
+    File::open(parent)?.sync_all()
 }
 
 /// The mesh state an `agent join` into `data` must forget, if any (#265, J162 F4).
@@ -232,13 +373,7 @@ pub fn control(
     executable: &Path,
 ) -> io::Result<Option<Status>> {
     if system_service {
-        require_root()?;
-        let executable = trusted_executable(executable)?;
-        match action {
-            "up" => install(&executable)?,
-            "down" => stop()?,
-            _ => return Err(io::ErrorKind::InvalidInput.into()),
-        }
+        MachineLock::acquire()?.set_service(action, executable)?;
         return Ok(None);
     }
     match action {
@@ -315,15 +450,21 @@ fn trusted_executable(path: &Path) -> io::Result<PathBuf> {
     ) {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    for parent in path.ancestors().skip(1) {
+    require_root_directories(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+    // A root-owned file can still make dyld load a user's library (J162 F2, #265).
+    crate::macos_image::check_file(&path)?;
+    Ok(path)
+}
+
+/// Verify each component of an absolute directory without following symlinks.
+fn require_root_directories(path: &Path) -> io::Result<()> {
+    for parent in path.ancestors() {
         let metadata = fs::symlink_metadata(parent)?;
         if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
     }
-    // A root-owned file can still make dyld load a user's library (J162 F2, #265).
-    crate::macos_image::check_file(&path)?;
-    Ok(path)
+    Ok(())
 }
 
 fn trusted_binary_metadata(uid: u32, mode: u32, regular_file: bool) -> bool {

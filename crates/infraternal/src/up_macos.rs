@@ -83,6 +83,8 @@ struct Created {
 
 /// A fresh install owned by this run until the service is confirmed running.
 pub(super) struct Install {
+    /// Hold the system lock through activation and any rollback in Drop.
+    lock: macos_service::MachineLock,
     /// Paths created by this run, oldest first.
     created: Vec<Created>,
     /// Set once the service install was attempted, so rollback stops it.
@@ -104,8 +106,10 @@ impl Install {
                 "This step needs root. Run infraternal up again and approve the sudo prompt.",
             ));
         }
+        let lock = macos_service::MachineLock::acquire()?;
         preflight()?;
         let mut install = Self {
+            lock,
             created: Vec::new(),
             service: false,
             alias_created: false,
@@ -241,7 +245,7 @@ impl Install {
         self.service = true;
         // `mesh up --system-service`'s own install: checks the image, writes the
         // plist, creates the state directory and kickstarts the job.
-        let installed = macos_service::control("up", true, binary);
+        let installed = self.lock.set_service("up", binary);
         if existing(state)?.is_some() {
             self.record(state, true)?;
         }
@@ -275,7 +279,7 @@ impl Install {
     fn rollback(&mut self) {
         if self.service {
             // Bootout and disable; a job that never loaded is already stopped.
-            let _ = macos_service::control("down", true, Path::new(MACHINE_BINARY));
+            let _ = self.lock.set_service("down", Path::new(MACHINE_BINARY));
         }
         for entry in self.created.drain(..).rev() {
             // Skip a path that is gone or now names another inode: not ours to remove.
