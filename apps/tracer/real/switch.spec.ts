@@ -307,10 +307,11 @@ test("targets: the new session's screen is there within a frame, and live within
       if (group === "manager") expect(r.attached ?? 1e9, `${r.way}: attach sent (ms)`).toBeLessThanOrEqual(100);
       expect(r.livePaint ?? 1e9, `${r.way}: live (ms)`).toBeLessThanOrEqual((group === "manager" ? 60 : 250) + rtt + 300);
     }
-    // The target is one frame (16.7 ms) of the click's own work, then the next frame paints the last known screen; a new
-    // window also has to be made and sized. A quiet machine meets it (see the table in the issue); the bounds here are two
-    // frames for a window that keeps its terminal, because the same machine runs the build and other jobs, and they are
-    // medians so that one slow task cannot fail the run. The run records the load average beside the numbers.
+    // The target is one 120 Hz frame (8.3 ms, D375) of the click's own work, then the next frame paints the last known
+    // screen; a new window also has to be made and sized. These bounds are not that target: they are loose medians
+    // (about two 60 Hz frames for a window that keeps its terminal) because the same machine runs the build and other
+    // jobs, so that one slow task cannot fail the run. The D375 "reconnect, last screen" row is measured and gated by
+    // `scripts/verify latency`. The run records the load average beside the numbers.
     expect(median(rows.map((r) => r.shown!)), `${group}: median work before the screen can paint (ms)`).toBeLessThanOrEqual(group === "manager" ? 34 : 50);
     expect(median(rows.map((r) => r.firstPaint!)), `${group}: median first paint (ms)`).toBeLessThanOrEqual(group === "manager" ? 70 : 100);
   }

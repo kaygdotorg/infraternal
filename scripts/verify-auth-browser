@@ -9,6 +9,9 @@ bun test ./scripts/browser-auth/response-headers.test.mjs
 python3 "${script_dir}/latency_proxy.py" self-test --samples 3
 cargo build --locked --package infraternal-server --example browser_auth
 bun install --cwd scripts/browser-auth --frozen-lockfile
+# The recovery bundle imports the tracer's auth modules, which resolve their
+# dependencies from apps/tracer; a fresh checkout has none installed yet (#447).
+bun install --cwd apps/tracer --frozen-lockfile
 mkdir -p "${CARGO_TARGET_DIR}/auth-rework"
 bun build scripts/browser-auth/entropy.mjs --target browser --outfile "${CARGO_TARGET_DIR}/auth-rework/entropy.js"
 bun run scripts/browser-auth/check.mjs

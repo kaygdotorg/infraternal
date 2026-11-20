@@ -14,11 +14,12 @@ perf-run --out "$HOME/.cache/codex-scratch/browser-budgets/evidence" -- \
   bun x playwright test -c playwright.perf.config.ts
 ```
 
-The moved thresholds remain unchanged:
+The thresholds (D375 rewrote the latency ones at 120 Hz, one frame = 8.3 ms;
+see `docs/PROCESS.md` §6):
 
-- terminal: returning sign-in p99 ≤ 5000 ms, predicted paint p99 ≤ 17 ms,
-  resume p99 within the original RTT-derived budget, access render upper
-  bound < 1000 ms;
+- terminal: returning sign-in p99 ≤ 5000 ms, predicted paint p99 ≤ 8.3 ms,
+  reconnect after a dropped socket p99 ≤ 4 round trips + 50 ms (D267), access
+  render upper bound < 1000 ms;
 - renderer: prediction-on median 50 MB throughput ≥ 95% of prediction-off;
 - frame incident: injected 200 ms stall has worst interval > 190 ms, attributed
   script > 150 ms and heartbeat lateness > 100 ms;
@@ -33,7 +34,8 @@ The moved thresholds remain unchanged:
 The functional suite retains the corresponding access, input, resume,
 renderer-canary and incident-recording checks without asserting elapsed speed.
 Its access/resume scenario uses one returning sign-in and one reconnect;
-the perf scenario retains the original ten sign-ins and twenty reconnects for p99 samples.
+the perf scenario retains the original ten sign-ins and twenty reconnects for p99 samples, and types 100 probe keys
+(the functional suite types 20), so the key p99 is the 99th of 100 keys rather than the slowest of 20.
 
 The terminal scenario and paired throughput samples use the default 300 ms
 proxy profile. The access first-paint check uses the direct backend (0 ms

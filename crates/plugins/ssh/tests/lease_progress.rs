@@ -86,6 +86,13 @@ fn released_lease_owner_can_stay_unreaped_without_blocking_recovery() {
 }
 
 /// Fresh payload consumption keeps transaction protection beyond the first lease interval.
+///
+/// The script marks `started` once `start_setup_lease` has returned. The test
+/// does not drive any lease interval before that: the lease's own two intervals
+/// are released by the test, while the script's tail (the descriptor-teardown wait
+/// and the `-ef` identity check) runs on real, load-stretched wall time. Without
+/// the marker, a loaded run could finish both intervals and retire the lease
+/// before the script checked it, and the script then exited 73 (J989, #553).
 #[tokio::test]
 async fn remote_payload_progress_renews_the_lease_but_idle_does_not() {
     let scratch = common::scratch();
@@ -117,10 +124,11 @@ while not (root / ('release' + str(index))).exists():
     .unwrap();
     std::fs::set_permissions(&sleep, std::fs::Permissions::from_mode(0o700)).unwrap();
     let script = format!(
-        "{}\n{}\nstage={}\nstart_setup_lease\nwhile [ ! -f {} ]; do sleep .001; done\n",
+        "{}\n{}\nstage={}\nstart_setup_lease\n: > {}\nwhile [ ! -f {} ]; do sleep .001; done\n",
         include_str!("../src/setup_guard.sh"),
         include_str!("../src/setup_lock.sh"),
         infraternal_plugin_ssh::transport::shell_quote(stage.to_str().unwrap()),
+        infraternal_plugin_ssh::transport::shell_quote(root.join("started").to_str().unwrap()),
         infraternal_plugin_ssh::transport::shell_quote(root.join("finish").to_str().unwrap()),
     );
     let mut command = tokio::process::Command::new("/bin/sh");
@@ -134,6 +142,15 @@ while not (root / ('release' + str(index))).exists():
     let guard = std::time::Instant::now() + Duration::from_secs(600);
     while !root.join("entered0").exists() {
         assert!(!running.is_finished());
+        assert!(std::time::Instant::now() < guard);
+        tokio::task::yield_now().await;
+    }
+    // Event wait: the lease is fully established before the test moves it.
+    while !root.join("started").exists() {
+        assert!(
+            !running.is_finished(),
+            "setup script exited before the lease started"
+        );
         assert!(std::time::Instant::now() < guard);
         tokio::task::yield_now().await;
     }
