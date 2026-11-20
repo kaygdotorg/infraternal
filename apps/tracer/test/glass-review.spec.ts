@@ -113,9 +113,11 @@ test("glass chunk arrives late: cumulative layout shift and the card's box do no
   await page.addInitScript(() => {
     const w = window as unknown as { __cls: number; __shifts: number[] };
     w.__cls = 0; w.__shifts = [];
-    new PerformanceObserver((list) => { for (const e of list.getEntries() as unknown as Array<{ value: number; hadRecentInput: boolean }>) if (!e.hadRecentInput) { w.__cls += e.value; w.__shifts.push(e.value); } }).observe({ type: "layout-shift", buffered: true });
+    new PerformanceObserver((list) => { for (const e of list.getEntries() as unknown as Array<{ value: number; hadRecentInput: boolean; startTime: number; sources: Array<{ node: Element | null }> }>) if (!e.hadRecentInput) { w.__cls += e.value; w.__shifts.push(e.value); (w as unknown as { __src: string[] }).__src ??= []; (w as unknown as { __src: string[] }).__src.push(`${Math.round(e.startTime)}ms ${e.value.toFixed(4)} ${e.sources.map((x) => x.node?.id || x.node?.className || x.node?.nodeName).join(",")}`); } }).observe({ type: "layout-shift", buffered: true });
   });
-  await interceptGlass(page, async (route) => {
+  const held: string[] = [];
+  if (process.env.GLASS_REVIEW_NO_DELAY !== "1") await interceptGlass(page, async (route) => {
+    held.push(route.request().url());
     // sleep: holds the glass chunks back so the first screens and a card open without them
     await new Promise((resolve) => setTimeout(resolve, 3000));
     await route.continue();
@@ -134,8 +136,8 @@ test("glass chunk arrives late: cumulative layout shift and the card's box do no
   await settled(page, "#palette");
   const after = await page.evaluate(() => { const p = document.querySelector("#palette")!; const r = p.getBoundingClientRect(); const s = getComputedStyle(p); return { box: [r.x, r.y, r.width, r.height], bg: s.backgroundColor, fg: s.color }; });
   await page.screenshot({ path: `${OUT}/chunk-late-after.png` });
-  const cls = await page.evaluate(() => ({ cls: (window as unknown as { __cls: number }).__cls, shifts: (window as unknown as { __shifts: number[] }).__shifts }));
-  appendFileSync(`${OUT}/chunk-late.txt`, `${JSON.stringify({ rulesBeforeCard: early, before, after, ...cls })}\n`);
+  const cls = await page.evaluate(() => ({ cls: (window as unknown as { __cls: number }).__cls, shifts: (window as unknown as { __shifts: number[] }).__shifts, sources: (window as unknown as { __src?: string[] }).__src ?? [] }));
+  appendFileSync(`${OUT}/chunk-late.txt`, `${JSON.stringify({ held, rulesBeforeCard: early, before, after, ...cls })}\n`);
   expect(after.box, "the card keeps its box when the chunk lands").toEqual(before.box);
   expect(cls.cls).toBeLessThan(0.01);
   await ctx.close();
