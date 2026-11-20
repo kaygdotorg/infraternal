@@ -60,26 +60,30 @@ async fn machine_approval_wait_rechecks_durable_state_with_or_without_a_signal()
         } else {
             std::time::Duration::from_millis(100)
         };
-        let check = f.auth.wait_for_device_join(token, NOW, wait);
-        tokio::pin!(check);
-        assert!(futures_util::poll!(&mut check).is_pending());
-        if notify {
-            f.auth
-                .approve_without_passkey_for_tests(&f.session, code, NOW)
-                .await
-                .unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), &mut check)
-                .await
-                .expect("matching approval must wake without the fallback timer")
-                .unwrap();
-        } else {
-            sqlx::query("UPDATE approvals SET user_id=(SELECT id FROM users WHERE owner=1) WHERE token_hash=?")
-                .bind(hash(token))
-                .execute(&f.auth.pool)
-                .await
-                .unwrap();
-            check.await.unwrap();
-        }
+        let publish = async {
+            if notify {
+                f.auth
+                    .approve_without_passkey_for_tests(&f.session, code, NOW)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query("UPDATE approvals SET user_id=(SELECT id FROM users WHERE owner=1) WHERE token_hash=?")
+                    .bind(hash(token))
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        let check = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            f.auth.wait_for_device_join(token, NOW, wait),
+        );
+        // Poll the subscriber first and keep driving both requests so the
+        // subscriber can return the fixture's single SQLite connection.
+        let (checked, ()) = tokio::join!(biased; check, publish);
+        checked
+            .expect("approval must wake or recheck within the expected bound")
+            .unwrap();
         assert!(f.auth.device_join_approved(token, NOW).await.unwrap());
     }
 }
