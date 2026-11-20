@@ -119,7 +119,7 @@ test("glass chunk arrives late: cumulative layout shift and the card's box do no
   if (process.env.GLASS_REVIEW_NO_DELAY !== "1") await interceptGlass(page, async (route) => {
     held.push(route.request().url());
     // sleep: holds the glass chunks back so the first screens and a card open without them
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.GLASS_REVIEW_DELAY ?? "3000")));
     await route.continue();
   });
   await ctx.request.post("/__mock/reset");
