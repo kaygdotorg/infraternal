@@ -237,12 +237,22 @@ pub(crate) fn registry_at_with_mesh_state(
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
-    // The Darwin mesh node owns a utun device and a system-keychain key, so it
-    // only runs in the root system service. A rootless agent (the one in a
-    // person's login session that shows app windows) still links to the
-    // server; it just leaves the mesh node out instead of failing to start.
+    // The Darwin mesh node owns a utun device. Root mode creates it itself. In
+    // user mode (#146, D203 C2 as amended 2026-11-20) the agent runs as the
+    // logged-in person and the root helper registered for that person's uid
+    // creates the utun, routes and resolver entry on request. Any other rootless
+    // agent (the one in a login session beside a root-mode daemon, which shows
+    // app windows) still links to the server; it just leaves the mesh node out
+    // instead of failing to start.
     #[cfg(all(feature = "mesh", target_os = "macos"))]
     if nix::unistd::Uid::effective().is_root() {
+        registry.register(Box::new(darwin_mesh_plugin(
+            mesh_state.or(state),
+            installation,
+        )?))?;
+    } else if infraternal_plugin_mesh::macos_helper::registered_for_current_user() {
+        infraternal_plugin_mesh::macos_helper::enter_user_mode();
+        eprintln!("Infraternal Mesh node running in user mode through the mesh helper");
         registry.register(Box::new(darwin_mesh_plugin(
             mesh_state.or(state),
             installation,

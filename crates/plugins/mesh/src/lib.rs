@@ -148,6 +148,10 @@ pub mod macos_node;
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_user_mode;
 
+/// The on-demand root helper for macOS user mode and the agent's client for it (#146).
+#[cfg(all(feature = "agent", target_os = "macos"))]
+pub mod macos_helper;
+
 // Pure byte parsing, so its tests also run in the Linux gate.
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_image;

@@ -75,10 +75,18 @@ pub(crate) enum Legacy {
 
 /// Load the node's key from `state`, creating it on the first start.
 ///
+/// A user-mode agent (#146) keeps the key the same way in its own `0700` state
+/// directory, owned by the person it runs as. That is the same boundary as its
+/// `identity.json`. No slice-1 keychain item can exist for a user-mode node, so
+/// the keychain is not consulted.
+///
 /// # Errors
-/// Refuses non-root callers, an exposed state directory or key file, a key of
-/// the wrong length, and failed durable writes.
+/// Refuses non-root callers outside user mode, an exposed state directory or key
+/// file, a key of the wrong length, and failed durable writes.
 pub fn load_or_create(state: &Path) -> io::Result<(StaticSecret, PublicKey)> {
+    if !Uid::effective().is_root() && crate::macos_helper::user_mode() {
+        return load_or_create_with(state, || Legacy::Absent);
+    }
     if !Uid::effective().is_root() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

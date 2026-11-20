@@ -84,9 +84,10 @@ pub enum Request {
         /// Interface MTU, [`MIN_MTU`] to [`MAX_MTU`].
         mtu: u16,
     },
-    /// Point the system resolver for `suffixes` at the agent's DNS listener on `address`.
+    /// Point the system resolver for `suffixes` at the agent's loopback DNS listener.
     Resolver {
-        /// The node's mesh IPv4 address; it must already be on the attached utun.
+        /// The node's mesh IPv4 address; it must already be on the attached utun, which
+        /// proves the caller is the running mesh node.
         address: Ipv4Addr,
         /// DNS suffixes; only those [`allowed_suffix`] accepts are written.
         suffixes: Vec<String>,

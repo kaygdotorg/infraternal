@@ -842,6 +842,23 @@ fn current_process_is_root() -> bool {
     nix::unistd::Uid::effective().is_root()
 }
 
+/// Writes the resolver files a user-mode agent asked the root helper for, then refreshes
+/// the system resolver (#146).
+///
+/// The files name `127.0.0.1` and the agent's high DNS port, where a user-mode agent serves
+/// the same snapshot: macOS sends traffic for a utun's own IPv4 address into the tunnel, so
+/// the mesh address itself is unreachable from this host. The helper has already checked
+/// that the caller's mesh address is on the caller's utun and that every suffix is a
+/// reserved private-use name; the same marker and ownership rules as root mode apply, so a
+/// file infraternal did not write is never replaced.
+/// # Errors
+/// Reports an unsafe resolver directory, a foreign file, or a failed write or refresh.
+#[cfg(target_os = "macos")]
+pub(crate) fn write_user_mode_resolver(suffixes: &[String]) -> io::Result<()> {
+    write_macos_files(Ipv4Addr::LOCALHOST, suffixes)?;
+    refresh_macos_resolver()
+}
+
 /// Writes one resolver file per suffix and removes stale files carrying our marker.
 #[cfg(target_os = "macos")]
 fn write_macos_files(address: Ipv4Addr, suffixes: &[String]) -> io::Result<()> {

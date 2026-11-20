@@ -394,6 +394,45 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
     response_for_source(packet, records, IpAddr::V4(records.local_address))
 }
 
+/// The loopback listener a user-mode Mac node adds beside its mesh-address one (#146).
+///
+/// macOS sends a datagram for a utun's own IPv4 address into the tunnel instead of looping it
+/// back (measured on the Mac VM), so the system resolver cannot reach a listener on the node's
+/// mesh address. In user mode the helper's `/etc/resolver` file therefore names
+/// `127.0.0.1` and [`DNS_PORT`], and this pair serves the same snapshot there. Root mode
+/// keeps its existing listeners.
+/// # Errors
+/// Reports a port that another program already holds on 127.0.0.1.
+#[cfg(all(target_os = "macos", feature = "agent"))]
+fn loopback_pair_for_user_mode() -> io::Result<Option<(UdpSocket, TcpListener)>> {
+    if !crate::macos_helper::user_mode() {
+        return Ok(None);
+    }
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, DNS_PORT));
+    let socket = UdpSocket::bind(address)?;
+    let listener = TcpListener::bind(address)?;
+    listener.set_nonblocking(true)?;
+    Ok(Some((socket, listener)))
+}
+
+/// Whether `source` is this host asking through a user-mode Mac's loopback listener (#146).
+///
+/// Only there does the system resolver ask from 127.0.0.1, because macOS cannot reach the
+/// utun's own address locally (see [`loopback_pair_for_user_mode`]); a peer cannot send from
+/// loopback over the mesh. Everywhere else a loopback source keeps the peer treatment the
+/// privacy rules and their tests expect.
+fn local_loopback(source: IpAddr) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        source.is_loopback() && crate::macos_helper::user_mode()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = source;
+        false
+    }
+}
+
 /// Builds the reply to `packet` received from `source`.
 ///
 /// The outcomes, in order:
@@ -401,8 +440,9 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
 ///   plain query.
 /// - `Ok(None)` if the name is outside every configured suffix.
 /// - `REFUSED` for a class other than `IN`.
-/// - `NXDOMAIN` plus a short-lived SOA if `source` is not this node's own mesh
-///   address or the host is absent (a name with multiple host labels never exists).
+/// - `NXDOMAIN` plus a short-lived SOA if `source` is not this node's own mesh address
+///   (or, on a user-mode Mac, this host over loopback; see [`local_loopback`]), or the host
+///   is absent (a name with multiple host labels never exists).
 /// - An `A` or `AAAA` answer for existing hosts; any other record type gets an
 ///   empty answer plus the SOA (NODATA). So does `AAAA` for a host that runs IPv4-only
 ///   (#578, J1142): the name exists, it just has no IPv6 address.
@@ -447,7 +487,7 @@ fn response_for_source(
         reply.metadata.response_code = ResponseCode::Refused;
         return encode(&reply).map(Some);
     }
-    if source != IpAddr::V4(records.local_address) {
+    if source != IpAddr::V4(records.local_address) && !local_loopback(source) {
         // A peer asking this node directly sees no names from its broader local view. Treat every
         // such in-zone query as missing, so the answer cannot reveal whether the name exists here.
         return negative_response(reply, suffix).map(Some);
@@ -782,7 +822,7 @@ impl Resolver {
         #[cfg(target_os = "macos")]
         let system_pair = {
             let _ = try_system_port;
-            None::<(UdpSocket, TcpListener)>
+            loopback_pair_for_user_mode()?
         };
         Self::serve_sockets(initial, socket, listener, system_pair)
     }
@@ -879,5 +919,52 @@ impl Drop for Resolver {
         if let Some(worker) = self.tcp_worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Source rules for answers, checked without sockets.
+#[cfg(test)]
+mod source_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// One plain `A` query for `web.internal`, built by hand.
+    fn query() -> Vec<u8> {
+        let mut packet = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in ["web", "internal"] {
+            packet.push(u8::try_from(label.len()).unwrap());
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.extend_from_slice(&[0, 0, 1, 0, 1]);
+        packet
+    }
+
+    /// The node's own address gets the answer; a peer asking directly, and loopback outside a
+    /// user-mode Mac (#146), see the name as absent.
+    #[test]
+    fn only_the_node_itself_is_answered() {
+        let own = Ipv4Addr::new(10, 254, 0, 7);
+        let mut names = BTreeMap::new();
+        names.insert(
+            "web".to_owned(),
+            Addresses {
+                ipv4: Ipv4Addr::new(10, 254, 0, 9),
+                ipv6: "fd00::9".parse().unwrap(),
+            },
+        );
+        let records = Records {
+            local_address: own,
+            suffixes: vec!["internal".to_owned()],
+            names,
+        };
+        let answers = |source: IpAddr| {
+            let reply = response_for_source(&query(), &records, source)
+                .unwrap()
+                .unwrap();
+            Message::from_vec(&reply).unwrap().answers.len()
+        };
+        assert_eq!(answers(IpAddr::V4(own)), 1);
+        assert_eq!(answers(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0);
+        assert_eq!(answers(IpAddr::V4(Ipv4Addr::new(10, 254, 0, 9))), 0);
     }
 }
