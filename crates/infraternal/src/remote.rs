@@ -649,6 +649,7 @@ pub(crate) async fn post_json(
     root: Option<&X509>,
     max_response_bytes: usize,
     request_started: &mut bool,
+    preference: Option<&'static str>,
 ) -> Result<ClientResponse, ClientFailure> {
     use http_body_util::BodyExt;
 
@@ -687,14 +688,18 @@ pub(crate) async fn post_json(
         let _ = connection.await;
     }));
     let request_body = SecretBytes(body);
-    let request = hyper::Request::builder()
+    let mut request = hyper::Request::builder()
         .method("POST")
         .uri(path)
         .header(
             header::HOST,
             url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
         )
-        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(preference) = preference {
+        request = request.header("prefer", preference);
+    }
+    let request = request
         .body(http_body_util::Full::new(request_body.clone_for_request()))
         .map_err(|_| ClientFailure::HttpHandshake)?;
     // Hyper may poll the request body as soon as this send future is polled.
@@ -761,21 +766,11 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
             .map_err(|_| ClientFailure::TlsConfiguration)?;
         tls.set_cert_store(trust.build());
     } else {
-        tls.set_default_verify_paths()
-            .map_err(|_| ClientFailure::TlsConfiguration)?;
-        // Vendored OpenSSL may have a build-time prefix absent on this host.
-        // Use the system's public bundle, never an enrollment TOFU pin.
-        for bundle in [
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/ca-bundle.pem",
-        ] {
-            if Path::new(bundle).is_file() {
-                tls.set_ca_file(bundle)
-                    .map_err(|_| ClientFailure::TlsConfiguration)?;
-                break;
-            }
-        }
+        // Replace OpenSSL's initial environment-derived store with only the approved bundle.
+        tls.set_cert_store(
+            infraternal_plugin_api::tls_roots::public_root_store()
+                .map_err(|_| ClientFailure::TlsConfiguration)?,
+        );
     }
     Ok(tls.build())
 }
@@ -820,6 +815,7 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
     }
 }
 
+/// Redeem a machine invitation over HTTPS using its pinned trust when provided.
 async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Result<JoinResponse> {
     let url = url::Url::parse(url).map_err(|_| refused())?;
     if url.scheme() != "https"
@@ -840,6 +836,7 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
         root,
         8192,
         &mut request_started,
+        None,
     )
     .await
     .map_err(client_failure_to_io)?;

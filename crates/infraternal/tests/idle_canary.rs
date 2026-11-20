@@ -3,8 +3,9 @@
 
 use std::{path::PathBuf, process::Command};
 
+/// The observer ignores a waking sibling and detects the target's own timer.
 #[test]
-fn one_hertz_wakeup_is_detected_past_the_legacy_half_second_window() {
+fn scheduler_observer_is_process_scoped_and_catches_a_periodic_wakeup() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .current_dir(root)

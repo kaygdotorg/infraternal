@@ -356,7 +356,7 @@ mod tests {
                 .unwrap();
         }
         let id = uuid::Uuid::new_v4();
-        OpenOptions::new()
+        fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
