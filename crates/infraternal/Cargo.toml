@@ -33,7 +33,8 @@ hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
-nix = { workspace = true, features = ["resource"] }
+nix = { workspace = true, features = ["resource", "dir"] }
+rustix = { version = "1.1.6", features = ["fs"], optional = true }
 openssl = { workspace = true, optional = true }
 qrcodegen = { version = "1.8.0", optional = true }
 tokio-openssl = { workspace = true, optional = true }
@@ -80,7 +81,7 @@ mesh = ["plugin-mesh"]
 ee = ["infraternal-server?/ee", "infraternal-agent?/ee"]
 plugin-host-facts = ["plugin-agent", "dep:infraternal-plugin-host-facts", "infraternal-agent/plugin-host-facts"]
 plugin-relay = ["dep:infraternal-plugin-relay"]
-plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "infraternal-plugin-remote?/server", "dep:infraternal-plugin-mesh", "dep:tokio"]
+plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "infraternal-plugin-remote?/server", "dep:infraternal-plugin-mesh", "dep:tokio", "dep:openssl", "dep:rustix"]
 plugin-ssh = ["dep:infraternal-plugin-ssh"]
 # Also compile the hidden commands of components that are not built yet (D299 C5); the
 # D16 one-source tests need them. Off by default: their text costs binary size (D243).
