@@ -36,6 +36,8 @@ with Mesh traffic available after the coordinator assigns its addresses and
 peers. Linux Mesh enrollment state belongs to its original machine ID. A
 backup of that state can restore the same enrollment on the original
 installation. Another installation must enroll through Add host.
+The macOS host built by `scripts/macos-release` carries the Mesh node too
+(`remote,desktop,plugin-mesh`, #221) and follows the same enrollment rules.
 The build requires `--channel`; there is no default. Use `--channel stable`
 for the workspace version. Both architecture binaries and signed `VERSION`
 carry the same stamped identity.
