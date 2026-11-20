@@ -179,6 +179,10 @@ test("every floating card uses the one overlay material", async ({ page }) => {
     const popover = read(document.querySelector(".canvas-popover")!);
     const probe = document.createElement("div");
     probe.className = "ui-overlay-surface";
+    // A card over the terminal or a picture carries data-glass-under and takes the static floor (0.87 for Tinted, D365, #448,
+    // glass-rules.on-demand.ts), which keeps its text at 4.5:1 over any backdrop. The probe takes the same mark, so the two
+    // compare one material, not the themed 0.78 against the floor.
+    probe.setAttribute("data-glass-under", "");
     document.body.append(probe);
     const shared = read(probe);
     probe.remove();
