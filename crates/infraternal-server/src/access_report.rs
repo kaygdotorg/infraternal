@@ -47,6 +47,13 @@ const CATEGORIES: usize = 16;
 pub(crate) const SHOWN: i64 = 16;
 /// Largest stored report in bytes; the table checks the same bound.
 pub(crate) const STORED_BYTES: usize = 32 * 1024;
+/// Bytes [`AccessReport::decided`] may add to one account, or to the report
+/// itself, when it rewrites a state and adds its reason: `"unchanged"`
+/// becomes `"not_checked"` (+4) and `,"reason":"programs_may_remain"` (31,
+/// the longest reason) is new. [`AccessReport::bounded`] keeps this much
+/// room per account plus one, so an honest report near the bound keeps its
+/// detail once decided; `decided` still enforces the bound itself.
+const DECISION_BYTES: usize = 40;
 /// What the owner is told when anything was cut from a file's lines.
 const MORE_LINES: &str = "more new lines than the report shows";
 
@@ -387,8 +394,12 @@ impl AccessReport {
             }
             account.truncated = cut;
         }
-        while self.json().len() > STORED_BYTES && self.trim() {}
-        if self.json().len() > STORED_BYTES {
+        // Leave room for what `decided` adds, or a report trimmed to just
+        // under the bound grows past the table's CHECK once decided.
+        let limit = STORED_BYTES
+            .saturating_sub(DECISION_BYTES.saturating_mul(self.accounts.len().saturating_add(1)));
+        while self.json().len() > limit && self.trim() {}
+        if self.json().len() > limit {
             // Nothing trimmable is left, and the fixed per-account fields
             // (name, categories) still exceed what the table accepts. A row
             // over its CHECK would fail the transaction that confirms the
@@ -505,6 +516,22 @@ impl AccessReport {
         } else {
             self.state = State::Unchanged;
             self.reason = None;
+        }
+        if self.json().len() > STORED_BYTES {
+            // `bounded` leaves room for the rewrite above, but this is what
+            // the store's CHECK accepts, and a row over it fails the
+            // transaction that confirms the revocation, so the removal could
+            // never finish. Keep no account detail rather than no receipt.
+            self.omitted_accounts = self
+                .omitted_accounts
+                .saturating_add(u64::try_from(self.accounts.len()).unwrap_or(u64::MAX));
+            self.accounts.clear();
+            self.state = State::NotChecked;
+            self.reason = Some(if rootless {
+                Reason::RootlessUnverified
+            } else {
+                Reason::Incomplete
+            });
         }
         self
     }
@@ -907,6 +934,40 @@ mod tests {
             kept.json().len()
         );
         let kept = kept.decided(false);
+        assert_eq!(kept.state, State::NotChecked);
+        assert_eq!(kept.reason, Some(Reason::Incomplete));
+        assert_eq!(kept.omitted_accounts, u64::try_from(ACCOUNTS).unwrap());
+    }
+
+    /// A report trimmed to just under the bound grows when `decided` adds
+    /// each account's state and reason (J1013). Every decided report, on a
+    /// rootless host or with missing root-check evidence, must still fit the
+    /// table's CHECK, or the transaction that confirms the revocation fails
+    /// on every delivery and the removal never finishes.
+    #[test]
+    fn a_decided_report_still_fits_the_store() {
+        for (rootless, keep_checks) in [(true, true), (false, false), (false, true)] {
+            let mut input = report(State::Unchanged, Vec::new());
+            input.accounts[0].unscanned = vec!["x".repeat(TEXT_CHARS); UNSCANNED];
+            if !keep_checks {
+                input.accounts[0].root_checks.clear();
+            }
+            input.accounts = vec![input.accounts[0].clone(); ACCOUNTS];
+            let kept = input.bounded().decided(rootless);
+            assert!(
+                kept.json().len() <= STORED_BYTES,
+                "{} bytes would fail the table's CHECK (rootless {rootless})",
+                kept.json().len()
+            );
+            assert_eq!(kept.state, State::NotChecked);
+            assert!(!kept.accounts.is_empty(), "the trimmed detail was kept");
+        }
+        // `decided` itself enforces the bound for a report that skipped it.
+        let mut input = report(State::Unchanged, Vec::new());
+        input.accounts[0].unscanned = vec!["x".repeat(TEXT_CHARS); UNSCANNED];
+        input.accounts = vec![input.accounts[0].clone(); ACCOUNTS];
+        let kept = input.decided(false);
+        assert!(kept.json().len() <= STORED_BYTES);
         assert_eq!(kept.state, State::NotChecked);
         assert_eq!(kept.reason, Some(Reason::Incomplete));
         assert_eq!(kept.omitted_accounts, u64::try_from(ACCOUNTS).unwrap());
