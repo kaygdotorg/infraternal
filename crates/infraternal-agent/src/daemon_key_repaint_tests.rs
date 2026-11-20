@@ -22,6 +22,8 @@ const STARVING_OUTPUT: usize = 128 * 1024;
 const SPAM_SNAPSHOT: usize = REPAINT_CREDIT as usize / 4;
 /// A generous guard for a missing fixture event, never a performance assertion.
 pub(super) const EVENT_GUARD: Duration = Duration::from_secs(3);
+/// Allow the paused timer and shim socket to report expiry and EOF.
+const CAPTURE_EXPIRY_OBSERVATION_SLACK: Duration = Duration::from_millis(8);
 
 /// Include a credit-starved shim frame even when returned output left no bytes in flight.
 #[test]
@@ -676,16 +678,18 @@ async fn key_repaint_funds_a_large_snapshot_from_unused_bulk_credit() {
     );
 }
 
-/// Give the PTY program one frame to render its response before the repaint captures the screen.
+/// Leave the PTY time to render, then request capture with time left in the frame budget.
 #[tokio::test(start_paused = true)]
-async fn key_repaint_waits_a_frame_for_pty_echo_after_input_ack() {
+async fn key_repaint_leaves_time_in_the_frame_after_pty_echo_grace() {
     let mut fixture = start_relay(2).await;
     fill_bulk_window(&mut fixture).await;
     assert!(type_key_and_wait_for_ack(&mut fixture, 0).await);
     tokio::task::yield_now().await;
 
+    let echo_start = u64::from(BULK_CREDIT) + STARVING_OUTPUT as u64;
+    let cursor = echo_start + 6;
     let early = tokio::time::timeout(
-        KEY_REPAINT_GRACE.saturating_sub(Duration::from_millis(1)),
+        Duration::from_millis(1),
         fixture.reader.read(&mut fixture.peer),
     )
     .await;
@@ -695,26 +699,44 @@ async fn key_repaint_waits_a_frame_for_pty_echo_after_input_ack() {
     } else {
         sessions::send(
             &mut fixture.peer,
-            &Shim::Output(u64::from(BULK_CREDIT), b"echo:k".to_vec()),
+            &Shim::Output(echo_start, b"echo:k".to_vec()),
         )
         .await
         .unwrap();
         tokio::task::yield_now().await;
-        // sleep: advance through the final millisecond of the PTY screen-update grace.
-        tokio::time::advance(Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
         let requested = matches!(
-            tokio::time::timeout(EVENT_GUARD, fixture.reader.read(&mut fixture.peer)).await,
+            tokio::time::timeout(
+                Duration::from_millis(4),
+                fixture.reader.read(&mut fixture.peer)
+            )
+            .await,
             Ok(Ok(Shim::SnapshotRequest))
         );
         if requested {
             sessions::send(
                 &mut fixture.peer,
-                &Shim::Snapshot(u64::from(BULK_CREDIT) + 6, b"echo:k".to_vec()),
+                &Shim::Snapshot(cursor, b"echo:k".to_vec()),
             )
             .await
             .unwrap();
-            wait_for_repaint(&mut fixture).await
+            let repaint = wait_for_repaint(&mut fixture).await;
+
+            // A response can continue after capture. Returning some flood
+            // credit lets the remainder follow the repaint at its cursor.
+            fixture
+                .commands
+                .as_mut()
+                .unwrap()
+                .try_send(Command::Credit(REPAINT_CREDIT))
+                .unwrap();
+            sessions::send(&mut fixture.peer, &Shim::Output(cursor, b":tail".to_vec()))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_message(&mut fixture).await,
+                Message::Shim(2, Shim::Output(seq, bytes)) if seq == cursor && bytes == b":tail"
+            ));
+            repaint
         } else {
             None
         }
@@ -723,12 +745,61 @@ async fn key_repaint_waits_a_frame_for_pty_echo_after_input_ack() {
 
     assert!(
         !requested_early,
-        "a key repaint must leave one PTY frame for the application's echo before capture"
+        "a key repaint must leave time for the application's echo before capture"
     );
-    assert_eq!(
-        repaint,
-        Some((u64::from(BULK_CREDIT) + 6, b"echo:k".to_vec()))
-    );
+    assert_eq!(repaint, Some((cursor, b"echo:k".to_vec())));
+}
+
+/// A whole echo produced after capture follows the repaint exactly once, at its cursor.
+#[tokio::test(start_paused = true)]
+async fn delayed_key_echo_follows_a_snapshot_without_an_echo() {
+    for delay in [3, 10, 50] {
+        let mut fixture = start_relay(2).await;
+        fill_bulk_window(&mut fixture).await;
+        assert!(type_key_and_wait_for_ack(&mut fixture, 0).await);
+        let echo_at = Instant::now() + Duration::from_millis(delay);
+        assert_eq!(
+            read_shim(&mut fixture.reader, &mut fixture.peer).await,
+            Shim::SnapshotRequest
+        );
+
+        let cursor = u64::from(BULK_CREDIT) + STARVING_OUTPUT as u64;
+        let screen = b"\x1b[Hprompt> ";
+        sessions::send(&mut fixture.peer, &Shim::Snapshot(cursor, screen.to_vec()))
+            .await
+            .unwrap();
+
+        // sleep: put the redraw at the chosen delay after the PTY acknowledgment.
+        tokio::time::sleep_until(echo_at).await;
+        let redraw = b"\r\x1b[2Kprompt> k";
+        sessions::send(&mut fixture.peer, &Shim::Output(cursor, redraw.to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_message(&mut fixture).await,
+            Message::Shim(2, Shim::Snapshot(seq, bytes)) if seq == cursor && bytes == screen
+        ));
+        fixture
+            .commands
+            .as_mut()
+            .unwrap()
+            .try_send(Command::Credit(REPAINT_CREDIT))
+            .unwrap();
+        assert!(matches!(
+            next_message(&mut fixture).await,
+            Message::Shim(2, Shim::Output(seq, bytes)) if seq == cursor && bytes == redraw
+        ));
+
+        let tail = cursor + redraw.len() as u64;
+        sessions::send(&mut fixture.peer, &Shim::Output(tail, b"!".to_vec()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_message(&mut fixture).await,
+            Message::Shim(2, Shim::Output(seq, bytes)) if seq == tail && bytes == b"!"
+        ));
+        stop_relay(&mut fixture).await;
+    }
 }
 
 /// A key arriving just before bulk starvation gets its own chance to repaint (#546).
@@ -796,8 +867,8 @@ async fn capture_wait_stays_bounded_after_credit_returns() {
         Shim::InputStateRequest
     );
 
-    // Deliberately withhold the snapshot. Allow one frame for the timer and EOF to be observed.
-    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    // Deliberately withhold the snapshot until the relay closes the shim link.
+    let end = started + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     stop_relay(&mut fixture).await;
 
@@ -816,7 +887,7 @@ async fn capture_wait_stays_bounded_with_available_bulk_credit() {
     assert!(type_key_and_wait_for_repaint_request(&mut fixture, 0).await);
 
     // The capture replaces unreturned output. No unaffordable frame has armed a bulk timer.
-    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let end = started + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     stop_relay(&mut fixture).await;
 
@@ -846,7 +917,7 @@ async fn capture_wait_stays_bounded_for_a_coalesced_follow_up() {
         Shim::SnapshotRequest
     );
 
-    let end = Instant::now() + relay::STARVATION + KEY_REPAINT_GRACE;
+    let end = Instant::now() + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     if matches!(closed, Ok(Ok(0))) {
         accept_relinked_peer(&mut fixture).await;
@@ -869,7 +940,6 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
     let (priority, mut queued) = mpsc::channel(1);
     let mut fixture = start_relay_with_priority(2, Some(priority)).await;
     fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
-    let started = Instant::now();
     fixture
         .commands
         .as_mut()
@@ -880,6 +950,8 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
         read_shim(&mut fixture.reader, &mut fixture.peer).await,
         Shim::SequencedInput(0, vec![b'k'])
     );
+    // The relay arms capture expiry before it writes this input frame.
+    let armed_by = Instant::now();
     sessions::send(&mut fixture.peer, &Shim::InputAck(1))
         .await
         .unwrap();
@@ -895,7 +967,7 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
     )
     .await
     .unwrap();
-    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let end = armed_by + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     assert!(matches!(
         queued.try_recv(),
@@ -912,6 +984,9 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
             Shim::ReadFrom(delivered)
         );
     }
+    // On an observer timeout, close the writer lane so teardown cannot wait
+    // on a recovery handshake the fixture never accepted.
+    drop(queued);
     stop_relay(&mut fixture).await;
 
     assert!(

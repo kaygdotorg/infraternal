@@ -61,8 +61,10 @@ use tokio::{
     time::Instant,
 };
 
-/// Give the PTY program one 120 Hz display frame to render an acknowledged key.
-const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(8);
+/// Give the PTY program a short render head start while leaving time in D375's
+/// 120 Hz flood budget for capture, delivery and paint. Later PTY output is
+/// still relayed in order from the snapshot cursor.
+const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// Wait for a relay operation while its active repaint still has time to finish.
 ///
@@ -86,10 +88,10 @@ async fn during_key_capture<T>(
     }
 }
 
-/// Request one capture once its acknowledged input has had a frame to render.
+/// Request one capture after the acknowledged input's render grace.
 ///
 /// The cumulative target coalesces key bursts. This common gate keeps credit
-/// returns and completed captures from bypassing the frame grace, and it spends
+/// returns and completed captures from bypassing the render grace, and it spends
 /// no credit itself; the later `Snapshot` must still fit the current repaint
 /// budget, including raw bytes that this capture replaces.
 async fn request_key_repaint_if_ready(
@@ -164,7 +166,7 @@ async fn forward_input_confirmation(
     Ok(advanced)
 }
 
-/// Whether a confirmation through `seq` should start the pending key repaint's frame grace.
+/// Whether a confirmation through `seq` should start the pending key repaint's render grace.
 ///
 /// It must, whichever shim reply carried it: the relay discards raw output while a key repaint is
 /// pending, so a key confirmed without starting its grace would never be repainted and the screen
