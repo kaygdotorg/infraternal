@@ -19,6 +19,12 @@ case "${TARGET:?Cargo target required}" in
     *) printf 'unsupported libghostty-vt target: %s\n' "$TARGET" >&2; exit 1 ;;
 esac
 
+# Fail before any download: a non-login shell (ssh, launchd) may lack Homebrew's bin.
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+command -v minisign > /dev/null || {
+    printf 'minisign is required to verify libghostty-vt releases and is not on PATH (macOS: brew install minisign)\n' >&2
+    exit 1
+}
 vt_tools="$target_root/vt-tools"
 mkdir -p "$vt_tools"
 source_name="libghostty-vt-$version.tar.gz"
@@ -35,11 +41,17 @@ minisign_public_key=RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV
 sha256_check() {
     local checksum="$1"
     local file="$2"
-    if command -v sha256sum > /dev/null; then
-        printf '%s  %s\n' "$checksum" "$file" | sha256sum --check --status
+    local actual
+    # Compare digests ourselves instead of `sha256sum --check`: a macOS PATH can hold a
+    # BSD or busybox-style sha256sum without --check, and every tool prints the digest first.
+    if [[ "$(uname -s)" = Darwin ]] && command -v shasum > /dev/null; then
+        actual="$(shasum -a 256 "$file")"
+    elif command -v sha256sum > /dev/null; then
+        actual="$(sha256sum "$file")"
     else
-        printf '%s  %s\n' "$checksum" "$file" | shasum -a 256 --check --status
+        actual="$(shasum -a 256 "$file")"
     fi
+    [[ "${actual%% *}" = "$checksum" ]]
 }
 fetch_pinned() {
     local name="$1"
@@ -72,7 +84,6 @@ for asset in "$source_name" "$source_name.minisig" "$deps_name" "$deps_name.mini
     esac
     fetch_pinned "$asset" "$destination"
 done
-command -v minisign > /dev/null || { printf 'minisign is required to verify libghostty-vt releases\n' >&2; exit 1; }
 minisign -V -P "$minisign_public_key" -m "$source_archive" -x "$source_signature"
 minisign -V -P "$minisign_public_key" -m "$deps_archive" -x "$deps_signature"
 
