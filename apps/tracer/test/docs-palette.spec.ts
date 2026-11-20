@@ -43,7 +43,7 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       // ---- the view: one window per page of the folder, found through the index, nothing written in the app -----------
       await expect.poll(() => requests.includes("/docs/index.json"), { timeout: 15_000 }).toBe(true);
       const slugs = (await (await page.request.get("/docs/index.json")).json() as { pages: { slug: string; title: string }[] }).pages;
-      expect(slugs.map((entry) => entry.slug).sort()).toEqual(["access", "appearance", "index", "machines", "mesh", "reference", "reference/keys", "sharing", "start", "terminal", "terminal/multiplexer", "you"]);
+      expect(slugs.map((entry) => entry.slug).sort()).toEqual(["access", "appearance", "index", "machines", "mesh", "mesh/networking", "reference", "reference/keys", "sharing", "start", "terminal", "terminal/multiplexer", "you"]);
       await expect(page.locator('section.cl[data-view="docs"]')).toBeAttached({ timeout: 10_000 });
       expect(await page.locator('section.cl[data-view="docs"] .ui-window').evaluateAll((windows) => windows.map((w) => (w as HTMLElement).dataset.windowId).sort())).toEqual(slugs.map((entry) => `d-${entry.slug}`).sort());
 
