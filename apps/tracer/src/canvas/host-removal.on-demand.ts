@@ -71,7 +71,7 @@ async function renewWindow(id: string): Promise<void> {
     draw();
     retitle = draw;
     mountConfirmTip(null, {
-      label: "Confirm host removal", titleNode: title,
+      titleNode: title,
       effect: "Confirm with your passkey to continue. This opens 15 minutes of admin actions.",
       named: true, confirmLabel: "Confirm with passkey", cancelLabel: "Keep host",
       onCancel: () => reject(new Error("Passkey confirmation was cancelled. The host was not removed.")),

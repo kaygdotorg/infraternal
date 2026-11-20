@@ -814,9 +814,10 @@ test("a normal preview session never writes text bottom left: reload, a failing 
   // The shared toast sits bottom centre and takes the theme's material (light on paper).
   await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = "The server could not open this terminal."; });
   await expect(page.locator(".ui-toast")).toBeVisible();
-  const toast = await page.locator(".ui-toast").evaluate((node) => { const r = node.getBoundingClientRect(); return { centre: r.left + r.width / 2, bottom: innerHeight - r.bottom }; });
-  expect(Math.abs(toast.centre - 720)).toBeLessThan(4);
-  expect(toast.bottom).toBeLessThan(40);
+  const place = () => page.locator(".ui-toast").evaluate((node) => { const r = node.getBoundingClientRect(); return { centre: r.left + r.width / 2, bottom: innerHeight - r.bottom }; });
+  // The toast rises into place, and a busy host reads it a few frames early (40.7 px up on its way to under 40): wait for it to rest.
+  await expect.poll(async () => (await place()).bottom).toBeLessThan(40);
+  expect(Math.abs((await place()).centre - 720)).toBeLessThan(4);
 });
 
 // ---- copying from an insecure origin ---------------------------------------------------------

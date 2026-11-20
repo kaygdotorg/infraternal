@@ -106,7 +106,7 @@ for (const size of SIZES) for (const theme of THEMES) {
     const box = await o2Pill(fail).boundingBox();
     if (box) await fail.screenshot({ path: `${prefix}-6-failed-arc-closeup.png`, clip: { x: Math.max(0, box.x - 10), y: box.y - 10, width: Math.min(size.width - Math.max(0, box.x - 10), box.width + 20), height: box.height + 20 } });
     if (size.touch) await o2Pill(fail).tap(); else await o2Pill(fail).click();
-    await fail.waitForSelector('[role="dialog"][aria-label="Setup of o2"]');
+    await fail.waitForSelector('.ui-confirm-tip[role="dialog"]');
     await fail.waitForTimeout(450);
     await fail.screenshot({ path: `${prefix}-7-failure-popover.png` });
     await failCtx.close();

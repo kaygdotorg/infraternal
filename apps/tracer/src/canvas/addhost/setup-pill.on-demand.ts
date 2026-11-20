@@ -193,7 +193,6 @@ export function bindSetupPill(options: SetupPillOptions): SetupPill {
       // Asked when the popover opens: the removal's label arrives from the server after the window does.
       const removal = view.retryAvailable === false ? options.remove?.() : undefined;
       tip = mountConfirmTip(card.pill, {
-        label: `Setup of ${host}`,
         title: guide.title,
         effect: guide.effect,
         confirmLabel: "Try again",

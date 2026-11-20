@@ -55,7 +55,7 @@ function renderKeys(pane: HTMLElement, keys: readonly KeyDef[]): () => void {
       revoke.dataset.tip = "Revoke";
       revoke.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS.close}</svg>`;
       revoke.addEventListener("click", () => mountConfirmTip(revoke, {
-        label: `Revoke ${key.name}`, title: `Revoke ${key.name}?`, effect: "Anything using this key stops working. You can make a new one.",
+        title: `Revoke ${key.name}?`, effect: "Anything using this key stops working. You can make a new one.",
         named: true, confirmLabel: "Revoke key", cancelLabel: "Keep key", onConfirm: () => { revoked.add(key.id); paint(); },
       }));
       li.querySelector(".ui-sp-actions")!.append(revoke);

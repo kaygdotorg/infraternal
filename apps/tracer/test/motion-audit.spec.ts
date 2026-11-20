@@ -36,7 +36,7 @@ declare global {
   }
 }
 
-test("measure deployed motion at 4x CPU and capture production screens", async ({ browser, page }, testInfo) => {
+test("measure deployed motion at 4x CPU and capture production screens", { tag: "@perf" }, async ({ browser, page }, testInfo) => {
   test.setTimeout(120_000);
   const context = page.context();
   const requestedWorkers: string[] = [];
