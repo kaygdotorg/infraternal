@@ -388,6 +388,17 @@ impl AccessReport {
             account.truncated = cut;
         }
         while self.json().len() > STORED_BYTES && self.trim() {}
+        if self.json().len() > STORED_BYTES {
+            // Nothing trimmable is left, and the fixed per-account fields
+            // (name, categories) still exceed what the table accepts. A row
+            // over its CHECK would fail the transaction that confirms the
+            // revocation, so keep no account detail and count every account
+            // as omitted: `decided` then reads "not checked: incomplete".
+            self.omitted_accounts = self
+                .omitted_accounts
+                .saturating_add(u64::try_from(self.accounts.len()).unwrap_or(u64::MAX));
+            self.accounts.clear();
+        }
         self
     }
 
@@ -876,6 +887,29 @@ mod tests {
             let result = input.decided(false);
             assert_eq!(result.state, State::NotChecked);
         }
+    }
+
+    /// A host can fill every account's fixed fields (name, categories) so
+    /// that nothing trimmable is left and the report is still over the
+    /// store's 32 KiB CHECK. The server must still keep a row it can store,
+    /// or the revocation receipt's transaction fails; it keeps no account
+    /// detail and reads "not checked".
+    #[test]
+    fn a_report_over_the_store_bound_after_trimming_is_not_checked() {
+        let mut input = report(State::Unchanged, Vec::new());
+        input.accounts[0].account = "\u{10348}".repeat(ACCOUNT_CHARS);
+        input.accounts[0].categories = vec!["\u{10348}".repeat(ACCOUNT_CHARS); CATEGORIES];
+        input.accounts = vec![input.accounts[0].clone(); ACCOUNTS];
+        let kept = input.bounded();
+        assert!(
+            kept.json().len() <= STORED_BYTES,
+            "{} bytes would fail the table's CHECK",
+            kept.json().len()
+        );
+        let kept = kept.decided(false);
+        assert_eq!(kept.state, State::NotChecked);
+        assert_eq!(kept.reason, Some(Reason::Incomplete));
+        assert_eq!(kept.omitted_accounts, u64::try_from(ACCOUNTS).unwrap());
     }
 
     /// Bounding the account list must say how many accounts were not checked.
