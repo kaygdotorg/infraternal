@@ -100,18 +100,38 @@ def copy_snapshot(source, target, selected=None):
 
 
 
-def copied_backup_values(backup):
-    """Check SQLite using writable copies, including any retained WAL."""
-    with tempfile.TemporaryDirectory(dir=backup.parent) as scratch:
+def copied_database_values(source, *, retained=False):
+    """Read a stopped SQLite snapshot without checkpointing its original WAL."""
+    with tempfile.TemporaryDirectory(dir=source.parent) as scratch:
         copy = Path(scratch)
-        for file in backup.glob("infraternal.sqlite*"):
-            assert not file.stat().st_mode & 0o222, file
+        for file in source.glob("infraternal.sqlite*"):
+            if retained:
+                assert not file.stat().st_mode & 0o222, file
             dest = copy / file.name
             shutil.copyfile(file, dest)
             dest.chmod(0o600)
         with contextlib.closing(sqlite3.connect(copy / "infraternal.sqlite")) as db:
             assert db.execute("PRAGMA quick_check").fetchone() == ("ok",)
             return db.execute("SELECT value FROM j925_fixture ORDER BY rowid").fetchall()
+
+def leave_committed_wal(path):
+    """Exit a fixture writer before SQLite closes and checkpoints its sidecars."""
+    subprocess.run(
+        [sys.executable, "-c", """
+import os
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("INSERT INTO j925_fixture VALUES ('wal-only')")
+db.commit()
+os._exit(0)
+""", str(path / "infraternal.sqlite")],
+        check=True,
+    )
+    assert (path / "infraternal.sqlite-wal").exists()
+    assert (path / "infraternal.sqlite-shm").exists()
 
 def release_fifo(path):
     """Signal a waiting pre-start without blocking if its reader has exited."""
@@ -210,6 +230,7 @@ def run_case(workspace, case, combined=False):
     for path in [unit, boot_target, drop_dir]:
         assert not path.exists(), f"fixture unit already exists: {path}"
     joined = None
+    rows = [("source",)]
     try:
         unit.write_text(before)
         boot_target.write_text(f"[Unit]\nDescription=D395 isolated target\nWants={server}\n")
@@ -220,6 +241,9 @@ def run_case(workspace, case, combined=False):
         systemctl("stop", server)
         if combined:
             (old / "server-fixture").write_text("server state")
+            if case == "failed-recovery":
+                leave_committed_wal(old)
+                rows.append(("wal-only",))
         metadata = {}
         if case == "nested-metadata":
             acl = struct.pack("<I", 2) + b"".join(
@@ -391,11 +415,13 @@ def run_case(workspace, case, combined=False):
             systemctl("start", server)
         elif case == "failed-recovery":
             assert result.returncode != 0 and not health(port), result
-            assert sqlite_values(old) == sqlite_values(new) == [("source",)]
+            assert copied_database_values(old) == copied_database_values(new) == rows
+            if combined:
+                assert {p.name: identity(p) for p in originals()} == journal["original_entries"]
             (root / "fail-start").unlink()
             systemctl("reset-failed", server)
             systemctl("start", server)
-            assert copied_backup_values(backup) == [("source",)]
+            assert copied_database_values(backup, retained=True) == rows
         else:
             assert result.returncode == 0, result
         if case in ("boot-target", "receipt-without-journal"):
@@ -403,10 +429,11 @@ def run_case(workspace, case, combined=False):
             assert wait_for(lambda: health(port))
             systemctl("start", server)
         assert health(port), "start answered before its server was ready"
-        rows = [("source",), ("early candidate",)] if case == "switched-active" else [("source",)]
+        if case == "switched-active":
+            rows.append(("early candidate",))
         assert sqlite_values(new) == rows
         if case == "switched-active":
-            assert copied_backup_values(backup) == [("source",), ("possible original",)]
+            assert copied_database_values(backup, retained=True) == [("source",), ("possible original",)]
         if combined:
             assert identity(old) == base_id and stat.S_IMODE(old.stat().st_mode) == 0o711
             assert identity(agent / "state") == agent_id
