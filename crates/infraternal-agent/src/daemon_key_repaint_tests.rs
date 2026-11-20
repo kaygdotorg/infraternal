@@ -888,7 +888,6 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
     let (priority, mut queued) = mpsc::channel(1);
     let mut fixture = start_relay_with_priority(2, Some(priority)).await;
     fill_partial_bulk_backlog(&mut fixture, PARTIAL_BULK_OUTPUT).await;
-    let started = Instant::now();
     fixture
         .commands
         .as_mut()
@@ -899,6 +898,8 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
         read_shim(&mut fixture.reader, &mut fixture.peer).await,
         Shim::SequencedInput(0, vec![b'k'])
     );
+    // The relay arms capture expiry before it writes this input frame.
+    let armed_by = Instant::now();
     sessions::send(&mut fixture.peer, &Shim::InputAck(1))
         .await
         .unwrap();
@@ -914,7 +915,7 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
     )
     .await
     .unwrap();
-    let end = started + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
+    let end = armed_by + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     assert!(matches!(
         queued.try_recv(),
