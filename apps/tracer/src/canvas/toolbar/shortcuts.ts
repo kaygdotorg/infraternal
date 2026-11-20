@@ -60,7 +60,7 @@ export function installShortcuts(cx: Ctx): () => void {
     ...(cx.adapters.docs ? [{ id: "window-docs", label: "Read about this window", keys: "", combo: platformCombo(WINDOW_DOCS_KEYS.mac, WINDOW_DOCS_KEYS.other) }] : []),
     { id: "overview", label: "All views (overview)", keys: "Esc" },
     // A swipe that starts on empty canvas or a window's chrome moves to the next window or column (D377); plain scrolling over content never does.
-    { id: "pan", label: "Next window or column", keys: "Swipe on empty canvas" },
+    { id: "pan", label: "Next window or column", keys: "Swipe on a window's header or edge" },
     // Moving the canvas with a mouse wheel on purpose (D374, D377): the modifier lives in camera/canvas-wheel-modifier.ts, and the
     // words follow it ("⌥ + scroll" on a Mac, "Alt + scroll" elsewhere).
     { id: "wheel-canvas", label: "Move the canvas with the wheel", keys: canvasModifierKeys() },
