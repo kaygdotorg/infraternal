@@ -497,38 +497,54 @@ fn cron(account: &User, observed: &mut Observation) {
 /// have no user column; missing spools are absent, read/parse errors unknown.
 fn root_crontab(observed: &mut Observation) {
     for path in ["/var/spool/cron/crontabs/root", "/var/spool/cron/root"] {
-        let path = Path::new(path);
-        if fs::symlink_metadata(path)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        root_table(observed, Path::new(path), |command| {
+            if command.starts_with('@') { 1 } else { 5 }
+        });
+    }
+}
+
+/// Read the anacron table, which runs every job as root. RHEL-family cron
+/// reaches it through `/etc/cron.hourly/0anacron`, and it is what runs
+/// `/etc/cron.daily`, `cron.weekly` and `cron.monthly` there, so those
+/// scripts are only seen through its lines (J1013). A job line is `period
+/// delay identifier command`, with `@monthly`-style periods taking the same
+/// three columns; assignments are read like a cron file's.
+fn anacrontab(observed: &mut Observation) {
+    root_table(observed, Path::new("/etc/anacrontab"), |_| 3);
+}
+
+/// Resolve every job line of one root-owned schedule table without a user
+/// column. `columns` says how many leading columns of a line are schedule,
+/// not command. Comments, blank lines and `NAME=value` assignments are not
+/// jobs; a missing table is absent and an unreadable one unknown.
+fn root_table(observed: &mut Observation, path: &Path, columns: fn(&str) -> usize) {
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+        return;
+    }
+    let Some(text) = cron_text(path) else {
+        observed.complete = false;
+        return;
+    };
+    let shell = cron_shell(&text);
+    for (line, command) in text.lines().enumerate() {
+        let command = command.trim();
+        if command.is_empty()
+            || command.starts_with('#')
+            || command
+                .split_ascii_whitespace()
+                .next()
+                .is_some_and(|word| word.contains('='))
         {
             continue;
         }
-        let Some(text) = cron_text(path) else {
-            observed.complete = false;
-            continue;
-        };
-        let shell = cron_shell(&text);
-        for (line, command) in text.lines().enumerate() {
-            let command = command.trim();
-            if command.is_empty()
-                || command.starts_with('#')
-                || command
-                    .split_ascii_whitespace()
-                    .next()
-                    .is_some_and(|word| word.contains('='))
-            {
-                continue;
-            }
-            let start = if command.starts_with('@') { 1 } else { 5 };
-            let target = after_columns(command, start);
-            root_job(
-                observed,
-                format!("{}:{}", path.display(), line + 1),
-                target
-                    .zip(shell.as_ref())
-                    .and_then(|(command, shell)| command_targets(command, shell)),
-            );
-        }
+        let target = after_columns(command, columns(command));
+        root_job(
+            observed,
+            format!("{}:{}", path.display(), line + 1),
+            target
+                .zip(shell.as_ref())
+                .and_then(|(command, shell)| command_targets(command, shell)),
+        );
     }
 }
 
@@ -692,6 +708,7 @@ pub(crate) fn inspect(account: &User) -> Observation {
     let mut observed = Observation::empty();
     cron(account, &mut observed);
     root_crontab(&mut observed);
+    anacrontab(&mut observed);
     system_units(account, &mut observed);
     root_writes(account, &mut observed);
     if !observed.complete {
@@ -882,6 +899,51 @@ mod tests {
         let wrapped = command_targets("/usr/bin/env python3 /home/alice/task", &shell()).unwrap();
         assert!(wrapped.contains(&PathBuf::from("/usr/local/bin/python3")));
         assert!(wrapped.contains(&PathBuf::from("/home/alice/task")));
+    }
+
+    /// J1013: anacron's table runs the daily, weekly and monthly scripts as
+    /// root (cronie reaches it only through `cron.hourly/0anacron`). Each job
+    /// line's command, after its three schedule columns, is a root input, and
+    /// a `run-parts` directory contributes its scripts. Programs are named by
+    /// path here: a bare name is also looked up in root's home, which an
+    /// unprivileged test cannot read.
+    #[test]
+    fn anacron_table_lines_are_root_jobs() {
+        let root = nix::unistd::mkdtemp("/tmp/rvana-XXXXXX").unwrap();
+        let daily = root.join("cron.daily");
+        fs::create_dir(&daily).unwrap();
+        fs::write(daily.join("backup"), "#!/bin/sh\n").unwrap();
+        let table = root.join("anacrontab");
+        fs::write(
+            &table,
+            format!(
+                "SHELL=/bin/sh\nPATH=/sbin:/bin:/usr/sbin:/usr/bin\nRANDOM_DELAY=45\n# comment\n\n1\t5\tcron.daily\t\t/usr/bin/nice /usr/bin/run-parts {}\n@monthly 45 cron.monthly {}\n",
+                daily.display(),
+                root.join("monthly-task").display()
+            ),
+        )
+        .unwrap();
+        let mut observed = Observation::empty();
+        root_table(&mut observed, &table, |_| 3);
+        let inputs: Vec<_> = observed
+            .root_inputs
+            .iter()
+            .flat_map(|(_, paths)| paths.iter().cloned())
+            .collect();
+        assert_eq!(observed.root_inputs.len(), 2, "{:?}", observed.root_inputs);
+        // A job that does not exist yet is checked through its parent.
+        for expected in [daily.join("backup"), root.clone()] {
+            assert!(inputs.contains(&expected), "{expected:?}: {inputs:?}");
+        }
+        assert!(
+            observed.complete && !observed.privileged,
+            "{:?}",
+            observed.jobs
+        );
+        let mut missing = Observation::empty();
+        root_table(&mut missing, &root.join("absent"), |_| 3);
+        assert!(missing.complete && missing.root_inputs.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// A cron file's HOME, PATH and SHELL decide where its commands run.
