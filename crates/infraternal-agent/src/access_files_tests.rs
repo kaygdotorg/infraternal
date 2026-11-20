@@ -306,6 +306,19 @@ fn a_same_size_edit_past_the_hashed_start_is_reported() {
     assert_eq!(files[0].change, ChangeKind::Changed);
 }
 
+/// J1013: a crontab over the spool bound is unreadable, never its first
+/// part, which would hide an edit past the cut.
+#[test]
+fn an_oversized_spool_file_is_not_cut() {
+    let (user, home) = account();
+    let path = home.join("crontab");
+    std::fs::write(&path, vec![b'#'; SPOOL_BYTES]).unwrap();
+    assert_eq!(read_spool(&path, &user).unwrap().len(), SPOOL_BYTES);
+    std::fs::write(&path, vec![b'#'; SPOOL_BYTES + 1]).unwrap();
+    assert!(read_spool(&path, &user).is_err());
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// J322 P2: a rootless agent runs as the account, so a person can rewrite
 /// the record to match their plant. Rootless reports are never "unchanged":
 /// they read "not checked: unverified", with what was found as a hint.

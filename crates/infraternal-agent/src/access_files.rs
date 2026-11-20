@@ -1741,7 +1741,8 @@ fn sshd_configuration(account: &User) -> io::Result<Vec<u8>> {
 }
 
 /// A spool file of the account: opened without following a symlink, owned by
-/// the account, bounded.
+/// the account, bounded. A file over the bound is an error, never its first
+/// `SPOOL_BYTES`: a cut copy would hide an edit past the cut (J1013).
 fn read_spool(path: &Path, account: &User) -> io::Result<Vec<u8>> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let file = std::fs::OpenOptions::new()
@@ -1753,8 +1754,11 @@ fn read_spool(path: &Path, account: &User) -> io::Result<Vec<u8>> {
         return Err(io::Error::other("not the account's regular file"));
     }
     let mut bytes = Vec::new();
-    file.take(u64::try_from(SPOOL_BYTES).unwrap_or(u64::MAX))
+    file.take(u64::try_from(SPOOL_BYTES + 1).unwrap_or(u64::MAX))
         .read_to_end(&mut bytes)?;
+    if bytes.len() > SPOOL_BYTES {
+        return Err(io::Error::other("spool file exceeded its bound"));
+    }
     Ok(bytes)
 }
 
