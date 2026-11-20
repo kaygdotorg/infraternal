@@ -1,0 +1,130 @@
+/**
+ * Restoring many windows at once must never show a person "offline or cannot reach this server" (#556).
+ *
+ * The server answers only a few plugin calls at a time on one socket (MAX_PENDING_PLUGIN_CALLS) and refuses the rest
+ * as `unavailable`, which a window shows as that offline message. A page restoring 8, 16 or 32 windows after a reload
+ * or a dropped network, and a person (or a script) clicking "new window" ten times in a second, all put many calls on
+ * the socket together. Production server binary, production build, real PTYs; no test double.
+ */
+import { expect, test, type Page } from "playwright/test";
+import { personName, startRealServer, type RealServer } from "./server";
+
+test.describe.configure({ mode: "serial" });
+
+const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
+const OFFLINE = "offline or cannot reach";
+
+/** Enrols the first passkey of a fresh server and lands on the canvas. */
+async function enrol(page: Page, server: RealServer): Promise<void> {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true } });
+  await page.goto(server.origin + "/");
+  await page.locator("#setup-token").fill(server.token);
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.locator("#setup-username").fill(personName("restore_many"));
+  await page.locator("#setup-display-name").fill("Restore many");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByRole("button", { name: "Create passkey" }).click();
+  await page.getByRole("heading", { name: "Save your recovery key" }).waitFor();
+  await page.locator(".auth-check").click();
+  await page.getByRole("button", { name: "Open infraternal" }).click();
+  await page.locator(".cl-viewport").waitFor();
+}
+
+/** Calls the server refused, on every socket so far. */
+const refusedOn = (server: RealServer): number => server.bridges.reduce((n, b) => n + b.control.filter((f) => f.dir === "down" && f.type === "Result" && f.detail !== "ok").length, 0);
+/** Windows (terminal streams) attached on the newest open socket. */
+const attachedOn = (server: RealServer): number => [...(server.bridges.filter((b) => !b.closed).at(-1)?.attached.values() ?? [])].flat().length;
+/** Calls the newest socket has sent that the server has not answered yet. */
+function pendingOn(server: RealServer): number {
+  const control = server.bridges.filter((b) => !b.closed).at(-1)?.control ?? [];
+  const answered = new Set(control.filter((f) => f.dir === "down" && f.type === "Result").map((f) => f.callId));
+  return control.filter((f) => f.dir === "up" && f.type === "Call" && !answered.has(f.callId)).length;
+}
+
+for (const total of [8, 16, 32]) {
+  test.describe(`${total} windows`, () => {
+    let server: RealServer;
+    let page: Page;
+    test.beforeAll(async ({ browser }) => {
+      server = await startRealServer();
+      const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 } });
+      page = await context.newPage();
+      await enrol(page, server);
+    });
+    test.afterAll(async () => { await page?.context().close(); await server?.dispose(); });
+
+    /** Waits until every window has attached and none says offline, as a person would see it; prints the numbers. */
+    async function whole(label: string, since: number, refusedBefore: number): Promise<void> {
+      await expect(windows(page)).toHaveCount(total, { timeout: 60_000 });
+      await expect.poll(() => attachedOn(server), { timeout: 120_000, message: "every window attached" }).toBeGreaterThanOrEqual(total);
+      const ms = Math.round(performance.now() - since);
+      const offlineWindows = await windows(page).filter({ hasText: OFFLINE }).count();
+      const refusedResults = refusedOn(server) - refusedBefore;
+      console.log(`${label} n=${total} ${JSON.stringify({ ms, offlineWindows, refusedResults })}`);
+      expect(offlineWindows).toBe(0);
+      expect(refusedResults).toBe(0);
+    }
+
+    test("builds the canvas", async () => {
+      test.setTimeout(240_000);
+      while ((await windows(page).count()) < total) {
+        const count = await windows(page).count();
+        // A person opens windows one at a time; wait for the calls of the last one so the setup itself is not the test.
+        await expect.poll(() => pendingOn(server), { timeout: 30_000 }).toBeLessThan(3);
+        await page.locator(".tab-add").click();
+        await expect(windows(page)).toHaveCount(count + 1);
+      }
+      await expect.poll(() => attachedOn(server), { timeout: 60_000 }).toBeGreaterThanOrEqual(total - 1);
+    });
+
+    test("a reload restores them all, none offline", async () => {
+      test.setTimeout(240_000);
+      const before = refusedOn(server);
+      const t0 = performance.now();
+      await page.reload();
+      await page.locator(".cl-viewport").waitFor();
+      await whole("RESTORE-RELOAD", t0, before);
+    });
+
+    test("a network drop reconnects them all, none offline", async () => {
+      test.setTimeout(240_000);
+      const before = refusedOn(server);
+      const sockets = server.bridges.length;
+      const t0 = performance.now();
+      await server.interruptBrowserRoutes(2_000);
+      await expect.poll(() => server.bridges.length, { timeout: 60_000 }).toBeGreaterThan(sockets);
+      await whole("RESTORE-DROP", t0, before);
+    });
+  });
+}
+
+test.describe("ten new windows within a second", () => {
+  let server: RealServer;
+  let page: Page;
+  test.beforeAll(async ({ browser }) => {
+    server = await startRealServer();
+    const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 900 } });
+    page = await context.newPage();
+    await enrol(page, server);
+  });
+  test.afterAll(async () => { await page?.context().close(); await server?.dispose(); });
+
+  test("every window gets its shell, none offline", async () => {
+    test.setTimeout(180_000);
+    await expect(windows(page)).toHaveCount(1);
+    const t0 = performance.now();
+    // Clicked from the page: a new window is still flying into view, and a pointer click would aim at where it was.
+    await page.locator(".tab-add").evaluate(async (button) => {
+      for (let i = 0; i < 10; i++) { (button as HTMLElement).click(); await new Promise((r) => setTimeout(r, 90)); }
+    });
+    await expect(windows(page)).toHaveCount(11);
+    await expect.poll(() => attachedOn(server), { timeout: 120_000 }).toBeGreaterThanOrEqual(11);
+    const ms = Math.round(performance.now() - t0);
+    const offlineWindows = await windows(page).filter({ hasText: OFFLINE }).count();
+    console.log(`RAPID-NEW n=10 ${JSON.stringify({ ms, offlineWindows, refusedResults: refusedOn(server) })}`);
+    expect(offlineWindows).toBe(0);
+    expect(refusedOn(server)).toBe(0);
+  });
+});
