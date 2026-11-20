@@ -434,7 +434,7 @@ fn produce(
 mod startup_recovery_tests {
     //! Exercises the real native-surface producer with a scripted companion that misses its startup keyframe.
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicU64};
+    use std::{fs, sync::atomic::AtomicU64};
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -448,13 +448,20 @@ mod startup_recovery_tests {
         ));
         fs::create_dir(&root).expect("create private test directory");
         let native_path = root.join("surface-native");
-        fs::write(
+        // Publish the checked-in executable fixture by symlink instead of
+        // writing a copy. A freshly written executable can still be open for
+        // writing in another thread's forked child until that child execs,
+        // and exec then fails with ETXTBSY. In this test binary that other
+        // thread is a sibling test spawning a child. That race ended the worker
+        // before its first frame ("Disconnected") in loaded runs (#553). The
+        // fixture is never opened for writing, so there is no writer to inherit.
+        // The fixture appends its request log beside `argv[0]`, the link path.
+        std::os::unix::fs::symlink(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/surface-first-picture.py"),
             &native_path,
-            include_bytes!("../tests/fixtures/surface-first-picture.py"),
         )
-        .expect("write scripted companion");
-        fs::set_permissions(&native_path, fs::Permissions::from_mode(0o700))
-            .expect("make scripted companion executable");
+        .expect("link scripted companion");
 
         let start = Start {
             passive_geometry: false,
@@ -501,7 +508,9 @@ mod startup_recovery_tests {
             )
         });
 
-        let first = received.recv_timeout(Duration::from_secs(2));
+        // Event wait for the first delivered frame. Interpreter start-up is
+        // load-stretched wall time, so the bound only separates a stuck worker from a slow one.
+        let first = received.recv_timeout(Duration::from_secs(30));
         stop.store(true, Ordering::Release);
         let _ = worker.join();
         let requests =
