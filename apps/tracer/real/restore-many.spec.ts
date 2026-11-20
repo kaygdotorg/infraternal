@@ -32,12 +32,16 @@ async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.locator(".cl-viewport").waitFor();
 }
 
-/** The actions the server refused, on every socket so far. */
+/**
+ * The actions the server refused, on every socket so far. A canvas that asks for the mesh while this fixture runs
+ * none is told "mesh unavailable" by the mesh feature itself; that is no refusal from the call cap and no window
+ * shows it, so it is left out.
+ */
 function refusedActions(server: RealServer): string[] {
   const names: string[] = [];
   for (const b of server.bridges) {
     const asked = new Map(b.control.filter((f) => f.dir === "up" && f.type === "Call").map((f) => [f.callId, f.detail]));
-    for (const f of b.control) if (f.dir === "down" && f.type === "Result" && f.detail !== "ok") names.push(`${asked.get(f.callId) ?? "?"}: ${f.reason ?? ""}`);
+    for (const f of b.control) if (f.dir === "down" && f.type === "Result" && f.detail !== "ok" && !f.reason?.includes("mesh unavailable")) names.push(`${asked.get(f.callId) ?? "?"}: ${f.reason ?? ""}`);
   }
   return names;
 }
