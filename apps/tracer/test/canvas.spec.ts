@@ -174,11 +174,19 @@ test("every floating card uses the one overlay material", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openCanvas(page);
   await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+  // The card is over the terminal, so glass-under marks it and it takes the static floor (0.87 for Tinted; D365, #448,
+  // glass-rules.on-demand.ts) instead of the themed 0.78. The mark arrives a moment after the popover opens (the watcher
+  // looks under a new surface from a mutation callback), so wait for it: reading earlier compares a card that is still on the
+  // themed rules, and which of the two a read catches is a race.
+  await expect(page.locator(".canvas-popover")).toHaveAttribute("data-glass-under", /./);
+  // The probe takes the same mark and sits where the rules apply the same way, so the two compare one material (tint, blur),
+  // not the floor against the themed value.
   const material = await page.evaluate(() => {
     const read = (el: Element) => { const s = getComputedStyle(el); return { background: s.backgroundColor, filter: s.backdropFilter }; };
     const popover = read(document.querySelector(".canvas-popover")!);
     const probe = document.createElement("div");
     probe.className = "ui-overlay-surface";
+    probe.setAttribute("data-glass-under", "");
     document.body.append(probe);
     const shared = read(probe);
     probe.remove();
