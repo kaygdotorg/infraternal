@@ -44,7 +44,8 @@ pub(crate) type Observed = BTreeMap<PublicKey, Seen>;
 
 /// One peer's send address and the address a recent authenticated session confirmed.
 ///
-/// `live_confirmed` is populated only when the last handshake is younger than [`SILENT`]. It
+/// `live_confirmed` is populated only when the last handshake is younger than
+/// [`OFF_LIST_RETENTION`]. It
 /// may preserve an address that a stale coordinator snapshot no longer lists, but only while
 /// the engine is still sending there and the peer's session remains live.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -59,7 +60,7 @@ pub(crate) struct EngineEndpoint {
 ///
 /// The send endpoint can move when the engine accepts a handshake initiation, before that
 /// sender proves its key. Only its separately confirmed endpoint is retained, and only for a
-/// session that has not exceeded [`SILENT`].
+/// session younger than [`OFF_LIST_RETENTION`].
 #[must_use]
 pub(crate) fn engine_endpoint(
     send: Option<SocketAddr>,
@@ -67,13 +68,24 @@ pub(crate) fn engine_endpoint(
     last_handshake_age: Option<std::time::Duration>,
 ) -> EngineEndpoint {
     let live_confirmed = last_handshake_age
-        .filter(|age| *age < SILENT)
+        .filter(|age| *age < OFF_LIST_RETENTION)
         .and(confirmed);
     EngineEndpoint {
         send,
         live_confirmed,
     }
 }
+
+/// How long after its handshake an authenticated address that the coordinator no longer lists is
+/// still kept over a changed snapshot (#483, J1025).
+///
+/// The address is kept so that a stale snapshot cannot undo a NAT roam the peer just proved. The
+/// same evidence cannot tell a roamed peer from one that moved on and fell quiet, so the
+/// retention is as short as the old recovery bound (about 25 s, the walk's whole list at its
+/// steps): a peer that moved and stays silent is followed to the coordinator's list after this
+/// time, not after [`SILENT`]. A peer in traffic re-handshakes at least every two minutes and its
+/// roam re-handshakes at once, so a stale snapshot that lands soon after the roam is outvoted.
+pub(crate) const OFF_LIST_RETENTION: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// One walk that has just started running: the peer's device key, the address the walk is on,
 /// and where the engine sent that peer's packets when the walk started. The worker moves the
@@ -421,10 +433,10 @@ mod tests {
     fn a_reinstall_keeps_only_a_live_authenticated_off_list_endpoint() {
         let peer = walking(4).peer;
         let learned = at("10.9.0.44:10254");
-        let live = engine_endpoint(Some(learned), Some(learned), Some(Duration::from_secs(179)));
+        let live = engine_endpoint(Some(learned), Some(learned), Some(Duration::from_secs(24)));
         assert_eq!(kept_address(&peer, live, None), Some(learned));
 
-        let expired = engine_endpoint(Some(learned), Some(learned), Some(SILENT));
+        let expired = engine_endpoint(Some(learned), Some(learned), Some(OFF_LIST_RETENTION));
         assert_eq!(kept_address(&peer, expired, None), None);
 
         let unconfirmed = engine_endpoint(Some(learned), None, Some(Duration::from_secs(1)));
@@ -438,20 +450,27 @@ mod tests {
         assert_eq!(kept_address(&peer, different, None), None);
     }
 
-    /// J988 review: only a handshake younger than [`SILENT`] keeps an authenticated address, and
-    /// the age is the engine's own monotonic one, so no clock is compared across machines.
+    /// J988 review, J1025: only a handshake younger than [`OFF_LIST_RETENTION`] keeps an
+    /// authenticated address, and the age is the engine's own monotonic one, so no clock is
+    /// compared across machines. A moved peer that fell quiet is therefore followed to the
+    /// coordinator's list after that time, not after [`SILENT`].
     #[test]
-    fn engine_endpoint_keeps_the_confirmed_address_only_while_the_handshake_is_younger_than_silent()
-    {
+    fn engine_endpoint_keeps_the_confirmed_address_only_while_the_handshake_is_younger_than_the_retention()
+     {
         let learned = at("10.9.0.44:10254");
-        let just_inside = Duration::from_millis(179_999);
+        let just_inside = OFF_LIST_RETENTION - Duration::from_millis(1);
         assert_eq!(
             engine_endpoint(Some(learned), Some(learned), Some(just_inside)).live_confirmed,
             Some(learned)
         );
         assert_eq!(
-            engine_endpoint(Some(learned), Some(learned), Some(SILENT)).live_confirmed,
+            engine_endpoint(Some(learned), Some(learned), Some(OFF_LIST_RETENTION)).live_confirmed,
             None
+        );
+        assert_eq!(
+            engine_endpoint(Some(learned), Some(learned), Some(SILENT / 2)).live_confirmed,
+            None,
+            "a session still live by the silence rule is not enough to keep an off-list address"
         );
         assert_eq!(
             engine_endpoint(Some(learned), Some(learned), None).live_confirmed,
@@ -531,8 +550,10 @@ mod tests {
                 endpoint: Some(stale),
             },
         )]);
-        let before =
-            BTreeMap::from([(key, engine_endpoint(Some(stale), Some(stale), Some(SILENT)))]);
+        let before = BTreeMap::from([(
+            key,
+            engine_endpoint(Some(stale), Some(stale), Some(OFF_LIST_RETENTION)),
+        )]);
         walks.start(
             BTreeMap::from([(key, peer.clone())]),
             &observed,
