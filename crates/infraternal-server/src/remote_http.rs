@@ -576,8 +576,8 @@ async fn issue_approved_machine_join(
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     // A device approval can create only its requested owner-bound host row.
     sqlx::query(
-        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) \
-         SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,device_approved) \
+         SELECT ?,?,?,?,?,1 WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
              WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1) \
          ON CONFLICT(id) DO NOTHING",
     )
