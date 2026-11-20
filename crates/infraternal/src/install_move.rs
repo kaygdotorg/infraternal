@@ -1133,8 +1133,14 @@ fn finish_combined(
     {
         return Err(disk::invalid("shared base identity changed during move"));
     }
-    let entries = journal.original_entries.as_ref().expect("combined journal");
-    let name = journal.backup.file_name().expect("validated backup path");
+    let entries = journal
+        .original_entries
+        .as_ref()
+        .ok_or_else(|| disk::invalid("combined move is missing its original entries"))?;
+    let name = journal
+        .backup
+        .file_name()
+        .ok_or_else(|| disk::invalid("combined backup lacks a name"))?;
     let backup = optional_tree(&source, name)?;
     let keep = journal.backup_action == Backup::Retain;
     let mut remaining = Vec::new();
@@ -1147,7 +1153,7 @@ fn finish_combined(
             .transpose()?
             .flatten();
         if original == Some(*identity) && saved.is_none() {
-            remaining.push(entry.to_owned());
+            remaining.push((entry, *identity));
         } else if !(original.is_none()
             && (saved == Some(*identity)
                 || (!keep && saved.is_none() && journal.backup_identity.is_some())))
@@ -1190,15 +1196,13 @@ fn finish_combined(
         journal.backup_identity = Some(identity);
         save(transaction.work, journal)?;
     }
-    for entry in remaining {
-        if disk::entry_identity(&source, &entry)?
-            != entries.get(entry.to_str().expect("UTF-8 entry")).copied()
-        {
+    for (entry, expected) in remaining {
+        if disk::entry_identity(&source, entry)? != Some(expected) {
             return Err(disk::invalid(
                 "original server entry changed during retirement",
             ));
         }
-        disk::rename_new(&source, &entry, &backup, &entry)?;
+        disk::rename_new(&source, entry, &backup, entry)?;
     }
     let leftover = retire_original(&source, name, identity, journal, service)?;
     Ok(Outcome { leftover })
@@ -1501,14 +1505,13 @@ fn needs_private_target(to: &Path, nested: bool) -> bool {
 pub(super) fn create_combined_server_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     let (base, name) = disk::parent(path, false)?;
-    let folder = match optional_tree(&base, name)? {
-        Some(folder) => folder,
-        None => {
-            let folder = disk::make_dir(&base, name)?;
-            folder.set_permissions(std::fs::Permissions::from_mode(0o700))?;
-            folder.sync_all()?;
-            folder
-        }
+    let folder = if let Some(folder) = optional_tree(&base, name)? {
+        folder
+    } else {
+        let folder = disk::make_dir(&base, name)?;
+        folder.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        folder.sync_all()?;
+        folder
     };
     check_combined_mode(&folder)
 }
