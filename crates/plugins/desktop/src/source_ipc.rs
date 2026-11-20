@@ -470,3 +470,247 @@ mod readiness_tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod cross_user_admission_tests {
+    //! The root agent's admission of a console-user helper, against scripted
+    //! impostors (D203 C2, #146; J1011 review). These need what only a real
+    //! root agent has: root, and a person logged in at the screen. Run them
+    //! on a Mac as root (`sudo <test binary> cross_user_admission`); anywhere
+    //! else each test says it was skipped and passes.
+    //!
+    //! Each impostor stands in for the helper: it is started by the same
+    //! launch path (standard input carries the token, the per-leg folder is
+    //! its first argument), binds the socket, and answers the agent's
+    //! connection with whatever token its mode says. The code-signature check
+    //! is replaced by a switch, so the token layer is tested on its own; the
+    //! real signature check is proved with `infraternal up` on the Mac.
+    use super::*;
+    use std::{
+        os::unix::{fs::PermissionsExt as _, process::CommandExt as _},
+        process::Command,
+        sync::Arc,
+    };
+
+    /// The impostor: reads the token from stdin, then binds, accepts one
+    /// connection and sends a token chosen by `IMPOSTOR_MODE`: `real` (what
+    /// it was given), `save` (the same, also written to `IMPOSTOR_SAVED`),
+    /// `replay` (the one saved by an earlier leg) or `wrong` (zeros).
+    const IMPOSTOR: &str = r#"#!/usr/bin/python3
+import os, socket, sys
+folder, mode = sys.argv[1], os.environ["IMPOSTOR_MODE"]
+saved = os.environ.get("IMPOSTOR_SAVED", "")
+token = sys.stdin.buffer.read(32)
+if mode == "save":
+    open(saved, "wb").write(token)
+elif mode == "replay":
+    token = open(saved, "rb").read()
+elif mode == "wrong":
+    token = bytes(32)
+os.umask(0o077)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(os.path.join(folder, "desktop.sock"))
+listener.listen(1)
+connection, _ = listener.accept()
+connection.sendall(token)
+connection.recv(1)
+"#;
+
+    /// A scratch area: a root-owned 0711 base for leg folders and a folder
+    /// the impostor (and the person) can read, removed on drop.
+    struct Scratch {
+        root: PathBuf,
+    }
+    impl Scratch {
+        /// A fresh scratch folder under `/private/tmp` that the person can
+        /// read, holding the impostor script.
+        fn new() -> Self {
+            let root = nix::unistd::mkdtemp("/private/tmp/j1011-XXXXXX").unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+            let impostor = root.join("impostor.py");
+            fs::write(&impostor, IMPOSTOR).unwrap();
+            fs::set_permissions(&impostor, fs::Permissions::from_mode(0o755)).unwrap();
+            Self { root }
+        }
+        /// The base folder for leg folders (created by the leg under test).
+        fn base(&self) -> PathBuf {
+            self.root.join("ifd")
+        }
+        /// A file the console user may create, for the `save`/`replay` modes.
+        fn saved(&self, user: ConsoleUser) -> PathBuf {
+            let folder = self.root.join("saved");
+            if !folder.exists() {
+                fs::create_dir(&folder).unwrap();
+                std::os::unix::fs::chown(&folder, Some(user.uid), Some(user.gid)).unwrap();
+            }
+            folder.join("token")
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Root and a person at the screen, or `None` (the test is skipped).
+    fn preconditions(name: &str) -> Option<ConsoleUser> {
+        let user = nix::unistd::geteuid()
+            .is_root()
+            .then(cross_user::console_user)
+            .flatten();
+        if user.is_none() {
+            eprintln!("{name}: skipped (needs root and a person at the screen)");
+        }
+        user
+    }
+
+    /// A leg's helper config: the impostor started as `uid`/`gid` in `mode`,
+    /// with the signature check answering `signed`.
+    fn config(
+        scratch: &Scratch,
+        uid: u32,
+        gid: u32,
+        mode: &str,
+        saved: &str,
+        signed: bool,
+    ) -> Config {
+        let (mode, saved) = (mode.to_owned(), saved.to_owned());
+        let launch: cross_user::Launch = Arc::new(move |_| {
+            let mut command = Command::new("/usr/bin/env");
+            command
+                .arg(format!("IMPOSTOR_MODE={mode}"))
+                .arg(format!("IMPOSTOR_SAVED={saved}"))
+                .uid(uid)
+                .gid(gid);
+            Ok(command)
+        });
+        let verify: cross_user::VerifyPeer = Arc::new(move |_| {
+            if signed {
+                Ok(())
+            } else {
+                Err(io::ErrorKind::PermissionDenied.into())
+            }
+        });
+        Config {
+            runtime: scratch.base(),
+            executable: scratch.root.join("impostor.py"),
+            cross_user: Some(CrossUser::new(launch, verify, scratch.root.join("none"))),
+        }
+    }
+
+    /// Starts one leg and returns whether the agent admitted its helper.
+    async fn admitted(config: &Config) -> bool {
+        let (_stop, mut stop) = watch::channel(false);
+        match Helper::start(config, &mut stop).await {
+            Ok(helper) => {
+                let checked = helper.console_uid() == cross_user::console_user().map(|u| u.uid);
+                let folder = fs::symlink_metadata(&helper.directory.path).unwrap();
+                assert_eq!(folder.mode() & 0o777, 0o700, "leg folder mode");
+                assert_eq!(Some(folder.uid()), helper.console_uid(), "leg folder owner");
+                let base = fs::symlink_metadata(&config.runtime).unwrap();
+                assert_eq!((base.uid(), base.mode() & 0o777), (0, 0o711), "base folder");
+                assert!(helper.stop().await.is_ok());
+                checked
+            }
+            Err(failure) => {
+                assert!(
+                    failure.cleanup().is_ok(),
+                    "a refused helper must be retired"
+                );
+                false
+            }
+        }
+    }
+
+    /// Positive control, then a token replayed from that earlier leg: the
+    /// real token is admitted once, and the same bytes never open a second
+    /// leg, because every leg draws a fresh token.
+    #[tokio::test]
+    async fn a_replayed_token_is_refused() {
+        let Some(user) = preconditions("a_replayed_token_is_refused") else {
+            return;
+        };
+        let scratch = Scratch::new();
+        let saved = scratch.saved(user).display().to_string();
+        assert!(
+            admitted(&config(&scratch, user.uid, user.gid, "save", &saved, true)).await,
+            "the harness's own helper must be admitted"
+        );
+        assert!(
+            !admitted(&config(
+                &scratch, user.uid, user.gid, "replay", &saved, true
+            ))
+            .await
+        );
+    }
+
+    /// Another process of the console user that answers without the token
+    /// (it was never given it) is refused, even with a passing signature.
+    #[tokio::test]
+    async fn a_same_user_process_without_the_token_is_refused() {
+        let Some(user) = preconditions("a_same_user_process_without_the_token_is_refused") else {
+            return;
+        };
+        let scratch = Scratch::new();
+        assert!(!admitted(&config(&scratch, user.uid, user.gid, "wrong", "", true)).await);
+    }
+
+    /// The right token from code that fails the signature check is refused:
+    /// the check runs first, so the agent never reads that token.
+    #[tokio::test]
+    async fn a_peer_with_the_wrong_signature_is_refused() {
+        let Some(user) = preconditions("a_peer_with_the_wrong_signature_is_refused") else {
+            return;
+        };
+        let scratch = Scratch::new();
+        assert!(!admitted(&config(&scratch, user.uid, user.gid, "real", "", false)).await);
+    }
+
+    /// Another local account, even one holding the real token, cannot answer
+    /// for the console user: it cannot enter the person's 0700 leg folder,
+    /// and a socket elsewhere is never looked at.
+    #[tokio::test]
+    async fn another_local_user_cannot_answer() {
+        let Some(_) = preconditions("another_local_user_cannot_answer") else {
+            return;
+        };
+        let scratch = Scratch::new();
+        let nobody = nix::unistd::User::from_name("nobody").unwrap().unwrap();
+        let config = config(
+            &scratch,
+            nobody.uid.as_raw(),
+            nobody.gid.as_raw(),
+            "real",
+            "",
+            true,
+        );
+        assert!(!admitted(&config).await);
+    }
+
+    /// A base folder someone else owns, or a symlink in its place, is
+    /// refused before any leg folder is made in it.
+    #[tokio::test]
+    async fn a_planted_base_folder_is_refused() {
+        let Some(user) = preconditions("a_planted_base_folder_is_refused") else {
+            return;
+        };
+        let scratch = Scratch::new();
+        fs::create_dir(scratch.root.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(scratch.root.join("elsewhere"), scratch.base()).unwrap();
+        assert!(!admitted(&config(&scratch, user.uid, user.gid, "real", "", true)).await);
+        assert_eq!(
+            fs::read_dir(scratch.root.join("elsewhere"))
+                .unwrap()
+                .count(),
+            0
+        );
+        fs::remove_file(scratch.base()).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o711)
+            .create(scratch.base())
+            .unwrap();
+        std::os::unix::fs::chown(scratch.base(), Some(user.uid), None).unwrap();
+        assert!(!admitted(&config(&scratch, user.uid, user.gid, "real", "", true)).await);
+        assert_eq!(fs::read_dir(scratch.base()).unwrap().count(), 0);
+    }
+}
