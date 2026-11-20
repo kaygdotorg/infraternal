@@ -925,6 +925,45 @@ mod tests {
         );
     }
 
+    /// Review J1027 F1 (#146), red on 9467b9aa4: another VPN's utun that carries exactly the
+    /// prefix asked for is not an earlier mesh utun. Today `plan_route` treats any utun with an
+    /// exact copy of the route as ours, deletes that VPN's route and skips its addresses in the
+    /// overlap check, so the mesh takes the VPN's traffic. Example: a CGNAT VPN routes
+    /// `100.64.0.0/10` (and owns `100.101.102.103`) on `utun3`; a node at `100.64.0.5` whose
+    /// peers span the block asks for `/10`. The helper must refuse unless it knows `utun3`
+    /// belongs to this person's earlier agent. Ignored so the branch gate stays meaningful;
+    /// run with `--ignored`. It must pass, un-ignored, once the helper tells its own utuns apart.
+    #[test]
+    #[ignore = "J1027 F1 red: a foreign VPN utun with the same prefix is replaced"]
+    fn another_vpn_with_the_same_prefix_is_a_conflict_not_an_earlier_mesh_utun() {
+        let wanted = ipv4_route(Ipv4Addr::new(100, 64, 0, 5), 10).unwrap();
+        let vpn_route = Route {
+            network: Network::v4(Ipv4Addr::new(100, 64, 0, 0), 10),
+            interface: "utun3".to_owned(),
+        };
+        let vpn_address = Route {
+            network: Network::v4(Ipv4Addr::new(100, 101, 102, 103), 32),
+            interface: "utun3".to_owned(),
+        };
+        let plan = plan_route(
+            wanted,
+            "utun7",
+            &[vpn_route, vpn_address.clone()],
+            &[vpn_address],
+        );
+        assert!(
+            plan.is_err(),
+            "the helper would delete the VPN's route and take its traffic: {plan:?}"
+        );
+        // The same for IPv6: a unique-local /48 another VPN already routes on its own utun.
+        let wanted = ipv6_route("fd7a:115c:a1e0::5".parse().unwrap()).unwrap();
+        let vpn_route = Route {
+            network: wanted,
+            interface: "utun3".to_owned(),
+        };
+        assert!(plan_route(wanted, "utun7", &[vpn_route], &[]).is_err());
+    }
+
     /// The helper's property list is socket-activated for one uid and read back exactly.
     #[test]
     fn helper_plist_names_its_uid_and_nothing_else_matches() {
