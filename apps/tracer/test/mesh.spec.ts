@@ -373,14 +373,14 @@ test.describe("editing arrows", () => {
     await server(page, (s) => s.failNext("mesh.grant.move", "refuse"));
     await dragEnd(page, "g3", "head", "edge-arm");
     await page.locator(".ui-confirm-yes").click();
-    await expect(page.locator(".ui-toast, .toast").first()).toContainText("Could not change who nix-cache can reach. You may not be allowed to");
+    await expect(page.locator(".ui-toast[data-front=\"true\"]")).toContainText("Could not change who nix-cache can reach. You may not be allowed to");
     await expect.poll(async () => (await grant("g3"))?.to).toBe("studio-mac");
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
     await page.waitForTimeout(3600);
     await server(page, (s) => s.failNext("mesh.grant.delete", "network"));
     await dragEnd(page, "g3", "head", undefined);
     await page.locator(".ui-confirm-yes").click();
-    await expect(page.locator(".ui-toast, .toast").first()).toContainText("Could not stop nix-cache reaching studio-mac");
+    await expect(page.locator(".ui-toast[data-front=\"true\"]")).toContainText("Could not stop nix-cache reaching studio-mac");
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(1); // the grant came back
   });
 });
@@ -457,7 +457,7 @@ test.describe("access", () => {
   });
 });
 
-/** The confirmation's two actions are icon buttons (cross, tick) that carry their name as label and warm tooltip, on bare glyphs: no halo behind them. */
+/** The confirmation's two actions are icon buttons (cross, tick) that carry their name as label and warm tooltip, on bare glyphs: no halo behind them (the card's text follows the shared material, D380). */
 async function expectIconButtons(tip: ReturnType<Page["locator"]>, names: [string, string]): Promise<void> {
   const buttons = tip.locator("button");
   await expect(buttons).toHaveCount(2);
@@ -469,8 +469,8 @@ async function expectIconButtons(tip: ReturnType<Page["locator"]>, names: [strin
   }
   // Text is crisp at rest: nothing in the popover carries the material's halo around a button.
   expect(await buttons.evaluateAll((bs) => bs.map((b) => getComputedStyle(b).textShadow))).toEqual(["none", "none"]);
-  // Nor does any text of the card: the halo is for text straight on glass, and on this card it is a smear around the glyphs.
-  expect(await tip.evaluate((root) => [root, ...root.querySelectorAll("*")].filter((e) => getComputedStyle(e).textShadow !== "none").length)).toBe(0);
+  // The card's own text is not checked: since D380 (#426) a confirmation is the shared floating-card glass and no longer
+  // resets text-shadow for its text; only the buttons keep theirs off (above), and readability is the shared contrast guarantee.
 }
 
 // ---- snap-fit: an arrow end follows the pointer 1:1, snaps in one frame and holds still; no spring -----------------
