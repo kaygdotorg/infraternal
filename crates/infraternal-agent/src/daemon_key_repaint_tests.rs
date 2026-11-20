@@ -22,6 +22,8 @@ const STARVING_OUTPUT: usize = 128 * 1024;
 const SPAM_SNAPSHOT: usize = REPAINT_CREDIT as usize / 4;
 /// A generous guard for a missing fixture event, never a performance assertion.
 pub(super) const EVENT_GUARD: Duration = Duration::from_secs(3);
+/// Allow the paused timer and shim socket to report expiry and EOF.
+const CAPTURE_EXPIRY_OBSERVATION_SLACK: Duration = Duration::from_millis(8);
 
 /// Include a credit-starved shim frame even when returned output left no bytes in flight.
 #[test]
@@ -813,8 +815,8 @@ async fn capture_wait_stays_bounded_after_credit_returns() {
         Shim::InputStateRequest
     );
 
-    // Deliberately withhold the snapshot. Allow one frame for the timer and EOF to be observed.
-    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    // Deliberately withhold the snapshot until the relay closes the shim link.
+    let end = started + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     stop_relay(&mut fixture).await;
 
@@ -833,7 +835,7 @@ async fn capture_wait_stays_bounded_with_available_bulk_credit() {
     assert!(type_key_and_wait_for_repaint_request(&mut fixture, 0).await);
 
     // The capture replaces unreturned output. No unaffordable frame has armed a bulk timer.
-    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let end = started + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     stop_relay(&mut fixture).await;
 
@@ -863,7 +865,7 @@ async fn capture_wait_stays_bounded_for_a_coalesced_follow_up() {
         Shim::SnapshotRequest
     );
 
-    let end = Instant::now() + relay::STARVATION + KEY_REPAINT_GRACE;
+    let end = Instant::now() + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     if matches!(closed, Ok(Ok(0))) {
         accept_relinked_peer(&mut fixture).await;
@@ -912,7 +914,7 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
     )
     .await
     .unwrap();
-    let end = started + relay::STARVATION + KEY_REPAINT_GRACE;
+    let end = started + relay::STARVATION + CAPTURE_EXPIRY_OBSERVATION_SLACK;
     let closed = tokio::time::timeout_at(end, fixture.peer.read(&mut [0; 1])).await;
     assert!(matches!(
         queued.try_recv(),
@@ -929,6 +931,9 @@ async fn capture_expiry_cancels_snapshot_writer_admission() {
             Shim::ReadFrom(delivered)
         );
     }
+    // On an observer timeout, close the writer lane so teardown cannot wait
+    // on a recovery handshake the fixture never accepted.
+    drop(queued);
     stop_relay(&mut fixture).await;
 
     assert!(
