@@ -29,15 +29,17 @@ async function open(page: Page): Promise<void> {
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   // sleep: the mock canvas finishes its first layout; no event marks it
   await page.waitForTimeout(1200);
-  // The Docs view is not the opening view: open the page through the palette, which brings its window onto the canvas.
+  // The Docs view is not the opening view. Open one of its pages through the palette, as the other swipe specs do; that
+  // mounts the view, and every page of it has a window, so the camera can then fly to the middle one.
   await page.keyboard.press("Control+Shift+K");
   await expect(page.locator("#palette-input")).toBeFocused();
-  await page.keyboard.type("multiplexer");
-  const result = page.locator(".palette .result", { hasText: "The Infraternal Multiplexer" }).first();
+  await page.keyboard.type("keys");
+  const result = page.locator(".palette .result", { hasText: "Keys and how long they last" }).first();
   await expect(result).toBeVisible({ timeout: 15_000 });
   await result.click();
-  await expect(page.locator(`${MIDDLE} .dr-page h1`)).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.ui-window[data-window-id="d-reference/keys"] .dr-page h1')).toBeVisible({ timeout: 10_000 });
   await fly(page);
+  await expect(page.locator(`${MIDDLE} .dr-page h1`)).toBeVisible({ timeout: 15_000 });
   const lock = (await api(page, "canvasLock")) as { index: number; stops: number };
   expect(lock.index, "the window has neighbours on both sides").toBeGreaterThan(0);
   expect(lock.index).toBeLessThan(lock.stops - 1);
