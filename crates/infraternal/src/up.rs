@@ -29,8 +29,9 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
+use tokio::time::Instant;
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -855,8 +856,6 @@ async fn wait_for_approval(
     host_id: uuid::Uuid,
     origin: &str,
 ) -> Result<ApprovedInvitation, Failure> {
-    use tokio::time::Instant;
-
     let deadline = Instant::now() + approval.lifetime;
     let body = Zeroizing::new(
         serde_json::to_vec(&DeviceRedeemRequest {
