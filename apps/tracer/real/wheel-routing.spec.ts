@@ -47,16 +47,24 @@ const strip = () => page.evaluate(() => {
   const col = document.querySelector<HTMLElement>('.cl[data-view="console"] .cl-col')!;
   return `${col.scrollTop}|${col.scrollLeft}|${document.querySelector<HTMLElement>(".cl-world")!.style.transform}`;
 });
-const scrolled = (index: number) => windows().nth(index).locator(".terminal-host").getAttribute("data-scrolled");
+/**
+ * Whether the terminal's viewport is scrolled back. The host's `data-scrolled` is written by the renderer's scroll event
+ * (`TerminalClient`), so it is absent until the viewport has moved once: absent means at the bottom, as "false" does (#556).
+ */
+const scrolled = async (index: number) => (await windows().nth(index).locator(".terminal-host").getAttribute("data-scrolled")) ?? "false";
 /** A point on the terminal that is on screen (the strip shows only part of a tall window). */
 const centre = async (index: number) => {
   const b = (await windows().nth(index).locator(".terminal-host").boundingBox())!;
   const top = Math.max(b.y, 70), bottom = Math.min(b.y + b.height, 880);
   return { x: b.x + b.width / 2, y: (top + bottom) / 2 };
 };
+/**
+ * Clicks a terminal and waits until it has the keyboard. The renderer keeps focus on its own input (a `textarea` inside
+ * `.terminal-host`, see `TerminalClient.open`), never on the host element, so that is the element that must be focused (#556).
+ */
 const focus = async (index: number) => {
   await windows().nth(index).locator(".terminal-host").click({ position: { x: 60, y: 60 } });
-  await expect(windows().nth(index).locator(".terminal-host")).toBeFocused();
+  await expect(windows().nth(index).locator(".terminal-host textarea")).toBeFocused();
 };
 /** A burst of wheel events 8 ms apart: one gesture, like trackpad momentum. */
 const burst = async (dy: number, count: number) => { for (let i = 0; i < count; i++) { await page.mouse.wheel(0, dy); await page.waitForTimeout(8); } };
