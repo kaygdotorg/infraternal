@@ -11,8 +11,8 @@ use std::{
 ///
 /// The test `mesh_files_cover_every_file_the_store_opens` fails when the store gains a file this
 /// list lacks. `mesh-listen-port.json` is listed ahead of the hole-punching branch (#483) that
-/// adds it, so that merge needs no change here. The private key stays last: a copy publishes the
-/// identity only after its public state.
+/// adds it, so that merge needs no change here. The enrollment sidecar travels with its public
+/// snapshot. The private key stays last so a copy publishes the identity after its public state.
 const MESH_FILES: &[&str] = &[
     "mesh-public.json",
     "mesh-routes.json",
@@ -21,6 +21,7 @@ const MESH_FILES: &[&str] = &[
     "mesh-engine.json",
     "mesh-authority.json",
     "mesh-listen-port.json",
+    "mesh-enrolment.json",
     "mesh-private-key",
 ];
 

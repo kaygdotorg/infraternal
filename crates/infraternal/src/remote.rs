@@ -777,8 +777,27 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
     Ok(tls.build())
 }
 
+/// Recognize authored Linux Mesh restore messages without exposing raw local errors.
+pub(crate) fn mesh_restore_failure(error: &io::Error) -> Option<(&'static str, &'static str)> {
+    #[cfg(all(target_os = "linux", feature = "plugin-mesh"))]
+    {
+        let refusal = error
+            .get_ref()?
+            .downcast_ref::<infraternal_plugin_mesh::node::MachineBindingError>()?;
+        Some((refusal.summary(), refusal.recovery()))
+    }
+    #[cfg(not(all(target_os = "linux", feature = "plugin-mesh")))]
+    {
+        let _ = error;
+        None
+    }
+}
+
 /// CLI output can carry only these authored public sentences, never arbitrary errors.
 pub(crate) fn public_error(error: &io::Error) -> &'static str {
+    if let Some((summary, _)) = mesh_restore_failure(error) {
+        return summary;
+    }
     match Failure::of(error) {
         Some(Failure::Dns(sentence)) => sentence,
         Some(Failure::Connect) => {
