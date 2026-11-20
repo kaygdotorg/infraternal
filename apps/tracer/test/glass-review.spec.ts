@@ -105,6 +105,8 @@ test("glass chunk fails to load: no error, no layout change, surfaces still open
   appendFileSync(`${OUT}/chunk-failure.txt`, `${JSON.stringify({ errors, state })}\n`);
   expect(state.rules, "the rules chunk was blocked").toBe(false);
   expect(errors, `errors with the glass chunk blocked: ${errors.join(" | ")}`).toEqual([]);
+  // A request still in flight when the context closes would fail its route callback and be reported as an error of the run.
+  await page.unrouteAll({ behavior: "ignoreErrors" });
   await ctx.close();
 });
 
