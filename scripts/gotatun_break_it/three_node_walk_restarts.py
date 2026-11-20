@@ -451,6 +451,13 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         if not all(announced.values()):
             raise TimeoutError(f"A and B did not learn C's announced endpoint within {ANNOUNCEMENT_BOUND_SECONDS}s: {announced}")
         row["announcement_ms"] = round((time.monotonic() - announcement_started) * 1000, 1)
+        row["endpoints_after_announcement"] = {
+            source: peer_rows(nodes[source])
+            .get(addresses["C"], {})
+            .get("counters", {})
+            .get("endpoint")
+            for source in ("S", "A", "B")
+        }
 
         stale_probe = dict(probes[MEMBERS.index("C")])
         stale_probe["lan"] = [f"10.9.0.45:{ports['C']}"]
@@ -463,6 +470,13 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
                 raise AssertionError(
                     f"{receiver} left C's authenticated roaming endpoint after a stale snapshot: {endpoint}"
                 )
+        row["endpoints_after_stale_snapshot"] = {
+            source: peer_rows(nodes[source])
+            .get(addresses["C"], {})
+            .get("counters", {})
+            .get("endpoint")
+            for source in ("S", "A", "B")
+        }
         post_snapshot = start_pingers(
             topology,
             addresses,
