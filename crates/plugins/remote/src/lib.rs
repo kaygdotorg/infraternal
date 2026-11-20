@@ -106,6 +106,9 @@ pub mod privilege_seal;
 pub mod runtime_lock;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod uninstall;
+/// Shared wire decoder for the authenticated removal action.
+#[cfg(feature = "agent")]
+pub mod uninstall_request;
 
 /// Report line for a kernel object uninstall leaves in place (#235).
 /// The server's removal reply shares it, so it lives outside the Linux-only

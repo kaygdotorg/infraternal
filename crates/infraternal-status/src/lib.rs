@@ -64,6 +64,8 @@
 
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::{
     collections::HashSet,
     fs,
@@ -291,6 +293,162 @@ pub fn probe(
         })
         .collect();
     assemble(roots, ids, units)
+}
+
+/// Read the installed system agent's `--state` only from trusted systemd sources.
+///
+/// Root CLI socket discovery uses this instead of ordinary status discovery:
+/// every matching unit file, drop-in directory, and `.conf` drop-in must be
+/// root-owned and protected from group or other writes along its path chain.
+/// An absent unit returns `None`; an unsafe or unreadable source returns a
+/// permission error so callers can refuse instead of choosing a different
+/// socket silently.
+///
+/// # Errors
+///
+/// Returns an I/O error if a unit source cannot be inspected or is unsafe.
+pub fn trusted_system_agent_state(roots: &Roots) -> std::io::Result<Option<PathBuf>> {
+    if !validate_system_unit_sources(roots, "infraternal-agent.service")? {
+        return Ok(None);
+    }
+    let status = probe(roots, &[], &|_, _| Activity::Unknown);
+    Ok(status.units.into_iter().find_map(|(unit, _)| {
+        (unit.scope == Scope::System
+            && unit.kind == Kind::Agent
+            && unit.name == "infraternal-agent.service")
+            .then_some(unit.state)
+            .flatten()
+    }))
+}
+
+/// Check every systemd source that can contribute to one system unit.
+fn validate_system_unit_sources(roots: &Roots, name: &str) -> std::io::Result<bool> {
+    let mut found = false;
+    for directory in &roots.system_units {
+        let unit = directory.join(name);
+        if source_exists(&unit)? {
+            found = true;
+            ensure_root_owned_source(&unit, false)?;
+        }
+
+        let dropins = directory.join(format!("{name}.d"));
+        if !source_exists(&dropins)? {
+            continue;
+        }
+        found = true;
+        ensure_root_owned_source(&dropins, true)?;
+        for entry in fs::read_dir(&dropins)? {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "conf")
+            {
+                ensure_root_owned_source(&path, false)?;
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Say whether a filesystem source exists without following a possible mask symlink.
+fn source_exists(path: &Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Refuse a systemd source unless it is a protected root-owned file or directory.
+fn ensure_root_owned_source(path: &Path, directory: bool) -> std::io::Result<()> {
+    if source_path_is_trusted_for(path, Path::new("/"), 0, directory) {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "system unit source is not root-owned and protected from group or other writes",
+    ))
+}
+
+/// Check a source and both its written and resolved path chains against one owner.
+fn source_path_is_trusted_for(
+    path: &Path,
+    boundary: &Path,
+    expected_owner: u32,
+    directory: bool,
+) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(boundary) = fs::canonicalize(boundary) else {
+            return false;
+        };
+        let Ok(resolved) = fs::canonicalize(path) else {
+            return false;
+        };
+        if !path.is_absolute() || !resolved.starts_with(&boundary) {
+            return false;
+        }
+        let masked = resolved == Path::new("/dev/null");
+        if !trusted_path_chain(path, &boundary, expected_owner, false)
+            || !trusted_path_chain(&resolved, &boundary, expected_owner, masked)
+        {
+            return false;
+        }
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+        if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file() || (masked && metadata.file_type().is_char_device())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, boundary, expected_owner, directory);
+        false
+    }
+}
+
+/// Check each path entry up to a trusted boundary for its owner and write mode.
+#[cfg(unix)]
+fn trusted_path_chain(path: &Path, boundary: &Path, expected_owner: u32, masked: bool) -> bool {
+    let mut current = path;
+    loop {
+        let Ok(metadata) = fs::symlink_metadata(current) else {
+            return false;
+        };
+        let symlink = metadata.file_type().is_symlink();
+        let device = masked && current == Path::new("/dev/null");
+        if !source_metadata_is_trusted(
+            metadata.uid(),
+            metadata.mode(),
+            symlink,
+            device,
+            expected_owner,
+        ) {
+            return false;
+        }
+        if current == boundary {
+            return true;
+        }
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        current = parent;
+    }
+}
+
+/// Check one source entry's owner and write bits, ignoring symlink mode bits.
+#[cfg(unix)]
+fn source_metadata_is_trusted(
+    owner: u32,
+    mode: u32,
+    symlink: bool,
+    masked_device: bool,
+    expected_owner: u32,
+) -> bool {
+    owner == expected_owner && (symlink || masked_device || mode & 0o022 == 0)
 }
 
 /// Assemble component facts after every unit has kept its own observation.
