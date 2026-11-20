@@ -17,6 +17,11 @@ const QUESTION = "tmux started automatically. Would you like to switch to the In
 const GUARD = '[ -n "$INFRATERNAL_SESSION" ] || exec tmux new-session -s main';
 
 const screen = (page: Page): Promise<string> => page.evaluate(() => (window as unknown as { __tracerTestDouble: { screenText(): string } }).__tracerTestDouble.screenText());
+/**
+ * The newest toast message. A second notice of the same tone reuses the card while the first is still leaving it (#395), so the
+ * card briefly holds both messages and a bare `.ui-toast-message` matches two; the last one is the notice just shown.
+ */
+const front = (page: Page) => page.locator(".ui-toast-message").last();
 const choice = (page: Page, name: string) => page.locator(".ui-toast-icons").getByRole("button", { name, exact: true });
 
 for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
@@ -49,12 +54,12 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       await page.waitForTimeout(300);
       await shot("confirm");
       await page.locator(".ui-confirm-yes").click();
-      await expect(page.locator(".ui-toast-message")).toContainText("Switched. tmux no longer starts in Infraternal terminals");
+      await expect(front(page)).toContainText("Switched. tmux no longer starts in Infraternal terminals");
       await expect.poll(() => screen(page)).toContain("INFRATERNAL_SESSION");
       await page.waitForTimeout(300);
       await shot("switched");
       await page.getByRole("button", { name: "Restore .zshrc", exact: true }).click();
-      await expect(page.locator(".ui-toast-message")).toHaveText(".zshrc restored. tmux starts automatically again.");
+      await expect(front(page)).toHaveText(".zshrc restored. tmux starts automatically again.");
       await expect.poll(() => screen(page)).toContain("3:  exec tmux new-session -s main");
 
       // ? opens the docs page and leaves the question up; ✗ closes it for good.
