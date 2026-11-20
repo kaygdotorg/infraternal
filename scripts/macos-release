@@ -13,9 +13,6 @@
 #   secret appears in argv:
 #     xcrun notarytool store-credentials infraternal-notary --keychain <keychain> \
 #       --key <AuthKey.p8> --key-id <KEY_ID> --issuer <ISSUER_UUID>
-# - The `infraternal` crate must build on macOS: today it does not (the session
-#   shim is Linux-only, #320, and scripts/auth-toolchain has no macOS host, D213),
-#   so a full run stops at the first cargo build. --skip-notarize still stops there.
 set -euo pipefail
 
 usage() {
@@ -262,10 +259,9 @@ cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
 export RUSTFLAGS="--remap-path-prefix=$root=/infraternal --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$target=/build"
 
-cargo build --locked --release --target "$target_triple" -p infraternal \
-    --no-default-features --features remote,desktop --bin infraternal
-cargo build --locked --release --target "$target_triple" -p infraternal-plugin-desktop \
-    --no-default-features --features desktop --bin infraternal-desktop-helper
+source scripts/release/feature-sets
+cargo build --locked --release --target "$target_triple" "${release_macos_host_cargo_args[@]}"
+cargo build --locked --release --target "$target_triple" "${release_macos_helper_cargo_args[@]}"
 
 cli="$target/$target_triple/release/infraternal"
 rust_helper="$target/$target_triple/release/infraternal-desktop-helper"
@@ -360,4 +356,4 @@ mkdir "$result_dir"
 mv "$result_dir" "$output"
 printf 'Release asset: %s/%s\n' "$output" "$archive_name"
 printf 'SHA256SUMS:\n'
-/usr/bin/cat "$output/SHA256SUMS"
+/bin/cat "$output/SHA256SUMS"

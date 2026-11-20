@@ -294,7 +294,7 @@ fn status_action() -> ActionDefinition {
     action
 }
 
-/// Register hosted command adapters against the descriptors used by the browser dispatcher.
+/// Register hosted command adapters for the browser actions this build can invoke.
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 fn hosted_server_actions() -> Vec<ActionDefinition> {
     vec![
@@ -309,6 +309,7 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
                 [],
             ),
         ),
+        #[cfg(feature = "ssh")]
         hosted_action(
             infraternal_plugin_ssh::manifest::START,
             &["hosts", "add"],
