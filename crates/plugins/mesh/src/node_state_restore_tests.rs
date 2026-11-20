@@ -205,6 +205,92 @@ fn public_state_restore_at_1000_peers() {
     );
 }
 
+/// A symlink to a runtime ID must be refused even though the link lives on disk.
+#[test]
+fn runtime_machine_id_symlink_is_not_persistent() {
+    let directory = super::tests::Directory::new();
+    let runtime = super::tests::Directory::new_in(Path::new("/dev/shm"));
+    let primary = directory.0.join("machine-id");
+    let fallback = directory.0.join("dbus-machine-id");
+    let id = "0123456789abcdef0123456789abcdef";
+    fs::write(&fallback, id).unwrap();
+    let persistent = machine_fingerprint_at(&primary, &fallback).unwrap();
+    std::os::unix::fs::symlink(&fallback, &primary).unwrap();
+    assert_eq!(
+        machine_fingerprint_at(&primary, &fallback),
+        Some(persistent)
+    );
+
+    let transient = runtime.0.join("machine-id");
+    fs::write(&transient, id).unwrap();
+    fs::remove_file(&primary).unwrap();
+    std::os::unix::fs::symlink(&transient, &primary).unwrap();
+    assert_eq!(machine_fingerprint_at(&primary, &fallback), None);
+    assert_eq!(machine_fingerprint_at(&transient, &fallback), None);
+}
+
+/// Missing machine identity leaves a fresh enrollment directory without a binding record.
+#[test]
+fn missing_machine_id_refuses_enrollment_without_writing_state() {
+    let directory = super::tests::Directory::new();
+    let enrolment = crate::enrolment::Enrolment::new(b"coordinator", "host", b"agent key");
+    let missing = machine_fingerprint_at(&directory.0.join("etc"), &directory.0.join("dbus"));
+    let result =
+        crate::node::Node::prepare_enrolled_restore_with_machine(&directory.0, enrolment, missing);
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("/etc/machine-id"));
+    assert!(!directory.0.join(ENROLMENT_FILE).exists());
+}
+
+/// A fresh OS installation must leave the original record intact and explain how to re-enroll.
+#[test]
+fn fresh_os_machine_id_requires_add_host() {
+    let directory = super::tests::Directory::new();
+    let enrolment = crate::enrolment::Enrolment::new(b"coordinator", "host", b"agent key");
+    let primary = directory.0.join("machine-id");
+    let fallback = directory.0.join("dbus-machine-id");
+    fs::write(&primary, "0123456789abcdef0123456789abcdef").unwrap();
+    let original = machine_fingerprint_at(&primary, &fallback);
+    assert!(original.is_some());
+    crate::node::Node::prepare_enrolled_restore_with_machine(
+        &directory.0,
+        enrolment.clone(),
+        original,
+    )
+    .unwrap();
+    let record = fs::read(directory.0.join(ENROLMENT_FILE)).unwrap();
+    fs::write(&primary, "fedcba9876543210fedcba9876543210").unwrap();
+    let replacement = machine_fingerprint_at(&primary, &fallback);
+    assert!(replacement.is_some());
+    assert_ne!(replacement, original);
+    let error = crate::node::Node::prepare_enrolled_restore_with_machine(
+        &directory.0,
+        enrolment,
+        replacement,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("Add host"));
+    assert_eq!(fs::read(directory.0.join(ENROLMENT_FILE)).unwrap(), record);
+}
+
+/// A pre-fix record without a fingerprint cannot establish this installation as its owner.
+#[test]
+fn unbound_enrolment_record_requires_add_host() {
+    let directory = super::tests::Directory::new();
+    let binding = directory.0.join(ENROLMENT_FILE);
+    let original =
+        br#"{"machine":null,"enrolment":{"coordinator":"ca","host":"host","agent_key":"key"}}"#;
+    fs::write(&binding, original).unwrap();
+    fs::set_permissions(&binding, fs::Permissions::from_mode(0o600)).unwrap();
+    let Err(error) = read_enrolment_with(&directory.0, || Some([1; 32])) else {
+        panic!("a record without a binding must be refused");
+    };
+    assert!(error.to_string().contains("Add host"));
+    assert_eq!(fs::read(binding).unwrap(), original);
+}
+
 /// A restored remote Mesh directory cannot start on a machine with a different ID.
 #[test]
 fn foreign_machine_mesh_restore_is_refused_before_network_setup() {

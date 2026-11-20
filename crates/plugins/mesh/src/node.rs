@@ -1,5 +1,5 @@
 //! Owns the root-only Mesh node, staged public configuration and synchronous data-plane lifecycle [163,166,198].
-pub use crate::enrolment::{Enrolment, ForeignMachine};
+pub use crate::enrolment::{Enrolment, MachineBindingError};
 pub use crate::gotatun_node::{EngineKind, EngineReason, EngineSelection};
 use crate::{
     dataplane::Config,
@@ -1034,23 +1034,42 @@ impl Node {
     /// loses stale peers and keys after ownership-checked retirement. A different machine
     /// is refused before either state or networking can change.
     /// # Errors
-    /// Refuses unsafe state, unowned kernel objects and incomplete retirement or publication.
+    /// Requires a persistent machine ID and refuses unsafe state, unowned kernel objects and
+    /// incomplete retirement or publication.
     pub fn prepare_enrolled_restore(
         path: &std::path::Path,
         enrolment: Enrolment,
     ) -> io::Result<()> {
-        use crate::node_state::{EnrolmentRecord, Store, machine_fingerprint, read_enrolment};
+        Self::prepare_enrolled_restore_with_machine(
+            path,
+            enrolment,
+            crate::node_state::machine_fingerprint(),
+        )
+    }
 
-        let saved = read_enrolment(path)?;
-        let machine = machine_fingerprint();
-        let matches = saved
+    /// Prepare the restore with a snapshot of the current machine fingerprint.
+    pub(crate) fn prepare_enrolled_restore_with_machine(
+        path: &std::path::Path,
+        enrolment: Enrolment,
+        machine: Option<[u8; 32]>,
+    ) -> io::Result<()> {
+        use crate::node_state::{Store, read_enrolment_with};
+
+        let machine = machine.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                MachineBindingError::MissingId,
+            )
+        })?;
+        let saved = read_enrolment_with(path, || Some(machine))?;
+        if saved
             .as_ref()
-            .is_some_and(|saved| saved.enrolment == enrolment);
-        if matches && saved.as_ref().and_then(|saved| saved.machine) == machine {
+            .is_some_and(|saved| saved.enrolment == enrolment)
+        {
             return Ok(());
         }
         let (store, state) = Store::open(path)?;
-        if !matches && store.has_mesh_state()? {
+        if store.has_mesh_state()? {
             // A link or filter can only be ours if saved state has an ownership proof.
             if state.backend.is_some()
                 || state
@@ -1074,7 +1093,7 @@ impl Node {
             }
             store.reset_enrolment_state(state.enabled)?;
         }
-        store.record_enrolment(path, &EnrolmentRecord { machine, enrolment })
+        store.record_enrolment(path, machine, enrolment)
     }
 
     /// Restore with an engine chosen in code, in place of `INFRATERNAL_MESH_ENGINE`.

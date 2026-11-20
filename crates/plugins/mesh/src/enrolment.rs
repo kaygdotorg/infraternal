@@ -44,8 +44,41 @@ fn hex(bytes: &[u8]) -> String {
         })
 }
 
-/// The saved machine ID is different or is unavailable on this host.
+/// Why a Linux Mesh enrollment cannot be bound to this installation.
 #[cfg(target_os = "linux")]
 #[derive(Debug, thiserror::Error)]
-#[error("Saved Mesh state belongs to a different machine or this machine has no persistent ID.")]
-pub struct ForeignMachine;
+#[error("{} {}", .summary(), .recovery())]
+pub enum MachineBindingError {
+    /// The current installation has no persistent machine ID.
+    MissingId,
+    /// The saved fingerprint belongs to a different Linux installation.
+    ForeignMachine,
+    /// The old record has no fingerprint to establish where it was created.
+    UnboundRecord,
+}
+
+#[cfg(target_os = "linux")]
+impl MachineBindingError {
+    /// Explain why the binding was refused without exposing either machine ID.
+    #[must_use]
+    pub fn summary(&self) -> &'static str {
+        match self {
+            Self::MissingId => "This Linux installation has no persistent machine ID.",
+            Self::ForeignMachine => {
+                "Saved Mesh state belongs to a different machine or an earlier Linux installation."
+            }
+            Self::UnboundRecord => "Saved Mesh state has no machine binding.",
+        }
+    }
+
+    /// Give the operator the matching recovery action.
+    #[must_use]
+    pub fn recovery(&self) -> &'static str {
+        match self {
+            Self::MissingId => "Configure a persistent /etc/machine-id, then try again.",
+            Self::ForeignMachine | Self::UnboundRecord => {
+                "Use Add host to re-enroll this installation with a fresh state directory."
+            }
+        }
+    }
+}

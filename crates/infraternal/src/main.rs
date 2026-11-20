@@ -3105,15 +3105,14 @@ fn run_remote_agent(
                 "The infraternal agent could not finish.",
                 remote::public_error,
             ),
-            if result
+            result
                 .as_ref()
                 .err()
-                .is_some_and(remote::foreign_mesh_restore)
-            {
-                "Restore this backup on the original machine or enroll this machine separately."
-            } else {
-                "Check the server address and that this machine is still enrolled, then run the command again."
-            },
+                .and_then(remote::mesh_restore_failure)
+                .map_or(
+                    "Check the server address and that this machine is still enrolled, then run the command again.",
+                    |(_, recovery)| recovery,
+                ),
             result
                 .as_ref()
                 .err()
@@ -3122,7 +3121,7 @@ fn run_remote_agent(
                         Exit::NotAllowed
                     }
                     Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
-                    None if remote::foreign_mesh_restore(error) => Exit::NotAllowed,
+                    None if remote::mesh_restore_failure(error).is_some() => Exit::NotAllowed,
                     Some(
                         remote::Failure::Refused
                         | remote::Failure::Upgrade

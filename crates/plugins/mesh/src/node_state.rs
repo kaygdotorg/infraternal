@@ -242,8 +242,8 @@ const ENROLMENT_FILE: &str = "mesh-enrolment.json";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EnrolmentRecord {
-    /// Domain-separated fingerprint of the persistent machine ID, if the host has one.
-    pub(crate) machine: Option<[u8; 32]>,
+    /// Fingerprint of the persistent machine ID. Older records without one are refused.
+    machine: Option<[u8; 32]>,
     /// Public authority, host ID and key from the enrolled infraternal agent.
     pub(crate) enrolment: crate::enrolment::Enrolment,
 }
@@ -251,21 +251,45 @@ pub(crate) struct EnrolmentRecord {
 /// Read only a persistent Linux machine ID and store its fingerprint, never the original ID.
 #[cfg(target_os = "linux")]
 pub(crate) fn machine_fingerprint() -> Option<[u8; 32]> {
-    let primary = Path::new("/etc/machine-id");
-    let dbus = Path::new("/var/lib/dbus/machine-id");
-    let (path, id) = match fs::read_to_string(primary) {
-        Ok(id) => (primary, id),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            (dbus, fs::read_to_string(dbus).ok()?)
-        }
+    machine_fingerprint_at(
+        Path::new("/etc/machine-id"),
+        Path::new("/var/lib/dbus/machine-id"),
+    )
+}
+
+/// Read the machine ID from the primary file or the legacy D-Bus location.
+#[cfg(target_os = "linux")]
+fn machine_fingerprint_at(primary: &Path, dbus: &Path) -> Option<[u8; 32]> {
+    use nix::sys::statfs::{TMPFS_MAGIC, fstatfs};
+
+    let path = match fs::canonicalize(primary) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::canonicalize(dbus).ok()?,
         Err(_) => return None,
     };
-    let id = id.trim();
-    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if path.starts_with("/run") || path.starts_with("/var/run") {
         return None;
     }
-    // A value mounted over the systemd file from /run may change on each boot.
-    if fs::symlink_metadata(path).ok()?.dev() != fs::metadata(path.parent()?).ok()?.dev() {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
+        .open(&path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    // Check the descriptor we read, including an ID bind-mounted over the disk file.
+    if !metadata.is_file()
+        || metadata.dev() != fs::metadata(path.parent()?).ok()?.dev()
+        || fstatfs(&file).ok()?.filesystem_type() == TMPFS_MAGIC
+    {
+        return None;
+    }
+    let mut id = String::new();
+    // A machine ID is 32 hex bytes with an optional newline. Bound reads even of invalid files.
+    if file.take(65).read_to_string(&mut id).ok()? == 65 {
+        return None;
+    }
+    let id = id.trim();
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     let mut digest = openssl::sha::Sha256::new();
@@ -277,14 +301,30 @@ pub(crate) fn machine_fingerprint() -> Option<[u8; 32]> {
 /// Read the sidecar and refuse a copy bound to a different or unavailable machine ID.
 #[cfg(target_os = "linux")]
 pub(crate) fn read_enrolment(parent: &Path) -> io::Result<Option<EnrolmentRecord>> {
+    read_enrolment_with(parent, machine_fingerprint)
+}
+
+/// Read the binding and compare it with the current machine fingerprint.
+#[cfg(target_os = "linux")]
+pub(crate) fn read_enrolment_with(
+    parent: &Path,
+    fingerprint: impl FnOnce() -> Option<[u8; 32]>,
+) -> io::Result<Option<EnrolmentRecord>> {
+    use crate::enrolment::MachineBindingError;
+
     let record: Option<EnrolmentRecord> = read_public(&parent.join(ENROLMENT_FILE))?;
-    if let Some(machine) = record.as_ref().and_then(|record| record.machine)
-        && Some(machine) != machine_fingerprint()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            crate::enrolment::ForeignMachine,
-        ));
+    if let Some(record) = &record {
+        let refusal = match (record.machine, fingerprint()) {
+            (_, None) => Some(MachineBindingError::MissingId),
+            (None, Some(_)) => Some(MachineBindingError::UnboundRecord),
+            (Some(saved), Some(current)) if saved != current => {
+                Some(MachineBindingError::ForeignMachine)
+            }
+            _ => None,
+        };
+        if let Some(error) = refusal {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, error));
+        }
     }
     Ok(record)
 }
@@ -393,12 +433,17 @@ impl Store {
     pub(crate) fn record_enrolment(
         &self,
         parent: &Path,
-        record: &EnrolmentRecord,
+        machine: [u8; 32],
+        enrolment: crate::enrolment::Enrolment,
     ) -> io::Result<()> {
         let _writer = lock_mesh_store_writer(parent, &self.directory_lease)?;
+        let record = EnrolmentRecord {
+            machine: Some(machine),
+            enrolment,
+        };
         write_public(
             &parent.join(ENROLMENT_FILE),
-            &serde_json::to_vec(record).map_err(io::Error::other)?,
+            &serde_json::to_vec(&record).map_err(io::Error::other)?,
         )
     }
 
@@ -1543,12 +1588,17 @@ pub(crate) mod tests {
     pub(crate) struct Directory(pub(crate) PathBuf);
     impl Directory {
         pub(crate) fn new() -> Self {
+            Self::new_in(&std::env::temp_dir())
+        }
+
+        /// Create a private, automatically removed fixture on the specified filesystem.
+        pub(crate) fn new_in(parent: &Path) -> Self {
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("test clock")
                 .as_nanos();
             let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let path = parent.join(format!(
                 "infraternal-mesh-state-{}-{nonce}-{sequence}",
                 std::process::id()
             ));
