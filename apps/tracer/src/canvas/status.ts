@@ -6,6 +6,27 @@
  * down again (a flow's own toast is not ours to dismiss).
  */
 import type { ToastController } from "../../../../packages/ui/src/toast";
+import { CONNECTION_LIMIT_REASON, plainCloseReason } from "../close-reasons";
+
+/**
+ * Status lines another surface already says: the account's connection limit and a tab paused for a newer one are the
+ * page's own notice (canvas/takeover-notice.ts, #523), so a terminal's copy of them would be a second toast.
+ */
+const SAID_ELSEWHERE = new Set([plainCloseReason(CONNECTION_LIMIT_REASON)]);
+
+/** Formats the signed infraternal agent status without mistaking a signal for a shell exit code. */
+export function exitStatusText(status: number): string {
+  if (status === 0) return "Shell exited.";
+  if (status > 0) return `Shell exited with status ${status}. Open a new shell to continue.`;
+  return `Shell was stopped by signal ${-status}. Open a new shell to continue.`;
+}
+
+/** Names the recorded reason in an ended window; missing statuses mean the host vanished, and negative statuses name signals. */
+export function endedStripText(status: number | undefined): string {
+  if (status === undefined) return "Session ended";
+  if (status < 0) return `Stopped by signal ${-status}`;
+  return `Session ended · Exit ${status}`;
+}
 
 /** Creates a detached status element for one terminal and relays its text to the toast. Returns both. */
 export function createStatusRelay(toast: ToastController): { element: HTMLElement; dispose(): void } {
@@ -21,7 +42,7 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
   let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
   const observer = new MutationObserver(() => {
     const message = element.textContent?.trim() ?? "";
-    if (message && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
+    if (message && !SAID_ELSEWHERE.has(message) && !message.startsWith("Shell exited") && !/(…|\.\.\.)$/.test(message) && !/reconnect|resum|connecting|starting|paused|approximate/i.test(message)) {
       clearTimeout(clearTimer);
       clearTimer = 0;
       relaying = true;

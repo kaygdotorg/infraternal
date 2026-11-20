@@ -1,7 +1,7 @@
 //! Exercise fresh, dev and production migration histories without weakening checksum validation [19], #169.
 use super::*;
+use sqlx::SqlStr;
 use sqlx::migrate::{Migration, MigrationType};
-use std::borrow::Cow;
 
 const INDEX: &str = include_str!("../../migrations/0022_terminal_exit_snapshot_index.sql");
 const MESH: &str = include_str!("../../migrations/0020_mesh_dataplane.sql");
@@ -14,6 +14,7 @@ async fn database() -> SqlitePool {
         .unwrap()
 }
 
+/// Seed the dev or production numbered history with its original migration digests.
 async fn history(pool: &SqlitePool, production: bool) {
     let mut migrations = sqlx::migrate!("./migrations");
     migrations.migrations.to_mut().retain(|migration| {
@@ -25,7 +26,7 @@ async fn history(pool: &SqlitePool, production: bool) {
             20,
             "terminal exit snapshot index".into(),
             MigrationType::Simple,
-            Cow::Borrowed(INDEX),
+            SqlStr::from_static(INDEX),
             false,
         ));
     }
@@ -34,6 +35,7 @@ async fn history(pool: &SqlitePool, production: bool) {
         .execute(pool).await.unwrap();
 }
 
+/// Apply the shipping upgrade twice and check the resulting schema and migration checksum.
 async fn upgrade(pool: &SqlitePool) {
     Auth::new(pool.clone(), "localhost", "https://localhost")
         .await
@@ -55,7 +57,7 @@ async fn upgrade(pool: &SqlitePool) {
             20,
             "mesh".into(),
             MigrationType::Simple,
-            Cow::Borrowed(MESH),
+            SqlStr::from_static(MESH),
             false
         )
         .checksum
@@ -100,6 +102,7 @@ async fn dev_history_keeps_its_mesh_checksum_and_data() {
     );
 }
 
+/// Preserve the earlier production index checksum and seeded account data across the upgrade.
 #[tokio::test]
 async fn production_history_keeps_index_checksum_and_data() {
     let pool = database().await;
@@ -116,7 +119,7 @@ async fn production_history_keeps_index_checksum_and_data() {
             20,
             "index".into(),
             MigrationType::Simple,
-            Cow::Borrowed(INDEX),
+            SqlStr::from_static(INDEX),
             false
         )
         .checksum
@@ -250,7 +253,7 @@ async fn live_production_retirement_history_survives_dev_upgrade() {
         20,
         "terminal exit snapshot index".into(),
         MigrationType::Simple,
-        Cow::Borrowed(INDEX),
+        SqlStr::from_static(INDEX),
         false,
     ));
     retirement

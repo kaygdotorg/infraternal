@@ -9,10 +9,18 @@ use infraternal_agent::{
     remote_tls::{self, Identity},
 };
 use openssl::x509::X509;
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    io,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    },
+};
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Notify, mpsc},
     task::JoinSet,
 };
 use uuid::Uuid;
@@ -183,7 +191,138 @@ pub(crate) struct RemoteHosts(
     bool,
     pub(crate) crate::remote_inventory::InventoryChanges,
     pub(crate) Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
+    /// Root upgrades' successors waiting for their promotion's driver (D376).
+    pub(crate) Arc<crate::remote_successor::Successors>,
+    /// Short-lived per-host state that closes terminal admission during promotion.
+    Arc<std::sync::Mutex<HashMap<Uuid, std::sync::Weak<TerminalAdmission>>>>,
 );
+
+/// Tracks one host's in-flight opens and whether a promotion has closed admission.
+///
+/// The promotion bit and opener count share one atomic word, so opening and
+/// closing admission have a single linearization point without a lock held over
+/// remote or database awaits.
+struct TerminalAdmission {
+    /// The high bit closes admission; the remaining bits count admitted opens.
+    state: AtomicUsize,
+    /// Wakes the single promotion that is waiting for admitted opens to finish.
+    opens_drained: Notify,
+}
+
+/// Why a host's terminal admission turned an open away.
+///
+/// Only [`AdmissionRefused::Upgrading`] tells the person the host is being upgraded (D393), so it
+/// must come from the promotion guard's own bit and nothing else: a broken admission map would
+/// otherwise make every host look "being upgraded" for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionRefused {
+    /// A root upgrade (D376) holds this host's admission closed. It reopens by itself when the
+    /// promotion guard drops: on commit, rollback, failure or cancel.
+    Upgrading,
+    /// Any other refusal: the admission map's lock was poisoned, or the open counter is full.
+    Unavailable,
+}
+
+/// Keeps a remote terminal open inside its admission window until its row is persisted.
+pub(crate) struct TerminalOpenGuard {
+    /// Its count keeps a promotion from passing the final session census.
+    admission: Arc<TerminalAdmission>,
+}
+
+/// Keeps a host's terminal-open admission closed for one complete promotion.
+pub(crate) struct TerminalPromotionGuard {
+    /// Dropping the guard reopens this host without holding a lock across awaits.
+    admission: Arc<TerminalAdmission>,
+}
+
+/// The highest bit marks a promotion; every lower bit is available for open counts.
+const PROMOTION_ACTIVE: usize = 1usize << (usize::BITS - 1);
+/// Counts in-flight opens without allowing the promotion flag to be overwritten.
+const OPEN_COUNT_MASK: usize = !PROMOTION_ACTIVE;
+
+impl TerminalAdmission {
+    /// Admit one open if promotion has not closed this host, refusing counter overflow.
+    ///
+    /// The refusal names its cause: the promotion bit is `Upgrading`, a full counter is
+    /// `Unavailable`. Both are read from the same atomic word the open would claim, so the reason
+    /// is exact at the moment of refusal.
+    fn admit(self: &Arc<Self>) -> Result<TerminalOpenGuard, AdmissionRefused> {
+        let mut current = self.state.load(AtomicOrdering::Acquire);
+        loop {
+            if current & PROMOTION_ACTIVE != 0 {
+                return Err(AdmissionRefused::Upgrading);
+            }
+            if current & OPEN_COUNT_MASK == OPEN_COUNT_MASK {
+                return Err(AdmissionRefused::Unavailable);
+            }
+            match self.state.compare_exchange_weak(
+                current,
+                current + 1,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(TerminalOpenGuard {
+                        admission: Arc::clone(self),
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Close admission, then wait until every already-admitted open has finished.
+    async fn block(self: &Arc<Self>) -> Result<TerminalPromotionGuard, ()> {
+        let mut current = self.state.load(AtomicOrdering::Acquire);
+        loop {
+            if current & PROMOTION_ACTIVE != 0 {
+                return Err(());
+            }
+            match self.state.compare_exchange_weak(
+                current,
+                current | PROMOTION_ACTIVE,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+
+        // Construct the reopening guard before waiting so cancellation cannot
+        // leave terminal admission closed forever.
+        let promotion = TerminalPromotionGuard {
+            admission: Arc::clone(self),
+        };
+        loop {
+            let notified = self.opens_drained.notified();
+            if self.state.load(AtomicOrdering::Acquire) & OPEN_COUNT_MASK == 0 {
+                break;
+            }
+            notified.await;
+        }
+        Ok(promotion)
+    }
+}
+
+impl Drop for TerminalOpenGuard {
+    /// Release this open and wake a promotion when it was the final in-flight one.
+    fn drop(&mut self) {
+        let previous = self.admission.state.fetch_sub(1, AtomicOrdering::AcqRel);
+        if previous & OPEN_COUNT_MASK == 1 && previous & PROMOTION_ACTIVE != 0 {
+            self.admission.opens_drained.notify_one();
+        }
+    }
+}
+
+impl Drop for TerminalPromotionGuard {
+    /// Reopen this host when promotion commits, rolls back or is cancelled.
+    fn drop(&mut self) {
+        self.admission
+            .state
+            .fetch_and(OPEN_COUNT_MASK, AtomicOrdering::Release);
+    }
+}
 
 /// Identity and admission limits are shared; this factory never retains its host map.
 struct ListenerFactory {
@@ -287,6 +426,7 @@ impl RemoteHosts {
             host.admission.clone(),
         )))
     }
+    /// An empty registry whose enrollment signs with `source` (none: no CA yet).
     pub(crate) fn from_source(source: Option<Arc<dyn crate::ca::CaKeySource>>) -> Self {
         Self(
             Arc::default(),
@@ -295,6 +435,8 @@ impl RemoteHosts {
             Arc::default(),
             false,
             crate::remote_inventory::InventoryChanges::default(),
+            Arc::default(),
+            Arc::default(),
             Arc::default(),
         )
     }
@@ -358,10 +500,81 @@ impl RemoteHosts {
             )
         })
     }
+    /// Find or create a host's admission state without keeping one per host forever.
+    ///
+    /// The map mutex protects only a lookup or insertion; no await happens while it is held.
+    /// Weak entries let state disappear after its last open or promotion finishes.
+    fn terminal_admission(&self, id: Uuid) -> Result<Arc<TerminalAdmission>, ()> {
+        let mut admissions = self.8.lock().map_err(|_| ())?;
+        admissions.retain(|_, admission| admission.strong_count() > 0);
+        if let Some(admission) = admissions.get(&id).and_then(std::sync::Weak::upgrade) {
+            return Ok(admission);
+        }
+        let admission = Arc::new(TerminalAdmission {
+            state: AtomicUsize::new(0),
+            opens_drained: Notify::new(),
+        });
+        admissions.insert(id, Arc::downgrade(&admission));
+        Ok(admission)
+    }
+
+    /// Refuse terminal opens while a promotion owns its admission window.
+    ///
+    /// The error says why (see [`AdmissionRefused`]); a poisoned admission map is `Unavailable`,
+    /// never `Upgrading`. Callers check that the person owns the host first, so the upgrade state
+    /// is only ever told to the host's owner.
+    pub(crate) fn admit_terminal_open(
+        &self,
+        id: Uuid,
+    ) -> Result<TerminalOpenGuard, AdmissionRefused> {
+        self.terminal_admission(id)
+            .map_err(|()| AdmissionRefused::Unavailable)?
+            .admit()
+    }
+
+    /// Acquire terminal-open exclusion for the duration of a promotion.
+    pub(crate) async fn block_terminal_opens(
+        &self,
+        id: Uuid,
+    ) -> Result<TerminalPromotionGuard, ()> {
+        self.terminal_admission(id)?.block().await
+    }
+
     /// The CA key source the enrollment issuer uses; mesh SSH signs with it too (#221).
     pub(crate) fn ca_source(&self) -> Option<Arc<dyn crate::ca::CaKeySource>> {
         self.1.clone()
     }
+    /// The live link of host `id`, which a root upgrade binds itself to
+    /// (D376, J415 R7): its actor, its uid, the exact certificate it was
+    /// admitted with, and its generation (which changes when another link
+    /// replaces it). `None` when the host has no live link.
+    pub(crate) async fn binding(&self, id: Uuid) -> Option<(EmbeddedAgent, u32, [u8; 32], Uuid)> {
+        let hosts = self.0.lock().await;
+        let host = hosts.get(&id)?;
+        host.authority.permits().then(|| {
+            (
+                host.actor.clone(),
+                host.uid,
+                host.authority.predecessor(),
+                host.generation,
+            )
+        })
+    }
+
+    /// The current link generation of host `id`, if it has a live link.
+    pub(crate) async fn generation(&self, id: Uuid) -> Option<Uuid> {
+        let hosts = self.0.lock().await;
+        hosts
+            .get(&id)
+            .filter(|host| host.authority.permits())
+            .map(|host| host.generation)
+    }
+
+    /// Root upgrades' successors waiting for their driver.
+    pub(crate) fn successors(&self) -> &crate::remote_successor::Successors {
+        &self.7
+    }
+
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
         self.0
             .lock()
@@ -497,6 +710,10 @@ impl RemoteHosts {
         if let Some(person) = authority.cleanup_person() {
             return deliver_login_cleanup(authority, link, person).await;
         }
+        // A root upgrade's successor never enters the registry (J415 R2).
+        if authority.successor_authority().is_some() {
+            return crate::remote_successor::deliver(&self.7, authority, link).await;
+        }
         if link.primed() {
             return self.admit_primed(authority, link).await;
         }
@@ -513,6 +730,21 @@ impl RemoteHosts {
         let generation = Uuid::new_v4();
         let peer = link.peer_address();
         let caps = link.peer_capabilities();
+        // After a root upgrade's handover the host's uid changed. The old
+        // epoch's actor was cut, but its retirement task may not have removed
+        // it yet; a live actor of another uid is still refused (R2).
+        if hosts
+            .get(&id)
+            .is_some_and(|host| host.uid != uid && !host.authority.permits())
+        {
+            let channel = hosts.remove(&id).and_then(|host| host.channel);
+            if let Some(channel) = channel
+                && let Some(runtime) = &runtime
+            {
+                runtime.detach_node_if(&channel).await;
+            }
+        }
+        let rootful = authority.identity.mode == crate::enrollment::Mode::Rootful;
         if let Some(host) = hosts.get_mut(&id) {
             if host.uid != uid {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -590,6 +822,15 @@ impl RemoteHosts {
         }
         if let Some(host) = hosts.get(&id) {
             host.authority.bind_login_actor(&host.actor);
+            // A promoted host's new root agent retires the rootless install
+            // and leaves standby, from the durable outbox (J415 R5).
+            if rootful {
+                tokio::spawn(crate::remote_successor::retire_predecessor(
+                    host.authority.store(),
+                    host.actor.clone(),
+                    id,
+                ));
+            }
         }
         if let Some(runtime) = runtime
             && let Some(host) = hosts.get_mut(&id)

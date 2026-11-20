@@ -69,9 +69,15 @@ impl Fixture {
         let bridge = SourceBridge::new(runtime.clone(), executable, 10);
         Self { runtime, bridge }
     }
+    /// Read complete helper events while ignoring a final record the helper is still appending.
     fn events(&self) -> Vec<Value> {
-        fs::read_to_string(self.runtime.join("events.jsonl"))
-            .unwrap_or_default()
+        let bytes = fs::read(self.runtime.join("events.jsonl")).unwrap_or_default();
+        let complete_end = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        std::str::from_utf8(&bytes[..complete_end])
+            .expect("complete helper events are valid UTF-8")
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()

@@ -32,6 +32,10 @@ use tokio::{
 const CONTROL_STREAM: u32 = 0;
 // Callers await bounded command capacity; output never waits on a browser receiver.
 const COMMAND_CAPACITY: usize = 64;
+/// Largest input of a `privilege.*` call: one pump of relay bytes, base64 in
+/// JSON (D376, #399). Matches the infraternal agent's own bound for these
+/// actions and stays under the protocol's 4 MiB frame.
+pub(crate) const PRIVILEGE_INPUT_BYTES: usize = 2 * 1024 * 1024;
 // Trusted lifecycle requests have their own mailbox and never consume ordinary
 // command or pending-call quota. Only authorized host removal can produce them.
 // Call ids are opaque u32 values on the wire. Only opportunistic login
@@ -41,9 +45,11 @@ const PREPARATION_CALL_BIT: u32 = 1 << 31;
 const RETIREMENT_CALL_BIT: u32 = 1 << 30;
 const BACKGROUND_CALL_BITS: u32 = PREPARATION_CALL_BIT | RETIREMENT_CALL_BIT;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
-// A default 1MiB grant can arrive in 256 bulk PTY frames while forwarding awaits I/O.
-// Credits bound payload bytes; frame slots separately bound small outputs and notices.
-const OUTPUT_CAPACITY: usize = 256;
+/// Each browser stream's output queue, bounded in bytes tied to the credit window [D381, #477].
+#[path = "embedded_output_queue.rs"]
+mod output_queue;
+use output_queue::{OUTPUT_QUEUE_SLOTS, OutputQueue};
+/// The most unspent output credit one browser stream may hold; it also sizes the queue cap.
 const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 // Bounded actor input queues backpressure each attachment forwarding worker.
 const INPUT_CAPACITY: usize = 4;
@@ -295,8 +301,12 @@ pub(crate) struct EmbeddedAgent {
     #[cfg(feature = "remote")]
     cleanup: mpsc::UnboundedSender<Retirement>,
     changes: tokio::sync::watch::Receiver<()>,
+    restarts: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
     session_inventory: watch::Sender<SessionInventoryState>,
+    /// The OS the host's infraternal agent named in its latest Hello ("macOS" or
+    /// "Linux"), or `None` before a Hello, for the server itself and for older agents.
+    reported_os: watch::Sender<Option<&'static str>>,
 }
 
 /// Weak retirement routing never keeps a remote infraternal agent actor alive.
@@ -341,22 +351,44 @@ impl EmbeddedAgent {
         changes
     }
 
+    /// Subscribe to future embedded infraternal agent process replacements.
+    pub(crate) fn restarts(&self) -> tokio::sync::watch::Receiver<()> {
+        let mut restarts = self.restarts.clone();
+        restarts.borrow_and_update();
+        restarts
+    }
+
     /// Start the on-demand agent supervisor for the server's own executable.
+    #[cfg(any(not(target_os = "linux"), test))]
     pub fn spawn(executable: PathBuf) -> Self {
+        Self::spawn_inner(executable, None)
+    }
+
+    /// Start the embedded node with mesh files stored apart from volatile sessions.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spawn_with_mesh_state(executable: PathBuf, mesh_state: PathBuf) -> Self {
+        Self::spawn_inner(executable, Some(mesh_state))
+    }
+
+    /// Build the on-demand supervisor with its optional Mesh-only state path.
+    fn spawn_inner(executable: PathBuf, mesh_state: Option<PathBuf>) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable,
+                mesh_state,
                 initial: None,
             },
             receiver,
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         Self {
@@ -364,8 +396,10 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 
@@ -376,6 +410,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (_changes, notice) = tokio::sync::watch::channel(());
+        let (_restarts, restart_notice) = tokio::sync::watch::channel(());
         drop(receiver);
         #[cfg(feature = "remote")]
         drop(cleanup_rx);
@@ -385,8 +420,10 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 
@@ -397,18 +434,22 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (accepts, incoming) = mpsc::channel(1);
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
+        let (reported_os, _) = watch::channel(None);
         tokio::spawn(run_actor(
             Source::Remote {
                 incoming,
                 uid,
                 pending: None,
+                reported_os: reported_os.clone(),
             },
             receiver,
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         (
@@ -417,8 +458,10 @@ impl EmbeddedAgent {
                 #[cfg(feature = "remote")]
                 cleanup,
                 changes: notice,
+                restarts: restart_notice,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
                 session_inventory,
+                reported_os,
             },
             accepts,
         )
@@ -647,9 +690,47 @@ impl EmbeddedAgent {
         result.await.map_err(|_| AgentError::Unavailable)?
     }
 
+    /// Calls one of the rootless infraternal agent's `privilege.*` actions of
+    /// a root upgrade (D376, #399).
+    ///
+    /// Separate from [`Self::call`] because `privilege.pump` carries relay
+    /// bytes (install steps and the payload) and so needs up to
+    /// [`PRIVILEGE_INPUT_BYTES`]; every other action keeps the 8 KiB bound.
+    /// The infraternal agent routes these outside its plugin worker.
+    pub(crate) async fn privilege_call(
+        &self,
+        action_id: &'static str,
+        input_json: Vec<u8>,
+    ) -> Result<Vec<u8>, AgentError> {
+        if !action_id.starts_with("privilege.") || input_json.len() > PRIVILEGE_INPUT_BYTES {
+            return Err(AgentError::Rejected);
+        }
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::Call {
+                action_id: action_id.to_owned(),
+                input_json,
+                reply,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        result.await.map_err(|_| AgentError::Unavailable)?
+    }
+
+    /// Stand in for an agent census in tests of code that reads it.
+    #[cfg(test)]
+    pub(crate) fn set_session_inventory_for_test(&self, state: SessionInventoryState) {
+        self.session_inventory.send_replace(state);
+    }
+
     /// Watch the latest authoritative live-shim set reported by this infraternal agent.
     pub(crate) fn session_inventory(&self) -> watch::Receiver<SessionInventoryState> {
         self.session_inventory.subscribe()
+    }
+
+    /// The OS the host's infraternal agent named in its latest Hello, if it named one.
+    pub(crate) fn reported_os(&self) -> Option<&'static str> {
+        *self.reported_os.borrow()
     }
 
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
@@ -686,7 +767,7 @@ impl EmbeddedAgent {
         stream_id: u32,
         monitored: bool,
     ) -> Result<TerminalAttachment, AgentError> {
-        let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
+        let (output_tx, output) = mpsc::channel(OUTPUT_QUEUE_SLOTS);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
         let (input_credit, input_acked) = watch::channel(last_in_seq);
         let id = self
@@ -725,22 +806,26 @@ impl EmbeddedAgent {
         })
     }
 
+    /// Build an embedded supervisor around an already-connected test socket.
     #[cfg(test)]
     pub(crate) fn from_test_socket(stream: UnixStream) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
                 executable: PathBuf::new(),
+                mesh_state: None,
                 initial: Some(stream),
             },
             receiver,
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         Self {
@@ -748,8 +833,10 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 }
@@ -838,6 +925,8 @@ enum Command {
     },
 }
 
+/// The host-link actor's state for one browser attachment: its cursors, retained unacknowledged
+/// input, granted output credit, route liveness, and the byte-bounded queue its output goes to.
 struct AttachmentState {
     session_id: [u8; 16],
     stream_id: u32,
@@ -856,7 +945,8 @@ struct AttachmentState {
     // The same actor tick owns the lease; a Pong never needs a payload forwarder.
     route: Option<Liveness>,
     proof_rebind_pending: bool,
-    output: mpsc::Sender<TerminalOutput>,
+    // Every send goes through the byte-bounded queue so its ledger sees each item.
+    output: OutputQueue,
 }
 
 enum Peer {
@@ -868,6 +958,7 @@ enum Peer {
     Remote(Arc<RemoteLink>),
 }
 
+/// Describes how the server supervisor reconnects to an embedded or remote child.
 enum Source {
     /// Already-greeted fixture links expose actor retry policy under a paused clock.
     #[cfg(test)]
@@ -877,6 +968,7 @@ enum Source {
     },
     Embedded {
         executable: PathBuf,
+        mesh_state: Option<PathBuf>,
         initial: Option<UnixStream>,
     },
     #[cfg(feature = "remote")]
@@ -884,10 +976,15 @@ enum Source {
         incoming: mpsc::Receiver<RemoteLink>,
         uid: u32,
         pending: Option<Box<RemoteLink>>,
+        /// Where each greeted link publishes the OS its agent named (#146).
+        reported_os: watch::Sender<Option<&'static str>>,
     },
 }
 
 impl Source {
+    /// Open the next child connection, consuming the inherited socket on first use.
+    /// # Errors
+    /// Returns unavailable when the child process or remote channel cannot connect.
     async fn connect(&mut self) -> Result<AgentConnection, AgentError> {
         match self {
             #[cfg(test)]
@@ -902,20 +999,22 @@ impl Source {
             }
             Self::Embedded {
                 executable,
+                mesh_state,
                 initial,
-            } => connect_agent(executable, initial.take()).await,
+            } => connect_agent(executable, initial.take(), mesh_state.as_deref()).await,
             #[cfg(feature = "remote")]
             Self::Remote {
                 incoming,
                 uid,
                 pending,
+                reported_os,
             } => {
                 let link = if let Some(link) = pending.take() {
                     *link
                 } else {
                     incoming.recv().await.ok_or(AgentError::Unavailable)?
                 };
-                connect_remote(link, *uid).await
+                connect_remote(link, *uid, reported_os).await
             }
         }
     }
@@ -948,8 +1047,15 @@ impl Source {
     }
 }
 
+/// Greets one admitted host link: sends the server Hello, reads the agent's,
+/// records the capabilities and the OS the agent named (#146), and wraps the
+/// link as the actor's connection. The whole greeting has a 5 s deadline.
 #[cfg(feature = "remote")]
-async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, AgentError> {
+async fn connect_remote(
+    link: RemoteLink,
+    uid: u32,
+    reported_os: &watch::Sender<Option<&'static str>>,
+) -> Result<AgentConnection, AgentError> {
     let mut receive = BytesMut::with_capacity(4096);
     let mut scratch = vec![0; READ_CHUNK];
     let hello = Frame::Hello {
@@ -982,6 +1088,11 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
                     }
                     link.hello(&decoded.frame)
                         .map_err(|_| AgentError::Protocol)?;
+                    if let Frame::Hello { client_info, .. } = decoded.frame {
+                        // Only the exact forms the agent sends are kept (#146).
+                        reported_os
+                            .send_replace(infraternal_agent::host_os::reported_os(client_info));
+                    }
                     receive.advance(decoded.wire_len);
                     return Ok(());
                 }
@@ -1048,6 +1159,11 @@ impl Drop for AgentConnection {
             if let Peer::Remote(link) = &self.peer {
                 link.retire();
             }
+        }
+        // Runtime cancellation can bypass the async connection cleanup task. Reap the embedded
+        // child before this drop returns so no local writer survives a server restart handoff.
+        if let Some(pid) = self.pid.take() {
+            stop_child_sync(pid);
         }
     }
 }
@@ -1206,11 +1322,13 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
+/// Run the embedded host actor and notify observers whenever its infraternal agent reconnects.
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
     #[cfg(feature = "remote")] mut cleanup: mpsc::UnboundedReceiver<Retirement>,
     changes: tokio::sync::watch::Sender<()>,
+    restarts: tokio::sync::watch::Sender<()>,
     session_inventory: watch::Sender<SessionInventoryState>,
 ) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
@@ -1223,6 +1341,7 @@ async fn run_actor(
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
+    let mut connected_once = false;
     #[cfg(feature = "remote")]
     let mut hot = priming::State::default();
     #[cfg(feature = "remote")]
@@ -1300,6 +1419,14 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
+                // Remote admission replaces plugin workers itself, including
+                // after path promotion. The embedded worker survives replacement.
+                if !source.remote() {
+                    if connected_once {
+                        restarts.send_replace(());
+                    }
+                    connected_once = true;
+                }
                 fresh_host_lease(&mut liveness, &mut doubted);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
@@ -1597,14 +1724,19 @@ fn after_loss(backoff: Duration, connected_at: std::time::Instant) -> Duration {
     }
 }
 
+/// Start or attach to the embedded infraternal agent and finish its handshake.
+/// # Errors
+/// Returns unavailable when the child cannot start or the channel handshake fails.
 async fn connect_agent(
     executable: &Path,
     initial: Option<UnixStream>,
+    mesh_state: Option<&Path>,
 ) -> Result<AgentConnection, AgentError> {
     let (mut socket, pid) = if let Some(socket) = initial {
         (socket, None)
     } else {
-        spawn_socketpair_agent(executable).map_err(|_| AgentError::Unavailable)?
+        spawn_socketpair_agent_with_mesh_state(executable, mesh_state)
+            .map_err(|_| AgentError::Unavailable)?
     };
     let setup = async {
         let mut encode = Vec::with_capacity(128);
@@ -2339,7 +2471,7 @@ async fn process_command(
                     replaying: false,
                     route: monitored.then(Liveness::new),
                     proof_rebind_pending: false,
-                    output,
+                    output: output.into(),
                 },
             );
             let _ = reply.send(Ok((attachment_id, stream_id)));
@@ -3430,9 +3562,26 @@ fn decode_session_id(value: &str) -> Option<[u8; 16]> {
         .then(|| parsed.into_bytes())
 }
 
-#[cfg(unix)]
+/// Spawn a child with its default paths for process-boundary regression tests.
+/// # Errors
+/// Returns unavailable when socket, spawn or stream setup fails.
+#[cfg(all(test, unix))]
 fn spawn_socketpair_agent(
     executable: &std::path::Path,
+) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
+    spawn_socketpair_agent_with_mesh_state(executable, None)
+}
+
+/// Spawn the embedded child with a private Mesh-only state override when present.
+///
+/// The ordinary `--state` remains unset, so session rendezvous and non-Mesh plugin files retain
+/// their existing runtime location.
+/// # Errors
+/// Returns unavailable when socket, argument, spawn or stream setup fails.
+#[cfg(unix)]
+fn spawn_socketpair_agent_with_mesh_state(
+    executable: &std::path::Path,
+    mesh_state: Option<&std::path::Path>,
 ) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
     use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, posix_spawn};
     use std::{
@@ -3444,12 +3593,19 @@ fn spawn_socketpair_agent(
     let (parent, child) = StdUnixStream::pair().map_err(|_| AgentError::Unavailable)?;
     let path =
         CString::new(executable.as_os_str().as_bytes()).map_err(|_| AgentError::Unavailable)?;
-    let argv = [
+    let mut arguments = vec![
         path.clone(),
         CString::new("agent").map_err(|_| AgentError::Unavailable)?,
         CString::new("--fd").map_err(|_| AgentError::Unavailable)?,
         CString::new("3").map_err(|_| AgentError::Unavailable)?,
     ];
+    if let Some(mesh_state) = mesh_state {
+        arguments.push(CString::new("--mesh-state").map_err(|_| AgentError::Unavailable)?);
+        arguments.push(
+            CString::new(mesh_state.as_os_str().as_bytes()).map_err(|_| AgentError::Unavailable)?,
+        );
+    }
+    let argv: Vec<_> = arguments.iter().map(CString::as_c_str).collect();
     let environment = std::env::vars_os()
         .map(|(key, value)| {
             let mut entry = key.as_os_str().as_bytes().to_vec();
@@ -3497,49 +3653,68 @@ fn spawn_socketpair_agent(
     Ok((stream, Some(pid)))
 }
 
+/// Spawn the embedded child with an optional private Mesh path on Unix platforms.
+/// # Errors
+/// Returns unavailable on platforms without inherited Unix socketpairs.
 #[cfg(not(unix))]
-fn spawn_socketpair_agent(
+fn spawn_socketpair_agent_with_mesh_state(
     _executable: &std::path::Path,
+    _mesh_state: Option<&std::path::Path>,
 ) -> Result<(UnixStream, Option<nix::unistd::Pid>), AgentError> {
     Err(AgentError::Unavailable)
 }
 
+/// Stop one embedded child and wait for its process to finish.
 #[cfg(unix)]
 async fn stop_child(pid: nix::unistd::Pid) {
+    let _ = tokio::task::spawn_blocking(move || stop_child_sync(pid)).await;
+}
+
+/// Terminate and reap one embedded child even when no async runtime remains.
+///
+/// Actor cancellation runs `AgentConnection::drop` synchronously, before a restart can hand mesh
+/// state to an older build. Keep the graceful signal window, then wait after `SIGKILL` so no
+/// writer can survive that handoff.
+#[cfg(unix)]
+fn stop_child_sync(pid: nix::unistd::Pid) {
     use nix::sys::{
         signal::{Signal, kill},
         wait::{WaitPidFlag, WaitStatus, waitpid},
     };
-    // Keep escalation inside the blocking task: runtime cancellation may drop
-    // its async waiter, but must not cancel the SIGKILL deadline or reaping.
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = kill(pid, Signal::SIGTERM);
-        let graceful = std::time::Instant::now() + Duration::from_secs(2);
-        let final_deadline = graceful + Duration::from_secs(1);
-        let mut escalated = false;
-        loop {
-            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
-                // Reap only this child. On return, no later signal can target a
-                // reused PID; ECHILD also retires the identity immediately.
-                _ => return,
-            }
-            let now = std::time::Instant::now();
-            if !escalated && now >= graceful {
-                let _ = kill(pid, Signal::SIGKILL);
-                escalated = true;
-            }
-            if now >= final_deadline {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+    let mut graceful = None;
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
+            // Reap only this child. On return, no later signal can target a
+            // reused PID; ECHILD also retires the identity immediately.
+            _ => return,
         }
-    })
-    .await;
+        if graceful.is_none() {
+            // Confirm the PID is still our unreaped child before signaling it; this avoids ever
+            // sending a late signal to a process that reused a stale PID.
+            let _ = kill(pid, Signal::SIGTERM);
+            graceful = Some(std::time::Instant::now() + Duration::from_secs(2));
+        }
+        if graceful.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            let _ = kill(pid, Signal::SIGKILL);
+            loop {
+                match waitpid(pid, None) {
+                    // Only an interrupted wait is retryable; every other result retires this child.
+                    Err(nix::errno::Errno::EINTR) => {}
+                    _ => return,
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(not(unix))]
 async fn stop_child(_pid: nix::unistd::Pid) {}
+
+/// Keep non-Unix builds compatible with the connection's unconditional drop guard.
+#[cfg(not(unix))]
+fn stop_child_sync(_pid: nix::unistd::Pid) {}
 
 #[cfg(test)]
 #[path = "embedded_regressions.rs"]

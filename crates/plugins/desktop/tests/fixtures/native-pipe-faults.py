@@ -6,12 +6,30 @@ from pathlib import Path
 import signal
 import struct
 import sys
+import tempfile
+
+
+def publish_marker(path: str, body: bytes) -> None:
+    """Publish a complete fixture receipt with one same-directory rename."""
+    parent = os.path.dirname(path)
+    descriptor, temporary = tempfile.mkstemp(prefix=".marker-", dir=parent)
+    try:
+        with os.fdopen(descriptor, "wb") as marker:
+            marker.write(body)
+            marker.flush()
+            os.fsync(marker.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
 
 mode = Path(sys.argv[0]).name
 if mode == "pixel-reader.py":
     # Startup is observed before the real stdio owner fills the unread pipe.
-    with open(sys.argv[0] + ".pid", "w") as output:
-        output.write(str(os.getpid()))
+    publish_marker(sys.argv[0] + ".pid", str(os.getpid()).encode())
     signal.pause()
 elif mode == "reply-ordering.py":
     source = sys.stdin.buffer

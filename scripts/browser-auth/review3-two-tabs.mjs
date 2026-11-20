@@ -5,12 +5,12 @@
  * outside the source worktree when a job supplies its own scratch target directory.
  */
 import { chromium } from 'playwright';
+import { responseHeaders } from './response-headers.mjs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { routeWithLatency } from './latency-route.mjs';
-import { fulfillHeaders } from './fixture-headers.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 if (!process.argv[2]) throw new Error('provide the production tracer dist directory');
@@ -74,7 +74,7 @@ try {
     if (breakUnwrap && path === '/auth/wraps' && response.status === 200) {
       for (const entry of response.body) if (entry.kind === 'passkey') entry.wrap.nonce = 'AAAAAAAAAAAAAAAA';
     }
-    await route.fulfill({ status: response.status, headers: fulfillHeaders(response.headers),
+    await route.fulfill({ status: response.status, headers: responseHeaders(response.headers),
       body: JSON.stringify(response.body) });
   });
   // This fixture verifies auth only. Close terminal sockets locally rather than dialing a host.

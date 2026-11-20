@@ -22,6 +22,7 @@ fn rss(pid: u32) -> u64 {
         })
         .unwrap_or(0)
 }
+/// Measure the native pipe path with one, ten and fifty responsive companions.
 #[test]
 #[ignore = "Responsive native-pipe burst measurement at 1/10/50 companions; run alone"]
 fn responsive_native_pipes_at_concurrent_scale() {
@@ -41,11 +42,12 @@ fn responsive_native_pipes_at_concurrent_scale() {
             let path = root.join(format!("companion-{index}.py"));
             fs::write(
                 &path,
-                r"#!/usr/bin/env python3
-# Role: drain complete native packets and send small framed acknowledgements.
-import os, struct, sys
-with open(sys.argv[0] + '.pid', 'w') as output:
-    output.write(str(os.getpid()))
+                concat!(
+                    "#!/usr/bin/env python3\n",
+                    include_str!("fixtures/atomic_marker.py"),
+                    r#"# Role: drain complete native packets and send small framed acknowledgements.
+import struct, sys
+publish_marker(sys.argv[0] + '.pid', str(os.getpid()).encode())
 source=sys.stdin.buffer
 sink=sys.stdout.buffer
 while True:
@@ -58,7 +60,8 @@ while True:
     payload=bytes(8)+b'\x01e' if kind==70 else b'{}'
     sink.write(struct.pack('>IBB',len(payload)+2,1,kind)+payload)
     sink.flush()
-",
+"#,
+                ),
             )
             .unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();

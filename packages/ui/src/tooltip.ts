@@ -31,7 +31,7 @@
  * Labels are read live, so a control whose aria-label changes (copy → "Copied")
  * updates an open tooltip through `refreshTip`.
  */
-import { attachGlassBed } from "./glass-bed";
+import { confirmBox, type Box } from "./confirm-bounds";
 import { markMotion } from "./input-source";
 import { EASE_OUT } from "./motion";
 
@@ -89,10 +89,11 @@ const STYLE = `
 :is(.ui-confirm-tip, .ui-confirm-bar) button:focus { outline: none; }
 :root[data-focus-ring="on"] :is(.ui-confirm-tip, .ui-confirm-bar) button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) { :is(.ui-confirm-tip, .ui-confirm-bar) button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
-/* The overlay material gives its text a soft halo in the tint colour (styles.css), meant for text that sits straight on
-   a busy terminal. The confirmation is a near-opaque card of its own, where the halo is only a dark smear around the
-   glyphs (it read as blurred text on the confirm button and the grey effect line), so nothing inside it takes one. */
-.ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
+/* The confirmation is the shared floating-card glass (D380, reversing #391's opaque card): the same overlay material and
+   blur as every other card, with nothing under it to hide the page. Its text is readable through the shared glass contrast
+   guarantee (D365, #448), including the overlay material's soft halo, so the card sets no material of its own. The buttons'
+   own text keeps no halo: on the filled confirm button it only smears the glyphs. */
+.ui-confirm-tip button { text-shadow: none; }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes svg { stroke-width: 2; }
 /* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
@@ -275,8 +276,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
   document.body.append(tip);
-  // A confirmation's own blur fades at its small box's edges and lets the page show through; the bed under it keeps text unreadable.
-  const bed = attachGlassBed(tip);
 
   anchor.setAttribute("aria-expanded", "true");
   anchor.setAttribute("aria-controls", tip.id);
@@ -286,32 +285,49 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   let controller: ConfirmTipController | undefined;
   const place = (): void => {
     if (tip.hidden) return;
-    const bound = options.boundary?.getBoundingClientRect();
+    // A card about something inside a window stays inside that window and the viewport, with the same 9 px inset (confirm-bounds.ts;
+    // TASTE: overlays stay inside the window they belong to; D385: on a phone it is inset, never edge to edge). The caller may name
+    // another boundary. A window too small for the card falls back to the viewport, so the card is never cut off.
+    const boundEl = options.boundary ?? (centred ? null : anchor.closest<HTMLElement>(".ui-window"));
+    const winRect = boundEl?.getBoundingClientRect();
+    // A window's header holds its own controls (pill, actions): the card sits below it, never over it. When what is left under the
+    // header is too short for the card, confirmBox hands the card to the viewport, where it opens on the anchor's free side.
+    const head = boundEl?.matches(".ui-window") ? boundEl.querySelector<HTMLElement>(".ui-window-head")?.getBoundingClientRect() : undefined;
+    const win = winRect ? { left: winRect.left, top: Math.max(winRect.top, head?.bottom ?? winRect.top), right: winRect.right, bottom: winRect.bottom } : undefined;
+    const view = { width: innerWidth, height: innerHeight };
+    /** Sizes the card to the box (its width follows the box) and measures it; the height is layout size, since the open animation scales the card. */
+    const fit = (box: Box): { width: number; height: number } => {
+      // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps the card compact; only a narrower box shrinks it.
+      tip.style.maxWidth = "";
+      tip.style.maxHeight = "";
+      tip.style.overflowY = "";
+      const room = Math.max(160, Math.floor(box.right - box.left));
+      if (tip.offsetWidth > room) tip.style.maxWidth = `${room}px`;
+      return { width: tip.offsetWidth, height: tip.offsetHeight };
+    };
+    let box = confirmBox(win, view, 0);
+    let size = fit(box);
+    // The box is re-chosen once the card's height is known: a window too short for it hands the card to the viewport.
+    const roomy = confirmBox(win, view, size.height);
+    if (roomy.left !== box.left || roomy.top !== box.top || roomy.right !== box.right || roomy.bottom !== box.bottom) { box = roomy; size = fit(box); }
+    // A viewport shorter than the card itself is the only case left that cannot fit: the card then scrolls inside the box.
+    if (size.height > box.bottom - box.top) { tip.style.maxHeight = `${box.bottom - box.top}px`; tip.style.overflowY = "auto"; size = { width: size.width, height: box.bottom - box.top }; }
+    const { width, height } = size;
     if (centred) {
-      // Centred in the boundary (or the viewport); `data-side="center"` hides the tail.
-      // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps it as compact as an anchored card; only a
-      // narrower boundary (a phone window) shrinks it further.
-      if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
-      const w = tip.offsetWidth, h = tip.offsetHeight;
-      tip.style.left = `${Math.max(9, (bound ? bound.left + bound.width / 2 : innerWidth / 2) - w / 2)}px`;
-      tip.style.top = `${Math.max(9, (bound ? bound.top + bound.height / 2 : innerHeight / 2) - h / 2)}px`;
+      // Centred in the box; `data-side="center"` hides the tail.
+      tip.style.left = `${Math.max(box.left, (box.left + box.right) / 2 - width / 2)}px`;
+      tip.style.top = `${Math.max(box.top, (box.top + box.bottom) / 2 - height / 2)}px`;
       tip.style.transformOrigin = "50% 50%";
       tip.dataset.side = "center";
-      bed.sync();
       return;
     }
     const anchorRect = anchor.getBoundingClientRect();
-    // A narrow card (a phone window) is narrower than the tip's own cap: the tip never outgrows its 9 px insets.
-    if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
-    // Layout size: the open animation scales the tip, and a scaled rect would misplace it.
-    const width = tip.offsetWidth;
-    const height = tip.offsetHeight;
-    const minX = bound ? bound.left + 9 : 12, maxX = (bound ? bound.right - 9 : innerWidth - 12) - width;
-    const minY = bound ? bound.top + 9 : 12, maxY = (bound ? bound.bottom - 9 : innerHeight - 12) - height;
+    const minX = box.left, maxX = box.right - width;
+    const minY = box.top, maxY = box.bottom - height;
     const left = Math.max(minX, Math.min(maxX, anchorRect.left + anchorRect.width / 2 - width / 2));
-    const below = (bound ? bound.bottom : innerHeight) - anchorRect.bottom;
-    const side = below >= height + 18 || below >= anchorRect.top - (bound?.top ?? 0) ? "bottom" : "top";
-    const top = Math.max(minY, Math.min(Math.max(minY, maxY), side === "bottom" ? anchorRect.bottom + 8 : anchorRect.top - height - 8));
+    const below = box.bottom - anchorRect.bottom;
+    const side = below >= height + 18 || below >= anchorRect.top - box.top ? "bottom" : "top";
+    const top = Math.max(minY, Math.min(maxY, side === "bottom" ? anchorRect.bottom + 8 : anchorRect.top - height - 8));
     tip.style.left = `${left}px`;
     tip.style.top = `${top}px`;
     const tail = Math.max(16, Math.min(width - 16, anchorRect.left + anchorRect.width / 2 - left));
@@ -319,7 +335,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     // Grow from the tail, so the popover visibly comes out of its trigger.
     tip.style.transformOrigin = `${tail}px ${side === "bottom" ? "0%" : "100%"}`;
     tip.dataset.side = side;
-    bed.sync();
   };
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
@@ -347,13 +362,12 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
       anchor.removeAttribute("aria-controls");
       markMotion(tip);
       tip.dataset.open = "false";
-      bed.setOpen(false);
       if (restoreFocus) {
         if (centred && options.returnFocus) options.returnFocus();
         else { const returnTo = centred ? previouslyFocused : anchor; if (returnTo?.isConnected) returnTo.focus({ preventScroll: true }); }
       }
       if (activeConfirmTip === controller) activeConfirmTip = undefined;
-      window.setTimeout(() => { tip.remove(); bed.dispose(); }, 190);
+      window.setTimeout(() => { tip.remove(); }, 190);
     },
   };
   controller = instance;
@@ -371,7 +385,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     // Opened with a key (palette, then Enter on a row that asks): the question appears whole. Read here, where it flips (#427).
     markMotion(tip);
     tip.dataset.open = "true";
-    bed.setOpen(true);
     cancel.focus({ preventScroll: true });
   });
   return instance;

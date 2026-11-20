@@ -14,8 +14,10 @@
  *      tab's terminal pointers, after the teardown so the canvas's last flush cannot write them back, and the
  *      stores ignore writes once disposed. The layout is restored from the server on the next sign-in.
  *
- * What stays: device preferences that hold no account data (theme, font, window sizes, toolbar order, device name,
- * background and density). Other accounts' keys on the same browser are untouched.
+ * What stays: explicit device-bound choices such as a custom toolbar override and device name. The account look
+ * cache is removed with that account, while the old unscoped appearance keys remain only until their canvas look is
+ * confirmed by the server; their migration owner prevents another account from consuming them. Other accounts' keys
+ * on the same browser are untouched.
  */
 import { forgetAccountWork, pauseAccountWork } from "./account-lifetime";
 import { logout } from "./auth";

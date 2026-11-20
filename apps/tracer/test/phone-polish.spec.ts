@@ -216,6 +216,7 @@ for (const { w, h } of SIZES) for (const theme of THEMES) {
 
 // ---- the window pills ----------------------------------------------------------------------------------------------------
 
+/** Measures the first Console window's header: pill and actions heights, the close button's hit area, icon sizes, whether the host name is cut, and the pill's children. */
 async function pillMetrics(page: Page) {
   return page.evaluate(() => {
     const head = document.querySelector<HTMLElement>("[data-view='console'] .ui-window .ui-window-head")!;
@@ -231,7 +232,9 @@ async function pillMetrics(page: Page) {
     return {
       pill: pill.getBoundingClientRect().height, actions: actions.getBoundingClientRect().height, close: close.getBoundingClientRect(),
       icons, hitW: parseFloat(hit.width) || 0, hitH: parseFloat(hit.height) || 0, hitInset: [hit.top, hit.right, hit.bottom, hit.left],
-      hostCut: host.scrollWidth > host.clientWidth, hostText: host.textContent, markShown: getComputedStyle(mark).display !== "none" && mark.querySelector("svg path") !== null,
+      // Cut means the text is wider than its box. `scrollWidth` and `clientWidth` are whole pixels rounded in different directions, so a name
+      // 79.4 px wide in a 79.4 px box reads as 80 against 79 (a false "cut"); the text's own range is compared with the box's real width instead.
+      hostCut: (() => { const range = document.createRange(); range.selectNodeContents(host); return range.getBoundingClientRect().width > host.getBoundingClientRect().width + 0.5; })(), hostText: host.textContent, markShown: getComputedStyle(mark).display !== "none" && mark.querySelector("svg path") !== null,
       markIsTerminalGlyph: mark.querySelector("svg.is-line") !== null, kids, sessionShown: getComputedStyle(session).display !== "none",
       pillWidth: pill.getBoundingClientRect().width, headWidth: head.getBoundingClientRect().width,
     };

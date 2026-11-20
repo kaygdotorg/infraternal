@@ -41,10 +41,11 @@ struct Fixture {
     file: File,
 }
 impl Fixture {
+    /// Writes the release fixture for `namespace` with the given payload `hash` under the private TMPDIR.
     fn new(namespace: &str, hash: &str) -> Self {
-        let root =
-            PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()))
-                .join(format!("release-fixture-{}", uuid::Uuid::new_v4()));
+        // Release fixtures are written, fsynced and read back by the code under test, which bounds
+        // each step; keep them on the private TMPDIR, not the slow build disk (#509).
+        let root = std::env::temp_dir().join(format!("release-fixture-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let key = root.join("key");
         assert!(
@@ -63,7 +64,11 @@ impl Fixture {
         );
         let payload = b"synthetic release payload\n";
         std::fs::write(root.join("payload"), payload).unwrap();
-        let sums = format!("{:x}  payload\n", Sha256::digest(payload)).into_bytes();
+        let sums = format!(
+            "{:x}  payload\n",
+            base16ct::HexDisplay(&Sha256::digest(payload))
+        )
+        .into_bytes();
         std::fs::write(root.join("SHA256SUMS"), &sums).unwrap();
         assert!(
             Command::new("ssh-keygen")
@@ -207,13 +212,64 @@ fn trust_namespace_hash_trailing_data_and_manifest_ambiguity_are_refused() {
     }
 }
 
+/// Lists the signer Worker writes name the license notices by bundle path (#419), so every
+/// real release has `licenses/libghostty-vt/<file>` lines. Those must parse; traversal and
+/// other non-canonical paths must still refuse the whole list, #211 S1.
+#[test]
+fn signed_lists_with_nested_notice_paths_are_parsed_and_traversal_is_refused() {
+    let line = |name: &str| format!("{}  {name}\n", "ab".repeat(32));
+    let real: String = [
+        "VERSION",
+        "infraternal-x86_64-musl",
+        "licenses/libghostty-vt/README.md",
+        "licenses/libghostty-vt/highway-BSD-3-Clause.txt",
+        "proxy-traefik-linux-amd64.json",
+    ]
+    .into_iter()
+    .map(line)
+    .collect();
+    assert_eq!(checksum("VERSION", real.as_bytes()), Ok([0xab; 32]));
+    assert_eq!(
+        checksum("infraternal-x86_64-musl", real.as_bytes()),
+        Ok([0xab; 32])
+    );
+    // Lookups stay plain file names; a nested entry is listed, never selected.
+    assert!(checksum("licenses/libghostty-vt/README.md", real.as_bytes()).is_err());
+    for bad in [
+        "licenses/../VERSION",
+        "/etc/passwd",
+        "licenses//README.md",
+        "licenses/./README.md",
+        "licenses/",
+        "./VERSION",
+        "licenses/libghostty-vt/README md",
+    ] {
+        let listed = format!("{real}{}", line(bad));
+        assert_eq!(
+            checksum("VERSION", listed.as_bytes()),
+            Err(ReleaseError::Checksums),
+            "{bad:?} must refuse the whole list"
+        );
+    }
+    let duplicate = format!("{real}{}", line("licenses/libghostty-vt/README.md"));
+    assert_eq!(
+        checksum("VERSION", duplicate.as_bytes()),
+        Err(ReleaseError::Checksums)
+    );
+}
+
+/// Measure verification time across repeated checks of a 20 MiB fixture.
 #[test]
 #[ignore = "run release-profile measurements in a weighted scope"]
 fn verification_twenty_megabytes_fifty_runs() {
     let fixture = Fixture::new("infraternal-release", "sha512");
     let payload = vec![0x42; 20 * 1024 * 1024];
     std::fs::write(fixture.root.join("payload"), &payload).unwrap();
-    let sums = format!("{:x}  payload\n", Sha256::digest(&payload)).into_bytes();
+    let sums = format!(
+        "{:x}  payload\n",
+        base16ct::HexDisplay(&Sha256::digest(&payload))
+    )
+    .into_bytes();
     // Measure the full verification hook. Generate a fresh signature for the enlarged manifest.
     let key = fixture.root.join("bench-key");
     assert!(

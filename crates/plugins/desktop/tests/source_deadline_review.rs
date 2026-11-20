@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+/// The silent inventory helper must release control admission at its deadline.
 #[tokio::test]
 async fn silent_inventory_helper_releases_control_admission_after_deadline() {
     let target = PathBuf::from("target");
@@ -21,8 +22,10 @@ async fn silent_inventory_helper_releases_control_admission_after_deadline() {
     let executable = runtime.join("silent.py");
     fs::write(
         &executable,
-        r#"#!/usr/bin/env python3
-# Role: acknowledges receipt out of band and keeps the response direction silent.
+        concat!(
+            "#!/usr/bin/env python3\n",
+            include_str!("fixtures/atomic_marker.py"),
+            r#"# Role: acknowledges receipt out of band and keeps the response direction silent.
 import os, socket, sys
 os.umask(0o077)
 listener = socket.socket(socket.AF_UNIX)
@@ -32,11 +35,11 @@ connection, _ = listener.accept()
 listener.close()
 request = connection.recv(65536)
 base = sys.argv[sys.argv.index("--companion-runtime") + 1]
-with open(os.path.join(base, "received"), "w") as marker:
-    marker.write(str(request[5]))
+publish_marker(os.path.join(base, "received"), str(request[5]).encode())
 while connection.recv(65536):
     pass
 "#,
+        ),
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o500)).unwrap();

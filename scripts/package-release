@@ -19,18 +19,16 @@ if [[ "${3:-}" != --built ]]; then
     scripts/auth-toolchain
     CARGO_TARGET_DIR="$host_target" scripts/auth-toolchain
     CARGO_TARGET_DIR="$session_target" scripts/auth-toolchain
-    # `desktop` is not a default feature (#146): without it the server neither advertises the
-    # desktop Hello capability nor links the app-window relay, so Settings → Hosts → App windows
-    # stays hidden. The host payloads below stay minimal; they never serve app windows.
-    scripts/static-cargo build --locked --release -p infraternal --features desktop \
+    # The feature sets are shared with scripts/verify's "release feature sets" row (#530).
+    source scripts/release/feature-sets
+    scripts/static-cargo build --locked --release "${release_server_cargo_args[@]}" \
         --target "$architecture-unknown-linux-musl"
     # Keep server, full node and session-only artifacts in separate Cargo roots.
+    # The host payloads stay minimal; they never serve app windows.
     for arch in x86_64 aarch64; do
-        CARGO_TARGET_DIR="$host_target" scripts/static-cargo build --locked --release -p infraternal \
-            --no-default-features --features plugin-host-facts,remote,ssh \
+        CARGO_TARGET_DIR="$host_target" scripts/static-cargo build --locked --release "${release_host_cargo_args[@]}" \
             --target "$arch-unknown-linux-musl"
-        # The early executable keeps only the verified shim and SSH bridge.
-        CARGO_TARGET_DIR="$session_target" scripts/static-cargo build --locked --release -p infraternal-session \
+        CARGO_TARGET_DIR="$session_target" scripts/static-cargo build --locked --release "${release_session_cargo_args[@]}" \
             --target "$arch-unknown-linux-musl"
     done
 fi

@@ -15,6 +15,7 @@ import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
 import type { SessionUiPart } from "./session-ui.on-demand";
 import type { RefusalAction } from "../../terminal-refusal";
+import { ICON_INFO } from "../../../../../packages/ui/src/icons";
 
 /** What the rest of the canvas asks of the session surfaces: repaint a window, open the manager, say a window was refused or cannot connect. */
 export interface SessionUi {
@@ -26,7 +27,7 @@ export interface SessionUi {
   /** A window was pointed at another session: its name slides in and its frame lights up. */
   arrived(rec: WinRec): void;
   /** The host refused a window's shell: its strip says why. False when no strip claims it (the caller shows a toast). */
-  refused(rec: WinRec, message: string, action?: RefusalAction): boolean;
+  refused(rec: WinRec, message: string, action?: RefusalAction, calm?: boolean): boolean;
   /** A window has been connecting too long (`message`), or connects again (undefined): its strip says so. */
   unreachable(rec: WinRec, message: string | undefined): void;
   /** The window whose session is `id` on `host`, in any view. */
@@ -99,14 +100,14 @@ export function createSessionHooks(cx: Ctx): SessionUi {
     },
     closeManager() { part?.closeManager(); },
     arrived(rec) { part?.arrived(rec); },
-    refused(rec, message, action) {
-      if (part) return part.refused(rec, message, action);
+    refused(rec, message, action, calm) {
+      if (part) return part.refused(rec, message, action, calm);
       // The strip's code is not here yet: a window with no session claims its refusal now and shows it once the code
       // arrives. If it cannot load, the refusal still reaches the person, as a toast, rather than being lost.
       if (rec.model.sessionId) return false;
       void load().then((p) => {
-        if (p) p.refused(rec, message, action);
-        else cx.toast.show({ message, tone: "error", duration: Math.max(4200, message.length * 70) });
+        if (p) p.refused(rec, message, action, calm);
+        else cx.toast.show({ message, ...(calm ? { icon: ICON_INFO } : { tone: "error" as const }), duration: Math.max(4200, message.length * 70) });
       });
       return true;
     },

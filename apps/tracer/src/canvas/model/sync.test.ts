@@ -71,6 +71,8 @@ test("a refused shell's window leaves the saved layout and stops holding the que
   expect(store.pending).toBe(true); expect(calls).toHaveLength(0);
   // The refusal is final for this shell: the window keeps showing why, but it is no longer a layout change in waiting.
   model.openRefused = true; sync.changed(); await Promise.resolve();
+  // A shared repaint must not keep scheduling saves for a shell that cannot acquire a saved reference (#507).
+  expect(sync.uncommittedWindows().size).toBe(0);
   expect(store.pending).toBe(false); expect(store.unresolvedWindow("refused")).toBe(false); expect(calls).toHaveLength(0);
   expect(documentWindows(store.current()).map((w) => w.id)).toEqual([]);
   // A new shell in the same window that does start is an ordinary birth with its session id.

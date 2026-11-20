@@ -80,6 +80,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string): H
   return node;
 }
 
+/** Builds one section of the tree (its header, branch drawing and rows, with a host caption's quiet note where the leaf has one). */
 function makeSection(section: BranchSection): HTMLElement {
   const root = el("section", "bm-sec");
   root.dataset.id = section.id;
@@ -136,6 +137,8 @@ function makeSection(section: BranchSection): HTMLElement {
         const name = el("span", "bm-label");
         name.textContent = leaf.label;
         caption.append(name);
+        // A quiet note after the host's name (why it cannot connect), in the same place a leaf's note sits.
+        if (leaf.meta) { const note = el("span", "bm-meta"); note.textContent = leaf.meta; caption.append(note); caption.setAttribute("aria-label", `${leaf.label}, ${leaf.meta}`); }
         caption.dataset.id = leaf.id;
         caption.setAttribute("role", "treeitem");
         caption.tabIndex = 0;

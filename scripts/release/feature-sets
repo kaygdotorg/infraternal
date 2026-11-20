@@ -1,0 +1,22 @@
+# The Cargo package and feature selections of every executable the release
+# bundle ships (#530). Source this file; it only defines arrays.
+#
+# The platform release recipes build these, and scripts/verify compiles
+# each of them in its "release feature sets" row. Keeping one list means a
+# feature set the release builds can never again be one the gate never
+# compiled: dev 6fe482d1e passed every gate but failed to build the host
+# payload, because code shared with the mesh and server plugins referred to a
+# name that only exists when one of them is built.
+
+# The server. `desktop` is not a default feature (#146): without it the server
+# neither advertises the desktop Hello capability nor links the app-window
+# relay, so Settings → Hosts → App windows stays hidden.
+release_server_cargo_args=(--package infraternal --features desktop)
+# The removable Linux host payload includes the Mesh node, remote runtime and SSH.
+release_host_cargo_args=(--package infraternal --no-default-features --features plugin-host-facts,remote,ssh,plugin-mesh)
+# The macOS host includes desktop capture support.
+release_macos_host_cargo_args=(--package infraternal --no-default-features --features remote,desktop --bin infraternal)
+# The macOS Rust capture helper is a separate executable.
+release_macos_helper_cargo_args=(--package infraternal-plugin-desktop --no-default-features --features desktop --bin infraternal-desktop-helper)
+# The early executable keeps only the verified shim and SSH bridge.
+release_session_cargo_args=(--package infraternal-session)

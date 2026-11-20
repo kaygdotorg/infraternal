@@ -22,10 +22,27 @@ Each row is a `METRIC name=d375_<key>` line from `latency_targets.row_line()`
 (own overhead is composed by the report from the two shares).
 The process exits non-zero when a gated row or component fails;
 `latency_targets.py report` then prints the whole table for the run.
+
+The fixture plays the browser's part of the output flow control: it returns
+credit for every Output and Snapshot byte it receives, as the tracer does
+(#477). A Snapshot is a repaint that replaces raw output the agent skipped
+after a key or its credit starvation deadline, so raw echo bytes inside a
+flooding session can legitimately never arrive. The initial credit includes
+the relay's 64 KiB repaint reserve. The same-session phase therefore measures
+each key's visible effect: a numbered token drawn on row 1, read from raw
+output or from a repaint, whichever comes first.
+
+Repaint bytes are terminal-control programs, so marker and token checks strip
+those controls before searching. Credit is still refunded by the wire byte
+length after a simulated 120 Hz paint frame. The fixture batches all frames
+already waiting before that boundary; the browser profile separately uses the
+real Ghostty paint callback.
 """
 import argparse
 import os
 from pathlib import Path
+import re
+import select
 import signal
 import struct
 import sys
@@ -43,10 +60,29 @@ REAL_ECHO_FRAMES_MS = 2 * targets.FRAME_MS
 PROBE_SAMPLES = 100
 #: Re-attaches measured for the resumed-link row; p99 of 20 samples is their maximum.
 REATTACH_SAMPLES = 20
+# Keep the 1 MiB bulk window while also funding the relay's 64 KiB key repaint reserve.
+INITIAL_CREDIT = 1024 * 1024 + 64 * 1024
 ECHO_KEY = b"x"
 #: The longest one key's Ack and echo (or one re-attach) may take before the probe fails instead of waiting on. Echo
-#: under a same-session flood has measured up to ~0.5 s at 300 ms RTT, so 30 s only trips on a stalled stream.
+#: under a same-session flood has measured up to ~0.5 s at 300 ms RTT, so 30 s only trips on a stalled stream (a key that never shows is a typing
+#: freeze: fail with the stream's flow state instead of hanging the gate).
 SAMPLE_TIMEOUT_S = 30
+# The fixture returns queued wire bytes at its next simulated terminal paint.
+PAINT_INTERVAL_S = targets.FRAME_MS / 1000
+# The same-session program draws `<K000001>`, `<K000002>`, ... on row 1 for
+# successive keys and starts `yes` when it reads FLOOD_KEY. One write(2) per
+# token keeps it whole between `yes` writes; the scroll region `ESC [2r` keeps
+# `yes` off row 1, so the newest token is on screen, and thus in a repaint.
+TOKEN = re.compile(rb"<K(\d{6})>")
+TOKEN_TAIL = 16
+FLOOD_KEY = b"F"
+TOKEN_PROGRAM = (
+    b"stty raw -echo; printf '\\033[2J\\033[2r'; n=0; "
+    b"while IFS= read -rsn1 c; do "
+    b"if [ \"$c\" = F ]; then yes & "
+    b"else n=$((n+1)); printf '\\0337\\033[1;1H<K%06d>\\0338' \"$n\"; fi; "
+    b"done\n"
+)
 
 
 def percentile(samples, fraction):
@@ -68,6 +104,49 @@ def metric(name, samples, budget_ms):
     return p50, p99
 
 
+def visible_snapshot_text(data):
+    """Return screen characters from an ANSI repaint without changing wire accounting.
+
+    Snapshot frames position and style cells with terminal controls, often
+    between every visible character. The fixture searches the flattened screen
+    text for markers and key tokens; callers must still refund the original
+    snapshot byte length because those controls were sent to the client.
+    """
+    visible = bytearray()
+    offset = 0
+    while offset < len(data):
+        current = data[offset]
+        if current == 0x1B:
+            offset += 1
+            if offset >= len(data):
+                break
+            kind = data[offset]
+            offset += 1
+            if kind == ord("["):
+                while offset < len(data) and not 0x40 <= data[offset] <= 0x7E:
+                    offset += 1
+                if offset < len(data):
+                    offset += 1
+            elif kind in (ord("]"), ord("P"), ord("X"), ord("^"), ord("_")):
+                while offset < len(data):
+                    if kind == ord("]") and data[offset] == 0x07:
+                        offset += 1
+                        break
+                    if data[offset] == 0x1B and offset + 1 < len(data) and data[offset + 1] == ord("\\"):
+                        offset += 2
+                        break
+                    offset += 1
+            elif kind in (ord("("), ord(")"), ord("*"), ord("+"), ord("-"), ord("."), ord("/"), ord("#")):
+                if offset < len(data):
+                    offset += 1
+        elif current < 0x20 or current == 0x7F:
+            offset += 1
+        else:
+            visible.append(current)
+            offset += 1
+    return bytes(visible)
+
+
 def update_state_output(client, streams, stream, body):
     """Maintain the current output cursor and a bounded ready-marker tail."""
     state = streams[stream]
@@ -81,12 +160,63 @@ def update_state_output(client, streams, stream, body):
     state["recent_output"].extend(data)
     if len(state["recent_output"]) > 4096:
         del state["recent_output"][:-4096]
-    state["credit_pending"] += len(data)
-    if state["credit_pending"] >= 64 * 1024:
-        client.send(stream, 0x14, struct.pack("<I", state["credit_pending"]))
-        state["credit_pending"] = 0
-    if state.get("pending_echo") and state["echoes"] >= state["pending_echo"][0]:
-        state["pending_echo"][2] = time.perf_counter()
+    observe_tokens(state, state["token_tail"] + data)
+    state["token_tail"] = (state["token_tail"] + data)[-TOKEN_TAIL:]
+    queue_paint_credit(client, stream, state, len(data))
+
+
+def observe_tokens(state, data):
+    """Record the newest row-1 token found in raw output or a repaint."""
+    for match in TOKEN.finditer(data):
+        state["token"] = max(state["token"], int(match.group(1)))
+
+
+def settle_echo(state):
+    """Stamp and report a pending key once its echo is visible after paint."""
+    pending = state.get("pending_echo")
+    if not pending or pending[2] is not None:
+        return False
+    seen = state["token"] if state["echo_by_token"] else state["echoes"]
+    if seen >= pending[0]:
+        pending[2] = time.perf_counter()
+        return True
+    return False
+
+
+def queue_paint_credit(client, stream, state, length):
+    """Hold received wire bytes until the next paint callback returns their credit."""
+    if length > 0:
+        state["paint_credit_pending"] = state.get("paint_credit_pending", 0) + length
+        if getattr(client, "paint_frame_due", None) is None:
+            client.paint_frame_due = time.monotonic() + PAINT_INTERVAL_S
+
+
+def paint_frame(client, streams):
+    """Paint queued updates, return exact wire credit, and report completed echoes."""
+    settled_echo = False
+    for stream, state in streams.items():
+        pending = state.get("paint_credit_pending", 0)
+        if pending > 0:
+            state["paint_credit_pending"] = 0
+            client.send(stream, 0x14, struct.pack("<I", pending))
+        settled_echo = settle_echo(state) or settled_echo
+    client.paint_frame_due = None
+    return settled_echo
+
+
+def paint_if_due(client, streams):
+    """Paint due output and report whether that paint completed a pending echo."""
+    if not any(state.get("paint_credit_pending", 0) for state in streams.values()):
+        return False
+    sock = getattr(client, "sock", None)
+    if sock is None:
+        return False
+    remaining = getattr(client, "paint_frame_due", time.monotonic()) - time.monotonic()
+    if remaining > 0:
+        readable, _, _ = select.select([sock], [], [], remaining)
+        if readable:
+            return False
+    return paint_frame(client, streams)
 
 
 def frame(client, streams):
@@ -95,6 +225,8 @@ def frame(client, streams):
     Returns `(stream, kind)` so a caller waiting for a connection-level reply
     (stream 0, such as a Pong fence) can see it; other stream-0 frames are ignored.
     """
+    if paint_if_due(client, streams):
+        return
     stream, kind, body = client.read()
     if stream == 0:
         return stream, kind
@@ -111,8 +243,19 @@ def frame(client, streams):
     elif kind == 0x11:
         update_state_output(client, streams, stream, body)
     elif kind == 0x15:
+        # A repaint replaces skipped raw output. It costs credit like Output,
+        # and the tracer returns that credit once painted; a fixture that kept
+        # it would shrink the window by one repaint per starvation cycle.
         sequence = struct.unpack("<Q", body[:8])[0]
+        data = body[8:]
         state["out"] = sequence
+        state["repaints"] += 1
+        state["token_tail"] = b""
+        # Screen matching uses visible cells; flow control still uses wire bytes.
+        visible = visible_snapshot_text(data)
+        state["recent_output"] = bytearray(visible[-4096:])
+        observe_tokens(state, visible)
+        queue_paint_credit(client, stream, state, len(data))
     elif kind == 0x33:
         pass
     else:
@@ -129,7 +272,12 @@ def new_stream_state(session_id):
         "acked": 0,
         "echoes": 0,
         "output_bytes": 0,
-        "credit_pending": 0,
+        "repaints": 0,
+        "echo_by_token": False,
+        "token": 0,
+        "token_keys": 0,
+        "token_tail": b"",
+        "paint_credit_pending": 0,
         "recent_output": bytearray(),
         "pending_ack": None,
         "pending_echo": None,
@@ -137,10 +285,10 @@ def new_stream_state(session_id):
 
 
 def attach_streams(client, streams):
-    """Attach every stream from cursor zero with a 1 MiB credit window and wait for the agent's Acks."""
+    """Attach every stream from cursor zero with the initial credit window (1 MiB plus the repaint reserve) and wait for the agent's Acks."""
     for stream, state in streams.items():
         client.send(stream, 0x16, state["id"].bytes + struct.pack("<QQ", 0, 0))
-        client.send(stream, 0x14, struct.pack("<I", 1024 * 1024))
+        client.send(stream, 0x14, struct.pack("<I", INITIAL_CREDIT))
     wait_for(client, streams, lambda: all(state["acked"] == 0 for state in streams.values()))
     # Keep only a small rolling marker tail while still crediting every PTY Output byte.
     for state in streams.values():
@@ -196,19 +344,36 @@ def stop_background_flood(client, streams, stream):
 
 
 def sample_echoes(client, streams, stream, count):
-    """Type `count` single keys one at a time; return per-key times to the agent's Ack and to the PTY echo (ms)."""
+    """Type `count` keys one at a time; return each key's Ack and echo latency in ms.
+
+    The echo is the raw `x` from `cat`, or the key's row-1 token when the
+    stream runs TOKEN_PROGRAM (`echo_by_token`). A key that shows nothing
+    within SAMPLE_TIMEOUT_S fails with the stream's flow state.
+    """
     state = streams[stream]
     ack_ms = []
     echo_ms = []
     for _ in range(count):
         target_ack = state["entered"] + len(ECHO_KEY)
-        target_echo = state["echoes"] + len(ECHO_KEY)
+        if state["echo_by_token"]:
+            state["token_keys"] += 1
+            target_echo = state["token_keys"]
+        else:
+            target_echo = state["echoes"] + len(ECHO_KEY)
         started = time.perf_counter()
         state["pending_ack"] = [target_ack, started, None]
         state["pending_echo"] = [target_echo, started, None]
         send_input(client, streams, stream, ECHO_KEY)
-        wait_for(client, streams, lambda: state["pending_ack"][2] is not None and state["pending_echo"][2] is not None,
-                 timeout=SAMPLE_TIMEOUT_S, what=f"the Ack and echo of a key on stream {stream}")
+        deadline = time.monotonic() + SAMPLE_TIMEOUT_S
+        while state["pending_ack"][2] is None or state["pending_echo"][2] is None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"stream {stream} key {len(echo_ms) + 1} showed no "
+                    f"{'Ack' if state['pending_ack'][2] is None else 'echo'} within {SAMPLE_TIMEOUT_S} s "
+                    f"(output_bytes={state['output_bytes']} repaints={state['repaints']} "
+                    f"token={state['token']})"
+                )
+            frame(client, streams)
         ack_ms.append((state["pending_ack"][2] - started) * 1000)
         echo_ms.append((state["pending_echo"][2] - started) * 1000)
         state["pending_ack"] = None
@@ -242,11 +407,11 @@ def sample_reattach(client, streams, stream, count):
     for nonce in range(1, count + 1):
         client.send(stream, 0x0f, struct.pack("<H", 0) + b"window released")
         fence(client, streams, nonce)
-        state["credit_pending"] = 0
+        state["paint_credit_pending"] = 0
         started = time.perf_counter()
         state["pending_ack"] = [state["acked"], started, None]
         client.send(stream, 0x16, state["id"].bytes + struct.pack("<QQ", state["out"], state["acked"]))
-        client.send(stream, 0x14, struct.pack("<I", 1024 * 1024))
+        client.send(stream, 0x14, struct.pack("<I", INITIAL_CREDIT))
         wait_for(client, streams, lambda: state["pending_ack"][2] is not None, timeout=SAMPLE_TIMEOUT_S,
                  what=f"the Ack of a re-attach on stream {stream}")
         ready_ms.append((state["pending_ack"][2] - started) * 1000)
@@ -361,20 +526,41 @@ def run(binary, state_dir, overhead_state, samples):
         if "result=FAIL" in resumed_line:
             failed_metrics.append("reconnect_resumed_link")
 
-        # Session 3 runs a PTY writer and `cat` concurrently; x is distinguishable from `yes`'s y\n.
-        same_flood_start = streams[3]["output_bytes"]
-        same_command = b"stty raw -echo; yes & cat\n"
-        send_input(client, streams, 3, same_command)
-        wait_for(client, streams, lambda: streams[3]["output_bytes"] >= same_flood_start + 64 * 1024)
-        streams[3]["echoes"] = 0
+        # Session 3 types into TOKEN_PROGRAM: first quiet, as this phase's own
+        # baseline, then with `yes` writing into the same PTY. Under the flood the
+        # agent may skip raw output for a repaint (#477), and `yes` would scroll
+        # a raw `x` away at once; the row-1 token stays visible in either form.
+        same = streams[3]
+        same["echo_by_token"] = True
+        send_input(client, streams, 3, TOKEN_PROGRAM)
+        sample_echoes(client, streams, 3, 1)  # the loop is reading keys
+        _, same_quiet_echo = sample_echoes(client, streams, 3, samples)
+        _, same_quiet_p99 = metric("keystroke_token_echo_quiet_same_session", same_quiet_echo, rtt_echo_budget_ms)
+        send_input(client, streams, 3, FLOOD_KEY)
+        same_flood_start = same["output_bytes"]
+        wait_for(client, streams, lambda: same["output_bytes"] >= same_flood_start + 64 * 1024)
+        cursor_start, delivered_start, repaints_start = same["out"], same["output_bytes"], same["repaints"]
+        flood_started = time.perf_counter()
         same_ack, same_echo = sample_echoes(client, streams, 3, samples)
+        flood_seconds = time.perf_counter() - flood_started
+        # `produced` follows the agent's output cursor, which a repaint moves past
+        # skipped bytes: it is how fast the flooding program ran. `delivered` is
+        # the raw output that reached this client.
+        print(
+            f"METRIC name=flood_throughput_same_session source=real-agent-pty seconds={flood_seconds:.2f} "
+            f"produced_mb_s={(same['out'] - cursor_start) / flood_seconds / 1e6:.2f} "
+            f"delivered_mb_s={(same['output_bytes'] - delivered_start) / flood_seconds / 1e6:.2f} "
+            f"repaints={same['repaints'] - repaints_start} result=REPORT",
+            flush=True,
+        )
         _, same_ack_p99 = metric("keystroke_echo_confirmed_flood_same_session", same_ack, rtt_echo_budget_ms)
         _, same_echo_p99 = metric("keystroke_pty_echo_flood_same_session", same_echo, rtt_echo_budget_ms)
-        same_growth = same_echo_p99 - baseline_echo_p99
+        same_growth = same_echo_p99 - same_quiet_p99
         print(
             f"METRIC name=flood_isolation_same_session source=real-agent-pty n={samples} "
-            f"baseline_p99_ms={baseline_echo_p99:.2f} flood_p99_ms={same_echo_p99:.2f} "
+            f"baseline_p99_ms={same_quiet_p99:.2f} flood_p99_ms={same_echo_p99:.2f} "
             f"growth_ms={same_growth:.2f} budget_ms={FLOOD_DELTA_BUDGET_MS:.2f} "
+            f"d375_target_ms={FLOOD_DELTA_BUDGET_MS:.2f} "
             f"result={'PASS' if same_growth <= FLOOD_DELTA_BUDGET_MS else 'FAIL'}",
             flush=True,
         )

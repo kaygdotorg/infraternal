@@ -206,7 +206,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, onClosed: (
     bed.setOpen(true);
   } else (inside ?? stage).append(root);
   if (!triggeredByKeyboard()) {
-    if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
+    if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT });
     else root.animate([{ opacity: 0, transform: `translateY(${above ? 4 : -4}px) scale(0.96)` }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE_OUT });
   }
   anchor.setAttribute("aria-expanded", "true");

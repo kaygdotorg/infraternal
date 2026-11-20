@@ -174,6 +174,17 @@ fn compile_inner(
             // The same directional policy installed for this receiver decides whether it learns a name.
             peer_names.insert(other, member.node.host.clone());
         }
+        // A private-scope address (the guess of a node that reaches the server over its LAN, a
+        // CGNAT or VPN range, link-local or ULA) only goes to a peer with network access in some
+        // direction (J699 P2-1, D164), the rule LAN candidates follow. Without access the peer
+        // could never use it, and it would learn where the node sits. A grant recompiles this
+        // snapshot, so the address arrives with the access. A public address stays, so a later
+        // grant still finds the peer without a fresh walk.
+        let endpoint = endpoints.get(&other).copied().filter(|address| {
+            !crate::candidates::is_private_scope(address.ip())
+                || has_access(&inbound)
+                || has_access(&outbound)
+        });
         // Retain keys even for denied pairs: a rule change needs only policy, not a fresh tunnel setup.
         peers.insert(
             other,
@@ -186,7 +197,8 @@ fn compile_inner(
                         .allocation
                         .get(other)
                         .ok_or(MeshError::InvalidAllocation)?,
-                    endpoint: endpoints.get(&other).copied(),
+                    endpoint,
+                    candidates: Vec::new(),
                 },
                 inbound,
                 outbound,
@@ -195,6 +207,8 @@ fn compile_inner(
         );
     }
     Ok(Config {
+        authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(local_member.keys.current),
         server: Some(checkpoint.server),
         node,
@@ -213,6 +227,15 @@ fn compile_inner(
         #[cfg(feature = "mesh-dns")]
         peer_names,
     })
+}
+
+/// Whether `policy` lets any traffic through: all ports, or a non-empty port list.
+fn has_access(policy: &TrafficPolicy) -> bool {
+    match policy {
+        TrafficPolicy::All => true,
+        TrafficPolicy::Ports(ports) => !ports.is_empty(),
+        TrafficPolicy::None => false,
+    }
 }
 
 #[cfg(any(feature = "mesh-dns", test))]
@@ -287,53 +310,32 @@ pub fn chunks(
     if old.is_some_and(|old| old.node != new.node || old.addresses != new.addresses) {
         return Err("Mesh address transition needs overlap.");
     }
+    let base =
+        old.filter(|old| old.authority_epoch == new.authority_epoch && old.version < new.version);
     let mut builder = Chunks {
-        part: crate::dataplane::Chunk {
-            access_updates: Vec::new(),
-            local_key: new.local_key,
-            server: new.server,
-            node: new.node,
-            #[cfg(feature = "mesh-dns")]
-            name: new.name.clone(),
-            #[cfg(feature = "mesh-dns")]
-            dns_suffix: new.dns_suffix.clone(),
-            from_version: old.map(|old| old.version),
-            version: new.version,
-            index: 0,
-            last: false,
-            addresses: new.addresses,
-            default_policy: new.default_policy,
-            exposure: new.exposure.clone(),
-            upserted: BTreeMap::new(),
-            merged: BTreeMap::new(),
-            removed: Vec::new(),
-            #[cfg(feature = "mesh-dns")]
-            peer_names: BTreeMap::new(),
-            #[cfg(feature = "mesh-dns")]
-            removed_peer_names: Vec::new(),
-        },
+        part: chunk_header(new, base.map(|old| old.version)),
         output: Vec::new(),
     };
     for (node, peer) in &new.peers {
-        if old.and_then(|old| old.peers.get(node)) != Some(peer) {
+        if base.and_then(|old| old.peers.get(node)) != Some(peer) {
             builder.peer(*node, peer)?;
         }
     }
     #[cfg(feature = "mesh-dns")]
     for (node, name) in &new.peer_names {
-        if old.and_then(|old| old.peer_names.get(node)) != Some(name) {
+        if base.and_then(|old| old.peer_names.get(node)) != Some(name) {
             builder.peer_name(*node, name)?;
         }
     }
     #[cfg(feature = "mesh-dns")]
-    for node in old
+    for node in base
         .into_iter()
         .flat_map(|old| old.peer_names.keys())
         .filter(|node| new.peers.contains_key(node) && !new.peer_names.contains_key(node))
     {
         builder.remove_peer_name(*node)?;
     }
-    for node in old
+    for node in base
         .into_iter()
         .flat_map(|old| old.peers.keys())
         .filter(|node| !new.peers.contains_key(node))
@@ -349,6 +351,41 @@ pub fn chunks(
     builder.output.push(builder.part);
     Ok(builder.output)
 }
+
+/// Build one chunk header without encoding any peer changes.
+///
+/// Compact policy updates use this header because their range list carries the only changed
+/// fields; a normal peer diff would repeat each changed policy as an upsert.
+#[must_use]
+pub(crate) fn chunk_header(new: &Config, from_version: Option<u64>) -> crate::dataplane::Chunk {
+    crate::dataplane::Chunk {
+        access_updates: Vec::new(),
+        local_key: new.local_key,
+        authority_epoch: new.authority_epoch.clone(),
+        rotation_operation: new.rotation_operation.clone(),
+        server: new.server,
+        node: new.node,
+        #[cfg(feature = "mesh-dns")]
+        name: new.name.clone(),
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: new.dns_suffix.clone(),
+        from_version,
+        version: new.version,
+        index: 0,
+        last: false,
+        addresses: new.addresses,
+        default_policy: new.default_policy,
+        exposure: new.exposure.clone(),
+        upserted: BTreeMap::new(),
+        merged: BTreeMap::new(),
+        removed: Vec::new(),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: BTreeMap::new(),
+        #[cfg(feature = "mesh-dns")]
+        removed_peer_names: Vec::new(),
+    }
+}
+
 struct Chunks {
     part: crate::dataplane::Chunk,
     output: Vec<crate::dataplane::Chunk>,
@@ -551,5 +588,36 @@ mod tests {
 
         assert_eq!(peer["key"], serde_json::to_value(new_key).unwrap());
         assert_eq!(peer["previous_key"], serde_json::to_value(old_key).unwrap());
+    }
+
+    /// A lower full snapshot within one authority is not encoded as a delta.
+    #[test]
+    fn lower_same_authority_snapshot_starts_without_a_revision_base() {
+        let node = |id: u8| Node {
+            id: NodeId(u64::from(id)),
+            public_key: PublicKey([id; 32]),
+            host: format!("host-{id}"),
+            tags: BTreeSet::new(),
+        };
+        let mut coordinator = Coordinator::new(MeshSettings::new([7; 5]), &[], node(0)).unwrap();
+        coordinator.join(node(1)).unwrap();
+        let mut old = compile(
+            &coordinator,
+            NodeId(1),
+            DefaultPolicy::Deny,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        old.version = 11;
+        old.authority_epoch = Some("11111111-1111-4111-8111-111111111111".to_owned());
+        let mut restored = old.clone();
+        restored.version = 2;
+
+        let chunks = chunks(Some(&old), &restored).unwrap();
+
+        assert!(
+            chunks.iter().all(|chunk| chunk.from_version.is_none()),
+            "a lower full snapshot cannot be sent as a delta from the newer revision"
+        );
     }
 }

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Builds the release-stamped macOS arm64 infraternal binary for a signed release bundle (#483).
+#
+# Run on the Mac build machine, from the repository's nix shell:
+#   nix develop -c scripts/release/build-darwin --channel {stable|edge} OUTPUT
+# OUTPUT must be an absolute path that does not exist yet. It receives:
+#   infraternal-aarch64-darwin  the default-feature `infraternal`, ad-hoc signed
+#   VERSION                     the stamped release version, one line
+#   BUILD-INFO                  toolchain, SDK, size and digest, for reproducibility notes
+# Copy OUTPUT to the Linux release builder, then run
+#   scripts/release/build --channel <same channel> --darwin OUTPUT
+# That build takes its release version from VERSION, so the Linux and macOS halves
+# carry one identity, and publication puts the Mac binary into the SHA256SUMS
+# that the release signer signs (D224). No new key is involved.
+#
+# Why on the Mac and not cross-compiled: the CLI's native dependencies (SQLite,
+# OpenSSL, the VT library) compile through .cargo/apple-cc.sh, which needs the
+# Apple SDK and /usr/bin/clang. Linux has neither (#379).
+# Why an ad-hoc signature: arm64 macOS runs no unsigned code. The Developer ID
+# and notarization path is scripts/macos-release (D321). An ad-hoc signature has
+# no identity and no timestamp, so the same build re-signs to the same bytes.
+# Only x86_64 Macs would need a second binary; none are in scope, so there is none.
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$root"
+usage() { printf 'usage: scripts/release/build-darwin --channel {stable|edge} ABSOLUTE_OUTPUT\n' >&2; exit 2; }
+[[ $# == 3 && "$1" == --channel && "$3" == /* && "$3" != / ]] || usage
+[[ "$(uname -s)-$(uname -m)" == Darwin-arm64 ]] || { printf 'build-darwin runs on macOS arm64 only\n' >&2; exit 2; }
+output="${3%/}"
+[[ ! -e "$output" && ! -L "$output" ]] || { printf 'the output directory already exists\n' >&2; exit 1; }
+workspace_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+case "$2" in
+    stable) version="$workspace_version"
+        [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'stable requires workspace x.y.z\n' >&2; exit 2; } ;;
+    edge) version="edge-$(date -u +%Y%m%dT%H%M%SZ)" ;;
+    *) usage ;;
+esac
+target_root="${CARGO_TARGET_DIR:-$root/target}"
+[[ "$target_root" = /* ]] || target_root="$root/$target_root"
+export CARGO_TARGET_DIR="$target_root"
+export INFRATERNAL_RELEASE_BUILD=1
+export INFRATERNAL_RELEASE_VERSION="$version"
+# The pinned Zig builds the VT library, as in scripts/macos-build-check (D213).
+scripts/auth-toolchain
+cargo build --locked --release -p infraternal
+binary="$target_root/release/infraternal"
+reported="$("$binary" --version)"
+[[ "$reported" == *"$version"* ]] || { printf 'the built binary does not report %s\n' "$version" >&2; exit 1; }
+# The root LaunchDaemon may load only libraries macOS ships (#265).
+if otool -L "$binary" | tail -n +2 | grep -v -E '^\s+(/usr/lib/|/System/Library/)'; then
+    printf 'infraternal links a library macOS does not ship\n' >&2
+    exit 1
+fi
+staging="$(mktemp -d "$(dirname -- "$output")/.build-darwin.XXXXXX")"
+trap 'rm -rf -- "$staging"' EXIT
+install -m 755 "$binary" "$staging/infraternal-aarch64-darwin"
+# Hardened runtime with no entitlements, as scripts/macos-release signs (D321).
+/usr/bin/codesign --force --sign - --identifier org.infraternal.cli --options runtime \
+    "$staging/infraternal-aarch64-darwin"
+/usr/bin/codesign --verify --strict "$staging/infraternal-aarch64-darwin"
+printf '%s\n' "$version" > "$staging/VERSION"
+{
+    printf 'version %s\n' "$version"
+    printf 'source %s\n' "$(git rev-parse HEAD)"
+    printf 'rustc %s\n' "$(rustc --version)"
+    printf 'macos %s\n' "$(sw_vers -productVersion)"
+    # Inside the nix shell xcrun reports the SDK the shell selected (SDKROOT).
+    printf 'sdk %s\n' "$(/usr/bin/xcrun --sdk macosx --show-sdk-version 2>/dev/null || printf unknown)"
+    printf 'clang %s\n' "$(/usr/bin/clang --version | head -n 1)"
+    # wc, not stat: the nix shell's GNU stat and macOS's BSD stat disagree on flags.
+    printf 'size %s\n' "$(wc -c < "$staging/infraternal-aarch64-darwin" | tr -d ' ')"
+    printf 'sha256 %s\n' "$(shasum -a 256 "$staging/infraternal-aarch64-darwin" | cut -d ' ' -f 1)"
+} > "$staging/BUILD-INFO"
+mv -- "$staging" "$output"
+trap - EXIT
+printf 'macOS release binary: %s/infraternal-aarch64-darwin (%s)\n' "$output" "$version"

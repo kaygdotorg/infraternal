@@ -34,14 +34,15 @@ test("no palette row renders without a title, whole list and scoped to Settings"
   expect(await blank()).toEqual([]);
   // Every settings entry the palette offers carries its component and group ("Appearance › Theme").
   const settings: string[] = [];
-  for (const word of ["appearance", "terminal"]) {
+  // Appearance has two windows (Themes, Layout) since the Themes replaced Theme, Font and Size; Terminal has four.
+  for (const [word, rows] of [["appearance", 2], ["terminal", 4]] as const) {
     await page.locator("#palette-input").fill(word);
     // The wording of the settings loads on demand (D188) and the palette is refreshed when it arrives: wait for the group rows.
     const rowsOf = page.locator('#palette-results .result[data-action^="canvas:settings:"]').filter({ hasText: "›" });
-    await expect.poll(() => rowsOf.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(4);
+    await expect.poll(() => rowsOf.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(rows);
     settings.push(...await rowsOf.allTextContents());
   }
-  expect(settings.filter((t) => t.includes("›")).length).toBeGreaterThanOrEqual(8);
+  expect(settings.filter((t) => t.includes("›")).length).toBeGreaterThanOrEqual(6);
   await page.keyboard.press("Escape");
   // The list scoped to the Settings view: its windows are named by their groups.
   await page.evaluate(() => {
@@ -55,7 +56,7 @@ test("no palette row renders without a title, whole list and scoped to Settings"
   await expect(page.locator("#palette")).toBeVisible();
   const names = await page.locator("#palette-results .result-label").allTextContents();
   expect(names.length).toBeGreaterThanOrEqual(5);
-  expect(names).toContain("Theme");
+  expect(names).toContain("Themes");
   expect(await blank()).toEqual([]);
 });
 
@@ -125,20 +126,21 @@ for (const theme of ["ink", "paper"]) for (const level of [2, 3, 4]) {
   });
 }
 
-test("the palette's blur is at least 1.5x a terminal line at every card level that has glass", async ({ page }) => {
+test("the palette keeps at least the shared 16 px blur in every theme, so no ghost text shows behind it (D329)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  for (const [level, name] of [[2, "tinted"], [3, "clear"], [4, "frosted"]] as const) {
-    await page.goto(`${URL("ink")}&card=${level}`);
-    await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  await page.goto(URL("ink"));
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  const blurs: Record<string, number> = {};
+  for (const id of ["solid", "tinted", "frosted"]) {
+    await page.evaluate((theme) => window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: theme } })), id);
+    // sleep: let theme application settle before reading the palette's computed blur.
+    await page.waitForTimeout(400);
     await page.keyboard.press(PALETTE_KEY);
     await expect(page.locator(".palette")).toBeVisible();
-    const blur = await page.locator(".palette").evaluate((el) => Number(/blur\((\d+(?:\.\d+)?)px\)/.exec(getComputedStyle(el).backdropFilter)?.[1] ?? 0));
-    expect(blur, `${name} blur`).toBeGreaterThanOrEqual(27);
+    blurs[id] = await page.locator(".palette").evaluate((el) => Number(/blur\((\d+(?:\.\d+)?)px\)/.exec(getComputedStyle(el).backdropFilter)?.[1] ?? 0));
+    await page.keyboard.press("Escape");
+    expect(blurs[id], `${id} blur`).toBeGreaterThanOrEqual(16);
   }
-  await page.goto(`${URL("ink")}&card=1`);
-  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-  await page.keyboard.press(PALETTE_KEY);
-  await expect(page.locator(".palette")).toBeVisible();
-  // Solid paints no glass, so it pays no blur.
-  expect(await page.locator(".palette").evaluate((el) => getComputedStyle(el).backdropFilter)).toMatch(/^(none|blur\(0px\))/);
+  // Frosted's own 50% blur (12 px) is under the floor, so the palette pays the floor there too; none is below it.
+  console.log(`PALETTE_BLUR ${JSON.stringify(blurs)}`);
 });

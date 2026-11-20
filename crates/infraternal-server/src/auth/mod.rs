@@ -110,8 +110,16 @@ pub enum Error {
     SetupClosed,
     #[error("storage unavailable")]
     Storage(#[from] sqlx::Error),
+    /// A statement on the D379 pool failed (see [`Auth::new`]). Same meaning
+    /// and same message as `Storage`; only the driver differs during the port.
+    #[error("storage unavailable")]
+    Database(#[from] infraternal_db::Error),
     #[error("migration failed")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    /// The database file was named by a relative path (see
+    /// `open_session_database`). Start the server with an absolute `--data`.
+    #[error("the database path must be absolute")]
+    RelativeDatabase,
     #[error("ceremony failed")]
     Webauthn,
     #[error("serialization failed")]
@@ -184,6 +192,12 @@ impl Pending {
 #[derive(Clone)]
 pub struct Auth {
     pool: SqlitePool,
+    /// The D379 rusqlite pool on the same file, when the database is a file
+    /// on disk (#473, slice 2). The session statements run here; everything
+    /// else still runs on `pool`. `None` for in-memory test databases, which
+    /// the pool cannot open (it needs WAL); the session code then falls back
+    /// to `pool`. See [`open_session_database`].
+    db: Option<infraternal_db::Database>,
     webauthn: Arc<Webauthn>,
     origin: String,
     system_service: bool,
@@ -191,6 +205,10 @@ pub struct Auth {
     ingress: Arc<Mutex<http::Ingress>>,
     device_sources: Arc<Mutex<devices::PendingSources>>,
     approval_ceremonies: Arc<Mutex<devices::ApprovalCeremonies>>,
+    /// Approval commits wake only waiters that hold the matching poll capability.
+    join_approval_changes: Arc<account_events::AccountEvents>,
+    /// Cap long requests even when clients reuse a valid capability.
+    join_approval_waiters: Arc<tokio::sync::Semaphore>,
     recovery_changes: Arc<account_events::AccountEvents>,
     recovery_clock: Arc<recovery::Clock>,
     revocations: Arc<account_events::AccountEvents>,
@@ -269,6 +287,8 @@ impl Auth {
             .map_err(|_| Error::Invalid)?;
         migration_compat::normalize_production_index(&pool).await?;
         migration_compat::MIGRATIONS.run(&pool).await?;
+        // After the migrations, so the pool opens a file whose schema is current.
+        let db = open_session_database(&pool).await?;
         let recovery_clock = Arc::new(recovery::Clock::load(&pool).await?);
         recovery_clock.start_checkpointing(pool.clone());
         #[cfg(test)]
@@ -276,6 +296,7 @@ impl Auth {
         let (setup_consumed, _) = watch::channel(());
         Ok(Self {
             pool,
+            db,
             webauthn: Arc::new(webauthn),
             origin: url.origin().ascii_serialization(),
             system_service: false,
@@ -283,6 +304,8 @@ impl Auth {
             ingress: Arc::default(),
             device_sources: Arc::default(),
             approval_ceremonies: Arc::default(),
+            join_approval_changes: Arc::default(),
+            join_approval_waiters: Arc::new(tokio::sync::Semaphore::new(128)),
             recovery_changes: Arc::default(),
             recovery_clock,
             revocations: Arc::default(),
@@ -296,6 +319,22 @@ impl Auth {
             #[cfg(test)]
             test_recovery_elapsed,
         })
+    }
+
+    /// Shut the D379 pool down at server exit: finish queued session writes,
+    /// then copy the WAL into the main file (`infraternal_db::Database::close`).
+    /// Does nothing when there is no pool. Every clone shares the pool, so call
+    /// it once, after the listener has stopped.
+    pub async fn close_database(&self) {
+        if let Some(db) = &self.db {
+            db.close().await;
+        }
+    }
+
+    /// Whether the session statements run on the D379 pool (tests only).
+    #[cfg(test)]
+    pub(crate) fn sessions_on_pool(&self) -> bool {
+        self.db.is_some()
     }
 
     #[cfg(test)]
@@ -323,6 +362,84 @@ impl Auth {
             .load(std::sync::atomic::Ordering::Relaxed);
         (now != i64::MIN).then_some(now)
     }
+}
+
+/// The file name prefix sqlx gives an in-memory database (`sqlite::memory:`):
+/// `file:sqlx-in-memory-N`. See [`open_session_database`].
+const SQLX_IN_MEMORY: &str = "file:sqlx-in-memory-";
+
+/// Open the D379 rusqlite pool (`infraternal-db`) on the same file as `pool`,
+/// or `None` when `pool` is not a database file on disk (#473, slice 2).
+///
+/// The port moves call sites one slice at a time, so both drivers share the
+/// file for a while. sqlx still owns the schema: its migrations ran before
+/// this is called, and the pool only opens the existing file
+/// (`create_if_missing: false`). The pool gets two readers, not the default
+/// seven, because only the session reads use them so far; the eight sqlx
+/// connections still serve everything else, and each reader costs a thread
+/// and its page cache.
+///
+/// Which databases get the pool:
+/// - **In-memory** (sqlx names it `file:sqlx-in-memory-N`): no pool, quietly.
+///   SQLite would read that name as a relative file and create it in the
+///   working directory, and an in-memory database cannot run in WAL mode
+///   anyway. These are test databases.
+/// - **A relative path: refused** with [`Error::RelativeDatabase`]. The pool reopens
+///   the path on each of its threads, so a relative name would follow any
+///   later change of directory, and falling back to sqlx would silently bring
+///   back the unbounded-WAL slide (J696 P3). The server opens its database by
+///   an absolute path (`runtime::open_database`), so only a caller that
+///   skips that reaches this.
+/// - **An absolute path to a regular file in WAL mode**: the pool.
+/// - **Anything else stays on sqlx, with a warning.** The pool switches every
+///   file it opens to WAL, and that setting is stored in the file. The
+///   server's own database is WAL from `open_database`; a file the caller
+///   keeps in another journal mode (some tests use a rollback journal on
+///   purpose, to make a read wait on a lock) must stay as it is.
+async fn open_session_database(pool: &SqlitePool) -> Result<Option<infraternal_db::Database>> {
+    let options = pool.connect_options();
+    let path = options.get_filename();
+    if path
+        .to_str()
+        .is_some_and(|name| name.starts_with(SQLX_IN_MEMORY))
+    {
+        return Ok(None);
+    }
+    if !path.is_absolute() {
+        tracing::error!(
+            path = %path.display(),
+            "the server database path must be absolute; start the server with an absolute --data folder"
+        );
+        return Err(Error::RelativeDatabase);
+    }
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+        tracing::warn!(
+            path = %path.display(),
+            "the database is not a regular file; session statements stay on sqlx"
+        );
+        return Ok(None);
+    }
+    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(pool)
+        .await?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        tracing::warn!(
+            path = %path.display(),
+            journal_mode = %mode,
+            "the database is not in WAL mode; session statements stay on sqlx"
+        );
+        return Ok(None);
+    }
+    let db = infraternal_db::Database::open(
+        path,
+        infraternal_db::Options {
+            readers: 2,
+            create_if_missing: false,
+            ..infraternal_db::Options::default()
+        },
+    )
+    .await?;
+    Ok(Some(db))
 }
 
 // Tests pause at the actual verification/write boundary without timing assumptions.

@@ -1,9 +1,9 @@
-# libghostty-vt 1.0.0 notices
+# libghostty-vt 1.0.1 notices
 
 These readable notices accompany the statically linked terminal engine and
 the dependencies listed in its signed release manifest. The source asset is
-`libghostty-vt-1.0.0.tar.gz`; the dependency asset is
-`libghostty-vt-1.0.0-deps.tar.gz`.
+`libghostty-vt-1.0.1.tar.gz`; the dependency asset is
+`libghostty-vt-1.0.1-deps.tar.gz`.
 
 | Package | SPDX expression | Distributed text |
 | --- | --- | --- |

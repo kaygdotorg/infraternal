@@ -42,6 +42,7 @@ fn turning_off_or_leaving_the_mesh_ends_sessions_but_renewal_does_not() {
             node,
             addresses: vec!["10.254.0.9".parse().unwrap()],
             interface: "infraternal0".into(),
+            userspace_filter: false,
             certificate: certificate.to_vec(),
         })
     };
@@ -87,6 +88,46 @@ fn a_stale_snapshot_is_reported_not_accepted() {
         let newer = node.call("mesh-ssh-node.configure", &serde_json::to_vec(&snapshot(6)).unwrap());
         assert!(newer.is_ok());
     });
+}
+
+/// The replacement process cannot install the previous process's host certificate.
+#[test]
+fn replacement_rejects_the_previous_process_host_certificate() {
+    let previous = MeshSshNode::new(std::env::temp_dir(), |_| None).unwrap();
+    let mut replacement = MeshSshNode::new(std::env::temp_dir(), |_| None).unwrap();
+    let ca = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+    let ca_public = ca.public_key().key_data().ed25519().unwrap().0;
+    let sign = |body: &[u8]| {
+        use russh::keys::signature::Signer as _;
+        let signature: russh::keys::ssh_key::Signature = ca.try_sign(body).ok()?;
+        signature.as_bytes().try_into().ok()
+    };
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs();
+    let configure = |subject| {
+        let certificate = crate::mesh_issue::host_certificate(
+            ca_public,
+            &sign,
+            &crate::mesh_issue::HostRequest {
+                subject,
+                principals: &["server.internal".to_owned()],
+                now,
+                lifetime: 3600,
+            },
+        )
+        .unwrap();
+        serde_json::to_vec(&json!({
+            "enabled": true,
+            "snapshot": {"sequence": 1, "node": 9, "ca": ca_public, "certificates": [], "grants": {}},
+            "host_certificate": certificate.to_openssh().unwrap(),
+        }))
+        .unwrap()
+    };
+    let old = configure(previous.shared.host_key.public_key());
+    let new = configure(replacement.shared.host_key.public_key());
+    assert!(replacement.call("mesh-ssh-node.configure", &old).is_err());
+    assert!(!replacement.desired.borrow().enabled);
+    assert!(replacement.call("mesh-ssh-node.configure", &new).is_ok());
+    assert!(replacement.desired.borrow().enabled);
 }
 
 /// Unauthenticated connections are bounded per source and in total.
@@ -230,6 +271,7 @@ fn stopping_the_agent_removes_the_redirect_and_mesh_22_reaches_sshd() {
         node: 9,
         addresses: vec![address],
         interface: "infraternal0".into(),
+        userspace_filter: false,
         peers: std::collections::BTreeMap::new(),
     };
     let observe = node.mesh_observer();
@@ -303,6 +345,7 @@ fn a_revoking_push_lands_while_logins_keep_overlapping() {
         node: 9,
         addresses: vec!["10.254.0.9".parse().unwrap()],
         interface: "infraternal0".into(),
+        userspace_filter: false,
         peers: std::collections::BTreeMap::new(),
     }));
     let runtime = node.handle().unwrap();

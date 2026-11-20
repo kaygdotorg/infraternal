@@ -238,7 +238,7 @@ pub async fn ensure(
     user: &User,
 ) -> io::Result<Option<PathBuf>> {
     let name = name(person, user.uid.as_raw());
-    let root = runtime_root(state);
+    let root = runtime_root(state, Uid::effective());
     // Serialize every account for a person against revocation. The tombstone
     // survives daemon restarts in the same runtime directory and fails closed.
     let _person = acquire(root, &format!("{}.person", person.simple())).await?;
@@ -685,18 +685,15 @@ fn set_group(identity: &mut crate::login_auth::Identity) -> io::Result<()> {
 /// Directory that holds the person locks, revocation markers and (as root)
 /// the login endpoints.
 ///
-/// As root, login units are host-wide service manager objects whose
-/// `RuntimeDirectory=` lives under `/run`, so their registry is host-wide too:
-/// two root daemons with different state directories still share one login per
-/// person and account, and must see the same revocation markers.
+/// Linux root login units are host-wide service manager objects whose
+/// `RuntimeDirectory=` lives under `/run`. Linux root daemons share their
+/// registry and revocation markers even when their state directories differ.
 ///
-/// Rootless, the registry belongs to this infraternal agent's state directory,
-/// which `sessions::state` has already resolved (an explicit `--state` wins,
-/// otherwise `$XDG_RUNTIME_DIR/infraternal`) and validated as private 0700. It
-/// never reads the environment again, so an explicit state works without
-/// `XDG_RUNTIME_DIR`, and open, revoke and restore always agree on one place.
-fn runtime_root(state: &Path) -> &Path {
-    if Uid::effective().is_root() {
+/// On macOS and for rootless infraternal agents, locks and revocation markers
+/// belong to the private session state directory. The caller already resolves
+/// and validates that directory, so open, revoke and restore use the same path.
+fn runtime_root(state: &Path, uid: Uid) -> &Path {
+    if cfg!(target_os = "linux") && uid.is_root() {
         Path::new("/run")
     } else {
         state
@@ -715,7 +712,7 @@ static AUTHORIZED: std::sync::LazyLock<
 /// No grant survives process exit, so an unconfirmed revocation cannot be lost
 /// into implicit permission when the daemon restarts before saving its marker.
 pub(crate) fn synchronize(state: &Path, person: uuid::Uuid) -> io::Result<()> {
-    synchronize_at(runtime_root(state), person)
+    synchronize_at(runtime_root(state, Uid::effective()), person)
 }
 
 /// Publish a bounded grant only when neither pending nor persisted refusal exists.
@@ -774,7 +771,7 @@ fn not_refused(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// ordinary opens never restore access.
 /// Returns `WouldBlock` when the durable queue is full, before opening a fence.
 pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
-    restore_at(runtime_root(state), person).await
+    restore_at(runtime_root(state, Uid::effective()), person).await
 }
 
 /// Admit restoration before opening its fence and retain it through an executing sync.
@@ -834,7 +831,7 @@ fn restore_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// a bounded owner retries independently of caller lifetime and ordinary saves.
 pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::Result<Revoked> {
     revoke_at(
-        runtime_root(state),
+        runtime_root(state, Uid::effective()),
         manager,
         person,
         !Uid::effective().is_root(),
@@ -993,6 +990,7 @@ async fn stop_user_services(uid: u32) -> io::Result<bool> {
     // no user manager back (J295 P1, #355). A few rounds absorb a request
     // that was already in flight; one that keeps coming back fails this
     // attempt, and the owner retries.
+    let mut linger_disabled = false;
     for _ in 0..LINGER_ROUNDS {
         kill_cgroup(&manager)?;
         // The cgroup check below decides; a manager that is already gone may
@@ -1010,22 +1008,27 @@ async fn stop_user_services(uid: u32) -> io::Result<bool> {
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
         cgroup_emptied(&manager).await?;
-        let linger = tokio::time::timeout(
-            SYSTEMD_QUERY_HANG,
-            loginctl()
-                .args(["disable-linger", &uid.to_string()].as_slice())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-        if !linger.success() {
-            return Err(io::Error::other(
-                "host account linger could not be turned off",
-            ));
+        // Disabling linger is a state change. Repeat it only if an in-flight
+        // request has made the flag visible again during another drain round.
+        if !linger_disabled || linger_file(&name).exists() {
+            let linger = tokio::time::timeout(
+                SYSTEMD_QUERY_HANG,
+                loginctl()
+                    .args(["disable-linger", &uid.to_string()].as_slice())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .status(),
+            )
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+            if !linger.success() {
+                return Err(io::Error::other(
+                    "host account linger could not be turned off",
+                ));
+            }
+            linger_disabled = true;
         }
         if !linger_file(&name).exists() && cgroup_empty(&manager)? {
             // Code of the account running outside the login (a cron or `at`
@@ -1727,6 +1730,40 @@ mod tests {
     //! Person identity remains distinct even when the OS account is shared.
     use super::*;
 
+    /// A login worker's bound control socket is not inherited by its children.
+    #[test]
+    fn runtime_socket_is_close_on_exec() {
+        let root = Path::new("/tmp");
+        let name = format!(
+            "infraternal-login-socket-test-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let endpoint = root.join(&name).join("login.sock");
+        let user = User::from_uid(Uid::effective()).unwrap().unwrap();
+        let bound = runtime_socket(root, &name, &endpoint, &user).unwrap();
+        let flags = nix::fcntl::FdFlag::from_bits_truncate(
+            nix::fcntl::fcntl(&bound, nix::fcntl::FcntlArg::F_GETFD).unwrap(),
+        );
+        drop(bound);
+        std::fs::remove_file(&endpoint).unwrap();
+        std::fs::remove_dir(endpoint.parent().unwrap()).unwrap();
+
+        assert!(flags.contains(nix::fcntl::FdFlag::FD_CLOEXEC));
+    }
+
+    /// Only Linux root shares the service manager's host-wide login registry.
+    #[test]
+    fn platform_login_registry_preserves_scope() {
+        let state = Path::new("/fixture/agent-state");
+        assert_eq!(runtime_root(state, Uid::from_raw(501)), state);
+        let root_state = if cfg!(target_os = "linux") {
+            Path::new("/run")
+        } else {
+            state
+        };
+        assert_eq!(runtime_root(state, Uid::from_raw(0)), root_state);
+    }
+
     /// A root open never takes the `su` fallback on a probe that only timed
     /// out: it probes again, uses an answer as given, and refuses the open if
     /// the manager is still silent (J291 P1, #355).
@@ -1795,12 +1832,15 @@ mod tests {
         services: PathBuf,
         /// Stops the stand-in kernel thread.
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// Owns the writer so fixture cleanup cannot race its last cgroup update.
+        kernel: Option<std::thread::JoinHandle<()>>,
     }
 
     impl ScriptedHost {
         /// Builds the host under `root`. With `dies`, a stand-in kernel empties
         /// the scope once `cgroup.kill` is written; without it the scope stays
-        /// populated, like a process in uninterruptible sleep.
+        /// populated, like a process in uninterruptible sleep. Dropping the
+        /// host joins that writer before its files can be removed.
         fn new(root: &Path, unit: &str, uid: u32, loaded: bool, dies: bool) -> Self {
             use std::os::unix::fs::PermissionsExt as _;
             let host = root.join("host");
@@ -1857,15 +1897,31 @@ mod tests {
                     "case \"$1\" in\nshow) printf 'LoadState=%s\\nActiveState=%s\\nControlGroup=/system.slice/{service}\\nMainPID=0\\n' \"$(cat \"$d/load\")\" \"$(cat \"$d/active\")\" ;;\nstop) echo inactive > \"$d/active\"; echo not-found > \"$d/load\"; exit 5 ;;\nesac\n"
                 ),
             );
-            // disable-linger removes the linger files, except once while
-            // `relinger` exists: a queued enable-linger that lands after it.
+            // The second marker keeps the manager populated for one extra
+            // drain round after linger is off, exposing redundant disables.
             let loginctl = script(
                 "loginctl",
-                "if [ \"$1\" = disable-linger ]; then if [ -e \"$d/relinger\" ]; then rm \"$d/relinger\"; else rm -f \"$d\"/linger/*; fi; if [ -e \"$d/comeback\" ]; then rm \"$d/comeback\"; (sleep 0.1; : > \"$d/linger/$(cat \"$d/comeback-name\")\") & fi; fi\nexit 0\n",
+                &format!(
+                    r#"if [ "$1" = disable-linger ]; then
+  if [ -e "$d/relinger" ]; then
+    rm "$d/relinger"
+  elif [ -e "$d/manager-returns" ]; then
+    rm "$d/manager-returns"
+    rm -f "$d"/linger/*
+    : > "$d/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.kill"
+    printf 'populated 1\n' > "$d/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.events"
+  else
+    rm -f "$d"/linger/*
+  fi
+  if [ -e "$d/comeback" ]; then rm "$d/comeback"; (sleep 0.1; : > "$d/linger/$(cat "$d/comeback-name")") & fi
+fi
+exit 0
+"#
+                ),
             );
             std::fs::create_dir_all(host.join("linger")).unwrap();
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            if dies {
+            let kernel = dies.then(|| {
                 let (groups, stop) = (vec![scope.clone(), services.clone()], stop.clone());
                 std::thread::spawn(move || {
                     while !stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1877,11 +1933,11 @@ mod tests {
                                     .unwrap();
                             }
                         }
-                        // sleep: the stand-in kernel polls for the kill write; the loop ends on it.
+                        // sleep: poll for kill writes until the host signals shutdown.
                         std::thread::sleep(Duration::from_millis(5));
                     }
-                });
-            }
+                })
+            });
             HOST_UNITS.with(|units| {
                 *units.borrow_mut() = Some(HostStandIn {
                     systemctl,
@@ -1898,6 +1954,7 @@ mod tests {
                 scope,
                 services,
                 stop,
+                kernel,
             }
         }
 
@@ -1908,8 +1965,15 @@ mod tests {
     }
 
     impl Drop for ScriptedHost {
+        /// Finish the writer's in-flight update before callers remove its files.
         fn drop(&mut self) {
             self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(kernel) = self.kernel.take()
+                && kernel.join().is_err()
+                && !std::thread::panicking()
+            {
+                panic!("stand-in kernel thread failed");
+            }
             HOST_UNITS.with(|units| *units.borrow_mut() = None);
         }
     }
@@ -2045,14 +2109,21 @@ mod tests {
                 .any(|line| line == format!("systemctl stop user@{uid}.service")),
             "{calls:?}"
         );
+        // Cleanup may start as soon as the host is dropped. Its writer must
+        // have released its last ownership by then, not merely been signalled.
+        let writer = std::sync::Arc::downgrade(&host.stop);
         drop(host);
+        assert!(
+            writer.upgrade().is_none(),
+            "fixture writer outlived its host"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// J295 `lingerloop`: the account's service keeps asking for linger, and
-    /// one request lands after `disable-linger`. The revocation reports
-    /// success only once linger is verified off (and the user manager stays
-    /// gone): it kills first, then disables, then checks, and repeats.
+    /// J295 `lingerloop`: one linger request lands after the first disable,
+    /// and the manager stays populated for another cleanup round after the
+    /// second. Revocation must turn linger off again without issuing a third
+    /// disable while it finishes draining the manager.
     #[tokio::test]
     async fn a_linger_request_landing_after_disable_never_survives_revocation() {
         let (root, person, uid, unit) = system_login_fixture().await;
@@ -2060,6 +2131,7 @@ mod tests {
         let name = User::from_uid(Uid::from_raw(uid)).unwrap().unwrap().name;
         std::fs::write(host.host.join("linger").join(&name), b"").unwrap();
         std::fs::write(host.host.join("relinger"), b"").unwrap();
+        std::fs::write(host.host.join("manager-returns"), b"").unwrap();
         record_scope(
             &root,
             &unit,

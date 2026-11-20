@@ -49,9 +49,14 @@ Definition of Done (it is in every job prompt):
    Clippy is not limited to the changed packages: a narrower feature set
    makes feature-dependent lints fire in untouched crates that the gate never
    reports.
+   The unit-test row builds first, untimed, and then runs the tests under a
+   hang timeout (`VERIFY_QUICK_TEST_TIMEOUT`, 1500 s), so a cold compile on a
+   busy host cannot be reported as a hung test (#509).
    It does not cover dependents of a changed crate, integration tests, the
    static builds, cargo-deny or the repository checks, so it never replaces
-   `iterate` or `fast` and is never quoted as the gate. Set
+   `iterate` or `fast` and is never quoted as the gate. The `test` row of
+   `fast` and `iterate` runs `cargo test --no-fail-fast` and lists every
+   failing test at its end, so one flaky test cannot hide the others (#509). Set
    `VERIFY_QUICK_BASE` to compare against another ref. Between commits,
    iterate with `scripts/verify iterate` (#204): the
    same fmt, VT fmt, clippy, tests, cargo-deny, plugin compile-out,
@@ -60,7 +65,10 @@ Definition of Done (it is in every job prompt):
    `scripts/verify fast` (static builds included) is the final gate: it runs
    at milestones and always on the branch head before you report done, hand
    off to review, push for integration or merge; its output is quoted
-   verbatim on the issue. A green `iterate` run is never quoted as the final
+   verbatim on the issue. Both modes run the `tracer unit suite` row with
+   `cd apps/tracer && bun test src` in one process, so module mocks and browser
+   globals leaking between source test files cannot hide behind separate runs
+   or a hand-picked file list (#503). A green `iterate` run is never quoted as the final
    gate. The commit body gives the why, the rejected alternatives, and the
    decision or issue references. (Owner, 2026-10-11: the full gate on every
    commit cost about half of each job's time on the shared build host.)
@@ -267,6 +275,15 @@ numbered history, both timestamp arrival orders and altered checksums.
   VM.
 
 ## 7. Rust build speed and static binary size
+
+- Dev and test profiles build hot crypto dependencies optimised (`sha2`,
+  `argon2`, `blake2` in the root `Cargo.toml`). Unoptimised Argon2 cost about
+  0.9 s of CPU per hash against 0.21 s optimised and made up 45% of the
+  server suite's CPU (#509). Add a dependency to that list only with a
+  measured per-test CPU saving; the production parameters never change.
+- Test fixtures must not move or hash the test executable (about 400 MB). A
+  scripted transport that never runs its payload takes a small tracked file
+  (#509).
 
 - `scripts/verify fast` checks the stripped, static release binaries against
   recorded baselines and reports the signed byte delta for each target
@@ -607,6 +624,16 @@ numbered history, both timestamp arrival orders and altered checksums.
 - The job launcher provides `sccache` through `RUSTC_WRAPPER`; keep the cache
   enabled for repeated builds. Put Rust build output in a job-specific
   `CARGO_TARGET_DIR` under `$HOME/.cache/codex-scratch/` rather than `/tmp`.
+  Give every distinct source worktree or revision its own target directory,
+  especially when comparing a job head with `origin/dev`; never reuse one target
+  across those source trees. #542 traced a shared-target failure to stale
+  generated migration metadata: the build target contained 62 migrations while
+  the source contained 64, and the host-promotion test refused a recorded
+  version missing from the stale list. `infraternal-server/build.rs` tracks the
+  migration directory and each existing migration file, and `scripts/verify`
+  warns when a target marker records a different source path or revision.
+  These checks help catch stale inputs but do not make cross-worktree target
+  reuse safe; keep the targets separate.
 - Machine-local compiler cache on the build VMs (#329), opt-in. `nix develop`
   provides `sccache`. When the machine sets `INFRATERNAL_SCCACHE_DIR` (the
   build VMs: `~/.cache/sccache`), the dev shell exports `SCCACHE_DIR`, the
@@ -823,28 +850,72 @@ the fuzz, and takes one of the build slots like any other run. Everything is
 token-less `infraternal-browser` account (`/var/lib/infraternal-browser`, mode
 0700, checkout moved to origin/dev each night, `nice -n 10`, own test port
 4731). Everything that account writes is hostile data. After the run, the
-root helper opens the run folder and its three result files without following
-links, accepts only regular files owned by that account under a size cap, and
-copies them into a staging folder owned by the token account. Only the
-root-owned, reviewed copy of the reporter runs in the `infraternal-fuzz`
-account, on the staged copies; it never opens a path the suite controls.
+root helper opens the run folder and its result files without following links,
+accepts only regular files owned by that account under size caps, and copies
+them into a staging folder owned by the token account. Only the root-owned,
+reviewed copy of the reporter runs in the `infraternal-fuzz` account, on the
+staged copies; it never opens a path the suite controls. After reporting, root
+copies the checked raw results, log, merged report and evidence to
+`/var/lib/infraternal-browser-pub/<run>/`. The publication directory is root-owned;
+each run is built under a hidden temporary name, synced, and made visible by a
+same-parent directory rename. Operators can read complete published runs
+with `sudo`, without access to the browser account's private home. The
+publication tree is root-owned (directories mode 0750, files mode 0640).
 
 **Reports:** one issue per failing spec file, found by a hidden marker (a hash
 of the name) in issues written by the token's own account, so a persistent red
 is one issue. It carries the dev SHA, the error text, a log tail and the
 evidence path (the newest seven nights are kept under
-`/var/lib/infraternal-browser/runs/`), all inside a code fence no content can
+`/var/lib/infraternal-browser-pub/`), all inside a code fence no content can
 close, with test titles inside it too. At most ten new issues a night and
 thirty open at once: more, or a mostly red suite (a dead test
 server), becomes one roll-up issue. A spec that passes again gets one comment,
 and a later regression one more; issues are never closed. A build or suite
 that cannot run at all fails the unit and opens no spec issue.
+**Shards.** The nightly runs `SHARDS` (2) Playwright shards side by side. Each has its own test
+server (a port pair: 4731/4732 and 4733/4734; `NIGHTLY_BASE_PORT` moves the range, for a manual run beside the service), its own build folder (`TRACER_DIST`) and its own evidence
+folder, because every spec of one server shares one test double (#377); the service helper holds one
+build slot per shard. Spec files are split longest-first by the previous night's seconds
+(`runs/file-times.json`, rewritten at the end of every run), or by an explicit equal-weight assignment
+on a first night. The durable manifest records each shard's assigned spec files before the run starts.
+Each reporter writes a plan with stable per-shard test IDs, then each completed test outcome, to one
+`results.jsonl`; a complete merged `merged-report.json` is written through a synced temporary file and
+atomic rename before issue filing. A spec counts as passing only when every planned test in it finished
+with an expected or flaky outcome. The report lists missing or interrupted tests under `not_run`, and
+the roll-up names spec files that were not fully run. All shards append to one log with `[s1]`/`[s2]`
+prefixes and a final `shard` line with their exit status. A shard that crashes does not hide the other:
+the night is still reported, each spec issue says which shard ran it, and the roll-up gets one note, for
+example "shard 1 of 2: 700 of 700 tests ran, finished (exit 1); shard 2 of 2: crashed (exit 2): none
+of its 90 assigned spec files ran". Tests tagged
+`@perf` (frame budgets and benchmarks, for example `clusters-bench`) are left out with
+`--grep-invert=@perf` and run on the performance VM.
+
 Time budgets: the wait for a build slot is bounded on its own (12 h; exit 75 and one
-`QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 6 h
-budget (`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot
-is granted; the unit's `TimeoutStartSec=24h` is just a backstop.
+`QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 9 h budget
+(`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot is granted; the
+unit's `TimeoutStartSec=24h` is just a backstop. A suite that hits its budget still reports:
+`apps/tracer/nightly-reporter.ts` streams one line per finished test into `results.jsonl`
+(Playwright's own JSON only appears at the end), issues are filed for the tests that really
+failed, and the roll-up gets one note, "suite timed out after 9 h; M of K tests ran". Specs that
+did not run are never reported fixed. After the run, every leftover process of the suite account
+is killed (a Python `os.kill(-1, SIGKILL)` as that account; if that cannot run, nothing is staged).
+
+**Token and login.** The token has issue write and repo read, and deliberately not `read:user`,
+so the reporter never calls `/user`. It is told whose markers to believe by
+`/etc/infraternal-browser-suite.login` (root-owned, written by the installer from
+`--forgejo-login <account>`, required the first time), checks every issue and comment it posts
+against that name, and stops the night if they differ. A 401 or 403 ends the reporter with one
+`TOKEN LACKS PERMISSION` line (HTTP status, route, Forgejo's message), exit 77; the staged files
+stay in `/var/lib/infraternal-fuzz/browser-staging/`. To file a night's results after fixing the
+token, without re-running the suite, as root:
+`/usr/local/libexec/infraternal-browser-suite-service --report-only [--run-name <folder name>]`
+(the name is only needed for staging left by an older helper; it takes no slot and runs only
+the reporter, which is safe to repeat because issues are deduplicated).
 `sudo systemctl start infraternal-browser-suite.service` is a manual run; the
 reporter's test is the `nightly browser suite reporter` gate row.
+
+For the host, account, log, report, stop and recovery commands, see
+[`docs/operations/nightly-browser-suite.md`](operations/nightly-browser-suite.md).
 
 **Install or update** (as root, only from a reviewed commit; the installer
 clones its own fresh root-owned copy at that exact commit and installs the two

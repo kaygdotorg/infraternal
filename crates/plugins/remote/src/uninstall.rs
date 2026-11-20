@@ -56,6 +56,35 @@ pub fn installation(host: &str, home: &Path, uid: u32) -> Context {
         sessions: base.join("sessions"),
     }
 }
+
+/// Whether `base` still contains exactly the committed transaction that asked
+/// for cleanup. Any staged transaction makes the old marker stale.
+fn committed_transaction_matches(
+    base: &Path,
+    transaction: uuid::Uuid,
+    uid: u32,
+) -> io::Result<bool> {
+    let stage = base.join(".bootstrap-lock");
+    match std::fs::symlink_metadata(stage) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let marker = base.join(".bootstrap-transaction");
+    let metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(denied());
+    }
+    Ok(public_file(&marker, uid, 33)? == format!("{}\n", transaction.simple()))
+}
 fn layout(context: &Context, home: &Path, uid: u32) -> io::Result<Layout> {
     if context.uid != uid
         || context.host.len() != 32
@@ -198,7 +227,7 @@ impl Kernel {
         retire: |_| Ok(Vec::new()),
     };
 }
-pub use crate::left_line;
+pub use crate::{left_line, uninstall_request::decode_request};
 
 /// Enabled only for a checked managed remote installation, without an idle task.
 pub struct UninstallPlugin {
@@ -226,33 +255,6 @@ impl UninstallPlugin {
             launcher: "systemd-run",
         })
     }
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-/// An exact host identity and dry-run choice, without filesystem input.
-pub struct Request {
-    host: String,
-    dry_run: bool,
-}
-/// Decode the same bounded object used by the authenticated uninstall handler.
-/// # Errors
-/// Refuses positional input, foreign fields, duplicate keys and invalid host identities.
-pub fn decode_request(input: &[u8]) -> Result<Request, PluginError> {
-    if input.len() > infraternal_plugin_api::MAX_ACTION_BYTES
-        || input.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{')
-    {
-        return Err(PluginError::Rejected);
-    }
-    let request: Request = serde_json::from_slice(input).map_err(|_| PluginError::Rejected)?;
-    if request.host.len() != 32
-        || !request
-            .host
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(PluginError::Rejected);
-    }
-    Ok(request)
 }
 impl AgentPlugin for UninstallPlugin {
     fn descriptor(&self) -> &'static PluginDescriptor {
@@ -642,6 +644,39 @@ pub async fn cleanup(
     // Held until return: a re-add of this host meanwhile is refused with
     // "Setup is already running" instead of racing the removal (#235).
     let _setup = setup_guard(&paths.base).await?;
+    cleanup_locked(context, &paths, home, uid, kernel, true).await
+}
+
+/// Remove a committed root install only while its transaction still owns the
+/// base. Stale abandonment is an idempotent no-op and cannot stop a later install.
+/// # Errors
+/// Reports validation, manager and file cleanup failures without claiming completion.
+pub async fn cleanup_for_promotion(
+    context: &Context,
+    home: &Path,
+    uid: u32,
+    transaction: uuid::Uuid,
+    kernel: Kernel,
+) -> io::Result<bool> {
+    let paths = layout(context, home, uid)?;
+    // Check the transaction under the same lock that fences setup and cleanup.
+    let _setup = setup_guard(&paths.base).await?;
+    if !committed_transaction_matches(&paths.base, transaction, uid)? {
+        return Ok(false);
+    }
+    cleanup_locked(context, &paths, home, uid, kernel, false).await?;
+    Ok(true)
+}
+
+/// Run the checked removal while the caller holds the setup lock.
+async fn cleanup_locked(
+    context: &Context,
+    paths: &Layout,
+    home: &Path,
+    uid: u32,
+    kernel: Kernel,
+    stop_agent: bool,
+) -> io::Result<Vec<String>> {
     validate(context, home, uid)?;
     (kernel.inspect)(&context.sessions)?;
     let sockets = context.sessions.join("sessions");
@@ -661,7 +696,13 @@ pub async fn cleanup(
             }
         }
     }
-    manager(&paths, &["disable", "--now", "infraternal-agent.service"]).await?;
+    if stop_agent {
+        manager(paths, &["disable", "--now", "infraternal-agent.service"]).await?;
+    } else {
+        // The abandonment reply travels over this daemon's live link. Disable
+        // its unit now, then stop the already-running process after the reply.
+        manager(paths, &["disable", "infraternal-agent.service"]).await?;
+    }
     // Recheck after manager calls; never unlink a replacement made during stop.
     validate(context, home, uid)?;
     let report: Vec<String> = (kernel.retire)(&context.sessions)?
@@ -671,7 +712,7 @@ pub async fn cleanup(
     std::fs::remove_file(&paths.unit)?;
     infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
     std::fs::remove_file(&paths.launcher)?;
-    manager(&paths, &["daemon-reload"]).await?;
+    manager(paths, &["daemon-reload"]).await?;
     // A rootful agent may have written mesh SSH's client files (#221); they
     // go with it. Only files infraternal wrote are removed.
     let mut report = report;
@@ -686,23 +727,139 @@ pub async fn cleanup(
     }
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
 }
+/// Retire this account's rootless installation after its host was upgraded
+/// to the root infraternal agent (D376, #399; J415 R5, R6).
+///
+/// Run as the account itself (the root agent starts this binary as the
+/// account; root never touches these files). Like [`cleanup`], ownership is
+/// decided before anything stops, under the setup lock. Unlike it, the
+/// running terminals stay: their shims and session sockets are left in
+/// place, so the person's own process can adopt them. The user unit is
+/// stopped (its `KillMode=process` stops only the agent, never a shim),
+/// disabled and removed with the launcher and the agent's state.
+///
+/// Idempotent: an installation that is already gone is a success, so the
+/// server's outbox can ask again after a lost receipt.
+/// # Errors
+/// Refuses another account's or another host's installation, and reports a
+/// service manager or file removal failure; nothing past the failure changes.
+pub async fn retire_for_promotion(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
+    let paths = layout(context, home, uid)?;
+    if !paths.user {
+        return Err(denied());
+    }
+    if !paths.base.join(".bootstrap-owner").exists() && !paths.unit.exists() {
+        return Ok(());
+    }
+    let _setup = setup_guard(&paths.base).await?;
+    validate(context, home, uid)?;
+    manager(&paths, &["disable", "--now", "infraternal-agent.service"]).await?;
+    // Recheck after the manager call; never unlink a replacement made meanwhile.
+    validate(context, home, uid)?;
+    std::fs::remove_file(&paths.unit)?;
+    infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
+    std::fs::remove_file(&paths.launcher)?;
+    manager(&paths, &["daemon-reload"]).await?;
+    for directory in ["bin", "state"] {
+        match std::fs::remove_dir_all(paths.base.join(directory)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    for file in [
+        ".bootstrap-ready",
+        ".bootstrap-transaction",
+        PLAN,
+        STAGED,
+        ".bootstrap-owner",
+    ] {
+        match std::fs::remove_file(paths.base.join(file)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Open the install's setup guard file, `<base>.bootstrap-guard`, creating
+/// it when missing; every infraternal setup command and the infraternal
+/// agent's runtime admission `flock` this one file (see the ssh plugin's
+/// `setup_guard.sh`).
+///
+/// The guard must be something no other local account can open: `flock`
+/// needs only a descriptor, so a lock on a world-readable object (the base's
+/// parent, `/var/lib` for a root install, before #399 J569 P1-1) let any
+/// account block every setup step, rollback and uninstall. So:
+/// - the parent must be a real directory owned by this account and not
+///   writable by group or others, so nobody else can plant or swap the name;
+/// - the file is created exclusively with mode 0600 and opened without
+///   following a link;
+/// - the opened file must be a regular file owned by this account, mode
+///   0600, with one link. Anything else is refused, never repaired.
+///
+/// The file is never removed (see `setup_guard.sh` for why).
+pub(crate) fn open_setup_guard(base: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = base.parent().ok_or_else(denied)?;
+    if !private_parent(base) {
+        return Err(denied());
+    }
+    let euid = nix::unistd::Uid::effective().as_raw();
+    let mut name = base.file_name().ok_or_else(denied)?.to_os_string();
+    name.push(".bootstrap-guard");
+    let path = parent.join(name);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != euid
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(denied());
+    }
+    Ok(file)
+}
+
+/// Whether `base`'s parent is a real directory owned by this account and not
+/// writable by group or others: the only kind setup installs under (its guard
+/// refuses any other parent with exit 71), so the only kind with a setup
+/// guard file.
+pub(crate) fn private_parent(base: &Path) -> bool {
+    base.parent()
+        .and_then(|parent| std::fs::symlink_metadata(parent).ok())
+        .is_some_and(|directory| {
+            directory.is_dir()
+                && directory.uid() == nix::unistd::Uid::effective().as_raw()
+                && directory.mode() & 0o022 == 0
+        })
+}
+
 /// Take the lock every infraternal setup command takes first (an exclusive
-/// `flock` on the base's parent directory, see the ssh plugin's
-/// `setup_guard.sh`), waiting a bounded time for a running setup step.
+/// `flock` on the install's guard file, [`open_setup_guard`]), waiting a
+/// bounded time for a running setup step.
 ///
 /// While it is held, setup admits no new attempt on this account (exit 73,
 /// "Setup is already running on this host"). Setup holds it only for one
 /// command, so the wait is short; a longer one refuses with nothing changed.
 async fn setup_guard(base: &Path) -> io::Result<nix::fcntl::Flock<std::fs::File>> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let parent = base.parent().ok_or_else(denied)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let directory = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
-            .open(parent)?;
-        match nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+        let guard = open_setup_guard(base)?;
+        match nix::fcntl::Flock::lock(guard, nix::fcntl::FlockArg::LockExclusiveNonblock) {
             Ok(guard) => return Ok(guard),
             Err((_, nix::errno::Errno::EWOULDBLOCK)) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -727,7 +884,13 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
             _ => {}
         }
     }
-    for file in [".bootstrap-ready", PLAN, STAGED, ".bootstrap-owner"] {
+    for file in [
+        ".bootstrap-ready",
+        ".bootstrap-transaction",
+        PLAN,
+        STAGED,
+        ".bootstrap-owner",
+    ] {
         match std::fs::remove_file(base.join(file)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
@@ -952,9 +1115,10 @@ mod tests {
         let Some((home, context, uid)) = installation("l", false) else {
             return;
         };
-        let parent = context.data.parent().unwrap().parent().unwrap().to_owned();
+        let base = context.data.parent().unwrap();
+        let guard_file = base.with_file_name("infraternal.bootstrap-guard");
         let held = nix::fcntl::Flock::lock(
-            std::fs::File::open(&parent).unwrap(),
+            open_setup_guard(base).unwrap(),
             nix::fcntl::FlockArg::LockExclusiveNonblock,
         )
         .map_err(|(_, error)| error)
@@ -967,7 +1131,7 @@ mod tests {
         let guard = setup_guard(context.data.parent().unwrap()).await.unwrap();
         let setup = std::process::Command::new("flock")
             .arg("-n")
-            .arg(&parent)
+            .arg(&guard_file)
             .arg("true")
             .status()
             .unwrap();
@@ -1266,6 +1430,38 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert!(intact && matches);
+    }
+
+    /// A delayed cleanup for A may finish as a no-op after B has committed, but it cannot claim B's install.
+    #[test]
+    fn promotion_cleanup_matches_only_its_committed_transaction() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!(
+            "infraternal-promotion-transaction-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let transaction_a = uuid::Uuid::from_u128(0xa);
+        let transaction_b = uuid::Uuid::from_u128(0xb);
+        let marker = base.join(".bootstrap-transaction");
+        std::fs::write(&marker, format!("{}\n", transaction_b.simple())).unwrap();
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let uid = nix::unistd::geteuid().as_raw();
+        assert!(!committed_transaction_matches(&base, transaction_a, uid).unwrap());
+        assert!(committed_transaction_matches(&base, transaction_b, uid).unwrap());
+
+        // A remains the last committed transaction while B is staged. A's
+        // delayed cleanup must not treat the old marker as authority over B.
+        std::fs::write(&marker, format!("{}\n", transaction_a.simple())).unwrap();
+        let active = base.join(".bootstrap-lock/transaction");
+        std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+        std::fs::write(&active, format!("{}\n", transaction_b.simple())).unwrap();
+        assert!(!committed_transaction_matches(&base, transaction_a, uid).unwrap());
+
+        std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
     fn replies_name_the_objects_left_as_valid_json() {

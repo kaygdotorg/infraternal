@@ -20,7 +20,8 @@ import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { ACTION, TOPIC, ActionRefused, type MeshTransport } from "../mesh/protocol";
 
 export type FakeMeshState = "ready" | "loading" | "error" | "denied";
-export interface FakeNode { id: number; name: string; live: boolean; behind: boolean; rttUs: number | undefined; os: HostPlatform; address: string; path: "direct" | "relay"; via: string | undefined }
+/** A mock mesh membership row, including whether the node can fence peers after a restore. */
+export interface FakeNode { id: number; name: string; live: boolean; behind: boolean; rttUs: number | undefined; os: HostPlatform; address: string; path: "direct" | "relay"; via: string | undefined; /** Whether the mock node can retire peers after a server restore. */ restoreSafe: boolean }
 export interface FakeGrant { name: string; arrowId: number; from: string; to: string; both: boolean; via: string | undefined }
 export interface FakeMeshSeed { nodes: FakeNode[]; tags: Record<string, number[]>; grants: FakeGrant[] }
 
@@ -30,7 +31,7 @@ const derive = (from: string, to: string): string => `${from.replace(/^tag:/, ""
 /** The four hosts, two tags and seven grants the mockup has always shown. */
 export function seedMesh(grants: ReadonlyArray<{ id: string; from: string; to: string; via?: string }>): FakeMeshSeed {
   const node = (id: number, name: string, os: HostPlatform, address: string, rttMs: number, over: Partial<FakeNode> = {}): FakeNode =>
-    ({ id, name, live: true, behind: false, rttUs: rttMs * 1000, os, address, path: "direct", via: undefined, ...over });
+    ({ id, name, live: true, behind: false, rttUs: rttMs * 1000, os, address, path: "direct", via: undefined, restoreSafe: true, ...over });
   return {
     nodes: [
       node(1, "build-01", "ubuntu", "10.69.69.71", 42),
@@ -55,7 +56,7 @@ export function generateMesh(hosts: number, extraGrants = 0): FakeMeshSeed {
     const relay = i % 11 === 0;
     nodes.push({
       id: i + 1, name, live: i % 53 !== 7, behind: i % 41 === 5, rttUs: (20 + ((i * 37) % 180)) * 1000, os: OS[i % OS.length]!,
-      address: `10.254.${Math.floor(i / 250)}.${(i % 250) + 2}`, path: relay ? "relay" : "direct", via: relay ? "fra-relay" : undefined,
+      address: `10.254.${Math.floor(i / 250)}.${(i % 250) + 2}`, path: relay ? "relay" : "direct", via: relay ? "fra-relay" : undefined, restoreSafe: true,
     });
     if (i % 9 !== 0) {
       (tags[`team-${String(i % tagCount).padStart(2, "0")}`] ??= []).push(i + 1);
@@ -77,6 +78,7 @@ export function generateMesh(hosts: number, extraGrants = 0): FakeMeshSeed {
   return { nodes, tags, grants };
 }
 
+/** Test-only Mesh transport that returns seeded membership and emits controllable updates. */
 export class FakeMeshServer implements MeshTransport {
   state: FakeMeshState = "ready";
   access = { view: true, manageGrants: true };
@@ -125,7 +127,7 @@ export class FakeMeshServer implements MeshTransport {
       node: { id: n.id, host: n.name, tags: [...this.tags].filter(([, m]) => m.has(n.id)).map(([t]) => t).sort() },
       live: n.live, last_seen: n.live && this.includeExtras ? 1_700_000_000 : null, last_rtt_us: n.rttUs ?? null,
       ...(n.live && n.path === "direct" ? { path: "direct" } : {}),
-      ...(this.includeExtras ? { os: n.os, address: n.address, ...(n.path === "relay" ? { path: n.path } : {}), ...(n.via ? { via: n.via } : {}), ...(n.behind ? { behind: true } : {}) } : {}),
+      ...(this.includeExtras ? { os: n.os, address: n.address, restore_safe: n.restoreSafe, ...(n.path === "relay" ? { path: n.path } : {}), ...(n.via ? { via: n.via } : {}), ...(n.behind ? { behind: true } : {}) } : {}),
     }));
     const end = (e: string): Record<string, unknown> => (e.startsWith("tag:") ? { Tag: e.slice(4) } : { Node: this.idOf(e) });
     const tags = [...this.tags].map(([name, m]) => ({ name, members: [...m].sort((a, b) => a - b) }));
@@ -192,7 +194,7 @@ export class FakeMeshServer implements MeshTransport {
   setAccess(access: { view: boolean; manageGrants: boolean }): void { this.access = access; this.bump(); }
 
   /** Changes a host the way a live mesh does (liveness, round trip) and tells the subscribers. */
-  patchNode(name: string, patch: Partial<Pick<FakeNode, "live" | "behind" | "rttUs" | "path" | "via" | "address" | "os">> & { rttMs?: number; state?: "online" | "offline" | "behind" }): void {
+  patchNode(name: string, patch: Partial<Pick<FakeNode, "live" | "behind" | "rttUs" | "path" | "via" | "address" | "os" | "restoreSafe">> & { rttMs?: number; state?: "online" | "offline" | "behind" }): void {
     const n = [...this.nodes.values()].find((o) => o.name === name);
     if (!n) return;
     const { rttMs, state, ...rest } = patch;
@@ -203,7 +205,7 @@ export class FakeMeshServer implements MeshTransport {
   }
   addNode(n: { name: string; os?: HostPlatform; address?: string; rttMs?: number }): void {
     const id = Math.max(0, ...this.nodes.keys()) + 1;
-    this.nodes.set(id, { id, name: n.name, live: true, behind: false, rttUs: (n.rttMs ?? 10) * 1000, os: n.os ?? "unknown", address: n.address ?? `10.69.69.${id + 60}`, path: "direct", via: undefined });
+    this.nodes.set(id, { id, name: n.name, live: true, behind: false, rttUs: (n.rttMs ?? 10) * 1000, os: n.os ?? "unknown", address: n.address ?? `10.69.69.${id + 60}`, path: "direct", via: undefined, restoreSafe: true });
     this.bump();
   }
   removeNode(name: string): void {

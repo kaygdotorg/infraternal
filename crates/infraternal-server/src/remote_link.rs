@@ -768,6 +768,27 @@ impl RemoteLink {
         if authority.cleanup_person().is_some() && !(stream == 0 && cleanup_frame) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
+        // A root upgrade's successor answers only its proof calls before the
+        // handover, and only its own uninstall once abandoned (J415 R2, R5):
+        // no terminal, plugin, mesh or native-stream traffic, even if misrouted.
+        if let Some(successor) = authority.successor_authority() {
+            let allowed = match frame {
+                Frame::Hello { .. } | Frame::Ping { .. } | Frame::Pong { .. } => true,
+                Frame::Call { action_id, .. } => match successor.purpose {
+                    crate::enrollment::promotion::SuccessorPurpose::Proof => {
+                        crate::remote_successor::PROOF_ACTIONS.contains(action_id)
+                    }
+                    crate::enrollment::promotion::SuccessorPurpose::Uninstall => {
+                        *action_id == infraternal_plugin_remote::UNINSTALL.id
+                            || *action_id == crate::remote_successor::ABANDON
+                    }
+                },
+                _ => false,
+            };
+            if !(stream == 0 && allowed) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+        }
         let _permit = authority.write_permit().await?;
         tokio::select! {
             biased;

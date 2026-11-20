@@ -50,10 +50,12 @@ mod macos {
     }
 }
 
+/// Signal stop must join a capture worker even while its native encoder is blocked.
 #[test]
 fn signal_stop_joins_capture_without_waiting_for_a_blocked_encoder() {
     use std::{
         fs,
+        io::Read,
         net::Shutdown,
         os::unix::{fs::PermissionsExt, net::UnixStream},
         path::PathBuf,
@@ -76,7 +78,10 @@ fn signal_stop_joins_capture_without_waiting_for_a_blocked_encoder() {
             ])
             .status()
             .unwrap();
-        assert!(status.success(), "owned-copy shutdown fixture failed");
+        assert!(
+            status.success(),
+            "owned-copy shutdown fixture exited with {status}"
+        );
         return;
     }
     let root =
@@ -84,7 +89,9 @@ fn signal_stop_joins_capture_without_waiting_for_a_blocked_encoder() {
     let dir = root.join(format!("desktop-helper-stop-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let executable = dir.join("native-fixture.py");
-    fs::write(&executable, r"#!/usr/bin/env python3
+    fs::write(
+        &executable,
+        r"#!/usr/bin/env python3
 # Role: acknowledge control cleanup but stop draining the encoder pixel packet.
 import json, signal, struct, sys
 source = sys.stdin.buffer
@@ -95,8 +102,8 @@ while True:
     if len(header) != 6: break
     length, version, kind = struct.unpack('>IBB', header)
     if encoder and kind == 101:
-        with open(sys.argv[0] + '.ready', 'w') as output:
-            output.write('ready')
+        # The parent observes only existence; create the empty event in one step.
+        open(sys.argv[0] + '.ready', 'xb').close()
         signal.pause()
         break
     if len(source.read(length-2)) != length-2: break
@@ -105,7 +112,9 @@ while True:
     reply = 66 if kind == 2 else 68
     sink.write(struct.pack('>IBB', len(body)+2, 1, reply)+body)
     sink.flush()
-").unwrap();
+",
+    )
+    .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let mut companion = native::Native::spawn(&executable).unwrap();
     let (mut client, server) = UnixStream::pair().unwrap();
@@ -119,6 +128,7 @@ while True:
         sent.send(result).unwrap();
     });
     let start = protocol::Start {
+        passive_geometry: false,
         target: protocol::Target::Screen { display_id: 1 },
         size: protocol::Size {
             width: 512,
@@ -134,24 +144,43 @@ while True:
         &serde_json::to_vec(&start).unwrap(),
     )
     .unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let (reply, _) = protocol::read(&mut client).unwrap();
+    assert_eq!(reply, protocol::Kind::Geometry);
+
     let ready = executable.with_extension("py.ready");
     let deadline = Instant::now() + Duration::from_secs(3);
     while !ready.exists() && Instant::now() < deadline {
+        // sleep: Poll for the encoder's readiness event under a bounded startup deadline.
         std::thread::sleep(Duration::from_millis(5));
     }
     // These are the same operations performed by the standalone signal handler.
     stopping.store(true, Ordering::Release);
-    client.shutdown(Shutdown::Both).unwrap();
+    // Half-close input so the helper sees EOF while its reply side stays readable.
+    client.shutdown(Shutdown::Write).unwrap();
     let completed = received.recv_timeout(Duration::from_secs(1));
     worker.join().unwrap();
+    let mut trailing = [0_u8; 1];
+    let peer_close = client.read(&mut trailing);
     let was_ready = ready.exists();
     fs::remove_dir_all(&dir).unwrap();
+
+    let session_result = completed.unwrap_or_else(|error| {
+        panic!("signal stop did not finish the helper session within one second: {error}")
+    });
+    assert!(
+        session_result.is_ok(),
+        "helper session returned an error during signal stop: {:?}",
+        session_result.err()
+    );
+    assert!(
+        peer_close.as_ref().is_ok_and(|bytes| *bytes == 0),
+        "helper did not close its side of the socket: {peer_close:?}"
+    );
     assert!(
         was_ready,
         "encoder fixture did not reach its blocked pixel write"
-    );
-    assert!(
-        completed.is_ok(),
-        "signal stop waited on a blocked capture worker"
     );
 }

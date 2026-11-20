@@ -15,6 +15,7 @@ function field(intent: Intent): string | undefined {
   // Tuple encoding preserves identifier boundaries even when an identifier contains a separator.
   return JSON.stringify([intent.type, row.view_id, row.window_id, row.column_id, row.node_id, Object.keys(row).sort()]);
 }
+/** The tab's ordered list of unconfirmed canvas edits over the last server-confirmed document; the visible document is that canonical state with these edits replayed on top. */
 export class LayoutJournal {
   #queuedBytes = 0;
 
@@ -48,7 +49,11 @@ export class LayoutJournal {
       this.#projection = undefined;
       if (!event.noop) reduce(this.canonical, event.intent as Intent);
       this.canonical.revision = Number(event.revision); this.initialized = true;
+      const ownLook = this.pending.some((p) => p.op_id === event.op_id && p.intent.type === "look.set");
       this.#retain((p) => p.op_id !== event.op_id);
+      // Our own look can arrive as an event before its receipt, which then finds nothing to acknowledge. Only our own
+      // op rebases: a look from another device must keep refusing a look written from before it.
+      if (ownLook && !event.noop) this.#rebaseLooks(Number(event.revision));
     } else return false;
     this.#prune(); return true;
   }
@@ -62,6 +67,9 @@ export class LayoutJournal {
     else {
       const op = this.pending.find((p) => p.revision === undefined && !this.#inflight.has(p.op_id));
       if (op && (op.intent.type === "open" || op.intent.type === "split") && this.unresolved.has(op.intent.window.id)) return undefined;
+      // A whole look is a compare-and-set on the last look. One sent while another of ours is still unacknowledged would
+      // carry the same base and be refused, losing the later pick, so it waits for the acknowledgement and is rebased there.
+      if (op && op.intent.type === "look.set" && this.pending.some((p) => p !== op && p.intent.type === "look.set" && p.revision === undefined && this.#inflight.has(p.op_id))) return undefined;
       entry = op;
     }
     if (entry) { if ("intent" in entry) entry.sent = true; this.#inflight.add(entry.op_id); }
@@ -85,11 +93,18 @@ export class LayoutJournal {
     this.unresolved = new Set([...this.unresolved].filter((id) => live.has(id)));
     return true;
   }
+  /** Our own accepted look is the newest look on the server, so an unsent look queued behind it is based on it: the server
+   * refuses a look written from before another look, and that must not hit this tab's own quick successive edits. */
+  #rebaseLooks(revision: number, except?: Pending): void {
+    for (const next of this.pending) if (next !== except && !next.sent && next.intent.type === "look.set" && next.base_revision < revision) next.base_revision = revision;
+  }
+  /** Records the server's receipt revision for a sent edit or migration. Returns whether the visible document may change. An accepted `look.set` also rebases the unsent looks queued behind it. */
   acknowledge(operation: Pending | Migration, revision: number, migration: boolean): boolean {
     if ("intent" in operation && !this.pending.includes(operation) || "document" in operation && this.migration !== operation) return false;
     const revealed = "intent" in operation && operation.held === true && revision > this.canonical.revision;
     this.#projection = undefined;
     operation.revision = revision;
+    if ("intent" in operation && operation.intent.type === "look.set") this.#rebaseLooks(revision, operation);
     if ("intent" in operation) delete operation.held;
     if (migration) this.initialized = true;
     const changed = this.#prune(); return migration || changed || revealed;
@@ -103,6 +118,7 @@ export class LayoutJournal {
     if (this.migration?.revision !== undefined && this.migration.revision <= this.canonical.revision) this.migration = undefined;
     return this.pending.length !== count;
   }
+  /** Turns the difference between the visible document and `doc` into queued intents. Adjacent unsent edits of one field, and unsent looks, merge into the latest; returns whether anything changed. Throws `LayoutQueueFull` when the unsaved edits would exceed the bound. */
   capture(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): boolean {
     let projection = this.current();
     const previous = structuredClone(before ?? projection);
@@ -128,7 +144,9 @@ export class LayoutJournal {
     // Accepted inputs own their values; the canvas may mutate its next drawing in place.
     const intents = edits(baseline, doc, cancelled ? undefined : hints).map((intent) => structuredClone(intent));
     const last = retained.at(-1), next = intents[0];
-    const coalesced = !cancelled && intents.length === 1 && last && !last.sent && next && field(next) !== undefined && field(last.intent) === field(next);
+    // Two looks in a row that have not left yet are one change: only the latest pick matters.
+    const lookOverLook = next?.type === "look.set" && last?.intent.type === "look.set";
+    const coalesced = !cancelled && intents.length === 1 && last && !last.sent && next && (lookOverLook || field(next) !== undefined && field(last.intent) === field(next));
     const retainedBytes = cancelled ? retained.reduce((total, p) => total + entryBytes(p.intent), 0) : this.#queuedBytes;
     const patchBytes = patches.reduce((total, p) => total + entryBytes(p.intent) - entryBytes(p.entry.intent), 0);
     const bytes = intents.reduce((total, intent) => total + entryBytes(intent), 0) - (coalesced ? entryBytes(last.intent) : 0);

@@ -128,6 +128,9 @@ pub(crate) async fn serve_negotiated(
         )
     })?;
     let entry = &route.entry;
+    // A provider can fill the QUIC send window with video. Keep terminal
+    // output (priority 0) ahead of provider writes on this connection.
+    channel.prioritize_terminal_output().await?;
     let identity = entry
         .definition
         .opening_identity

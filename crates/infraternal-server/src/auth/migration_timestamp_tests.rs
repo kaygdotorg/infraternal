@@ -1,7 +1,7 @@
 //! Prove timestamp upgrades keep numbered history and strict `SQLx` validation [D347, #344].
 use super::migration_compat::MIGRATIONS;
 use sqlx::{
-    SqlitePool,
+    SqlStr, SqlitePool,
     migrate::{MigrateError, Migration, MigrationType, Migrator},
 };
 use std::borrow::Cow;
@@ -25,7 +25,7 @@ fn numbered_history() -> Migrator {
                 version,
                 Cow::Borrowed("reserved fixture"),
                 MigrationType::Simple,
-                Cow::Borrowed("SELECT 1;"),
+                SqlStr::from_static("SELECT 1;"),
                 false,
             ));
         }
@@ -36,6 +36,8 @@ fn numbered_history() -> Migrator {
         ignore_missing: MIGRATIONS.ignore_missing,
         locking: MIGRATIONS.locking,
         no_tx: MIGRATIONS.no_tx,
+        table_name: MIGRATIONS.table_name.clone(),
+        create_schemas: MIGRATIONS.create_schemas.clone(),
     }
 }
 

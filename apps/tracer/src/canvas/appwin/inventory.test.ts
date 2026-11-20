@@ -51,6 +51,21 @@ test("a poll that changed nothing is the same inventory, and a new title is not"
   expect(sameInventory(a, changed)).toBe(false);
 });
 
+test("a window row keeps its icon hash only when it is a content hash", () => {
+  const hash = "ab".repeat(32);
+  const good = parseInventory({ windows: [{ ...(sample.windows[0] as object), app_version: "1.2+8", icon: hash }] });
+  expect(good.windows[0]?.appVersion).toBe("1.2+8");
+  expect(good.windows[0]?.iconHash).toBe(hash);
+  for (const icon of [hash.toUpperCase(), hash.slice(1), "<img src=x>", 7]) {
+    expect(parseInventory({ windows: [{ ...(sample.windows[0] as object), icon }] }).windows[0]?.iconHash).toBeUndefined();
+  }
+});
+
+test("a new icon hash is a changed inventory", () => {
+  const row = { ...(sample.windows[0] as object), icon: "ab".repeat(32) };
+  expect(sameInventory(parseInventory({ windows: [row] }), parseInventory({ windows: [{ ...row, icon: "cd".repeat(32) }] }))).toBe(false);
+});
+
 test("a window without a title says what it is, and the app tile takes a letter", () => {
   const inv = parseInventory(sample);
   expect(entryTitle(inv.windows[1]!)).toBe("Minimised");

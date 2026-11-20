@@ -323,6 +323,8 @@ async fn node() {
         match command {
             Command::Peers(list) => {
                 let mut next = Config {
+                    authority_epoch: None,
+                    rotation_operation: None,
                     local_key: Some(public),
                     server: None,
                     node: NodeId(1),
@@ -346,6 +348,7 @@ async fn node() {
                         previous_active: peer.previous_active,
                         addresses: peer.addresses,
                         endpoint: peer.endpoint,
+                        candidates: Vec::new(),
                     })
                     .collect();
                 for (index, peer) in list.iter().zip(&installed).enumerate() {

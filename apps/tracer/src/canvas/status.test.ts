@@ -1,18 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** The terminal status relay never dresses a lost connection as good news (TASTE: the icon matches the news). */
-import { expect, test } from "bun:test";
-import { createStatusRelay } from "./status";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createStatusRelay, endedStripText, exitStatusText } from "./status";
 
+/** Each relay owns an observer and may leave a pending clear timer; release both after its test. */
+const disposals: Array<() => void> = [];
+/** Restore the DOM descriptors as well as their values so later suites see their own browser environment. */
+const browserGlobals = new Map<string, PropertyDescriptor | undefined>();
+beforeEach(() => {
+  for (const name of ["document", "MutationObserver"]) browserGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+});
+afterEach(() => {
+  for (const dispose of disposals.splice(0)) dispose();
+  for (const [name, descriptor] of browserGlobals) {
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+    else Reflect.deleteProperty(globalThis, name);
+  }
+});
+
+/** A real status relay with controlled text changes and no rendered DOM. */
 function relay() {
   const shown: Array<{ message: string; tone?: string; duration?: number }> = [];
   let dismissed = 0;
   const callbacks: Array<() => void> = [];
   const element = { hidden: false, textContent: "" };
   const globals = globalThis as unknown as Record<string, unknown>;
-  // This fixture mounts no SVG paths; lazy mark completion can still query it.
-  globals.document = { createElement: () => element, querySelectorAll: () => [] };
+  globals.document = { createElement: () => element };
   globals.MutationObserver = class { constructor(callback: () => void) { callbacks.push(callback); } observe() {} disconnect() {} };
-  createStatusRelay({ show: (value: { message: string; tone?: string; duration?: number }) => shown.push(value), dismiss() { dismissed += 1; }, dispose() {} } as never);
+  const status = createStatusRelay({ show: (value: { message: string; tone?: string; duration?: number }) => shown.push(value), dismiss() { dismissed += 1; }, dispose() {} } as never);
+  disposals.push(status.dispose);
   const say = (text: string): void => { element.textContent = text; for (const callback of callbacks) callback(); };
   return { shown, say, get dismissed() { return dismissed; } };
 }
@@ -95,4 +111,33 @@ test("a close reason stays visible through a quick reconnect and clears after a 
   state.say("");
   await new Promise((resolve) => setTimeout(resolve, 320));
   expect(state.dismissed).toBe(1);
+});
+
+test("normal shell exits never produce error toasts", () => {
+  const state = relay();
+  for (const message of ["Shell exited.", "Shell exited with status 3. Open a new shell to continue.", "Shell exited with status 129. Open a new shell to continue."]) state.say(message);
+  expect(state.shown).toEqual([]);
+});
+
+test("signed exit statuses distinguish shell codes from actual signals", () => {
+  expect(exitStatusText(0)).toBe("Shell exited.");
+  expect(exitStatusText(129)).toContain("status 129");
+  expect(exitStatusText(-1)).toContain("signal 1");
+  expect(exitStatusText(-9)).toContain("signal 9");
+});
+
+test("ended strips name actual signals and preserve recorded ordinary exit codes", () => {
+  expect(endedStripText(undefined)).toBe("Session ended");
+  expect(endedStripText(-1)).toBe("Stopped by signal 1");
+  expect(endedStripText(-9)).toBe("Stopped by signal 9");
+  expect(endedStripText(0)).toBe("Session ended · Exit 0");
+  expect(endedStripText(3)).toBe("Session ended · Exit 3");
+  expect(endedStripText(129)).toBe("Session ended · Exit 129");
+});
+
+test("the account's connection limit is left to the page's own notice, not repeated per terminal (#523)", () => {
+  const { shown, say } = relay();
+  say("This account is open in too many browser tabs. Close the ones you don't need to connect.");
+  say("This tab paused so a newer tab could connect. It reconnects when you come back to it.");
+  expect(shown).toEqual([]);
 });

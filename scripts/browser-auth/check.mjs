@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { routeWithLatency } from './latency-route.mjs';
-import { fulfillHeaders } from './fixture-headers.mjs';
+import { responseHeaders } from './response-headers.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const targetRoot = process.env.CARGO_TARGET_DIR ?? resolve(root, 'target');
@@ -36,7 +36,7 @@ try {
         }
         child.stdin.write(JSON.stringify({ path: new URL(request.url()).pathname, headers: request.headers(), body: request.postDataJSON() }) + '\n');
         const response = JSON.parse((await lines.next()).value);
-        await route.fulfill({ status: response.status, headers: fulfillHeaders(response.headers), body: JSON.stringify(response.body) });
+        await route.fulfill({ status: response.status, headers: responseHeaders(response.headers), body: JSON.stringify(response.body) });
       });
       await page.goto('https://auth.example.test/');
       await page.addScriptTag({ content: await readFile(resolve(targetRoot, 'auth-rework/entropy.js'), 'utf8') });
@@ -69,10 +69,8 @@ try {
           delete extensions.prf;
           return { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response, extensions };
         };
-        // The public status carries only first-run state and the local setup command (#252); nothing account-specific.
-        const publicStatus = (body, required) => body?.setup_required === required &&
-          Object.keys(body).every(key => key === 'setup_required' || key === 'setup_token_command');
-        check(publicStatus((await post('status', {})).body, true), 'initial public status');
+        // Public status names the local command while keeping setup authority private.
+        check(JSON.stringify((await post('status', {})).body) === JSON.stringify({setup_required:true, setup_token_command:'infraternal server setup-token'}), 'initial public status');
         const start = await post('setup-start', { token, username: 'browser_owner', display_name: 'Browser owner' });
         check(start.status === 200, 'setup options');
         let credential;
@@ -126,7 +124,7 @@ try {
         const recoveryWrap = { salt: encode(recoverySalt), nonce: encode(recoveryNonce), ciphertext: encode(recoveryCiphertext) };
         const finish = await post('registration-finish', { ceremony: start.body.ceremony, proof: proof(credential), passkey_wrap: wrap, recovery_wrap: recoveryWrap, recovery_verifier: recoveryVerifier });
         check(finish.status === 200, 'registration finish');
-        check(publicStatus((await post('status', {})).body, false), 'completed public status');
+        check(JSON.stringify((await post('status', {})).body) === JSON.stringify({setup_required:false, setup_token_command:'infraternal server setup-token'}), 'completed public status');
         check((await post('wraps', {})).status === 200, 'secure cookie unavailable');
         const login = await post('login-start', {});
         check(login.status === 200, 'login options');

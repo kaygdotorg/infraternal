@@ -54,6 +54,47 @@ async fn probe_acks(messages: &mut mpsc::Receiver<Message>, nonce: u64, sent_us:
     }
 }
 
+/// Keep terminal output dispatch from waiting on a full socket-writer queue.
+/// Keep raw output staging bounded when the shared writer queue is full.
+#[tokio::test]
+async fn a_full_writer_queue_stages_one_raw_output_without_blocking() {
+    let (tx, _messages) = mpsc::channel(1);
+    tx.try_send(Message::Event(2, Vec::new())).unwrap();
+    let mut staged = None;
+
+    queue_raw_output(&tx, &mut staged, 2, 0, vec![b'f'; 1024]).unwrap();
+    assert!(matches!(
+        staged.as_ref(),
+        Some(Message::Shim(2, Shim::Output(0, bytes))) if bytes.len() == 1024
+    ));
+    assert_eq!(
+        queue_raw_output(&tx, &mut staged, 2, 1024, vec![b'g'; 1])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock,
+        "a second raw frame must wait until the staged frame is written or replaced"
+    );
+    assert!(matches!(
+        staged,
+        Some(Message::Shim(2, Shim::Output(0, bytes))) if bytes.len() == 1024
+    ));
+}
+
+/// A staged raw frame must not keep shim acknowledgments and liveness replies unread.
+#[test]
+fn a_staged_raw_frame_allows_one_bounded_shim_read() {
+    let staged = Message::Shim(2, Shim::Output(0, vec![b'f'; 1024]));
+
+    assert!(
+        can_read_shim_frame(None, Some(&staged)),
+        "the reader must keep control replies moving while raw output waits for writer capacity"
+    );
+    assert!(
+        !can_read_shim_frame(Some(&Shim::Output(1024, vec![b'g'; 1])), Some(&staged)),
+        "the extra pending slot must bound read-ahead while raw output is staged"
+    );
+}
+
 #[tokio::test]
 async fn input_state_probe_preserves_written_ack_after_input() {
     state_ack(true).await;
@@ -64,6 +105,10 @@ async fn input_state_probe_preserves_written_ack_before_input() {
     state_ack(false).await;
 }
 
+/// Shared body of the two input-state probe tests: a relay answering a route
+/// proof with the shim's input state keeps the already written input
+/// acknowledged, whether the probe arrives before or after new input
+/// (`input_first`).
 async fn state_ack(input_first: bool) {
     let id = *uuid::Uuid::new_v4().as_bytes();
     let root = PathBuf::from(
@@ -121,6 +166,11 @@ async fn state_ack(input_first: bool) {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let task = tokio::spawn(terminal(path, id, 2, 0, 30, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, ..))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(30)))
@@ -173,6 +223,8 @@ async fn state_ack(input_first: bool) {
     );
 }
 
+/// A Ping to a relay detached for lack of output credit keeps the shim's
+/// written-input acknowledgment.
 #[tokio::test]
 async fn detached_ping_preserves_written_ack_without_output_credit() {
     let id = *uuid::Uuid::new_v4().as_bytes();
@@ -209,6 +261,11 @@ async fn detached_ping_preserves_written_ack_without_output_credit() {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let task = tokio::spawn(terminal(path, id, 2, 0, 30, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, ..))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(30)))
@@ -233,6 +290,8 @@ async fn detached_ping_preserves_written_ack_without_output_credit() {
     );
 }
 
+/// A terminal liveness probe waits for the shim's fence before it is answered,
+/// and the answer keeps the stream's identity.
 #[tokio::test]
 async fn terminal_probe_waits_for_the_shim_fence_and_keeps_stream_identity() {
     use infraternal_shim::frame::MULTI_WRITER;
@@ -353,6 +412,11 @@ async fn terminal_probe_waits_for_the_shim_fence_and_keeps_stream_identity() {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let task = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, ..))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(0)))

@@ -90,11 +90,11 @@ async fn stalled_body_expires_after_thirty_seconds_without_data() {
 }
 
 #[tokio::test]
+/// The downloader refuses an oversized body, a bad status and an existing destination.
 async fn bounded_body_status_and_existing_destination_are_refused() {
-    let root = std::path::PathBuf::from(
-        std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()),
-    )
-    .join(format!("release-http-{}", uuid::Uuid::new_v4()));
+    // The downloader bounds every write and fsync at 30 s, so its destination must
+    // not sit on the slow build disk, whose fsync stalls exceed that (#509).
+    let root = std::env::temp_dir().join(format!("release-http-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     for (index, status, body, maximum, accepted) in [
         (0, "200 OK", "payload", 7, true),
@@ -133,6 +133,7 @@ async fn bounded_body_status_and_existing_destination_are_refused() {
 }
 
 #[tokio::test]
+/// An `https://` source never falls back to plaintext when the bucket speaks plain HTTP.
 async fn https_cannot_silently_accept_a_plaintext_bucket() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("https://{}/payload", listener.local_addr().unwrap());
@@ -146,10 +147,7 @@ async fn https_cannot_silently_accept_a_plaintext_bucket() {
             .await
             .unwrap();
     });
-    let destination = std::path::PathBuf::from(
-        std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()),
-    )
-    .join(format!("https-refusal-{}", uuid::Uuid::new_v4()));
+    let destination = std::env::temp_dir().join(format!("https-refusal-{}", uuid::Uuid::new_v4()));
     assert!(matches!(
         download(&address, &destination, 7).await,
         Err(DownloadError::Network)

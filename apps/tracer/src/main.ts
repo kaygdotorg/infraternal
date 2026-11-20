@@ -20,13 +20,18 @@ import { BRAND_MARK } from "./auth-marks";
 import { loading } from "../../../packages/ui/src/countup";
 import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
-import { PerformanceProbe, type ProbeTraceSample } from "./perf-probe";
+import type { PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
 import { onDemand } from "./on-demand";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
 
 declare global {
   interface Window {
+    /** Per-key paint stage timestamps, exposed only on the explicit `?probe=1` measurement page. */
+    __tracerPerformanceProbe?: {
+      /** Returns content-free probe stage times for the current synthetic key run. */
+      trace: () => ProbeTraceSample[];
+    };
     __tracerTestDouble?: {
       isConnected: () => boolean;
       dropConnection: () => void;
@@ -106,8 +111,9 @@ let deviceApprovalLink: ApprovalLink = consumeDeviceApprovalLink();
 let deviceApprovalComplete = false;
 type UiFont = "sans" | "mono";
 
-const uiFont = uiFontPreference();
-document.documentElement.dataset.uiFont = uiFont;
+/** UI font chosen for the signed-out authentication flow. */
+const authUiFont = uiFontPreference();
+document.documentElement.dataset.uiFont = authUiFont;
 
 let activeUserId: string | undefined;
 let checkingResume = false;
@@ -421,6 +427,16 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
+/**
+ * Test double only: tells a spec how a terminal that finished opening after its session ended was dealt with. Its absence cannot
+ * be observed any other way, so a spec waiting for "nothing happened" waits for this instead of sleeping. Sets
+ * `data-late-terminal` on the root element to "cancelled" (nothing was built: the right outcome), "disposed" (a client was built
+ * and closed at once: the backstop) or "failed". The product itself never reads it.
+ */
+function markLateTerminal(mockMode: boolean, how: "cancelled" | "disposed" | "failed"): void {
+  if (mockMode) document.documentElement.dataset.lateTerminal = how;
+}
+
 /** Opens the terminal screen for the signed-in person, reusing the startup snapshot, and publishes the test double in mock mode. */
 async function showTerminal(knownSession?: DrawingIdentity, instant = false): Promise<void> {
   // Startup already authenticated this snapshot. Reuse it rather than adding
@@ -429,6 +445,9 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   sessionStarted = performance.timeOrigin + performance.now();
   const identity = knownSession ?? await checkSession();
   if (generation !== sessionGeneration) return;
+  // No session at all is a 401: the cookie is gone or no longer valid (another sign-in, a server restart). That sends the
+  // person to sign-in, exactly as the background session check does; it is not a server whose name could not be read.
+  if (!identity) { endSession("Your session ended. Sign in again to continue."); return; }
   const hostName = sessionHostname(identity);
   if (!hostName) {
     renderUnavailable("Could not read this server's name. Try again.");
@@ -455,6 +474,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   coreScreen = undefined;
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
+  const uiFont = uiFontPreference(activeUserId);
   const mockMode = query.get("mock") === "1";
   // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
@@ -474,13 +494,17 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
     const { mountCoreScreen } = await import("./core-screen");
-    // The screen mounts only after its selected face is ready, preventing a one-frame
-    // fallback and keeping the mobile layout stable while the font loads.
-    await (uiFont === "mono" ? loadFont(initialFont()) : document.fonts.load('450 14px "Geist Sans"'));
+    // The screen mounts after both its terminal face and its page face are ready. They are separate account choices: a sans page must
+    // still load the selected terminal font, and a mono page must not make the terminal inherit a page-only font preview.
+    const font = initialFont(activeUserId);
+    await loadFont(font);
+    applyFontVars(font, document.documentElement);
+    if (uiFont === "sans") await document.fonts.load('450 14px "Geist Sans"');
     if (generation !== sessionGeneration) return;
-    // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
+    // The controller stores the account face in the canvas look; `?ui=` overrides this page only and never enters that look.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      ...(activeUserId ? { accountId: activeUserId } : {}),
       canvas: canvasMode || clustersMode || useCanvas,
       // The clusters canvas and the product canvas register their own "Add hosts" row with the wizard (canvas/addhost).
       addHostEntry: canvasMode,
@@ -495,6 +519,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     });
   } catch (error: unknown) {
     screen?.dispose();
+    // A font that fails after the person has signed out (here or in another tab) must not replace the sign-in screen.
+    if (generation !== sessionGeneration) return;
     renderUnavailable(safeMessage(error));
     return;
   }
@@ -502,6 +528,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   if ((clustersMode || canvasMode) && query.get("fps") !== "0") startPerfHud(query.get("fps") === "bench");
   if (clustersMode) {
     const { mountMockup } = await import("./canvas/mock");
+    if (generation !== sessionGeneration) return;
     const scene = Number(query.get("scene"));
     const roleParam = query.get("role");
     let clusters: Awaited<ReturnType<typeof mountMockup>>;
@@ -510,7 +537,12 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       ...(scene ? { scene } : {}),
       ...(roleParam === "viewer" || roleParam === "operator" || roleParam === "new" || roleParam === "asha" ? { role: roleParam } : {}),
     });
-    } catch (error: unknown) { console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    } catch (error: unknown) {
+      if (generation !== sessionGeneration) return;
+      console.error("clusters mockup failed", error); screen.dispose(); renderUnavailable(safeMessage(error)); return;
+    }
+    // The session ended while the mockup was mounting: endSession() had no handle to it yet, so close it here.
+    if (generation !== sessionGeneration) { clusters.dispose(); return; }
     canvasPrototype = clusters;
     // The flow carries on: the live terminal opens into the build-01 window the mockup hosts it in.
   }
@@ -519,11 +551,14 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     // test double only. The canvas mounts first; the flow hangs its windows on the canvas.
     const { mountCanvas } = await import("./canvas/mock/windows-proto/canvas");
     const { mountAddHostPrototype } = await import("./add-host-prototype");
+    if (generation !== sessionGeneration) return;
     const canvas = mountCanvas(screen, hostName);
     let addHost: { dispose(): void } | undefined;
     try { addHost = await mountAddHostPrototype(screen, canvas, query.get("empty") === "1", proto === "addhost" || query.get("wizard") === "1"); }
-    catch (error: unknown) { canvas.dispose(); screen.dispose(); renderUnavailable(safeMessage(error)); return; }
+    catch (error: unknown) { canvas.dispose(); if (generation !== sessionGeneration) return; screen.dispose(); renderUnavailable(safeMessage(error)); return; }
     canvasPrototype = { dispose() { addHost?.dispose(); canvas.dispose(); } };
+    // As above: a session that ended while the flow was mounting leaves nothing of it behind.
+    if (generation !== sessionGeneration) { canvasPrototype.dispose(); canvasPrototype = undefined; return; }
   }
   if (useCanvas) {
     screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
@@ -585,7 +620,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     }
     return;
   }
-  if (probeMode) performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
+  if (probeMode) {
+    // The latency probe is a measuring tool for `?probe=1` pages, so its code loads only for them and stays off the first-screen budget.
+    const { PerformanceProbe } = await onDemand(() => import("./perf-probe.on-demand"));
+    if (generation !== sessionGeneration) return;
+    performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
+    window.__tracerPerformanceProbe = { trace: () => performanceProbe?.traceSamples() ?? [] };
+  }
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
   // public session id so a reload reattaches to the same terminal.
@@ -626,14 +667,16 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       onInputActivity: () => screen?.onInputActivity(),
       onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen?.setRecoveryPending(readyAt); },
       onRecoveryCompleted: (message) => { if (generation === sessionGeneration) endSession(message); },
+      // Nothing is constructed, and so no connection opened, for a session that has already ended (sign-out while loading).
+      isCurrent: () => generation === sessionGeneration,
       traceMockServer: probeMode && mockMode,
       ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
       ...(initialSessionId ? { initialSessionId } : {}),
     });
-    // The person may have signed out (or the session ended) while the terminal was still connecting. endSession() could not
+    // Backstop for a session that ended during the last step of the open, after `isCurrent` was asked: endSession() could not
     // dispose a client it did not have yet, so a late one is closed here instead of being kept, bound to a dead screen and
     // left connected to the host after sign-out.
-    if (generation !== sessionGeneration) { client.dispose(); return; }
+    if (generation !== sessionGeneration) { client.dispose(); markLateTerminal(mockMode, "disposed"); return; }
     currentTerminal = client;
     screen.bindTerminal(client);
     if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
@@ -676,6 +719,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       };
     }
   } catch (error: unknown) {
+    // A terminal that was cancelled, or that failed after the session ended, has nothing to tell the person on the sign-in screen.
+    if (generation !== sessionGeneration) { markLateTerminal(mockMode, error instanceof Error && error.name === "TerminalOpenCancelled" ? "cancelled" : "failed"); return; }
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
   }
@@ -689,6 +734,7 @@ async function showRecovery(): Promise<void> {
   productCanvas?.dispose(); productCanvas = undefined;
   coreScreen?.dispose(); coreScreen = undefined;
   performanceProbe?.dispose(); performanceProbe = undefined;
+  delete window.__tracerPerformanceProbe;
   delete window.__tracerTestDouble;
   document.documentElement.removeAttribute("data-ui-font");
   mountRecovery(app, () => { void showTerminal(); }, (userId, _, displayName, instant) => {
@@ -700,22 +746,23 @@ async function showRecovery(): Promise<void> {
   scheduleBackdrop();
 }
 
-/** URL choices win and are remembered when storage is available; private mode still works. */
-function uiFontPreference(): UiFont {
+/** Reads the page-only preview first, then the existing account cache so the signed-in canvas can paint immediately. */
+function uiFontPreference(accountId?: string): UiFont {
   // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
   const proto = new URLSearchParams(location.search).get("proto");
   if (proto === "windows" || proto === "addhost" || proto === "clusters") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
-  if (requested === "sans" || requested === "mono") {
-    try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
-    return requested;
+  if (requested === "sans" || requested === "mono") return requested;
+  if (accountId) {
+    try {
+      const raw = localStorage.getItem(`tracer.look.account.${encodeURIComponent(accountId)}`);
+      if (raw !== null) {
+        const cached = JSON.parse(raw) as { uiFont?: unknown };
+        if (cached.uiFont === "sans" || cached.uiFont === "mono") return cached.uiFont;
+      }
+    } catch { /* Storage can be unavailable before the canvas has mounted. */ }
   }
-  try {
-    // Monospace is the product face (TASTE.md section 2); sans stays an explicit opt-in.
-    return window.localStorage.getItem("tracer.ui-font") === "sans" ? "sans" : "mono";
-  } catch {
-    return "mono";
-  }
+  return "mono";
 }
 
 function testScrollbackLimit(value: string | null): number | undefined {
@@ -746,6 +793,10 @@ let sessionStarted = 0;
 const peerSessions = sessionNotifications((account, before) => {
   if (activeUserId === account && sessionStarted <= before) endSession("Your session ended. Sign in again to reconnect.");
 });
+/**
+ * Ends the signed-in interface after logout or an expired account session. Disposes session-owned terminals, canvases,
+ * screens and probes before showing sign-in so callbacks from the old session cannot update the new one.
+ */
 function endSession(message = ""): void {
   sessionGeneration++; forgetAccountWork(activeUserId);
   welcomeEffect?.destroy();
@@ -759,6 +810,7 @@ function endSession(message = ""): void {
   productCanvas = undefined;
   performanceProbe?.dispose();
   performanceProbe = undefined;
+  delete window.__tracerPerformanceProbe;
   perfHudGeneration++;
   perfHud?.dispose();
   perfHud = undefined;

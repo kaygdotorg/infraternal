@@ -30,7 +30,7 @@
  * - `added*`: the host is already added: an `install` failure with `already_added` and the existing `host_id`, no details
  * - `running*`: `setup_running` once; the retry succeeds
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
- * - `installed*`: a finished install this server doesn't know (#394); `noacct*`: the login name is no account there
+ * - `installed*`: a finished install this server doesn't know (#394); `relock*`: the server's authority is locked until the page unlocks it (`caLocked` in the config endpoint); `noacct*`: the login name is no account there
  * - `unproven-cache*` / `unproven-prepared*` / `unproven-foreign*`: a staging step refused files it can't prove are its own (`unproven_files`
  *   with that `refusal`, J314 P2-1)
  * - `takeover*`: the same, but proven ours: in root mode the attempt pauses on the Take over offer (D359), carrying
@@ -57,7 +57,7 @@ const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 
 type Step = "check" | "install" | "facts" | "connect" | "done" | "failed";
 /** The failure kinds the double can script, mirroring the server contract (contracts/ssh-bootstrap.md). */
-type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account";
+type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account" | "authority_locked";
 const PHASES = [
   { step: "check", message: "Checking the system" },
   { step: "install", message: "Installing the infraternal agent" },
@@ -77,7 +77,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string; takeover?: { install: string; live: boolean } };
+  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string; takeover?: { install: string; live: boolean }; closes?: { terminals: Array<{ account: string; program: string; since: number; tty?: string; others?: number }>; close_challenge: string } };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -145,12 +145,24 @@ const ADDED_HOST_ID = "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30";
 /** Host keys the person trusted on the same bootstrap socket, until `reset`. */
 const trusted = new Set<string>();
 let sshKeyMode: "ok" | "locked" | "missing" = "ok";
+/** Whether the double's certificate authority is locked, as a real server's is after a restart. `relock*` hosts fail while it is. */
+let caLocked = true;
+/** Every open bootstrap socket, so a spec can drop them all the way a server restart does (`drop` in the config endpoint). */
+const openSockets = new Set<WebSocket>();
+/** While true a new bootstrap socket is closed at once, as when the server is still coming back after a restart (`refuse` in the config endpoint). */
+let refuseSockets = false;
+/** Bumped by `rotateKey` in the config endpoint: every host then presents a different key, as when a machine in the path swaps it. */
+let keyGeneration = 0;
 let discoveryMode: "ok" | "empty" | "error" | "hang" | "off" = "ok";
 let installMode: "ok" | "off" = "ok";
 
+/** Puts the double back to its start: no trusted keys, every mode "ok", and the authority locked as after a restart. */
 export function resetBootstrapDouble(): void {
   trusted.clear();
   sshKeyMode = "ok";
+  caLocked = true;
+  refuseSockets = false;
+  keyGeneration = 0;
   discoveryMode = "ok";
   installMode = "ok";
 }
@@ -158,7 +170,8 @@ export function resetBootstrapDouble(): void {
 /** A fixed v4-shaped UUID per target, so specs can assert the challenge round trip. */
 const challengeOf = (id: string): string => { const hex = createHash("sha256").update(`challenge:${id}`).digest("hex"); return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`; };
 
-const fingerprintOf = (name: string): string => `SHA256:${createHash("sha256").update(`host-key:${name}`).digest("base64").replace(/=+$/, "")}`;
+/** The fingerprint a host presents now: fixed per name, and different after each `rotateKey`. */
+const fingerprintOf = (name: string): string => `SHA256:${createHash("sha256").update(`host-key:${name}${keyGeneration ? `:${keyGeneration}` : ""}`).digest("base64").replace(/=+$/, "")}`;
 
 /** Scripted outcome of one attempt for a host: undefined succeeds. */
 function failureOf(target: Target): Failure | undefined {
@@ -168,6 +181,9 @@ function failureOf(target: Target): Failure | undefined {
   if (/^(newkey|changedkey)/.test(name) && !trusted.has(name)) {
     return { phase: 0, beforeLogin: true, kind: "host-key", message: "The SSH host key is not trusted.", evidence: "Checking SSH and host support.", fingerprints: [fingerprintOf(name)], ...(name.startsWith("changedkey") ? { keyChanged: true } : {}) };
   }
+  // `relock-pw*` also wants a typed credential first, so the lock is met after a one-off password was used up.
+  if (/^relock-pw/.test(name) && !target.credential) return { phase: 0, beforeLogin: true, kind: "auth", message: "No sign-in method was accepted.", evidence: "Network access, the server key and a saved key were not accepted.", choose: true };
+  if (/^relock/.test(name) && caLocked) return { phase: 0, beforeLogin: false, kind: "authority_locked", message: "Set up or unlock host connections with an administrator passkey before adding a host.", evidence: "" };
   if (target.fixed) return undefined;
   if (host?.reachability === "unreachable") return { phase: 0, beforeLogin: true, kind: "unreachable", message: "No SSH answer on port 22", evidence: host.evidence };
   if (host?.reachability === "mesh-policy") return { phase: 0, beforeLogin: true, kind: "mesh-policy", message: "Blocked by the mesh policy", evidence: host.evidence };
@@ -367,12 +383,22 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
               kind: "unrecognized_install",
               message: "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.",
               log_tail: ["Setup location: /var/lib/infraternal"],
-              takeover: { install: TAKEOVER_INSTALL, live: true },
+              takeover: { install: TAKEOVER_INSTALL, live: true, ...(target.name.startsWith("takeover-terminals") ? { terminals: [{ account: "root", program: "bash", since: 1792195200, tty: "pts/0", others: 1 }], close_challenge: target.challenge } : { terminals: [] }) },
             }, undefined, {
-              challenge: target.challenge,
+              challenge: target.name.startsWith("takeover-terminals") ? "00000000-0000-0000-0000-000000000000" : target.challenge,
               mode: target.mode,
               findings: ["An infraternal agent from an earlier setup that isn't one of this server's hosts", "Its infraternal agent is running; Take over stops it", "It is set aside, put back if setup fails, and deleted once this machine has joined"],
             });
+            return;
+          }
+          // Hosts named `stale-terminals*`: a stuck first install with one of its own terminals open. Start fresh lists it
+          // and only its own challenge confirms; the generic leftovers challenge is nil, as the server sends it (D368, #433).
+          if (/^stale-terminals/.test(target.name) && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "This host has leftovers from an earlier setup", { kind: "stale_previous_attempt", message: "An earlier setup of this host stopped before it finished.", log_tail: [],
+              closes: { terminals: [{ account: "root", program: "bash", since: 1792195200, tty: "pts/0", others: 0 }], close_challenge: target.challenge } }, undefined,
+              { challenge: "00000000-0000-0000-0000-000000000000", mode: target.mode, findings: ["Earlier setup ownership marker", "Fresh setup ownership journal", "No other live setup found", "An open terminal: root, bash on pts/0; Start fresh closes it"] });
             return;
           }
           // Hosts named `stale*`: the check finds leftovers and the attempt pauses on a `check` event until `start-fresh`.
@@ -481,7 +507,10 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
   });
 
   // Disconnect cancels outstanding work; hosts that were running free their slot.
+  if (refuseSockets) { socket.close(); return; }
+  openSockets.add(socket);
   socket.on("close", () => {
+    openSockets.delete(socket);
     closed = true;
     for (const target of targets.values()) {
       const wasRunning = target.state === "active" && (target.timers.size > 0 || !!target.challenge);
@@ -536,6 +565,10 @@ export async function handleBootstrapHttp(request: IncomingMessage, response: Se
   if (path === "/__mock/bootstrap/config" && request.method === "POST") {
     const body = await bodyOf(request);
     if (body?.sshKey === "ok" || body?.sshKey === "locked" || body?.sshKey === "missing") sshKeyMode = body.sshKey;
+    if (typeof body?.caLocked === "boolean") caLocked = body.caLocked;
+    if (typeof body?.refuse === "boolean") refuseSockets = body.refuse;
+    if (body?.rotateKey === true) keyGeneration++;
+    if (body?.drop === true) for (const open of [...openSockets]) open.terminate();
     if (body?.discovery === "ok" || body?.discovery === "empty" || body?.discovery === "error" || body?.discovery === "hang" || body?.discovery === "off") discoveryMode = body.discovery;
     if (body?.install === "ok" || body?.install === "off") installMode = body.install;
     json(response, 200, { ok: true });

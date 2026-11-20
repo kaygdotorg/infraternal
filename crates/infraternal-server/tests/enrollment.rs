@@ -20,9 +20,12 @@ struct Database {
 }
 
 impl Database {
+    /// Open a fresh database file under TMPDIR for one test, private to that test.
     async fn new() -> Self {
-        let directory =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/enrollment-tests");
+        // Live SQLite stays in TMPDIR, off the build disk: on a loaded build host the first
+        // connection's WAL switch waited out sqlx's 30 s acquire timeout behind compiler writes
+        // (PoolTimedOut, #509), as J540 found for the server's own fixtures.
+        let directory = std::env::temp_dir().join("enrollment-tests");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("{}.sqlite", Uuid::new_v4()));
         let pool = SqlitePoolOptions::new()

@@ -16,9 +16,8 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 import { buildDocsView, DOCS_VIEW } from "../views/docs";
 import { viewIcon } from "../views/icons";
+import { DOCS_ACTION } from "./docs-action";
 import type { DocsIndexPage } from "./docs-source";
-
-export const DOCS_ACTION = "canvas:docs:";
 
 /** Splits `canvas:docs:<section>/<page>#<heading>`; anything else is not ours. */
 export function parseDocsAction(action: string | undefined): { slug: string; heading?: string } | undefined {
@@ -37,7 +36,7 @@ export function docsRows(pages: readonly DocsIndexPage[]): PaletteEntry[] {
     // A section says how many pages it holds; one with none yet says what it is about. The summary is for reading; only titles are searched.
     const hint = members > 0 ? `${members} ${members === 1 ? "page" : "pages"}` : page.summary;
     return [
-      { group: "Docs", glyph: "i", icon: viewIcon("docs"), label: trail, hint, search: "", action: `${DOCS_ACTION}${page.slug}` },
+      { group: "Docs", glyph: "i", icon: viewIcon("docs"), label: trail, title: page.title, hint, search: "", action: `${DOCS_ACTION}${page.slug}` },
       ...page.headings.map((heading): PaletteEntry => ({ group: "Docs", glyph: "§", icon: viewIcon("docs"), label: heading.text, hint: trail, search: "", queryOnly: true, action: `${DOCS_ACTION}${page.slug}#${heading.id}` })),
     ];
   });

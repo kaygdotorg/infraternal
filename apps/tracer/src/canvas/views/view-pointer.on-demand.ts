@@ -138,8 +138,8 @@ export function createViewPointer(cx: Ctx, host: ViewPointerHost): ViewPointer {
   const ghost = el("div", "cl-ghost");
   let ghostX: Spring, ghostY: Spring;
   const paintGhost = (): void => { if (ghostX && ghostY) ghost.style.transform = `translate(${ghostX.value}px, ${ghostY.value}px)`; };
-  ghostX = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3 }));
-  ghostY = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.3 }));
+  ghostX = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.2 }));
+  ghostY = restPx(new Spring(0, () => paintGhost(), { visualDuration: 0.2 }));
   world.append(ghost);
 
   const beginDrag = (c: ViewRec, id: number, x0: number, y0: number): void => {

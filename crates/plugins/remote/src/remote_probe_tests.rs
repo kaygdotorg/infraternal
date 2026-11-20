@@ -177,10 +177,17 @@ async fn lost_path_proof_spends_its_reserved_retry_margin() {
     let blackhole = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
     path.use_mesh(blackhole.local_addr().unwrap());
     let margin = Duration::from_millis(30);
-    let allowance = path.proof_allowance(dial.rtt(), margin);
     tokio::time::pause();
     let guard = path_interrupted(&dial, &path, Duration::from_millis(15), margin);
     tokio::pin!(guard);
+    // Arm the real guard, then model a late scheduler poll with virtual time.
+    // Its adaptive response budget must include this scheduling delay.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(guard.as_mut(), cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    tokio::time::advance(Duration::from_millis(150)).await;
     // Poll the real guard while only its logical timer advances. Every physical
     // challenge is deliberately lost, so neither QUIC nor a backup can answer.
     let result = loop {
@@ -189,15 +196,15 @@ async fn lost_path_proof_spends_its_reserved_retry_margin() {
             () = tokio::time::sleep(Duration::from_millis(1)) => {},
         }
     };
+    let finished = tokio::time::Instant::now();
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
     let attempts = proofs.lock().unwrap();
-    let first = attempts[0];
+    // Handshake ACKs and scheduler delay can revise the live allowance. The
+    // fixed retry margin ends at the guard's actual timeout, independently
+    // of the fallback RTT observed before its first poll (#509).
     let retries = attempts
         .iter()
-        .filter(|at| {
-            let age = at.duration_since(first);
-            age >= allowance.saturating_sub(margin) && age < allowance
-        })
+        .filter(|at| finished.duration_since(**at) <= margin)
         .count();
     assert!(
         retries >= 3,

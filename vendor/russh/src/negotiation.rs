@@ -51,6 +51,7 @@ pub struct Names {
     pub server_compression: compression::Compression,
     pub client_compression: compression::Compression,
     pub ignore_guessed: bool,
+    /// Both peers placed the negotiated exchange and host-key algorithms first.
     pub(crate) both_first: bool,
     /// Whether `key` was negotiated as a certificate algorithm or not
     pub(crate) host_key_is_certificate: bool,

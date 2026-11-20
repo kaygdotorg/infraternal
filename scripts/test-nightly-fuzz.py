@@ -50,6 +50,8 @@ class FakeForgejo:
         self.drop_next_create = False
         # Who the fake says wrote what, and who the token belongs to (the browser suite trusts only its own account).
         self.login = 'forgejo-bot'
+        # `deny(method, path)` returns an HTTP status to refuse a request with, like a token without the needed scope, or None.
+        self.deny = None
         self.author = self.login
         fake = self
 
@@ -66,6 +68,8 @@ class FakeForgejo:
                 """Issue state, open-issue listing and comment listing."""
                 fake.requests.append(('GET', self.path, self.headers.get('Authorization')))
                 path = self.path.split('?')[0]
+                if fake.deny and (status := fake.deny('GET', path)):
+                    return self.reply({'message': 'token does not have at least one of required scope(s): [read:user]'}, status)
                 if path == '/api/v1/user':
                     return self.reply({'login': fake.login})
                 if m := re.fullmatch(r'/api/v1/repos/[^/]+/[^/]+/issues/(\d+)/comments', path):
@@ -80,6 +84,8 @@ class FakeForgejo:
                 """Create issues and comments, and accept attachments."""
                 data = self.rfile.read(int(self.headers['Content-Length']))
                 fake.requests.append(('POST', self.path, self.headers.get('Authorization')))
+                if fake.deny and (status := fake.deny('POST', self.path.split('?')[0])):
+                    return self.reply({'message': 'token does not have at least one of required scope(s): [write:issue]'}, status)
                 if self.path.endswith('/issues'):
                     number = 345 + len(fake.issues)
                     fake.issues[number] = dict(json.loads(data), number=number, state='open', user={'login': fake.author})

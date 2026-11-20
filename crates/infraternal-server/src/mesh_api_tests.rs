@@ -33,12 +33,10 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Open an independent disk-backed WAL fixture in the configured temporary root.
     async fn new() -> Self {
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map_or_else(|| PathBuf::from("target"), PathBuf::from);
-        let directory = target.join("mesh-api-tests");
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join(format!("{}.sqlite", Uuid::new_v4()));
+        // Keep live database state in TMPDIR, independently of Cargo target placement.
+        let path = std::env::temp_dir().join(format!("mesh-api-{}.sqlite", Uuid::new_v4()));
         let options = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(true)
