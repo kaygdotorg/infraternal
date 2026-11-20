@@ -28,7 +28,7 @@ async function interceptGlass(page: Page, handle: (route: import("playwright/tes
   await page.route(/\.js(\?.*)?$/, async (route) => {
     const response = await route.fetch();
     const body = await response.text();
-    if (/data-glass-rules|data-glass-watching|readGlassCells|glassUnder|data-glass-under/.test(body)) await handle(route);
+    if (/data-glass-rules|data-glass-watching/.test(body)) await handle(route);
     else await route.fulfill({ response, body });
   });
 }
