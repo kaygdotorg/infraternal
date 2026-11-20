@@ -15,8 +15,8 @@ import { LINE, openScene, putPicture, removePicture, SIZES, SURFACES } from "./g
 import { measure, type Result } from "./glass-pixels";
 import { settled } from "./glass-settled";
 
-/** Where the table lands. */
-const OUT = tracerEvidencePath("glass-contrast");
+/** The table of ratios. */
+const OUT = tracerEvidencePath("glass-contrast", "ratios.jsonl");
 /** The surfaces that carry controls. */
 const WITH_CONTROLS = SURFACES.filter((s) => s.id === "menu" || s.id === "confirm");
 
@@ -49,7 +49,7 @@ for (const size of SIZES) {
               await settled(page, `${surface.selector} button:not([disabled])`);
               const results = await measure(page, surface.selector);
               expect(results.length, "text runs found").toBeGreaterThan(0);
-              appendFileSync(`${OUT}/ratios.jsonl`, `${JSON.stringify({ size: size.id, scheme, surface: surface.id, picture, card, state, lowest: Number(results[0]!.ratio.toFixed(2)), text: results[0]!.text })}\n`);
+              appendFileSync(OUT, `${JSON.stringify({ size: size.id, scheme, surface: surface.id, picture, card, state, lowest: Number(results[0]!.ratio.toFixed(2)), text: results[0]!.text })}\n`);
               if (!worst || results[0]!.ratio < worst.ratio) { worst = results[0]!; worstState = state; }
             }
             await page.mouse.move(2, 2);

@@ -12,7 +12,7 @@
  * static floor; that is the surface exactly as the first frame shows it, and it must reach 4.5:1 on its own.
  * The lowest ratio of each case goes to `ratios.jsonl` in the evidence directory next to its screenshot.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 import { frames, LINE, openScene, PICTURES, putPicture, removePicture, SIZES, surfacesFor, watchFirstFrame } from "./glass-scenes";
@@ -46,6 +46,7 @@ for (const size of SIZES) {
               expect.soft(first?.under, `${picture}: marked as over a picture in the first frame it is visible`).toBe("picture");
               const results = await measure(page, surface.selector);
               expect(results.length, "text runs found").toBeGreaterThan(0);
+              if (results[0]!.ratio < LINE) writeFileSync(`${OUT}/low-${size.id}-${scheme}-${surface.id}-${picture}-${pass}-card${card}.png`, results.hidden);
               appendFileSync(`${OUT}/ratios.jsonl`, `${JSON.stringify({ size: size.id, scheme, surface: surface.id, picture, pass, card, lowest: Number(results[0]!.ratio.toFixed(2)), text: results[0]!.text })}\n`);
               expect.soft(results[0]!.ratio, `${picture}: lowest "${results[0]!.text}" ${results[0]!.ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(LINE);
               await surface.close(page);

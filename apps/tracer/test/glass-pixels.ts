@@ -13,7 +13,7 @@ export interface Run { text: string; colour: [number, number, number, number]; x
 export interface Result { text: string; ratio: number; colour: string }
 
 /** Contrast of every text run in `selector`'s popover against the pixels under it; the lowest first. */
-export async function measure(page: Page, selector: string): Promise<Result[]> {
+export async function measure(page: Page, selector: string): Promise<Result[] & { hidden: Buffer }> {
   const box = await page.locator(selector).first().boundingBox();
   if (!box) throw new Error(`${selector} has no box`);
   const runs: Run[] = await page.evaluate((sel) => {
@@ -43,12 +43,21 @@ export async function measure(page: Page, selector: string): Promise<Result[]> {
   }, selector);
   // Hide every glyph so the screenshot holds only what is behind the text.
   const hide = await page.addStyleTag({ content: `${selector}, ${selector} * { color: transparent !important; text-shadow: none !important; -webkit-text-fill-color: transparent !important; } ${selector} svg, .tip svg { visibility: hidden !important; } .tip, .tip * { color: transparent !important; text-shadow: none !important; -webkit-text-fill-color: transparent !important; }` });
-  // sleep: one frame for the style to paint before the capture
-  await page.waitForTimeout(80);
-  const png = await page.screenshot({ clip: box });
+  // Two animation frames, not a sleep: the capture must not be taken before the hiding style has painted. On a loaded host a fixed
+  // 80 ms was sometimes shorter than a frame, the glyphs were still in the capture, and a white label then measured against its own
+  // lightest pixels (1.05:1, and 3.88:1 on a glyph in the full run of #448).
+  await page.evaluate(() => new Promise<void>((done) => { requestAnimationFrame(() => { requestAnimationFrame(() => { done(); }); }); }));
+  // Captured until two captures in a row are identical: a capture taken before the hiding style reached the screen differs from the
+  // next one, so a stale frame can never be the one that is measured.
+  let png = await page.screenshot({ clip: box });
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const again = await page.screenshot({ clip: box });
+    if (again.equals(png)) break;
+    png = again;
+  }
   await hide.evaluate((el) => { (el as unknown as Element).remove(); });
   const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
-  return page.evaluate(async ({ url, runs, box }) => {
+  const ratios = await page.evaluate(async ({ url, runs, box }) => {
     const img = await createImageBitmap(await (await fetch(url)).blob());
     const scale = img.width / box.width;
     const c = new OffscreenCanvas(img.width, img.height);
@@ -77,4 +86,6 @@ export async function measure(page: Page, selector: string): Promise<Result[]> {
       return { text: run.text, ratio: Math.min(ratioOver(lo), ratioOver(hi)), colour: `rgb(${tr} ${tg} ${tb} / ${ta})` };
     });
   }, { url: dataUrl, runs, box }).then((all) => all.sort((a, b) => a.ratio - b.ratio));
+  // The capture with every glyph hidden rides along, so a low reading can be looked at: it is what the runs were measured against.
+  return Object.assign(ratios, { hidden: png });
 }
