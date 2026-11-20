@@ -438,6 +438,112 @@ mod tests {
         assert_eq!(kept_address(&peer, different, None), None);
     }
 
+    /// J988 review: only a handshake younger than [`SILENT`] keeps an authenticated address, and
+    /// the age is the engine's own monotonic one, so no clock is compared across machines.
+    #[test]
+    fn engine_endpoint_keeps_the_confirmed_address_only_while_the_handshake_is_younger_than_silent() {
+        let learned = at("10.9.0.44:10254");
+        let just_inside = SILENT - Duration::from_millis(1);
+        assert_eq!(
+            engine_endpoint(Some(learned), Some(learned), Some(just_inside)).live_confirmed,
+            Some(learned)
+        );
+        assert_eq!(
+            engine_endpoint(Some(learned), Some(learned), Some(SILENT)).live_confirmed,
+            None
+        );
+        assert_eq!(
+            engine_endpoint(Some(learned), Some(learned), None).live_confirmed,
+            None,
+            "a peer that never handshook has no live session to keep"
+        );
+        assert_eq!(
+            engine_endpoint(Some(learned), Some(learned), Some(Duration::ZERO)).send,
+            Some(learned),
+            "the send endpoint is reported unchanged"
+        );
+    }
+
+    /// J988 review: a peer kept on an off-list address that then really goes away is not kept
+    /// forever. Once its session is older than [`SILENT`] the retained walk reads as silent and the
+    /// next snapshot-less refresh walks the coordinator's list again, so the new endpoint is tried.
+    #[test]
+    fn a_kept_off_list_endpoint_ages_out_when_its_session_goes_silent() {
+        let mut walks = Walks::default();
+        let peer = walking(9).peer;
+        let key = peer.key;
+        let live = at("10.9.0.44:10254");
+        let alive = Seen {
+            received: 7,
+            handshake: 1,
+            endpoint: Some(live),
+        };
+        let before = BTreeMap::from([(
+            key,
+            engine_endpoint(Some(live), Some(live), Some(Duration::from_secs(1))),
+        )]);
+        let wanted = BTreeMap::from([(key, peer.clone())]);
+        let now = Instant::now();
+        assert_eq!(
+            walks.start(wanted.clone(), &BTreeMap::from([(key, alive)]), &before, now),
+            Vec::<Started>::new()
+        );
+        // Still alive: an unrelated refresh starts nothing.
+        let none = BTreeMap::new();
+        assert_eq!(
+            walks.start(wanted.clone(), &BTreeMap::from([(key, alive)]), &none, now),
+            Vec::<Started>::new()
+        );
+        // Session now older than SILENT: `observe` reads its handshake as 0.
+        let gone = Seen {
+            handshake: 0,
+            ..alive
+        };
+        let restarted = walks.start(wanted, &BTreeMap::from([(key, gone)]), &none, now);
+        assert_eq!(restarted.len(), 1, "the silent peer is walked again");
+        assert!(
+            restarted
+                .iter()
+                .all(|started| started.key == key && started.engine_at == Some(live)),
+            "the walk begins from where the engine sits"
+        );
+    }
+
+    /// J988 review: an off-list address whose handshake has expired is not put on the new walk's
+    /// list, so a peer that really moved walks the coordinator's addresses only.
+    #[test]
+    fn an_expired_off_list_endpoint_does_not_join_the_new_walk() {
+        let mut walks = Walks::default();
+        let peer = walking(10).peer;
+        let key = peer.key;
+        let stale = at("10.9.0.44:10254");
+        let observed = BTreeMap::from([(
+            key,
+            Seen {
+                received: 7,
+                handshake: 0,
+                endpoint: Some(stale),
+            },
+        )]);
+        let before = BTreeMap::from([(
+            key,
+            engine_endpoint(Some(stale), Some(stale), Some(SILENT)),
+        )]);
+        walks.start(
+            BTreeMap::from([(key, peer.clone())]),
+            &observed,
+            &before,
+            Instant::now(),
+        );
+        let list = walks.walks.get(&key).map(|(_, walk)| walk.list().to_vec());
+        let expected: Vec<_> = peer
+            .endpoint
+            .into_iter()
+            .chain(peer.candidates.iter().copied())
+            .collect();
+        assert_eq!(list, Some(expected));
+    }
+
     /// An idle peer with a live session on its first address starts finished: no address to
     /// install, so no handshake, no timer, and later snapshots that leave it unchanged (and its
     /// session live) start nothing either.
