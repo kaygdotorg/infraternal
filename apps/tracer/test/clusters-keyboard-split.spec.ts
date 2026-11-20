@@ -1,7 +1,7 @@
 /**
  * A split from the keyboard never animates and never floods (TASTE, #141). One press is one split and lands at once:
- * no silhouette layer, no flip, the new window active. Holding the key for 2 s (auto-repeat) adds nothing more and
- * keeps every frame short. The pointer path keeps its animation (the silhouette layer exists for it). The Mac chords
+ * no animation layer, no flip, the new window active. Holding the key for 2 s (auto-repeat) adds nothing more and
+ * keeps every frame short. The pointer path keeps its animation: the new window fades in over 150 ms (#484; the droplet layer it used to play is gone). The Mac chords
  * are covered in clusters-window-actions.spec.ts (D212).
  */
 import { expect, test, type Page } from "playwright/test";
@@ -54,9 +54,19 @@ test("a key press splits at once, and holding it splits once with short frames",
   expect(Math.max(0, ...m.late), "and none of them is long").toBeLessThan(60);
 });
 
-test("a pointer split still plays the silhouette", async ({ page }) => {
+test("a pointer split still animates: the new window fades in over 150 ms", async ({ page }) => {
   await boot(page);
-  const seen = page.evaluate(() => new Promise<boolean>((r) => { const mo = new MutationObserver(() => { if (document.querySelector(".cl-goo")) { mo.disconnect(); r(true); } }); mo.observe(document.body, { subtree: true, childList: true }); setTimeout(() => r(false), 3000); }));
+  // Declared duration of an opacity-only animation, read the moment it starts (the same probe clusters.spec.ts uses for the split fade).
+  const seen = page.evaluate(() => new Promise<number | null>((r) => {
+    const mo = new MutationObserver(() => {
+      for (const a of document.getAnimations()) {
+        const keys = (a.effect as KeyframeEffect | null)?.getKeyframes() ?? [];
+        if (keys.length === 2 && "opacity" in keys[0]!) { mo.disconnect(); r(a.effect!.getTiming().duration as number); return; }
+      }
+    });
+    mo.observe(document.body, { subtree: true, childList: true, attributes: true });
+    setTimeout(() => r(null), 3000); // sleep: give up if no fade ever starts
+  }));
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:split:down", source: "pointer" } })));
-  expect(await seen).toBe(true);
+  expect(await seen).toBe(150);
 });
