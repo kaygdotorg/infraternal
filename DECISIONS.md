@@ -1715,9 +1715,14 @@ access (#341 B19).
        without a trusted decoder is decided in I2a.
      - **Decoder (I4):** the most performant and reliable PNG decoder by
        measurement (speed plus fuzzing), reported to the owner.
-     - **Capture (C2):** on macOS the infraternal agent stays a daemon; a
-       small per-user helper in the logged-in session does capture and input,
-       as part of the desktop plugin (D198).
+     - **Capture (C2), amended (owner, 2026-11-20, #146):** macOS has two
+       modes, like Linux. **User mode (default):** the infraternal agent runs
+       as the logged-in user; a one-shot privileged helper creates the mesh
+       interface, route and resolver entry, then exits. **Root mode:** a
+       LaunchDaemon for Macs with no logged-in user, with a per-user helper
+       for capture and input, as part of the desktop plugin (D198).
+       (Was: "on macOS the infraternal agent stays a daemon; a small per-user
+       helper in the logged-in session does capture and input".)
      - **Engines (C4):** capture bindings and encoders are measured
        (latency, CPU and memory per session at ×10 and ×50); nothing chosen
        without numbers. The owner has an Apple Developer account for signing
