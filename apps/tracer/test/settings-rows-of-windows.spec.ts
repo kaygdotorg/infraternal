@@ -1308,6 +1308,39 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
   });
 }
 
+/** A wheel at the end of a window's content stays with that window (D377): fresh gestures there never step the canvas to the next row. */
+test("desktop: a wheel at the end of a window's content never steps to the next row", async ({ browser }) => {
+  test.setTimeout(240_000);
+  const context = await browser.newContext({ ...SIZES.desktop, baseURL: baseURL() });
+  const page = await context.newPage();
+  await open(page, "&at=terminal.typing");
+  const first = await page.evaluate(windowBoxes);
+  const b = (await page.locator('[data-window-id="s-terminal-typing"] .ui-window-body > .ui-settings-pane').boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  for (let i = 0; i < 6; i++) {
+    await page.mouse.wheel(0, 2000);
+    // sleep: a quiet gap longer than a gesture (150 ms), so each wheel is a fresh gesture
+    await page.waitForTimeout(300);
+  }
+  // sleep: the pane's scroll settles; no event marks the end
+  await page.waitForTimeout(600);
+  const atEnd = await page.evaluate(windowBoxes);
+  const typing = atEnd.find((w) => w.id === "s-terminal-typing")!;
+  expect(typing.paneMax - typing.paneTop, "the content is at its end").toBeLessThanOrEqual(1);
+  // Not one window moved while the content scrolled to its end, even with fresh gestures arriving at the end.
+  for (const [k, w] of atEnd.entries()) near(w.top, first[k]!.top, `${w.id} did not move while the content reached its end`);
+  for (let i = 0; i < 3; i++) {
+    await page.mouse.wheel(0, 300);
+    // sleep: a quiet gap longer than a gesture (150 ms), so each wheel is a fresh gesture at the end
+    await page.waitForTimeout(350);
+  }
+  // sleep: a wrongly started row step would be mid-spring now; no event marks that nothing happened
+  await page.waitForTimeout(1000);
+  const after = await page.evaluate(windowBoxes);
+  for (const [k, w] of after.entries()) near(w.top, first[k]!.top, `${w.id} did not move: the wheel at the end of the content stayed with the window`);
+  await context.close();
+});
+
 /** A resize drag changes only its own window (D323): the windows above, below and beside it keep their size, whichever edge is dragged. */
 test("desktop: narrowing one window leaves the rest of its column and its row as they were", async ({ browser }) => {
   test.setTimeout(240_000);

@@ -5,7 +5,7 @@
  *
  * - The FOCUSED terminal with scrollback: a vertical wheel over it moves its scrollback and the strip (the column's scroll offset
  *   and the canvas transform) does not move by a pixel, also past its top and bottom (a burst like trackpad momentum is swallowed).
- * - The same terminal at the bottom of its scrollback: a FRESH gesture (after a quiet moment) goes to the canvas and steps the column.
+ * - The same terminal at the bottom of its scrollback: a FRESH gesture (after a quiet moment) stays with the terminal and the column does not step (D377).
  * - A focused terminal with nothing to scroll, and an UNFOCUSED terminal even with scrollback, belong to the canvas (D275).
  * - The wheel over a window's header strip (nothing scrolls there) still pans.
  * Captures at 1440×900 (DPR 2) go to the external evidence directory.
@@ -105,14 +105,16 @@ test("focused, unlocked, with scrollback: the wheel scrolls the terminal and the
   expect(await strip(), "momentum past the bottom did not reach the strip").toBe(before);
 });
 
-test("at the bottom of its scrollback a fresh gesture goes to the canvas (D275)", async () => {
+test("at the bottom of its scrollback a fresh gesture stays with the terminal (D377)", async () => {
   await quiet();
   const before = await strip();
   const mid = await centre(1);
   await page.mouse.move(mid.x, mid.y);
   await page.mouse.wheel(0, 240);
-  await expect.poll(strip, { timeout: 5000 }).not.toBe(before);
-  await page.screenshot({ path: `${OUT}/handoff-after-bottom.png` });
+  // sleep: a wrongly started canvas step would be mid-spring now; no event marks that nothing happened
+  await page.waitForTimeout(1000);
+  expect(await strip(), "scrolling never overflows to the canvas: the strip stayed").toBe(before);
+  await page.screenshot({ path: `${OUT}/no-handoff-after-bottom.png` });
 });
 
 test("an unfocused terminal belongs to the canvas, even with scrollback", async () => {
